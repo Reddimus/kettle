@@ -85,7 +85,7 @@ impl DragState {
         DragState::Idle
     }
 
-    /// Cancel path (phase 9 of docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md).
+    /// Cancel the active drag and leave its tab in the source window.
     /// Returns Some(tab_idx) if a tab was being dragged when the cancel
     /// fired, so the caller can restore that tab's visual state (clear
     /// ghost, reset focus). None when the cancel comes from Idle (no-op).

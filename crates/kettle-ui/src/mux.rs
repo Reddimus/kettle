@@ -856,15 +856,10 @@ pub struct Pane {
     /// connection or TUI, not a generic shell. It does not track environment
     /// or later cwd changes; the closed-tab snapshot records the cwd itself.
     pub argv: Vec<String>,
-    /// Terminator parity, `plugins/remote.py`, phase 6 of
-    /// [`TERMINATOR-REMOTE-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): the most-recently
-    /// detected remote-session context for this pane, updated by
-    /// the App's periodic process poll. `None`
-    /// means either the pane's process tree has no SSH / container
-    /// descendant, or the poll hasn't run yet. When non-None, the
-    /// pane title shows `format_remote_title(...)` and the right-
-    /// click menu exposes a "Clone session" entry.
+    /// Most recently detected SSH/container context, updated by the background
+    /// process scanner. `None` means no context was detected or the scanner has
+    /// not run yet. A detected context supplies the pane title prefix. The
+    /// reconnect menu entry appears only when command construction succeeds.
     pub remote_context: Option<kettle_remote::RemoteContext>,
     /// Latest bounded process-scan result for the program currently attached
     /// to the PTY. Unix input policy accepts it only when its pid still matches
@@ -1743,10 +1738,7 @@ pub struct ClosedTab {
 /// standard is 8-10; we keep 10 to amortize accidental close-bursts.
 const CLOSED_TAB_RING_CAP: usize = 10;
 
-/// Phase 2 of [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
-/// ../../../docs/TERMINATOR-NAMED-GROUPS-DESIGN.md): the
-/// broadcast-scope enum the design proposes, held in
-/// `Mux::broadcast`.
+/// Broadcast input scope: focused pane, active tab, window, or named group.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BroadcastScope {
     #[default]

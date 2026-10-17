@@ -1749,7 +1749,7 @@
   cycle 684 — **theme-submenu sub-cycle 1: `ContextMenuItem::
               Submenu` recursive variant**. Adds the data
               type that sub-cycles 2-9 of
-              [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](../TERMINATOR-THEME-SUBMENU-DESIGN.md)
+              [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)
               will consume:
                 - `Submenu { label, items: Vec<ContextMenuItem> }`
                   — recursive, so nested-nested submenus are
@@ -1914,7 +1914,7 @@
   cycle 678 — **named-groups sub-cycle 2: `BroadcastScope`
               enum + `compute_broadcast_targets` pure helper**:
               lands the core data type the
-              [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](../TERMINATOR-NAMED-GROUPS-DESIGN.md)
+              [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)
               hinges on.
                 - `pub enum BroadcastScope { Off, Tab, All,
                   Group(String) }` — the cycle-178 per-tab
@@ -1934,7 +1934,7 @@
 
   cycle 677 — **Audit doc: Bucket D close-out summary
               (cycles 614-677)**: new section in
-              `docs/TERMINATOR-AUDIT.md` summarizing the
+              [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) summarizing the
               7-feature Bucket D arc:
                 - `plugins/remote.py` ✅ A 7/7 (cycle-659 deploy)
                 - `plugins/auto_theme.py` ✅ A 7/7 (cycle-671)
@@ -2457,7 +2457,7 @@
               `App::area` now wraps the helper; cycle-651 v1
               treats `TabBarPos::Left` / `Right` the same as
               `Top` (the cycle-647 fallback). Sub-cycle 4 of
-              [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](../TERMINATOR-VERTICAL-TABS-DESIGN.md)
+              [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-VERTICAL-TABS-DESIGN.md)
               branches on orientation + carves a per-strip
               width instead of a per-edge height. Drift guard
               `content_rect_for_carves_out_tab_and_status_bands`
@@ -2471,7 +2471,7 @@
               `<cache>/kettle/shots/kettle-<secs>-<pid>.png`
               with relative `./kettle-shots/` fallback when no
               cache dir resolves. Sub-cycle 3-5 of
-              [`TERMINATOR-TERMINALSHOT-DESIGN.md`](../TERMINATOR-TERMINALSHOT-DESIGN.md)
+              [`TERMINATOR-TERMINALSHOT-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-TERMINALSHOT-DESIGN.md)
               will call this from `Action::TakeScreenshot`
               dispatch + queue a wgpu readback request keyed
               on the path. Drift guard
@@ -2485,7 +2485,7 @@
               current theme name + detected OS dark-mode flag.
               Pure — entirely a function of its 5 inputs, no env
               or clock. Sub-cycle 3 of
-              [`TERMINATOR-AUTO-THEME-DESIGN.md`](../TERMINATOR-AUTO-THEME-DESIGN.md)
+              [`TERMINATOR-AUTO-THEME-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUTO-THEME-DESIGN.md)
               will add the `dark-light` crate subscribe; this
               cycle's helper consumes whatever boolean that
               subscribe returns. Drift guard
@@ -2523,7 +2523,7 @@
               to `Top`. Now the values store the actual
               orientation; the render-layer change to draw
               vertical strips lands in sub-cycles 2-6 of
-              [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](../TERMINATOR-VERTICAL-TABS-DESIGN.md).
+              [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-VERTICAL-TABS-DESIGN.md).
               Also: new `TabBarPos::is_vertical()` helper for
               the upcoming `content_rect` branch + paint_tab_bar
               orientation dispatch. Non-exhaustive match arms
@@ -2627,7 +2627,7 @@
   cycle 642 — **named-groups sub-cycle 1: action surface for
               `CreateGroup` + `GroupTab` + `GroupWindow` +
               `UngroupTab` + `UngroupWindow`**: 5 new Action
-              variants from [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](../TERMINATOR-NAMED-GROUPS-DESIGN.md)
+              variants from [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)
               plus the 12 aliases that Terminator users would
               type. Dispatch:
                 - `CreateGroup` and existing cycle-407
@@ -2650,7 +2650,7 @@
               Parser arm accepts kebab + underscore key spellings
               and 4 alias values for `Auto` (`auto` / `system` /
               `follow-system` / `follow_system`). Sub-cycle 2 of
-              [`TERMINATOR-AUTO-THEME-DESIGN.md`](../TERMINATOR-AUTO-THEME-DESIGN.md)
+              [`TERMINATOR-AUTO-THEME-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUTO-THEME-DESIGN.md)
               wires the `dark-light` crate subscribe; for now
               this just lets a Terminator config copy in
               cleanly without --check-config warnings. Drift
@@ -2662,7 +2662,7 @@
               variant + 4 aliases (`take_screenshot`,
               `take-screenshot`, `terminalshot`, `screenshot`)
               from
-              [`TERMINATOR-TERMINALSHOT-DESIGN.md`](../TERMINATOR-TERMINALSHOT-DESIGN.md).
+              [`TERMINATOR-TERMINALSHOT-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-TERMINALSHOT-DESIGN.md).
               Dispatch arm logs a TODO pointing at the headless
               `--screenshot=PATH` fallback for now; sub-cycles
               2-6 wire the wgpu surface readback + PNG encode +
@@ -2677,7 +2677,7 @@
               `portable_pty::Child::process_id()`. Read-only,
               doesn't consume the Child. The upcoming remote-
               session detector (sub-cycles 2-6 from
-              [`TERMINATOR-REMOTE-DESIGN.md`](../TERMINATOR-REMOTE-DESIGN.md))
+              [`TERMINATOR-REMOTE-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-REMOTE-DESIGN.md))
               roots its process-tree walk here. Returns None on
               lock contention or platforms without pid access.
               No new drift guard — the method is one line over
@@ -2689,7 +2689,7 @@
               pure helper**: new `AskBeforeClosing::should_prompt(
               scope_count) -> bool` method on the existing enum
               implements the matrix from
-              [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](../TERMINATOR-CONFIRM-DIALOG-DESIGN.md):
+              [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md):
                 - `Never`              → never prompts
                 - `Always`             → always prompts
                 - `MultipleTerminals`  → prompts iff `scope_count > 1`
@@ -2699,7 +2699,7 @@
               walks all 3 modes × 4 scope counts (0, 1, 2, 100).
               Workspace tests 370 → 371.
 
-  cycle 637 — **`docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md` —
+  cycle 637 — **[`docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md) —
               Bucket D for `ask_before_closing` + a reusable
               confirm-dialog primitive**: the cycle-343-360
               parsed-but-unwired `AskBeforeClosing` config gets
@@ -2767,7 +2767,7 @@
               rationale, or 🟡 Bucket C with a concrete
               implementation sketch.
 
-  cycle 634 — **`docs/TERMINATOR-THEME-SUBMENU-DESIGN.md` —
+  cycle 634 — **[`docs/TERMINATOR-THEME-SUBMENU-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-THEME-SUBMENU-DESIGN.md) —
               Bucket D design doc for the right-click theme +
               profile submenu (Terminator
               `terminal_popup_menu.py`)**: today's cycle-245
@@ -2788,7 +2788,7 @@
               submenu (use cycle-329 palette instead), keyboard-
               only accelerator (follow-up). No code change.
 
-  cycle 633 — **`docs/TERMINATOR-VERTICAL-TABS-DESIGN.md` —
+  cycle 633 — **[`docs/TERMINATOR-VERTICAL-TABS-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-VERTICAL-TABS-DESIGN.md) —
               Bucket D design doc for `tab-position = left/right`
               (vertical tab strip)**: cycle 331/628 wired the
               parser for the values; this design lays out the
@@ -2810,7 +2810,7 @@
               promoted from B-partial to A+D with cross-link.
               No code change.
 
-  cycle 632 — **`docs/TERMINATOR-AUTO-THEME-DESIGN.md` — Bucket D
+  cycle 632 — **[`docs/TERMINATOR-AUTO-THEME-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUTO-THEME-DESIGN.md) — Bucket D
               design doc for auto-detect + sunrise/sunset (the
               other half of `plugins/auto_theme.py` not shipped
               in cycle 616's manual toggle)**:
@@ -2835,7 +2835,7 @@
               launch (100 ms timeout), system-sleep drift,
               lat/long range validation. No code change.
 
-  cycle 631 — **`docs/TERMINATOR-NAMED-GROUPS-DESIGN.md` —
+  cycle 631 — **[`docs/TERMINATOR-NAMED-GROUPS-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-NAMED-GROUPS-DESIGN.md) —
               Bucket D design doc for Terminator's named broadcast
               groups (`create_group` / `group_tab` / `group_win`
               + ungroup_*)**:
@@ -2859,7 +2859,7 @@
               group assignments. Audit-doc rows promoted from
               C/❌ to D. No code change.
 
-  cycle 630 — **`docs/TERMINATOR-TERMINALSHOT-DESIGN.md` —
+  cycle 630 — **[`docs/TERMINATOR-TERMINALSHOT-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-TERMINALSHOT-DESIGN.md) —
               Bucket D design doc for `plugins/terminalshot.py`
               live-window capture**:
               live-window readback fills the gap between the
@@ -2882,7 +2882,7 @@
               thread blocking, image-crate version skew. No
               code change.
 
-  cycle 629 — **`docs/TERMINATOR-REMOTE-DESIGN.md` — Bucket D
+  cycle 629 — **[`docs/TERMINATOR-REMOTE-DESIGN.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-REMOTE-DESIGN.md) — Bucket D
               design doc for `plugins/remote.py` port**:
               SSH / Docker / Podman / kubectl session detection
               via a new `kettle_remote` crate (sysinfo-backed
@@ -2964,7 +2964,7 @@
               Workspace tests 367 → 368.
 
   cycle 624 — **Doc-truth refresh:
-              `docs/TERMINATOR-AUDIT.md` (round 3)**:
+              [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) (round 3)**:
               flipped 9 more stale rows to ✅, citing the cycles
               that closed them (335, 342, 345, 347, 350, 613,
               617). Plus reclassified `scroll_tabbar` to Bucket
@@ -3174,7 +3174,7 @@
                 guard `pick_light_dark_target_round_trips` covers
                 the 7 input shapes. Workspace tests 354 → 356.
 
-  cycle 615 — **Doc-truth refresh: `docs/TERMINATOR-AUDIT.md`**
+  cycle 615 — **Doc-truth refresh: [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md)**
               flipped 9 rows from ❌/🟡 to ✅, citing the
               cycles that closed them (604/606/607/609/611/
               612/613/614). Plugin inventory + gap table +
@@ -3925,7 +3925,7 @@ Post-v1.42.0 packaging-drift cleanup. Three template files
 version-string drift discovered + closed in one sweep, with
 release.yml CI gate extended to prevent recurrence.
 
-  cycle 547 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
+  cycle 547 — `docs/ROADMAP.md` + [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) +
               `docs/ARCHITECTURE.md` post-sweep summaries
               extended to v1.42.0 (cycles 411-543, 11 releases,
               121 cycles).
@@ -3970,7 +3970,7 @@ Post-v1.41.0 polish + a real user-reported bug fix.
   cycle 524 — README + INSTALL.md + scripts/install-online.sh
               version pins bumped to v1.41.0.
 
-  cycle 525 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
+  cycle 525 — `docs/ROADMAP.md` + [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) +
               `docs/ARCHITECTURE.md` post-sweep summaries
               extended to v1.41.0 (cycles 411-521, 10 releases,
               111 cycles).
@@ -4010,7 +4010,7 @@ Post-v1.41.0 polish + a real user-reported bug fix.
               tests 321 → 322.
 
   cycle 539 — Exact-numeric test counts in
-              `docs/TERMINATOR-AUDIT.md` + `docs/ROADMAP.md`
+              [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) + `docs/ROADMAP.md`
               bumped 321 → 322.
 
   cycle 540 — **Real user-reported bug fix.** kettle icon
@@ -4049,7 +4049,7 @@ Post-v1.40.0 polish — pre-commit hook UX tightens, real-bug
 catches from running shellcheck on scripts/, and crates.io
 metadata polish.
 
-  cycle 501 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
+  cycle 501 — `docs/ROADMAP.md` + [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) +
               `docs/ARCHITECTURE.md` post-sweep summaries
               extended to v1.40.0 (cycles 411-497, 9 releases,
               87 cycles).
@@ -4136,7 +4136,7 @@ bugs: cycle 484's doc-list overindentation (cycle 493) and the
 cycle-494 hook's missing deletion filter (cycle 496) — both
 caught the bug class they exist to prevent.
 
-  cycle 489 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
+  cycle 489 — `docs/ROADMAP.md` + [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) +
               `docs/ARCHITECTURE.md` post-sweep summaries
               extended to v1.39.0 (cycles 411-486, 8 releases,
               76 cycles).
@@ -4200,7 +4200,7 @@ recipe for release-cut pre-flight, three field doc-comments in
 the cycle-471 helper rustdoc gained a maintenance note for future
 contributors.
 
-  cycle 478 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
+  cycle 478 — `docs/ROADMAP.md` + [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) +
               `docs/ARCHITECTURE.md` post-sweep summaries extended
               to v1.38.0 (cycles 411-475, 7 releases, 65 cycles).
 
@@ -4257,7 +4257,7 @@ contract, and a sweep removing internal cycle refs from every user-
 facing doc surface (man page + example config + drift-guard scan
 list extension so the pattern can't reintroduce).
 
-  cycle 466 — ROADMAP + TERMINATOR-AUDIT + ARCHITECTURE post-sweep
+  cycle 466 — ROADMAP + [TERMINATOR-AUDIT](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) + ARCHITECTURE post-sweep
               summaries extended to v1.37.0 (cycles 411-463, 6
               releases, 53 cycles).
 
@@ -4293,7 +4293,7 @@ list extension so the pattern can't reintroduce).
               branches now have dedicated test coverage.
 
   cycle 473 — Exact-numeric test count claims in
-              `docs/TERMINATOR-AUDIT.md` + `docs/TESTING.md`
+              [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) + `docs/TESTING.md`
               bumped to 321 / +13 / post-v1.37.0. Loose-bound
               snapshots stay accurate without churn.
 
@@ -4346,7 +4346,7 @@ chain hygiene.
               shell exit. Future contributors don't have to
               re-derive the dedup rationale.
 
-  cycle 455 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md` +
+  cycle 455 — `docs/ROADMAP.md` + [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) +
               `docs/ARCHITECTURE.md` post-sweep summaries
               extended to v1.36.0 (cycles 411-452, 5 releases,
               308 → 319 tests).
@@ -4418,7 +4418,7 @@ across the docs.
 
   cycle 438 — README + INSTALL.md version pins bumped to v1.35.0.
 
-  cycle 439 — `docs/ROADMAP.md` + `docs/TERMINATOR-AUDIT.md`
+  cycle 439 — `docs/ROADMAP.md` + [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md)
               post-sweep summaries updated to include v1.35.0
               (4 releases across 28 cycles, 308 → 318 tests).
 
@@ -4499,7 +4499,7 @@ guards extended, docs caught up to current HEAD.
               closures could silently drop the push and the
               helper would just see empty drains. 308 → 316.
 
-  cycle 431 — `docs/TERMINATOR-AUDIT.md` tail extended with the
+  cycle 431 — [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) tail extended with the
               post-sweep polish summary (cycles 411-430 spanning
               v1.32.0 → v1.34.0). Future contributors see the
               audit's trajectory through current HEAD.
@@ -4672,7 +4672,7 @@ for exit-action=restart.
               24 releases of sweep). `docs/ROADMAP.md` grew a
               "v1.8.0 → v1.31.0 Terminator-parity sweep" section
               + trimmed Next list to the genuine remaining threads.
-              `docs/TERMINATOR-AUDIT.md` tail appended with the
+              [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) tail appended with the
               cumulative cycles 330-412 sweep completion summary.
               `docs/kettle.example.config` grew a Terminator-parity
               section with every major new knob's default + origin.
@@ -5342,7 +5342,7 @@ ship; init.lua auto-loads; sandbox config knob in place; URL
 + menu handlers route through Lua registry before kettle
 defaults.
 
-  ✅  13 of 13 docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles
+  ✅  13 of 13 [docs/TERMINATOR-PLUGIN-DESIGN.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-PLUGIN-DESIGN.md) sub-cycles
 
 ### Titlebar Bucket-D progress
 
@@ -5362,7 +5362,7 @@ defaults.
 ### Detachable tabs Bucket-D
 
   ⌛  All sub-cycles deferred to dedicated session per
-      docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md. Needs
+      [docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md). Needs
       SCM_RIGHTS fd transfer (Linux/macOS) + cross-window
       IPC. Wayland users get the documented keybind-fallback
       alternative.
@@ -5404,7 +5404,7 @@ Workspace tests 302 → 304 (+2 bg_image drift guards).
   ⌛  pending — LuaEvent::Output emission (throttled per-PTY-chunk
                 event for plugins that watch terminal output)
 
-10 of 13 docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles complete.
+10 of 13 [docs/TERMINATOR-PLUGIN-DESIGN.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-PLUGIN-DESIGN.md) sub-cycles complete.
 Every user-facing plugin Lua API is now shipped. Only Output
 event emission remains, and that's bounded (throttle bucket +
 fire call at the drain_events Output match arm).
@@ -5456,7 +5456,7 @@ run_cmd_on_match.py + maven.py as a few-line Lua module:
   ⌛  pending — LuaEvent::Output, kettle.add_menu_item,
                 sandbox config knob
 
-8 of 13 docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles complete.
+8 of 13 [docs/TERMINATOR-PLUGIN-DESIGN.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-PLUGIN-DESIGN.md) sub-cycles complete.
 
 Workspace tests stay at 302.
 
@@ -5490,7 +5490,7 @@ Plugin system implementation push. Cycles 370-372 ship:
                 kettle.add_url_handler, kettle.set_theme,
                 sandbox config
 
-6 of 13 docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles complete.
+6 of 13 [docs/TERMINATOR-PLUGIN-DESIGN.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-PLUGIN-DESIGN.md) sub-cycles complete.
 
 ### Workspace tests
 
@@ -5519,7 +5519,7 @@ them fire on real kettle events:
                                   with the closing tab index.
 
 All 4 LuaEvent variants thus have App emission sites. The
-docs/TERMINATOR-PLUGIN-DESIGN.md sub-cycles 2-5 are complete
+[docs/TERMINATOR-PLUGIN-DESIGN.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-PLUGIN-DESIGN.md) sub-cycles 2-5 are complete
 (foundation + every event-site wiring). Subsequent plugin
 sub-cycles (notify, add_menu_item, add_url_handler, set_theme,
 sandbox config) build on this foundation.
@@ -5575,14 +5575,14 @@ design docs + plugin-system foundation.
 
 ### Bucket-D design docs shipped (cycles 361-364)
 
-All four multi-cycle Bucket-D items from docs/TERMINATOR-AUDIT.md
+All four multi-cycle Bucket-D items from [docs/TERMINATOR-AUDIT.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md)
 have concrete design docs now, each following the cycle-328/329
 template:
 
-  docs/TERMINATOR-PLUGIN-DESIGN.md          — Lua event-hooks
-  docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md   — per-pane titlebar
-  docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md — cross-window drag
-  docs/TERMINATOR-BG-IMAGE-DESIGN.md        — background image
+  [docs/TERMINATOR-PLUGIN-DESIGN.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-PLUGIN-DESIGN.md)          — Lua event-hooks
+  [docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md)   — per-pane titlebar
+  [docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md) — cross-window drag
+  [docs/TERMINATOR-BG-IMAGE-DESIGN.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-BG-IMAGE-DESIGN.md)        — background image
 
 ### Plugin foundation (cycle 365)
 
@@ -5749,7 +5749,7 @@ key dispatcher). Tracked as cycle 349+ in audit doc.
 ### Bucket D items still deferred
 
 Plugin system, per-pane titlebar, detachable tabs, background
-image rendering. Each is documented in docs/TERMINATOR-AUDIT.md
+image rendering. Each is documented in [docs/TERMINATOR-AUDIT.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md)
 with a roadmap pointer; each warrants its own multi-cycle
 thread (~3-6 sub-cycles).
 
@@ -5769,7 +5769,7 @@ users can copy their config and have `--check-config` not flag anything.
 
 ### Audit + planning (cycle 330)
 
-`docs/TERMINATOR-AUDIT.md` is the single source of truth — every
+[`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) is the single source of truth — every
 Terminator source file enumerated with feature/setting bullets +
 a 5-bucket gap table (A/B/C/D/E). Phase 1 audited Terminator at
 SHA `403fa1e5`; subsequent cycles flip B/C rows to ✅ A.
@@ -6194,7 +6194,7 @@ release so the tarball-bundled man page gets the v1.4.0+ content.
 - `docs/CONFIG.md` gains rows for the three v1.4.0-era config
   keys that were undocumented: `accent-color`, `status-bar`,
   `trigger`.
-- `docs/UX-COMPARISON.md` matrix gains 9 new rows (vi-mode,
+- [`docs/UX-COMPARISON.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/UX-COMPARISON.md) matrix gains 9 new rows (vi-mode,
   remote-control IPC, Quake toggle, triggers, named-layout /
   profile, peacock accent, annotated screenshots, status bar) +
   a "Shipped in v1.4.0 → v1.7.0" chronological block. Vi-mode
@@ -6752,7 +6752,7 @@ as `Cargo.toml`.
   tab_drag_target_index_clamps_to_strip, hovered_close_button_*,
   cli_help_preserves_indented_code_examples); CI section
   rewritten to list every workflow + smoke step on every OS.
-- **UX-COMPARISON.md** matrix gains 8 v1.3.x parity rows
+- **[UX-COMPARISON.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/UX-COMPARISON.md)** matrix gains 8 v1.3.x parity rows
   (drag-reorder, activity / silence dots, undo-close, duplicate,
   right-click menu, command palette, hint mode, search overlay,
   shell integration, SSH launcher). Backlog list now distinguishes
@@ -7318,7 +7318,7 @@ keep the docs and packaging in sync as the project grows.
   cycle 232 adds the same shape for text links — `[label](path.md)`
   to relative `.md` files. README alone cross-links to 8+ docs
   (`CONFIG`, `INSTALL`, `ROADMAP`, `SHELL-INTEGRATION`,
-  `ARCHITECTURE`, `RESEARCH`, `UX-COMPARISON`, `TESTING`,
+  `ARCHITECTURE`, [`RESEARCH`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/RESEARCH.md), [`UX-COMPARISON`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/UX-COMPARISON.md), `TESTING`,
   `CONTRIBUTING`, `CHANGELOG`); a rename / deletion silently broke
   GitHub-rendered navigation with no CI signal. The guard:
   (1) walks byte offsets like the image guard;
@@ -7458,12 +7458,12 @@ contracts that landed in this cycle batch.
 ### Internal
 - **Image drift guard now covers every `docs/*.md`, not just README.**
   Cycle 223's `readme_referenced_images_exist` only scanned the
-  root README. `docs/UX-COMPARISON.md` already embeds two images
+  root README. [`docs/UX-COMPARISON.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/UX-COMPARISON.md) already embeds two images
   (`kettle-showcase.png` + `refs/xterm.png`) — same forgotten-
   commit / rename / broken-image-on-github regression risk. The
   guard now walks `docs/*.md` and resolves each `![…](path)`
   against the doc's own directory (README's `docs/images/…` and
-  UX-COMPARISON's `images/…` both need to work). Renamed test
+  [UX-COMPARISON](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/UX-COMPARISON.md)'s `images/…` both need to work). Renamed test
   `readme_referenced_images_exist` → `user_facing_doc_images_exist`.
 
 ### Added
@@ -7848,7 +7848,7 @@ stop calling this pre-release software.
   `cargo --check-config` and `--version`.
 
 ### Documentation
-- **`docs/UX-COMPARISON.md` drag-and-drop entry gains a citation
+- **[`docs/UX-COMPARISON.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/UX-COMPARISON.md) drag-and-drop entry gains a citation
   paragraph.** Cycle 200 added the matrix row but didn't add the
   matching Citations paragraph (which cycle 193 had done for its
   broadcast row). The Citations paragraph explains iTerm2 /
@@ -7884,7 +7884,7 @@ stop calling this pre-release software.
   pass.
 
 ### Documentation
-- **`docs/UX-COMPARISON.md` matrix gains drag-and-drop file paths
+- **[`docs/UX-COMPARISON.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/UX-COMPARISON.md) matrix gains drag-and-drop file paths
   row.** Cycle 175 added drag-drop, cycle 182 made it bracketed-
   paste-safe — kettle's implementation has the distinctive triple
   property (shell-quoted, bracketed-paste-safe, broadcast-aware)
@@ -7986,7 +7986,7 @@ stop calling this pre-release software.
   ```
 
 ### Documentation
-- **`docs/UX-COMPARISON.md` matrix now has a broadcast/group-input
+- **[`docs/UX-COMPARISON.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/UX-COMPARISON.md) matrix now has a broadcast/group-input
   row.** The 173/174/178/184 trilogy made broadcast a real
   user-facing feature with double visual indicators (tab accent +
   pane border), but the comparison matrix didn't reflect it.
@@ -10308,7 +10308,7 @@ stop calling this pre-release software.
 - `kettle --screenshot <out.png> [--cols --rows]`: renders a representative
   frame **offscreen** (no window) through the real `wgpu`/`glyphon`/quad
   path and writes a PNG. Used to generate the showcase images in
-  **docs/UX-COMPARISON.md** — a cited UI/UX comparison matrix (kettle vs
+  **[docs/UX-COMPARISON.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/UX-COMPARISON.md)** — a cited UI/UX comparison matrix (kettle vs
   Ghostty/kitty/WezTerm/Terminator/Alacritty) with a tab-bar hit-region
   mermaid and the prioritized backlog status.
 - UX backlog: unfocused-pane **dimming** (`unfocused-split-opacity`,

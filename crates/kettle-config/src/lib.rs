@@ -194,9 +194,7 @@ pub enum BellMode {
     Both,
 }
 
-/// Terminator parity (`plugins/auto_theme.py`; see
-/// [`TERMINATOR-AUTO-THEME-DESIGN.md`](docs/TERMINATOR-AUTO-THEME-DESIGN.md)):
-/// theme-mode policy.
+/// Theme selection policy for explicit, forced-light, forced-dark and OS-following modes.
 ///
 /// - `Explicit` — use the `theme = …` value. Default.
 /// - `Light` — always use `light-theme`.
@@ -488,10 +486,7 @@ pub enum TabBarMode {
     Always,
 }
 
-/// Where the tab bar sits.
-///
-/// `Left` and `Right` draw a vertical tab strip; see
-/// [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](docs/TERMINATOR-VERTICAL-TABS-DESIGN.md).
+/// Tab-strip edge; Left and Right use vertical layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarPos {
     Top,
@@ -766,8 +761,7 @@ pub enum AskBeforeClosing {
     Never,
 }
 
-/// Theme-schedule policy; kettle never geolocates the user. See
-/// [`TERMINATOR-AUTO-THEME-DESIGN.md`](docs/TERMINATOR-AUTO-THEME-DESIGN.md).
+/// Theme schedules use explicit coordinates and never geolocate the user.
 ///
 /// `Clock { dark_at, light_at }` flips between dark and light at
 /// the wall-clock times (local). E.g.
@@ -885,8 +879,7 @@ pub fn parse_theme_schedule(value: &str) -> Option<ThemeSchedule> {
 /// `day_of_year` (1..=366) + latitude + longitude. Uses the well-known
 /// NOAA simplified algorithm, accurate to ~1 minute at temperate
 /// latitudes. It degrades near the poles, where the sun may not rise/set
-/// on some days (returns `None` for polar-day or polar-night). See
-/// [`TERMINATOR-AUTO-THEME-DESIGN.md`](docs/TERMINATOR-AUTO-THEME-DESIGN.md).
+/// on some days (returns `None` for polar-day or polar-night).
 ///
 /// Pure — no env, no clock, no dep. Unit-testable against
 /// known fixtures.
@@ -990,8 +983,7 @@ pub fn schedule_decision_sunrise(
 /// Pure helper that picks the right theme name given the current
 /// `ThemeMode`, the configured `light_theme` / `dark_theme` /
 /// `theme_name` triple, and the detected OS dark-mode preference
-/// (Some(true)=dark, Some(false)=light, None=can't tell). See
-/// [`TERMINATOR-AUTO-THEME-DESIGN.md`](docs/TERMINATOR-AUTO-THEME-DESIGN.md).
+/// (Some(true)=dark, Some(false)=light, None=can't tell).
 ///
 /// Returns the new theme name to apply, or `None` if no change
 /// is needed.
@@ -1035,10 +1027,8 @@ pub fn resolve_theme_for_mode(
 }
 
 impl AskBeforeClosing {
-    /// Terminator parity (see
-    /// [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)):
-    /// pure-decision helper — does a Close action with `scope_count`
-    /// panes/tabs about to die need the confirm dialog?
+    /// Evaluate the scope-count portion of close-confirmation policy; the UI separately
+    /// handles idle scopes.
     ///
     /// Matrix:
     ///   - `Never`              → never prompt
@@ -8677,8 +8667,7 @@ cell-height = 1.2\n";
         // top/left/right/bottom/hidden; kettle maps them as:
         //   - top/bottom: native.
         //   - hidden: alias to `tab-bar = off`.
-        //   - left/right: stored as `TabBarPos::Left` / `TabBarPos::Right`
-        //     and drawn as vertical strips (TERMINATOR-VERTICAL-TABS-DESIGN.md).
+        //   - Left and Right retain their configured orientation and render as vertical strips.
         let hidden = Config::parse_text("tab-bar-position = hidden");
         assert_eq!(hidden.tab_bar, TabBarMode::Off);
         let left = Config::parse_text("tab-bar-position = left");
@@ -10487,9 +10476,7 @@ split_horiz = <Control><Shift>j
         assert_eq!(cfg.search_case_sensitive, Smart);
     }
 
-    /// Drift guard. `TabBarPos::is_vertical` + the
-    /// parser. Phase 1 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md).
+    /// Regression coverage for vertical tab-position parsing.
     #[test]
     fn tab_bar_pos_left_right_parse_and_classify() {
         // is_vertical classification.
@@ -10937,11 +10924,7 @@ split_horiz = <Control><Shift>j
         );
     }
 
-    /// Drift guard. `theme-mode` config parsing (phase
-    /// 1 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-AUTO-THEME-DESIGN.md)). Default
-    /// is `Explicit`; the 3 Terminator modes parse cleanly; aliases for
-    /// `Auto` accommodate user muscle memory.
+    /// Regression coverage for theme-mode parsing and its default.
     #[test]
     fn language_parses_its_three_values_and_reports_others() {
         assert_eq!(Config::default().language, LanguagePreference::Auto);
@@ -11038,10 +11021,7 @@ split_horiz = <Control><Shift>j
         }
     }
 
-    /// Drift guard. `AskBeforeClosing::should_prompt` is
-    /// the pure decision behind the confirm-dialog primitive
-    /// (phase 1 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)).
+    /// Regression coverage for close-confirmation policy parsing.
     /// Cover all 3 modes × edge-case scope counts (0, 1, 2, large).
     #[test]
     fn ask_before_closing_should_prompt_matrix() {

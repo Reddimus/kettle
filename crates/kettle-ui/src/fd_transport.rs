@@ -4,26 +4,9 @@
 //! processes and has no idea what they are for. Deciding what to send, and
 //! whether to keep what arrives, belongs to the caller.
 //!
-//! It exists for moving a tab between windows in different processes, where the
-//! point is that the PTY is handed across rather than reopened. The intended
-//! composition:
-//!
-//!   source process → SerializedTab + raw PTY fds
-//!                 → send_fds over unix socket
-//!   target process ← recv_fds over unix socket
-//!                 ← deserialize_tab + adopt fds as Pane PTYs
-//!
-//! That last step is not wired up. `--tab-handoff-fd` receives the payload and
-//! then closes every descriptor it was given (`app.rs`, `load_startup_session`),
-//! so nothing adopts a live PTY yet. The transport is finished; the feature on
-//! top of it is not.
-//!
-//! Unix only, deliberately: Linux, macOS, and the BSDs. Windows and Wayland get
-//! the keyboard-driven `Action::MoveTabToNewWindow`, which opens a new tab
-//! rather than moving a running one.
-//!
-//! The handshake, authentication, and connection lifecycle around this are
-//! described in `docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`.
+//! Legacy Unix descriptor transport. Deprecated handoff receivers discard received
+//! descriptors; current live tab moves transfer ownership within one process. See
+//! docs/ARCHITECTURE.md, Detachable tabs.
 
 #![allow(dead_code)]
 

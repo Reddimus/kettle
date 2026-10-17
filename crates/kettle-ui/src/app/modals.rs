@@ -428,11 +428,7 @@ impl App {
         true
     }
 
-    /// Phase 5 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md): dispatch
-    /// the `ConfirmAction` after the user accepts the modal. Skips
-    /// the `should_prompt` check (we wouldn't be here otherwise) so
-    /// the close-family actions run their real bodies.
+    /// Dispatch the accepted confirmation action without asking again.
     pub(super) fn dispatch_confirm_action(
         &mut self,
         ws: &mut WindowState,

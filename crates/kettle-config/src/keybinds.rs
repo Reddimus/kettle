@@ -448,10 +448,7 @@ pub enum Action {
     StartSearch,
     ToggleBroadcastAll,
     ToggleBroadcastOff,
-    /// Terminator parity, phase 5 of
-    /// [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
-    /// docs/TERMINATOR-NAMED-GROUPS-DESIGN.md): toggle broadcast
-    /// scope to `Group(focused_pane.group_name)`. When the focused
+    /// Toggle broadcast to the focused pane's named group. When the focused
     /// pane has no group, log + no-op. Pressing again with the
     /// same group already set switches to Off (toggle semantics).
     /// Distinct from `ToggleBroadcastAll` (which sets Tab scope).
@@ -559,18 +556,11 @@ pub enum Action {
     /// When on, closes the file. Per-pane state (per-tab and
     /// per-window). No-op + warn when the cache dir can't be created.
     ToggleSessionLog,
-    /// Terminator parity (`plugins/terminalshot.py`,
-    /// phase 1 of [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
-    /// docs/TERMINATOR-TERMINALSHOT-DESIGN.md)): trigger a live-
-    /// window screenshot of the focused pane. wgpu surface readback +
-    /// BGRA→RGBA conversion + row-padding strip + image::ImageBuffer save,
-    /// plus per-pane crop via focused-pane rect and a toast notification via
-    /// `fire_notify`. PNG lands at `session_screenshot_path`
+    /// Capture the focused pane through the live offscreen-scene screenshot pipeline.
+    /// PNG lands at `session_screenshot_path`
     /// (`<cache_dir>/kettle/shots/kettle-<unix>-<pid>.png`).
     TakeScreenshot,
-    /// Terminator parity (phase 1 of
-    /// [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
-    /// docs/TERMINATOR-NAMED-GROUPS-DESIGN.md)).
+    /// Prompt for a broadcast-group name for the focused pane.
     /// `create_group` is Terminator's name for "prompt for a
     /// group name + assign it to the focused pane." Already wired
     /// as `Action::EditPaneGroup`; `CreateGroup`

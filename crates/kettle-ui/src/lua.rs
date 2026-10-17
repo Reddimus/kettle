@@ -12,7 +12,8 @@
 //!
 //! Lua can't mutate App state directly, so `send_text`, `exec_action`,
 //! `notify` and `set_theme` queue a [`LuaCommand`] that the App drains after
-//! the Lua call returns. See docs/TERMINATOR-PLUGIN-DESIGN.md for the design.
+//! the Lua call returns. See docs/PLUGINS.md for the Lua API and
+//! docs/ARCHITECTURE.md, Plugin system, for integration.
 
 use anyhow::{Context, Result};
 use mlua::Lua;
@@ -209,9 +210,7 @@ pub enum LuaCommand {
     SetTheme(String),
 }
 
-/// Terminator plugin parity (design doc:
-/// docs/TERMINATOR-PLUGIN-DESIGN.md): event hooks. The App fires each
-/// variant to the callbacks registered with `kettle.on`.
+/// The App dispatches these events to callbacks registered with kettle.on.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LuaEvent {
     /// Emitted once after kettle's first window + first pane are
@@ -231,11 +230,8 @@ pub enum LuaEvent {
     /// activity watchers) can drop their state. Used by
     /// `kettle.on('pane_close', function(pane_id) … end)`.
     PaneClose(u64),
-    /// Terminator plugin parity (phase 3 of
-    /// docs/TERMINATOR-PLUGIN-DESIGN.md): emitted once per chunk of
-    /// PTY output drained from a pane. Payload: pane id + the chunk's
-    /// bytes. The per-pane output queue is bounded, so a plugin that
-    /// falls behind may miss chunks.
+    /// Emitted for drained PTY-output chunks; bounded delivery may drop chunks.
+    /// Payload: pane id and the chunk's bytes.
     Output(u64, Vec<u8>),
     /// Terminator plugin parity (focus event hook).
     /// Emitted when keyboard focus moves
@@ -368,9 +364,7 @@ impl LuaEngine {
         Self::new_with_sandbox(theme_name, kettle_config::LuaSandbox::Safe)
     }
 
-    /// Terminator plugin parity (phase 12 of
-    /// docs/TERMINATOR-PLUGIN-DESIGN.md): build a VM at the configured trust
-    /// level.
+    /// Construct a VM at the configured Lua sandbox level.
     ///
     /// `Safe` and `Restricted` both nil the Lua stdlib functions that execute
     /// external processes or open arbitrary files: `os.execute`, `os.exit`,
@@ -706,8 +700,7 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.exec_action")?;
-        // Phase 7 of docs/TERMINATOR-PLUGIN-DESIGN.md: kettle.notify(title, body?)
-        // queues a desktop notification. Body is optional;
+        // kettle.notify(title, body?) queues a desktop notification. Body is optional;
         // `kettle.notify('Build done')` works too.
         // Per-field cap (MAX_LUA_NOTIFY_BYTES) on title +
         // body so a hostile script can't smuggle gigabytes through
@@ -747,9 +740,8 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.notify")?;
-        // Phase 10 of docs/TERMINATOR-PLUGIN-DESIGN.md: kettle.set_theme(name)
-        // queues a SetTheme command; the App drains + applies via
-        // the existing NextTheme infrastructure.
+        // kettle.set_theme(name) queues a runtime theme change. The App applies it
+        // through the existing NextTheme infrastructure.
         let pending_for_theme = Arc::clone(&pending);
         kettle_tbl
             .set(
@@ -768,10 +760,9 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.set_theme")?;
-        // Phase 8 of docs/TERMINATOR-PLUGIN-DESIGN.md: kettle.add_menu_item(
-        //   label, callback). Lua-supplied entries that render BELOW
-        // the built-in context-menu items. Callback is
-        // a Lua function invoked when the item is clicked.
+        // kettle.add_menu_item(label, callback) registers a context-menu callback.
+        // Lua-supplied entries render below the built-in context-menu items.
+        // Callback is a Lua function invoked when the item is clicked.
         //
         // Storage: kettle_menu_items registry table; each entry is
         // a {label, callback} table.
@@ -817,9 +808,9 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.add_menu_item")?;
-        // Phase 9 of docs/TERMINATOR-PLUGIN-DESIGN.md: kettle.add_url_handler(
-        //   name, pattern, callback). Lua-supplied URL handlers that
-        // run when a URL matches the pattern, BEFORE kettle's default
+        // kettle.add_url_handler(name, pattern, callback) registers a Lua-pattern URL handler.
+        // Lua-supplied URL handlers run when a URL matches the pattern,
+        // BEFORE kettle's default
         // open-in-browser path. Use case: route Launchpad/GitHub PR
         // URLs to a custom CLI tool instead of the system browser.
         //
@@ -882,9 +873,8 @@ impl LuaEngine {
                 )?,
             )
             .context("set kettle.add_url_handler")?;
-        // Terminator plugin parity (docs/TERMINATOR-PLUGIN-DESIGN.md):
-        // `kettle.on(event_name, callback)` registers a Lua function to
-        // fire when the named event occurs. Stored as a registry-table
+        // kettle.on registers callbacks for the nine supported event names.
+        // Callbacks fire when the named event occurs. Stored as a registry-table
         // entry keyed by one of the nine LuaEvent names; callbacks accumulate
         // in a list (multiple subscribers per event). Unknown names return
         // false instead of creating permanent registry keys.

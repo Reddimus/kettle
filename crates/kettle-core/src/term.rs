@@ -8484,8 +8484,7 @@ impl Terminal {
     /// pane was spawned. `None` means the platform does not expose a pid for
     /// this Child type (the Windows fallback path).
     ///
-    /// The remote-session detector roots its process-tree walk here (see
-    /// [`TERMINATOR-REMOTE-DESIGN.md`](docs/TERMINATOR-REMOTE-DESIGN.md)).
+    /// The remote-session detector roots its process-tree walk at this captured child PID.
     /// Read-only; does not consume the Child.
     pub fn child_pid(&self) -> Option<u32> {
         self.child_pid

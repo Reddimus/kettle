@@ -6,21 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Isolated from kettle-core (per TERMINATOR-REMOTE-DESIGN.md) so the
-# sysinfo dep doesn't propagate to non-UI consumers (the headless
-# --screenshot path, the --check-config validator).
+# Keep process-scanning dependencies out of kettle-core.
 description = "kettle: SSH / Docker / Podman / kubectl remote-session detection for the focused pane"
 
 [lints]
 workspace = true
 
 [dependencies]
-# Cross-platform process-tree walking (per
-# TERMINATOR-REMOTE-DESIGN.md). sysinfo handles
-# /proc on Linux, libproc on macOS, NtQuerySystemInformation on
-# Windows behind a single Rust API. Isolated to this crate so
-# the dep doesn't propagate to non-UI consumers (the headless
-# --screenshot path, --check-config validator).
+# sysinfo supplies the portable full-snapshot API and Windows scanning; Linux/macOS UI scans
+# use pane-rooted native walks.
 #
 # Default features turn on a lot of unused refreshers (disk, net,
 # components). We only need process enumeration; opt-out + opt-in

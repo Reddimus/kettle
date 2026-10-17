@@ -1,6096 +1,1180 @@
 # Testing
 
-kettle is verified by a fast, deterministic test suite plus native CI smoke
-runs on Linux and macOS. A Windows CI leg retains compile and regression
-coverage for conditional code, but it does not represent a supported package or
-installer. Most parser, state, and UI-decision tests need neither a GPU nor a
-PTY. The full workspace suite intentionally also opens an offscreen wgpu
-device and runs a small number of native PTY/ConPTY lifecycle tests. An
-adapter-less host can soft-skip the GPU test and a restricted sandbox can
-soft-skip the PTY tests, but that is reduced coverage and must not be reported
-as a native GPU or PTY pass.
-
-Session-save regression coverage injects a blocked writer, queues newer
-snapshots, and checks that shutdown persists only the newest pending snapshot
-after the in-flight write. It needs no GPU, PTY, or filesystem timing assumptions.
+Run `just gauntlet` before opening a PR. Before a release or a supply-chain
+change, run `just gauntlet-strict`; use `just gauntlet-full` for the required
+native gates on your current OS, especially after packaging or renderer changes.
+CI adds the other operating systems, the minimum Rust version, packaging,
+scheduled dependency scans, and longer fuzz runs. Linux and macOS are supported
+runtime hosts. Windows CI retains compile and regression coverage, but does not
+produce a supported package. Record every skipped check and its reason.
 
 ## Run it
 
+Run commands from the repository root. [Justfile](../Justfile) defines the
+recipes; `just --list` shows those available on your host.
+Install the source-build dependencies in [INSTALL.md](INSTALL.md#from-source).
+Use Rust stable with rustfmt and Clippy, Python 3, Git, and just.
+The workspace declares Rust 1.95 as its minimum version in
+[Cargo.toml](../Cargo.toml).
+
+For the normal edit loop:
+
 ```sh
+cargo fmt -p <crate>
 cargo fmt --all --check
 just gauntlet
 ```
 
-Use a non-root user and `docker run --init` for Linux container runs. Root
-bypasses mode-bit tests, and a bare PID 1 may leave killed fixtures as zombies.
-Fixtures for trusted decoders and IPC explicitly create private roots and
-non-writable executable paths. Run them under umask `002` to catch accidental
-inheritance. The private-parent regression fails when either fresh-parent
-creation branch uses the ambient mode; existing unrelated directories stay as
-they were. Release-script fixtures require Git as well as Cargo.
+Replace `<crate>` with the package you changed. Format only that crate while
+iterating. The workspace check catches formatting drift elsewhere.
+A focused test helps during development, but does not replace the gate.
 
-### Strict and full gates
+### Main gates
 
-Before a release or supply-chain change, also run:
+- `just gauntlet`: checks formatting, locked workspace build/test/Clippy,
+  default-feature core Clippy, rustdoc, media test features, and helper fixtures.
+  Run before a PR; needs the source-build tools and native libraries.
+- `just gauntlet-strict`: adds vendor tests, deny/audit/machete, the advisory
+  scope guard, tracked-file audit, fuzz guards, Mermaid, and release fixtures.
+  Run before releases or supply-chain changes; install all three Cargo tools.
+- `just gauntlet-full`: runs strict plus `full-native-gates` for this OS.
+  Run after packaging, installer, or renderer work and before a release;
+  needs release builds, native tools, a GPU adapter, and a graphical session.
+- `just fuzz-check`: checks formatting and lints the fuzz workspace on stable.
+  Run after changing fuzz entry points; Unix only, with a notice on Windows.
+- `just fuzz-guard`: tests the planner and target table, then checks that
+  shipped binaries exclude fuzzing features. Run after fuzz or feature changes;
+  needs Python, Bash, and Cargo on Unix.
+- `just vendor-check`: directly tests and lints the patched parser and PTY
+  crates and checks the clipboard patch. Run after vendor changes;
+  needs the native Rust toolchain and Python on the current OS.
+- `just tracked-audit`: runs its self-test and audits every tracked path.
+  Run after file, asset, manifest, or documentation changes; needs Git and
+  Python 3 on Unix, with output under `target/diagnostics`.
+- `just mermaid-check`: compiles diagrams in tracked Markdown.
+  Run after diagram changes; needs Python, npx, and Chrome/Chromium on Unix.
+  Missing rendering tools skip locally unless required mode is enabled.
 
-```sh
-just gauntlet-strict
-```
+The strict gate requires `cargo-deny`, `cargo-audit`, and `cargo-machete`.
+Missing tools fail their commands. The audit recipe fetches the advisory database
+into `target/advisory-db`. Supply-chain scans can need network access.
+The Mermaid helper can fetch its CLI through npx.
+Do not assume either gate is offline.
 
-The strict gate includes the normal gauntlet, direct patched-crate validation,
-RustSec advisory scans of the product and vendor lock graphs, the scoped
-`lru` exception guard, dependency-policy checks (including the `ttf-parser`
-ban), unused-dependency checks, and the tracked-file ledger. The `lru` guard
-fails when its reviewed inverse path changes, and also pins the upstream
-crates.io sources and versions whose API reachability was reviewed for
-RUSTSEC-2026-0253. It reads
-locked Cargo metadata without a platform filter, so target-specific Windows
-and macOS consumers remain visible when the guard runs on Linux CI. Install
-`cargo-audit`, `cargo-deny`, and
-`cargo-machete` locally first; a missing tool fails the recipe. `cargo-audit`
-fetches into ignored `target/advisory-db` rather than trusting a stale global
-cache.
+### Focused recipes
 
-`just gauntlet-full` adds every required native check supported by the current
-OS. Its platform dependency lists contain real checks rather than successful
-stubs. It prints other-OS legs as explicitly not applicable and claims only a
-current-OS pass; cross-platform release evidence still requires the native CI
-matrix.
+Use these to isolate a failure or validate the area you changed:
 
-### Inline-card rendering foundation
+| Recipe | What it checks; when to use it | Prerequisites |
+| --- | --- | --- |
+| `just test` | Workspace unit and integration tests | Rust and native build dependencies |
+| `just clippy` | Warnings-denied workspace lint | Clippy and native build dependencies |
+| `just core-default-features-check` | Core without features enabled by sibling crates | Clippy |
+| `just media-protocol-test` | Stub worker and injected worker panic paths | Rust; builds test-only features |
+| `just doc` | Workspace rustdoc with warnings denied | Rustdoc |
+| `just shell-integration-check` | Executes shipped snippets and path fixtures | Python; installed native shells |
+| `just live-ui-helper-selftest` | Harness parsing, readiness, and command-generation fixtures | Python; no desktop |
+| `just native-titlebar-self-test` | Native checker admission and diagnostic fixtures | Python; no desktop |
+| `just wayland-first-frame-self-test` | First-frame trace classification | Python; no compositor |
+| `just vm-launcher-test` | QEMU launcher's command and network boundary | Python; no guest disk |
+| `just script-fixture-self-test` | Live-probe timing and menu-capture ownership fixtures | Unix and Python; no desktop |
+| `just deny` | License, source, and ban policy for both lock graphs | cargo-deny |
+| `just audit` | RustSec scans of product and vendor graphs | cargo-audit and advisory database access |
+| `just lru-scope` | Reviewed dependency path for the advisory exception | Unix, Python, Cargo metadata |
+| `just machete` | Unused workspace dependencies | cargo-machete |
 
-Production display callers register inline cards for supported agents. These
-tests exercise marker recognition, text projection, terminal scrolling, image
-exclusion and both renderer modes; live agent routing is checked separately:
+The live smoke recipes appear once in the [Live UI smokes](#live-ui-smokes)
+table. Choose the row that matches the behavior you changed.
+Do not run every interactive smoke for a documentation-only edit.
 
-```sh
-cargo test --locked -p kettle-vt --lib inline_marker
-cargo test --locked -p kettle-vt --lib placeholder
-cargo test --locked -p kettle-core --lib inline_text
-cargo test --locked -p kettle-core --lib term::conformance::inline_card
-cargo test --locked -p kettle-render --lib inline_cards
-cargo test --locked -p kettle-render --lib card_context
-cargo test --locked -p kettle-render --lib card_scene
-cargo test --locked -p kettle-render --lib card_with_only_
-cargo test --locked -p kettle-render --lib unknown_inline_cluster -- --nocapture
-cargo test --locked -p kettle-render --lib fallback_cursor_blinks -- --nocapture
-cargo test --locked -p kettle-render --lib registered_poster -- --nocapture
-cargo test --locked -p kettle-render --lib refused_card_poster -- --nocapture
-cargo test --locked -p kettle-render --lib exhausted_preview_account -- --nocapture
-cargo test --locked -p kettle-render --lib card_badge_labels -- --nocapture
-```
+### What strict and full mean
 
-GPU acceptance requires the `INLINE_CARD_GPU_ACCEPTANCE` record for both
-`Grid` and `Legacy` in every targeted case. An `INLINE_CARD_GPU_SKIPPED`
-record means the host did not exercise those pixels, even if Cargo reports a
-passing test. The headless frame tests use the live renderer's upload and draw
-path and read back a PNG; they do not prove native input or installed-package
-acceptance.
+`gauntlet` is the core Rust gate. It also runs the live-helper, titlebar,
+Wayland-trace, shell, VM-launcher, and fuzz-workspace checks.
+Its media subgate enables `test-worker` and `test-faults`, which ordinary
+workspace tests do not enable.
 
-The scroll regressions feed actual terminals, scroll their retained grid and
-require the card to survive when its upper or lower rows leave the viewport.
-Changing an offscreen label, caption or gutter must invalidate it on the next
-capture. A separate long-scrollback test verifies the 26-row context bound and
-retained allocation capacity. GPU readbacks verify partial-card pixels and
-same-frame removal after an offscreen overwrite. Test-only preview-account
-reservations exercise upload refusal, text-only window creation under a full
-preview account and recovery after capacity returns, without allocating a
-budget-sized GPU texture. Pure clipped-row tests require a visible Kettle
-badge and typed pending/unavailable label for the first or last visible row,
-including a Ready poster whose upload is refused.
+`gauntlet-strict` adds the direct vendor and repository-integrity gates.
+It does not prove that an installed application works on a desktop.
+It does not require a published macOS update archive.
 
-Plain-text tests cover reads, copy projection and search while retaining
-ordinary Unicode and four-mark Kitty clusters. Kitty exclusion tests put more
-than the ordinary placeholder admission limit of long clusters before a valid
-Kitty cell. Fallback tests verify real glyph coverage, owned colors and cursor
-blink behavior. The glyph-reference comparison uses equal opaque backgrounds;
-a separate translucent-pane readback requires the owned cell to stay opaque
-and pixel-identical while ordinary pane text retains translucency.
+`gauntlet-full` adds the explicit native dependency list in Justfile.
+Both Unix hosts check icons, package templates, release/package fixtures,
+online-installer fixtures, offscreen GPU output, and CLI behavior.
+Both also run touchpad, split-exit resize, text-presentation, and line-edit
+smokes against real windows.
 
-### macOS appearance and icon gates
+Linux adds isolated installer checks and the Xvfb launch smoke.
+macOS adds the Xcode icon compiler, modal shortcuts, native titlebar, Dock menu,
+agent CLI probes, and the comparator, standing, and A/V-sync self-tests.
+Other-OS legs are reported as not applicable.
+A current-OS pass still needs the other native CI legs before release.
 
-The macOS AppIcon gate runs twice on pull requests. The normal `macos-latest`
-leg covers the current host, while `macOS 26 release icon toolchain` runs the
-exact release host. `scripts/compile-macos-app-icon.sh` selects the newest
-installed Xcode 26.x toolchain before invoking `actool`. The major pin keeps a
-different Xcode major from silently changing release assets. Both CI and the
-release workflow use the same helper so a runner/toolchain mismatch cannot
-first appear after a tag.
+### Host requirements and skipped tests
 
-The macOS 26 job retains `macos-release-icon-<sha>-<run>-<attempt>` artifacts for seven days.
-Use only matching-commit assets for local bundle checks when Xcode 26 is absent;
-this does not count as a local icon-compilation pass.
+Use a non-root account. Root can bypass the permission checks under test.
+Use an init process for container runs so killed fixture children get reaped.
+Native PTY tests need permission to create Unix PTYs or Windows ConPTYs.
+Restricted sandboxes can skip those tests.
 
-The macOS material policy has portable tests for opaque, plain-alpha, blurred,
-and Reduce Transparency states, including the borderless sharp-alpha fallback.
-`just native-titlebar-self-test` checks native-state admission and restore
-diagnostics without a desktop. `just native-titlebar-smoke` captures a light-themed native macOS window at
-startup, after resize, and with the pointer over the caption. It rejects text
-outside the native buttons over the traffic-light cluster and
-missing caption text. It also enters fullscreen through the native green button
-and requires one Kettle toggle to restore the original surface. macOS CI runs
-the same check, verifies a borderless roundtrip, and retains failure captures. Portable geometry tests cover
-resized and maximized frames, startup fullscreen, rejected transitions, queued
-reentry, duplicate exits and invalid sizes. Mutations that remove the transition freeze, exit
-preparation or original exit generation fail their regressions.
-The check caught intermittent overlap in the published 5.0.0 bundle on macOS 27;
-the corrected window-blur path passes. Windows tests pin DWM
-color byte order and minimum caption-text contrast. Linux tests require both a
-Wayland handle and the KWin blur global, cache that registry probe per process,
-and prove the 99% fallback is Linux-only; renderer tests prove the fallback
-survives the replacing pane-base pass in the live window but does not change
-screenshots. Those checks cannot prove native presentation. The release
-appearance gate therefore records
-a native decorated window with blur on and off, checks resize and full-screen on
-the blurred window, repeats the style transition while borderless, and toggles
-Reduce Transparency live. It verifies the titlebar seam, rounded corners,
-traffic lights, drag region, and first content row by sight.
+The full workspace suite includes offscreen wgpu tests.
+Most parser, state, and UI-decision tests need no GPU or child process.
+An adapter-less host can skip GPU coverage, so inspect the test output.
+A passing Cargo summary with a skip is reduced coverage.
 
-### Unix suspend/resume compatibility
+Linux GPU tests need a Vulkan loader and a hardware or software adapter.
+`libvulkan1` and `mesa-vulkan-drivers` provide the CI software path.
+macOS uses Metal. Windows uses an available wgpu backend.
+Offscreen tests need an adapter but do not need a visible display.
+Live smokes need a usable window-system session as well.
 
-`just job-control-smoke` builds Kettle and checks shell editing before a client
-starts, while it is suspended, after `bg` and `fg`, and after it exits. It covers
-Ctrl+Backspace, Alt+Backspace, ordinary Backspace, arrows, Ctrl+C, and Enter.
-The offline fixture negotiates Kitty keyboard reporting on both the main and
-alternate screen. Linux and macOS CI run it without accounts or network calls.
-`--negative-controls` requires the test to reject clients that deliberately
-leak keyboard modes on suspension or background resume; CI runs both controls.
-The test uses the normal PTY and `send_keys` encoder; it does not inject physical
-desktop events. Windows has no Unix job control and retains its normal CI gates.
+For private-path and trusted-decoder changes, repeat focused tests under
+umask `002`. Fixtures must create private roots explicitly rather than inherit
+ambient permissions. Existing unrelated directories must keep their modes.
 
-For the real Codex TUI, explicitly choose the executable:
+Report the exact command, revision, host, and skipped coverage in a PR.
+Distinguish an offscreen render from a native window, and a fixture from an
+installed-package check. Do not claim another platform passed from compilation.
+
+## What the tests cover
+
+The source is the coverage index. Test names state their contract.
+Use the current test list instead of a count copied into documentation:
 
 ```sh
-python3 scripts/check-job-control-smoke.py --kettle ./target/release/kettle \
-  --codex /absolute/path/to/codex --shell zsh --configured-shell --cycles 100
+cargo test -p <crate> -- --list
+cargo test -p kettle-core --lib -- --list
+cargo test -p kettle-config --test documented_examples_parse
 ```
 
-Codex 0.155.1 can fail shell editing while suspended, before `fg`; see
-[upstream #26564](https://github.com/openai/codex/issues/26564). CI uses the
-offline fixture.
-
-This opt-in check uses that client's local configuration and authentication,
-starts an idle session, and never submits a model prompt. A trust or login dialog
-fails readiness rather than receiving an automatic confirmation. Use a trusted
-working directory. Add `--codex-yolo` only to reproduce `codex-yolo`; it explicitly
-disables Codex approvals and sandboxing. Add `--background`, `--alternate`, or
-`--split` to exercise those paths. Standalone Codex development builds can use
-`--codex-no-daemon` when they lack a packaged daemon. `--external-editor` checks a temporary editor's
-draft handoff before suspending; `--transcript` suspends from the transcript
-overlay. `--columns` and `--rows` control the startup size; `--maximized` opens a
-maximized window.
-The harness owns its isolated window and cleans up its PTY sessions, including
-stopped jobs. It does not operate existing user windows.
-
-Artifacts retain exact binary versions and launch settings even on failure.
-Successful runs also save final window geometry and pane grids. Failed tests
-retain local screen text for diagnosis; review it before sharing. CI uploads
-failure diagnostics only from the offline fixtures. No screenshots or recordings
-are published by this test.
-
-### Shell integration and completion
-
-Shell-integration changes also run `just shell-integration-check`. Unlike the
-CLI smoke's source-text checks, this executes the shipped snippets: macOS uses
-interactive `zsh -f` with `PROMPT_SUBST` off and its system Bash 3.2, while
-Linux CI installs Fish and executes its OSC 133 event hooks and OSC 7 cwd report.
-A separate Ubuntu 24.04 job asserts Fish 3.7.x before running the same suite, so
-the oldest supported completion binding cannot drift with `ubuntu-latest`.
-The Fish job also runs the AppleScript payload fixture with a simulated window
-and a real Fish command interpreter, checking argument quoting and exit status.
-Windows runs the PowerShell prompt-status and PSReadLine binding fixture
-under each installed PowerShell host. Other hosts run the interpreters they have
-and print explicit skips for native legs that belong to the CI matrix.
-
-The same gate exercises completion metadata. Portable fixtures pin UTF-8-safe
-field truncation and custom-binding preservation in all four snippets. The Zsh
-fixture also emits the maximum 64-row payload under a time bound, catching a
-per-byte subshell regression; Bash also proves a full non-ASCII label is not
-shortened by locale-sensitive character counts. A real interactive Fish PTY
-proves default and Vi-insert Tab behavior, keymap ownership changes, reverse
-cycling, cursor-move invalidation, paging beyond 64 candidates, and that Fish's
-pager stays closed.
-A second Fish run sources integration from a path containing spaces, an
-apostrophe and a dollar sign, including the Vi-mode re-source.
-It also pins the count, per-field, and aggregate retained-state caps and keeps
-the selected row in a bounded wide-character wire page. Ordinary and
-bounded-prefix singletons are inserted from the captured result without a
-second provider query, proving neither path can re-open the stock pager. A real
-Fish editor round trip pins the ordinary singleton's trailing space and an
-expandable, unquoted `~user` completion. It also proves protocol v4 retains the
-original typed token and current-line input prefix across forward and reverse
-cycling. The PowerShell fixture pins the same replacement-span retention.
-Parser tests keep v1 through v3 compatible, require both v4 presentation fields,
-and degrade unsafe or oversized hint values without hiding safe candidates.
-Terminal and renderer tests pin one stable command-column anchor across
-candidate insertion, UI-only dismissal, Ctrl-L redraw, focus loss, Unicode
-display-width math, and right-edge clamping. A same-prefix reply after the card
-was hidden must retain the cursor captured with that prefix; a changed prefix
-must replace both halves, and real editor input must clear them. The
-deterministic fixture keeps native no-space results open, treats leading-dash
-candidates as data, and counts exactly one provider call. Request-numbered
-parser/state tests cover prompt sessions, duplicate same-row Fish prompt marks,
-the reader-thread prompt-ring bridge, screen-clearing commands that reuse a
-prompt row, a transient startup resize that preserves a single-row active
-prompt, clear, re-arm, delayed old replies, rejected queue admission, Kitty
-key releases, rejection of Alt/Ctrl/Super Tab, custom Tab directions, counter
-exhaustion, pump-buffered prompt boundaries, and multi-key remote batches; only
-an admitted current Tab may restore the card. UI guards keep DEC focus reports
-in the chronological input lane without consuming that admission. A real Fish
-Ctrl-L round trip
-proves a moved prompt keeps publishing on its current session, while terminal
-state tests prove that session remains accepted and a fresh sync may replace
-it. PowerShell pins both stock-direction bindings, its quoted-directory edit,
-multi-page absolute positions, the 64 KiB wire cap, and the same source-memory
-limits. Its prefix and replacement token are rejected before grapheme indexing
-when an editor line exceeds their presentation bounds. Native Windows runs
-that fixture with PSReadLine. Parser and terminal tests bound malformed control strings,
-compare every split of private metadata through the screen and raw-output
-filters, sweep private-message starts around the exact recovery boundary, keep
-absolute positions when unsafe rows are skipped, and reject stale replies after
-unrelated input or focus loss.
-
-Modified-Enter auto detection has an additional native Unix PTY regression. It
-starts stock `zsh -f` on macOS or unconfigured Bash on Linux, proves the shell
-editor's prompt is noncanonical while the shell's own process group still owns
-the PTY, then starts a raw child and proves job control transfers the foreground
-group through the same `foreground_process_group` API the UI samples. Portable
-tests separately pin the recognized-composer allowlist, reject stale Unix pid
-snapshots, prove the Windows breadth-first scan chooses a composer before its
-forked helpers, and cover the policy matrix. A live `kettle ctl send_keys` check
-remains useful because it exercises the GUI/control encoding path against the
-actual pane.
-
-### Vendored dependencies
-
-The patched crates under `vendor/` are explicitly excluded from the product
-workspace, so the root gates exercise their public Kettle integration but do
-not run package-owned unit targets. A separate validation workspace and
-committed `vendor/Cargo.lock` pin the direct-test dependency graph for `vte`,
-`alacritty_terminal`, `portable-pty`, and `arboard`.
-
-`cosmic-text` is the exception: it stays outside that workspace, because its
-optional editor features would put unmaintained crates into a graph whose audit
-admits no exceptions. The product build compiles it, the product audit covers
-it, and
-`kettle-render`'s `paragraph_separator_shaping_tests` exercise its patch on every
-CI platform. `vendor/README.md` records how its upstream unit tests were run.
-`just deny` checks licenses, sources, and banned crates in both lock graphs;
-the Audit workflow scans both for RustSec advisories. Run all retained unit
-parser and PTY targets, doctests, warnings-denied Clippy, and display-free
-Linux clipboard URI tests with:
+The first two commands list tests after Cargo prepares the test targets.
+They can build code. Use source searches when you only need to inspect coverage:
 
 ```sh
-just vendor-check
+rg -n '#\[test\]|#\[cfg\(test\)\]' crates/kettle-core/src
+rg -n 'selection|scrollback|replay' crates/kettle-core/src/term.rs
+rg --files crates/kettle-render/tests
 ```
 
-The terminal-query replies are tested at both levels. The vendored units pin
-each reply byte for byte: XTVERSION, DSR and DECXCPR under origin mode,
-DECRQSS for every SGR form (including Neovim's exact undercurl and truecolor
-probes), the scroll region and every cursor style, XTGETTCAP for every
-capability with hex-only echoes, and DECRQM for modes 47 and 1047. They also
-pin that an unknown or oversized request is never echoed, and that a string
-cut off before ST is not answered. `kettle-core`'s
-`terminal_queries_get_their_replies_through_a_pty` sends XTVERSION, DECXCPR,
-DECRQSS and XTGETTCAP from a real PTY child through the kettle-vt extractor,
-so `cargo test --workspace` catches a reply lost on the product path.
+Read the owning module and nearby tests before changing a behavior.
+Unit tests usually live in the same Rust file as the implementation.
+Larger suites use child test modules; integration tests live under `tests/`.
+The table lists main homes, not every test file.
+All paths below are relative to the repository root.
 
-CI runs `vte` plus its `alacritty_terminal` consumer on Linux. It runs
-`portable-pty` on Linux, macOS, and Windows because each compiles its own
-descriptor or pipe code: Linux uses `close_range`, macOS lists open
-descriptors through `proc_pidinfo`, and only the Windows runner executes the
-`PIPE_NOWAIT` ConPTY regression. The `require_cwd` opt-in has a Unix test that
-spawns into a missing directory and must fail, and a Windows test of the
-directory handed to `CreateProcessW`. A local `just vendor-check` is therefore
-evidence only for the platform it ran on.
+| Crate | Main test homes | Main boundary |
+| --- | --- | --- |
+| `kettle-vt` | `crates/kettle-vt/src/`, `crates/kettle-vt/tests/escape_prefix.rs` | Escape extraction, images, private protocols |
+| `kettle-core` | `crates/kettle-core/src/term.rs`, `crates/kettle-core/src/`, `crates/kettle-core/tests/` | Grid, PTY lifecycle, selection, search, recording |
+| `kettle-config` | `crates/kettle-config/src/`, `crates/kettle-config/tests/` | Parsing, defaults, keybinds, documented examples |
+| `kettle-media` | `crates/kettle-media/src/`, `crates/kettle-media/tests/` | Bounded wire protocol, worker client, video sniffing |
+| `kettle-media-worker` | `crates/kettle-media-worker/src/`, `crates/kettle-media-worker/tests/` | Process boundary, playback, native audio |
+| `kettle-media-native` | `crates/kettle-media-native/src/`, `crates/kettle-media-native/tests/` | Decoders, sandboxing, audio output |
+| `kettle-media-render` | `crates/kettle-media-render/src/`, `crates/kettle-media-render/tests/` | Raster, SVG, Mermaid, hostile inputs |
+| `kettle-render` | `crates/kettle-render/src/lib.rs`, `crates/kettle-render/src/headless_tests.rs`, `crates/kettle-render/tests/` | Text, geometry, GPU pixels, menus |
+| `kettle-ui` | `crates/kettle-ui/src/app.rs`, `crates/kettle-ui/src/app/`, `crates/kettle-ui/src/` | Input routing, windows, settings, control actions |
+| `kettle-i18n` | `crates/kettle-i18n/src/`, `crates/kettle-i18n/tests/` | Locale selection and catalogue/build rules |
+| `kettle-state` | `crates/kettle-state/src/` | Private state and filesystem policy |
+| `kettle-ctl` | `crates/kettle-ctl/src/`, `crates/kettle-ctl/tests/pipe_instances.rs` | Local IPC, framing, permissions, liveness |
+| `kettle-update` | `crates/kettle-update/src/`, `crates/kettle-update/tests/` | Trust root, manifests, archive/update boundaries |
+| `kettle-remote` | `crates/kettle-remote/src/` | Process ancestry and remote-session detection |
+| `kettle-test-support` | `crates/kettle-test-support/src/`, `crates/kettle-test-support/tests/` | Shared fixtures, source scans, MSRV drift |
+| `kettle` | `crates/kettle/src/`, `crates/kettle/tests/` | CLI, exec, MCP, source identity, native preview |
 
-The vendored trees intentionally preserve their upstream release formatting so
-the retained patch remains reviewable against the published source. Do not run
-workspace-wide `cargo fmt` against `vendor/Cargo.toml`: unchanged upstream files
-are not a rustfmt gate. Keep Kettle-owned edits narrowly styled to their
-surroundings; direct tests, doctests, warnings-denied clippy, audit, and deny are
-the validation contract for the vendor workspace.
+### Drift guards and source scans
 
-### Platform coverage
+Some contracts cross files or cannot be exercised cheaply in every unit test.
+Source-scan tests pin the production call path in addition to helper behavior.
+A helper test alone cannot show that the UI still calls that helper.
 
-For full Linux coverage, install the source-build dependencies from
-[INSTALL.md](INSTALL.md#from-source) plus `libvulkan1` and
-`mesa-vulkan-drivers`. No graphical session is needed for
-`gpu_pipelines_compile_and_render_offscreen`, but a working Vulkan loader and
-hardware or software adapter are. Windows uses DX12/WARP or another available
-wgpu backend; macOS uses Metal. The native PTY checks also need permission to
-create `/dev/ptmx` children on Unix or a ConPTY on Windows.
+Examples worth finding before a refactor:
 
-Native ARM guest checks complement, but do not replace, the hosted release
-matrix. The maintained guest is the migrated Ubuntu 26.04 aarch64 installation
-running directly under QEMU with Apple's HVF accelerator. Start it with
-`scripts/vm/run-ubuntu-arm.sh`; the launcher pins the CPU, memory, disk, EFI,
-network, display, and guest-agent channels while keeping disk and EFI state
-private to the owner.
+- `crates/kettle-config/tests/documented_examples_parse.rs` checks documented
+  configuration examples against the real parser.
+- `crates/kettle-config/tests/docs_text_action_examples_parse.rs` checks
+  documented text-action examples.
+- `crates/kettle-config/tests/harness_action_names_resolve.rs` scans smoke
+  scripts for literal action names and resolves them through production rules.
+- `crates/kettle-ui/src/app/ui_text_drift_tests.rs` scans user-visible text
+  sinks so new English literals do not bypass the translation catalogue.
+- `crates/kettle-i18n/tests/build_gates.rs` checks catalogue/schema failures.
+- `crates/kettle-test-support/tests/msrv_consistency.rs` keeps the declared
+  Rust floor aligned with its CI job and related toolchain settings.
+- `crates/kettle-test-support/tests/independent_hazards.rs` checks that
+  test-only source cannot satisfy a production source guard.
 
-The private qcow2 and mutable EFI variables live outside the checkout under
-`~/VMs` and must never be committed. The default mode is headless and forwards
-guest SSH to `127.0.0.1:2222`; `scripts/vm/run-ubuntu-arm.sh gui` adds the Cocoa
-virtio framebuffer for desktop checks. Use the pinned `kettle-vm` SSH host for
-automation. Shut down with `ssh kettle-vm 'sudo systemctl poweroff'`, wait for
-QEMU to exit, and run `qemu-img check ~/VMs/ubuntu-arm.qcow2` only while the
-image is offline. An in-guest `sudo fstrim -av` before shutdown returns freed
-blocks to the sparse qcow2 because the launcher enables discard.
+Core and UI also pin lifecycle ordering, nonblocking teardown, input routing,
+and redraw paths with source guards near their behavioral tests.
+Use `rg -n 'source_guard|production_source|drift' crates` to find them.
+When moving a function, read the guard's invariant before changing its matcher.
+Do not make the scan pass by letting it match its own assertion or a comment.
+Keep a behavioral regression when the contract can be exercised directly.
 
-The 2026-08-23 migration kept the guest OS, user, tools, credentials, and
-repository state, and grew the root disk to 256 GiB. A full workspace run then
-completed 2,131 tests across 45 binaries with zero failures, and the release
-binary linked. The native aarch64 `search-history` live-window smoke passed
-once under Xvfb and once in the real GNOME Wayland session. Both runs selected
-Vulkan through Mesa llvmpipe and reported `Adapter type: Cpu`. This proves the
-software-rendered Vulkan and Wayland paths. It does not prove accelerated
-virtio GPU rendering.
-
-Centered-viewer tests cover split-relative padding, backdrop coverage,
-localized pin controls, control identity and keyboard traversal. Reverting
-placement, pin identity or focus navigation fails their regressions. For a
-native check, compare `ui_geometry` and the PTY dimensions before opening and
-after closing: both must stay unchanged. Verify consumed backdrop clicks,
-focus return, source/diagram navigation and pinning without restarting video.
-`preview_overlay` reports the same geometry and playback metadata as a lane.
-
-The Linux CI viewer smoke uses an isolated X server and native input to check
-focus loss, blocked terminal input, panning, centered placement, and pinning.
-`check-media-viewer-smoke.py --case focus|pan` isolates either regression. Its
-Xvfb result does not establish GNOME Wayland acceptance.
-The native Wayland checklist also covers source/gallery navigation, video
-poster and playback, timeline focus, pause/seek, pinning, window resizing, and
-no-room recovery. Record silent output separately from working audio.
-
-On Linux, `just lane-media-smoke` explicitly selects `media-open-mode = lane`
-and checks pinned previews live under Xvfb. It
-shows an image, an SVG, a Mermaid diagram and a video with `kettle show`,
-and checks that each renders in a lane, the video as its poster. It then
-plays the video and steps it back five seconds with native X input
-(the shared X11 input helper), since a control client may do neither, and checks that a control
-client's step moves nothing and its pause pauses. It also reads the
-worker's `NoNewPrivs` and `Seccomp` flags and captures a Spanish lane for
-review. Kettle runs only a worker file no one else can write, so the script
-stages both binaries in a private directory first. It needs xvfb-run,
-ffmpeg, X11/XTest libraries and x11-utils, and writes results under
-`target/diagnostics/lane-media-smoke/`. `--self-test` covers its fixture
-writer and staging without a display. On 2026-10-11 it passed on the guest
-against the 5.0.0 release candidate (`1fec1dd4`), all twelve checks, under
-Xvfb with Mesa llvmpipe. The worker reported `ffmpeg` alone, no
-GStreamer, and ran with `NoNewPrivs` 1 and `Seccomp` 2. A native Left from
-7.2 s stepped back 5.09 s, and the Spanish lane read "Video · 640×360 ·
-H.264 · 0:40 · con audio".
-
-The retained Windows CI runner compiles and tests portable and conditional
-Windows code, including native ConPTY and PowerShell fixtures. Kettle 4.0 does
-not publish or support a Windows package, installer, GPU smoke, or live-window
-harness. Historical native Windows and Parallels ARM evidence belongs to the
-3.3.0-and-earlier record, not to current release coverage.
-The runner does not use `--ignored`. Its required evidence is the PowerShell
-script fixtures, workspace tests, CLI smoke, and vendored ConPTY regression.
-
-Read test output for `no GPU adapter ... skipped` and `no PTY ...` messages.
-Those messages leave the portable suite green by design; record the missing
-coverage instead of treating the exit code alone as platform validation.
-
-### GPU devices in tests
-
-The `kettle-render` tests that stand up a real GPU device hold a process-wide
-lock so only one of them runs at a time. Without it, libtest runs them in
-parallel. On a host whose only adapter is a software or basic display driver,
-creating and tearing down several wgpu devices at once can take the whole test
-binary down with `STATUS_ACCESS_VIOLATION`. Cargo reports that against
-`kettle-render` with no failed test, because the fault is in the driver rather
-than in Rust. A new test that creates an adapter, device, or surface belongs
-behind the same guard.
-
-Every renderer-owned device request uses the same limit policy as the live
-window. Kettle requests the adapter's full 2D texture dimension so a large
-high-DPI surface remains legal, but clamps every other WebGPU default to the
-adapter's advertised value. This matters on virtual GLES adapters which expose
-graphics and presentation while advertising zero compute workgroups: Kettle
-has no compute pipelines, so a default request for 65,535 workgroups must not
-reject an otherwise usable device. The pure limit regression is portable. The
-QEMU Ubuntu ARM smokes prove Vulkan through llvmpipe on Xvfb and real Wayland;
-they do not claim accelerated virtual-GPU rendering.
-
-### Performance evidence
-
-Current performance automation is native to the supported platforms:
+The tracked audit protects repository files rather than runtime behavior.
+It checks path/case collisions, object identity, text hygiene, TOML/JSON,
+local Markdown targets, and bounded font/image structures.
+Its ledger is `target/diagnostics/tracked-files-audit.json`.
+For staged release checks, the underlying script also accepts
+`--require-clean-index`:
 
 ```sh
-just macos-perf
-just macos-standing
-just macos-avsync
-just linux-perf
+python3 scripts/audit-tracked-files.py --require-clean-index
 ```
 
-The macOS comparator measures the maintained multi-terminal campaign and its
-top-half gate. Its timings land on 100 ms polling steps and its memory figure
-is resident set size, so published standings and before/after numbers come
-from `just macos-standing`: exact launch timing, Activity Monitor memory,
-idle CPU and wakeups, and vtebench, or a paired A/B of two Kettle builds with
-`--kettle-b`. Keystroke-to-screen latency is opt-in (`--workloads latency`,
-after `--latency-check`), since it posts keys and needs its probe's grants. A published rank combines 3 countable sessions on 3 dates with
-`--combine`, and a session is countable only when its preflight found the
-machine quiet. See [scripts/perf/README.md](../scripts/perf/README.md). The Linux
-comparator remains a narrower diagnostic gate and requires the documented peer
-terminals and a real X11 or Wayland session.
+### Features and separate workspaces
 
-`just macos-avsync` measures a lane's A/V sync from real presentation times.
-For each flash of a fixture it compares when the window server displayed it
-with when its click reached the system mix, plus the output device's
-latency. It does that after a native play press and after each of three
-native seeks, against the −125 to +45 ms target. Each run launches its own
-Kettle and plays the fixture out loud, so it needs Screen Recording for the
-terminal that runs it and an uncovered window. `just macos-avsync-self-test`
-is its GUI-free part: the analysis on synthetic captures, including both
-edges of the target, recovery after a seek, a dropped click and the
-refusals; and the probe's pure helpers. CI runs it on macOS.
+A workspace build unifies features. It can hide a core crate that accidentally
+uses an optional dependency without declaring the feature.
+That is why the gauntlet lints `kettle-core` alone with default features.
 
-The standing self-test also checks schema-1 `.dat` reconstruction, schema-2
-reads and schema-3 absence rules; typed MiB/rate/signed comparisons; metric
-failure isolation; interrupted sessions and first countable dates; finite
-inputs; warmup exclusion; legacy zero-containing A/A gates and verdicts;
-scientific-notation flood offsets; fixed-set vtebench aggregates with invalid
-members; and latency censoring. The date-selection fixture has one invalid
-optional round out of five, leaving four paired comparisons. It must reject
-the actual `countable: counts and covered` revert. The latency fixture rejects
-negative keys and negative, fractional or boolean censor counts, and must fail
-with the original latency-key decoder restored. Kettle's launch argv ends with
-AppKit's `-ApplePersistenceIgnoreState YES` after the payload, and no peer's
-does, so a 4.7.0 baseline cannot stall at AppKit's "reopen windows?" alert.
-Adjacent peer fixtures check the current log-ratio and launch-difference
-Student-t intervals and require all ranked pairwise comparisons, including
-peer pairs that omit Kettle. Analysis, combine and Markdown checks reject
-supplemental estimators. Markdown checks require adjacent labels after the
-completed tables and no labels without new metrics. The existing Student-t
-coverage simulations still run. A change to the harness's analysis must also
-keep every existing output file (`summary.md`, `combined.md`, `combined.json`
-and `results.json`) byte-identical for schema-1/2 sessions, compared as whole
-files rather than prefixes or selected JSON fields.
+The media stub worker and panic injection are test-only feature legs.
+Run `just media-protocol-test` after changing their boundaries.
+Do not enable those features in a shipped binary to make a test pass.
 
-The portable `NativeEvidence` tests cover retained startup child/native
-policies, both delayed-child grid corrections, provisional recorder completeness,
-failed/no-op resizes, event loss, wrong identities and overflow. Startup fixtures
-pin the S1 format and the S2 font-thread format separately. They check raw stamps,
-thread/path attribution, signed slack, per-round GPU/font intervals, missing and
-reversed endpoints, duplicate conflicts and diagnostic-only unknown stamps.
-A malformed stamp (negative, non-numeric, missing or over 20 digits)
-invalidates its phase rather than leaving an earlier stamp in force, and a
-malformed path line voids font attribution. Native geometry components must lie
-in 1-65,535, the range of `struct winsize`; an isolated fixture checks the
-initial-grid refusal alone. First output stays unavailable. Private trace tests
-refuse to infer echo joins from unemitted data. CLI fixtures mock every spawn and helper build, exercise the
-actual entry point and check private input redaction.
+The fuzz workspace has its own manifest and lockfile.
+The vendor validation workspace also has its own manifest and lockfile.
+Root workspace tests do not run those package-owned suites.
+Use the recipes below rather than assuming `cargo test --workspace` covers them.
 
-`LegacyOutputBytes` compares all bytes of `results.json`, `summary.md`,
-`combined.json` and `combined.md` against fixed baseline outputs for schema 1,
-2 and 3, in both standing and A/B layouts. The schema-1 cases include `.dat`
-reconstruction. The checks use unittest equality, which remains active under
-`python3 -O`. `startup-phases-s1.fixture` is a frozen S1-era capture and
-`startup-font-phases.fixture` a frozen font preload capture, while
-`startup-phases.fixture` follows the live producer, which `startup_trace.rs`
-tests against. Fixtures are inert harness-version inputs.
+### Vendor coverage
 
-`CursorLayerEvidence` uses `cursor-layer.fixture`, a full synthetic export of the
-cursor layer smoke's `run_contract`, including its raw monotonic stamps,
-rusage samples, geometry reads and selected cursor states. The positive case
-checks independently known peak, median, real span and counter rates. Refusal
-cases cover short span, a missing sample gap, samples outside the handoff/timeout
-interval, nonmonotonic sample/stamp times, changed geometry exits or renderer,
-aggregate mismatches, every missing stamp and aggregate-only legacy input.
-Additional cases cover geometry ordering/counts, hides/handoffs, declared
-cadence, counter regression/balance, exit-history counts, rested/reload/key
-states, invalid numeric types,
-clock mismatch, partial exports, threshold boundaries and CLI overrides.
-CLI checks forbid helper builds and process creation and check private-field
-redaction. These unittest checks, including whole-file comparisons, remain
-active with optimization:
+[vendor/README.md](../vendor/README.md) describes the retained patches.
+`just vendor-check` combines `vendor-parser-check`, `vendor-pty-check`, and
+`vendor-clipboard-check`.
+The parser gate tests and lints `vte` with `ansi` and `alacritty_terminal`.
+The PTY gate uses `serde_support` for compatibility with serialized builders.
+The clipboard gate runs display-free Linux URI-list tests, then the X11 INCR
+paste test under `xvfb-run` when xvfb-run and xclip are installed. Other hosts
+check formatting for that patch.
+
+CI runs parser patches on Linux and portable-pty on all three native hosts.
+Only Windows executes its ConPTY-specific code.
+Only Unix executes its descriptor and process-group paths.
+A local vendor pass covers only the current platform.
+
+`cosmic-text` stays outside the vendor validation workspace.
+The product build and audit cover it; renderer paragraph-separator tests cover
+its patch. Consult the vendor README for its upstream validation notes.
+Keep upstream formatting when editing a vendor patch.
+Do not reformat unchanged vendor files to satisfy the root formatting gate.
+
+## End-to-end harness: selection, copy and `.cast` replay
+
+The terminal harness lives in
+[crates/kettle-core/src/term.rs](../crates/kettle-core/src/term.rs).
+`harness()` constructs a real terminal grid without a PTY or child process.
+`feed()` drives the processor; `feed_ex()` first drives Kettle's extractor,
+then feeds pass-through bytes into the processor.
+Use `feed_ex()` when the regression depends on extraction as well as VT state.
+These tests need neither a desktop nor an authenticated client.
+
+Run the selection and replay contracts:
 
 ```sh
-python3 scripts/perf/macos-standing-self-test.py CursorLayerEvidence NativeEvidence LegacyOutputBytes CursorLatency.test_existing_output_files_match_bytes_under_optimization
-python3 -O scripts/perf/macos-standing-self-test.py CursorLayerEvidence NativeEvidence LegacyOutputBytes CursorLatency.test_existing_output_files_match_bytes_under_optimization
-TZ=Pacific/Kiritimati python3 -O scripts/perf/macos-standing-self-test.py CursorLayerEvidence NativeEvidence LegacyOutputBytes CursorLatency.test_existing_output_files_match_bytes_under_optimization
+cargo test -p kettle-core --lib selection_while_scrolled_reads_visible_row_not_active_screen
+cargo test -p kettle-core --lib simple_drag_selection_while_scrolled_copies_visible_rows
+cargo test -p kettle-core --lib replays_asciicast_v2_output_into_grid
+cargo test -p kettle-core --test diagram_copy
 ```
 
-Per-file snapshots use the same directory layout, with `snapshot.gitignore`
-beside the self-test. The test runner places temporary files and compiler
-caches inside that snapshot. Targeted production reverts must make each
-refusal regression fail while the unchanged production candidate passes.
-
-These tests launch no GUI application. Synthetic raw samples prove parser
-behavior, not a real layer's footprint or observer cost. Native PTY recording,
-an actual delayed-child startup barrier, live layer measurement and harmless
-geometry polling still require separate native acceptance on an authorized
-runner. The row-shaping source exports no private echo trace, so that capability
-remains unavailable. See the retained diagnostic formats in
-[scripts/perf/README.md](../scripts/perf/README.md#retained-startup-and-native-diagnostics).
-
-For per-file review snapshots, put `macos-standing-self-test.py` beside the
-patched harness, retain the helper source snapshots under `macos-standing/`,
-and place the repository ignore-rule snapshot at `snapshot.gitignore`. Run
-`python3 macos-standing-self-test.py` in that directory. That file marks the
-snapshot layout, which keeps temporary files and compiler caches inside the
-snapshot directory. It skips
-the host user-default tests, four tests requiring the real repository or its
-packaging plist, and two controlling-terminal/`ps` tests requiring an
-unrestricted native runner. A snapshot pass does not certify those checks.
-In a checkout, `scripts/perf` has no `snapshot.gitignore`, so every test
-runs, and a stray one makes the harness version dirty. No GUI measurements or
-A/A are part of this self-test.
-
-PR 3 closure fixtures audit the canonical key registry against the config
-parser and cover changed wallpaper bytes at a stable path, intentional B-only
-changes, A/A baseline rejection, generated-path normalization, aliases and
-last assignment, empty references, quotes, home and cwd resolution, unknown
-references, unsafe and unstable reads, include cycles and isolated `init.lua`.
-They check source mutation against the bytes actually launched, public/private
-privacy, retained private snapshots, peer config bypasses and launch environment,
-and row-boundary mutation at the real campaign entry point with mocked apps.
-The closure reads managed configs exactly as kettle-config does: only `\n`
-ends a line, trimming uses Unicode White_Space, keys lowercase ASCII letters
-only, a value is unquoted once, and `background-image` is then trimmed again.
-Fixtures pin each difference from Python's own line splitting, stripping and
-lowercasing (U+2028, vertical tab, U+0085, a lone `\r`, U+001C, the Kelvin sign
-and padding inside quotes) and require the captured bytes to be the file Kettle
-reads.
-The session directory is claimed once and used by its canonical path, so a
-retargeted parent symlink cannot send a launch to an unsealed config.
-A mid-row mutation must preserve earlier raw rows, retain the invalid row and
-leave the session incomplete and uncountable. The public session loader never
-reads the adjacent local manifest.
-
-The registry audit uses the checked-out parser in a real repository. In the
-standard snapshot layout it uses `base/crates/kettle-config/src/lib.rs`, obtained
-from the pinned base with `git show`. If that supporting snapshot is absent,
-only that audit skips. It does not launch Kettle or infer rendered behavior.
-All other closure fixtures use temporary files and mocked terminal launches.
-Configs without file-valued settings keep their generated bytes, legacy
-fingerprints and report outputs byte-identical across schemas 1, 2 and 3.
-
-Printing and blink fixtures drive the collectors with synthetic timelines,
-including stale or nonmonotonic focus checks, notification races, missing or
-stale frame arrivals, invalid evidence linkage and missing trace files.
-Native helpers have GUI-free self-test entries. The printing fixture executes
-the production loop with a fake monotonic clock, short sleep returns and 30 ms
-write costs; it checks every deadline, byte and completion timestamp. The
-observer decision takes synthetic front-to-back window dictionaries and tests
-same-process dialogs, covering alerts, transparent or distant windows and
-unknown state. The probe self-test exercises the production routing decision
-with capture and posting counters, exact-window selection, and complete, idle,
-missing and incomplete pixel updates. These entries run before any permission
-or application initialization and never post input.
-
-Native scratch tests retain spawned target handles through the observer's last
-query, then reap observers before targets. Each fixture retains its spawn
-handles and signals only its own children. A native scratch pass proves query,
-scheduling and ownership behavior. It does not certify live visibility or
-cursor capture.
-
-On an authorized native runner, run the self-test without `snapshot.gitignore`.
-The four real-repository checks are live harness identity, two packaging
-Info.plist/bundle tests, and Cargo workspace exclusion of the vtebench checkout.
-The snapshot also skips the host user-default recovery suite and the two native
-controlling-terminal/ps tests. Record these separately from a snapshot pass;
-a snapshot pass certifies no repository gate.
-
-The excluded functional pilot uses an explicit app bundle, a known still image
-and a known animated image. Compare the rendered background with the intended
-asset for an absolute reference, `~/` and a relative reference in the invocation
-cwd. Confirm the managed file points to retained bytes, then change the original
-source and verify rendering still uses the capture. Check each installed peer
-with an adversarial user config and a sentinel Lua/include under its usual root;
-the managed launch must ignore it. Do not run these pilots in the developer's
-existing terminal windows or count them as standings or A/A evidence. Keep the
-pilot artifacts private and settle any resolver mismatch before method freeze.
-
-The optional printing/blink fixtures also pin the unchanged default workload
-list, complete printable payload bytes, absolute line schedule, designated
-query selection, current versus lifetime memory, timestamped focus races,
-wrong windows and covering/unknown states. They reject short, stalled or
-incomplete payloads, late/missing endpoints, malformed/native-error records,
-changed process identities and nonmonotonic counters. Blink fixtures check
-launch anchoring, readiness cutoff, actual counter span, current interval peak,
-activity eligibility and binary/config/display/crop/origin evidence matching.
-Validation-only capture posts no input. Exception, timeout and cancellation
-fixtures verify observer-first cleanup and reaping.
-
-macOS scratch tests compile the new helpers locally, observe only spawned
-command-line fixtures, compare all 80 native printing writes, and prove the
-launch helper retains an exited target until observer drain. They do not open
-GUI apps or grant permissions. Live pilots on installed 4.8.0 and one peer
-remain required for focus association, exact sample timing, cursor capture and
-probe grant attribution. Observer-on/off equivalence remains an owner pilot;
-no standing or A/A acceptance follows from these tests. Run the repository
-format, standing self-test, gauntlet and tracked-audit gates in an authorized
-checkout before merge, then freeze the combined HC method before calibration.
-
-The portable typing-memory fixtures pin measured-epoch selection, both
-boundary-straddling queries, asymmetric current-footprint medians and lifetime
-maxima. Calibration, warmup and hold samples cannot change the median.
-Censored keys remain at their bound in timing statistics and inside the epoch.
-Coverage failures preserve latency and leave only memory unavailable. Tests
-check the five-sample, 80% coverage and 250 ms gap rules independently, reject
-clock/cadence/bundle mismatches as calibration evidence, and retain scalar MiB
-ratios and differences through summary and combined publication input. Floors
-have no typing-memory row; opaque remains unranked.
-
-Mocked capture, calibration failure, timeout and cancellation verify observer
-reaping before target cleanup and retention of probe, timeline, key log and
-launch context. Retained artifacts have relative names and SHA-256 digests.
-Native synthetic probe tests run the shared calibration and measured-key loops
-with virtual time and frames. They check six calibration posts, 20 warmups,
-seeded gaps, the 95% classifier, final censoring and the guarded epoch bounds.
-The `--self-test-typing` entry runs before AppKit setup or permission checks;
-`--fail-guard` verifies refusal after synthetic focus loss. A native payload
-fixture executes the unchanged block main with fake terminal I/O and checks
-initialization bytes, all three toggles and log records. These tests require
-macOS compilers and never capture a screen or post input. Malformed launch
-context fixtures verify that valid timing survives with memory unavailable. Whole-file output
-compatibility should compare results, analysis, summary and combined JSON and
-Markdown across schemas 1, 2 and 3 when typing memory is absent, with explicit
-checks that still run under `python3 -O`.
-
-The excluded observer pilot is described in the standing README.
-`--observer-pilot typing|printing|blink --observer-pairs 10` rotates peers and
-balances consecutive arm order. Typing off starts no observer; printing off
-uses readiness, a 5900..6500 ms burst and one query after done; blink off uses
-only boundary queries.
-Off arms alone waive timeline coverage. Equivalence is the two one-sided
-tests at 5% each: the paired Student-t 90% interval must lie within +/-1 ms
-typing, +/-0.5 MiB printing, and both +/-0.01 percentage points CPU and
-+/-0.1/s wakeups for blink. Up to 5% of the declared pairs may be invalid, only
-for focus, visibility or the probe's cover and foreign-input guards, and every
-terminal must pass. `--observer-control` reports pilots; combine and A/A
-refuse them.
-
-`ObserverPilot` fixtures check CLI conflicts, rotation/order/seeds, real
-entry-point metadata with mocked collectors, retained failures/cancellation
-without retries, missing-observer on-arm refusal,
-typing observer omission, sparse observer requests, boundary/query focus and
-lateness, numeric self-cost allowlists, the 90% interval against its bounds,
-the desktop-only 5% allowance (a pair with any other failure never counts as
-the desktop's), typing observer focus reasons counted as the desktop's, a
-failed probe round that keeps its unclean stop, its target pid, its
-`shutdown` provenance and its observer's readiness, trace and coverage up to
-the probe's end, a probe failure off the session grid or naming no other
-process (pid 0 included) or, other than foreign input, unproven by the
-round's own observer (an off arm's cover included), a hidden window or activation counted as the
-desktop's only when another process is named while the measured window is
-still the target's, one verdict that no proven activation can let mask the
-terminal's own dialog, rows without `attribution_contract` never carrying the
-desktop, unreadable focus evidence judged ahead of a focus change, an off-arm
-printing row whose hidden window cannot mask its missing post-done query, the
-native observer's `top_owner`/`cover_owners`/`target_owner` decisions (a
-foreign cover beside the terminal's own panel included), activations that
-must each be explained, malformed reasons read as invalid evidence, the
-launch helper's records of a child that exited apart from one it stopped (the
-race its exit-before-stop check closes cannot be forced from outside),
-incomplete pairs, failed arms, report dispatch and privacy. The native offset parser fixture
-compiles `observer.m` using the existing macOS skip policy and runs only its
-pure `--self-test-offsets` entry. Owned native scratch fixtures also verify
-the pilot self-cost sidecar and sparse launch requests. The parser checks
-strict increasing integers, count
-agreement, the 60000 ms limit and the 64-entry limit.
-`GhosttyUserConfig` checks absent/empty Application Support files, nonempty
-files, symlinks/specials, sealed-state changes, unmeasured peers and fixed
-public refusals. Local paths and content sentinels cannot reach results,
-summary or equivalence output. The Kettle runtime-spool fixture allows only
-empty regular `remote.cmd` and `remote.cmd.lock` files, and empty peer config
-directories only for kitty, WezTerm and Alacritty. Two native tests run the
-cursor payload on a real controlling terminal from `pty.fork()`: it waits,
-enables and parks the cursor, and it refuses a standard input that is not its
-terminal. The socket handshake fixture stubs the terminal calls instead.
-
-For live acceptance, reserve an owner measurement window; it uses balanced on/off pairs per terminal, sized for
-90% power, with the same verified artifact, sealed config and seeds. Both arms
-are diagnostic. The entire 90% paired launch-mean difference interval must fit
-within +/-1 ms.
-Retain observer/target counters, query durations and every failed attempt. A
-zero-containing interval alone does not pass equivalence. This pilot, native
-focus/capture acceptance and the ordinary shared A/A remain separate from the
-GUI-free suite. Repository-wide gates still run in an authorized checkout.
-
-See [the standing analysis schema](perf-standing-schema.md) for the current
-statistical contract, units, eligibility fields and preserved legacy reads.
-
-The portable `ProbeIntegrity` fixtures use mocked compiler, signing and launch
-commands with real scratch files. They check source-only bogus caches,
-executable edits, validly signed substitutions with the same identifier,
-plist/entitlement/resource/extra-file changes, malformed and partial receipts,
-interrupted builds and publication, reuse without signing, artifact identity,
-compiler/SDK contract drift, receipt permissions, symlinks/FIFOs (including a
-plist swapped for a FIFO after the snapshot, which must refuse rather than
-block), hashing races, replacement during use, lock contention and
-cancellation cleanup. Every probe
-entry point must refuse an invalid cache before the launch mock is called.
-The success path verifies before and after invocation and passes the private
-lease; timeout/cancellation reaps only the child returned by its own spawn,
-and a second cancellation during that cleanup still reaps it.
-
-Receipt version 2 has `version`, `contract`, `artifact` and `local` objects.
-`contract` carries source/plist SHA-256, normalized command, compiler path and
-version, SDK path/version and the private signing choice. `artifact` carries
-executable and full bundle SHA-256, exact file hash/mode maps and verified
-signature metadata/requirements. `local` retains build source and app paths.
-The external receipt is mode 0600 and never becomes public report input.
-Public artifact objects contain only hashes, identifier, CDHash and signing
-mode. Receipt files are bounded regular files; bundle links and special files
-are rejected. A missing receipt after interrupted publication requires an
-explicit rebuild, not promotion of the partially published app.
-
-The native macOS scratch test needs `swiftc`, `xcrun` and `codesign`. It builds
-a fresh probe with explicit preparation, verifies the seal and receipt, runs
-only its pure synthetic self-test, reuses it without rebuilding, substitutes
-a different validly ad-hoc-signed bundle with the same identifier and confirms
-refusal, then rebuilds explicitly and tampers with executable bytes to confirm
-that preparation and the launch path both refuse it before spawning `open`. The pure Swift self-test also checks locked, unlocked and
-removed invocation leases. It opens no GUI app, posts no keys, calls no TCC
-API and never uses the real probe cache. The test does not certify owner
-grants, a native latency pilot, method calibration or a freeze.
-
-The PowerShell performance campaign and its self-tests retired with the final
-Windows-supported 3.3.0 line. The measurements and methodology remain in
-[PERFORMANCE.md](PERFORMANCE.md) as historical evidence. To reproduce that
-historical campaign, use the scripts from the `v3.3.0` tag. Deleted PowerShell
-commands are not part of the 4.0 test or release gate.
-
-## What's covered (automated)
-
-**2000+ tests across the workspace.** Run `cargo test --workspace` for today's
-number; it was 2,131 on native Ubuntu ARM on 2026-08-23. The per-section counts
-below are
-deliberately range-stable rather than exact, because the workspace grows by one
-to three tests per feature landed and an exact figure is wrong again within a
-release. [CHANGELOG.md](../CHANGELOG.md) records what was added when.
-
-The `user_facing_docs_have_no_internal_cycle_refs` drift guard scans
-user-facing docs for hardcoded "N workspace tests" claims that go stale. This
-file is exempt, being contributor-facing, but follows the same discipline.
-
-### kettle-vt
-
-Escape-prefix regressions compare OSC recognition and executed controls with
-vendored vte across deterministic random read splits. They cover raw-tap
-identity, private completions, cancellation, EOF and the 64 KiB prefix bound.
-Each new regression fails with the escape-state correction reverted.
-
-Plain-text passthrough is byte-exact;
-iTerm2 / Sixel / kitty (incl. zlib-less RGBA + chunked reassembly)
-decode to the right pixels; OSC 7 / OSC 133 are consumed and
-surrounding text still passes; OSC 1 → OSC 2 rewrite so
-vim/tmux/ranger short-titles set the tab title; a sequence delivered
-one byte at a time still yields exactly one image; an ~8 MiB
-interleaved stream passes through intact in well under 5 s
-(linear-time / bounded-memory guard). Limit and limit-plus-one tests cover
-sequence/transmission, decoded-image, animation, placement, and CPU/GPU RAII
-accounting without allocating host-scale adversarial buffers.
-
-Encoded-image admission fills a small isolated account with real existing
-pixels, then decodes a four-byte PNG and an image that exactly fills the
-remaining quota. Shared-clone lifetime and an insufficient-space request pin
-the retained accounting. PNG, JPEG, GIF, RGBA16 PNG and grayscale16 PNG are
-compared with the image library's ordinary decode output; a truncated PNG with
-valid headers verifies release after pixel decoding fails. These are portable
-pixel/accounting tests, independent of a GPU adapter.
-
-Partial-animation admission uses a real four-by-four root and two retained
-pixel buffers in a small isolated account. A one-pixel patch fits while its
-full canvas does not: both origin and nonzero-offset requests leave the root,
-frames and accounting unchanged. Releasing the retained buffers permits the
-same request, with the full canvas dimensions, exact transparent-background
-pixels, requested gap and complete lease release.
-
-Oversized OSC and DCS tests also cover real-terminator recovery, bounded recovery when no
-terminator arrives, and an `ESC` split exactly across the recovery boundary.
-Kitty deletion fixtures cover visible, image/placement, cursor, cell,
-cell-plus-z, id-range, column, row, z-index, and frame selectors; lowercase
-retain-data versus uppercase free-data; independent named virtual
-placements; interrupted image/frame uploads; and delete-before-replace
-ordering within one extractor feed. Placement fixtures preserve
-`x/y/w/h`, `c/r`, `X/Y`, and `C` across transmit, put, and relative commands.
-Screen-lifecycle fixtures prove that primary and alternate Kitty stores can
-reuse one image id without collision; mode 47 preserves the alternate store
-across both boundaries; mode 1047 preserves it on entry and clears it on
-exit; mode 1049 clears it on entry and preserves it on exit. ED 2 is
-active-buffer-only and RIS clears both stores. Saturation fixtures pin eviction
-of eligible older images while preserving the new image's named identity,
-subsequent addressability, and `U=1` virtual placement. When reclamation cannot
-satisfy admission, the upload is refused without producing a placement.
-Compositing fixtures pin straight-alpha source-over against a transparent and a partly
-transparent destination, not only an opaque one, plus the zero-alpha
-short-circuit the blend's divisor depends on.
-
-### kettle-core image lifecycle
-
-The terminal engine's authoritative journal
-preserves parser execution order for RIS, ED 2, DECSET/DECRST 47/1047/1049,
-and DECSTBM scrolls. Direct vendored-crate tests pin its 256-event bound,
-compatible-scroll coalescing with the complete monotonic screen delta,
-sticky overflow/current-screen snapshot, recovery after drain, and exact
-47/1047/1049 text-buffer behavior. Core registry tests pin mode 47
-preservation, 1047 exit clearing, 1049 entry clearing plus exit preservation,
-primary-store restoration, ED 2 active-only clearing, RIS clearing of both
-stores, and fail-safe two-buffer clearing/resynchronization after overflow or
-an inconsistent sequence. A full-budget Kitty chain regression crosses the
-terminal graphics interface and deletes all 256 relative placements from one
-root. `cargo bench -p kettle-core --bench relative_delete` measures that core
-registry path separately from kettle-vt's decoder benchmark. Direct VTE tests
-pin unforgeable marker ordering at exact byte offsets, nested synchronized-update
-boundaries, and the 256-marker cap. Extractor tests prove Sixel, Kitty, and
-iTerm2 controls retain their
-exact terminators while deferred and that a deferred Kitty transmit does not
-mutate decoder state before replay. Core DEC 2026 regressions interleave
-images with 1049 enter/leave in both orders, prove image cursor movement
-precedes later buffered text, keep text/images and the output generation/wake
-invisible before close, fail closed on deferred-queue overflow, and prove the
-shared deadline/EOF force-flush path replays buffered graphics before its
-single paint publication.
-Partial-scroll regressions prove that wholly contained placements move, crop
-at the top/bottom margin, compose repeated normalized source ranges, retain
-raw Kitty DPI intent after permanent cropping, leave margin-crossing images
-fixed, retain history document ids, and reanchor rows fixed outside
-the region. Natural-size and one-axis-auto monitor-change regressions verify
-that recomputation preserves the composed crop, document anchor, and
-post-scroll fractional y offset while updating horizontal geometry and the
-cropped occupied-row count. A greater-than-page-height coalescing case guards
-the complete screen-top delta. Column reflow clears regular/relative anchors while
-retaining virtual prototypes in both active and parked state.
-
-### kettle-config (190+ tests)
-
-TokyoNight Night is the verified shipped
-default theme (the self-contained `Theme::default()` fallback palette is
-Catppuccin Mocha); `key = value` overrides, repeats, `palette`
-(0..=15 + out-of-range diagnostic), `infinite` scrollback,
-`ssh-host`; the bundled theme set has >400 entries incl. "TokyoNight
-Night"; default keybinds and trigger parsing; the
-`from_name` ↔ `action_names` round-trip drift guard; the
-`defaults_has_no_shadow_collisions` audit (no
-HashMap-shadowed bindings); the palette-completeness drift
-guard (including `OpenContextMenu` / `UndoCloseTab` /
-`DuplicateTab` / `DuplicatePane`); theme look order (the dark and light orders
-split the bundle, stepping never crosses appearance and reverses cleanly, and
-neighbours are at least twice as similar as in name order); the
-`open_theme_picker` action and its palette entry; palette ranking in
-English and Spanish, English names still matching a Spanish palette, stable
-empty-query order and distinct labels in each language; the
-example-config drift guard; the README-keybind regression guard;
-persistence preserves encoding, newline convention, comments, permissions,
-first-write backups, and symlinked dotfile targets while refusing
-non-regular/oversized files, newly malformed edits, and external changes
-observed by the final pre-stage comparison;
-implicit config provenance tests reject group-writable requested and symlink
-target directories, pin trusted ownership and a single name for the requested
-link itself, and retain a legitimate user-owned dotfile link while the
-explicit-path mode loads the same bounded regular files; the corresponding
-Lua tests prove automatic `init.lua` uses the trusted path, explicit
-`--lua-script` keeps its escape hatch, and a dotfile-manager symlink loads only
-through a trusted link and resolved target;
-CLI `--check-config` exercises the same bounded reader against a resolved
-default-path FIFO and oversized file, and verifies UTF-16LE/BE BOM decoding;
-session load/save atomic + corruption-backup contracts;
-empty-value resets for every string-config key;
-`clamp_font_size` bounds.
-
-### kettle-media
-
-`tests/protocol.rs` pins the protocol in [MEDIA-PROTOCOL.md](MEDIA-PROTOCOL.md):
-golden bytes for every frame kind; round trips of every job, source, theme,
-target and result; an external request can never decode as a GUI user pull;
-handshake mismatch and reverse skew stay distinct; path guards; checked RGBA
-and crop products; an RGBA mismatch, an oversize frame header, hostile counts
-and unknown nested enums are refused before any payload allocation; fence
-indices and every metadata bound; input caps, fonts and video options; the
-content digest changes with the content and each identity field (its framing
-is pinned against a value computed independently); build ID bounds and wire
-direction; the largest reply and its allocation budget; streaming at exact
-boundaries and through interrupted reads; version 1, 2, 3 and 5 frames of
-every kind are `RestartRequired`; a stills job's poster or sheet layout and its
-4096 edge round-trip, while a poster of several frames, a sheet of no columns
-or more columns than frames and an edge past 4096 are refused; a video reply's
-result round-trips plain and typed, is required on a video reply and refused
-on any other, and a rotation off the right angles, an empty or oversized
-frame list, a time past the end, a zero or excessive frame rate, a frame
-farther from its instant than the tolerance, a tolerance past the duration,
-an empty or oversized side, a duration past its bound and an
-unknown codec or container are refused on encode and, written past the
-encoder, on decode, before any pixel is copied; an Auto job has tag 6; a typed reply is its
-media-kind byte followed by exactly the plain reply's payload, round-trips
-for every kind and streams after Ready, and an unknown kind or a typed reply
-in another direction is refused. `tests/worker.rs` drives a
-feature-gated stub worker (`media-test-worker`, a fixture, never shipped)
-through exact replies and reaping, handshake mismatch, an oversize frame,
-trailing payload bytes, a fence index out of range and truncation. The
-workspace commands do not build the stub, so `just media-protocol-test` (also
-in `just gauntlet` and ci.yml) runs it with `--features test-worker`.
-
-`tests/job_encoding.rs` holds `encode_job`, which encodes a worker job from a
-borrow, to the frame encoding byte for byte and refusal for refusal across
-byte, attested-path and user-pull sources with fallback fonts. A counting
-allocator, installed in that test binary only because the crate forbids unsafe
-code, shows a 2 MiB source encodes with one frame-sized allocation while the
-cloning path allocates twice, so a copy reintroduced into `encode_job` fails.
-
-The availability client's unit tests (`src/client.rs`) run it against a
-scripted platform: a missing worker is typed and never verified; an
-unsupported platform is never inspected; a worker that passes every check
-reads `available` without starting a process; verification is cached by file identity and repeated
-for a replaced file; a file replaced during verification is refused; a failed
-verification is not cached; and asking never waits on a held check and never
-starts a second one. `BuildId::from_embedded` refuses empty, non-hex and
-formatted (`<version> (<hash>)`) identities.
-
-Worker distribution is covered by `python3 scripts/test-install-media.py`:
-both binaries are installed, recorded and uninstalled without starting the
-worker, and a missing helper leaves the destination untouched. Installer
-fixtures also reject held or untrusted update locks, remove an idle lock on
-uninstall and preserve unrelated prefix files. Installer and updater share
-the same lock; Rust lock acquisition rejects a removed or replaced inode.
-The Linux smoke checks the published 5.0.0 archive's retained empty lock as
-legacy behavior. Current installs and later archives must remove it; a
-regression distinguishes those policies and rejects nonempty or symlink locks.
-FIFO fixtures require bounded rejection of source, payload and provenance
-leaves without a writer.
-Interrupted-install fixtures fail a publish with `ENOSPC` part way and end
-the process after a file is in place. A retry and an uninstall must work after
-either, through the recorded provenance and the `install-pending.json`
-receipt; a file with the right bytes but no receipt is still refused, and a
-plan past the 128-file provenance limit is refused before anything is
-written.
-Linux updater tests require both package binaries, promote the 4.9 compatibility
-capsule on
-first restart, recover an interrupted bootstrap idempotently, and restore the
-old pair after either binary publication. macOS fixtures require the helper
-and exchange/restore the whole pair. `installed_worker_renders_svg_and_raster`
-copies the real compiled worker to a private install directory, checks Ready,
-exact pixels, framed EOF and clean exits. Shared Unix executable fixtures in
-`kettle-test-support` use a lock barrier
-to wait for writable descriptors inherited by concurrent forks before launch,
-with a 5 s failure bound. A retained-writer regression checks both the bounded
-failure and success after the writer closes. The stub-worker client suite uses
-the same helper: a concurrent fork must not turn a watchdog timeout assertion
-into a copy-and-execute failure. Linux also holds a duplicated writer to
-reproduce `ETXTBSY`, then verifies execution succeeds after the barrier.
-The two descriptor regressions run serially within their test process so the
-execution regression cannot inherit the other regression's locked writer and
-invalidate its deliberate zero-timeout checks.
-These are hermetic tests; final
-release acceptance separately uses actual signed macOS and Linux release
-archives for the 4.9-to-5.0 upgrade on each shipped architecture.
-
-`src/lifecycle.rs` drives `render` against scripted workers over real pipes,
-with short budgets: a Ready from another build is `RestartRequired` and never
-retried; a reply counts once the worker exits 0; a reply before a crash or a
-non-zero exit is discarded; more after the reply, an extra frame or a second
-Ready is refused; a Ready header claiming 50 MB is refused at once, from the
-header; worker refusals keep only worker codes, at startup and as the reply;
-a worker that never answers is tried twice, and a second one that answers is
-used; startup exits are never retried; silence after Ready is one
-`RenderTimeout`; a reply cut short is killed at the deadline; a worker that
-will not die is not retried, is left to a reaper and counted, and a second
-turns media off (`stuck_workers`) with nothing more started, both reaped once
-they exit, and media stays off; startup refusals must end cleanly and exit
-rather than crash, and only handshake codes count before a job; an exit is
-seen at once while something holds the worker's stdout, before Ready and
-after it; a start that hangs returns at the startup deadline and the late
-worker is killed, and while it hangs no second start begins; a file check that
-hangs is bounded the same way; a start refuses once the stuck limit is
-reached, whatever its caller read earlier; a worker that exits 9 as the startup deadline
-passes is `RestartRequired`, not retried; one that crashes as the reply
-deadline passes is `RenderResource`; the
-writer guards its pipe writes before the first one; a footprint over the
-limit kills the worker before Ready or after it, never retried, while one at
-the limit for a whole deadline does not; a worker over the limit while it
-exits after a complete reply is `RenderResource`, not a success, while one
-that exits 0 just as a measurement runs keeps its reply, as does any stop
-that ends after its own exit was seen; a footprint that cannot be measured
-fails closed; and exit codes map as documented. Typed replies: an Auto job
-returns the kind its worker reports, raster or SVG, after a clean exit; a
-plain reply cannot satisfy an Auto job, and a typed reply cannot change an
-explicitly requested kind (both `WorkerUnavailable`). `RenderControl`: a job
-cancelled or expired before it starts never starts a worker; cancelling
-before Ready or after the job is written kills and reaps the worker and
-retries nothing; the deadline covers waiting for another job's slot, both
-cold starts and the final clean exit; a worker that replied but lingers is
-killed at the deadline rather than after a five-second cleanup budget; a job
-interrupted while the worker file is still being checked starts no worker
-once the check ends, nor does one cancelled just as the check ends, before
-its caller looks again; a cancelled late start is reaped before another is
-admitted; and a cancelled worker that will not die is still counted as
-abandoned. `tests/client.rs` (with `--features test-worker`) runs the
-stub worker as a real process, copied under a name that picks its behavior: a
-job rendered; a worker that never answers tried twice within bounds; a 4 MiB
-job to a worker that never reads it, ended by the deadline; a reply followed
-by an abort discarded as `RenderResource`; and the worker's watchdog exit read
-as `RenderTimeout`. Tests that need the worker to start and answer allow it
-10 s: each copies the stub afresh, and a new executable's first launch on a
-loaded macOS machine can take longer than the short deadlines the timeout
-tests use.
-
-The stuck-worker scenario retains its short startup and cleanup budgets,
-checks exact spawn/kill/abandon counts, and uses a separate 5 s completion
-watchdog to allow CI scheduling delays. A zero-budget cleanup test requires
-exactly one process poll without a timing assertion.
-
-### kettle-media-worker
-
-Unit tests (`src/early_unix.rs`) run in a child of the test binary, so
-changing limits and descriptors disturbs nothing else: the early sweep closes
-inherited pipe ends at 3, 17 and 200 and keeps stdio, sets the core limit to
-0 and, on Linux, clears the dumpable flag; the Linux fallback sweep closes a
-descriptor above a hard limit lowered after it was opened; and the resource
-limits land at their values while a lower inherited hard limit, or a lower
-soft limit under a higher hard one, stays (never raised).
-`worker_early_setup_precedes_all_reads` reads the production source as code
-alone (`kettle_test_support::code_only` blanks comments and literals, so a
-mention cannot stand in for a call): the sweep is `main`'s first statement
-and closing descriptors the sweep's first act, then come the panic hook, the
-limits, the watchdog, the one stdout writer and `serve`, each once; no source
-prints, reads arguments, the environment or files (only the Linux fallback
-lists `/proc/self/fd`), or touches stderr outside the fixed panic line.
-
-`tests/process_boundary.rs` drives the built binary: Ready carries this
-build's identity and a 1x1 PNG raster job comes back rendered, pixel for
-pixel, as does a 4x4 SVG fitted into a 1x1 box, while bytes no decoder
-recognizes are `UnsupportedMedia`, each with
-nothing else on stdout or stderr; a Hello from another source hash or version, and a
-header of another protocol version, are `RestartRequired` with exit 9;
-garbage, a job before Hello, a second Hello and a frame cut short in its
-header or payload (with stdin closed and stdout still read) are `BadParams`
-with exit 2; a parent that closes stdin before Hello or after Ready ends the
-worker quietly;
-the watchdog exits 4 after five silent seconds before Hello and after Ready;
-a slow parent within each phase still gets its answer, so Ready starts a new
-deadline; and a pipe left open at fd 40 by the parent is closed by the time
-Ready arrives. On Linux, `/proc/<pid>/limits` shows the CPU, file-size, core,
-address-space and descriptor limits, and the worker's `/proc` entries are
-owned by root, so it is not dumpable (checked when not running as root). With
-`--features test-faults`, a job that panics leaves exactly
-`media worker panic` on stderr and no reply. An Auto job's reply names what
-it rendered, a PNG as raster and an SVG as SVG, prose is
-`UnsupportedMedia`, and an explicit kind's reply stays the plain frame. A
-Markdown gallery crosses whole: an Auto job's reply says Markdown and carries
-both pages, the document as read and the first page rendered; an explicit
-page comes back with its index and the same digest, and one past the last is
-`IndexOutOfRange`. An animation's stills cross too: a labeled sheet of the
-WebP fixture comes back as a Video reply with its duration, codec and each
-frame's time, and inline MP4 bytes are `UnsupportedMedia`. An Auto job on
-an MP4 named `.png` comes back, through the stand-in decoder, as a detected
-Video reply, its poster the 40x30 picture fitted into a 20x20 box and its
-middle frame's time; without decoders for Auto jobs it fails. So do a
-video's: with stand-in ffmpeg and ffprobe named in `KETTLE_MEDIA_DECODER`,
-shell built-ins only, a held MP4 comes back as a Video reply with the
-stand-in's description and each requested timestamp, accepting only the shown
-frame or its preceding keyframe when the deadline requires it. The reported
-tolerance must equal the greatest actual timestamp difference. Its digest
-carries the file's identity (on macOS after AVFoundation turns the stand-in
-file down); without an external decoder, or with one anyone can write, it is
-`BackendUnavailable` on Linux and AVFoundation's `UnsupportedContainer` on
-macOS, and inline MP4 bytes are `UnsupportedMedia`. On macOS AVFoundation
-reads the MP4 fixture in the worker, under its limits, each frame's time a
-frame's own start within the tolerance. When a trusted ffmpeg is installed,
-the WebM fixture decodes through the worker to the frames showing at each
-instant (skipped, and said so, when none is). Taking the decoders away from
-the worker, or the fallback from AVFoundation to ffmpeg, fails these. With
-`test-faults`, a job can pause either side of its classification: a 2.2 s
-pause after it ends a raster job, explicit or Auto, at the watchdog (exit 4)
-while an SVG job of either kind answers; and two 1.2 s pauses either side of
-an Auto raster job's classification end it too, while one alone does not, so
-learning the kind does not restart the clock. The workspace commands do not
-enable that feature, so `just media-protocol-test` and ci.yml run it.
-
-The Apple and FFmpeg session fixtures keep the parent lease until their known
-last frame, then wait for clean exit before reading Ended. Both fail at runtime
-if a heartbeat is written after that wait, making the former terminal-write
-race deterministic. The fault-session fixture also waits for clean exit before
-reading its queued RenderParse failure; a failed heartbeat stops writes but
-still requires the exact terminal reply and exit. Reinstating the unchecked
-heartbeat fails at runtime. Frame order and completion assertions remain.
-
-Linux PCM coverage checks that sample data and EOF never renew the command
-lease, bounded metadata and queues, common stream timestamps,
-credit and generation validation, stale-clock withholding, partial PCM reads,
-and the combined worker footprint. `read_play_control` keeps ordinary commands
-at their one-byte cap while admitting fixed-size feedback.
-
-Build the worker and native tests from one frozen checkout: even a test-source
-change updates their shared build hash. For a direct Linux playback check:
-
-```sh
-cargo build --locked --profile media-worker -p kettle-media-worker
-KETTLE_TEST_PCM_WORKER="$PWD/target/media-worker/kettle-media-worker" \
-KETTLE_TEST_PCM_CLIP="$PWD/crates/kettle-media-native/tests/fixtures/video/ticks.mp4" \
-KETTLE_TEST_PCM_LONG_CLIP="$PWD/crates/kettle-media-native/tests/fixtures/video/long-audio.mp4" \
-cargo test --locked -p kettle-media-worker --test native_audio -- \
-  --ignored --skip linux_client_keeps_video_when_the_audio_clock_stalls --test-threads=1
-```
-
-These require trusted `/usr/bin/ffmpeg` and a live PulseAudio-compatible service.
-They cover two simultaneous sessions, pause/resume/mute, commands sent during
-opening, seeks between frame/sample boundaries, audio outlasting video,
-owned worker closure, and video continuing when the broker cannot start. The
-PCM-only boundary fixture checks the confined broker with Play arriving before
-its first PCM packet.
-The native FFmpeg suite checks shared timestamps,
-leading audio, continuous tone samples, codec padding and video paced by PCM
-instead of unbounded draining. Relocated binaries can name the fixture directory
-with `KETTLE_TEST_VIDEO_FIXTURES`.
-
-The [native audio workflow](../.github/workflows/linux-audio.yml) builds the
-worker independently, then runs mandatory output, decoder, playback and broker tests
-through `scripts/check-linux-audio.py`. It rejects skips, retains raw logs and
-results, and closes only an audio service it started. Native playback failures
-print bounded protocol summaries with receipt times before deleting their
-private test logs; samples, pixels and paths are omitted. An existing service is
-preserved. An owned Pulse fixture first checks silent-video fallback against
-the null sink's default two-second startup buffer, then checks successful
-playback with its `norewinds=1` 50 ms mode. The one-second stalled-clock bound
-stays unchanged. The cold-sink case is reported unrun when reusing a service.
-The Ubuntu 26.04 ARM check also exercised a Matroska audio tail with
-and without its track-end tag. These checks verify service playback, not
-physical speakers. The native output test also feeds continuous PCM for 600 ms
-and rejects withheld writable credit. Portable tests bound negotiated storage
-and write credit. Hardware presentation time includes device latency and must
-not throttle stream writes. Nix package-content checks require the helper's Pulse
-runtime library and search path. `check-lane-media-smoke.py --require-audio` checks native
-play/pause and seek through the UI; `--mode overlay` exercises the centered
-viewer with the same assertions. Both retain screenshots and failure logs.
-
-Native macOS clock fixtures share a bounded poll for observed timestamps
-instead of taking one sample after a fixed sleep. The polling regression fails
-when the first unavailable timestamp is treated as final.
-The empty and partial PCM startup regressions failed before priming the first
-output piece. Pending startup keeps the one-second failure bound, and Pause
-resets that wait without starting the device.
-The command-lease regression failed on a real encoded PCM block before the
-unconditional renewal was removed; heartbeat and Close remain positive controls.
-The PCM regressions were red-checked by removing the window, generation,
-clock freshness/progress/ordering, parent timestamp aging, partial-piece,
-combined footprint, command-size, heartbeat, retired-window and opening-command
-fixes. The PCM movie seek regression failed on an overlapping packet before
-replacing floating-point timestamp subtraction with integer output samples. Ordinary commands still fail from their header alone when oversized.
-
-Playback sessions cross the same binary. With `test-faults`, a file whose
-MP4 box is followed by `kettle-media-worker-test-video` and a frame count,
-rate and size plays through a stand-in decoder that fills frame N with N:
-a session opens paused on its first frame, then plays every frame in order,
-numbered and timed, paced rather than flushed, and ends with Ended and exit
-0; Pause holds the frames, Play takes them up where they stopped, and a
-session opened later in the video starts there. A parent that goes quiet
-with its pipes open loses its session to a SIGKILL of the worker's group
-once the 5 s lease lapses, paused or playing, while a worker outside its own
-group just exits 4; frames the parent stops reading end the session at the
-watchdog (exit 4) whatever heartbeats it sends; a reader that stops for a
-second and a half gets every frame after, in order and at its pace, never a
-burst. With frames of a megabyte left unread, Close or a closed stdin still
-ends the session with 0 within two seconds, twenty heartbeats ahead of it
-or not; Close 4.6 s into a held write ends it with 0, before the watchdog
-could, and so does a closed stdin 4.7 s in, before the lease would
-(`leaving_just_before_the_lease_lapses_still_ends_with_0`); a heartbeat that waited three seconds behind the unread write counts
-from when it came, so the session ends five seconds after it, not after the
-session took it; and one that came during a held write keeps the session
-past the lease of the command before. Close or a closed stdin while the
-stand-in decoder takes three seconds to open ends the session with 0 within
-a second and a half. A stall while playing is `RenderTimeout` after 5 s and two frame
-lengths, a decoder failure
-is its failure, a first frame that never comes is `RenderTimeout` within the
-open's 5 s, and so is one whose write the parent holds past them, heartbeats
-or not (`a_first_frame_written_past_the_deadline_is_a_timeout`), a file appended to while playing is `Changed`, and so is one
-appended to while a slow stand-in decoder opens it, whether that then opens
-or fails; closed stdin ends
-the session with 0, a frame larger than a command is `TooLarge` and a
-command-sized frame of another kind `BadParams`, both exit 2. Without a
-decoder a session is `BackendUnavailable`, and a file that is not a video
-`UnsupportedMedia`. On Linux a job's CPU limit is pinned to 5 s, soft and
-hard, while it is held up, and a session's is 30 s and a second for each
-second of video left. When a trusted ffmpeg is installed, the index fixture
-plays from 2 s through the confined worker to its end, every frame on the
-clip's own times, and a paused session whose parent goes quiet leaves no
-process in its group.
-
-A session read for four seconds after its last command, then held in an
-unread write, has its group killed five seconds after that command, not at
-the watchdog; the worker waits for that kill rather than exiting first,
-which under load could beat it (four of these test binaries run at once
-failed nine runs of twelve before, none after). Play and Pause move the
-decoder's gate as the command reader hears them, in order, with no session
-thread coming round, and Play, Pause, Mute and Unmute reach the sound the
-same way (`the_gate_and_the_sound_follow_the_latest_command`), and
-a session closed while its decoder opened takes not even its first frame
-(`a_closed_session_s_decoder_takes_no_frame`). The session's loop also
-runs inside the worker's own test binary, with its
-events sent in an order the test picks and its output read from a pipe as
-the parent reads it. The opening's allowance ends with the first frame:
-anything written after it, a state the parent will not read included, is
-held to the 5 s watchdog (`the_first_frame_ends_the_opening_s_allowance`).
-Play sent before the first frame sets the clock at that
-frame, so the next waits its time, and so does Play taken while the first
-frame's write is held (`play_during_the_first_write_sets_the_clock_there`);
-Play after the first frame was written paused, even within its length,
-leaves the clock to the next frame, which goes out at once
-(`play_after_the_first_write_leaves_the_clock_to_the_next`, at a second a
-frame); a megabyte frame whose write the reader
-holds up for 600 ms sets the clock again where the write ends, so the frames
-after it stay a tenth of a second apart; a session whose file is appended
-to, paused, before its first frame or while its last frame's write is held
-up, ends as `Changed`, not `Ended`; a decoder that fails just after the file
-changes fails the session as `Changed`; and a decoder handed a buffer after a
-Pause decodes nothing until Play. With a stand-in speaker whose clock the
-test moves, a session with sound holds each frame until its sound comes due
-(40 ms early), drops one the sound passed, sends Play and Mute on to the
-speaker and ends only once all of its sound was heard; a speaker that fails
-is said (`AudioState` Unavailable) and the session plays on silent to its
-end; a frame the sound passed is dropped only for a newer one waiting, so a
-late last frame whose End comes after it still goes out
-(`a_late_last_frame_is_never_dropped`), and lateness counts from when the
-sound is heard, not from the lead before it (`frames_follow_the_sound_s_clock`,
-at ten and thirty a second). The sound's own thread fills the speaker before Play and nothing
-plays until it, queues the sound in place with its gap and all after its
-end silent, keeps the speaker's clock from where the sound starts, and
-gives the sound up when the speaker refuses a piece, gives no clock a
-second after starting, or its thread stops; a clock lost while playing is
-none, so frames wait, and a second without it gives the sound up
-(`a_clock_lost_while_playing_is_none`), time paused without one counting
-for nothing (`a_pause_without_a_clock_counts_for_nothing`); paused, the sound
-has no clock, so frames played again wait for a fresh one
-(`a_paused_sound_has_no_clock`); Close ends the sound and lets its speaker
-go while the session still holds it, and the parent leaving closes it,
-both before the reader's grace runs out
-(`close_ends_the_sound_and_lets_its_speaker_go`,
-`leaving_ends_the_sound_before_the_process_exits`). With a trusted ffmpeg at hand, a
-session asking for sound is refused for the WebM clip, which Apple's decoder
-turns down, rather than handed to ffmpeg
-(`a_session_asking_for_sound_runs_no_external_decoder`). On macOS the confined worker
-plays `ticks.mp4` muted with its sound: Opened says Ready, its frames come
-in order, each on the clip's own times, at least thirty of its forty (one
-the sound passed may be dropped on a busy machine) and the last among them, and the session ends about four seconds after
-Play (skipped without an audio output unless `KETTLE_REQUIRE_AUDIO`). What
-the parent asked keeps its latest
-Play or Pause, taken once, apart from it its latest Mute or Unmute, and the
-moment of its last command.
-
-Red checks: no sweep, a sweep after the hook or not first in its function,
-a call moved with a comment left in its place, a sweep that closes nothing,
-core dumps left on, the dumpable flag left set, no CPU or address-space
-limit, limits that raise past a hard or soft limit, a cut-short descriptor
-list, a fallback sweep bounded by the descriptor limit, a watchdog that never
-fires, phases sharing one deadline, a panic line with the payload, an
-uncompared build, frame skew read as garbage, a second frame accepted and a
-truncated frame left unanswered each fail a test above, and so does a
-worker that answers without rendering.
-
-### kettle-media-native
-
-`src/tools.rs` trusts a binary through relative and absolute links, by the
-path it resolves to and the name it was given, finds ffprobe beside it, and
-refuses it once it changes. It refuses a relative path, nothing there, a
-directory, a file that is not executable or has a set-id bit, and a file or
-any directory on the way, the link's or the target's, that someone else can
-write; a sticky shared directory passes, and on macOS so does one the admin
-group can write (Homebrew's layout), but not one everyone can. A link loop
-is refused. The search finds a Nix profile under the home it is given and
-never looks in `PATH`. These tests assert first that the temporary
-directory's parents are themselves trusted. `src/contain.rs` starts copies
-of its test binary: contained, a child makes a thread but cannot start a
-process, and on Linux cannot call `setsid` or `setpgid` either; uncontained,
-the same child does all four. On Linux raw calls built to fail in the kernel
-show the filter's answers: `clone3` gets `ENOSYS`, a `clone` without
-`CLONE_THREAD` gets `EPERM` and one with it reaches the kernel, and on
-x86_64 an x32 number gets `EPERM`, where uncontained the kernel answers each.
-The seccomp filter's every jump lands inside it and it ends in a return. `src/reopen.rs` reopens a held file from its own
-start without moving the held offset, follows it through a rename, and
-refuses it once it is replaced at its path (macOS) or rewritten.
-`src/run.rs` runs shell stand-ins with an empty environment in `/`, reads
-output to its cap, calls a byte more an overrun, takes a failing exit as no
-success, refuses a binary changed since it was trusted, and kills one still
-running (silent, or with its output closed) at the deadline. `src/lib.rs`
-holds every process the crate starts to `run`, which contains each before
-starting it.
-
-`src/ffmpeg.rs` reads ffprobe's numbers exactly or not at all; a description
-gives the size as shown (a 90 degree counterclockwise display matrix turns
-1280x720 to 720x1280; a 16:15 pixel aspect widens 720 to 768), skips cover
-art, falls back to the stream's duration, and refuses no video or 64
-streams; ticks convert to and from milliseconds without drift, from a late
-start too; the frame showing is the last starting at or before an instant,
-past a discarded packet, and its keyframe the last before it; packets
-without timestamps make the list unusable; the decode and packet arguments
-are fixed but for the stream, the seek and the size; the codec list says
-what decodes; frames are hurried only once the pace would miss the
-deadline; time bases past 32 bits are refused; of frames starting in the
-same microsecond, which a seek cannot tell apart, the first is taken.
-
-`tests/ffmpeg.rs` drives the decoder with shell stand-ins that log their
-arguments: each instant takes the frame showing (125, 375, 625 and 875 ms
-take the frames at 100, 300, 600 and 800 ms) by its own timestamp
-(`-seek_timestamp 1`), packets are listed only around the instants (32
-frames past each, 3.2 s at 10 fps, and 32 s at one frame a second), and the
-description comes through; instants showing one frame decode it once; output
-a pixel short, a pixel over, a byte over or a failing exit is `RenderParse`,
-or `CodecUnavailable` when the codec list lacks the codec, but `RenderParse`
-when the codec list itself fails and `RenderTimeout` when it is still coming
-at the deadline; a decoder past the deadline is `RenderTimeout`; with no duration the whole stream is listed and
-gives the length; no video is `UnsupportedMedia` and a failing ffprobe
-`RenderParse`; untimed packets seek by time with a frame's length as the
-tolerance; a decoder anyone can write, or without ffprobe beside it, is
-refused, and a held file rewritten in place is `Changed` before any decoder
-runs. When a trusted ffmpeg is installed, the fixtures in
-`tests/fixtures/video` (provenance in their README; frame N shows N's six
-bits as black and white blocks, which no tone curve changes) decode to the
-frames showing at 666, 2000, 3333 and 3999 ms
-(frames 6, 20, 33 and 39), in MP4, WebM, a rotated MP4 shown upright and a
-WebM with no duration measured from its packets, and a clip cut in half is
-refused; without one these tests say they were skipped.
-
-`tests/avfoundation.rs` (macOS, with the `avfoundation` feature) reads the
-same fixtures with AVFoundation: each frame shows the fixture frame starting
-at the time reported, that time within the tolerance reported (at most a
-quarter of the closest gap), and instants whose shares meet at the clip's
-keyframes (every 1.5 s) each take a different frame inside their own share,
-where half the gap let two take the keyframe between them; the video is described as H.264 at 10 fps, 64x36, four
-seconds, no audio; a single instant is exact (666 ms is frame 6, 2050 ms
-frame 20); the rotated clip is shown upright, 36x64 at 270 degrees as ffmpeg
-reads it; WebM is `UnsupportedContainer`, which the chain passes on and,
-with no external decoder, answers `BackendUnavailable`; a clip cut in half
-fails as the stream's fault.
-
-Red checks: the frame after an instant taken, seeking by time, no
-`-seek_timestamp`, keyframes always, a run left uncontained, no macOS
-process limit, a group-writable directory trusted, frames of any length
-accepted, a reopened file not checked, no deadline on a run, no codec
-explanation, rotation read the wrong way, no scan for a stream without a
-duration, a one-second packet window, frames in one microsecond told
-apart, and a codec list's deadline taken for the stream's fault each fail a
-test; so do AVFoundation given the wrong MIME type, no display transform,
-its rotation read the wrong way, a single instant taken loosely and the
-instant reported as the frame's time.
-
-### kettle-media-render
-
-`tests/raster.rs` renders through the crate's one entry point. Each supported
-format (PNG, JPEG, WebP, BMP, GIF) renders; a PNG named `.jpg` renders, while
-text named `.png` and TIFF bytes are `UnsupportedMedia`. Hand-built PNG
-headers (IHDR, a minimal IDAT, IEND) of 9000x10, 10x9000, 8192x8192 and
-u32::MAX x1 are `RenderResource` in under a second, before any pixel buffer
-exists. A two-frame GIF returns its first frame. A fully transparent pixel
-whose hidden color is white comes back all zero beside a half-transparent one
-kept as it was, and downscaling an opaque blue edge next to transparent white
-keeps it pure blue. A 4x4 box fits an 8x4 image at 4x2; a 16x16 box
-keeps it at its native 8x4, since raster images are never enlarged. A crop in
-box coordinates is transparent where the centered image does not reach; a box
-over the rendered edge or a crop outside it is `BadParams`. A file's digest
-covers its bytes and the open file's identity, the same bytes inline carry
-none, and a video probe is `UnsupportedMedia` for now.
-
-Stills: `src/stills.rs` pins the instants, the middles of equal shares of
-the window or of `start_s` to `end_s`, past the end the end, `at_s` on its
-own and clamped, and all at 0 for a still image; a sheet's grid; a tile as
-large as the edge allows after the gaps, its shape kept, never larger than
-the picture, and no tile when the gaps leave no room; labels in `mm:ss`,
-`h:mm:ss` and tenths under a minute. A sheet lays frames out in reading
-order with the gap around each, a transparent frame showing the background,
-the result opaque, a Video reply with each frame's times and the tolerance;
-a label marks a tile's lower left only when asked for, the upper right
-staying the frame; frames off the tile size, none or one too many are
-`RenderResource`. Through the crate's entry point a stills job on the WebP
-fixture renders as Video, reported once, an MP4's first bytes are
-`BackendUnavailable` and text is `UnsupportedMedia`. With a decoder in
-process (`a_video_is_decoded_by_the_decoder_given`), a held MP4 becomes a
-sheet of the decoder's frames with its times, its digest the first bytes and
-the held file's identity; a frame short, a frame for another time and a file
-rewritten while it was decoded are refused, and inline MP4 bytes are
-`UnsupportedMedia` with or without a decoder.
-`src/animation.rs` decodes GIFs and APNGs built in the test and the
-`tests/fixtures/stills/anim.webp` fixture (provenance in its README): each
-still is the frame showing at its time, with that frame's start as its time
-and the farthest of them from its instant as the tolerance, an `at_s` poster
-too; a frame shrinks with premultiplied alpha, so a transparent pixel's
-hidden color, white or red, leaves the poster the same opaque blue; a GIF delay
-under 20 ms shows for 100 ms and an APNG's 0 ms delay for 100 ms, even
-delays give a frame rate and uneven none, a single frame is a still image
-of no duration; WebP frames come back within 2 of their colors (the decoder
-blends each onto the last), a PNG that does not animate is
-`UnsupportedMedia`, a spent deadline is `RenderTimeout` and a broken GIF is
-`RenderParse`. `src/source.rs`'s `a_held_file_reads_through_its_descriptor`
-holds a file by its first bytes, reads it whole through the same descriptor
-whatever is renamed over its path, and calls it `Changed` once it is
-appended to or rewritten in place at the same size; inline bytes are their
-own prefix, and either over its cap is refused as a load refuses it. Red
-checks: samples at the ends of the shares, tiles grown past the picture,
-alpha kept rather than flattened, labels drawn unasked, the frame after the
-time taken, GIF short delays kept, no deadline between frames, still PNGs
-allowed and a held file not checked after reading each fail a test, as do
-a video's file not checked after decoding, a decoder's frames taken
-without checking their count and times, and an animation frame shrunk in
-straight alpha.
-
-Unit tests in `src/auto.rs` also show a video to an Auto job: an MP4 named
-`.mp4`, `.png` or nothing is a video, reported once, its poster the middle
-frame fitted into a 400x400 box (1280x720 becomes 400x225) or kept at the
-picture's size in a larger box, with the video result; without a decoder it
-is `BackendUnavailable` with no kind heard, and a 48 MiB video, past every
-snapshot cap, is held and decoded, not read. Dropping the video branch fails
-them.
-Unit tests in `src/auto.rs` classify Auto jobs: a PNG is raster whatever the
-file is called (`.svg`, `.bin`, no suffix), and a declared SVG with a
-byte-order mark, an XML declaration and a comment is SVG named `.png`; each
-reports its kind once. Replacing the file after it is loaded changes
-nothing: the loaded snapshot is classified and rendered, its digest and
-identity included. Mermaid text is Mermaid whatever the file is called,
-reported once it has rendered, and text that only starts like a diagram is
-`RenderParse` with no kind reported. Prose, an HTML page, bytes that are not
-UTF-8 and an empty file are `UnsupportedMedia` with no kind reported.
-Markdown with a Mermaid fence is a gallery whatever the file is called
-(`.md`, `.mmd`, `.bin`, `.svg`, no suffix), heard as Markdown once, with both
-pages, the document and the first page's display lines, while Markdown whose
-only fence is Rust is `UnsupportedMedia`. Prose past a diagram's 64 KiB
-around a small fence is a gallery, the same prose with no fence is
-`FileTooLarge`, and a document a byte past 1 MiB is `FileTooLarge` while one
-at it renders. Markdown that starts with an autolink, a README's HTML block
-or a comment is still a gallery, while an HTML page with no Mermaid fence is
-`UnsupportedMedia`, small or past a diagram's 64 KiB.
-`src/markdown.rs` pins extraction: Mermaid fences are pages in document
-order, backtick or tilde, the language in any case and with attributes after
-it, inside a list item or a block quote with their indentation removed, while
-other languages, indented code, a fence in no language, a blank fence and
-`mermaid-ish` are not; a longer closing fence closes and a shorter one is
-text; an unclosed fence runs to the end. Thirty-two pages are a gallery and a
-thirty-third refuses the document (`FileTooLarge` from a file), blank fences
-not counting; a page at 64 KiB is kept and a byte more refuses the document
-wherever it is, while a blank fence of twice that is no page and no refusal,
-and text after 64 KiB of white space in one fence still refuses it, a row
-at a time in a block quote too; a document at 1 MiB parses and a byte more is refused before
-parsing. Text built to work a parser hard (nested quotes and lists, runs of
-backticks, brackets and emphasis, repeated openers) comes back within a
-second at the limit, a spent deadline stops extraction, a page renders beside
-every page with the document and its digest while another page renders other
-pixels, no page is `UnsupportedMedia`, a page past the last is
-`IndexOutOfRange`, a broken page is `RenderParse`, bytes that are not UTF-8
-are `UnsupportedMedia`, and the pages and pixels come from the snapshot read
-though the file is replaced after. Red checks: an off-by-one page limit, a
-thirty-third page kept, blank pages kept, a file refused as inline bytes, a
-case-sensitive language, the page's source or digest returned in place of the
-document's, no deadline between parser events, a blank fence refused, white
-space past the limit not counted, every markup taken for SVG, and markup
-with no fence sent to Mermaid each fail a test.
-`src/mermaid.rs` renders real diagrams that keep their Mermaid source as
-source text and digest, rerenders on a white canvas with new pixels but the
-same identity, keeps prose (`UnsupportedMedia`) apart from broken diagram
-syntax (`RenderParse`), and keeps the fixed failures for a spent deadline,
-bytes that are not UTF-8, an oversized source and an empty one.
-`tests/mermaid_corpus.rs` renders each of the 37 pinned diagram families
-(fixtures from merman's upstream, provenance in their README) as a Mermaid
-and as an Auto job, with real pixels inside the target, and checks the
-fallback collection face per job. The same families as Markdown galleries, a
-family to a page: every page renders the pixels its Mermaid does with the
-document's digest, and one document of all 37, more pages than a gallery
-holds, is `TooLarge`. `svg::sanitize`'s
-`generated_diagrams_are_cleaned_where_outside_svg_is_refused` checks that a
-generated diagram keeps the first of repeated ids, leaves out an element
-past the number bound whole, resolves `em`, `ex` and percentage font sizes
-from attributes and style sheets against the inherited size (and leaves out
-one that would resolve past the bound), keeps a left-out element's id from
-passing to a later element, whichever attribute comes first, and leaves out
-a style declaration it cannot read, while an outside SVG with the same
-content is refused. SVG
-content one byte over the SVG cap is refused before it is parsed, as an
-explicit SVG job's is (`FileTooLarge` from a file, `TooLarge` inline), and a
-byte less renders; a file over the Auto cap is never read whole. The root
-decides first: an HTML page over the SVG cap, one with 257 attributes (past
-the parser's limit) and one whose comment mentions `<svg/>` are all
-`UnsupportedMedia`, and an SVG behind a document type declaration is SVG,
-refused as `RenderParse` as an explicit SVG job is. `src/svg/mod.rs` pins the
-root scan: byte-order mark and XML whitespace, namespace prefixes, comments,
-declarations with quoted `>` and internal subsets (whose comments,
-instructions and literals cannot fake the root, in either direction), and a
-prolog that never ends.
-
-`tests/hostile.rs` renders under a global allocator that records the largest
-single allocation each thread makes. A WebP whose 1x1 canvas holds a bitstream
-declaring 4096x4096, and a 1x1 animation frame holding one, are `RenderParse`
-with no allocation near that size; a real 2x2 lossy frame behind an alpha
-plane in a 1x1 animation frame, which the decoder would otherwise write past
-its buffer for (a panic), is `RenderParse`, and so is a chunk other than VP8
-after an alpha plane. Well-formed extended WebP still renders: still and
-animated, with and without alpha. BMP headers of 70000x1, 1x-70000 and
-9000x1, and WebP canvases of 70000x70000 and 9000x1, are `RenderResource`
-whichever decoder would have refused them. Halving a 2048x2048 image
-allocates nothing larger than the decoded image itself. The lossy fixture is
-a 2x2 VP8 frame from `cwebp`, with its size fields rewritten per case.
-
-`tests/svg.rs` renders SVG jobs. Opaque and half-transparent fills come back
-as straight RGBA (within one level), uncovered pixels all zero. Text renders
-with the bundled face whatever family it names (`Arial`, `serif`, a missing
-font). Eight injection vectors render with nothing of theirs drawn: an
-`<image>` naming a readable red PNG by absolute path (as a Mermaid style
-value that broke out of its attribute would), by `file:` URL, by relative
-path and over the network; a data URL; a script, an event attribute and a
-`javascript:` link; a `use` of another file; and an `feImage` of the PNG with
-a style fill naming the other file. A `foreignObject` in a `switch` is
-dropped and its fallback drawn; a DTD with entities, or naming an external
-subset, is `RenderParse`. At 512 pixels, four filtered rectangles sharing one
-blur pass and sixteen are refused (charged per use); a filter of eight
-primitives passes and sixteen are refused; ten translucent groups pass and
-twenty are refused; an 8192-unit pattern tile, a chain of forty masks and a
-chain of forty clips are refused while a small tile and one clip draw
-correctly. Two filters on one element, the second a pixel wide with
-lighting on the source graphic, are refused. Two finite scales that overflow when composed are `RenderParse`, and
-so is a filter rectangle scaled past what tiny-skia converts without
-panicking; marker sizes past the number bounds are `RenderParse`, while the
-extremes inside them render. A use bomb is refused within two seconds; a
-style sheet giving two thousand rectangles a thousand-shape pattern is
-charged per drawing and refused. Three inputs that would crash usvg or
-resvg are refused as `RenderParse`: three patterns drawn with each other
-through inherited fills, relative font sizes multiplying a marker and a
-stroke past what usvg unwraps, and a 65536-square convolution kernel; and a
-filter region so small and far that usvg panics is answered as `RenderParse`
-by the guard. A 10x10
-image in a 4096x2048 box comes back at 1024x1024, and a crop reaches the
-full fitted image within the ceiling. An input of exactly 2 MiB renders and
-one byte more is `TooLarge`; a path source renders through its held file
-with its identity in the digest; bytes that are not UTF-8, not XML or not
-SVG are `RenderParse`.
-
-Unit tests in `src/svg/` pin the parts: the sanitizer keeps local references
-and removes the rest, rewrites `style` declarations, refuses escapes and
-unclosed `url(` and outside style-sheet references, round-trips `&`, `<`,
-quotes and line breaks exactly, drops scripts, foreign content, events and
-metadata, refuses a DTD, writes back a non-ASCII attribute name, keeps of
-two `href` spellings only the one usvg uses and of other namespaced
-attributes only `xml:space`, refuses numbers past the bounds while keeping
-editor rounding noise, hex colors and names with digits, ignores style sheets
-inside dropped subtrees (including otherwise refused CSS), writes style sheets
-and `style` attributes back as attributes (an id rule beating a class rule
-beating the attribute, the `style` attribute last, an outside reference
-left out, the `marker` and `font` shorthands expanded, non-presentation
-properties ignored), refuses CSS it does not resolve (combinators, at-rules,
-`! important`, a `*fill` property, a backslash, a relative font size, an
-unclosed comment), bounds convolution orders, writes numbers below 1e-6 as
-zero (`1e-9.5` as `0 .5`, `1e-30em` as `0em`, a style sheet's too) while
-`1e30em` is refused, and refuses font-size keywords, a relative size in the
-`font` shorthand, `inherit` for a mask or clip, filter lists and filter
-functions, a percentage past 1000%, a 65-entry dash list, font lists over
-256 bytes and a 2,000-byte inherited value, counts 257 attributes on one
-element before the parser runs (not counting signs in quotes, comments or
-character data), and drops
-`tref`, and carries `mix-blend-mode`, `isolation` and `font-kerning` in a
-composed `style` of checked keywords; `src/svg/css.rs` tests parse simple
-selectors and refuse the rest (non-ASCII ones included),
-refuse sheets it does not resolve, bound rules and their declarations
-times elements, and expand shorthands;
-the structural count splits numbers as a parser does, refuses duplicate ids
-(but not one on a dropped style sheet), charges context paint inherited by a
-marker's content per vertex and text paint per character (through a `use`
-of text and a link inside text as well), refuses viewports nested more than
-eight deep (symbols reached through uses included), charges a filter table
-of 1,000 numbers and a 200,000-byte result name per element using them,
-charges decorated positioned text per copy and text per enclosing text
-level, charges ten thousand one-character spans by spans times characters
-and a text path by characters times segments (along a point list too),
-holds a filter to 64 primitives, a text element to 20,000 characters and a
-gradient to 256 stops,
-charges a shared definition per use (900 uses of a thousand elements pass,
-999 do not), refuses nested uses, reference cycles (but not a link to an
-ancestor), cycles through paint contexts (a pattern under an element whose
-fill names it, whatever the pattern's shape declares: nothing, `inherit`, a
-color or a removed outside reference; three patterns chained through
-inherited fills; a `use` copy inheriting it), while patterns filling shapes
-elsewhere pass, charges inherited paint
-per drawing element (directly and through a `use`) and a context-painted
-marker's pattern per vertex, markers per vertex whether set directly,
-inherited through a `use` or behind a comment, with `H` and `V` steps
-counted as vertices and a namespaced `points` not hiding the real one,
-counts the `href` usvg follows, refuses markers that could hold markers
-(context paint included, while a context-stroke arrowhead on two hundred
-paths passes), and too many
-elements, too deep a tree and too long a path; the layer walk refuses drawing work
-past its count and a filter list on trees built straight from usvg; placement fits the box
-and then the ceiling and shifts a crop; unpremultiplying rounds and clears
-alpha-0 pixels; source lines are bounded, without line breaks; usvg with
-these options builds no image node even from unsanitized absolute paths and
-data URLs; and the font database holds the bundled face alone, which every
-family resolves to. A unit test shows the guard answering a panic with its failure and passing
-results through. `tests/hostile.rs` also shows an SVG filter five
-canvases wide refused before any allocation as large as the canvas itself.
-
-SVG red checks: an `href` kept whatever it names, a DTD allowed, scripts and
-foreign content kept, outside references kept in a style declaration or a
-property, `&` left unescaped, style sheets unchecked, usvg's default
-resolvers, `use` copies uncounted, markers uncounted, nested markers
-allowed, cycles followed, nesting, element count or style matching left
-unbounded, a `use` copy not inheriting its marker context, filter
-primitives, group layers, pattern tiles, clips or masks left free,
-non-finite transforms passed, drawing work unbounded, no SVG ceiling, a crop
-past it, and premultiplied output each fail a test above; so do an event
-prefix sliced through a character, the `xlink:` spelling followed first or
-both spellings written, any namespaced attribute kept or read by name,
-comments kept in a style sheet, a path counted as half its numbers, a
-selector list counted as one rule, inherited or style-sheet paint ignored, a
-`use` copy's paint left free, numbers left unbounded, primitives charged at
-their region, filter rectangles left unbounded, a style sheet allowed to
-name, `!important` or relative font sizes allowed, kernel orders unbounded,
-a paint context without its ancestors, shapes or `use` copies not linked to
-their paint context, context paint unlinked, a unit's `e` read as an
-exponent, tiny numbers kept, font-size keywords or an unchecked `font`
-shorthand allowed, `inherit` for a reference allowed, filter lists allowed
-by the sanitizer or the layer walk, duplicate ids allowed, context paint in
-a style sheet, context paint not inherited, text drawn once, a `style`
-attribute passed to usvg, combinators accepted, any property name accepted,
-non-presentation properties applied, rules left unsorted, matching left
-unbounded, `!` or a backslash allowed in a declaration, percentages or dash
-lists left unbounded, `tref` kept, viewports left unbounded, a link inside
-text not counted as text, copies counting elements rather than pieces, a
-selector split by byte, CSS-only properties written as attributes or with
-unchecked values, panics not caught, only path numbers counted, attribute
-bytes left free, text painted once per character, font lists, filter
-primitives or text nesting left unbounded, property bytes left unbounded,
-span and text-path pairs left free, declarations left out of the style
-matching bound, attributes uncounted or quoted signs counted, text
-characters or gradient stops unbounded, text paths measured along
-paths only, filter input-name copies left free (including implicit second
-inputs and linked templates), merge inputs and dual-primitive input surfaces
-left out of the layer budget, style sheets collected from dropped subtrees,
-and real blank source lines
-removed at the line cap. Exactly-at-cap blank lines do not report clipping;
-a clipped long line does not erase a following real blank line. Public SVG
-jobs also exercise the dropped styles and filter accounting refusals.
-The real worker's `svg_admission_failures_are_framed_and_exit_cleanly`
-test sends name-copy, merge and dual-input multipliers through
-Hello/Ready/Job, checks the `RenderResource` frame, and requires EOF, a zero
-exit and empty stderr.
-
-`tests/source.rs` loads paths: a group-writable file (as umask 002 leaves it)
-and a symbolic link at the leaf are accepted; a FIFO with no writer is
-`FileNotRegular` on a thread whose hang would fail the test instead of
-stalling it; a directory and `/dev/null` are `FileNotRegular`; exactly the cap
-is accepted and one byte more is `TooLarge` inline or `FileTooLarge` on disk;
-and a missing or unreadable file has its fixed failure. Unit tests in
-`src/source.rs` change the file between the open and the read: a file renamed
-over the path does not change what is read, one appended to is `Changed`, one
-shrunk below the cap after an oversized open is still `FileTooLarge` without
-a read, and an external request's attested inode must match the open file.
-`media_loader_never_writes` reads the production source as code alone and
-refuses any file creation, write, rename, removal or permission change, and
-any use of `std::process`, `std::net` or `std::env`.
-
-`tests/svg_fonts.rs` uses synthetic outline fixtures derived in memory from
-the bundled OFL font. Renamed faces retain copyright/license metadata;
-codepoint remapping is a selection/coverage fixture, not evidence of real
-Arabic, Hebrew or CJK typography. `svg_fallback_face_index_is_preserved`
-compares both faces of a TTC with their standalone equivalents, with different
-advance widths, and refuses nonexistent indexes. `svg_only_explicit_font_bytes_are_loaded`
-proves that a family name or file on disk does not load bytes, supplying the
-file changes the result, and later jobs do not retain it. Tests cover actual
-fallback use, multiple missing scripts, a first uncovered character followed
-by a covered one, invisible/unpainted text, unused supplied fonts, text in
-patterns, and refusing report overflow instead of silently truncating scripts.
-Directory/missing/FIFO inputs, per-file cap plus one, exact 32 MiB files and
-exact 128 MiB aggregate admission are checked, along with oversized selected
-names, name tables/record counts, table directories, cmap records and
-variation axes. Every blocked embedded SVG/color/bitmap table is refused.
-The hostile allocator test `a_collection_count_cannot_allocate_all_faces`
-refuses a huge TTC face count without any allocation reaching 64 KiB after
-warming the trusted bundled database. This measures the largest allocation,
-not the complete process footprint.
-
-The real worker's
-`explicit_collection_faces_and_font_failures_cross_the_worker_protocol`
-sends both TTC indexes and an invalid index through Hello/Ready/Job, checks
-the result's script/warning fields or fixed failure, then requires EOF,
-exit 0 and empty stderr. It exercises a built worker, not an installed,
-signed release or the future GUI fallback requeue.
-
-Font red checks: forcing a TTC's stored index to zero, skipping explicit file
-loads, increasing the per-file or aggregate policy limits, removing the
-remaining aggregate read budget, accepting embedded glyph tables, lifting
-each metadata bound, stopping at the first uncovered character, dropping
-either glyph warning, truncating the script report and omitting pattern text
-each fail their focused regression. Sources are restored and hash-checked
-after every mutation; no build, edit or second mutation overlaps a run.
-
-Red checks: no size pre-check and no codec limit, transparent pixels left
-colored, resampling without premultiplied alpha, an uncentered crop, a fit
-that ignores the aspect ratio, a non-regular file accepted, an ignored
-attestation, no identity check after the read, a digest without the file's
-identity, a blocking open and no size check at open each fail a test above,
-and so does a format allowlist that lets TIFF through when the TIFF codec is
-linked in (as a workspace build links it, for the clipboard). Removing all
-container checks, the BMP size, the WebP canvas cap, the still or animation
-bitstream check, the check behind an alpha plane or the VP8 requirement after
-one, or resizing through a full-size float intermediate, each fails a test in
-`tests/hostile.rs`.
-
-### kettle-i18n
-
-The build script validates the catalogue, and `tests/build_gates.rs` runs it
-against broken inputs: a key missing from or extra in one language, duplicate
-TOML keys, a wrong entry shape, a missing plural branch, placeholder sets that
-differ between languages, invalid placeholder syntax and unescaped literals.
-`compile_fail` doctests prove an unknown key and a missing, extra or wrongly
-typed argument do not compile. `tests/catalogue.rs` checks that every message
-has clean text in both languages, that Spanish is never left as English except
-for listed cognates, and that arguments pass through verbatim. Unit tests prove
-a missing Spanish entry falls back to English for every message and that the
-pseudo-locale lengthens text by 35–40% while keeping arguments intact; a release
-build has no pseudo state at all. Run it in debug, `--release` and
-`--features dev-pseudo`.
-
-Each surface on the catalogue tests its English text against the old strings
-and its Spanish text: Settings, the palette and pickers, the context menu, the
-new-tab dropdown, the About panel, the remote reconnect row, the confirmations
-the title editors, the search bar, the completion card, the paste receipts,
-the screen-reader names and the notifications;
-a rejected input's notification follows the UI's language while its log line
-stays English, and config lines, paths and line breaks pass through
-notifications unchanged. Counted messages are
-tested at 0, 1, 2, 1000, one million and `u64::MAX`; only 1 reads as singular.
-Every line of a paste receipt shows whole at the standard size in English and
-Spanish, and an expanded remote card is admitted only when its translated
-warning fits (`remote_warning_columns`, 18 columns in English).
-
-Pseudo-locale layout checks run the same layouts against text about 38%
-longer, in debug test builds only: the Settings rows, category tabs and key
-hints fit the 144 columns of a default window on a 1366 px laptop; a 2400 px
-search bar shows every label whole, and from 300 to 2400 px its controls
-never overlap or leave the bar; every compact receipt title shows whole, the
-card widening for it; a widened compact card stays inside the expanded card
-it shares a lane with and gives its title every column it was sized for, with
-chrome and terminal cells of different widths; and an admitted expanded remote
-card shows its warning whole at every pane width from 140 to 600 px with 6 and
-8 px cells, which English and Spanish must exercise (the pseudo-locale's
-warning never fits the expanded detail box, so it keeps the compact card);
-Dock titles carry no ellipsis. Informational receipt lines may be cut with an
-ellipsis in a longer language; the remote warning may not where the card has
-room. The `ui_text_sinks_never_take_literal_text` drift guard scans the
-production source of kettle-ui and kettle-render for prose literals given to a
-screen-reader label or description, a window title, a desktop notification, a
-menu or picker row's label or hint, a prompt or a painted label: in any
-argument, inside `format!` and in raw strings. Prose is two words, a
-capitalised word or a non-ASCII letter outside `{…}` placeholders, so GPU
-debug labels and config keys pass; key names and the layout picker's shell
-command are listed as language-neutral. Its scanner has its own test, and
-reintroducing one literal label fails it.
-The search bar's control widths equal the old fixed widths in English, and a
-Spanish bar shows every word whole with no ellipsis. The renderer's `Overlay`
-and `SearchOverlay` implement `Default` only for tests (kettle-render's
-`test-defaults` feature, enabled by kettle-ui's dev-dependency): a default
-overlay speaks English, so a plain or release build, which CI runs, rejects
-production code that builds one from a default. The context
-menu's Terminator-row guard pairs each row's catalogue key with its action and
-checks the key's English is still Terminator's row name.
-
-### kettle-state
-
-Creates and replaces private state without leaving staging
-files on handled outcomes, safely reclaims exact dead-creator crash remnants,
-preserves an existing destination's permissions, rejects symlink
-destinations, and proves exclusive advisory locks block competing handles
-and release on drop. Acquisition checks the held file against its path, so a
-waiter on a retired inode cannot proceed. Reaping tests preserve live-PID,
-noncanonical, multi-link and nonregular lookalikes. A Unix regression creates
-a backup and replaces a destination with a 240-byte basename, then verifies
-that its bounded staging name remains recognizable by the stale-file parser.
-Scheduler regressions pin
-in-flight
-coalescing, the five-minute completion cooldown, eviction rather than
-permanent saturation after 256 tracked destinations, and completion after a
-worker guard failure; the live queue is bounded at 32 destinations. Native
-Unix tests assert mode `0600`; native Windows
-tests require an effective-user owner and exactly one zero-flag full-access
-ACE for that user under `SE_DACL_PROTECTED`. Policy tests reject a
-group-valued or different owner as provenance even when a DACL looks exact.
-Reparse leaf/parent tests use symbolic links when
-permitted and an unprivileged directory-junction fallback otherwise. Private
-replacement publishes the secured staged file itself, leaving no ACL
-or mode hardening step after publication. Native tests also prove
-failed-create cleanup deletes the created object through its handle and that
-Win32 trailing-dot aliases and NTFS alternate-data-stream leaf names are
-rejected without changing the intended file.
-User-selected-output tests keep that private-state policy intact while
-allowing a new `0600`/current-user-only leaf beneath an existing public
-parent. Native Unix displaces the parent after it is opened and proves the
-helper fails without writing into the replacement and retains the visible
-original entry. Discard tests require visible Unix exports to remain in place
-and confine fallible export payloads and cleanup to an owner-only staging
-directory, preserving a competing destination. macOS seeds an inheritable
-read ACL and proves atomic publication from an ACL-free staging directory
-leaves the new leaf with no extended ACL. A macOS private-file regression
-observes the inode before its first hardening, requires it to be ACL-free,
-and verifies append semantics after seeking. Native Windows pins the
-parent against rename, verifies the protected DACL, and rejects alternate
-streams, trailing-dot aliases, and embedded NULs before path normalization.
-The missing-parent and existing-leaf cases fail without creating or changing
-anything on every platform. Streaming-publication tests prove the requested
-destination stays absent while bytes are written to its owner-only sibling,
-publication creates the complete inode with a no-replace hard link or atomic
-rename fallback, and no staging name remains under a trusted parent. A Unix
-discard regression displaces the private staging directory and installs a
-replacement, then proves cleanup removes only the held directory's payload.
-A platform seam forces only the
-hard-link syscall to fail, then exercises the real `renameat2`,
-`renameatx_np`, or `FILE_RENAME_INFO` path and its racing-destination refusal.
-Deterministic nonce injection
-proves random staging collisions stop after 32 attempts without touching the
-destination. Injected PNG encoder and flush failures prove both
-output policies remove their exact unpublished sibling. A racing destination
-wins unchanged; primary and cleanup errors are reported together instead of
-silently claiming retry is available. An injected post-publication failure
-separately proves the result says the destination may exist.
-Windows test scratch files live under the current profile rather than the
-process temp directory because a machine policy may intentionally grant
-sandbox principals delete-child access there; the production policy rejects
-such an ancestor instead of weakening its trust requirements.
-Trusted-read tests keep verified parent handles through the leaf open, reject
-writable/multiply-linked Unix leaves, and on native Windows reject an
-otherwise valid config whose protected DACL grants `GENERIC_WRITE` to
-Everyone without rewriting that ACL. A re-executed Unix test lowers
-`RLIMIT_NOFILE` and holds forty parent guards at once, proving steady guard
-descriptor use stays O(1) rather than growing with path depth.
-Configuration, session, diagnostics, screenshots, pasted images, recording,
-remote-command, and updater callers fail closed when the shared primitive
-fails.
-Remote-command parser regressions also pin the 1,024-operation exact boundary,
-whole-batch rejection at 1,025, coalesced unknown-line diagnostics, and
-command ordering below the cap. Versioned `send-text-json` tests round-trip
-literal backslash+n, actual LF, CR, NUL, and command-looking text byte for
-byte, assert the payload occupies one physical spool line, retain legacy
-`send-text` coverage, and treat malformed JSON only as coalesced unknown
-lines.
-
-### kettle-ctl transport and server liveness
-
-The split-handle loopback and
-same-user kernel credential path run on every native CI OS. A deterministic
-failed-identity injection proves clients reject before sending protocol
-bytes. Stalled readers prove deadline and cancellation exits from both a
-client handle and an accepted server handle with an 8 MiB write. Windows
-therefore exercises the server-side arm on a real overlapped named-pipe
-handle. Unix additionally asserts the shared open-file
-description remains stably nonblocking while a cloned reader retains
-blocking semantics. Control-server regressions occupy all eight slots with
-idle peers, slow-drip an incomplete frame, and stop reading a subscribed
-stream; each waits for reclamation and then completes an independent fresh
-request. Activation starts an incomplete client in its own worker and proves
-a second launch is activated without waiting for that worker's deadline.
-Bounded-JSON, incremental newline scan-offset, lazy inventory-stop, and key
-batch/byte tests pin cap-before-work behavior. These regressions must run on a
-real macOS runner because AF_UNIX full-buffer behavior cannot be claimed from
-Linux alone.
-
-### kettle-update archive boundary
-
-Linux and Windows tests parse one bounded,
-digest-verified archive into immutable member buffers, destroy or overwrite
-the former archive storage, and prove transaction publication still consumes
-only the verified bytes. Hash mismatch, entry count, unpacked bytes, path,
-link/special/sparse-file, mode, and exact package-manifest failures remain
-fail-closed. Windows separately proves a held archive blocks overwrite and
-rename, a forged pending capsule with correct local archive/helper hashes but
-no valid Ed25519 signature is rejected, and a correctly authenticated pending
-version cannot downgrade the installed version. Timestamp regressions cover
-expired/future signed metadata and strict RFC 3339 parsing. Post-update
-integration tests require the installed script to match the verified archive
-bytes and retain it against replacement through execution. Transaction tests
-interrupt backup streaming, backup sync, prepared-entry persistence, and
-replacement publication after an earlier destination was installed. They
-prove every boundary rolls back, foreign unjournaled evidence still fails
-closed, Linux startup and explicit update recover before provenance checking,
-rollback preserves a post-update conflicting write and its recovery evidence,
-and committed last-known-good bytes remain until the target version reaches
-managed startup.
-
-### kettle-core VT conformance (150+ tests)
-
-Drives the *real*
-vte + alacritty_terminal path used by the PTY reader and asserts
-grid/cursor/SGR/mode state across a broad `vttest`-style sweep —
-text + `\r\n` + CUP addressing, erase-line/erase-display, SGR
-truecolor + bold + reset + dim/underline (4:3) + strikeout +
-double-underline + curly + dashed + dotted (plus the
-SGR individual attribute-off codes 22/23/24/27/29), tab stops +
-carriage return, alt-screen + bracketed-paste private modes,
-DECSTBM scroll region, DEC special-graphics line-drawing charset,
-ICH/DCH, IL/DL, DECSC/DECRC save-restore, DECAWM autowrap, DECOM
-origin mode, device responses via the real EventProxy PTY
-write-back (DSR 6n cursor-position, primary + secondary device
-attributes, DECRQM mode report, DECALN screen alignment, REP, G1
-via SO/SI, RIS, EL/ED/ECH, CHA/HPA/VPA, DECSC-restores-SGR, SU/SD,
-DECSCUSR cursor shape, NEL/IND/RI, DECID, cursor-blink mode ?12,
-CHT/CBT tab nav, DECSET 1049 alt-screen, DECSET 2026 sync output),
-OSC 4 palette query + 104 reset, OSC 10/11/12 default
-fg/bg/cursor set + 110/111/112 reset siblings, OSC 8
-hyperlink cell-carry, OSC 52 clipboard copy + paste policies,
-DA1 clipboard-extension advertisement toggled by the live write policy,
-wide CJK (2 cells + spacer) + wide-char wrap, combining-mark
-zero-width.
-
-Kitty graphics capability queries echo the image id before device attributes,
-including immediate delivery during synchronized output. The chunked query
-regression exercises every split of a multi-query PTY read. A native Unix PTY
-child switches to raw input and checks the exact returned query bytes through
-its actual stdin before exiting successfully. Pure VT tests cover invalid data,
-unsupported file transfer, quiet settings across chunks, untouched existing
-pixels/virtual placements/animation frames and another partial image upload.
-Direct RGB/RGBA, encoded PNG and zlib probes succeed with a full small retained
-quota and return every temporary process lease. Ordinary transmission and
-placement acknowledgements use the separate coverage below.
-
-Ordinary transmission/placement reply regressions live in
-`extract::ordinary_graphics_reply_tests` and
-`term::image_lifecycle_tests::ordinary_graphics_*`. They cover completed and
-chunked transmissions, first-chunk ids/numbers/placement ids, distinct generated
-ids, latest-number selection, quiet overrides, anonymous silence, identifier
-conflicts, zero identifiers treated as absent, unsupported media, unreclaimable
-retained quota, and aborted uploads. Conflicting-identifier deletes leave a
-partial upload able to complete. Unrecognized actions cannot become uploads or
-successful replies, and cannot append to or abort a partial upload.
-Core cases distinguish accepted `C=1` placement from refused crops, preserve an
-existing physical placement on crop refusal, check virtual
-admission, exact missing-parent errors, combined relative uploads, and preservation
-of a previous relative definition on refusal. A reflow regression checks that
-refusal cannot restore a cleared definition. An accepted relative placement
-against a surviving virtual parent retains its new definition when reflow occurs
-between decoding and admission.
-
-Two `term::teardown_tests::ordinary_graphics_ack_reaches_*` tests use actual native
-PTY children. The child uploads an image and waits for the exact reply before
-exiting; the synchronized variant sends the closing marker only after that
-reply. Each asserts one reply and successful child exit. Run focused coverage
-with:
-
-```sh
-cargo test --locked -p kettle-vt ordinary_graphics_reply_tests::
-cargo test --locked -p kettle-core ordinary_graphics_ -- --test-threads=1
-```
-
-These test decoded admission and bidirectional PTY delivery. They do not prove
-GPU pixels, a foreground UI session, quiet performance, or release installation.
-Animation frame/composition regressions live in
-`extract::animation_graphics_reply_tests`,
-`term::image_lifecycle_tests::animation_graphics_*`, and
-`term::teardown_tests::animation_graphics_*`. They check exact completion bytes,
-actual one-based frame numbers, first-chunk identity, quiet overrides, unchanged
-pixels on errors, append/edit/background selection, strict composition geometry,
-overlapping self-copy refusal, and playback controls against existing roots.
-Animation effects precede their replies and raw command bytes appear once.
-Two native Unix PTY children wait for frame and composition replies through
-actual stdin, directly and during synchronized output. Their replies must arrive
-before the child sends its final text marker or closes the synchronized update.
-
-The pre-fix compiled baseline executed all 23 VT and three Core regressions:
-22 VT and all three Core cases failed, including both waiting PTY children.
-One VT case already passed. These counts describe overlapping coverage, not
-25 separate defects. The post-fix focused gate passed all 252 VT and 430 Core
-tests, warnings-denied Clippy, all-target builds, and formatting. The installed
-Rust 1.89.0 toolchain also passed all 23 VT and three Core animation cases.
-The full and minimum-toolchain Core runs each exercised both waiting PTY
-children, which received their replies and exited successfully.
-`image::transient_crop_tests` adds three allocation-contract cases covering
-process-only scratch pixels, disjoint in-place composition at a full retained
-quota, and unchanged ordinary crop charging and clipping semantics. Those new
-cases passed in the full VT run.
-
-Four compiled mutation checks failed at runtime when their fixes were removed:
-`successful_animation_effect_precedes_its_reply`,
-`composition_patch_counts_process_memory_without_retained_scope`,
-`disjoint_self_composition_succeeds_at_unchanged_retained_size`, and
-`overlapping_self_composition_is_refused_without_mutation`. Each exact run
-reported one failure and no ignored test; all sources were restored before
-the full ordinary workspace gate.
-
-That gate passed formatting, warnings-denied Clippy, all-target builds,
-workspace unit/integration/doc tests, media-worker feature gates, headless
-rendering tests, and Rustdoc builds. Its 86 result reports total 3,133 passes,
-zero failures, and two ignored cases, including nested and feature-run repeats;
-this is not a count of unique tests. The ignored argv sleeper is exercised by
-its subprocess caller; the other ignored case is a release-mode contrast-cache
-benchmark. Independent review and merge remain separate from these results.
-
-```sh
-cargo test --locked -p kettle-vt animation_graphics_reply_tests::
-cargo test --locked -p kettle-vt transient_crop_tests::
-cargo test --locked -p kettle-core animation_graphics_ -- --test-threads=1
-```
-
-This coverage exercises decoded pixels and bidirectional PTY delivery; foreground
-GPU rendering and quiet performance measurements require separate acceptance.
-
-Root-frame edit regressions exercise real Kitty wire commands through the core
-extractor and graphics application path, both directly and inside synchronized
-output. They verify physical, virtual, and relative bases, unchanged placement
-geometry, and release of the previous pixel allocation. Both stale-pixel tests
-failed before the fix. Additional cases check matching image ids across primary
-and alternate screens, appended-frame selection, and playback-clock continuity
-for stopped and running animations. A Unix end-to-end case launches `/bin/sh`
-in a real PTY, emits all three placement kinds and the edit, then waits for
-a following terminal-text marker before checking the updated pixels and
-physical size in the live reader registries, directly and with synchronized
-output. This does not claim foreground UI or GPU acceptance for this edit path.
-
-Animation compatibility regressions use a four-color source and distinct source
-and destination offsets to catch coordinate reversal, including a second copy
-in the opposite direction and an unchanged source-frame assertion. Timing tests
-read stored gaps and exercise playback with the 40 ms appended-frame default,
-zero/omitted delays, negative gapless frames, and preservation of root and
-appended-frame timing during edits. The coordinate and default-delay tests
-failed before the correction. Core wire tests and a real Unix PTY child exercise
-all three placement kinds directly and in synchronized output; the wire test
-also checks that the old pixels remain visible until commit.
-
-Relative `Q=` regressions compiled and failed against unchanged production
-code: three real Unix PTY cases reproduced wrong physical/chained origins and
-fallback for a missing explicit parent; a portable wire case reproduced missed
-spatial deletion. The baseline reached the direct parameters; after correction,
-all direct and synchronized parameters pass. The PTY child waits after its text
-marker so the assertions inspect live registries and `relative_tiles`, rather
-than a parser-only result. Pure origin tests cover separate virtual prototypes,
-omitted placeholder placement selection, unknown prototypes, deterministic
-parent defaults, exact chain keys, offset clamping, and the existing depth bound.
-An additional real PTY regression failed against the initial keyed resolver when
-a hidden virtual prototype shadowed a physical default parent. Only prototypes
-with visible cells now contribute concrete defaults; portable and PTY coverage
-preserve that behavior, directly and in synchronized output.
-These checks do not establish foreground UI pixels, quiet performance, or release
-artifact acceptance.
-
-Retransmission regressions first failed against unchanged production code: four
-VT admission/lifetime cases, one self-composition case, and four Core cases,
-including a real PTY. Small isolated byte quotas check actual lease release,
-retained-snapshot refusal, and same-read callback order at every wire split.
-Core cases verify all placement/animation owners, synchronized visibility,
-primary/alternate id collisions, and preservation of independently placed children.
-The PTY child pauses at text barriers before retirement and before completion;
-the test checks weak handles and all registries between those phases, both directly
-and with synchronized output. Additional cases cover stale frame slot reuse without
-aborting other uploads, exact raw bytes for ESC/C1 terminators and store/display/
-virtual results, oversized-header preservation, and callback reset/screen/new-upload
-invalidation. A preliminary VT fixture compile error was corrected before recording
-the nine runtime failures. These checks do not establish foreground UI, quiet
-performance, or release artifact acceptance.
-
-Quota eviction regressions first reproduced byte/count refusal against unchanged
-production code. Further compiled regressions exposed stale external-owner counts,
-stale scope usage, an expired collecting-API request, and unnecessary inactive-screen
-retirement for an active count slot. Planning now reads live allocation witnesses
-and current retained bytes; Core holds its registry owners through planning and
-batch removal in the existing lock order. Small budgets cover root/frame aliases,
-retained snapshots, incomplete plans, active/inactive id collisions, and byte/count
-pressure together. Portable wire tests check callback invalidation and exact raw
-bytes for split ESC/C1 terminators. Real Unix PTY tests hold the child at text
-barriers and verify the newest incoming id stays addressable, directly and with
-synchronized output. The PTY setup fills roots before opening its synchronized
-pressure frame, keeping that frame within the existing 256-entry journal. Pixel
-edit tests preserve creation age both with weak-cache detachment and with a held
-snapshot requiring a copy. These checks do not establish foreground UI pixels,
-quiet performance, or release artifact acceptance.
-Shared creation-order tests also check concurrent allocation across cloned screen
-budgets and refusal at `u64::MAX`. The allocator uses a checked compare-and-swap
-loop supported by Rust 1.95 and current stable toolchains.
-
-Native vi-mode regressions drive Alacritty's own cursor and
-selection through scrollback rotation and reflow, proving the cursor remains
-bounded and evicted selections are invalidated. OSC 133 tests pin monotonic
-`history_origin` row ids, prompt navigation offsets, pruning after eviction
-or reset, normal-screen retention across the alternate screen, and prompt
-capture from the writing cursor rather than the vi cursor. Image regressions
-use the same monotonic row domain, exercise half-open pruning at the retained
-history boundary (including `u64` overflow), and prove placeholder projection
-does not apply `display_offset` twice.
-
-### kettle-render (110+ unit tests + visual integration tests)
-
-Truncate respects display columns (not chars), the
-`clamp_font_size` floor/ceiling/NaN/∞ contract, the
-`cap_axis_cells` GPU-texture safety guard, color
-resolve / dim / minimum-contrast WCAG math, the offscreen GPU
-pipeline self-test (real wgpu pipelines compile + render through
-Vulkan/Metal/DX12/GLES), pure native-backend-order/fallback tests, uniform
-device-limit clamping for virtual graphics adapters with no compute queues,
-and isolated
-native Windows checks: the Auto test selects DX12 without first constructing
-an all-backend/Vulkan instance, the DX12-only stale-pin test preserves the
-platform-preferred adapter, and the explicit-Vulkan test works without a
-physical GPU pin. Screenshots use the loaded configuration; the CI
-self-test uses the same resolver with `Config::default()` to stay independent
-of developer state. Shared-image UV validation composes source rectangles
-with permanent vertical crops; independent inline/wallpaper instance limits
-and same-texture draw batching are also covered.
-Pane-clipping regressions crop destination geometry and source UVs by the
-same fractions, reject fully outside/degenerate/non-finite instances, admit
-no placement for a zero-line viewport, and prove the pane-interior/grid
-intersection excludes padding, top/bottom titlebars, borders, and pane edges.
-Titlebar-origin parity also verifies that bottom titles move row zero back to
-ordinary pane padding while selection/link/mouse hit testing and the native
-IME anchor consume that same renderer-owned origin.
-The wallpaper no-clip test and zero-sized skipped slots pin the independent
-background contract and indexed batching.
-Image-cache lifetime coverage uses an actual GPU upload and a portable weak-pin
-test to prove cached identities remain distinct after CPU pixels are released.
-The native replacement regression checks texture identity, upload counts and
-pixel readback: a same-size, half-transparent replacement reuses the retired
-texture at a full retained budget while preserving a green image drawn later.
-A larger replacement releases the old lease before admission, and an empty
-frame releases the remaining cache. A separate scenario in the same GPU test
-forces instance-buffer growth to fail and verifies its unused transfer lease is
-released. Budget pressure uses accounting reservations, not large VRAM
-allocations. These tests share the existing GPU-test lock; adapter absence is
-reported as a skip and does not establish native GPU acceptance.
-Pixel-allocation regressions retain a bare pixel handle after dropping its
-image wrapper, verify its quota remains charged, then release it and retry
-admission. A strong pixel snapshot survives composition with its original
-pixels and reservation; a further copy at a full quota leaves the destination
-unchanged. With only a weak cache pin, composition preserves the pixel data
-pointer and charge while retiring the old allocation key. These tests failed
-on the original implementation before the fix was applied.
-The native `composition_after_placement_drop_refreshes_cached_pixels_without_copying`
-regression first uploads and reads red/blue pixels, drops the placement handles,
-then edits the remaining image while the GPU cache still has its weak pin.
-It verifies no pixel copy, old-key retirement, same-size texture reuse, exactly
-one replacement upload and green/blue pixel readback. It failed at composition
-on the original implementation after successful initial GPU readback. Its
-adapter is printed; adapter absence is a skip, not GPU acceptance.
-Startup fonts prepared before the scale is known measure what a direct load
-measures at 1x and 2x, for the default family and one the system lacks,
-whichever families were warmed first; warming a family a second time does
-nothing, and a remeasure at a new scale or size equals a fresh load there.
-Source guards prove only `PreparedFonts::enumerate` builds a font system, and a
-renderer given fonts measured for another scale remeasures them instead of
-loading them again.
-The grid-regression guard renders
-zsh-style `➜  ~`, POSIX, lambda/starship-style, git-status, and
-PowerShell-style prompt lines through the cell-locked glyph pipeline,
-toggles only the block cursor between two offscreen frames, and
-asserts every non-cursor prompt pixel remains unchanged. The
-`tests/menu_visual.rs`
-integration test renders both `DebugScene::Default` and
-`DebugScene::ContextMenu` PNGs via `capture_png_with`, then
-asserts ≥ 1000 pixels differ between the two AND ≥ 200 fg-leaning
-pixels appear in the menu area. It catches the blank-menu render-pass-order
-regression class that bare logic
-tests can't see. `tests/bell_visual.rs` renders `DebugScene::Default` and
-`DebugScene::BellFlash` for the default dark theme and a bundled light theme,
-measures the mean CIE L\* of a background patch in each, and asserts the
-flash moves it by exactly the configured `bell-flash-intensity` step (+3 L\*
-on dark, −3 L\* on light, within 8-bit rounding) through the real linear-light
-quad pipeline; `color::tests` pins `perceptual_wash_alpha` itself (endpoints,
-monotonicity, the order-of-magnitude alpha gap between dark and light
-themes, and the same-luminance fallback), and `kettle-ui` pins the ease-out
-ramp, the per-pane stamping, and the expiry/erase pacing. The
-`just bell-flash-smoke` live check rings BEL in one pane of a split and
-proves only that pane's body lightens while the sibling pane and tab bar
-stay byte-identical, then fades back to the baseline. Live-screenshot unit coverage verifies whole-frame
-preservation, exact row/column cropping, out-of-surface rejection, and
-truncated-source rejection. Separate file-policy regressions prove an
-explicit output succeeds beneath a public existing parent while the default
-private-state policy rejects the same tree. The native live smoke exercises
-the asynchronous readback path.
-A headless renderer holds exactly two distinct quad pipelines, one replacing
-and one blending, and one image pipeline; a source guard keeps `with_gpu`
-building its layers only from `SharedPipelines`, and replacing and blending
-layers draw the same pixels through shared and standalone pipelines. A
-latency A/B (`--kettle-b --workloads latency --rounds 5 --latency-keys 100`,
-difference CI upper bound at most +1 ms) is optional: 4.9.0 merged this change
-on tests and reviews, without its measurement gates, by the owner's decision.
-
-### kettle-ui (290+ tests)
-
-Split-tree layout tiles with no
-gaps/overlap, `remove_leaf` collapses to the sibling, nested
-splits keep every leaf; `Node::leaf_ids` DFS-order +
-`nth_leaf`/`leaf_index_of` symmetry; `close_tab_at` and
-`close_window` tab-reaping with active-index
-bookkeeping; `reap_tabs` keeps focus on the same tab
-after a pane death; `close_focused_promotes_sibling_in_two_pane_split`
-(`Ctrl+Shift+W` in a split closes the focused pane, not the whole tab);
-`reap_reports_whether_it_removed_a_pane` plus the
-`every_reap_site_schedules_the_survivor_resize` source guard pin that a pane
-dying on its own resizes whatever inherits its rectangle, and that an idle
-reap does not, so the flag cannot re-drive `resize_all` every frame;
-`next_context_menu_highlight_skips_separators_and_disabled`
-+ `clamp_context_menu_anchor_keeps_panel_on_screen`;
-`classify_tab_activity_picks_the_right_indicator`
-+ `classify_tab_activity_transitions_to_silent_after_threshold`;
-`closed_tab_ring_bounded_and_lifo`;
-`tab_drag_target_index_clamps_to_strip`;
-`hovered_close_button_finds_only_the_close_rect_hits`
-+ `tab_close_hover_icon_overrides_chrome_default`;
-`split_new_tab_button_places_arrow_left_of_plus` also pins independent
-dropdown/`+` hover hit targets;
-`new_tab_glyphs_are_unpadded_and_centered_in_their_own_hit_rects` prevents
-artificial text padding from shifting either symbol, while
-`pane_window_corner_tests` proves only panes touching a rounded surface bottom
-receive left/right corner masks.
-selection-autoscroll inner edge and overshoot ladder; cwd-basename tab-title fallback;
-the SSH and `-e PROG` initial-pane-title heuristics;
-session JSON round-trips, durable private save,
-symlink refusal, permission tightening, and corruption/oversize backup
-contracts; xterm modifier encoding + paste payload bracketing +
-injection-guard.
-Session restore preflight accepts the exact 16-window/256-pane boundary,
-rejects either limit plus one before fan-out, clamps saved rectangles to the
-live monitor set, accepts 16 1080p surfaces, and rejects 16 4K surfaces over
-the 64-Mi-pixel aggregate budget. Startup sizing is pinned in logical
-pixels: `startup_geometry_cells_convert_to_inner_size` covers explicit and
-half-specified `window-width`/`window-height` (the missing axis comes from the
-160×45 default grid), `default_startup_size_targets_the_agent_grid_and_fits_the_monitor`
-pins the fresh-window rule on 1080p, 1366×768, ultrawide, a tiny monitor (no
-floor), a 2× HiDPI monitor (same grid as 1×), and that an explicit size is
-never monitor-fitted, and a source guard proves both window constructors use
-the shared rule as a `LogicalSize` and that the restore planner's fallback
-surface is the same rule in physical pixels. The startup phase stamps keep the first mark,
-leave unmarked phases out, print in time order, and match the fixture the
-macOS standing harness parses (`startup-phases.fixture`); a source guard
-proves every phase is marked, only the reveal and the spawn at more than one
-site, and in startup order, the font phases in `font_preload.rs`. The same
-guard proves the font thread warms the compiled-in family before it waits for
-the config, and that measurement finishes before `fonts_joined`, so the stamped
-wait includes the fallback's cold matches and face loading. The font preload
-measures what a direct load measures, whether the family arrived
-early or only when the first window joined it, and without its thread the first
-window loads the fonts itself; a preload dropped before its first window ends
-its thread instead of waiting for a family, and on macOS the thread runs at the
-user-initiated QoS class. A source guard proves `run_with` starts the preload
-right after the trace guard, before the event loop is built and before any
-config read, sends the family after the command-line overrides, and that
-the first window joins it and keeps the fonts for the renderer before its
-pane spawns. On macOS `load_window_icon` returns `None`
-without decoding (`macos_skips_the_window_icon_decode`). The existing palette
-guard retains both icon assets and the Windows/X11 call sites.
-Input-queue regressions fill both the
-64-message channel and user byte reservation, verify reservation release,
-enforce reply-lane failure on overflow, and pin the precedence of
-`failed > oversize > backpressured > read_only > queued`. RPC mapping tests
-require `read_only`, `busy`, `bad_params`, and `internal` to remain distinct;
-local-paste coverage requires 4 MiB to pass and one byte more to be rejected
-with visible feedback.
-S3 startup tests cover the command/directory override and every combination
-of session, layout and tab-handoff restore intent, window state and configured
-position. Display arithmetic and the shared monitor-fit boundary are checked
-at 1x, 2x and 3x, including odd point sizes. A real PTY child must exit within
-two seconds of `Mux::kill_children`; environments unable to open a PTY print
-an explicit skip, which is not native acceptance. Source guards keep the
-pre-launch spawn between App construction and `run_app`, preserve the override
-after its arguments are consumed, reuse the sizing/fonts, and hang up children
-on window/renderer failure. The #379 guard now requires three callers of the
-shared startup surface rule. Its fallback spawn/window/GPU order and #388's
-ApplePersistence registration order remain guarded.
-
-The optional native PTY recorder tests preserve an initial 99x30 observation
-across a correction to 100x30, read kernel geometry before correction, and
-keep errors, no-ops, overflow and incomplete intervals explicit. Source guards
-cover creation, both resize branches, pane linkage and early teardown.
-The production-capture regression opens a real PTY with deterministic opt-in,
-records a correction and finishes the trace. PTY creation failure fails that
-test. Separate zero-start and inverted-initial fixtures pin the completeness
-conjuncts. The macOS display test drives a missing screen match without AppKit.
-The provisional native_pty_v1 wire contract and bounded private collector are
-documented in `scripts/perf/README.md`.
-On a single-display Mac, `default-window-size` compiles a private SHELL
-observer and runs it through LiveKettle's owned tracker. Its explicit-size leg
-enables startup and native logs, uses a scratch XDG_CONFIG_HOME, and checks
-the collector's process/pane/session join. The default leg keeps the monitor-fit
-and 1296-pixel guards. The explicit leg requires settled and child 100x30, `path=pre_launch`,
-`monitor_match=true`, and zero SIGWINCH for two seconds. Native evidence must
-also start at 100x30, cover that child interval and contain no changing resize.
-A delayed-child control deliberately creates 99x30 then corrects to 100x30
-before the child installs its trap; the strict native policy must fail even
-when the child reports 100x30 and zero signals. Use 119x36 then 120x36 for the
-standing-size control. Missing, failed, dropped or mismatched evidence fails
-closed. Geometry diagnostics require a separate observer-equivalence check
-before use in measurements.
-
-Run the repository gates, the macOS hidden job-control CI smoke with
-`path=pre_launch`, `monitor_match=true` and ordered phases for each successful
-launch through `--expect-startup-path pre_launch`. Negative controls are exempt.
-CI runs these at 100 columns so the grid fits the 1024x768 runner display and
-the early path is exercised. It also passes `--allow-fit-decline`: a runner
-display too small for the grid
-may decline the early spawn, but only with Kettle's `startup pre_launch
-declined=fit` line giving the surface and monitor sizes, after the display
-read. Any other decline, or none, fails. Kettle prints a declined line for
-every reason (`ineligible`, `display`, `window`, `fit`), so a fallback is
-never silent. The live default-window-size smoke stays strict.
-Run the live default-window-size, split-exit-resize,
-dock-menu, window-close-isolation and tab-title smokes. Record command exit,
-directory override, multi-window restore, named-layout preservation, malformed
-config fallback, hidden launch and Cmd+N checks with an isolated
-`XDG_CONFIG_HOME`. Mixed-scale displays are an explicit skip if unavailable.
-Portable code also requires Docker Linux build/tests and an Xvfb launch with
-`path=resumed_early`. S3's paired 30-launch gate compares against S2: shell
-improvement at least 20 ms or B/A <= 0.92, with window time not worse. Stop on
-any wrong initial grid, single-display SIGWINCH or monitor disagreement.
-
-Lua tests preserve exact mixed-command FIFO order, separate large sends,
-enforce the 1 MiB call/8 MiB aggregate/1,024-entry limits, latch a retry's
-target pane, and retain a backpressured head until its deadline. Registry
-tests allowlist all nine emitted event names, reject unknown names without
-creating registry state, accept exactly 256 callbacks/menu items/URL
-handlers and reject the next, and exercise the 1-KiB menu-label,
-256-byte URL-name, and 4-KiB URL-pattern boundaries before UTF-8 conversion.
-Remote-file
-tests hold the shared lock while a claim is attempted, prove the spool is
-unchanged on contention, accept exactly 1 MiB, reject limit plus one without
-mutation, and dispatch a claimed batch in file order.
-Pasted-image tests encode/decode a real PNG, cap declared RGBA input, fill
-the 64-file allowance, place the aggregate one byte below 256 MiB and prove
-the final PNG is refused without leaving a partial file, and pin the bounded
-writer's exact accepted-byte count. Open-handle identity fixtures require a
-retained handle to match its creator and distinguish a different private
-object. Name-parser fixtures reject
-noncanonical/overflowed creator, nonce, and sequence aliases. The stale
-sweep preserves an older-than-24-hour live PID, reaps the same verified tree
-only under an injected dead-PID verdict, and fails closed for unknown and
-multi-link children; the production liveness probe must report the current
-process as live, while native Windows also pins an impossible PID as
-definitively dead. Native Windows exercises protected file handles plus
-name-pinned, volume/file-ID-verified empty-directory deletion; native Unix
-additionally displaces the held directory before child creation and proves
-screenshot bytes still land only beneath that descriptor, then replaces a
-saved pathname while retaining the original handle and proves
-descriptor-relative cleanup leaves the replacement untouched.
-Receipt regressions derive a bounded aspect-preserving thumbnail only from
-the exact retained image path and require the initiating pane to accept its
-own paste before showing it. A broadcast accepted only elsewhere cannot put
-success chrome over a rejecting initiating pane. Geometry stays inside the
-owning pane and left of its scrollbar, avoids a completion card, budgets the
-real chrome line height, degrades to a compact chip with a local-path label in
-short remote panes, and disappears when even that chip cannot fit. Timer
-tests pin the four-second expansion, 30-second lifetime, and hover pause;
-paint, pointer, and
-accessibility all consume the same geometry function. Live UI diagnostics
-expose the safe geometry and state but not the retained path or thumbnail
-pixels.
-Crash sweeping is dispatched off the startup thread and independently capped
-by elapsed time, stale attempts, successful removals, root entries, and
-per-session children.
-Runtime-diagnostic tests verify control-character stripping, message bounds,
-private Unix directory/file modes, and ten-record rotation without needing a
-live event loop. Idle-loop regressions pin the cursor-blink truth table,
-require the phase timestamp to advance before a redraw request, simulate an
-idle blink to prove it stops on its visible phase within one half-period of
-`cursor-blink-timeout`, and normalize repeated empty IME preedit notifications
-to the same absent state. `check-live-render-smoke.sh` sets
-`cursor-blink-timeout = 0` so the blink keeps running for its whole capture;
-its `ctl screenshot` captures are frames, so on macOS they end any Core
-Animation blink and show the app's phase, not the window server's.
-`kettle-ui`'s `cursor_blink` tests prove on every platform that the macOS
-layer's plan shows exactly what the GPU scheduler would draw at every
-millisecond, for intervals across 50-5000 ms, timeouts of 0 or 1-60 s and random
-activity times; that materializing the phase after any gap matches stepping the
-scheduler and composes; the hand-off truth table (each condition alone blocks
-it); the quiet half-period rule; and layer frames for flipped and unflipped
-roots at 1x and 2x. On macOS, CA tests on a windowless layer tree check that the
-layer sits directly above the topmost Metal layer, that `show` installs one
-discrete opacity keyframe animation with the planned timing and a visible model
-opacity, that `hide` leaves no animation, and that an exit frame restores
-`presentsWithTransaction`; they take turns, since one thread's commit can drop
-another's finished animation. Source guards keep every layer mutation inside a
-transaction with implicit actions off, hide the layer in `redraw` only for a
-presented frame inside the exit transaction, hide it without a frame when the
-window changes size or scale, loses focus or is occluded, hand off only at an
-edge that hid the cursor, and keep `ui_geometry` reads frameless. The writer-wins check calls the
-production anchor decision; refused hand-offs wait for a non-blink frame.
-Exit durations include transaction begin, render, commit and flush; logs also
-carry render-only durations. The cursor-latency measurement is optional: 4.9.0
-merged this change on tests and reviews, without its measurement gates, by
-the owner's decision, so no latency result is claimed. When it is run, it uses
-the harness's `--latency-payload cursor` on a frozen harness. C2's smoke and
-helper checks run independently of it.
-`cargo test -p kettle-ui cursor_exit_log` exercises strict context parsing,
-private-file metadata rules, exact capability/input/exit bytes, the 4096-byte
-limit, calibration and extra-key counting, modifier/release/window exclusions,
-input-to-exit joins, retry/hide handling, duplicate preservation, and an
-`input` record for every counted key that ends no layer blink: calibration
-keys, a key after the final exit, coalesced and hide-cancelled keys, untimed
-frames and eligible keys that ask for no frame. Source
-guards pin the native routing hook, startup binding and timestamps around
-scene preparation, rendering, layer hide, transaction commit and flush.
-These pure tests run on Linux and Windows too; protocol activation stays
-macOS-only. They do not establish native handoffs or clock/input correlation.
-
-For an optional native measurement, use the frozen cursor harness with a private
-context and `kettle::cursor_blink` info enabled. Require one capability even
-for a zero-exit launch, `input` records for keys 1-6 and no other key, exactly
-one exit for every warmup/measured key, actual
-initial pane/native-window identity, ordered raw-clock endpoints and byte
-agreement with its `cursor-exits.fixture`. The legacy duration line is
-suppressed only in this opt-in stream because HC refuses legacy records.
-Do not poll geometry during the campaign. Missing handoffs or coalesced,
-extra, duplicate or wrong-pane keys must fail coverage, never become synthetic
-zero-cost records. The harness reports complete-frame p95 against its 4000 us
-threshold.
-
-`just cursor-blink-layer-self-test` checks the wire geometry object, refuses
-idle samples shorter than 3 s, and verifies private capture cleanup on success
-and failure. It also checks delayed diagnostic replies, captures spanning two
-edges, exhaustion of the capture retry deadline, captures that the expected
-renderer did not draw throughout, and blank or unblinking captures. The live
-smoke runs these checks before launching a window.
-`just cursor-blink-layer-smoke` (macOS) checks the same in a live window through
-`ui_geometry.cursor_blink`: the hand-off over the cursor cell, footprint, wakeups
-and CPU while the layer blinks, the visible rest at the timeout, and the exit a
-reload and a key cause. Its `analysis.json` keeps the raw evidence beside the
-aggregates: every rusage sample, the phase stamps (hand-off, measurement window,
-rest, reload, key) and each of the 20 geometry reads, all on one monotonic
-clock. `--pixels` compares `screencapture -l` frames with the key on and off
-and needs Screen Recording. Pixel sampling bounds each capture
-command using timed diagnostic reads and millisecond truncation, with 20 ms
-margins at both phase edges. It re-reads after sleeping, deletes ambiguous
-captures and retries within 10 s. The reads before and after a capture must
-show the expected renderer, the same phase and the same hand-off, exit and hide
-counts. Each run's on and off captures must differ at the cursor before the
-layer and GPU runs are compared. These helper checks use a simulated clock; native pixel parity must
-still verify compositor behavior, including delayed captures.
-`kettle-render`'s headless tests render real panes from a real `Term` through
-the live frame path into the offscreen capture target, with no window. They
-prove a blink uploads the same quads in both phases and prepares no text, that
-the off phase is byte-identical to a cursor hidden with DECTCEM for the block,
-beam and underline shapes, and that a block over a wide glyph restores the
-glyph when it goes off; a source guard keeps the blink phase out of
-`build_pane`. They also prove an unchanged frame and a blink edge write nothing
-to the GPU while a changed frame writes only its difference, and each pipeline
-skips an unchanged upload; a source guard fails on any `write_buffer` or
-`write_texture` outside `upload.rs`, and `just steady-uploads-smoke` checks the
-same through `ui_geometry.render_uploads` in a live window: unchanged
-screenshots, a blinking window, and a blinking window after 2 MiB of output.
-The window runs a plain `/bin/sh` with a fixed prompt, since a user's shell can
-redraw its prompt after the smoke has decided the window is steady.
-On a host whose adapter gets mapped uploads (Apple silicon, lavapipe), the
-headless tests also prove that a visible cursor glyph whose key changes
-(another character, emoji presentation or cell, even the same character one
-cell over) prepares the chrome with it, while a blank-cell cursor and a blink
-do not, that printing a line adds no queue write, that the
-quad ring draws each frame's own data (a short frame between two longer ones
-must not leave a stale tail) with only the screen uniform through the queue,
-and that the glyph ring outgrows its first buffer. The direct ring tests run
-on any adapter supporting the feature, including discrete test devices. A
-headless GPU test places an opaque image paste receipt over a cell that holds
-a focused block cursor and its inverted glyph, and requires every pixel inside
-the receipt to match between the two blink phases; with the cursor glyph drawn
-after the overlays it fails where the glyph shows through.
-The live-path printing test uses the production adapter policy. Blink and
-steady-frame tests run with both that policy and an explicitly featureless
-device, so shared-memory hosts also cover queue uploads. Hosts without an
-adapter skip GPU tests. Unit
-tests pin which platform, backend and adapter type get the feature (never
-Windows, a discrete GPU or GL) and the ring's choice between a mapped spare, a new buffer and the
-queue, and source guards keep `MAP_WRITE`, the feature and every write in
-`upload.rs` and the live device's feature request behind that check. Grid-mode
-output prepares no glyphon text, while legacy-mode output still does. The
-smoke's fourth phase prints 30 lines twice where uploads are mapped and
-requires the second round to add mapped writes with flat buffer writes,
-texture writes and main/menu `chrome_prepares`. Cursor-only prepares are
-excluded because a blank-cell cursor prepares no vertices. Older builds
-without mapping diagnostics run phases A-C and skip D. A mapped build must
-supply `chrome_prepares`. GL backend rendering still needs the native check.
-
-The cursor patch tests composite the patch over the off frame and require the
-on frame byte for byte, both rendered as the window shows them: an `Opaque`
-surface ignores alpha, a `PreMultiplied` one presents the scene's bytes, and a
-`PostMultiplied` one presents its straight-alpha pass. The matrix crosses block, beam and underline with
-opaque and 0.86 opacity with blur, scale 1 and 2, and cell widths 1.0 and
-1.07, with a glyph under the cursor. It also covers a blank block, wide CJK,
-OSC 12, cursor text equal to the background, opaque overhang at cell width
-0.6, a split with padding and a real scrollbar overlapping the cursor.
-Fixtures choose padding from font metrics and assert that cursor edges stay
-at least 1/64 px from pixel centres. Crop comparisons run on Apple Metal and
-lavapipe; WARP and other unmeasured adapters still run portable eligibility
-and combine tests, and cannot present cursor layers in production.
-
-A patch target must equal the crop of the full frame, compared in the full
-frame's straight-alpha screenshot convention, and the combine must return
-every byte for RGBA and BGRA. To make the combine test red, temporarily
-replace its shader's `return vec4<f32>(on.rgb, 1.0);` with
-`return vec4<f32>(on.rgb * 0.99, 1.0);`. Require a byte-equality assertion
-failure, then restore the shader and rerun green. Multiplying by `0.999`
-rounds back to the original bytes and cannot establish this red check.
-An adapter skip is not a passing run or red evidence.
-
-Translucent overhang (on `PreMultiplied` and `PostMultiplied` surfaces), an
-`Auto` or `Inherit` surface alpha convention, a convention changed since the
-frame, vi mode, the on phase, a snap-band edge, starfield and image overlap
-each report their ineligibility. Image overlap deliberately falls back to GPU blink rather
-than being an eligible parity case. Tests also cover missing or invalidated
-frame records, config changes, empty and oversized patches, rejected
-submissions and missing combine pipelines. Source guards protect the frame
-record and validation ordering. On Apple Metal a standalone `CAMetalLayer`
-takes one patch frame sized to the patch. That test runs in a child process
-with a 30-second deadline, since Metal drawable acquisition can block
-indefinitely. A timeout fails the test and reaps the child; it is not a pass.
-
-Trailing-blank shaping tests compare row keys directly when prompt padding
-or a reverse-video block on a blank row changes colour. The headless test
-also checks text prepares, the changed background pixels, and retained
-interior spaces. GPU-independent tests cover the inked extent, row keys,
-and a pad blank for each cut bold/italic face. A cosmic-text layout test
-compares full and cut rows with `font-family-bold = "Courier New"`, which
-has different metrics from the bundled regular family; it skips when that
-family is absent. A source guard checks that `build_pane` uses the same
-`ShapedRow` for its key and text. Red checks revert only production code
-and retain every test, including after rebasing onto changes to preparation.
-
-The theme picker lists the opening theme's appearance first in look order and
-the other appearance after it, so its rows partition the bundle; a blank query
-is no query; a query keeps only fuzzy matches and puts the theme it names
-exactly first (`dracula` scores the same against "Dracula+"); an unmatched
-query shows a disabled row in English and Spanish and selects nothing; only
-the opening theme is ticked and every row names its appearance; and the
-previewed and kept theme is the highlighted row even past the end of a
-narrowed list. The preview lifecycle runs on a bare `WindowState`: a step
-previews the next theme, reopening over a running preview opens on and ticks
-the theme from before it, an unmatched query shows the opening theme and keeps
-it as the baseline even when something else changes the theme, Esc restores
-it once, and a kept theme stays. Screen readers hear each row's appearance
-and the opening theme's tick in English and Spanish. A key that closes or
-replaces any modal ends its input-method composition (the closing-key test
-drives it on a bare `WindowState`), on the keyboard path and, by source guard,
-on the control plane's. Source guards keep the picker ahead of every Settings
-branch in the key handler and the control plane's modal order, gate its
-auto-repeat like the palette's, record its closing key, suppress its bar under
-a confirm dialog, and close it with every other modal. Only the Settings Theme row opens it. `just theme-picker-smoke` drives the
-picker live: it opens on the current theme, Down previews the next theme, Esc
-restores the first, a typed name previews and Enter keeps it in the config
-file, the Settings Theme row opens it over a hidden panel that Esc brings
-back, and the right-click menu shows "Theme…".
-
-Links and hints are found per soft-wrapped logical line (`grid_text::logical_line_into`):
-a URL wrapped onto the next row is one link with a segment per row, sharing
-its URI and hover group, and one hint labelled where it starts; a hard line
-break never joins; the join stops at a gap in the visible lines and at
-`MAX_LOGICAL_ROWS`, and a match touching an edge where the line was cut (it
-runs on below the viewport or the bound, or began above the first visible row)
-is no link and no hint, rather than a fragment. Parser-fed tests scroll a
-wrapped URL across both viewport edges (no link, not even a path link to its
-tail, until all of it shows) and wrap a wide character that did not fit on the
-last column (its spacer cell does not cut the URL). A path cannot start inside a longer token, for links and hints alike
-(`path_may_start_after`): `foo(1)/bar.png` and `x]/etc/hosts` hold no path,
-while paths after a space, a bracket, `=`, or a list, chain or redirect
-separator (`PATH=/usr/bin:/bin`, `>/tmp/out.log`, `a|/usr/bin/sort`,
-`true&&/usr/bin/printf`) stay. Quick-select hints (kettle-core `hints`) take a relative path whole from its
-first segment (`out/diagram.png`, `./`, `../`, `~/`, `C:/`, Unicode segments),
-keep a URL's path inside the URL, trim trailing punctuation and leave
-`10.0.0.1/24` an address; double-click smart selection follows the same spans.
-Each span says whether it meets a boundary on both sides. `out/report#1.pdf`,
-`out/report,1.pdf`, `out/report(1).pdf`, `foo(1)/bar.png`,
-`user@host:dir/file.txt`, `out/a.png?raw=1`, an unclosed `"docs/annual report.pdf`,
-`./docs/it's.md`, and every name in `out/report,dir/file.txt` or
-`./user's/report.pdf` give partial matches. Whole: `out/a.png, b`,
-`"src/main.rs:12"`, `[src/main.rs:12]`, `See src/main.rs:12.`,
-`src/main.cpp(12,5):`, grep's `src/main.rs:12:text`, `**docs/README.md**`,
-`'out/a.png'`, `out/a.png? yes` and `"inspect out/a.png," she said`. A quote
-or `*` before a path must close right after it. In kettle-ui, a plain label opens a URL and copies
-anything else, and Shift (the modifier, not Caps Lock) copies a URL and opens
-a path, only when the span is bounded and its own pane, looked up by id, is
-not remote. A path hint resolves against that pane's directory or
-home into a percent-encoded `file://` URL that passes the same open check as
-a clicked link, without touching the filesystem: a source guard keeps stats
-and `canonicalize` out, so a printed `/net/host/…` path cannot mount a share
-from the UI thread. A climb with `..`, a base that is unknown or not local
-(`//host/share` from OSC 7), or a drive path off Windows opens nothing, and on
-Windows no path hint opens. Red checks: the old pattern detects
-`/diagram.png`, dropping the CIDR rule makes `10.0.0.1/24` a path, and
-a comma treated as a boundary in every position lets `out/report,1.pdf` open.
-File URLs and reported working directories are checked after decoding
-(kettle-core `decoded_file_url_path`, used by `is_safe_url` and
-`local_file_path`; kettle-vt `plain_cwd` for OSC 7): `.%2e`, `%2E.`,
-`%2F%2Fhost/share`, `%2F..%2F`, an encoded `/` (and `\` on Windows),
-`%00`, `%0A`, `%1B`, `file:////host` and `kitty-shell-cwd` reports with `..`,
-`//` or a control character are refused, while `%20`, `%C3%A9`, `%25` and
-`a%2eb` decode as before, a POSIX name may hold a backslash (`a%5Cb`), and a
-local WSL share (`//wsl.localhost/Ubuntu/…`) stays a cwd. A link's escapes must be valid hex; an OSC 7 report keeps a stray `%`
-as literal text, as shells that do not encode it send. Red checks: dropping
-the decoded check in `is_safe_url`, the OSC 7 cwd check, or the OSC 7
-separator rule each fail a test. "Open cwd in file manager" builds its URL
-with `file_url_for_path`, so a folder named `a b` or `x#1` opens; a source
-guard keeps the cwd from being formatted into a URL.
-
-Links from terminal output open through `open_pane_link`, which gates a
-`file://` link by its pane (`link_gate`, `pane_path_origin`): from a local pane
-it opens, behind tmux, screen or zellij it asks with a confirmation naming the
-file and the multiplexer, and from a remote pane, or one that has gone, it is
-refused with a notification, since the path names a file on that machine. Web
-and mail links are never gated. A pane is remote with a detected remote
-session, a remote or container client as the command it was launched with, or
-one in the foreground program, also through a shell's `-c` script (only the
-foreground's: a launch script that ran ssh and then `exec bash`, wrapped or
-not, leaves the pane local once bash runs), every command in it and its
-command substitutions (quoted parentheses inside them do not count), past
-leading or glued redirections (`2>/dev/null tmux`, `>log 2>&1 ssh`,
-`tmux</dev/tty`), quotes and backslash-newlines removed (`sh
--c 'cd ~ && "tmux" attach'`, `echo hi | ssh host`), or a wrapper with its own
-value-taking options (`env TERM=xterm ssh host`, `sudo -n tmux`, `time -p ssh
-host`, `sshpass -p … ssh`, `sudo --user alice tmux`, and a client one word
-after an option the table does not know, but not a wrapper's plain arguments
-such as `env less /tmp/ssh`), past shell keywords (`if … then tmux`, `while
-…; do ssh`, `! {`, fish's `not`, `and`, `or`, `begin`) and precommand words with their options (`command -p
-tmux`, `exec -a work tmux`, `noglob ssh`; `command -v ssh` runs nothing); a
-command the parser cannot name
-(`$EDITOR`, `` `cmd` ``, `eval`), a script past 4 KiB or 16 commands and
-nesting past four levels fail closed as remote, and tmux, screen and zellij
-count as local. A Lua URL handler's rewritten
-target meets the same gate. The name a notification shows has
-bidirectional and format characters replaced and a long name shortened around
-an ellipsis, by display width. Source guards keep every
-`open_url` call inside `open_pane_link` and the release
-page, route Cmd-click, the right-click "Open link" (which captures the link's
-pane with its address), quick-select hints and "open cwd in file manager"
-through it. Red
-checks: opening from a remote or gone pane, a hint ignoring the origin,
-Cmd-click bypassing the gate, dropping the shell unwrap and the menu dropping
-the pane each fail a test. `just remote-links-smoke` checks it live, with a
-missing file so nothing opens: in a bare `/bin/sh` and under a private tmux
-server (an explicit `-S` socket in a temporary directory, killed and removed
-afterwards) a Shift-picked path hint opens without asking. The smoke picks
-only once the path is the one target on screen, so it never copies to the
-clipboard. Red check: 5.0.1's multiplexer prompt fails it ("behind tmux, a
-Shift-picked path asked before opening").
-
-`just raw-paste-smoke` checks that a two-line paste into a bare `/bin/sh`,
-which never turns bracketed paste on, runs both lines with no confirmation.
-It sets the desktop clipboard; on macOS it saves the clipboard's text first
-and restores it. Red check: 5.0.1 fails it ("a multi-line paste asked before
-pasting").
-
-A local link that names a program or shortcut is refused (kettle-core
-`names_program_or_shortcut`, kettle-ui `check_file_link`): Windows, macOS and
-Linux program, script and shortcut extensions, read as Windows reads a name
-(`payload.exe.`, `a.exe::$DATA`, `notes.txt:payload.exe`); a folder only as a
-bundle (`.app`, or `Contents/Info.plist`), so a folder named `archive.sh`
-opens; a macOS alias by its Finder flag (a classic alias with an empty data
-fork) or its bookmark data, even renamed `report.pdf`; a Linux launcher whose
-first group, past a byte-order mark, comments and blank lines, is `[Desktop
-Entry]` (a config file starting `# Config File` opens); and an executable file
-without a document extension (`tool`, `a.out`). A document with its executable bits set (as on exFAT)
-opens, as does a non-executable file with an unknown extension, and a missing
-file resolves to nothing. Symlinks are resolved
-first: `notes.md` linking to an executable or a bundle is refused, and a link
-to a document opens the document. `local_file_path` decodes a `file://` URI
-strictly, up to its `?` or `#` as a URL parser reads it, and refuses a bad
-escape, an encoded separator (`%2F`, `%5C`: `file:///%2Fhost/share` would be a
-share on Windows), a decoded `//` start, control character or `..` segment;
-`file_url_for_path` encodes the URL a custom handler gets, rewriting `\` only
-on Windows. Source guards keep the check ahead of
-the custom handler and the system opener, on a spawned thread, refuse an
-undecodable file link instead of passing it on, and hand openers the
-resolved path only; at most four openers run at once. On Windows a resolved
-verbatim path is kept only when Win32 reads it the same without `\\?\`: no
-name ending in a dot or a space, no reserved device name (`CON`, `nul.txt`,
-`COM1`). Red checks: each of
-these rules, removed on its own, fails a test.
-
-Quoted paths (kettle-core `hints::quoted_paths`, shared by hints and links)
-take a path between matching `"`, `'` or `` ` `` whole, spaces and `#`, `,` or
-`( )` included, and names in decomposed Unicode (`cafe\u{301}`): `"docs/annual report.pdf"`, Python's `File "/my app/x.py",
-line 12`, `` `out/report #1.pdf` ``, `"src/my file.rs:12"` (the location stays
-out of the hint and in the link), `"~/Library/Application Support"`,
-`"C:\Program Files\…"` on Windows (elsewhere a one-letter prefix is a remote
-host, as in `scp "h:/srv/a b.pdf" .`, and stays partial), and a quoted path
-the terminal wrapped. The contents
-must read as a path, with no filesystem lookup: quoted prose such as
-`"see src/main.rs"` keeps only its bare path, as do `"/model sonnet"`,
-`"and/or more words"`, a relative path whose first segment holds a space
-(`'My Files/a b.txt'`), segments that start or end with a space, empty
-segments, a backslash outside a drive path, a quoted URL and an overlong run.
-An unclosed, mismatched or glued quote (`"a/b c.pdf'`, `"a/b c.pdf"x`,
-`x"a/b c.pdf"`) leaves the bare match, as does any quote after a `:` (`scp
-user@host:"/srv/my report.pdf"` and `'user@host':"…"` name remote files, so
-compact JSON's `"file":"…"` is read the same way), after an escaped space
-(`host:dir\ "…"`), or inside a quote that opened but did not close on a
-boundary (`ssh host "cat '/srv/a b.pdf'"&&…`) or within reach, while pretty-printed JSON
-(`"file": "/my app/x.py", "line": 3`) and `["a/b c.txt","d/e f.txt"]` take
-each path whole. The boundary check reads at most 16 characters ahead, so a
-line of repeated `;""` stays linear (it took 2.8 s at 40,000 bytes before),
-and overlap checks against earlier matches use an ordered map (`Taken`), so
-neither looking up nor inserting depends on how many matches came before, and inside quoted text a bare path that
-stops before the closing quote is not whole (`Files/a`, `src/main.rs` in
-`"cannot open src/main.rs now"`). A quoted network (`"10.0.0.1/24/"`) stays an address, and a link or hint
-ending in a wide character covers its spacer cell too. A quoted link encodes
-its spaces, and one
-refused for a `..` climb also keeps any piece of it from linking. Red checks:
-each rule above, removed on its own, fails a test.
-
-URL tails (kettle-core `url_trim`, shared by links and hints) drop trailing
-prose punctuation, Markdown backticks and `*` emphasis, and closing brackets
-only when unbalanced, while the same characters inside a URL stay; a backtick-
-or asterisk-wrapped URL is detected without its marks.
-
-Session-log and `exec --strip-ansi` regressions cover C0 controls and DEL
-between an escape and an OSC introducer, including an escape from an earlier
-OSC or DCS. Every split preserves executed controls and removes the payload;
-both tests fail against the former reset-to-ground behavior.
-
-Double-click selection uses the same grid-column mapping as quick select. A
-Unicode path fixture checks every cell, including both wide spacers, and fails
-when the row is rebuilt as a string containing spacer spaces. Existing URL,
-address, hash and plain-path selection cases use the grid entry point too.
-
-Solar schedule tests cover Gregorian boundaries and every day of a 400-year
-cycle. A daily decision fixture uses the actual UTC ordinal; all three tests
-fail with the former epoch-day modulo 365 calculation.
-
-`just modal-shortcuts-smoke` runs a macOS fixture under the user's GUI session.
-It verifies Command chords leave hints, vi selection and menus unchanged, while
-ordinary letters still act. The hint copies a fixture path and must match the
-clipboard, keeping desktop focus inside Kettle. The former URL fixture fails
-this copy check with a harmless URL-handler stub. The three Command cases
-fail against 5.0.0.
-The smoke deliberately hides its own window, then reacquires native and
-renderer focus before input and measured captures. That recovery failed before
-the focus helper was added. Input still requires the fixture PID to be frontmost;
-teardown owns its processes and clears the clipboard. macOS CI runs the same
-smoke and retains failure logs, focus state and captures. Portable window-state tests
-also reject control-plane typing into search beneath a menu or vi mode.
-
-### kettle-remote
-
-The macOS missing-root fixture uses a controlled clock and checks expiration
-at the exact 25 ms boundary, independent of test-thread scheduling.
-
-Injected process-tree fixtures cover SSH and
-container detection, deterministic breadth-first selection, cwd/shell clone
-behavior, cycles, missing roots, and injection-safe reconnect commands.
-Endpoint fidelity has its own set: the options that decide which machine a
-host or container name reaches (ssh port / ProxyJump / identity / config
-file, Docker and Podman context, daemon address, kubectl namespace and in-pod
-container, lxc container root) must survive into the reconnect command in
-both their separated and joined spellings, an option value must never be read
-as the host or container, and an option that cannot be reproduced — a
-ProxyCommand, a stdio forward, a bearer token, a credential or identity
-selector — must yield no reconnect command at all while leaving the remote
-title intact. Each suppression set is paired with positive controls, so
-"suppressed" cannot pass by suppressing everything; `--` is asserted per CLI
-(docker/podman keep naming the container after it, kubectl and `podman exec
---latest` never do); ordinary Windows and POSIX paths must KEEP the entry; and
-a structural guard walks both option tables against the emit tables so an
-option can never be captured into a slot the reconnect command would drop. The
-portable proc parsers reject invalid/overflowed PIDs and preserve lossy argv;
-Linux CI additionally builds a synthetic proc tree and proves the rooted
-scanner finds the requested SSH descendant and cwd without reading an
-unrelated process. Native macOS fixtures read a live rooted process tree,
-check a large environment without confusing it with argv, and isolate an
-oversized argv to its own pane. The environment fixture launches its ignored
-sleeper with the fully qualified test name and `--exact`, so the child stays
-alive for observation rather than exiting after selecting zero tests.
-
-### Multi-window (v2.18.0, cross-crate)
-
-Automatic accent ownership tests in `window_accent.rs` run without a native
-window or presence files. They cover a checked-out opener's reservation,
-expired-claim reuse and pruning, theme-color updates, external claims, and the
-full-pool fallback. `detach.rs` tests the press-to-frame anchor and first-motion
-follow geometry with a native titlebar offset and negative physical desktop
-coordinates. These geometry cases do not claim a mixed-DPI monitor run.
-Three mutations were compiled and red-checked: removing local claim collection,
-removing the theme-color update to a live claim, and omitting the client/frame
-inset from the drag anchor. Each failed its regression test at runtime. These
-pure tests do not replace the native dispatch check below.
-
-The presence publisher tests use private temporary claims and a blocked writer
-backend. They cover bounded admission, coalescing theme previews while local
-accents update immediately, closing during an in-flight write, and reopening
-that filename without losing the replacement claim. They need no native window.
-
-Run `scripts/check-tab-window-transfer.py --kettle <binary> --worker <worker>
---out <new-directory>` under an isolated Linux X server; add `--language es`
-for the Spanish chooser. It uses native keyboard and pointer input to cover an
-empty destination list, lone-tab rejoin, a source with remaining tabs, and a
-destination closed while its chooser is open. Original pane/child IDs and
-scrollback must survive; automatic window accents must differ. The matching
-Ubuntu 26 ARM Xvfb fixture passed all five cases. This does not establish a
-Wayland drag gesture. Native GNOME checks must also exercise held-press tear,
-lone-window rejoin, original PTY preservation, actual destination typing,
-Escape restoration, source/destination closure and tiled carriers. Drop an
-image and video from Nautilus, copy/paste a file through its real clipboard,
-and check a modal never receives terminal input. URI tests cover exact byte,
-path-count and URI bounds, malformed/remote batches, Unix filename bytes,
-stalled producers, cancellation and oversize streams before EOF. Input tests
-reject a delayed drop after another paste while preserving focus reports.
-`just vendor-clipboard-check` covers Nautilus CRLF decoding and encoded CR
-filenames without touching the desktop clipboard. Its regression fails with
-the upstream decoder correction removed.
-Normal decorated Wayland windows must also retain their configured grid at
-startup and their content dimensions after a tear. In an isolated test profile,
-capture `WAYLAND_DEBUG=client` while opening those windows, then run:
-
-```sh
-python3 scripts/check-wayland-first-frame.py wayland.log --minimum-windows 2
-```
-
-The checker requires decoration buffers to commit before each window's first
-client buffer; an earlier client commit clips the decoration geometry. Its
-portable fixtures cover the old ordering, uncommitted buffers, missing evidence,
-reused object IDs and bounded file reads. Logs must be regular files of at most
-16 MiB. `just wayland-first-frame-self-test` runs them in the gate.
-The native regression lost 35 pixels at startup and again on tear-off with inline
-first paint; queued Wayland first paint must preserve both grids instead.
-
-Portable tests cover action parsing and shared menu
-dispatch; the pre-change native fixture rejects the unknown action.
-
-On native GNOME Wayland, also check the destination's `window_focused` state
-and type into the moved pane after keyboard and pointer selection. Repeat with
-a lone source, a minimized destination and a destination closed during selection.
-Compare pane/child IDs and verify Escape leaves terminal content unchanged.
-Check that the Wayland reader sleeps while idle and exits with the app. An Xvfb
-pass does not verify compositor activation or native drag gestures.
-
-For native macOS tear-off acceptance, use an isolated config with
-`detachable-tabs = true`, `accent-color = auto`, plain fixture shells, and
-`tab-bar = always`. Add a tab, record both pane and child IDs, tear it off,
-release, then start a **new** tab drag from the lone-tab window back onto the
-original bar. Verify one window with both original panes and child processes,
-correct insertion and focus, then repeat off-target and Escape cancellation.
-Repeat color comparison with the fixture's optional presence directory
-unavailable: source and torn windows must still differ when a pool hue is free.
-Also check `tab-bar = auto` docking onto the hidden target band and disabled
-`detachable-tabs`; pinned accents may intentionally match. Capture both windows'
-rendered chrome, and verify all fixture App and PTY groups are gone on cleanup.
-Record `ui_geometry.desktop` for both windows to qualify frame/client offsets
-and the actual docking point. Unsupported native position queries return null;
-they do not establish a drop coordinate. Readiness, a successful drag call,
-and a zero fixture exit are not acceptance.
-
-The 2026-10-06 macOS candidate check exercised an actual tear, a released
-lone-tab off-target move, and a subsequent calibrated drop onto the original
-window. It restored one window with the same two panes and shell processes,
-inserted and focused the dropped tab, cleared the preview, and accepted shell
-input. With the presence directory unavailable, two separate native captures
-also showed distinct blue and green window borders. The compiled UI suite had
-875 passing tests; warnings-denied Clippy, formatting and the binary build
-passed. This is focused evidence, not the full workspace or release gate.
-
-Compare physical frame origins to qualify movement: a cropped window image
-does not show displacement. If input synthesis cannot reach a negative
-window-relative endpoint, reposition the fixture and measure a positive
-endpoint inside the target band. For full-window captures of separate windows,
-use `screenshot` with `pane` and `full_window = true`; `window` is the
-`ui_geometry` selector and does not select a screenshot target.
-Caption dragging, interactive Auto-mode docking, held-button Escape, pinned
-and disabled live gestures, and actual mixed-DPI monitors remain unverified by
-this check. Native window selection failed during the later cases; only the
-Auto-mode hidden bar was confirmed by its rendered capture and geometry.
-
-The subsequent saturation and native-caption candidate has separate coverage.
-Two new accent cases compiled and failed at runtime against the pre-fix
-production module, reproducing color reuse at a fully occupied palette and
-uneven reuse counts. The isolated harness only supplies the `Rgb` value type;
-whole-crate validation remains separate. The fix excludes the opener's RGB
-when another hue exists, balances saturated reuse, and preserves seeded ties,
-duplicate-color and single-hue behavior. `native_drag.rs` checks caption-event
-qualification, mismatched windows, released pointers, double clicks, non-pointer
-events, client/outside coordinates, and single-tab/config eligibility.
-`detach.rs` checks conversion between a shared desktop and different target
-scales, including negative monitor origins. On October 6, the separate candidate
-passed formatting, warnings-denied all-target UI Clippy, the application build,
-and all 885 UI tests on both stable Rust and Rust 1.89.0. The 22 named accent,
-caption and drag cases ran on both toolchains. Two private compiled mutations
-removed opener exclusion or reuse counting; each exact regression failed at
-runtime with zero passes, one failure and no ignores. Repository sources were
-unchanged throughout. This owning-crate check does not establish foreground
-gesture behavior for the new bridge. The subsequent uninterrupted ordinary
-workspace gate passed formatting, warnings-denied workspace and standalone Core
-Clippy, all-target builds, unit/integration/doc tests, both media worker feature
-configurations, and warnings-denied Rustdoc. Its 88 reports contain 3,092 passes,
-zero failures and two ignores, including nested subprocess and feature repeats;
-these are not unique-test counts. The ignored argument-probe helper ran through
-its caller; the release-mode contrast benchmark was not run. The native macOS
-video-poster check and visual bell, menu and scrollbar pixel assertions passed.
-All 93 recorded process groups and the wrapper were gone after result consumption,
-with the candidate sources unchanged. This does not establish a release,
-quiet performance, foreground caption gestures or native mixed-monitor behavior.
-During a separate Auto fixture experiment, the app appeared in the running-app
-inventory, but native
-selection by its full app path returned `cgWindowNotFound` before any input.
-The fixture and all recorded PTY groups were closed and reaped; the candidate
-was not launched, and that attempt provides no gesture acceptance.
-A subsequent experiment required an actual full-window rendered screenshot
-before the same full-path selector. Both the baseline and the new candidate
-were then selected successfully. Native Auto-mode tab tears retained both
-original pane ids and shell child processes, hid each single-tab bar, and
-cleared docking previews. The candidate's original and torn borders measured
-RGB `(125, 207, 255)` and `(187, 154, 247)` in separate captured frames. A native
-shell command remained visible through both accessibility and `read_cells`.
-Title-bar drag requests did not change either measured window origin, including
-a raised candidate with only one window, so that check established no caption
-move. All 14 recorded groups, including both fixtures, their PTYs and the
-controller, were gone after the original result was consumed. This isolated
-fixture did not include the sibling media worker and does not validate the
-media release package or installation.
-
-On October 8, slow pointer drags through the window server moved a bundled
-candidate's windows by their captions, with Auto tab bars and ctl reading the
-results. A single-tab window dropped on a sibling's hidden band docked on
-release, kept both shell processes and closed the emptied window. An
-off-target drop only moved the window, and a two-tab window dropped on the band
-stayed undocked. Escape held during a caption drag at first left the dock
-latched: AppKit's move loop swallows the key event, and the cancel poll read
-only the combined session key state, which HID-level injected input does not
-update (a separate poller saw the held key in the HID system state only). The
-poll now reads both states. With that change, the same held Escape cleared the
-dock preview before release and both windows remained, where the previous
-build had docked on three identical attempts. A tap shorter than the 16 ms
-poll can still be missed. Programmatic geometry changes are covered by the
-caption-press unit tests. A key event and an application-defined event,
-built but never posted, are refused as caption presses without reading their
-mouse-only fields; without the type check that test aborts on AppKit's
-exception. No second display was attached, so mixed-DPI docking
-was not exercised.
-
-Paste receipts follow their tab: unit tests move a receipt's pixels without
-copying and keep its expiry, carry a pending video preview through a tear and
-a dock with its exact generation, restore only what a failed move took, keep
-another tab's receipt or pending preview when only the other part arrives,
-keep another tab's receipt when a preview fails, ignore expired and stale
-preview replies, and end a hover pause without resetting the hard expiry; a
-late video preview finds the window its tab moved to. A census
-requires every function that detaches a tab to take the tab's paste state
-before handing it on, every failed new-window handoff to restore it, and the
-receiving side to adopt it.
-The docking band is one function shared by the painted tab bar and the dock
-hit test, pinned for bottom bars above the search and bottom status bars,
-side strips above the search bar and an unchanged top band, with a guard that
-both callers use it; split drop previews and prospective split rects are
-checked against the pane an actual split creates for odd, fractional and
-cramped leaves.
-Accent claims follow palette edits that keep the theme name: unit tests reload
-Dracula with one palette color changed and with every color the same, and
-change the theme without a redraw, checking the slot, the live color, the
-local claim and that a torn window still avoids the source color; the tear-off
-guard requires each tear to read the refreshed source color. The tab tear-off
-drag is a
-pure FSM (`DragState` in `kettle-ui/src/detach.rs`) tested with no
-window or GPU — idle→armed→dragging threshold, mouse-up/Esc-cancel
-returning the dragged tab, cursor leave/re-enter, plus an
-end-to-end drag walkthrough; the per-window accent **presence
-registry** (`kettle-ctl/src/presence.rs`) pins claim/release
-round-trips, private directory/file modes, dead-PID pruning, bounded and
-no-follow reads, filename/payload validation, rejected hue updates, and
-in-place valid hue updates against a temp dir — plus pid reuse, where a
-record naming a live pid but a different process instance is pruned while
-this instance's own record survives, and the reverse: a delete aimed at a
-record judged stale does nothing once the file on disk is a *newer* record
-that took the same name (the same two rules are pinned for the ctl discovery
-registry, once through the injected predicate and once through the real
-one). The discovery registry also pins its socket lifecycle against real
-Unix sockets: pruning a dead entry removes its socket; pruning an entry whose
-pid now belongs to a running process keeps the socket; while a starting server
-holds the registry lock, pruning removes the entry but no socket; a starting
-server's sweep removes a dead server's leftover socket but keeps a socket whose
-pid runs, a regular file, an entry-owned socket and other files; and a server
-dropped while its listener is still open unlinks its socket; a socket replaced
-after it was judged dead is not the one unlinked. The entry walk is pinned as a
-pure function: an entry after 2,048 other files is found, an entry past the
-8,192-entry walk is not read, and at most 1,024 entries are read; the two
-limits are pinned to their documented values. Each of these fails when its
-removal, guard or bound is mutated away;
-**shell detection**
-(`detect_shells_windows`/`_unix`,
-kettle-core) is pure over injected closures (PATH lookup, WSL
-enumeration, vswhere, Git Bash probe), so the Windows-Terminal
-ordering / skip-when-absent / never-empty cases run on every OS;
-**session v2** round-trips multi-window saves with geometry
-(`session_v2_windows_round_trip_with_geometry`) and still loads
-legacy single-window files; and the **exit-allowlist drift guard**
-(`event_loop_exit_sites_are_allowlisted`, kettle-ui) pins the only
-code paths allowed to terminate the process, now that closing one
-window must leave the others running. Bare-launch activation tests cover
-private lock/socket permissions, first-process election, matching handoff,
-incompatible recorder identity, bounded request validation, UI rejection
-fallback, and the `--new-process`/explicit-argument bypass contract. Retry
-idempotency is pinned three times: re-sending one launch's request opens a
-single window while a separate launch still opens its own; a retry that lands
-while the first attempt is inside the handler waits for that attempt's
-outcome instead of opening a window beside it; and a duplicate of a launch
-whose first attempt never finishes still receives a status inside its own
-read deadline rather than waiting out the request and getting nothing. A
-ledger-level test pins that a full ledger evicts only settled launches, never
-one still inside the handler. Test-only activation servers carry a
-stop/wake/join guard; dropping it releases the listener and election lock
-before the scratch directory, which is asserted on native Windows as well as
-Unix.
-Live-reload regressions additionally pin the filesystem event-kind matrix:
-opens, reads, closes, unrelated paths, and backend-specific `Other` events do
-not reload; create/modify/remove and imprecise `Any` changes to the exact file
-do. Concurrent notifications prove the one-in-flight latch, failed sends
-prove re-arming, and a behavioral registration helper proves a rejected
-subscription cannot retain its candidate handle. Re-executed cache-resolver
-tests exercise each platform environment branch without mutating the shared
-test process. Trust fixtures reproduce mode-bit mutation on Unix, extended
-ACL mutation on macOS, and both generic-write and generic-all DACL grants on
-Windows; the latter remains a native-runner gate. Diagnostics fixtures use
-explicit private creation so `umask 002` still reaches the parser/size
-assertions they exist to test. Process-level guards require one config load
-followed by application to every mapped window while preserving per-window
-runtime zoom on a no-op reload.
-
-### kettle (binary, 50+ tests)
-
-Clap argv parsing for the
-`-e` + `-d` + `--config` combination; the
-`format_ssh_hosts` table renderer (sort + column alignment +
-empty fallback); the
-`cli_help_text_has_no_internal_cycle_refs` audit-trail leak
-guard; the
-`cli_help_preserves_indented_code_examples` drift guard that
-pins `verbatim_doc_comment` on every flag with an indented
-example block (without it, clap flattens the example into prose).
-
-`tests/source_id.rs` includes the shared build helper
-(`build_support/source_id.rs`) and checks the source hash on scratch
-workspaces: a checkout with git files, build output and docs matches an
-exported tree; an edit to a source, the shared helper, `Cargo.lock` or
-`Cargo.toml`, or a rename, changes it; rewriting identical bytes or building
-in another directory keeps it; a linked source counts by its contents; and
-this build's `KETTLE_SOURCE_ID` is its version and `KETTLE_SOURCE_HASH`.
-`embedded_build_id_uses_source_hash_not_git_sha` pins the media build
-identity to that hash. `media_platform`'s tests resolve the worker beside the
-executable (a later rename does not move it, a linked executable finds its
-install, a deleted or unreadable one has none), and in a child process whose
-`PATH` or working directory holds a decoy worker, still beside the test
-binary, where none is installed. Its file checks refuse a missing worker as
-missing, and a non-executable, group- or world-writable or set-id worker, a
-directory writable by others, a directory in its place and a link to a real
-worker as unsafe; a same-size rewrite that restores the modification time
-still changes the identity. On macOS a copy of `/usr/bin/true` signed ad hoc
-as the worker, with the hardened runtime, passes a requirement pinned to each
-architecture's cdhash (the control), and fails Kettle's official requirement,
-as the unchanged Apple-signed copy does; with its signature removed, one byte
-of its code flipped or the hardened runtime left out, it fails the pinned
-requirement too. A universal copy rebuilt from separately signed
-architectures fails when either one lacks the hardened runtime, and passes
-when both have it; architectures are read from the universal header (thin
-files, masked subtypes, refusing empty, oversized, repeated or truncated
-lists). An ACL entry that lets anyone write, append or change the security
-of the worker, or add or delete files in its directory, makes it unsafe;
-read-only and deny entries do not, and the ACL text parser counts any entry
-in another shape as allowing. `csreq` compiles the official requirement,
-and the CodeDirectory flags parser reads only the CodeDirectory line. A
-`codesign` run is bounded: a stuck command is killed and reaped at its
-deadline (`check_failed`); a child still running after its grace leaves the
-guard set, no run starts (a marker command never runs) until a reaper
-collects it, and then runs start again; and a finished one reports its exit
-status and stderr. In kettle-ui,
-`media_platform`'s process tests spawn stand-in workers: a worker that has
-exited but is not yet reaped measures as holding nothing rather than failing
-the measurement (macOS answers ESRCH for it; a large reply read after the
-worker exits made this a live race; counting it fatal fails the test);
-`/usr/bin/env` prints
-nothing inherited, only `KETTLE_MEDIA_DECODER` naming the trusted ffmpeg the
-search finds when one is installed (dropping it fails the test there),
-`/bin/pwd` prints `/`, and a script leads its
-own process group; a kill reaches a background child before anything is
-reaped; a worker that exits 0 by itself keeps that status while the child it
-left behind is killed before the reap; asking whether a running worker has
-exited never reaps it; in a child process with SIGPIPE's default action, a
-worker that answers Ready and exits before reading a 4 MiB job cannot end the
-process, and it can render again; and in a child process with SIGCHLD
-ignored, no worker starts, and one started anyway reads as lost and is never
-signalled, whether it is asked about or killed first. The footprint tests find
-a worker's whole tree (the worker and two children), count 32 MiB a child
-holds while the worker alone holds little, count 32 MiB an orphaned grandchild
-holds (its parent exited; it stays in the group), leave out a process in
-another group (as a reused pid would be), measure a reaped worker as 0, and,
-through the client with a 16 MiB limit, stop a worker whose child holds 64 MiB
-as `RenderResource`; on Linux the process-group fallback finds the same tree,
-the `stat` parser reads the group past a command name with spaces, parentheses
-or bytes that are not UTF-8, 100 remembered processes that have exited
-neither count toward the cap nor stay remembered, and the group is rescanned
-every 100 ms where the kernel has no children lists. Scripts are spawned with
-a retry on `ETXTBSY`, since a parallel test's fork can hold a just-written
-script open for a moment on Linux. Red checks for the spawn client: no Ready cap, no
-cold retry, a retry after a stuck worker or after Ready, a reply accepted
-without a clean end or whatever the exit, skew accepted, any worker code
-kept, stuck workers not counted or not stopping `render`, no kill at the
-reply deadline, an inherited environment or working directory, no process
-group, no group kill before the reap, a leader-only kill, an exit check
-that always says exited, unguarded pipe writes, no `F_SETNOSIGPIPE` on macOS,
-exits not watched, a late worker left alive, a start waited on forever, a
-startup refusal with its end unchecked or masking a crash, any code kept at
-startup, abandoned workers never reaped, `ECHILD` not read as lost, a late
-self-exit read as killed, hung starts piling up, workers started while
-SIGCHLD is ignored, a kill that signals a lost worker, a self-exit at the
-reply deadline read as a timeout, a file check outside the deadline, no
-stuck-limit recheck in the start, a footprint never enforced or never
-sampled, the limit itself refused, an unmeasurable worker read as fine,
-descendants not walked, the group not listed (macOS) or scanned (Linux),
-reused pids counted, `stat` read as text, stale candidates counted or not
-forgotten, a rescan that is never faster, no sampling while a replying
-worker exits, an exit seen while measuring lost, and a kill that forgets a
-seen exit each fail a test above. The stub's crash-after-reply test allows a
-long reply budget: without a core limit its abort can write a core dump first,
-which takes a CI runner seconds.
-`get_state_reports_media_availability_without_waiting` checks that
-`get_state` carries `media`, that an unconfigured GUI reports
-`not_configured`, that a held check answers `checking` at once, and that a
-missing worker then reads `worker_missing`.
-
-Red checks for this slice: ignoring the file identity in the cache, dropping
-the cache, skipping the re-inspection after verification, reporting a
-verified worker as anything but `incomplete` in the earlier foundation (the
-packaging step now changes that contract to `available`), each file-mode, owner, link and
-directory check, dropping the status time from the identity, leaving the
-executable's links unresolved, resolving from the working directory, dropping
-the requirement or the hardened-runtime check, a requirement without the
-team, no deadline or no kill at it, ignoring `codesign`'s exit status,
-checking the runtime on the host architecture only, either ACL check, deny
-entries with flags or any allow entry read as safe, an unbounded reap,
-ignoring the reap guard, unmasked subtypes, repeated architectures, a build
-identity from the git commit, `get_state` without `media`, an
-unconfigured client read as checking, hashing absolute paths, not following
-links and leaving `Cargo.lock` out each fail a test above.
-
-## End-to-end harness: selection, copy & `.cast` replay
-
-The no-PTY conformance harness in `kettle-core/src/term.rs` (`harness()` +
-`feed_ex()`) builds a real `Term` and drives the **same Extractor → Processor →
-grid pipeline the PTY reader uses**, with no PTY and no child process — so a
-whole interactive session (Claude Code, Codex CLI, AstroNvim, tmux) can be
-replayed deterministically in CI.
-
-**Selection / copy across scrollback.** Mouse selection involves three
-coordinate spaces. Converting a click to the grid-absolute point alacritty's
-`Selection` expects must apply `− display_offset`; without it, copying an
-earlier chunk *while scrolled up* (the constant motion in a long Claude Code
-conversation) reads the wrong rows:
-
-```mermaid
-flowchart LR
-    M["Mouse pixel (x, y)"] -->|"px_to_cell:<br/>− rect, padding, titlebar"| V["Viewport cell (row, col)"]
-    V -->|"viewport_point_to_grid:<br/>− display_offset"| G["Grid-absolute Point"]
-    G --> S["alacritty Selection"]
-    S -->|"selection_to_string / to_range"| C["Clipboard text + highlight rect"]
-```
-
-Guarded by `selection_while_scrolled_reads_visible_row_not_active_screen`,
-`simple_drag_selection_while_scrolled_copies_visible_rows` (kettle-core) and the
-pure `viewport_point_to_grid_applies_display_offset` (kettle-ui). The same
-conversion now also feeds smart double-click selection and its grid-row text
-read, so word-select works while scrolled too. The live interaction harness
-also generates 140 numbered history lines and reproduces the complete
-Shift+Home → first-line click → Shift+End → Shift+click-last-character flow.
-It asserts the exact selected text through the additive `read_screen.selection`
-field and dispatches Copy. The test also guards that no-op action resizes do not
-erase the selection.
-
-**Agent/editor file links.** `links_with_cwd_detects_file_paths_without_splitting_urls`
-drives the same grid harness with Codex/Claude-style `path/to/file.rs:line:col`
-output and verifies that pane-cwd-relative paths become local `file://` links
-without splitting URL text into extra file links.
-`detected_links_follow_a_resize_that_reflows_the_text` (kettle-ui) prints
-grep-style paths in a real pane, scans its links, narrows the pane with no
-further output and requires the scan to match the reflowed grid: the link
-cache keys on the pane's geometry generation as well as its output, which
-`the_geometry_generation_counts_resizes_not_output` (kettle-core) pins.
-
-**Output coalescing.** Apps that repaint without DEC 2026
-synchronized output (Claude Code toggles `?25l/?25h` ~1750×/session and never
-opens 2026) can be snapshot mid-repaint under load — the transient "cursor above
-the prompt". Kettle paces PTY-output paints against the active monitor's refresh
-period (bounded to 4–33.333 ms, with a 16.667 ms fallback) so a multi-read burst
-settles into one frame; sustained floods back off further to a bounded 50 ms.
-Input/cursor paints bypass the cap so typing stays immediate:
-
-```mermaid
-flowchart LR
-    PTY["blocking PTY pump<br/>(64 KiB reads)"] --> Parser["parser worker"]
-    Parser --> Grid["grid + bounded side channels"]
-    Grid -->|"Release generation increment"| Gate["per-pane OutputWakeGate"]
-    Gate -->|"one pending wake"| Diff{"generation newer<br/>than presented?"}
-    Diff -->|"stale: acknowledge + resample"| Gate
-    Diff -->|"yes"| Coal{"typed recently or<br/>frame budget elapsed?"}
-    Coal -->|"yes"| RR["queue one redraw"]
-    Coal -->|"no"| Pend["pacer: deferred<br/>about_to_wait owns deadline"]
-    Pend --> RR
-    RR --> Guards["visibility / recovery / renderer guards"]
-    Guards -->|"renderable: acknowledge gate,<br/>snapshot generations"| Frame["pacer: presenting"]
-    Frame -->|"Presented"| Commit["commit generations + paint time"]
-    Frame -->|"Retry / lost / occluded"| Pend
-```
-
-The pure `output_paint_coalesces_within_frame_budget`,
-`output_frame_budget_tracks_monitor_refresh_with_safe_bounds`,
-`output_coalescer_retains_flood_signal_without_busy_waiting`, and
-`output_frame_transition_follows_every_renderability_guard` regressions cover
-the pacing state machine. `reader_sidechannels_share_the_generation_ordered_output_gate`,
-`stale_presented_output_wakeup_rearms_without_losing_a_race`, and
-`dirty_output_wakeup_keeps_latch_closed_until_frame_snapshot` pin the
-generation-before-wake ordering and both sides of the latch race.
-
-**Frame presentation transaction.** A successful Rust return from surface
-acquisition does not always mean pixels reached the compositor. The
-`output_generations_commit_only_after_presentation` regression drives
-`Presented`, `RetryLater`, `Occluded`, and `SurfaceLost` through the same commit
-helper used by the live UI and proves that only `Presented` advances the
-window's consumed output map.
-
-The pure `FrameRecoveryState` regressions
-`frame_timeout_retries_are_one_shot_deadlines_with_a_cap`,
-`frame_retry_stays_armed_but_quiescent_while_hidden_minimized_or_occluded`,
-`renderer_rebuilds_back_off_until_a_frame_presents`, and
-`renderer_rebuild_supersedes_a_pending_surface_retry` verify capped timeout
-pacing, hidden/minimized/occluded quiescence, stronger-repair precedence, and
-the rule that only presentation resets renderer-rebuild history. Renderer and
-UI compilation keeps the public `FrameOutcome` contract exhaustive; native
-live-render smoke remains responsible for actual window-system presentation
-and wgpu surface recreation.
-
-Process-wide recovery adds
-`gpu_recovery_snapshot_survives_failed_attempts_until_commit` and
-`gpu_recovery_set_is_all_or_nothing_with_injected_factory` for retained runtime
-state and atomic multi-window commit. The renderer-side
-`clone_retains_live_overrides_and_screenshot_completion` regression pins font,
-cell-scale, accent, and queued ctl screenshot-completion ownership.
-`output_wakeup_quiesces_for_every_render_hidden_state_and_repair` covers
-occluded, minimized, explicitly invisible, and repair-pending paint
-suppression; the consumed output generation remains unchanged until a restored
-frame is presented.
-`an_explicit_screenshot_overrides_only_transient_surface_guards` pins the
-narrow exception: a queued live screenshot may bypass compositor occlusion and
-an already-armed transient surface retry only when the window is shown and the
-backend does not report it hidden/minimized. Wayland reports neither state, so
-the test also pins its explicit `Unknown` path and bounded-timeout fallback.
-Renderer rebuilds remain a hard gate. The renderer creates a process-budgeted
-transient scene texture, encodes the render and copy before swapchain
-acquisition, and allocates any presentation-only texture afterwards. Separate
-target and staging reservations are both admitted before encoding and remain
-charged through submission completion or device loss; one timeout cannot retire
-them, while two repeated timeouts prove the wedged device is reset rather than
-stranding worker admission. A loss flag raised during a successful poll still
-wakes recovery. After mapped bytes reach CPU memory, a source-order guard proves
-GPU admission clears before the process-wide bounded two-worker persistence
-pool can block; multiple renderer generations share the same admission counter;
-permit tests cap that pool and prove slots reopen on every drop.
-The 6K/256 MiB and source-order regressions distinguish that path from the 64
-MiB retained-image limit and require every no-drawable/presentation-failure
-outcome to submit the capture. Known hidden/minimized control targets fail
-before queueing; deliberately blocked encoder and durability-flush steps prove
-timeout cancellation wins before atomic no-replace sibling publication,
-leaving the requested leaf absent throughout. Once publication begins, a
-second finite wait produces either the real result or an explicit
-destination-may-exist error, never an unbounded control thread. A repeated GPU
-wait timeout must destroy the device and wake the event loop. A racing
-destination is preserved. The native `agent-tui-smoke`
-screenshot sequence is the render/readback boundary; a focused macOS check
-additionally activates Finder and requires two consecutive non-empty
-`ctl screenshot` results.
-`hidden_output_sidechannels_keep_transport_wakes_without_enabling_paints`
-separately proves an opt-in recorder/Lua sidechannel keeps the transport gate
-serviceable while hidden without bypassing the paint guards.
-
-The pure per-window DPI coalescer regressions
-`dpi_scale_then_resize_commits_exactly_one_layout`,
-`dpi_resize_stays_pending_while_minimized_or_renderer_unavailable`, and
-`dpi_about_to_wait_is_only_a_pending_scale_fallback` pin the
-`ScaleFactorChanged` → `Resized` ordering, the single PTY/grid resize
-invariant, and the no-resize backend fallback. A mixed-DPI native Windows move
-is still required before claiming the compositor, wgpu surface, or ConPTY path
-passed.
-
-**Context-menu frame fast path.**
-`pane_snapshot_reuse_fails_closed_on_output_layout_or_order_changes`
-exercises the snapshot identity/generation/dimension gate, and
-`hover_generation_candidate_preserves_racing_output_as_pending` verifies that
-cached visible-pane and background-pane generations retain damage that races a
-hover frame until a later presentation.
-`context_menu_snapshot_reuse_rejects_live_pointer_gestures` covers UI-side
-selection/scroll/layout invalidation.
-`context_menu_hover_preserves_text_damage_key` proves the menu text-damage key
-ignores highlight motion but changes for scrolling, enabled state, and theme
-colors.
-`hover_updates_menu_highlight_skipping_separators` also proves that the blank
-partial-row strip at a clamped panel edge is not a visible row, while
-`clicks_share_the_fully_visible_hover_row_contract` pins the click dispatcher to
-that same resolver. Renderer test `scroll_indicators_follow_the_remaining_suffix`
-checks the top, middle, and final scroll windows.
-`count_rows_fitting_respects_panel_height_and_separator_height` and
-`theme_submenu_with_512_entries_clamps_panel_to_surface_height` pin the
-single-pass scroll clamp for ordinary and maximum-size menus.
-`picker_candidates_are_vertical_rows_and_selection_scrolls_into_view` pins the
-command palette's reuse of that panel: one row per ranked result, live keybind
-hints, a visible selected row, and no overlap with the bottom input lane.
-`layout_and_ssh_pickers_keep_ranked_candidates_on_separate_rows` covers the
-other two projections and SSH target dispatch; the regression fails when the
-projection is collapsed to the former flattened strip.
-`picker_scroll_offset_handles_tiny_and_invalid_geometry` keeps malformed or
-too-small geometry from producing an invalid row window.
-`capture_carries_cursor_blink_state_for_lock_free_ui_redraws` keeps the cached
-blink bit wired through `PaneSnapshot::capture`, and
-`cached_cursor_blink_lookup_tracks_the_active_snapshot` verifies a validated
-lookup never falls through to the live terminal.
-`cursor_glyph_damage_key_reuses_only_identical_vertices` covers the retained
-cursor-glyph vertices; `failed_text_prepare_keeps_the_retry_latch_armed` guards
-the fallible shared-atlas preparation transaction. These are focused structural
-invariants; native interaction capture remains the evidence for end-to-end
-input-to-present latency, lock contention, and frame pacing.
-
-**`.cast` replay.** `replays_asciicast_v2_output_into_grid` parses an asciicast
-v2 trace — the exact format [`docs/RECORDING.md`](RECORDING.md)'s recorder
-writes — and feeds its `o` (output) events through the harness, asserting grid
-text + SGR state. A scrubbed recording of a real agent session can therefore be
-committed as a regression fixture and re-fed without a PTY or auth.
-
-**Recorder boundaries.** `kettle-core` tests exact-limit and limit-plus-one
-events, UTF-8 splits, the visible limit marker, unique private directory files,
-exclusive-writer refusal, link rejection, locked-file retention, and pruning by
-both count and bytes without touching unrelated names. Injected writer tests
-hold a sink inside `write`, force a one-slot overload, and return a write error;
-they prove producer admission and asynchronous drop remain prompt, pre-overload
-events drain, failure states are observable, and every retained cast line parses
-as JSON. A zero-bound finish test proves imposed exec stops detach a stalled
-sink without waiting. The ordinary asynchronous-target test proves output and
-resize events remain lossless and replayable. A session-log test proves secure
-target creation does not occur until its persistence worker receives data.
-`kettle-ui` pins the `[REC]` / `[REC LIMIT]` /
-`[REC INCOMPLETE]` / `[REC ERROR]` title states and lossless redraw/close fan-out.
-`kettle exec` integration tests prove an unavailable recording path prevents
-child startup with status 125, a normal run writes replayable output, and
-cancellation promptly closes a replayable trace.
-
-**Windows Codex footer cursor.** Native Windows Codex goes through ConPTY. Its
-active repaint can finish with a visible cursor on the status row and then move
-the cursor over the DIM empty composer placeholder in a separate PTY read.
-`kettle-render` keeps parsed visibility, shape, and blink state intact, but
-suppresses those two renderer-only artifacts when the surrounding active Codex
-footer proves the context. A non-DIM queued-input caret remains visible. A
-scrubbed two-read Codex/ConPTY replay and negative fixtures cover the policy
-without committing a private recording.
-
-**Synchronized-update timeout and PTY bounds.** The reader tests open a real DEC
-2026 synchronized update, omit its close sequence, wait through the parser's
-deadline, and assert one forced flush/wakeup. A split close sequence arriving
-before the deadline must not force-flush. Ready data queued after expiry must be
-preserved but only returned after the buffered update is applied, while EOF
-before expiry flushes immediately. Pending updates suppress ordinary output
-generation increments and wakes; natural close and forced EOF fixtures require
-the buffered text plus marker-ordered graphics to become visible before the
-single publication. A separate capacity assertion pins the four-slot PTY pump
-queue; recycled 64 KiB buffers bound flood memory instead of growing an
-unbounded channel.
-`pty_pump_spawn_failure_is_observable_and_closes_the_pane` proves a failed pump
-creation logs the cause and follows the normal pane-exit path rather than
-parking the parser on a senderless channel. The raw-output sender tests
-separately prove a full best-effort plugin queue drops without blocking and a
-full lossless queue backpressures only until its receiver drains. `kettle exec`
-uses the latter with a four-slot queue.
-`the_pty_reader_owns_the_startup_slave_before_the_parent_releases_it` pins the
-complementary startup invariant: the constructor receives the pump's runtime
-readiness signal before `spawn_command`, then transfers its Unix slave
-descriptor to that pump while the spawned-child rollback guard is still armed.
-The pump releases the descriptor only after a successful read or a child-only
-exit observed without reaping it. A macOS `openpty` fixture queues readability
-and `NOTE_EXIT` together and proves the tail is read before the retained slave
-is dropped; the opposite order loses those bytes. That same watcher remains active after
-startup: Linux exercises a master-plus-pidfd wait, macOS a
-master-plus-process kqueue, and the portable fallback backs off from one
-millisecond to one second rather than polling every frame. The Linux
-`leaked_slave_cannot_hold_the_terminal_exit_event_forever` test launches a
-`setsid()` descendant that retains the slave and proves the ordered exit marker
-still arrives at the five-second bound. The detached child reports its own PID
-after installing its HUP policy, signals readiness to the parent, and remains
-alive with that PID after `exec sleep`. The test also verifies
-`/proc/<pid>/fd/1` still names the PTY slave before accepting `EofTimeout`; a
-timed parent-side `$!` report can otherwise turn a fixture startup race into a
-false product failure. The source guard also pins that
-`Mux::reap` keys on the UI-consumed exit event, not `child_exited()`, and that
-an earlier `ChildExit(status)` notification cannot apply exit policy, so neither
-can get ahead of the reader's final output; a held pane whose status lags EOF
-remains on a one-second status-collection deadline. Windows interactive panes
-wait on a duplicated child handle that exits after one semantic wake. Source
-and pure-state tests prove that wake drains lifecycle events before output-
-generation gating (including a hidden/quiet window), a delayed first wake still
-begins close, the second bound starts from successful close-worker creation, and
-worker-start failure retries instead of applying Hold to a live master.
-
-Two negative controls pin the startup slave handoff. Starting the reader after
-spawn, with a two-second pause between them, makes the real integration test
-exit 0 with empty output on both its normal run and raw diagnostic retry. A
-readiness signal before spawn is not enough, since it still precedes the actual
-read; a two-second pause right after the signal fails the same way. With the
-slave-ownership guard, that second mutant passes because the delayed reader
-still receives the retained output.
-
-`kettle exec` also has platform-specific completion policy tests. Unix may
-report success only after the raw channel disconnects and the core reader
-publishes an orderly EOF; an 810-ms cross-platform fallback is a failing
-mutant because silence can mean the reader has not been scheduled yet. An
-unexpected reader error and a five-second Unix no-EOF bound return explicit
-internal failures, but the bound does not override queued raw bytes or
-downstream stdout backpressure. A Unix mock-child regression also refuses to signal a reaped child and retains
-termination of a live child. A Linux self-reexec fixture exits its direct
-child while a `setsid()` descendant retains the slave, proving non-reaping child
-status—not the unavailable parser Exit event—starts that bound. It cleans up
-the escaped descendant before asserting the result. Pure deadline tests pin
-the five-second policy; the native fixture does not time runner scheduling.
-A failed-reader
-model separately keeps multiple admitted parser chunks and an occupied stdout
-worker ahead of the final 125; a disconnected parser with an irreducible
-pending count must fail rather than deadlock. Windows ConPTY retains a bounded quiet interval
-because its pseudoconsole output handle can legitimately outlive the child and
-final repaint, but quiet now only starts an off-thread pseudoconsole close.
-Completion still requires the real EOF and reader disconnect, and a stuck close
-fails explicitly. A native close-ownership model proves a `Terminal` dropped
-during that stuck close cannot publish reader stop before the close worker
-returns. A single-word source-progress test pins the atomic
-status/generation/pending snapshot, while an accepted stdout command stays
-non-idle until its worker write returns. The native platform seam is tested
-directly, so changing production's selection back to ConPTY semantics fails on
-Unix rather than passing helper-only tests.
-
-The operation timeout covers lossless output delivery as well as the direct
-child. A short-deadline test pins exit 124 when the child already reported 0 but
-its PTY sender remains live. Linux coverage lets the root exit and a background
-session member be reparented, then proves deadline teardown reaches a
-descriptor-free worker without relying on vanished ancestry. Another test
-blocks the stdout worker after PTY EOF and lets the operation deadline win,
-proving the unreaped root anchor survives until lossless delivery completes. An
-active-fork fixture moves its worker into a different process group in the same
-session and keeps creating members as timeout begins; the PTY group fallback
-cannot satisfy it, so deleting the procfs scan makes the test fail. It also
-proves the freeze phase observes stopped states before its final scan. A delayed
-stop regression verifies that acknowledgement shares the 500 ms cleanup budget.
-Separate Linux unit coverage pins `/proc/stat` parsing, pidfd-backed identities,
-rejection of a vanished or start-time-mismatched leader before numeric targeting,
-and reports a
-local or shared procfs work bound instead of silently truncating cleanup. Native
-Windows vendor coverage opens a real ConPTY, services its startup DSR,
-re-executes the small native test helper whose first action creates a descendant,
-retains that process handle before teardown, and proves the pre-resume Job
-Object kill reaches it. A product integration fixture then lets the direct
-child exit while its same-console descendant waits two seconds before writing,
-proving Job accounting postpones quiet close until that tail is delivered. A
-real native process exit of 259 separately pins handle-signalled liveness rather
-than the ambiguous `STILL_ACTIVE` value. The vendored gate enables `serde_support`, so both a
-serialized builder from before the containment field and a true containment
-round trip are compiled on Linux and Windows.
-The native integration
-suites continue to cover streamed stdout, replayable asciicast output, explicit
-raw-mode EOF, query replies, and child status propagation through the real
-PTY/ConPTY.
-
-Native lifecycle coverage also parks a child in a quiet PTY and requires
-`Terminal::Drop` to return promptly while pseudoconsole destruction and child
-reaping continue on the detached teardown worker. A cross-platform source guard
-rejects reader joins or moving master destruction back onto the UI path.
-
-**Pane-input backpressure.** The GUI queue tests are intentionally separate
-from `kettle exec`'s writer-arbiter tests. Each pane has a 64-message user lane
-and a 64-message reply lane, 8 KiB write steps, and independent byte
-reservations. A saturated user lane must return `Backpressured` without marking
-the pane failed; an oversized user message must return `Oversize` before
-allocating a shared payload; a rejected protocol reply must mark the transport
-failed because silent reply loss is not recoverable. Broadcast tests require
-the strongest aggregate outcome and scroll only panes whose enqueue succeeded.
-The App-facing tests also pin the three-second notification throttle so held
-key repeat cannot create a toast/log storm.
-
-**Tracked-file ledger.** `just tracked-audit` walks `git ls-files --stage` and
-audits every entry for path/case collisions, index/worktree hashes, UTF-8 and LF
-hygiene, parseable TOML/JSON, local Markdown link targets, and bounded SFNT/PNG
-tables. It writes the full per-file SHA-256 ledger to
-`target/diagnostics/tracked-files-audit.json`. Add `--require-clean-index` when
-auditing a staged release tree. The Markdown scan masks fenced and inline code,
-but retains the link delimiters around inline-code labels so those links cannot
-bypass target validation. A file `.gitattributes` marks `-text` (an upstream
-license, an upstream fixture, a terminal capture) keeps its bytes on purpose,
-so the LF, final-newline and trailing-whitespace rules pass it by; its own
-self-test (`scripts/test-audit-tracked-files.py`) pins that, and that other
-text is still held to them.
-
-**Search regressions.** Search changes need focused tests at all three owning
-boundaries:
-
-- `kettle-core`: `regex-automata` meta-engine behavior; distinct invalid,
-  too-complex, and 4096-byte query errors; 512 KiB NFA, 256 KiB one-pass,
-  256 KiB hybrid-cache, and 40 KiB DFA ceilings; implicit whole-match-only
-  captures; Smart/Match/Ignore; Unicode word boundaries; forward/reverse and
-  wrapped outcomes; signed history coordinates; one-pass zero-width suppression
-  and nullable-alternative priority; soft wraps, wide characters, combining
-  marks, variation selectors, and ZWJ graphemes; scan cancellation; and the
-  65,536-span cap;
-- `kettle-core` work limits: each engine invocation and aggregate bounded call
-  is <=64 KiB UTF-8; an aggregate call is also <=262,144 inspected cells and
-  <=256 complete logical haystacks; a single haystack is <=256 physical rows
-  and <=262,144 inspected cells. Tests must distinguish an exact continuation
-  between complete hard logical lines from an immediate Results-limited barrier
-  inside an over-capacity logical line, and prove neither direction skips;
-- `kettle-ui`: grapheme-aware edit/selection/delete/copy/cut/paste, per-window
-  state, per-pane remembered queries, the nominal 1000-line nearby/idle ranges
-  with one core slice per turn, continuous-output progress, the
-  non-navigation-only quiet retry, output-interrupted explicit-navigation
-  Results-limited state, output/layout/query invalidation, direction shortcuts,
-  result anchoring, and the invariant that UI-dispatched keys never reach the
-  PTY. Pointer routing is pinned separately: `search_pointer_route` decides by
-  the bar's rectangle for a press and by the live editor drag for motion and
-  release, and a source guard proves every native and control-plane mouse arm
-  consults it, that the pointer gate (`pointer_modal_open`) excludes the bar
-  while the keyboard, file-drop, and focus-follows-mouse gates keep it, that a
-  grid press clears the editor selection so the bar's Copy reaches the grid,
-  that the right-click menu leaves the bar open, and that focus changes call
-  `retarget_search_to_focus`. `fresh_search_state` is tested for the carried
-  query and toggles and an immediate scan on the new pane;
-- `kettle-render`: one row on wide surfaces and as many additional rows as
-  needed on narrow surfaces, all control hit targets, reserved content rows,
-  signed multi-line projection, active/inactive colors, every bounded status
-  including Pattern too complex, and linear visible-cell/span traversal.
-
-For a deterministic live check, start a disposable full control server, emit
-repeated history markers into its focused pane, then use Kettle-owned input:
-
-```sh
-kettle ctl perform_action --text start_search
-kettle ctl dispatch_ui_key --keys "n,e,e,d,l,e"
-kettle ctl ui_geometry --raw
-kettle ctl dispatch_ui_key --keys "enter,shift+enter,f3,shift+f3,escape"
-```
-
-`ui_geometry.scale_factor` converts physical surface/cell dimensions to logical
-pixels. `monitor` reports logical dimensions, or null when unavailable.
-
-`ui_geometry.search` must report the bar/control rectangles, target pane,
-status, `has_match`, truncation, Wrap, Case, and Invert states. The Search
-object must not contain the raw query or matched terminal text. Use `kettle ctl screenshot --json
-'{"full_window":true,"path":"/tmp/kettle-search.png"}'` plus `read_cells` to
-verify historical and soft-wrapped highlight pixels. Do not substitute
-`send_keys` in this test:
-`send_keys` intentionally targets the PTY; `dispatch_ui_key` is the bounded
-modal-only path and must fail when no supported modal is open.
-
-`just search-selection-smoke` drives the grid under an open bar with
-`send_mouse`: a drag selects a fixture row (read back through
-`read_screen.selection`), a click on the Wrap control toggles it without
-disturbing the selection, the bar's Copy chord puts the grid selection on the
-clipboard (proven by pasting it back into the shell), a right-click opens the
-menu with the bar still open and its Copy row closes only the menu, a click on
-another split moves focus and `ui_geometry.search.target_pane` together and a
-query then matches text that exists only in that pane, Kettle's shortcuts run
-with the bar open (`Ctrl+=` and `Ctrl+0` change the cell size, `Ctrl+Shift+N`
-moves focus and the bar), and Esc closes the bar with the last selection
-intact. A press on Case, moved off before the release, leaves it unchanged;
-a press and release on it cycles it.
-
-Media-receipt visual smokes pass the receipt bounds back through the four
-`crop_*` screenshot fields. The renderer crops the GPU readback before it opens
-the output file, and the receipt surface is opaque, so the private command-line
-path never enters the retained PNG.
-
-**Search engine-budget performance probe.** This is a local diagnostic, not a
-CI pass/fail benchmark. On the 2026-07-22 audit machine (i7-1165G7, Rust 1.96.0,
-`regex-automata` 0.4.14, optimized `rustc -O`, pinned to CPU 3), the worst
-accepted adversarial family `(?:\w?){8}\P{Letter}\b` took a three-sample median
-17.8 ms for a no-match 64 KiB haystack. That is the production single-call
-ceiling. Larger diagnostic inputs scaled to 35.8/71.3/143.6/288.5 ms at
-128 KiB/256 KiB/512 KiB/1 MiB respectively, but production never passes those
-sizes to one invocation. N=10 needs 543,244 NFA bytes and must compile as
-Pattern too complex; N=200 needs 10,050,980 bytes and demonstrates the prior
-unbounded risk (1.56 s per 256 KiB no-match and about 11.3 MiB static memory).
-
-The ignored probe lives at `target/diagnostics/regex_limits.rs`; build and run
-it against the checkout's `regex-automata` target rlib:
-
-```sh
-rustc -O --edition=2024 target/diagnostics/regex_limits.rs \
-  -L dependency=target/debug/deps \
-  --extern regex_automata=target/debug/deps/libregex_automata-c458cab110e7d576.rlib \
-  -o target/diagnostics/regex_limits
-taskset -c 3 target/diagnostics/regex_limits extra
-taskset -c 3 target/diagnostics/regex_limits engines
-taskset -c 3 target/diagnostics/regex_limits cachefamilies
-```
-
-The rlib fingerprint is specific to that recorded checkout and changes after a
-dependency rebuild. Preserve raw results with the release audit; do not promote
-this host-specific median to a cross-platform CI threshold. Full details and
-the evidence boundary are in
-[AUDIT-2026-07-22-SEARCH.md](https://github.com/Reddimus/kettle/blob/v5.0.1/docs/AUDIT-2026-07-22-SEARCH.md) (at v5.0.1).
-
-The settled local checkpoint also passed the core search tests (27/27), full
-core library tests (179/179), UI library tests (320/320), the renderer bounded
-status test (1/1), warnings-denied all-target clippy for all three owning
-crates, `cargo fmt --all --check`, `git diff --check`, and
-`just live-ui-helper-selftest`. The post-hardening Xvfb history E2E is retained
-at
-`target/diagnostics/search-history-e2e-settled/search-history-20260722-164503/`;
-its navigation statuses were Wrapped/Match/Match/Match. These are local Linux
-artifacts, not substitutes for the still-pending workspace/strict gates,
-GitHub CI, or native Windows/macOS checks.
+Selection tests distinguish viewport coordinates from grid/history coordinates.
+A scrolled viewport must copy the visible rows, not the active screen's rows.
+The UI applies the display offset before constructing the grid selection.
+Keep copy text and highlight geometry consistent after scrolling or resizing.
+
+The `.cast` test parses asciicast v2 output events and replays their bytes.
+It checks grid text and SGR state. The neighboring recorder round-trip test
+also writes a trace through the real recorder before reading it back.
+See [RECORDING.md](RECORDING.md) for the recording format and user controls.
+
+To turn an interactive failure into a regression:
+
+1. Reduce the output to the bytes needed to show the fault.
+2. Remove private paths, prompts, credentials, and unrelated session text.
+3. Choose the smallest grid and history that still reproduce it.
+4. Feed the bytes, including meaningful read boundaries.
+5. Assert the resulting text, selection, style, reply, or bounded state.
+6. Include a nearby negative case if the fix recognizes a special pattern.
+
+Do not commit a private terminal recording as a shortcut.
+A hand-authored trace is enough when only protocol bytes matter.
+The diagram-copy fixtures live in
+`crates/kettle-core/tests/fixtures/diagram-copy/`.
+Their README explains the captures and expected copy projections.
+
+This harness proves terminal state, not compositor presentation or clipboard
+ownership. Use a live smoke for native input, desktop paste, window routing,
+or pixel evidence. A real PTY regression remains necessary for lifecycle,
+foreground process-group, EOF, and child cleanup behavior.
+
+When diagnosing a replay failure, compare the raw output with the projected
+grid first. Then check scroll offset, resize/reflow, and selection endpoints.
+Avoid replacing exact expected text with a loose substring merely to get green.
 
 ## Diagram gate
 
-`just mermaid-check` compiles every ```` ```mermaid ```` block in tracked
-Markdown with the mermaid CLI. A diagram that does not parse is replaced by a
-red "Unable to render rich display" panel on GitHub, which reads as a broken
-document rather than a broken snippet.
+`just mermaid-check` runs [scripts/check-mermaid.py](../scripts/check-mermaid.py)
+on Mermaid fences in tracked Markdown.
+It renders them with Mermaid CLI 11 and Chrome/Chromium.
+A parser error fails the gate.
 
-It skips when there is no Node toolchain or no Chrome/Chromium, so the suite
-still runs on a machine without them. CI sets `KETTLE_MERMAID_REQUIRED=1`,
-which turns that skip into a failure: a gate that silently stops running is the
-failure mode this one exists to prevent.
+List affected documents without rendering:
 
-Two mermaid traps it catches:
+```sh
+python3 scripts/check-mermaid.py --list
+```
 
-- `;` separates statements in a sequence diagram, so a literal semicolon in
-  message text (`OSC 133;A`) truncates the line. Write `#59;`.
-- Quotes inside a node label must be `&quot;`, not `\"`.
+For a required local rendering check:
+
+```sh
+KETTLE_MERMAID_REQUIRED=1 just mermaid-check
+```
+
+Without required mode, missing npx or a browser prints a skip and exits
+successfully. CI sets required mode on Linux.
+`PUPPETEER_EXECUTABLE_PATH` or `CHROME_PATH` can select an installed browser.
+The helper can fetch the CLI through npx, so plan for that dependency.
+
+In sequence messages, escape a literal semicolon as `#59;`.
+Inside quoted node labels, use `&quot;` for an embedded quote.
+Keep labels short enough to read in the rendered document.
+This documentation gate is separate from the media renderer's Mermaid tests.
 
 ## Fuzzing
 
-What Kettle parses from untrusted bytes has one entry point each, called
-both by an in-process sweep in every test run and by a cargo-fuzz target
-(`fuzz/`) each night. The renderer's and ffprobe's are built only on macOS
-and Linux, where the worker runs; Windows builds neither, and neither sweep
-runs there.
+The byte-processing contracts have deterministic in-process sweeps and
+cargo-fuzz entry points. The sweeps run with ordinary crate tests.
+The libFuzzer targets live in [fuzz/](../fuzz/) with a separate lockfile.
+They do not add libFuzzer to the product graph.
+Native render and ffprobe coverage runs on Linux and macOS, not Windows.
 
-| Target | Entry point | What must hold |
-| --- | --- | --- |
-| `wire` | `kettle_media::fuzzing::wire` | a frame in the direction its first byte picks decodes within that direction's allocation budget; one that decodes encodes back to its bytes and reads the same from a stream, and one read from a stream is what its own bytes decode to |
-| `session` | `kettle_media::fuzzing::session` | a session's stream, read at the size its first two bytes give: every pixel read is that size, and what the session reader takes is what those bytes decode to |
-| `sniff` | `kettle_media::fuzzing::sniff` | a video's first bytes sniff without a panic or a read past them, whatever length the file is said to have (the answer may change with it: an atom of size zero runs to the end of the file) |
-| `render` | `kettle_media_render::fuzzing::render` | a job the parent could send, of the kind its first byte picks, rendered into a 64-pixel box: no panic outside a guarded library call, and a render that passes the parent's reply checks, fits its box, is the kind asked for and encodes as the worker writes it |
-| `ffprobe` | `kettle_media_native::fuzzing::ffprobe` | ffprobe's description and packet list and ffmpeg's codec list, split at NUL bytes, parse or fail: a description's picture within bounds, turned by a quarter turn, with a frame of at most a thousand seconds; a packet list sorted, distinct and holding its keyframes, every frame it finds for a time one of its own |
-| `vt` | `kettle_vt::fuzzing::vt` | a script of PTY reads and extractor calls, read whole and in pieces, gives the same engine bytes, raw bytes and chunks at the same places; bytes with no ESC pass through untouched; every image is the size it says and within its limits; the graphics account is back to zero once the extractor is gone |
-| `images` | `kettle_vt::fuzzing::images` | Sixel, iTerm2 and Kitty decoding, the completion protocol and the placeholder marks: images within their limits, completion lists within the protocol's caps with no unsafe characters, an inline marker that decodes encodes back to itself |
-| `term` | `kettle_core::fuzzing::term` | a pane's PTY pipeline through resizes, scrollback, scrolling, selection and search: cursor and grid in bounds, links, hints and matches inside the grid and within their caps, selected text within its cap, replies in proportion to what was sent |
-| `ctl` | `kettle_ctl::fuzzing::ctl` | a request stream finds the same newline read in pieces; a request line, `show` request or activation request that parses writes back as itself; pages stay within their limit |
-| `update` | `kettle_update::fuzzing::update` | no manifest verifies under the release key; one signed with a test key and accepted has unique, safely named, bounded assets with a lowercase SHA-256, and any flipped bit voids it; an accepted archive path has only plain relative components |
-| `config` | `kettle_config::fuzzing::config` | a config file reads the same with or without a UTF-8 byte-order mark and with CRLF as with LF; a key bind or color that parses parses again from how Kettle writes it |
+[targets.json](../fuzz/targets.json) defines the schedule and seed crates.
+[scripts/fuzz-plan.py](../scripts/fuzz-plan.py) turns that table into the
+workflow matrix and rejects names that differ from `fuzz/Cargo.toml`.
+The times below are minutes per target, not total workflow duration.
 
-The sweeps (`mutated_frames_never_break_the_decoder` and the rest in each
-crate's `fuzzing` module) build their cases with
-`kettle_test_support::mutate`: seeds with one to four mutations each (a
-flipped bit, an edge byte or length word, a cut, a repeated or inserted run,
-a splice), the same cases on every machine. The frames' sweep also fixes each
-case's header length to what follows, so mutations reach the payload's
-parser. The renderer's seeds are a picture in each raster format (two larger
-than the box), two SVGs, eight Mermaid diagrams and two Markdown galleries;
-ffprobe's include descriptions at the edges of rate, rotation and size.
-Planted faults each turn a sweep red: dropping a render's source or calling
-an SVG a raster, a fit past the box, a guarded call that does not mark its
-thread; an unsorted packet list, a picture past the size limit, an
-unfiltered rate, a rotation of 360, a frame found outside the list; and,
-for the frames, trailing bytes accepted after a frame and a session frame
-whose pixel count is not checked against its size.
+| Target | Seed crate | Contract | Nightly / Sunday |
+| --- | --- | --- | --- |
+| `term` | `kettle-core` | PTY parsing, resize, history, selection, search, and replies stay bounded | 20 / 60 |
+| `vt` | `kettle-vt` | Whole and chunked extraction agree; images and accounting stay bounded | 20 / 60 |
+| `images` | `kettle-vt` | Image decoders, completion metadata, and inline markers obey their limits | 10 / 10 |
+| `wire` | `kettle-media` | Directional decode budgets, round-trip bytes, and stream decoding agree | 20 / 20 |
+| `session` | `kettle-media` | Session pixels match the requested size and decoded bytes | 10 / 10 |
+| `sniff` | `kettle-media` | Video prefix sniffing handles arbitrary bytes and declared lengths | 10 / 10 |
+| `render` | `kettle-media-render` | Worker renders fit the box and satisfy the parent's reply checks | 20 / 60 |
+| `ffprobe` | `kettle-media-native` | Descriptions, rates, rotation, codecs, and packet indexes parse safely | 10 / 10 |
+| `ctl` | `kettle-ctl` | Request framing and serialization agree; pages stay bounded | 10 / 10 |
+| `update` | `kettle-update` | Signatures, asset names, hashes, and archive paths obey trust rules | 10 / 10 |
+| `config` | `kettle-config` | BOM/line endings preserve parsing; keybinds and colors round-trip | 10 / 10 |
 
-The fuzz targets live in `fuzz/`, a workspace of its own with its own
-lockfile, so the product's builds and audits never include libFuzzer;
-`just fuzz-check`, part of `just gauntlet`, formats, compiles and lints them
-on stable on macOS and Linux, so a change to what they call shows before the
-nightly run (on Windows the recipe only says the targets are Unix-only). A
-render that panics inside a guarded library call unwinds to the guard, as it
-does in the worker; any other panic aborts.
+### What CI runs
 
-`.github/workflows/fuzz.yml` runs every target in `fuzz/targets.json` on a
-pinned nightly:
+[.github/workflows/fuzz.yml](../.github/workflows/fuzz.yml) uses
+`nightly-2026-09-24` and cargo-fuzz 0.13.2.
+It runs at 07:41 UTC daily.
+Sunday uses each target's Sunday time and minimizes every corpus.
+Only `term`, `vt`, and `render` get the longer Sunday duration.
 
-- each night, for the target's nightly time (10 or 20 minutes); Sundays run
-  some targets for an hour and minimize every corpus;
-- for a minute on a pull request that changes a target or what it fuzzes;
-- on dispatch, the targets named (all when none are) for as long as asked,
-  up to five hours.
+A matching PR runs every target for 60 seconds.
+The PR path filter covers the workflow, `fuzz/**`, the planner,
+`crates/kettle-test-support/src/mutate.rs`, and crate fuzzing modules.
+It does not trigger on every ordinary parser source edit.
 
-Each run starts from the corpus the last night or dispatch kept, plus the
-sweeps' seeds (`KETTLE_FUZZ_CORPUS` names the directory they write to). It
-uses the dictionaries in `fuzz/dict`, and keeps a target's crash, leak,
-out-of-memory or hang input as an artifact; a failed night opens one issue,
-or comments on the open one. `scripts/fuzz-plan.py` turns the table into the
-run's matrix and refuses a table that disagrees with `fuzz/Cargo.toml`.
-`just fuzz-guard` tests it and checks that no shipped binary is built with a
-crate's `fuzzing` feature; CI and the release pretest run the same check. To
-run a target locally, with that nightly and
-`cargo install cargo-fuzz --version 0.13.2 --locked`:
+Manual dispatch accepts space-separated target names; empty means all targets.
+The default duration is 3,600 seconds per target.
+Positive requested durations are capped at 18,000 seconds.
+The planner rejects unknown target names and invalid durations.
+Each target job gets its requested runtime rounded up to minutes plus
+30 minutes for build, seed, and minimization overhead.
+At most six target jobs run in parallel.
+
+Each run restores a prior corpus and adds deterministic sweep seeds.
+`KETTLE_FUZZ_CORPUS` names the seed output root.
+A matching file in `fuzz/dict/` supplies a target dictionary.
+The run uses these libFuzzer limits:
+
+- Maximum input: 262,144 bytes.
+- Resident-memory limit: 2,560 MiB.
+- Per-input timeout: 30 seconds.
+
+PRs consume cached corpora but do not save them.
+Scheduled and dispatched runs save corpora, including after a failure.
+Failed targets upload finding inputs from their artifact directory for 30 days.
+A failed scheduled plan or fuzz job opens or updates one tracking issue.
+A failure without an input artifact may be a planning, build, or seeding error.
+
+### Run locally
+
+Use `just fuzz-check` for the stable format/lint gate on Unix.
+Use `just fuzz-guard` after changing target registration or feature wiring.
+Those checks do not replace a timed sanitizer run.
+On Windows, `fuzz-check` only prints that the targets are Unix-only.
+
+For a timed run, install the workflow's pinned nightly and cargo-fuzz version.
+The following example seeds the media targets and runs `render` for five minutes:
 
 ```sh
-KETTLE_FUZZ_CORPUS=$PWD/fuzz/corpus cargo test -p kettle-media -p kettle-media-render -p kettle-media-native --lib fuzzing
-cargo +nightly-2026-09-24 fuzz run render fuzz/corpus/render -- -dict=fuzz/dict/render.dict -max_total_time=300
+cargo install cargo-fuzz --version 0.13.2 --locked
+KETTLE_FUZZ_CORPUS=$PWD/fuzz/corpus cargo test --locked -p kettle-media -p kettle-media-render -p kettle-media-native --lib fuzzing
+cargo +nightly-2026-09-24 fuzz run render fuzz/corpus/render -- -dict=fuzz/dict/render.dict -max_total_time=300 -max_len=262144 -rss_limit_mb=2560 -timeout=30
 ```
+
+For another target, seed its crate from the table and select that target.
+Use its dictionary only if the matching dictionary exists.
+Reproduce a saved finding with the same pinned nightly:
+
+```sh
+cargo +nightly-2026-09-24 fuzz run <target> <input>
+```
+
+`<target>` is a table entry; `<input>` is the saved finding file.
+Keep the input and error report while reducing the case.
+Add a focused regression through the ordinary crate tests after fixing it.
+A successful short local run does not prove an input space is safe.
 
 ## Supply-chain fixture gates
 
-Release and installer changes have hermetic regression suites in addition to
-the Rust updater tests:
+Installer and release work needs fixture checks as well as Rust updater tests.
+These suites use temporary repositories, fake services, or synthetic archives.
+They do not publish releases or require production signing credentials.
+Run the relevant recipe while iterating, then strict and full before release.
+
+| Recipe | What it protects |
+| --- | --- |
+| `just update-manifest-test` | Signed-feed bytes, trust root, sidecars, signing command wiring |
+| `just release-assets-test` | Exact draft asset names, sizes, and SHA-256 binding |
+| `just release-script-test` | Release preparation, version/document updates, immutable historical references |
+| `just package-manifest-test` | Inner manifests, bounded extraction, media installation |
+| `just online-installer-test` | Online install parsing, transport limits, no downgrade, hostile archives |
+| `just package-templates` | Deterministic Homebrew/AUR template rendering and optional published checks |
+| `just icons-check-required` | Generated icon geometry, rasters, and formats with tooling required |
+| `just icns-smoke` | macOS release icon assets through Xcode actool |
+| `just linux-installer-smoke` | Real install/uninstall paths in isolated prefixes |
+
+### Fixture commands
+
+The main Python suites can also run directly:
 
 ```sh
 python3 scripts/test-update-manifest.py
 python3 scripts/test-verify-release-assets.py
 python3 scripts/test-release.py
 python3 scripts/test-package-manifest.py
+python3 scripts/test-install-media.py
 python3 scripts/test-install-online.py
 ```
 
-The suites cover signed update manifests, exact draft releases, release
-preparation and macOS command wiring, package manifests, and POSIX online
-installation. They pin the checked-in Ed25519 trust root, canonical manifest bytes and
-sidecars, no-follow same-handle artifact hashing, exact local-to-GitHub
-name/size/SHA-256 binding, bounded release-document updates, immutable archive
-references, bounded archive structure and extraction, modern no-downgrade
-behavior, compatible legacy sidecars, and hostile archive/network/parser
-fixtures.
-Raw TAR-header fixtures reject oversized GNU metadata and forbidden PAX before
-extension parsing, while retaining support for bounded GNU long names.
-The update-smoke case checks relative and absolute cache paths, including
-spaces, using a synthetic archive and verifier. It failed with the original
-absolute-path prefix. This covers wiring; `macos-update-smoke` separately checks
-a real notarized archive with `codesign` and `spctl`.
-The package-command case executes the checked-in workflow's nested-binary loop
-and final bundle command under the system Bash with mock commands. It requires
-the helper and libraries to precede the bundle, with the main executable signed
-only through that final bundle operation. It checks argument vectors, including
-paths with spaces and the helper's explicit identifier. This follows
-[Apple's inside-out signing order](https://developer.apple.com/library/archive/technotes/tn2206/).
-On macOS this exercises Bash 3.2 with `set -u`, which refuses an
-empty array expansion. It uses synthetic fixture arguments and no signing
-credentials or keychains.
-On macOS the signed-update suite also opens disposable keychains whose paths
-contain quotes and backslashes, then proves the native Security.framework
-helper's prepend, de-duplication, removal, and empty-list transformations
-losslessly. The test never writes the developer's user search list, so a killed
-test process cannot strand it in a cleared or partially mutated state. Other
-platforms skip only that native case.
-The online-installer transport cases route the installed curl through a
-hermetic local HTTPS server: transient manifest failures recover or stop after
-exactly three total attempts, while a permanent HTTP refusal and an
-unknown-length response stopped by the kernel file limit remain single-attempt
-failures. The size case deliberately removes curl's userspace
-`--max-filesize` inside the test proxy and requires the real process to die with
-`SIGXFSZ`, proving the kernel guard independently. A hostile `.curlrc` enables
-`retry-all-errors` from an isolated `CURL_HOME`, so the request counts also
-prove that first-argument `-q` keeps user configuration out of the policy. A
-60-second `Retry-After` is refused by the 30-second retry-admission timer without
-sleeping. The fake-curl cases pin the common flags on every fetch, including
-`--retry-connrefused` and curl's exponential-backoff mode; resilience cannot
-drift into an unbounded loop or a retry of security limits.
-Extraction canonicalizes its already-existing output parent before the
-no-link walk. This intentionally accepts an alias anywhere in that existing
-parent chain—including macOS `/var` to `/private/var`—then pins the canonical
-directory identity once so later writes never traverse the alias. The absent
-output root itself is still created as a new real directory and cannot be a
-pre-planted link or junction. A separate case-alias regression drives the
-portable path registry directly, independent
-of whether the host filesystem permits case-distinct directory entries.
+Run all of them after changing signer/publisher boundaries, installer parsing,
+archive handling, or release metadata.
+Release fixtures need Git and the tools used by the mocked command paths.
+Online-installer coverage needs a supported Linux/POSIX host and GNU tar;
+its real transport fixtures need curl and openssl.
+The online-installer suite also exercises installed curl against a local HTTPS
+server. It tests bounded retries and file-size enforcement without remote data.
+Check its output for unavailable native prerequisites.
 
-Release CI keeps the two capabilities separate: the protected signer has the
-Ed25519 secret and read-only repository permission, while the publisher has
-repository write permission and no signing secret. The publisher must
-re-verify the signature, bind every local archive back to the canonical signed
-manifest, regenerate package metadata, and verify the exact remote draft before
-making it public. Run all five fixture suites after changing either job,
-installer parsing, archive handling, or release metadata.
+The package suite checks path traversal, links, collisions, metadata bounds,
+case aliases, and safe extraction into a newly created output root.
+It accepts aliases in an existing parent only after canonicalizing that parent.
+It must still reject a pre-planted output-root link.
+Do not weaken these tests to make an unusual temporary directory pass.
+
+On macOS, the update-manifest suite also tests the native keychain helper
+against disposable keychains. It does not rewrite the developer's user search
+list. Other hosts cannot prove that native helper works.
+Mock signing fixtures check argument order and paths containing spaces;
+they do not establish notarization or Gatekeeper acceptance.
+
+### Real packages and published assets
+
+`just linux-installer-smoke` builds the release binary and worker, then uses
+isolated prefixes. It checks local development and release-tarball layouts,
+recording-path validation, ownership markers, uninstall safety, and assets.
+When the matching tag and asset exist, it also exercises the online installer.
+A not-yet-published asset can skip that online part.
+Record that separately from the local install/uninstall result.
+
+`just package-templates` checks source rendering on a feature branch.
+At an exact clean release tag, auto mode also checks published assets.
+The underlying script's `--require-release` makes that check mandatory:
+
+```sh
+scripts/check-package-templates.sh --require-release
+```
+
+This mode needs the release to exist and needs network access.
+A source-only template pass is not publication proof.
+
+`just macos-update-smoke` downloads or reuses a published notarized archive,
+checks its sidecar, and runs the real bundle updater with codesign and spctl:
+
+```sh
+just macos-update-smoke
+```
+
+The script sets `KETTLE_MACOS_ARCHIVE_REQUIRED=1` itself.
+A missing archive fails on macOS; other hosts print a skip.
+The recipe accepts a tag argument; empty selects the latest release.
+It also accepts an existing archive path with its sidecar beside it, so a
+notarized candidate can be tested before publication.
+This gate is outside `gauntlet-full`; its default route needs network access.
+It needs Rust, gh for downloads, and native macOS signing-verification tools.
+Synthetic update tests cannot replace it.
+
+### Release trust boundary
+
+The release workflow separates the protected signer from the publisher.
+The signer has the Ed25519 secret and read-only repository permission.
+The publisher has repository write permission and no signing secret.
+Before publishing, it verifies the signature, binds local archives to the
+signed manifest, regenerates package metadata, and verifies the remote draft.
+
+Keep these checks in the fixture suites when changing either job.
+A successful archive build alone does not prove the published set is complete.
+The release and upgrade jobs are mapped in [CI](#ci).
+
+## Live UI smokes
+
+Use an isolated desktop and a disposable application instance.
+The Python harness starts its own instance with a full control server.
+It saves geometry, screen/cell data, logs, and screenshots as each case needs.
+Default Unix artifacts go under `target/diagnostics`.
+Some captures contain terminal text or local paths; inspect them before sharing.
+
+Most recipes below build or select a release binary.
+`--cargo-release` uses Cargo's reported executable, including a custom target
+directory or configured target triple.
+A direct `--kettle` invocation uses exactly the binary you supply.
+Record its revision and build identity.
+
+### Prepare the desktop
+
+Linux needs an X11 or Wayland session and a working GPU backend.
+Xvfb can cover windowed control paths with software rendering.
+It cannot establish physical input, monitor behavior, or native Wayland behavior.
+Tests that need focus may need a window manager as well.
+
+macOS needs an unlocked Aqua console.
+Native event injection, accessibility, and screen capture may require grants
+for the process launching the test.
+A locked or unavailable desktop fails the Python harness preflight.
+It is not a successful skip.
+
+Clipboard tests replace the desktop clipboard.
+Linux bitmap paste needs `wl-copy` on Wayland or `xclip` on X11.
+Video receipt tests need ffmpeg to generate their default fixtures and a usable
+media worker for native posters.
+Follow the existing worker installation/signing path in
+[INSTALL.md](INSTALL.md); a plain unsigned sibling is not macOS release proof.
+
+### Smoke map
+
+This is the single index of live smoke names and recipes.
+"Linux/macOS" describes the maintained recipe path in this snapshot.
+Some helper code retains Windows branches, but those are not supported native
+release acceptance. A dash means no dedicated just recipe exists.
+Prerequisites beyond the desktop are included in the proof column.
+
+| Name | Just recipe | What it proves or captures | Platform |
+| --- | --- | --- | --- |
+| Live renderer | `just live-render-smoke` | Grid cursor blink changes only a cursor-sized region | Linux/macOS |
+| Agent TUI | `just agent-tui-smoke` | Shell, installed clients, tmux, and clean/configured Neovim states; optional clients can skip | Linux/macOS |
+| Agent CLI | `just agent-cli-smoke` | Mandatory PTY/JSON/MCP probes plus available client version/help checks; no composer attachment proof | Linux/macOS; required in macOS CI |
+| Native titlebar | `just native-titlebar-smoke` | Light caption, traffic-light separation, resize, native fullscreen and restoration | macOS |
+| Modal shortcuts | `just modal-shortcuts-smoke` | Command chords do not act as ordinary modal letters | macOS |
+| Interaction | `just interaction-smoke` | Multiline input, wheel, selection/copy, tabs, context-menu split, and screenshots | Linux/macOS |
+| Selection autoscroll | `just selection-autoscroll-smoke` | Held selection scrolls at both vertical pane edges; native pointer on macOS, control path on Linux | Linux/macOS |
+| Image paste receipt | `just image-paste-receipt-smoke` | Bitmap paste and expanded, compact, hover-expanded receipts; replaces clipboard | Linux/macOS |
+| Video paste receipt | `just video-paste-receipt-smoke` | Two pasted video files produce bounded poster receipts; needs ffmpeg and worker | Linux/macOS |
+| Hover wheel | `just hover-wheel-smoke` | Wheel targets hovered pane; no swapchain screenshot support required | Linux/macOS |
+| Window close isolation | `just window-close-isolation-smoke` | One detached child's exit leaves the sibling OS window and pane alive; Linux needs xdotool | Linux X11/macOS |
+| Touchpad scroll | `just touchpad-scroll-smoke` | Fractional wheel deltas accumulate into scrolling through the real conversion path | Linux/macOS |
+| Tabbar click | `just tabbar-click-smoke` | Multi-tab click state with PNG and tab geometry evidence | Linux/macOS |
+| Pane drag | `just pane-drag-smoke` | Intended pane reorder gesture; currently known broken because ctl input cannot arm native drag | Linux/macOS |
+| Tear-off | `just tearoff-smoke` | Control-plane detach/broadcast, then real pointer tear/follow/redock/cancel on X11 | Linux/macOS control tier; X11 live tier |
+| Tab title | `just tab-title-smoke` | Cwd-derived title recovers from shell truncation | Linux/macOS |
+| Split titlebar | `just split-titlebar-smoke` | Cwd titles at both pane edges and focused/receiving/inactive colors | Linux/macOS |
+| Text presentation | `just text-presentation-smoke` | Text-style bullet uses a monochrome face | Linux/macOS |
+| Update chip | `just update-chip-smoke` | Tab-bar notice preserves pane size; right-click menu and persisted dismissal | Linux/macOS |
+| Split exit resize | `just split-exit-resize-smoke` | Exiting split restores survivor grid and tty winsize | Linux/macOS |
+| Steady uploads | `just steady-uploads-smoke` | Unchanged frames and cursor blink avoid GPU uploads; paced output uses mapped writes where available | Linux/macOS |
+| Cursor blink layer | `just cursor-blink-layer-smoke` | Native layer handoff, idle behavior, and exits; `--pixels` needs Screen Recording | macOS |
+| Job control | `just job-control-smoke` | Shell editing across suspend/bg/fg/exit, alternate screen, and negative controls | Linux/macOS |
+| Zoom keybind | `just zoom-keybind-smoke` | App zoom chords resolve and change geometry | Linux/macOS |
+| Alt-arrow zoom | `just alt-arrow-zoom-smoke` | Focus actions fall through at edges or hidden neighbors and dispatch for visible neighbors | Linux/macOS |
+| Zoomed layout keys | `just zoomed-layout-keys-smoke` | Pane-focus chords reach a Kitty-owning client when zoom hides destinations; unzoom remains owned | Linux/macOS |
+| Pane focus reports | `just pane-focus-reports-smoke` | DEC 1004 reports follow keyboard focus once per change | Linux/macOS |
+| Color scheme | `just color-scheme-smoke` | DEC 2031 subscriber receives light/dark changes | Linux/macOS |
+| Theme picker | `just theme-picker-smoke` | Preview, Esc restore, Enter persistence, Settings and menu entry points | Linux/macOS |
+| Remote links | `just remote-links-smoke` | Shift-picked missing path bypasses confirmation; tmux leg skips if unavailable | Linux/macOS |
+| Raw paste | `just raw-paste-smoke` | Multiline paste into an unbracketed shell proceeds; replaces clipboard | Linux/macOS |
+| Program keys | `just program-keys-smoke` | Client-owned Shift+Left reaches Kitty client, then returns to split resize | Linux/macOS |
+| Search selection | `just search-selection-smoke` | Open search bar preserves grid selection, copy, menus, focus, shortcuts, and Esc | Linux/macOS |
+| Bell flash | `just bell-flash-smoke` | Only ringing pane brightens, then pixels return to baseline | Linux/macOS |
+| Default window size | `just default-window-size-smoke` | Monitor-fitted defaults and explicit sizing; needs a sufficiently wide monitor | Linux/macOS |
+| Line edit chords | `just line-edit-chords-smoke` | Text-action backspace, macOS default chord, and search word deletion | Linux/macOS |
+| Dock menu | `just dock-menu-smoke` | Real Dock rows, window list, and New Window effect; accessibility and no other Kettle instance | macOS |
+| Live stress | `just stress-live [S1 … S10]` | Floods, resize storms, 100 tabs, huge pastes and titles, config churn, hostile media and 64 control clients leave Kettle alive and answering; S6 replaces the clipboard, then restores it; S9 needs a working worker | Linux/macOS |
+| Underline scroll | `just underline-scroll-smoke` | Repeated git-diff/delta scrolling preserves underline pixels; needs git, delta, less | Linux/macOS |
+| Search history | - | Scrollback search status, cells, and highlight pixels; direct helper case | Linux/macOS; Linux CI quarantined |
+| Native image paste routes | - | Native paste shortcuts, PRIMARY/middle-click, managed image path, and optional real composer attachments | Linux/macOS |
+| Launch-scoped cards | - | Simulated agent TTY launches, receipt privacy, card pixels, exit, and shelf fallback | Linux |
+| Centered media viewer | - | Worker-backed viewer routing and live pixels through native X11 input | Linux X11 |
+
+### Run a helper directly
+
+For cases without a just recipe, use an existing release binary:
+
+```sh
+python3 scripts/check-live-ui-smoke.py --kettle ./target/release/kettle search-history
+python3 scripts/check-image-paste-parity.py --kettle ./target/release/kettle
+```
+
+On Linux, isolate native paste routes from your normal clipboard with Xvfb:
+
+```sh
+env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/check-image-paste-parity.py --kettle ./target/release/kettle
+```
+
+That helper needs xclip, X11 utilities, and libXtst on Linux.
+Its optional `--codex` argument selects an installed client.
+CI supplies a checksum-pinned Codex 0.155.1 binary and an offline provider.
+The test waits for the actual composer, adds attachments, and submits no prompt.
+The mandatory recorder client proves terminal routing separately.
+A version/help probe does not prove that a real composer accepts an attachment.
+
+Linux card and viewer checks use independently built workers.
+Run the viewer helper inside an isolated X11 server, such as Xvfb:
+
+```sh
+python3 scripts/check-agent-cards-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker --out target/diagnostics/agent-cards
+python3 scripts/check-media-viewer-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker --out target/diagnostics/media-viewer
+```
+
+The card fixture needs Rust, Python, and Node already installed.
+It uses a simulated harness and makes no model calls.
+Xvfb fixture success does not establish official-client or GNOME Wayland
+acceptance. The viewer helper uses native X11 input.
+
+### Read the result
+
+The helper's `all` case does not include every scenario.
+Dock, clipboard receipt, selection-autoscroll, hover-wheel, and window-isolation
+cases have explicit opt-ins. Use the table instead of treating `all` as a gate.
+
+`just stress-live` runs every scenario when given no names. Each one must
+leave Kettle alive with no panic in its log, answering `get_state` within 2 s
+and echoing a typed command within 1 s. The script's docstring lists the
+scenarios; `--self-test`, part of `just script-fixture-self-test`, checks the
+pass criteria without a desktop.
+
+The tear-off recipe has two tiers. Its shell helper skips native pointer work
+outside X11. The control tier alone cannot prove the native drag gesture.
+The pane-drag recipe is explicitly known broken in Justfile.
+Do not count its expected failure as a pass.
+
+The steady-upload case needs a focused window for blink and output phases.
+`--screenshots-only` runs the narrower screenshot phase for environments such
+as Xvfb without a window manager. Record that restriction.
+A screenshot-capability failure is distinct from a rendering failure.
+
+Inline-card GPU tests print `INLINE_CARD_GPU_ACCEPTANCE` for actual acceptance
+and `INLINE_CARD_GPU_SKIPPED` when the adapter cannot exercise it.
+Require acceptance for both Grid and Legacy cases you claim to have tested.
+Headless readbacks still do not prove native input or installed-package behavior.
+
+### Authenticated agent and configured editor checks
+
+The default agent TUI smoke uses version/help probes for installed agents.
+For real marker prompts and the Claude diff-panel probe, explicitly opt in:
+
+```sh
+KETTLE_AGENT_AUTH_SMOKE=1 just agent-tui-smoke
+```
+
+This path uses installed client credentials and makes real model calls.
+Confirm access before running it; its result is separate from offline coverage.
+For configured Neovim/AstroNvim, the direct helper accepts `--astro-config` and
+`--nvim-data`. Supply your installed configuration/runtime directories.
+The helper copies them into an isolated sandbox before use.
+Keep the provenance record and distinguish clean from configured editor results.
 
 ## Manual / interactive checks
 
-These need a real display and are run by hand (or on real hardware):
+Use these for behavior that fixtures or synthetic input cannot establish.
+Run the relevant automated smoke first; do not repeat its scripted steps here.
+Use the exact release bundle for release acceptance.
+Record the OS, display backend, GPU, renderer mode, scale, and application build.
+Keep failures and skipped areas with the evidence.
 
-- **VT conformance**: run [`vttest`](https://invisible-island.net/vttest/)
-  and walk the cursor/erase/SGR/mode screens.
-- **TUIs**: `nvim`/AstroNvim (icons, undercurl, truecolor, mouse), `tmux`,
-  `htop`, `fzf`, `less`.
-- **Images**: in split panes with both top and bottom pane titlebars, exercise
-  `img2sixel`/`chafa -f sixel`, `kitten icat`, and iTerm2 `imgcat`. Include
-  negative-offset and oversized placements, resize/DPI changes, scrollback,
-  partial DECSTBM scroll regions in both directions, mode 47/1047/1049
-  transitions, ED 2, and RIS; verify pixels crop with the page margins and
-  never cross padding, borders, titlebars, sibling panes, or window chrome. The
-  automated tests pin geometry/UV and lifecycle state, but this real-display
-  check is still required before claiming GPU pixel output passed.
-- **Shell integration**: enable the snippet from
-  [SHELL-INTEGRATION.md](SHELL-INTEGRATION.md), then `Ctrl+Up`/`Ctrl+Down`
-  to jump between prompt marks.
-- **Perf**: `cat` a ~100 MB file / fast `yes` stays responsive.
-- **Platform compatibility**: before a release, verify the shipped binaries on
-  Ubuntu and macOS. Windows 11 and WSL were release checks through 3.3.0; in
-  4.0 they remain historical baselines and compile/regression CI coverage, not
-  required live evidence for a supported package.
+### Terminal applications and physical input
 
-### Agent gauntlet
+- [ ] Use your actual editor, pager, multiplexer, and agent TUI with its normal
+  configuration. Check repaint, mouse use, icons, truecolor, and undercurl.
+- [ ] Try physical Enter and modified Enter, word/line deletion, selection,
+  paste, and held keys. Confirm modal dismissal does not leak a repeat.
+- [ ] Check real client focus and theme changes. Synthetic recorders cannot
+  prove that a third-party client interprets the reports correctly.
+- [ ] Use an installed terminal conformance tool for VT screens that matter
+  to the change. Record the tool and failing screen, not just "VT checked."
 
-Run these on supported Linux and macOS desktops. [AGENT.md](AGENT.md) has the
-full surface. Windows and WSL behavior mentioned below records the final 3.3.0
-line and retained conditional tests.
+### Selection, search, and clipboard ownership
 
-#### Local agent/TUI CLIs
+- [ ] Drag beyond each pane edge with the physical pointer. Check autoscroll
+  speed, reverse direction, release outside the pane, and exact copied text.
+- [ ] Inspect search highlights in long scrollback, soft-wrapped text, wide
+  characters, and a narrow window. Check the physical shortcuts you use.
+- [ ] Paste through the native menu, keyboard, and primary/middle-click routes
+  available on the host. Check interoperability with another desktop app.
+- [ ] Check desktop clipboard lifetime after the source application exits.
+  A control-plane paste does not establish native clipboard ownership.
 
-`scripts/check-agent-cli-smoke.sh` launches any
-installed Codex CLI, Claude Code CLI, tmux, and Neovim/AstroNvim through
-`kettle exec --strip-ansi` and matches their bounded version, help, or
-command-path output. Before those optional probes, it always verifies
-Kettle's own PTY env, `kettle exec --json` output events, and
-`kettle mcp --self-test`. When Unix Python with `termios` is available, it
-also performs a real Kitty keyboard capability-query round trip. The Codex
-top-level help probe requires its `--image <FILE>` initial-attachment
-option. Exact input-encoder regressions require Enter, Shift+Enter,
-Ctrl+Enter, and Alt+Enter to be pairwise distinct in both legacy xterm and
-negotiated Kitty modes while plain Enter remains CR. The smoke script does
-not drive an interactive Codex/Claude composer, populate a
-clipboard, inject paste keys, or assert an image attachment. The tmux probe
-verifies `tmux-256color`, progressive extended keys, and Kettle's additive
-terminal feature declaration. Missing
-optional tools are reported as skips. `just agent-cli-smoke` runs the
-mandatory Kettle-owned probes plus every available optional probe; macOS CI
-requires the mandatory portion while a fully populated real-machine run is
-still needed to claim the optional clients. On Windows Git Bash, npm-style
-extensionless POSIX shims are resolved to their adjacent `.cmd` launchers
-and executed through `cmd.exe /d /s /c`;
-`scripts/check-agent-cli-smoke.sh --self-test` pins the resolver and quoting
-with hostile shadow fixtures.
-#### Live agent/TUI window
+### Images, cards, and video
 
-`just agent-tui-smoke` opens a real
-grid-renderer Kettle window in explicit native-shell mode: PowerShell on
-Windows and deterministic non-rc Bash on Unix/macOS. The recipe consumes
-Cargo's JSON build artifact to select the current checkout's exact release
-executable, including custom target directories and configured target
-triples. Its graphical-session preflight fails nonzero rather than turning
-an unavailable display into a successful skip; on macOS it requires an
-unlocked Aqua console and wakes the display before launch. It then drives a
-shell marker,
-a prompt-shaped `➜  ~`
-marker, deterministic Windows Codex active-placeholder and queued-input
-cursor fixtures with cell-level pixel assertions, optional
-Codex/Claude CLI version probes plus `codex exec --help` /
-`claude --print --help` output captures, tmux attach/send/capture and a
-tmux-managed horizontal split workflow when `tmux` is installed,
-clean/configured Neovim marker buffers, and clean/configured
-Neovim/AstroNvim vertical-split workflow states through `kettle ctl`, then
-saves PNG, `read_screen`, `read_cells`, and
-`analysis.json` artifacts under `target/diagnostics/agent-tui-*` on Unix.
-Windows defaults to an unpredictable
-`%LOCALAPPDATA%\kettle\kettle-live-ui-diagnostics-*\agent-tui-*` tree with
-a protected DACL granting only the current user and SYSTEM full control;
-its full ancestry is checked for reparse points before use. It fails if a
-captured state is blank or lacks visible terminal cells. The
-Codex/Claude legs still cover only version/help output or opt-in
-noninteractive authenticated prompts, not interactive attachment keys or
-image state. When tmux is present, the run includes `tmux.png`,
-`tmux-split.png`, matching screen JSON, and matching cells JSON. For tmux
-3.4 or newer, the helper queries
-tmux's inner DA1 response rather than trusting its version to determine
-whether the build enabled SIXEL; tmux 3.6 or newer is cross-checked against
-`#{sixel_support}`. A confirmed-capable build is launched with the `sixel`
-outer-terminal feature, then queried for runtime pixel cell size. Nonzero
-geometry must render a generated 24x12 magenta SIXEL, producing
-`tmux-sixel.png` plus bounded pixel evidence. Zero geometry must expose
-tmux's `SIXEL IMAGE (WxH)` text fallback and produces
-`tmux-sixel-fallback.png`; this remains a render skip. Older, disabled,
-malformed, and unverified capability probes are also explicit skips and
-are never reported as render passes. A portable `kettle-vt` regression
-fixture separately decodes the exact raster attributes, palette, scaling,
-and empty columns emitted by the locally verified tmux 3.4 path. When
-Neovim is present, the run includes both `nvim-split-clean` and
-`nvim-split-configured` states plus a configured LazyVCS sidebar over a
-disposable repository with a real unstaged change. The LazyVCS marker is
-conditional on completed discovery, the disposable repository's exact
-canonical root in both the active state and discovered repository specs,
-its per-run unique rendered sidebar row, and the matching `tracked.txt`
-buffer. The captured screen is split at the visible pane
-divider: marker/change-count/repository evidence must be on the sidebar
-side, while the unique changed-row gutter and committed-row blame must be
-on the tracked-file side. The divider is one consistent column taken from
-the cell grid, and the exact cell snapshot being validated is the one
-retained in the artifact. Generic, misplaced, or independently
-sampled tokens cannot satisfy the probe. Those visible checks deliberately
-do not depend on LazyVCS's private caches or extmark namespace names.
-Because that plugin buffer is normally non-modifiable, the helper inserts
-one persistent marker line under a
-temporary option toggle and restores the option; it also dismisses an exact
-Neovim hit-enter prompt if an unrelated configured plugin warning covers
-the grid. The sandbox forces the C message locale and the LazyVCS launch
-repeats that choice inside Neovim, so prompt recognition is not tied to the
-developer's language. Editor markers are assembled without occurring
-literally in the typed launch command, so shell echo cannot satisfy the
-editor-state waits.
-On native Unix, a same-basename shell wrapper runs as portable-pty's session
-leader under the host's absolute Python interpreter with isolated, no-site
-startup (`-I -S`). User `sitecustomize` and `.pth` hooks therefore cannot run
-before it records its id or starts the real shell/explicit command, while the
-basename still preserves Kettle's shell-integration selection. The wrapper returns the
-payload's exit status as soon as its session is otherwise empty, or
-terminates itself with the payload's signal, preserving pane-exit behavior.
-A pipe barrier holds the payload before exec until the session leader has
-placed its new process group in the foreground; only the parent calls
-`tcsetpgrp`, so restoring `SIGTTOU` cannot stop the child in a handoff race.
-A failed foreground handoff closes the barrier and kills/reaps the child
-instead of releasing it in the background. The self-test repeats the success
-transition through a real controlling PTY and injects the failed handoff.
-The wrapper remains alive while a same-session background job still needs an
-identity-stable cleanup anchor. A reported leader is accepted only after a
-stable handle is retained and while it is a live direct child of the
-launched Kettle; Linux retains a pidfd and macOS a process audit token at
-that point. Control inventories may associate panes only with those
-independently retained anchors, while a transient unavailable child id
-retains the last value for that pane rather than erasing it. A hung control
-request is best-effort and cannot skip the retained PTY sessions or the
-outer Kettle group. Failed cleanup transfers every acquired process handle
-to one finalizer-owned set before it closes a duplicate or signals any of
-them, then freezes every process instance in each anchored session until
-enumeration is stable, kills foreground Neovim/plugin jobs without resuming
-their signal handlers, and kills the wrapper anchor last before stopping
-Kettle. Every signal uses the retained pidfd/audit token rather than the
-reusable PID printed by `ps`. The self-test covers a separate job group, its
-descendant, a payload that exits while its background job remains, and a
-TERM handler that would spawn a new group if resumed; a separate-session
-decoy survives. Duplicate and final handle-close failures are aggregated
-after every later target is killed and closed. A second exact-environment
-pass catches configured-editor daemons that intentionally detach from the
-PTY session. It reads the actual NUL-delimited environment rather than
-`ps`'s combined argv/environment rendering, so whitespace in a sandbox path
-remains exact and command-line decoys survive; a matching process for which
-no stable handle can be acquired fails the drain closed. Darwin process-environment
-reads retry transient `EIO` for at most 200 ms, restarting both the size and data
-query. Portable syscall fixtures cover recovery at either stage, disappearance
-after an I/O error, persistent errors reaching the deadline, and permission
-errors without retries. These checks run in the ordinary helper self-test.
-Linux
-configured-editor containment uses the child-subreaper contract before
-Neovim starts. A helper that detaches, reparents, hides its environment, or
-outlives Kettle is therefore adopted by the harness instead of PID 1. New
-direct children are compared to a stable-identity baseline. The self-test
-models a reused numeric PID with two distinct retained identities, so reuse
-cannot redirect ownership. The complete acquired batch is stopped before a
-linear parent-to-children walk and rescanned until the tree is quiescent;
-handle exhaustion and other non-disappearance errors fail closed, and the
-absolute eight-second drain deadline also bounds every process-table query.
-A TERM handler never resumes to fork a late escape. Nested scopes leave the
-process-global subreaper state enabled until the last close, and a failed
-restoration remains retryable. Unrelated same-user services with protected
-`/proc/<pid>/environ` entries remain outside that owned tree and are ignored,
-which keeps hardened hosted runners and desktop sessions usable. Readable
-exact-marker matches are still found regardless of ancestry, including
-detached plugin daemons. WSL retains its narrow, nonblocking regular-file
-PID-record path because the Windows host cannot become a Linux subreaper;
-Linux fixtures present a FIFO, symlink, and Unix socket and require each to
-be rejected within the bounded subprocess deadline.
-After a successful drain,
-Unix identity and removal walk from retained directory descriptors. Child
-opens are relative and no-follow; permission restoration uses `fchmod` only
-after the opened inode is validated; unlink/rmdir stay relative. An ancestor
-swap therefore cannot redirect an operation outside the sandbox. Sabotage
-fixtures replace a checked directory with a link or hard link immediately
-before open. A nonzero or
-malformed ownership query and a retained identity that cannot be reopened
-are uncertainty, not absence: startup aborts through full process and path
-cleanup while every already-retained handle remains owned. The self-test
-injects those failures and a `KeyboardInterrupt` across the actual
-post-launch startup boundary, models identity reuse across two stable
-identities, and proves an internal member-recheck failure closes its
-complete partial handle batch. A preliminary session-query failure after
-earlier handles were acquired closes that partial batch as well.
+- [ ] Display real Sixel, Kitty, and iTerm2 images in split panes. Scroll,
+  resize, change scale, and cross screen modes; inspect clipping at every edge.
+- [ ] Put pane titlebars at both top and bottom. Images must stay out of
+  padding, titlebars, sibling panes, and window chrome.
+- [ ] Use the supported installed clients for inline cards and attachment
+  receipts. Check pending, ready, unavailable, compact, and hover states.
+- [ ] On Linux, check launch-scoped cards on the actual GNOME Wayland desktop.
+  The simulated agent fixture does not prove official-client acceptance.
+- [ ] Play and seek video through the shipped worker. Listen for audio, check
+  pause/resume, output-device changes, and recovery after a device disappears.
 
-That fail-closed rule has one narrow exception, and it is the exit-teardown
-window rather than a tolerance. macOS destroys a process's Mach task while
-its BSD proc entry is still in the session, so a dying member briefly
-answers `kill(pid, 0)` and `getsid` as a live member that
-`task_name_for_pid` refuses to retain with `kern_return=5`. Forking 54,000
-children on an M-series Mac hit that window 24 times; the four timed hits
-spanned 29 to 49 microseconds and one retry settled every one of them, and
-all 18 hits whose resolution was classified ended with the proc entry
-disappearing rather than with a change of session. A loaded runner widens
-the window enough that one instantaneous recheck can abort a whole scan on
-`could not retain PTY session member <pid>` with `kern_return=5`. The scan
-therefore rechecks membership under a one-second deadline scoped to exactly
-that window. A pid still reporting this session when the deadline expires
-fails the scan closed, and so does one that reports a different live session
-mid-retry, because that is a detach under the scan rather than a teardown.
-Only the proc entry disappearing ends a retry quietly. Waiting therefore
-cannot turn any outcome into a skip that was not already one, so the retry
-is no weaker than a single recheck. Four self-test injections pin
-it, each verified to fail on its own mutation: the teardown member must be
-skipped without aborting, an unretainable live member must still abort, a
-mid-retry detach must abort, and both aborts must close every handle they
-acquired. The injections replace the retention primitive outright, so Linux
-CI runs them too.
+### Window system and appearance
 
-Native
-Windows creates the unpredictable named kill-on-close Job before creating
-the sandbox, registers cleanup immediately after creation, and makes the
-exact PowerShell pane self-assign before sandboxed Neovim starts. A real
-native regression holds a sandbox file without delete sharing, proves the
-OS refuses an actual pre-drain tree deletion, terminates the Job, requires
-zero active processes, and only then accepts deletion. The
-separate Job close-only test proves the configured limit kills both a
-process and its child even without explicit termination. The
-tmux server uses an unpredictable private socket, the target-resolved Bash
-path, and checked cleanup on every Kettle exit path.
-`KETTLE_AGENT_AUTH_SMOKE=1 just agent-tui-smoke` additionally runs real
-serialized authenticated `codex exec` / `claude --print` marker prompts
-inside the Kettle pane and records `*-auth-session` probes. Success requires
-an exit code of zero **and** an exact response marker between a generated
-output boundary and the emitted `DONE:<exit-code>` token; prompt text echoed
-by the shell is outside that frame and cannot satisfy the probe. The helper
-self-test runs in the normal CI matrix and pins this distinction, including
-a failed-command/stale-exit-code transcript. External auth failures are
-captured as `auth_failed`; set `KETTLE_AGENT_AUTH_SMOKE=strict` when missing
-credentials should fail the run.
-After a successful Claude probe the same flag drives a `claude-diff-panel`
-probe: an interactive `CLAUDE_CODE_NO_FLICKER=1 claude` REPL in the pane is
-resized to ~93 columns, where `/diff` must answer "Resize your terminal to at
-least 110 columns", then to 160 columns, where `/diff` must answer "Diff panel
-shown"; both screens are captured. This proves the columns Kettle reports are
-what the client's fullscreen diff panel (Claude Code 2.1.260+) acts on. A REPL
-that never shows its prompt (login, first-run dialog) is recorded as
-`skipped` with the reason, fatal only under `strict`.
-The Windows/WSL live-agent recipe retired with the final
-Windows-supported 3.3.0 line. Its prior contract remains in the `v3.3.0`
-documentation and source history. The portable helper self-tests still protect
-retained parsing and cleanup code on the Windows CI runner, but no current
-release claims a Windows or WSL live-window pass.
+- [ ] Move between monitors and scales. Inspect text, cursor, split borders,
+  titlebars, menus, and the first content row after resize or fullscreen.
+- [ ] Check real minimize/restore, occlusion, window close, and focus changes.
+  Verify other OS windows survive and keep working.
+- [ ] Drag and tear off tabs with the native pointer, redock them, and cancel
+  a gesture. Control-plane movement alone does not test that gesture.
+- [ ] On macOS, inspect decorated and borderless windows with blur on/off,
+  then toggle Reduce Transparency. Check corners, seam, traffic lights,
+  caption, and drag region by sight.
+- [ ] Inspect Finder and Dock icons from the exact packaged app.
+  Compilation or an offscreen icon image is not installed appearance proof.
 
-The artifact directory writes its initial `provenance.json` before Kettle
-launches. After configured Neovim has completed any first-run bootstrap,
-it adds a bounded, no-follow content hash of the copied LazyVCS tree and
-the canonical source plus hash of the LazyVCS module Neovim actually loaded
-from that tree. It counts each directory entry before retaining it for the
-deterministic sort, and rejects links, junctions, special files, oversized
-files, deep trees, and mutations during hashing. Sentinel-iterator tests for
-both native and generated WSL implementations prove traversal stops at the
-cap rather than merely rejecting after materializing the directory. Typed
-directory and file path records are part of the digest, so adding an empty
-directory changes the identity without inflating file or byte counts. The
-exact target Neovim executable bytes, copied tree, loaded module, Kettle executable, and harness
-are re-hashed after the run. Repository identity first streams exact
-NUL-delimited porcelain status under pathname-byte and record caps, then
-counts every indexed path and streams textconv-disabled staged/worktree
-diffs and untracked regular-file contents under one 100,000-file, 2-GiB
-aggregate budget,
-rather than buffering binary patches or hashing only porcelain path names.
-The entire filesystem pass runs in a child process under one absolute,
-parent-enforced 120-second launch-and-run deadline. On Unix the worker and
-ordinary descendants share a private process group, and configured Git
-fsmonitor processes are disabled. A pipe-free silent member ignores the
-leader-exit hangup and retains that group until controller cleanup, so
-`communicate()` cannot make the numeric PGID reusable before the final
-`killpg`. This cleanup boundary does not claim to
-sandbox a helper that deliberately calls `setsid`. On Windows the complete
-tree is assigned to a kill-on-close Job Object. Internal workers start with
-Python isolated and site-disabled (`-I -S`), so environment/user-site
-`sitecustomize` and `.pth` code cannot execute in the CreateProcess-to-Job
-assignment window. The worker then waits for a parent handshake before it
-can launch Git, so no descendant can escape during Job assignment. Timeout
-returns at the deadline while an asynchronous reaper owns any process whose
-filesystem state delays exit. A sabotage test spawns a child and blocks,
-then verifies the error, deadline, tree death, and successful process reap;
-a failed `communicate` plus failed `wait` must leave the completion event
-unset. Completed Unix workers also prove the anchor still reserves their
-process group, then kill it before a result is accepted, covering ordinary
-inherited-group helpers from failed Git operations without adding a new
-post-deadline reap wait. Windows runs a
-close-only case only after atomically reading both worker and child PIDs,
-proving the configured Job limit, rather than `TerminateJobObject`, kills
-the whole tree. Unexpected pipe errors take the same containment and
-asynchronous-reaping path. Thus
-even a blocked open/read/stat cannot extend the caller's wait. A
-separate 200,000-entry streaming worktree scan rejects untracked
-links, junctions, FIFOs, sockets, and devices; every directory chain remains
-held while its leaf is opened, and traversal errors fail closed. The smoke
-fails if any of those inputs or the target Neovim identity changed while it
-ran; a successful `analysis.json` carries the verified pre-run identity rather
-than describing whatever happened to be on disk after the UI checks.
-#### Live interaction window
+Use [APPEARANCE-GATE.md](APPEARANCE-GATE.md) for the release capture contract.
+Keep matching-commit icon artifacts when the local Xcode version cannot compile
+release assets. Borrowed CI assets do not count as local compilation.
 
-`just interaction-smoke` opens a real
-grid-renderer Kettle window and drives multiline text entry, scrollback
-mouse wheel movement, local selection drag, the exact keyboard/Shift-click
-whole-history selection workflow, tab-bar `+` tab creation,
-right-click context-menu opening, Settings modal open/close from that menu,
-context-menu `Split Right` dispatch, split-window resize, and Command
-palette opening from the new-tab dropdown through `kettle ctl`, plus Search
-opening through `perform_action start_search`, editing/stepping through
-`dispatch_ui_key`, and control/status assertions through `ui_geometry`.
-The Search probe must include a negative-line history result, a soft-wrapped
-result, invalid/too-complex/too-long patterns, an exact resumable work yield,
-an in-line capacity Results-limited barrier, no-wrap boundaries,
-continuous-output progress, non-navigation quiet verification, an
-output-interrupted explicit navigation that remains Results limited until
-retry, close anchoring, and a PTY sentinel proving modal input was not
-forwarded. It also drives the SSH
-launcher, layout picker, quick-select hint mode, and window/tab/pane
-title-edit overlays through `perform_action`, with a visible URL fixture for
-hint mode. It emits OSC 777 from inside the live pane and asserts the
-subscribed control event stream receives a `protocol_notification` event
-with the expected title/body. It writes PNG, `read_screen`, `read_cells`,
-`ui_geometry`,
-`notification-events.jsonl`, and `analysis.json` artifacts under
-`target/diagnostics/interaction-*`, and asserts default `read_screen`
-follows the visible scrolled viewport, modal state is reported by
-`ui_geometry`, title-edit chrome does not intersect the terminal content
-rect, and resize updates the focused pane grid.
-Shell completion tokens are split across two separately quoted arguments in
-every typed fixture. The contiguous token therefore appears only after the
-shell executes the command, not in terminal-driver echo; this is especially
-important for scrollback builders, where accepting echo inspects an empty
-history and misdiagnoses a working touchpad accumulator. `just
-touchpad-scroll-smoke` drives 60 raw 0.08-detent events through the live
-accumulator, requires about 14 lines of movement, mirrors the gesture back
-to the live bottom, and then checks one whole detent still moves three lines.
-Its control-plane screen JSON is the assertion surface. Supporting PNGs are
-captured when the window is mapped; a Kettle launched through Windows SSH
-can remain fully controllable while its window is intentionally unmapped,
-so only that precise state skips the optional images. The exception requires
-Windows, an `SSH_CONNECTION` or `SSH_CLIENT` marker, and the exact structured
-`busy` server error stating that the target is hidden, minimized, or not yet
-shown, including the CLI's one expected terminal newline and no other
-output. The same text on a local session, a different code or message,
-leading/trailing blank lines, stdout output, and every renderer, control, or
-filesystem failure still fail the scenario.
-The same interaction scenario emits OSC 777 and waits for both its executed
-completion token and the control event. This is also the live regression for
-desktop-notification dispatch: the OS backend runs on a bounded worker, so a
-slow notification service cannot make `wait_for` lose the UI thread. A
-deterministic injected backend blocks inside the real dispatcher worker
-while the caller continues to admit/drop messages immediately and bounded
-shutdown returns on deadline. Separate admission tests fill and disconnect
-a one-slot queue, and normal GUI shutdown gives admitted messages a bounded
-drain without joining a platform call that may never return.
-`just hover-wheel-smoke` extracts the split-wheel portion as a focused
-control-plane scenario: it fills two independent panes, keeps keyboard
-focus on the left, hovers the right, and proves only the right viewport
-moves. It deliberately requires no screenshot so pointer routing remains a
-focused assertion independent of PNG encoding; the broad interaction
-scenario retains its strict screenshot checks. Live captures read Kettle's
-offscreen scene target, so they do not need swapchain `COPY_SRC`, which
-RDP/virtual adapters may not advertise. Native capture completion on those
-backends is not claimed until it is exercised there.
-`just window-close-isolation-smoke` detaches a tab into a second native
-window, exits only that window's shell, requires the logical map to fall to
-one, rejects an exact geometry query for the detached id, and independently
-requires the OS-native visible-window inventory to return to the original
-single id. The original pane must still accept terminal input. Linux runs
-this scenario through winit's X11 backend by removing the Wayland selectors
-from only the child environment, and requires `DISPLAY` plus
-`xdotool`; native Wayland surfaces expose no portable independent window
-inventory, so this focused proof does not claim Wayland coverage. Windows
-excludes winit's named 16x16 thread-event helper, which Win32 reports as a
-visible top-level handle even though it owns no user surface. On Unix the
-smoke waits for each new PTY wrapper's stable cleanup handle before it can
-trigger the exit and uses a non-reaping leader probe so failure cleanup
-retains the outer process group's numeric anchor; a portable regression
-proves an outliving group child is still killed. The child program is deliberately the
-native shell: Kettle receives the same PTY exit/reap event whether the child
-was a shell, Codex, or another TUI, while the shell keeps the check
-deterministic and credential-independent. Commands are typed literally and
-submitted with `send_keys enter`; a raw `\n` is not an Enter key on ConPTY
-and would leave the Windows child alive without testing the reap path.
-#### macOS menu bar
+### Shell integration and completion
 
-`macos_menu`'s `the_app_menu_keeps_winit_s_rows_in_the_ui_s_language` holds
-the application menu to winit's rows, standard actions and key equivalents
-(Command-H, Option-Command-H, Command-Q, nothing else), titled in English and
-Spanish, and `resumed_installs_the_app_menu` to the first `resumed`, with no
-`cfg` at the call site. `kettle`'s `tests/cli_language.rs` runs every help
-text, the listings, the zsh, bash and fish completions, the default config, a
-config check and `--version` under an English and two Spanish locales, and
-with `language = en` and `es` in the config every command reads (named by
-`XDG_CONFIG_HOME`, so on Windows too, and checked to be the one read), in a
-home of its own: the output is byte-identical, compared
-unaltered (checked red by making one config-check label follow either). `kettle-i18n`'s
-`the_desktop_entry_speaks_spanish` keeps the desktop entry's Spanish keys
-present and translated. The CLI fixture explicitly creates private directories
-and files; the old construction failed under umask `002` before the correction.
+- [ ] Use your configured shell with the shipped snippet from
+  [SHELL-INTEGRATION.md](SHELL-INTEGRATION.md). Check cwd and prompt navigation.
+- [ ] Exercise your plugins, custom bindings, Vi mode, Unicode candidates,
+  directory completion, cycling, dismissal, and redraw with a long command.
+- [ ] Confirm completion neither opens a competing pager nor changes a custom
+  binding unexpectedly. Native fixture success covers only its supplied setup.
 
-#### macOS Dock menu
+### Unix suspend/resume compatibility
 
-
-`just dock-menu-smoke` drives the real Dock. It reads the menu back through
-accessibility, requires the New Window and New Tab rows plus at least one
-open-window title above them, minimizes the sole window, and clicks New Tab.
-It requires one additional tab, the same window restored, and application focus
-before clicking New Window and requiring two windows over the control plane.
-The portable Dock wiring test pins restoration before action dispatch.
-Screenshots play no part: the Dock
-is filtered out of automation captures at the allowlist level, which is why
-five release runs recorded in `APPEARANCE-GATE.md` could not judge the Dock
-from a screen capture. Accessibility enumeration is a different surface and
-does reach it, though it returns empty often enough that both phases retry;
-an empty read fails rather than passing. The tile is selected by
-`AXIsApplicationRunning`, never by name or index, because a
-pinned-but-not-running `kettle.app` owns a second identically named tile and
-Dock indices shift as apps come and go; two *running* kettles would defeat
-even that, so the smoke refuses to start while another kettle is up. It needs
-an unlocked Aqua session, so it is macOS-only, excluded from `all`, wired into
-the macOS `full-native-gates`, and never a required CI check. The menu model,
-the command-to-action mapping, and the platform split carry portable unit
-coverage that runs on every target.
-
-#### Selection drag at pane edges
-
-`just selection-autoscroll-smoke` uses
-the native macOS pointer and Kettle's portable control driver on Linux and
-Windows. It selects terminal text, holds at the upper edge until the
-viewport enters scrollback, then drags to the last pane pixel and requires
-the viewport to return to the live bottom. After waiting for the shell's
-fresh prompt, the smoke proves an edge press, a duplicate move, small inward
-jitter, and a short crossing above the client area create a selection
-anchor without scrolling. The scenario puts its tab bar at the bottom and
-asserts terminal content begins at client Y=0, so the macOS probe sends an
-explicit out-of-client drag coordinate rather than moving into chrome.
-Native capture may report that as an out-of-client `CursorMoved` instead of
-`CursorLeft`; the latter path has focused unit coverage. Native macOS derives
-probe coordinates from CoreGraphics and requires the Swift toolchain. Its
-probes remain within the two-logical-point threshold; the portable hosted
-legs exercise their scale >= 1 coordinates, while focused behavior tests
-cover representative positive and invalid display scales.
-It then requires non-empty selected text after the drag. Native macOS
-checks Accessibility permission before posting events, so a missing grant
-cannot look like an application failure. Portable behavioral tests cover
-the DPI-scaled movement threshold,
-latched drag state, owning-button matching, window-leave latch, edge zones,
-and both rate directions. Source drift guards pin copy-before-clear ordering
-across modal, confirmation, focus-loss, pane invalidation, and
-native/control release paths.
-#### `kettle exec`
-
-`kettle exec -- echo ok` — output is piped to stdout and
-the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
-On Unix/WSL, also verify stdin-driven one-shots:
-`printf 'ok\n' | kettle exec --strip-ansi -- sh -c 'read x; echo "got:$x"'`.
-The `crates/kettle/tests/exec.rs` native PTY regression also sends empty,
-line-terminated, and unterminated piped input through canonical EOF, then
-requires ordered DSR, DA1, and Kitty capability replies over the still-open
-master. Its synchronized raw-mode fixture requires Kettle to inject no
-guessed EOF byte, preserve DSR replies and ordinary child exit, and emit the
-documented noncanonical-EOF diagnostic. Portable planner tests separately
-pin live `IGNCR`/`ICRNL`/`INLCR`, VEOF, VEOL, and VEOL2 boundary semantics,
-Linux-versus-BSD VWERASE rules, `EXTPROC` refusal, bounded 64 KiB tracking
-of oversized records, and fail-closed termios races. A native Linux N_TTY
-fixture verifies punctuation-sensitive VWERASE followed by a complete EOF
-sequence; native `EXTPROC` coverage requires explicit refusal while DSR,
-DA1, and Kitty replies remain usable.
-Unread-stdout coverage has two distinct child states. The infinite-flood
-helper stays alive and must return 124 at its deadline. The Linux
-finite-burst helper exits 23 after 64–128 KiB; its parent shrinks and
-preloads Kettle's stdout pipe before spawn, then confirms the helper is a
-zombie or gone through `/proc`. It must terminate at the deadline and
-preserve 23. Do not replace those state assertions with a sleep or a guessed
-burst threshold.
-A separate Windows/Linux broken-pipe fixture reads one line and closes the
-only stdout reader while the child keeps producing output. It requires the
-dedicated exit 74 diagnostic and verifies the child no longer runs. This is
-intentionally separate from the unread-pipe deadline fixtures, which must
-retain the `stdout was not fully delivered` warning. The quiet
-`exec_timeout_returns_124` must not print it. Unit tests pin the final-write
-wait: a stopped JSON run hands a slow but reading consumer its exit event
-before returning, a write blocked in the OS is reported once the grace ends,
-and a command still held on the lifecycle thread is reported without waiting. Another native test
-supplies a nonexistent explicit `--cwd`, requires exit 125, and proves a
-child-side marker was never created. Two more pin the default: a child started
-without `--cwd` must report `kettle exec`'s own directory, not HOME, and on
-Unix a deleted current directory must return 125 before spawn. On Linux, a
-directory whose name is not UTF-8 must work as the starting directory.
-Backpressure regressions must cover both piped stdin and `/dev/null`: a
-query-flooding child that never reads replies must hit the bounded
-64-message reply queue promptly rather than defeating timeout. A separate
-semantic OSC-event flood must trip the 1024-event parser queue.
-Unit tests pin `--json` rendering. A golden test compares every event kind
-against the bytes equivalent `serde_json::Value` maps produced when their keys
-were sorted, which it reproduces by sorting each map's keys itself. It covers escapes,
-invalid bytes, split and carried codepoints, and the lossy tail at exit. A
-counting sink requires exactly one `write` per event, with the carried tail and
-the exit event sharing one. A sink that takes seven bytes per call proves each
-event is still written in full.
-`admitted_reply_preempts_a_pending_eof_retry` stages a mock first VEOF step
-returning `Pending`, records the arbiter's stale empty-channel fast-path
-observation, admits a DSR reply through the publication gate, and proves
-the final recheck writes the reply bytes before attempting the next VEOF.
-Native canonical-EOF cases separately read through real N_TTY EOF and then
-issue DSR, DA1, and Kitty queries to prove reply liveness. They deliberately
-do not claim that a future query can overtake a VEOF byte the kernel already
-accepted. Portable lease-state tests reject overlapping Unix stdin handles,
-release a failed setup reservation, and latch a failed status restoration
-closed; the Unix-native pipe fixture additionally proves `O_NONBLOCK` is
-shared, exclusive, restored exactly, and reusable only after restoration.
-On native Windows, pipe a delimited payload through ConPTY and assert every
-byte reaches the child; do not claim an EOF half-close. An EOF-waiting
-Windows fixture must carry an explicit delimiter or finite `--timeout`.
-`windows_pipe_nowait_never_blocks_at_capacity` fills a `PIPE_NOWAIT`
-anonymous pipe to zero progress without a blocking call and proves progress
-resumes when the reader drains. Its vendored `portable-pty` mirror pins the
-backend-local helper. The native `kettle exec` regression waits for a real
-ConPTY child, loads forwarded input with a fixed 64 KiB, emits a terminal
-query, and still requires timeout code 124 and prompt process closure. That
-load is deliberately a fixed volume rather than a full input queue: ConPTY
-buffers input without a bound a test can exhaust, so "the pipe stays full"
-is not an achievable Windows precondition, and because ConPTY echoes the
-input back, a variable volume makes the child's query marker race the
-caller's bounded wait for it. Do not reintroduce either. PTY teardown has
-three complementary guards: portable close-order and full-queue models
-prove the pump stays live and can bypass parser backpressure through
-platform close, a deterministic source check rejects UI-thread joins and
-pre-close stop publication, and
-`high_output_drop_returns_promptly_and_reaper_finishes` runs a real Windows
-ConPTY producer to require both prompt caller-side `Drop` and eventual
-detached-reaper completion. The native test exercises the legacy-safe
-ordering on every Windows build, though only a pre-24H2 runner can reproduce
-the historical blocking `ClosePseudoConsole` implementation itself.
-#### Control server + `kettle ctl`
-
-Launch `kettle --agent-server full`, then
-cross-process `kettle ctl get_state` / `list_panes` / `send_text` /
-`read_screen`. For UI regressions, also use `ui_geometry`, `read_cells`,
-`send_mouse`, and `screenshot` to drive/capture deterministic tab and
-underline states. On Windows the GUI first-paint can take a few seconds —
-poll the discovery registry until the entry appears before issuing `ctl`,
-and capture `kettle ctl` output via a programmatic spawn (the GUI-subsystem
-binary auto-detaches stdout from an interactive shell, so a piped invocation
-from the same console shows nothing).
-
-The control policy has unit and loopback coverage. `kettle-ctl`'s `policy`
-tests pin the six-by-three truth table, the exact refusal texts, every launch
-flag combination over every configured policy, and that display only ever
-turns on while Kettle runs. `ctl_server` tests run real connections:
-display-only refuses every read and mutation, `read-only` refuses every
-mutation, a refusal comes before parameter errors (including a `wait_for` with
-a broken regex), and none of them reaches the App; a refused or malformed
-`subscribe` never starts streaming; `wait_for` probes carry only
-`read_screen`. Drift guards pin admission before every route, no second gate in
-the App, the single server start, and the reload's latch. For a live check,
-launch `kettle --agent-server off --agent-display on` and confirm `kettle ctl
-get_state` is refused with `display_only`; then turn Agent previews on in
-Settings in a plain launch and confirm a running `kettle ctl` client is
-refused with `display_only` rather than finding no server.
-
-Caller verification has scripted and real-process coverage. `kettle-ctl`'s
-`identity` tests walk a scripted process table: a matching claim reaches the
-server; equal start ticks pass; a pid alone, a different start, or a pid reused
-before accept (S4's failure) never verifies; a peer that exits or is replaced
-after accept, a younger parent, a reparented child, a cycle, a spent deadline
-and a 65th link all fail closed; an unreadable parent ends the chain. Two real
-tests connect over the actual transport: the test process to itself, and a
-shell-started grandchild that the server verifies through the shell up to
-itself. `process` tests read this process and a child, a killed child before it
-is reaped, and Linux `stat` lines with hostile command names. `ctl_server`
-tests pin the claim latch and that `get_state` and `show` alone carry the
-check over a real connection; App tests pin the nearest-pane match and that hints never
-verify; `mux` tests pin that the pane id exists before the child and that
-config cannot override `KETTLE_PANE_ID`/`KETTLE_PID`. For a live check, run
-`kettle ctl get_state --pid $KETTLE_PID` inside a pane and confirm `caller`
-names it, then run it outside Kettle and confirm `no_pane`.
-
-Client selection is tested over scripted registries: the Kettle a client runs
-inside beats a newer one, the nearer of nested ones wins, a reused pid with
-another start is not an ancestor, its failure never falls through to another
-instance, `KETTLE_PID` is a fallback behind the ancestry and only when well
-formed, and an explicit `--pid` is exact. An alias leads a client that knows
-only the OS location to the real entry once, an alias to a missing entry leads
-nowhere, and a dead server's alias is withdrawn while its entry is left to its
-own registry. A real connection is accepted only when the kernel names the
-entry's pid and the live start matches its token.
-
-`kettle` on a pane's `PATH`: `mux` tests pin that the running Kettle's
-folder is appended last to a `PATH` none of whose absolute entries holds an
-`kettle` this user may run, and that the `PATH` is left alone when one does
-(a `kettle` that cannot run, or that only other users may run, is none, as
-is one in a relative entry, which is not looked in), when it is empty, and
-for a folder that is translocated, relative or holds a `:`; that a pane's `PATH` starts from the configured `env`, and stays as
-configured with `add-kettle-to-path = off`. `kettle-config` pins the default,
-the values, and a malformed value reported; Settings pins the Agents row.
-For a live check, start Kettle from a Finder launch on macOS: `command -v
-kettle` in a new pane names `kettle.app/Contents/MacOS/kettle` unless one is
-installed elsewhere on the `PATH`.
-
-Showing media. `kettle-ctl`'s `show` tests: exactly one nonempty source;
-bounded, typed options (a key or title one byte over its cap is
-`too_large`); inline SVG moves rather than copies and is refused over 2 MiB;
-image bytes are standard base64, sized from their length and padding before
-anything is decoded, and classified by the worker; a path must be absolute
-and attested by device and inode; params round-trip through the one parser
-for every source, and a request built in code that the parser would refuse
-is refused before it is sent; failures carry fixed codes, reasons and wording that
-never mentions full control; results name kinds and warnings by their wire
-words. `process` reads this test binary's executable and refuses the same pid
-under another start; `identity` refuses as the peer a process that started
-after the accept under a reused pid. Display discovery over scripted registries tries only
-the Kettle named or enclosing, then a `KETTLE_PID` entry that records its
-start, and otherwise ends in `NotInKettle` having connected nowhere, while
-control discovery still falls back. The `method` table classifies `show` as
-the one Display method. `ctl_server` answers a malformed `show`, non-object
-params included, on its connection thread in `show`'s own wording and hands the App a valid one parsed, its params moved, its
-sender named by the kernel with its executable, and its caller checked. The
-program that asked is the one that ran Kettle's own command line, when the
-sender's checked ancestry starts at it; any other sender asked for itself.
-`kettle-ctl`'s `signing` tests (macOS): Apple's own `sleep` meets the
-Apple-issued requirement as `com.apple.sleep`, signed by `macOS Software
-Signing` with no team; a requirement it does not meet, a test binary's ad-hoc
-signature and another process on its pid are refused; a null reference is
-never released; an exec changes a process's audit token though its pid and
-start stay; and every requirement Kettle checks parses. A signed program's
-path is the one its signature was checked against. Apple is named only for
-Apple's own code, never for a third party's signature without a team. The
-kernel's validity flag and the code-directory match need a program whose
-signature broke after it started, which CI cannot make;
-on a Developer ID build, Claude Code (236 MB) validates as `Anthropic PBC
-(Q6L2SF6YDW)` in about 2 ms after the first check in a process, which takes
-0.2 to 0.5 s. A signer reads as its certificate's name, or Apple for Apple's
-own code. Inline cards: `kettle-render`'s `inline_cards` tests refuse a card
-of no or too many rows or columns, a duplicate nonce and a 65th card in a pane,
-and show that a card keeps no strong reference to its poster (released pixels
-paint as failed, a card without a poster as pending); a headless frame reports
-the card it accepted. `kettle-ui`'s `media::cards` tests bound a harness to 32
-live cards across panes and four a second, mint unbiased digits that never
-repeat a live card's nonce, and retire each card once; `media::inline` tests
-size a card at a quarter of the pane's lines and the image's shape within the
-width Claude Code prints, build its rows and caption, keep the widest card
-under Claude Code's message limit, and strip a file name of anything that
-could forge marks or break the caption's line, give media sent as bytes a
-caption of kind and size alone, and refuse a pane too narrow for the hook's
-61-column label. A full shelf drops an item whose card is on screen only when
-every other item is on screen too, and never grows past eight.
-`register_card` registers a
-card with the message its harness prints and nothing when the pane is too
-small or the harness past its rate; only Claude Code that ran Kettle's own
-command line is a harness, and source guards keep cards to verified routes,
-retirement on the tick and painted items' pixels. In `kettle`, `mcp_display`
-tests ask for a card only from an interactive session that Kettle's plugin
-launched, with a plain bounded tool-use id from the call's metadata, keep a
-delivery for one hook for five seconds, and bound the waiting deliveries;
-`kettle_card` is never listed, refuses the model's own call, needs its
-`tool_use_id`, refuses an in-flight request id before it can take a delivery,
-and answers once, even while the tool queue is full; a card's result carries
-none of its text; and `kettle ctl` never asks for a card. Kettle's Claude Code
-plugin: `kettle-ui`'s `agent_plugin` tests build a plugin that launches this
-Kettle's display server and hooks only `kettle_show`, refuse a translocated
-path, and install it read-only. The plugin must then verify, and a
-reinstall must keep it. A contended install returns within one second without
-writing and asks for a retry; once the holder releases its lock, it installs.
-Cleanup removes this executable's plugins from an older version, one whose
-program is gone, an unreadable one, one whose server is not `kettle mcp` or
-whose file is too long, and any staging, but keeps another installed
-Kettle's plugin, a newer version's, and another of this version's. They fail a
-changed file, an extra entry, a link and a writable directory, and repair
-each by installing again. On policy, they cover each source Claude Code
-reads: the managed file, its visible JSON drop-ins, the cached remote policy
-and, on macOS, managed preferences through `plutil`. The managed file and
-its drop-ins merge in Claude Code's order, by UTF-16 units, so a later one
-can lift the rule; other sources count beside them, and a byte-order mark is
-dropped. The user's own settings, a file that is not JSON, a
-hidden or non-JSON drop-in and a directory named like one forbid nothing; an
-oversized file, a FIFO, too many drop-ins, an unreadable plist and a
-configuration directory Kettle cannot place forbid the plugin. A change on
-disk is seen despite the cache, and a source that becomes unreadable is never
-answered from it. The configuration directory is the pane's `CLAUDE_CONFIG_DIR`
-or `.claude` in its `HOME`, never a relative one. The plugin directory comes
-first in `CLAUDE_CODE_PLUGIN_DIRS`. The pane keeps its configured or
-inherited entries, but not Kettle directories that an outer Kettle or an
-older version left there, wherever it keeps them and in any case, even when
-the pane gets no plugin or the value is not UTF-8. A path that cannot be an entry adds nothing, and Settings says so. App tests pin the
-footer note for each refusal, the offer before the first pane and after
-each reload's display reconcile, and the gate on both settings. Checked live
-with Claude Code 2.1.295: a new pane's Claude Code loaded the plugin and its
-server's `kettle_show`, the hook printed the card's rows and caption, and
-Kettle painted the image in those rows. `kettle`'s `agent_setup` tests
-tell interactive Codex sessions (fresh, resume, fork) from every other
-command, help and version, never take an option's value for a command or a
-prompt, and pass a remote session, images, unknown options, extra
-positionals, a value that looks like an option and arguments that are not
-Unicode through unchanged, after `--` as well. Kettle's options go right
-after the session's command, with no second `--no-daemon`; the server table
-reads back
-as written through a TOML parser for a path with spaces, quotes, `$`,
-backticks and backslashes, and carries no approval. A relative or
-translocated path is refused, only a 0.x Codex from 0.159 is known, and a
-Kettle pane needs both positive variables. The version probe reads its first
-line within three seconds even when a child keeps the output open, and gives
-up on a program that never answers. The printed function, run by bash and
-zsh, hands each argument to Kettle untouched. Checked live with Codex
-CLI 0.162.0: the function launched an interactive session with the display
-server, `kettle_show` reached the pane's shelf verified, and `codex mcp list`
-ran unchanged. Codex cards: `agent_setup` tests add Kettle's card hook, its
-retrieval and the server's flag only with cards. The hook reads back
-through a TOML parser as one `mcp_tool` handler matching
-`mcp__kettle__kettle_show`, asking `kettle_card` for `${tool_use_id}`. A
-launch setting its own hooks gets none, and only Codex 0.162 gets cards.
-`mcp_display` tests key a Codex session's cards by `_meta.callId`; and
-`kettle_card` refuses a call carrying either harness's model call id.
-`kettle-render` recognizes a Codex card under `↳ Hook ·` with rows and
-caption four columns in, and refuses Claude Code's label, the wrong column,
-or text after the label; its tab names Codex. `kettle-ui` sizes a Codex card
-from its own column and label. macOS admits only a sender signed as the
-harness it asked as; Linux launch checks are described below. Checked live with Codex CLI 0.162.0 (hooks bypassed
-for that one run, so no trust was saved): the function's launch printed the
-card under `↳ Hook ·` and Kettle painted the chart there, tabbed Codex.
-Clicking cards: `kettle-render` records each drawn card with the part of it
-on screen, clipped to its pane, and `card_at` finds a press inside it on a
-real frame; `kettle-ui` takes a press only on a card drawn in the same place
-for half a second, as a new sighting after a move, settles two printed
-copies of one card apart, and forgets a card no longer drawn. Only a
-presented frame puts cards on screen (a guard on the renderer's frame
-path), so one whose present timed out neither moves the hit targets nor
-starts a card's half second. The card's press and release come before
-everything but dialogs and the preview lanes on both the native and control
-paths, only for a primary press without Shift. The release opens nothing
-while a dialog is up, and every dialog opener, the context menu,
-search, focus loss and a new primary press end a card press, so a dialog
-opened and closed while the button is held still cancels the click.
-`media::sightings` tests the half second per spot, two printed copies apart,
-and instance numbers: one per placement, a new one after a move or a return,
-none reused, and none once they run out. `a_card_is_a_button_assistive_technology_can_open`
-checks the card node id namespace against every other node's, and a card's
-button (role, label from title and detail, description, Focus and Click,
-bounds) in English and Spanish. `a_card_is_a_quick_select_target_and_text_inside_it_is_not`
-orders card and text targets and drops text inside a card,
-`placements_name_each_registered_card_the_grid_shows` pins the placements
-quick select reads from the grid it scans for text (a scroll or new output
-since the last frame moves both alike), and
-`a_hint_chip_over_a_card_is_drawn_above_it` renders a label over a card's
-poster on the GPU and finds its chip, and `a_hint_chip_stays_inside_its_pane`
-renders one at a pane's last column and finds none of it in the next pane.
-The placements test also pins that a snapshot taken without card marks
-finds no cards, which is why quick select captures them. `every_way_to_open_a_card_goes_through_one_door`
-guards that clicks, quick select and accessibility actions all go through
-`open_card`, that no card label carries a placeholder sequence, that only
-cards in panes the active tab shows now are reachable, that focusing a card
-closes Search so the keys follow it, and that a key press,
-text from an input method, or a native press of any button (side buttons
-included) returns a card's focus to its pane.
-The hover: `a_hovered_card_is_outlined_in_the_accent`
-renders a card with and without `card_hover` and checks the outline rings it,
-and that a hover naming a moved card, another card or another pane at that
-spot draws nothing;
-`a_settled_card_under_the_pointer_shows_it_takes_a_click` guards the hand
-cursor's place after dialogs and chrome but before split seams, its Shift,
-viewer and pointer-left exclusions, the settle wake in `about_to_wait`, and
-that the cursor icon, native buttons and the wheel follow the physical
-pointer even after a control client moved the cursor (the icon sets nothing
-while the pointer is outside the window)
-(`native_input_resumes_at_the_physical_pointer` checks the reset), and
-`media::sightings` tests `settles_at`. The shelf test pins that a
-replacement by key, kept in its place, is still `latest()`, and on macOS
-`macos_opens_the_media_viewer_with_ctrl_shift_cmd_i` pins the default
-chord. Codex's startup: `kettle-core`'s `shell_startup` checks that the
-user's zsh borrows `ZDOTDIR` and keeps what it was (set, empty, unset, or not
-UTF-8), that fish gets `-C` and its code as arguments to the login shell with
-nothing borrowed, that a lone `zsh` or `fish` command gets the same and other
-shells or commands with arguments get nothing, that it adds to the shell the
-PTY will run (a `SHELL` that cannot run falls to the passwd shell for both),
-and that a system `zshenv` naming `ZDOTDIR` or the `RCS` option in any
-spelling zsh accepts, or too large to read, keeps Kettle out of zsh, the
-`etc/zshenv` of zsh's install prefix included, that a FIFO there is passed
-over without waiting, and that a bare `zsh` command is found on the pane's
-`PATH`; the
-vendored portable-pty's `the_default_shell_keeps_its_login_name_with_shell_args`
-checks the default shell keeps its login `argv[0]` with those arguments.
-`codex_shell` runs a real zsh and fish (skipped where not installed) with
-what `additions` gives, a scratch home and a stand-in Kettle: zsh runs the
-user's files once each in zsh's order (`.zshenv`, `.zprofile`, `.zshrc`,
-`.zlogin` for a login shell) from the `ZDOTDIR` they had, gets it back
-exactly, prints no error for a missing or unreadable `.zshenv`, defines
-`codex` before the first prompt only when interactive and hands every
-argument through exactly, and a user's own or autoloadable `codex` wins; fish
-reads the user's configuration as it would without Kettle, a `conf.d` file's
-`XDG_DATA_DIRS` included, defines `codex` only when interactive, and leaves
-alone a `codex` the user can autoload. The same startup, kept as fixtures
-that `the_startup_matches_the_checked_fixtures` holds equal to the
-generator, runs under every zsh and fish the shell-integration check covers
-(macOS zsh, and fish 3.7, 4.2 and 4.8 in CI): `check_codex_zsh` and
-`check_codex_fish` check the restored variable, the user's startup order, the
-forwarded arguments and that a user's own or autoloadable `codex` wins.
-`agent-setup`'s tests check that `--status` reports the saved settings, the
-Kettle it reached or why not (in its own words, never a reply's), whether
-its previews are on, asked of a test socket with an empty `show` (malformed
-where on, disabled where off, anything else unknown), Claude Code's plugin
-in the pane, a local policy forbidding it, a Kettle that cannot offer it,
-and that a remote one is not visible, and that status and removal name what the harnesses still
-write, and names a system `zshenv` that keeps Kettle out of zsh;
-`agent_plugin` pins a pane counted as having the plugin by its variable;
-`codex_shell` pins a shell known by its program's name; the palette and
-keybind tests pin `copy_agent_setup` without a default binding, and an App
-guard pins it copying the function for the configured shell or `SHELL` from
-this Kettle's path, with a notification for a translocated copy and for a
-clipboard it could not reach; `owned_dir` checks a nested layout installs
-read-only at every level and that an extra entry deep inside fails the
-check; the App tests pin that the startup files are offered before the first
-pane and on reload, gated on both settings, and the Codex row's note. Checked
-live on macOS with the owner's own zsh setup and Codex CLI 0.162.0: a new
-pane's zsh loaded the user's startup files as usual, `whence -w codex` said
-function, `ZDOTDIR` was unset again with Kettle's variables gone, and `codex
---version` went through Kettle's launcher to Codex; a pane whose shell was
-fish ran as the login `-fish -C …`, defined `codex`, and kept the
-`XDG_DATA_DIRS` Kettle inherited. The card menu: `a_card_menu_row_is_an_ordinary_menu_row` checks its
-rows dispatch with what the menu captured and take mnemonics and typing, and
-`a_card_takes_its_press_and_release_before_anything_behind_it` and
-`every_way_to_open_a_card_goes_through_one_door` guard that a right-press on a
-settled card opens it, that a row acts only while the card shows the item at
-the generation the menu named, and that its Open row is `open_card`.
-On Linux, `media::external::loupe` tests use private session buses to check
-receiver identity, exact URI delivery, alias replacement, closed receivers,
-process reuse, oversized replies and stalled calls. Identity-sensitive cases
-run from protected copies stripped with binutils `objcopy`; Cargo's original
-artifact is unchanged even under a group-writable umask or with large debug
-sections. Install binutils and `dbus-daemon` to run these Linux tests.
-The portal tests share the private bus fixture.
-
-Linux notification tests use a private bus to verify that completed sends share
-one live sender, preserve their messages, and release the connection at shutdown.
-The regression fails when each send drops its connection. Native GNOME checks
-must also confirm a Kettle notification remains visible after delivery; a
-successful D-Bus method reply alone does not establish visual delivery.
-
-Reversals of selection, filename-free launch, unique recipient, held program,
-process instance, reply cap and call timeout each failed their regression test.
-For native acceptance, open a shown image through its menu on GNOME Wayland,
-verify Loupe shows the copied pixels, and close only fixture-owned windows.
-This passed on Ubuntu 26 ARM/GNOME Wayland: keyboard activation opened Loupe,
-the copied gradient was visible, Ctrl+W closed it, terminal content was unchanged,
-and Kettle then exited cleanly with no viewer or reader left running.
-
-`media::external` checks the copy the viewer gets is a 0600 PNG of exactly
-the pixels shown, marked downloaded, that a third open is refused at once
-and writes nothing, that the viewer commands are fixed, that a program is
-trusted only when root owns it and its directory, and that the copy reaches
-the viewer only after every check, in order; the ignored
-`preview_opens_a_marked_copy_live` opens Preview by hand on a Mac (checked
-live: Preview passed its signature check and showed the copy with no
-warning). `paste_image` checks the viewer-copy store drops its oldest by
-count and by bytes, keeps numbering, is swept under its own prefix and
-marks copies downloaded, keeps every copy for its minute and refuses
-another while full of newer ones (`a_full_store_of_new_copies_is_busy` turns
-that into the busy notice), and still counts a copy it could not delete,
-deleting it at cleanup, and takes nothing once closed
-(`a_copy_that_will_not_go_still_counts_until_cleanup`, skipped as root), and `signing::only_preview_passes_for_preview`
-that nothing else passes for Preview. In a preview lane,
-`the_open_outside_button_sits_before_close` places the `↗` button between
-browsing and the collapse toggle and hit-tests it, and
-`a_lane_draws_its_open_outside_button_only_when_offered` renders it on the
-GPU as a button cell with its glyph only when offered. A video's silent
-preview: `a_video_lane_offers_its_preview_button_first` places `▶` right of
-the other controls after collapse and hit-tests it;
-`a_preview_frame_takes_the_items_place_unzoomed` draws a frame where the
-poster is, at its size, never zoomed or panned, without zoom controls or a
-sharper tile, and with the poster's pixels released. `media::preview` asks
-for eight frames four by two, each within 384 pixels and never past the
-picture, with a reply limit of that sheet; shows each for its eighth of the
-video between a twelfth and half a second; takes only a sheet laid out as
-asked (one to eight samples, the size and shape the job gives, each frame
-within the edge, a same-area sheet of another shape refused); steps one
-frame an interval apart without catching up, pauses while hidden, times out
-and cancels its job at two seconds, takes only its own ticket's frames,
-holds stopped frames to play again, refuses frames that come after their
-deadline (`late_frames_are_refused_and_a_dropped_preview_cancels`, which
-also lets a preview go while its frames are made and sees the job
-cancelled), and ends a hover loop at four seconds, when the pointer leaves
-or motion is no longer allowed; its reply limit holds the largest sheet the
-checks allow, so a worker that finds the video a little taller still fits.
-`a_hover_rest_is_a_pointer_that_stays_put` starts a rest on arrival or
-movement and never twice from one rest.
-`kettle_media`'s `an_edge_for_tiles_fits_them_to_the_longest_side` sweeps
-picture shapes to show the sheet edge it finds is the largest whose frames
-fit (a closed form overshot to 385 pixels), and the client's
-`a_reply_past_the_caller_s_limit_is_refused` refuses a reply one byte past
-the caller's limit and renders one exactly at it.
-`only_a_video_lane_offers_a_preview`, `a_failed_preview_says_why` and
-`the_silent_preview_is_wired` cover which items offer one, the footer for
-each failure, and the wiring (routed before any other lane render, never the
-item's pixels or its cards' poster, never while a control request or a Lua
-action is handled or for a changed file, a hover that only replays held
-frames and only within reach of the pointer, ended with its lane, ticked
-with the event loop); the lane's accessibility test hears a notice in place
-of where keys go. `kettle_media`'s edge search starts at the smallest edge
-with room for the margins, where a picture's frames begin. Checked live on macOS 27 with a signed worker, when the lane's button still started the preview: `▶` played the
-nine-color MP4's frames in turn (green at 0:01, yellow at 0:03, cyan at
-0:05) with "Silent preview · 0:03 of 0:09" in the footer, `■` brought the
-poster back still, a control client's `preview_play` started nothing, the
-real pointer resting on the picture with `video-preview-hover` on looped it
-for four seconds and again after leaving and coming back, and with
-`reduce-motion = on` resting did nothing.
-Linux motion tests use a private `dbus-daemon`, never the desktop's settings.
-They exercise initial reads, live signals, concurrent-read reconciliation,
-owner replacement, invalid values, payload bounds and cancellation during a
-stalled method. The portable policy tests cover portal values, unavailable
-preferences and explicit overrides. On Ubuntu 26.04 ARM, the ten default
-motion tests passed. The separate ignored desktop test also passed against
-GNOME's actual `ReadOne` value, without changing system preferences:
+`just job-control-smoke` covers offline suspend/resume fixtures.
+Use the real client only when checking actual client behavior.
+Choose its installed executable explicitly:
 
 ```sh
-cargo test -p kettle-ui motion::
-KETTLE_MOTION_EXPECT=<ReadOne value> cargo test -p kettle-ui \
-  desktop_portal_initial_preference_matches_the_native_probe -- --ignored
+python3 scripts/check-job-control-smoke.py --kettle ./target/release/kettle --codex /absolute/path/to/codex --shell zsh --configured-shell --cycles 100
 ```
 
-Each new test was checked red by reversing its behavior: portal mapping,
-conservative defaults, lazy overrides, initial publication, live updates,
-initial-read reconciliation, owner-loss and malformed-value fallback,
-payload bounds, cancellation, and reconnect-delay reset. The plan's S-K latency, CPU and memory
-measurement was skipped for this release (no quiet machine); the
-bounds in PERFORMANCE are policy, not measurements.
+`/absolute/path/to/codex` is a placeholder for your installed executable.
+The opt-in check uses local client configuration and authentication.
+It starts an idle session and submits no model prompt.
+A trust or login dialog fails readiness; the harness does not approve it.
+Use a trusted working directory and inspect failure text before sharing it.
 
-A video playing in its lane: `kettle_media::session`'s tests run a session
-against an in-process stand-in worker speaking the session's frames:
-opened paused on its first frame, played to Ended and reaped without a kill;
-only the newest frame waiting and one wake until the caller looks; dropping
-it sends Close and stops it counting at once; a third session refused and
-one made after a drop; only the latest Play or Pause sent, and apart from
-it only the latest Mute or Unmute, neither taking the other's place
-(`only_the_latest_of_each_wish_is_sent`, each run of wishes taken under one
-lock); its sound Opened's until the worker says it went, and none before it
-opened (`a_session_s_sound_is_what_the_worker_says`); a worker that gives a
-silent session sound or says Ready again breaking the stream
-(`a_session_that_cannot_go_on_says_why`); a refusal kept or
-flattened as a render's is, before Ready only a handshake's, and none with a
-byte after it, and kept only when the worker then exits as a render's must
-(after Ready exit 0, else the exit says why: 4 `RenderTimeout`, 9
-`RestartRequired`, a signal `RenderResource`); a worker that
-leaves without ending the session, at Hello or once open, failing it; an
-Opened that comes after the open budget leaving its `RenderTimeout` standing;
-a
-misframed frame, a signal, a footprint over the limit and a silent worker
-each failing as they should; and heartbeats
-each second while the caller keeps the session, none three seconds after
-(`heartbeats_follow_the_caller`, about ten seconds).
-`a_session_reads_its_frames_into_one_buffer` reads a frame's pixels straight
-into the caller's buffer and refuses one of another size before its pixels
-are read. `kettle-media-native`'s ffmpeg tests play the stand-in's frames
-from a start at a rate, timed from that start and held to the length, under
-a CPU limit of 30 s and four a second left, refuse a buffer of another size,
-fail a misframed run, explain one with no frame, and fail one that exits 1
-after whole frames (`RenderParse`) or is killed by a signal
-(`RenderResource`); with a real ffmpeg every
-fixture frame plays in order (MP4, WebM, rotated, unsized, from a start, at
-half the rate, mirrored), and a start past the video in `long-audio.mp4`, whose sound
-runs six seconds longer, shows its last frame, at the video's rate and at a
-tenth of it (with the stand-in, a file two
-seconds longer than its video stream seeks to that stream's last frame).
-AVFoundation plays MP4 every frame in order, upright when rotated, mirrored
-when its display matrix mirrors it (as its stills show it), at half the
-rate, from past its end on its last frame, the video's own last frame in
-`long-audio.mp4`, at the video's rate or a slower one, and leaves WebM to
-ffmpeg; it decodes `ticks.mp4`'s sound to four seconds of 48 kHz stereo
-floats, each block placed on the video's timeline and none overlapping the
-last, every tick within 10 ms of its second and quiet between, from a second
-and a half in starting exactly there with its first tick at two seconds, and
-gives no source, saying why, for no sound asked or none in the video
-(`audio::trim` drops what plays before the start or the block before);
-`frame_slots_keep_a_video_within_its_rate` keeps ten seconds of video at 24
-to 60 frames a second, from two starts, within rates of one to thirty, never
-above them, a video no faster keeping every frame;
-`frames_turn_upright_as_they_are_copied` pins all eight, each quarter turn
-mirrored or not, pixel by pixel, and `display_transforms_that_reflect_mirror_the_picture` a
-reflection as a mirror and a turn. In the
-worker on macOS, AVFoundation plays a session inside the sandbox with no
-ffmpeg (a video composition's renderer was refused there,
-so the decoder service scales instead). `kettle-render`'s
-`a_playing_video_lane_has_its_bar_above_the_hint`,
-`the_play_button_shows_what_a_press_does`,
-`a_playing_lane_draws_its_frame_and_bar` (on the GPU) and
-`frames_of_one_size_keep_one_texture` (thirty frames, one texture, thirty
-writes, each replaced frame's pixels free to reuse) cover the lane;
-`media::playback` covers the lane's playback (opened playing, each newest
-frame shown and the one it replaced given back, paused, ended keeping its
-frame and replayed from the start, parked or failed and reopened where it
-stood, a hidden lane pausing what plays and staying paused once shown, a
-drag along the bar moving it on release, a frame without room given back), `a_failed_playback_says_why`
-the footer for each failure, and `video_playback_is_wired` the wiring.
-`a_session_apple_turns_down_opens_again_silent` (macOS) opens a sound
-session Apple's decoder refused again, once, silent and where it was, its
-lane then saying ffmpeg plays the picture only, and fails a second refusal;
-`only_apples_containers_ask_for_sound_on_macos` keeps WebM, Matroska and AVI
-from asking for sound there.
-`a_playback_s_sound_follows_its_session_and_the_user` covers its sound: the
-session's word, kept once the session goes; the user's mute reaching the
-session and holding for the sessions after a seek; no mute without sound
-that can play; heard sound saying nothing in the footer and muted or silent
-sound saying so. `a_silent_playback_says_why` gives each reason for no
-sound its own words in English and Spanish and its own `ui_geometry` name;
-`video_playback_is_wired` also holds a control client or Lua script to
-muting, never unmuting, and a new session to the sound the user left; and
-`kettle-render`'s `a_video_lane_offers_its_sound_button_beside_play` and
-`the_play_button_shows_what_a_press_does` the button (left of play, given up
-before it as the header narrows, the title keeping its columns, and its
-glyph dim while muted). Checked live on macOS 27 on 2026-10-11 with a
-signed worker: `▶` played `ticks.mp4` with its sound, coreaudiod holding an
-audio-out assertion on the USB output from Play, and `ui_geometry` said
-`heard`; a control client's `video_mute` muted it, the lane showing `♪`
-struck through and "Playing muted", and its second `video_mute` was refused;
-a click on `♪`, and M while the lane held the keyboard, muted and unmuted
-it; the mute held for the next session, and the sound stayed said once the
-video ended. All
-were checked red by reverting what each protects. Checked live on macOS 27
-with a signed worker: `▶` played the nine-color MP4 in real time (rate
-1.001 over five seconds) with the bar, "0:05 / 0:09" and "Playing without
-sound"; at its end it held the last frame with no worker left; `▶` replayed
-it from the start, `‖` held it with its worker paused, a drag along the bar
-opened it paused (stopped) or playing (playing) at the place dragged to;
-Space played and paused it and Left and Right stepped it five seconds;
-closing the lane ended its worker; and three lanes playing left two
-workers, the one played least recently stopped on its frame. Checked again
-live on 2026-10-11 after the review rounds: a control client's `new_tab`
-paused it with its worker kept, and its `goto_tab` back left it paused until
-`▶`; the client's `video_play` paused a playing video but did not play a
-paused one; and appending a byte to the file of a paused video ended its
-worker at once with "The file changed since it was shown", `▶` then started
-nothing until `↻` reloaded it, after which it played. The plan's text-latency A/B of playback was
-skipped for this release (no quiet machine). The tip: `media::tip` tests it shows once on the first card
-and is remembered, that of two Kettles that loaded before either showed it
-only the first to record it shows it, that a corrupt, oversized or empty
-record is left alone and stops the tip, and that only a regular file is read,
-never a link to a record or a pipe, and no tip is recorded over a link; its tests record only into a private
-temporary directory. `refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame`
-checks that a card whose poster the GPU refused is on screen but not among
-`shown_cards`, and is once the upload recovers;
-`the_tip_shows_on_its_ready_card_only` places it on its card's foot only once
-the image is ready and only on a registered card, and
-`the_first_card_shows_the_tip_until_opened_or_timed_out` guards its start
-on a presented frame's first shown card with no dialog, menu or viewer over
-the cards (checked every presented frame while it waits, so a card that
-loads in place or is uncovered qualifies) and its end on an open or at its
-deadline. Checked live with Codex CLI 0.162.0: a
-`send_mouse` click on a Codex card opened its item, and a
-press on the card released after Settings opened left Settings up and
-opened nothing. Held buttons in general:
-`held_buttons::tests` checks one entry per button, the newest dragging, each
-release taking its own entry once, the last cell told to each pane, a press
-after a lost release handing back the stale entry, and a newer gesture of
-Kettle's own taking the drag from a program's until its release.
-`a_mouse_release_queues_even_when_input_filled_the_lane` fills a pane's
-input lane by message count and by bytes and checks a release still queues,
-in order behind the input before it, within its own bounded room.
-`a_held_buttons_reports_stay_with_the_pane_its_press_went_to` guards the
-routing: a release takes its press's entry or goes nowhere, a drag follows
-the newest held button, both reach that pane before the focused one, Shift
-no longer declines them, a pane off screen gets only the release at the cell
-it last saw, a press refused by a full input queue holds nothing while a
-release takes the room kept for releases, every release handler ends a
-gesture of Kettle's own first, and focus loss, search, the context menu,
-turning the pane read-only, Reset and Reset and Clear, every tab detach and
-a repeated press release what they end. Checked live with a probe that logs SGR reports in each
-pane: a press in one tab released after switching tabs, and a press in one
-split released after moving focus to the other, used to leave the first
-probe a press alone and hand the second a drag and release; now the first
-gets the whole click and the second nothing. A lane's sender line finds its program's path and signer in
-any language's word order, whatever they hold, and a line too narrow even for
-the path's last segment shortens around the signer, which stays whole. In
-`kettle-ui`'s `media` module, `route` tests: the nearest live pane ancestor
-in any window wins; a reused pid is not an ancestor; a verified caller keeps
-its pane whatever it asks for; only full control names a pane for an
-unplaced caller; a hint routes, unverified, only when it names this Kettle
-and a live pane; nothing else routes. `queue` tests: one render at a time in
-arrival order; one waiting push per sender, the newest keeping its place;
-senders are panes or processes (pid and start), never connections; a full
-queue is busy; a push past its deadline never starts. `shelf` tests: newest
-first, a key replacing in place with its id; a full shelf drops the least
-recently viewed item, never the visible one; evicted pixels keep the item;
-the `list_panes` report holds no pixels. A push cancelled after its render
-finished stays cancelled and publishes nothing, and a lane thread that ends,
-by a return or a panic, closes its result channel before it wakes the App.
-The shelf counts unseen items, and a replaced item is unseen again unless it
-is the one on screen.
+- [ ] Type and edit before launch, while suspended, after background/foreground
+  transitions, and after exit. Include the main and alternate screens.
+- [ ] Check your real shell/editor combination and split layout. Preserve
+  binary versions and launch settings when assigning a fault to Kettle/client.
 
-Executable shell fixtures are written by a child and published by rename after
-it exits, so parallel decoder forks cannot inherit a writable script descriptor
-(`ETXTBSY`). The Linux replacement test holds an old writer open; reverting
-`write_script` to in-place writes fails at execution with `Text file busy`.
+The harness uses PTY/control input rather than physical keyboard events.
+Check physical chords separately when native event routing is the suspected
+failure. Unix job control has no equivalent Windows acceptance leg.
 
-Pane geometry and preview lanes. `kettle-ui`'s `pane_partition` tests check
-that a pane's titlebar, terminal and lane tile its leaf exactly, with no
-overlap and nothing left over, across fractional origins and cells, both
-titlebar positions, both lane sides, expanded and collapsed lanes and sizes
-around every floor (`partitions_tile_the_leaf_without_overlap`); that a
-collapsed or cramped right lane is a strip along the bottom with the pane's
-whole width; that with
-no lane the terminal is the leaf less its titlebar, as before lanes existed;
-that a lane takes about its share and leaves the terminal whole rows (or,
-on the right, its rows); that it never takes the terminal below 20 columns
-and 5 rows; that a collapsed lane is a strip, or a badge that changes
-nothing when the strip would cost the floor's last row; that closing a lane
-gives back exactly the partition the pane had; that bad numbers are refused
-where they come in and a degenerate leaf keeps its pane; and that a lone
-pane has no titlebar. `mux`'s lane tests check that a lane carves only its
-own pane, closes back exactly and collapses to a strip, survives zoom (a
-hidden pane keeps its lane) and stays with its pane through a split (the new
-pane has none), and leaves with its pane, with anything its window refuses
-and with a torn-off tab. The App tests that pinned titlebar insets now
-check pointer mapping and grid sizes through the partition
-(`titlebar_inset_realigns_hit_test_and_grid`).
+### Automation surfaces and real integrations
 
-The lane panel (`kettle-render`'s `media_lane` tests) fills its lane with
-its controls on one header row (previous, next, open outside, collapse,
-close) and the sender on a line of its own under kind and size; a sender
-line too long for the lane shortens the program's path from its middle,
-keeping its last segment and who signed it; it needs no browsing buttons
-for one item, fits its image centered and never enlarged, keeps the image's
-shape within half a pixel at one scale and lands on whole pixels inside its
-area (a sweep of wide and tall sizes under whole and fractional overlay
-metrics; an image too thin to fit keeps one pixel), maps presses to its
-controls and to the lane itself and nothing outside it, keeps every control
-inside however narrow it gets, dropping them in order down to close and
-collapse (`a_narrow_header_keeps_every_control_inside_the_lane`), is its
-header alone when collapsed or too short for its rows, has no panel in a lane too narrow
-or with a degenerate cell, and bounds and clips its checkerboard. On the
-GPU, `a_terminal_paints_nothing_outside_its_rect` checks a snapshot taller
-than its terminal paints nothing below it (glyphs and cell quads both), and
-`a_preview_lane_paints_its_panel_and_leaves_the_terminal` checks the panel
-fills the lane with its title while the terminal beside it is unchanged; a
-drift test pins that lanes draw after the terminal's text and cursor and
-before its dimming, scrollbar and every overlay. Other drift tests keep each
-lane's shaped text in the retained chrome damage key and reshape it on a
-font reload, and the text layout damage key changes when a terminal is
-carved inside an unmoved pane. `kettle-ui` tests pin that a lane takes no
-keys, that the native and ctl press paths reach the lanes before inline
-cards, the receipt and the terminal and only the primary button acts, that a
-side button over a lane goes nowhere, that wheel motion over a lane is
-dropped before the accumulator banks it, that plain motion over a lane
-reaches no program while a drag from the terminal still does, that modals
-open over lanes without closing them and take them out of the
-accessibility tree and its actions, that opening a lane with no room is
-refused with a notice and leaves the item unseen, that the event loop prunes a lane with nothing to show, that
-the shelf's shortcut toggles the focused pane's lane, and that a lane's
-accessibility node says the item's place on the shelf and a release, enters
-the accessibility key, and that lane node ids round-trip and never collide
-with pane, card or other nodes. For a live check (macOS, worker signed), show
-a PNG, run `kettle ctl perform_action --json '{"action":"open_media_shelf"}'`
-and take screenshots: the lane opens along the bottom with the item's title,
-kind, size and sender, `stty size` in the pane reports fewer rows and the
-same columns, `ui_geometry` reports the lane under `preview_lanes`, a click on
-`▾` leaves a one-row strip and on `×` gives the terminal back its size
-exactly.
+- [ ] Connect the actual agent/MCP client and check permissions, refusal text,
+  disconnect/reconnect, and the UI result of its requested operation.
+- [ ] Inspect redaction and user-facing receipts before publishing evidence.
+  A passing MCP self-test does not prove the host client's configuration.
+- [ ] Check real SSH/tmux nesting and local versus remote path opening in a
+  disposable session. The fixture cannot model every remote desktop policy.
 
-Lane content: `kettle-media` tests pin the protocol's layout and exact
-source; `kettle-ui` tests pin that a spec rebuilds the job it came from, that
-an item's text is its exact source until released and evicting its pixels
-releases it, that native path keys never merge by their printed form, that
-a lane shows only the source rows in view with nothing that acts, scrolls
-within its rows, shows a raster's or an SVG's canvas as chosen but a
-diagram's as rendered until a render for the choice comes back, takes a
-lane's render only for the same item and source (a render of bytes kept with
-another digest is gone by, never a changed file; only a file read again
-changes), queues it as its own
-sender that fails to its lane, copies on a thread that runs one copy and
-holds one more, and never reads a file for a control client's canvas
-change; and that reload pulls the item's own file under its key, title and
-canvas, refused for a control client, and clears the lane's notice when the
-item shows again. `kettle-render` tests pin where the new controls sit, how they give
-way in a narrow header, and, on the GPU, that source mode draws rows and not
-the image. For a live check, preview an SVG and click `≡`, `◐` and `⧉`
-(their rectangles are in `ui_geometry`'s `preview_lanes`).
+See [AGENT.md](AGENT.md) for the control and agent surfaces.
+Keep large request/response examples there rather than duplicating them here.
 
-Galleries: `media::source` tests pin that a gallery holds one to 32 pages,
-that a page is its item's source (a Mermaid job over the bytes kept, which a
-source copy shares, on the job's canvas and target), that another page
-replaces it whole and one past the last changes nothing, and that a gallery
-read from a file reloads that file at the page shown, still once its pages
-are given back, while copied pages have none. App tests pin that a page's
-render counts only for that page's bytes and a canvas render of the page
-shown before paging is gone, for a gallery from a file and from bytes alike;
-that a step counts from the page asked for, else the one shown, and stops at
-either end; that a lane takes a page render for the request it waits on,
-at the generation asked, or for the page it shows, never another item,
-generation or page, nor an older request for the page it waits on; that reload reads a gallery's file at the page shown as
-`MarkdownDiagrams`; that the page controls have their own ctl names and
-node ids; and that the wiring holds: a Markdown reply becomes a Mermaid item
-with its pages, refused as over budget without room; a page is asked for
-from the bytes kept on the chosen canvas and taken only while its lane waits
-on it, then fitted from the top with the render's warnings; a canvas change
-while one is waited on asks for that page again; the counter shows the page
-asked for; a failure, a withdrawal or a lane that moved on lets the wait
-go. Page Up and Page Down page a focused lane and the palette's diagram
-actions work as the lane's `‹` and `›`. `kettle-render` pins the page
-controls at the end of the detail line, which keeps four columns beside
-them, their presses, and none for one page, a collapsed lane or too little
-room, and on the GPU that they are drawn as button cells with their glyphs
-and the counter between, the page before quieter on the first page. Red checks: a bytes render read as changed, any digest taken for a
-page, a step that wraps or ignores the page asked for, a page whose digest
-is not taken, pages kept when released, a reload page that does not follow
-the page shown, a missing page press, the detail's columns ignored, no
-button cells, no quieter edge, the page shown not taken again, the
-generation ignored, a canvas change that drops the page waited on, warnings
-kept from the last page, a counter that ignores the page asked for, a
-ticket ignored and a canvas change reusing the old ticket each fail a test.
+### Responsiveness and release packages
 
-Zoom and pan: `kettle-render`'s `media_viewport` tests pin that zooming at a
-point keeps the image point under it, that an axis longer than the content
-keeps it covered and a shorter one stays centered, that the zoom stays
-within an eighth and 32 times the fit, that panning stops at the edges and a
-pan back takes effect at once, and that a resized lane keeps the image point
-at its center; lane tests pin the zoom controls' place, presses and absence
-without a rendered image, and, on the GPU, that a zoomed image covers its
-content and nothing of it reaches the header, footer or terminal.
-`kettle-ui` tests pin how the wheel and a pinch pan or zoom (a touchpad's
-pixels, three cells a notch by the multiplier, sideways with Shift, a zoom
-step a notch, at most ten an event) and that the gestures are wired: a press
-on the content arms a drag whose motion and release are the lane's on the
-native and control paths, and focus loss ends it. For a live check, preview
-an image, zoom with Cmd+wheel (Ctrl+wheel off macOS) over a corner, drag,
-and press `⤢`: `ui_geometry`'s `preview_lanes` reports `zoom` and the
-image's rectangle at each step. A pinch needs a real touchpad.
+- [ ] During sustained output, resize, select, switch tabs, type, and close a
+  pane. Check perceived responsiveness and cleanup on the real desktop.
+- [ ] Test installed Ubuntu and macOS release packages with the relevant
+  manual areas above. Record the actual package identity.
+- [ ] Check post-update launch, native signing, desktop integration, and
+  uninstall on the target host when those paths changed.
 
-Lane edge: `pane_partition` tests pin that a dragged edge gives the lane the
-share past it, held so the terminal keeps its floor and the lane its least,
-always expanded, and the body without its titlebar on either side; `mux`
-tests drag both sides, past both ends, and a collapsed lane that does not
-move; `kettle-render` pins the edge strip as the lane's padding, clear of
-every control and the content. For a live check, drag the edge
-(`preview_lanes`' `edge`) up and to both ends: `stty size` in the pane
-follows, down to 5 rows.
-
-Mermaid cards: app tests pin that a Mermaid item gets a card, captioned as
-one, from inline source or a file, and that a lane's render on another
-canvas moves the item's card posters to the new pixels before the old go;
-`kettle-render` pins that a card shows pixels rendered again, held as weakly
-as the first, and `media::cards` that an item's cards are those at its
-generation in its pane.
-
-Copied diagrams: `kettle-core`'s `diagram_copy` tests pin fences (any
-indentation, verbatim, in order, up to 32 with blank ones not counting and a
-33rd refused as `TooMany`, never cut short, closed by their own mark indented
-at most three columns past the opening, a tab counting to the next multiple of
-four, an unclosed one running to the end, a fence of another language
-consuming its body, so a Mermaid fence inside it is its text and no diagram is
-looked for there), the bullet, notice and prose around a diagram, where it
-starts (a header beginning its paragraph or after a label or notice, not a
-header word in prose; a notice or label inside it stays), the front matter,
-directives and comments above it (front matter with blank rows, a `---` inside
-a YAML block scalar, a directive over several rows and over blank rows;
-wrapped front matter, a directive or front matter row a wrap could have made,
-and a header a wrap could have made of the comment above it, refused; a header
-word inside front matter ignored; a rule under prose or with nothing to close
-it, and an unclosed directive, prose), every type the renderer detects as a
-whole word, where it ends (over blank rows inside its body, at prose, to the
-end of a source at the left edge, and `Unbounded` after an unindented body in
-a reply), the common indentation, and the hard-wrap rules: a wrap joins back
-only when the width is known and no wrapper of the harness, or of either when
-it is unknown, could have kept the row above, with wide characters; it refuses
-a hyphen or slash Codex may have broken at, after a letter of any script, a
-full row a long word could have been cut at, a row wrapped at another width,
-and unindented text, and without a width a row some width could have wrapped,
-in an unindented body too, as an unindented body is with a width; a diagram at
-the left edge is taken as written. `tests/diagram_copy.rs` runs the S6 corpus
-of Claude Code and Codex captures (its fixtures' README): 93 cases give their
-source exactly and 15 are refused, as the validated prototype did; and every
-diagram in the renderer's Mermaid corpus copies back whole; hostile text at
-the 1 MiB cap, shaped to make the search revisit rows, takes about as long as
-any other. Term tests pin the bounded selection, a selection that starts
-inside a row, and a rectangle over a diagram taking its lines whole. App
-guards pin the control-client refusal before any read, menus a control client
-opens reading neither, Mermaid bytes as the user's pull, several diagrams as
-one gallery carried with the first (refused as over budget without room),
-more than 32 refused by name, and the menu rows. Red checks: no `TooMany`
-and a scan that stops at the limit, so a 33rd is never seen, each fail a
-test.
-For a live check, `/copy` a diagram (or put a capture on the clipboard), press
-the bound chord: the lane shows "Copied diagram"; select a wrapped reply and
-press the selection chord: its source view shows the wrap joined back; the
-menu rows show on right-click and Shift+right-click, and a control client's
-`perform_action` reads nothing.
-
-Preview focus: `media::focus` tests pin the keys a focused lane takes and
-that it swallows the rest, every chord with Ctrl, Alt or Command
-included, and which act once a press; app guards pin it as the last modal
-before keybind resolution, `dispatch_ui_key`'s preview modal, `send_keys`
-and `send_text` refused before writing, the input method off, and every
-way out. For a live check, `focus_preview` with a lane open, then type
-Enter, digits, y, n and Cmd+T: nothing reaches the shell and no tab
-opens, `+` and `0` zoom and fit, `send_keys` answers busy, and after Esc
-typing reaches the shell again.
-
-Sharper pixels: `media::crop` tests pin the plan (the box at the size shown
-and the part in view with its guard, a raster never past its own pixels,
-none past 4096 on an edge, an SVG's crop within its ceiling, nothing asked
-without a quarter more detail or for another kind), what a reply covers
-from its layout, when a tile serves and suffices, and the 75/150 ms
-coalescing and who asked last. `kettle-render` pins that a tile is placed
-only while it covers the view and, on the GPU, drawn instead of the item's
-pixels, never as well; app guards pin the wiring. For a live check, show a
-large PNG with one-pixel stripes, Cmd+wheel to about two device pixels a
-source pixel: `preview_lanes` reports `sharp`, and the stripes show where
-the lane's own pixels would be grey. A control client's `preview_zoom_in`
-leaves `sharp` null; change the file and pan, and the lane says the file
-changed and keeps what it showed until `↻`.
-
-Previews the user asks for: `kettle-ui` media tests pin that the user's
-request waits in a slot of its own even with every push slot full, runs
-first, gives way to a newer one, and expires and cancels like a push; that
-its failures are kept by pane, bounded and told once while a control
-client's are answered; that a replaced request, or one whose pane went, ends
-without a word; and that a client leaving never touches it. App tests pin
-the files quick select for previews labels (by extension in any case, a
-whole path off Windows, a local `file://` link, never a web link, hash or
-card), that the menu row and quick select reach `preview_pane_link` through
-`link_gate`, that a
-quick select for previews keeps its purpose with the targets it chose
-(an empty scan leaves an open quick select as it was) and a pick is checked
-again, that a lane is measured where its pane is or will be once another
-pane's zoom ends (`Mux::partition_of`), and that
-`pull_preview` refuses while a control request is handled. For a live check
-(macOS, worker signed), print a PNG's path in a pane, run `kettle ctl
-perform_action --json '{"action":"preview_link"}'` and type the label with
-a real key press (a `dispatch_ui_key` pick previews nothing): the lane
-opens on the file with "You opened this from the pane", and
-`list_panes` reports the item `from_user`. Right-clicking a `file://` link
-to the PNG offers "Preview in Kettle" between Open Link and Copy Link
-Address; a path to a text file gets no label.
-
-Copied files: `kettle-ui` tests pin that a file a file manager copied
-previews as the first listed one a lane can show, ignoring the text beside
-it and any relative entry; that copied text previews only as one path or
-`file://` link to such a file (quotes and a shell's escapes undone, a
-relative path only from a known folder, never a web or other URL, two
-lines, `..` or more than 4 KiB), and on Windows only as a drive path; that
-Shift+right-click on the selection opens the menu instead of extending it;
-that only Shift+right-click reads the clipboard for the menu's row; and
-that `preview_next`, `preview_previous` and `close_preview` act through the
-lane's own controls. For a live check, copy a PNG's absolute path, bind
-`preview_clipboard_path` to a chord in a scratch config and press it for
-real (on macOS, System Events under `launchctl asuser`): the lane opens on
-it. `kettle ctl perform_action` with the same action previews nothing, as
-no control request may start a read. Then `send_mouse` a right click with
-`"mods":["shift"]` and see "Preview Copied File" in the menu.
-
-`kettle mcp --display`: unit tests pin that it offers exactly `kettle_show`
-(one of `mermaid` and `path`, no other property) and refuses every
-full-mode tool, that full mode offers the same `kettle_show`, that bad
-requests (no source, both, an empty or oversized Mermaid source, a relative
-path, a missing file, a directory, an over-long key, an empty title) are
-refused in the fixed wording before anything is sent, that the schema and
-the validator agree (whatever the validator sends on the schema accepts,
-and for ASCII text the two agree exactly, at each cap and one past it, in
-ASCII and four-byte characters), that a sent result is one plain
-line plus status-only structured content saying the model has not seen it,
-that a refusal carries its fixed code and reason and nothing else, and that
-the client's own refusals have codes of their own,
-and that discovery is private with no cache lifetime in both modes. `mcp`
-pins where the server runs (a Kettle found the strict way, `TERM_PROGRAM`
-saying Kettle, tmux, and tmux's own `TERM_PROGRAM` saying nothing of
-Kettle), the instructions for each (the triggers, keeping the source,
-showing is not seeing, no retry and no changes inside; the tmux addition;
-not calling it outside; the full server saying the same after its tools,
-then Appendix A's frames guidance, which the display server never gives),
-and both protocol eras carrying the same words.
-`mcp_tools` pins `kettle_video_frames` to the full server: listed and
-callable there, refused by the display server, its schema requiring only an
-absolute path with `count` up to 16, `max_edge` up to 2560 and `select` only
-`even`. Bad arguments (a relative path, another selection, an unknown
-argument, a count past 16 or fractional, `at_s` beside a window, none at
-all) come back as the fixed `bad_params` failure with no image, and a
-missing file is found missing before any worker starts. A sheet's result is
-exactly one JPEG image (base64 that decodes to a JPEG) and then the index,
-with no `structuredContent` and no `isError`; with a 40 KB request id it fits
-the 768 KiB response in both eras; under a quarter of its size it shrinks
-and stays whole, its index uncut; fitting nowhere is `too_large`. A missing
-decoder's failure adds the install hint; a parse failure does not.
-`video_frames` pins the request rules (nine frames, three across, on a 1568
-edge by default; `at_s` as one frame; a window narrowing the sheet; columns
-the fewest that hold the frames) and the refusals (times not finite or
-negative, a window ending at or before its start, `at_s` beside a window or
-several frames, no frames or seventeen, an edge of 0 or past 2560); the
-encoder keeping the best quality that fits and shrinking a quarter at a time,
-never cutting; the index's exact words, milliseconds under a second; the
-install hint only for a missing decoder; and the output written whole,
-private, never over the video and never left half-written, a folder others
-can change (0777, 0775) refused while a sticky or private one is not, and a
-failed write removing nothing it did not make, a look-alike temporary file
-included. The private-output fixture uses `private_tempdir`; it failed with
-the former ambient-umask directory under `002`, then passed with explicit
-owner-only permissions. A single frame is a labeled one-column sheet; `at_s` with any
-count, and a supplied path past 4 KiB however it normalizes, are refused;
-the encoder tries the 320-pixel minimum itself; the index rounds a tolerance
-up. MCP takes integer arguments written as 9.0, and the launcher names
-ffmpeg by the path it was found under, so the worker finds the same ffprobe. The model
-acceptance for `kettle_video_frames` used a nine-second clip of nine
-one-second colors (red, green, blue, yellow, magenta, cyan, white, orange,
-purple) as VP8 WebM, through ffmpeg, and H.264 MP4, through AVFoundation:
-Claude Code 2.1.296 (`claude -p` with the full server and only this tool
-allowed) and Codex 0.162.1 (`codex exec` with the server, and the tool
-approved by name, as `-c` overrides) each called the tool and named all nine
-colors in order with the index's times, on both clips. An earlier run on the
-MP4 named seven, two instants having taken the same keyframe, which led to
-AVFoundation's quarter-gap tolerance. Both eras were checked by hand over
-stdio: one image and the index, no `structuredContent`, every response under
-768 KiB, a 4K sheet of 16 frames at 2560 pixels included.
-`tests/mcp_stdio.rs` runs `kettle_show` to completion through the real
-`kettle mcp`, in display and full mode, in both protocol eras, from Mermaid
-source and from a file, against a Kettle with previews on that the test
-itself registers and serves (the server descends from it, so the strict
-lookup picks it): the source arrives as sent, or the file's path with its
-device and inode, and the model gets one plain line saying it has not seen
-the media. It also runs the real `kettle mcp --display` in both protocol
-eras: initialize's instructions name `kettle_show`, `tools/list` is exactly
-`[kettle_show]`, a `kettle_run` call is refused as an invalid tool, and
-`server/discover` is private. The model-behavior acceptance (S-G, with S3)
-ran each harness in a Kettle pane on 15 prompts that should show something
-(five that write or edit a Mermaid file, five that make an image, five whose
-reply holds a useful diagram) and 20 ordinary ones, each once in a fresh
-directory: Claude Code 2.1.296 called `kettle_show` on 15 of 15 and 0 of
-20, by path for files and images and inline for reply diagrams; Codex 0.162,
-through the launch function's server table, on 0 of 15 and 0 of 20, on 14
-of 15 with "Show it in Kettle." added and 15 of 15 when the tool was named.
-No reply in either claimed to have seen the media. The drivers, prompts and
-scores are kept outside the repository with the run's other evidence. For
-a live check, run `kettle mcp --display`
-inside a pane of `kettle --agent-server off --agent-display on` and call
-`kettle_show` on an SVG: it lands verified in that pane. Titles lose control characters,
-separators, bidirectional formatting and placeholder sequences (the
-placeholder and the marks after it, which `strip_placeholders` in `kettle-vt`
-tests), bounded at 256 characters.
-`card_scene`'s `a_video_card_shows_play_and_its_length` paints a video
-card's play glyph (a triangle a pixel row at a time, on a plate, inside the
-poster) and its length (`0:12`) on the poster's foot, and neither on another
-card; `duration_label` writes `m:ss` and `h:mm:ss`. In `kettle-ui`, a
-video's caption gives its own size and length, its detail line its own size
-(not its poster's), codec, length and sound (no codec name when Kettle does
-not know it), and its failure notices say to install ffmpeg for a missing
-container, codec or decoder only; each fails without its change.
-A shown video's lines say what it is (`video 1280x720 VP8 0:12, no audio`,
-no codec name a sender made up) in `kettle show`, `kettle_show`'s shelf line
-and its card line, and `kettle_show`'s structured content adds the `video`
-block beside the poster's size, still with `model_has_seen: false`. Quick
-select and the menus offer common video files (`.webm`, `.mp4`, `.mov`,
-`.mkv` and the like, never `.ts`) for a preview.
-`paste_image`'s video-copy tests copy a source by clone and by bytes (a
-read-only source too) into an owner-only file named with the extension
-asked for; stop a byte copy when asked, at its deadline, or at a source
-shorter than it said, leaving nothing; discard a short clone or a copy its
-check refuses; refuse an extension not the store's, an empty or oversized
-copy, a store full of new copies, and a copy that would leave the volume
-too full; and reap a dead video session. `media::external::video`'s tests
-copy the fixture MP4 named `.webm` as `.mp4`, private and quarantined;
-refuse a file grown, replaced, gone, a FIFO, rewritten with its identity
-restored, without an identity, or of another container, writing nothing;
-refuse a sparse file past 4 GiB; refuse a copy of another length, other
-first bytes or container, or whose source changed while copied; map each
-copy failure to its notice; copy nothing once closed; check each player's
-formats, its fixed command (mpv's `fd://3` after `--`) and the order of
-every check before the player starts; and open a video item, not an
-animation, in the player. The store's reservation tests keep two copies'
-names, places and bytes apart while they are made, refuse a reservation
-past the bounds, give room back, and discard a copy finished after the
-store closed with the directory cleanup left for it; a copy an end was
-asked for after its clone or last chunk is discarded; a byte copy asks
-before every chunk whether to end and whether the rest still fits; a kept
-copy that never reached the player is removed, and one that cannot be
-deleted stays charged; byte copies made at once count each other's
-unwritten bytes against the reserve; a launch asked last whether exit has
-begun refuses when it has;
-a pinned process reads the
-checked copy on descriptor 3 (read-only on Linux) after something else took
-its name; a viewer or player that exits with an error is reported; and an
-Auto video's poster is placed and cropped in its box as a raster is, laid
-out against the video's own size.
-`kettle-ctl`'s `only_quicktime_passes_for_quicktime`
-checks QuickTime Player's requirement. Each fails without its change. The
-ignored `quicktime_opens_a_marked_copy_live` opens the copy in QuickTime
-Player and closes the store; QuickTime Player keeps playing its open copy
-after Kettle deletes it.
-
-`kettle-media-native`'s `tests/sandbox.rs` measures the worker's sandbox
-from inside a fresh copy of the test binary, each scenario against an
-unconfined control that shows every refused operation works without it: a
-confined job reads the file it holds (through its descriptor, a
-`/proc/self/fd` or `/dev/fd` reopen, and its path) but not the file beside
-it, `/etc/hosts` or anything to write; changes no mode; reaches no network;
-stays in its session; starts no program; and threads it starts are
-confined too. On macOS the same sibling cannot be reached through
-`/System/Volumes/Data` either. With programs, only those run, they read only what the job
-may, and a process the job starts inherits every refusal. A thread started
-earlier, as the watchdog is, confines itself to nothing (on Linux an
-earlier thread that did not would keep its access). Each runs on macOS and,
-in Docker, on Linux with Landlock ABI 4; a system without a sandbox says
-SKIP. The macOS profile takes every path as a parameter, and the Linux
-filter's jumps all land inside it; a script shorter than an ELF header is
-still a script, and a decoder's library tree is its package prefix, or the
-`lib` beside its `bin`, never a home, never a `lib` that is a link (to the
-home or to a sibling), and not through a `Cellar` of one's own. A confined
-job whose decoder runs past its deadline is answered at the deadline even
-where the sandbox refuses the kill. `kettle-media-render` reads only what the worker
-admitted: the admitted file after another takes its name, a failed file's
-failure even once its name leads to an admitted one, and no path the job
-never named. On macOS, the cancellation-free message-queue call is refused
-too. A sandbox that fails to apply fails these tests; only a system without
-one skips them. Unconfined a muted output AudioQueue plays and its clock
-runs; confined it cannot start, and a job granted sound plays it while
-refused everything else as before. Without either of the sound grant's two
-services an output does not start, so each is needed; the profile carries
-neither unless sound is granted; confined, the output's device still says
-its latency. `tests/audio_out.rs` plays muted silence
-through the output: its clock starts with it, runs while it plays, holds
-while paused and runs on after, each buffer comes back free once played,
-and a buffer is filled only within its size by whole frames; the default
-device says a latency above nothing and at most three seconds, and what
-has been heard is what the queue played less it
-(`what_is_heard_is_what_the_queue_played_less_its_latency`; this Mac's USB
-output said 12.75 ms). A machine
-with no audio output skips the sound tests, saying so, unless
-`KETTLE_REQUIRE_AUDIO` is set, which makes that a failure. The Linux
-filter's answers are checked by running it
-through an evaluator that accepts only the opcodes it uses: sockets, pairs
-but connected Unix ones, System V IPC, ioctls past the descriptor queries,
-signals leaving the worker (and, where Landlock scopes signals, none of
-that), processes and namespaces, truncating opens, and another
-architecture's numbering.
-`kettle-media-worker`'s fault tests show a job cannot read the file beside
-its source, that without a sandbox a video is refused
-(`SandboxUnavailable`) while an image renders, and that a watchdog left
-unconfined refuses videos too; its guard pins the watchdog's
-self-confinement and the barrier before rendering. Each fails without its
-change.
-
-V1b live acceptance (macOS 27, debug build with a signed worker, Claude Code
-2.1.296 in a Kettle pane with Claude Code previews): `kettle_show` of an
-H.264 MP4 and of a VP8 WebM each printed a card with the middle frame, the
-play glyph and `0:09`, named by assistive technology as `Video · 640×360 ·
-H.264 · 0:09 · no audio` (VP8 for the WebM, its poster through ffmpeg); a
-native right-press on the MP4's card offered Open and Open in QuickTime
-Player, which opened an owner-only, quarantined copy byte-identical to the
-file in a 0700 `kettle-video-` session; the WebM's row opened nothing and
-copied nothing; the lane's `↗`, clicked natively and through `send_mouse`,
-opened another copy; and closing the window deleted the copies while
-QuickTime Player kept the ones it had open. Not run: Linux with mpv, left
-for R1's pass on the Ubuntu guest (argv, trust and refusal are unit-tested,
-and Docker runs the copy tests through the byte copy, as its file system
-cannot clone), mixed DPI, and the notice banners, which macOS draws outside
-what the tools can capture (their mapping is unit-tested). This branch predates #512,
-so the WebM's notice raised macOS's "Choose Application" dialog, as main
-did before that fix.
-A video's Show result carries `video` (duration, its own size, codec name,
-rate when known, audio) beside its poster's size and round-trips; other
-results carry none. `media::shelf` keeps a video's metadata when its
-poster's pixels are evicted, and `app`'s `videos_keep_what_they_are` holds
-`finish_show` and `finish_lane_render` to storing it and the Show result to
-sending it.
-`kettle-vt` hands a refused image's pixels back when only the account's room
-was missing. `just cli-smoke` runs the built `kettle show` for its options,
-a missing file, an overlong path and non-UTF-8 Mermaid on stdin, all refused
-before any Kettle is looked for, so the smoke never shows anything where it
-runs, `kettle video-frames` for its options and a missing file (refused, no
-sheet written, the command in the completions), and `kettle agent-setup` for its function, its removal text and the
-lines of its status (on Windows, that it is not available). `main`'s tests
-pin that a pending update (on Windows, where one waits for Kettle's windows
-to close) ends every `show`, `mcp` and `agent-setup` invocation without
-running it.
-`kettle show`'s own tests pin its fixed failure wording, every
-refusal said by its code and reason and never in the reply's words (a
-hostile message, an unknown code or reason), stdin taken at its cap and
-refused one byte over (64 KiB with `--mermaid`, which must be UTF-8), never
-cut short, a path at 4 KiB looked for and one byte more refused before the
-file system is asked, the whole request measured as a client frames it (the
-largest image whose base64 fits the line, and the next refused; escape-heavy
-Mermaid always fits), the absolute attested path, `--mermaid` on a file, the
-attestation taken by opening the file (one it may look up but not read is
-refused with `permission`, unless the suite runs as root; a named pipe is
-refused at once, never waited on; a symbolic link is attested by its target
-and sent by its own name), and its confirmation. `kettle-ctl` pins `request_fits` against the line a client
-frames, to the byte with escapes, the inline `mermaid` source at 64 KiB and
-one byte over, `kind: "mermaid"` on a path only, and a path at 4 KiB in
-native units. `markdown_index` names a page of a file's gallery from 0 to 31,
-past that (32, 256, the largest number) is `index_out_of_range`, a negative,
-fractional or string index or one on any source but a path, or beside
-`kind: "mermaid"`, is `bad_params`, a request built in code is held to the
-same bound, and a page round-trips through the one parser. For a live check on macOS, the
-worker must carry Kettle's Developer ID signature: inside a pane of
-`kettle --agent-server off --agent-display on`, `kettle show plot.png` and
-`kettle show diagram.svg` are confirmed as raster and svg, verified; a text
-file is `unsupported_media`; with `KETTLE_PID` and `KETTLE_PANE_ID` stripped
-the pane is still found by ancestry; outside Kettle the command says it is
-not in Kettle, and naming this Kettle and pane through the environment from
-outside lands unverified.
-#### `kettle mcp`
-
-`a_stalled_stdout_is_detected_while_stdin_stays_open` drives the transport
-with a blocked writer and keeps input open until the server returns. It uses
-the shortened unit-test stall limit; production remains 30 seconds.
-
-`kettle mcp --self-test` (in-process handshake +
-`tools/list` + one `kettle_run`). CI also runs
-`crates/kettle/tests/mcp_stdio.rs`, which spawns the real `kettle mcp`
-process and speaks newline-delimited JSON-RPC over stdio — the boundary
-Claude Code / Codex use when the server is registered as an MCP. Protocol
-tests must cover both supported revisions, the exact initialized
-notification, initialization-time ping, notification silence, malformed or
-unknown tool envelopes, encoded-response truncation, 1 MiB/768 KiB framing
-limits, queue saturation, duplicate ids, and cancellation. Oversized run
-geometry must be rejected before terminal allocation. `kettle-ctl`
-loopback tests separately pin response deadlines, cancellation,
-authenticated peers, strict frame/id validation, concurrent activation,
-and preservation of events that precede a response. They also pin that a
-client retires itself after any request that ended without its response —
-a timeout, a cancellation, a breached event bound, a malformed frame — so a
-late response cannot answer the next call and no further request reaches
-that stream, while a structured server error (a real response) leaves the
-client serving calls. Retirement is checked at the *server* end too: the
-peer observes exactly one request and sees the connection close while the
-retired client is still alive, and the abandoned exchange's buffered events
-and unparsed bytes are released with it. The complementary case — a
-deadline that expires before the first byte goes out — leaves the
-connection usable and serving the next call.
-#### Live MCP
-
-`claude --mcp-config .mcp.json --strict-mcp-config -p "use
-kettle_run to echo a marker"` — Claude Code drives the MCP tools end-to-end.
-#### Live renderer/UI diagnostics
-
-On a Linux desktop or unlocked macOS Aqua
-session run
-`just live-render-smoke`, `just interaction-smoke`, `just hover-wheel-smoke`,
-`just image-paste-receipt-smoke`, `just video-paste-receipt-smoke`,
-`just tabbar-click-smoke`,
-`just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
-`just split-titlebar-smoke`, `just split-exit-resize-smoke`,
-`just steady-uploads-smoke`, `just cursor-blink-layer-smoke` (macOS),
-`just text-presentation-smoke`,
-`just zoom-keybind-smoke`, `just alt-arrow-zoom-smoke`, `just program-keys-smoke`,
-`just color-scheme-smoke`, `just theme-picker-smoke`,
-`just search-selection-smoke`, `just bell-flash-smoke`,
-`just default-window-size-smoke`, and
-`just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
-for frame-by-frame review. The tearoff recipe is two-tier: a portable
-ctl tier proves the mouseless `move_tab_to_new_window` tear +
-`tab_moved` broadcast (plus the `tear_lift`/`dock_highlighted`/`band`
-diagnostics in `ui_geometry`), and an X11-desktop-only tier
-(`scripts/check-tearoff-live-smoke.sh`) drives xdotool REAL pointer
-input through the full gesture — tear, freeze-guarded follow, re-dock
-merge, Esc cancel — once per carry path (native `_NET_WM_MOVERESIZE`,
-then `KETTLE_TEAR_MANUAL_FOLLOW=1` forcing the manual-follow/rescue-
-tick fallback). Real input is load-bearing: `maybe_tear_off` and
-re-dock respond only to native winit pointer events, so ctl
-`send_mouse` cannot reach them by design; the dock-highlight visuals
-are verified by recorded-frame analysis rather than this smoke (the
-ctl geometry endpoint only addresses the focused window mid-drag). Tabbar runs write `analysis.json` with the
-old/new active tab rects and outside-rect pixel-change counts; tab-title
-and split-titlebar runs assert cwd-derived labels use the available title
-budget before ellipsizing. The split-titlebar run launches independent
-top/bottom-title windows and captures broadcast-off plus broadcast-on
-frames. It combines `ui_geometry` with exact PNG samples to prove the
-titlebar/grid edge and focused/transmit, inactive, and receiving colors;
-the sample gutter excludes title glyphs, icons, and pane accents.
-`analysis.json` records every sample coordinate and grid boundary. The
-split-exit-resize run covers the other half of a split's life: it lets the new
-pane's shell exit on its own, which is the path that goes through `Mux::reap`
-rather than a close action, and asserts the survivor's grid returns to its
-exact pre-split size before reading the same numbers back out of the tty with
-`stty size`. Both numbers matter. The grid commits local geometry even when the
-native resize fails, so the grid alone would not prove the child was told.
-Before closing, it waits for the source grid to shrink; pane creation precedes
-the redraw that applies that resize.
-
-`just pane-drag-smoke` does not currently pass anywhere. The gesture arms only
-in the native winit pointer path; `ctl_mouse_press` never sets `ws.pane_drag`,
-so the control plane cannot reach it and the script stops at "press on a pane
-titlebar did not arm the gesture". That is the same native-only property the
-tearoff smoke documents for `maybe_tear_off`, which is why the tearoff recipe
-carries a separate xdotool tier. Closing it needs either an arming path in
-`ctl_mouse_press` or an xdotool tier here, and the script header records both.
-
-`crates/kettle-config/tests/harness_action_names_resolve.rs` feeds every action
-name these scripts hand to `perform_action` through the real parser. The
-scenarios are manual rather than gated, so a dead name would otherwise stay
-invisible until someone runs them.
-
-`just split-repro` is a hunt rather than a gate and runs in no recipe chain. It
-splits and closes in a loop against a pane whose foreground process keeps
-spawning short-lived `bash <script>` helpers. A split must never clone that
-shape, because the clone dies on arrival. Exit 2 means it reproduced and printed
-a capture directory holding the doomed pane's argv, its child pid, a process
-tree rooted at the source pane, and any swallowed split error.
-`just split-repro --claude` drives a real Claude Code pane instead of the
-fixture and skips cleanly when `claude` is not installed.
-The pane-drag run builds a three-pane tab, grabs the focused pane by its own
-titlebar, and walks press -> jitter inside the slop radius -> move onto a
-neighbour's right quarter -> release, asserting the `pane_drag_armed` /
-`pane_drag_live` / `pane_drag_target` triple at each step and that the drop
-reorders `ui_geometry`'s `panes` without gaining or losing one. The drop-zone
-geometry itself is unit-tested (`pane_drop_zone`, `pane_drop_preview` in
-`mux.rs`, including a case that fails under the rejected pixel-distance
-model); this smoke proves a titlebar press actually reaches it.
-Underline runs write
-`analysis.json` with the visible underlined sentinel sequence across down/up
-scrolling plus per-row SGR underline, plain-row, and autodetected `/` and
-`\` path-overlay pixel hit counts from the PNG frames. The underline probe
-uses the renderer cell metrics from per-frame `ui_geometry` rather than
-deriving cell size from the full screenshot, so unused bottom/right surface
-pixels cannot masquerade as row drift.
-`delta_fixtures` records whether the git and SVN `diff | delta` fixtures
-were active. Interaction runs include
-`notification-events.jsonl` and `notification-event.json` for the OSC 777
-event-feed assertion. Before it sends OSC 777, the helper waits up to eight
-seconds for `kettle ctl events` to print `kettle ctl: listening for events`
-on stderr, which it does once the server confirms the subscription. The
-helper self-test holds that line back to check the wait. Native
-Windows runs the tabbar/underline recipes through
-`scripts/check-live-ui-smoke.py`; WSL uses the Unix shell scripts. Run those
-platform-local recipes before changing renderer defaults or tab/underline
-interaction code.
-
-The image-paste receipt run intentionally replaces the desktop clipboard
-with a generated 640 by 360 bitmap. It requires `wl-copy` on Wayland or
-`xclip` on X11; macOS and Windows use native clipboard APIs. The run proves
-the exact source dimensions reach the receipt, the pane receives a managed
-temporary path, expanded and compact frames differ, hover restores the
-thumbnail, and `ui_geometry` exposes neither that path nor image pixels.
-The path is verified in memory and redacted from `screen.json`; saved PNGs
-are cropped to the receipt lane so the private command-line path never
-enters the visual artifact. After the visual states are captured, a second
-paste proves that later key input clears both the shell line and its
-now-stale receipt.
-
-On GNOME Wayland, also paste a native screenshot and click its receipt. The
-configured Kettle viewer must open without a default-application dialog. In the
-default overlay mode, check its 90% pane-relative frame and unchanged terminal
-grid; Escape must restore the exact command line and cursor. Capture audio output
-separately when checking video sound, and compare a continuous tone with direct
-PipeWire playback under the same video load. A virtual-device capture does not
-prove physical speaker output.
-
-`just video-paste-receipt-smoke` copies two generated videos, invokes the
-real Paste action, and captures the receipt lane in expanded, compact,
-hover, and dismiss states. It requires `ffmpeg` plus a graphical session, Swift on macOS, and
-`wl-copy` on Wayland or `xclip` on X11. Windows needs no extra clipboard
-helper. On macOS and Linux the poster comes from the media worker, so the
-smoke first waits for `get_state` to report it available beside the Kettle
-under test, and stops with a build hint when it is not (on macOS the worker
-must also be signed); Windows exercises its Shell provider. The Linux run
-starts Kettle with an empty `XDG_CACHE_HOME`, so the poster comes from the
-user's ffmpeg rather than a cached thumbnail. The smoke rejects
-leaked paths or pixels, a path-based open action, a lost batch count, a
-missing poster, unchanged card states, or a dismiss target that does not
-close the receipt. A final re-paste proves later key input clears both the
-file-list text and its stale receipt.
-On macOS the clipboard writer reads back every file-URL item before Swift
-exits, so the full batch remains available to the later paste reader. Native
-readback failures report the writer exit code, distinguishing clipboard setup
-from later receipt failures.
-
-Native CI also runs `video_preview_native`. Its tests start one worker at a
-time: run in parallel, two workers asking the Windows Shell thumbnail
-provider at once could each overrun the two-second deadline on a loaded
-runner, although each passes alone. Every platform leaves worker
-stdin open and proves the child exits at its own deadline. On macOS and
-Linux the check answers with the file's own device, inode, size and
-modification time and no pixels
-(`shipped_check_answers_with_the_file_s_identity_and_no_pixels`); on Linux,
-given an isolated `XDG_CACHE_HOME`, it names the video's cached thumbnail with
-the file it opened (`shipped_check_names_the_video_s_cached_thumbnails`).
-Windows retries only an explicit first-worker timeout, matching production's
-cold-provider retry, and never retries malformed output, read errors, or
-trust failures. Windows validates
-the response when its shell thumbnail provider supports that fixture; set
-`KETTLE_REQUIRE_NATIVE_VIDEO_POSTER=1` on a capable Windows host to make a
-missing poster fail. `a_preview_child_that_exits_unread_cannot_end_kettle`
-runs, in a child process with SIGPIPE's default action and on a thread that
-blocks it as the queue workers do, a request larger than a pipe holds to a
-worker that exits unread: the process survives (on macOS that needs the
-pipe's `F_SETNOSIGPIPE`, since the signal goes to the whole process; red
-check: without it the child dies of SIGPIPE). Worker identity: the
-identity is `KETTLE_SOURCE_ID` (the version and a hash of the Rust sources),
-bounded; a request
-from another build, by frame version or identity, is skew, which the worker
-reports with its own exit code and the parent neither retries nor treats as
-an ordinary failure; on Linux the worker program is `/proc/self/exe`, and a
-copy of the test binary that deletes its own file can still start it; a
-source guard keeps `main` setting the identity before the worker dispatch.
-The same shipped-worker suite verifies that text named `.mp4`, an incomplete
-EBML header named `.webm`, and an AVIF container named `.mp4` produce no receipt,
-while the real MP4 fixture named `.avi` produces a valid response. Portable
-`kettle-media` tests in `video_sniff` cover ISO-BMFF brands and normal, extended
-and to-EOF atoms; complete EBML headers, top-level DocType and wide sizes; RIFF
-AVI forms; legacy QuickTime, FLV, Ogg, ASF and MPEG families; and the exact
-64 KiB inspection boundary. These identify container families, not video tracks
-or decoder capability. Before wiring the shared classifier, the shipped worker
-returned a receipt for the text fixture; the new test failed on that behavior.
-On every native runner `video_preview_native` sends the shipped binary a
-request from another build and an old-frame request (both exit with the skew
-code, stdout empty) and one from its own build (not skew).
-Red checks: ignoring the identity, reading an older frame as garbage,
-retrying skew, and dropping the skew exit mapping each fail a test.
-The poster step's unit tests drive it with injected worker replies and read
-back the jobs it sent: the Auto job is held to the checked device and inode
-and fitted inside 256 by 160; a render of a changed file, of anything but a
-video, or past the receipt's bounds is no poster, and so is one a second check
-does not agree with (contents rewritten with the time restored, another
-inode, or a check that now fails); every render is held to the receipt's
-deadline. On Linux the failures a
-cached thumbnail can stand in for (no decoder, no codec or container, no
-sandbox, a stream the decoder fails on) try each checked thumbnail in turn as
-a CachedThumbnail job held to its inode and to the video's URI and time,
-stopping at the first that renders or at the deadline, while a changed video,
-a passed deadline, a missing worker or a gone file get no stand-in, nor does
-any failure on macOS, and a stand-in for a video rewritten before the worker
-read it is dropped by the second check. The check names only thumbnails
-opened through a trusted
-chain, largest first: never a link, a file others can write, or one under a
-directory others can swap (`the_check_names_only_trusted_cached_thumbnails`),
-and it looks in `XDG_CACHE_HOME` when set, in an isolated child. Check
-attempts end by the receipt's 20-second deadline: a job past it starts none,
-each attempt waits its own two seconds or less, and a timeout is retried only
-while time is left (`check_attempts_end_by_the_receipt_s_deadline`); a helper
-that stalls without reading a request larger than a pipe holds stops the
-attempt at its cutoff, since the request is written on its own thread; a reply
-seen after the cutoff counts as a timeout; and a second check whose helper
-cannot be reaped stops its queue thread, which answers the checked receipt
-without a poster. The
-shipped check gives the same fingerprint for the same file twice. The thumbnail's own rules
-are the worker's, in `kettle-media-render`'s `thumbnail` tests: it renders
-only when `Thumb::URI` and `Thumb::MTime` name the video, the time in whole
-seconds or with tumbler's fraction when it agrees with the file's nanoseconds
-to its own precision, truncated or rounded, a rounding that carries into the
-next second included; another second, another fraction, signs, exponents,
-spaces, leading zeros, over nine digits and a fraction before 1970 (where the
-sign makes it ambiguous) do not; anything but a PNG, or one past 4096 pixels
-on a side, or a header too large to size, is refused before a pixel is
-decoded, and a rounding past the largest second matches nothing. The worker's
-`a_cached_thumbnail_renders_only_for_its_video` crosses the real worker
-boundary, sandboxed where the system has a sandbox; a raster, it renders
-unconfined where none can be applied. There is no GStreamer acceptance test because Kettle uses no
-GStreamer: the plan's spike did not meet its go/no-go rule, so it does not
-apply, rather than passing. Portable state tests also
-prove that a missing worker response expires and that the event loop
-schedules the cleanup deadline instead of retaining a pending path forever.
-
-Search release evidence is platform-scoped. Run the live interaction/search
-probe on an Ubuntu Wayland or X11 desktop and an unlocked macOS Aqua session;
-exercise the same pane under tmux, clean Neovim, configured AstroNvim, Codex
-CLI, and Claude Code CLI where installed. Never infer one supported platform's
-result from another platform's unit test or offscreen renderer pass. Record
-missing tools and unrun platforms as explicit skips in the release audit.
-
-### Linux launch-scoped cards
-
-Portable tests cover hook profiles, direct/npm ancestry, pane generation,
-one-use pickup, expiry/capacity and redacted permit serialization. Native
-Linux tests exercise held ELF metadata, descriptor transfer, executable
-changes and agent exit. Access ACL fixtures reject named-user and named-group
-write grants through the private-group exception and accept masked grants;
-filesystems without access ACL support skip that fixture explicitly.
-Launcher fixtures check native and npm layouts,
-relative PATH preservation and close-on-exec descriptors. zsh/fish fixtures
-verify each enabled agent independently, unchanged argument forwarding,
-noninteractive shells and user-defined functions. MCP tests keep card text
-and pickup permits out of model receipts and remove pending cards before
-performing blocking validation.
-
-Run `cargo test -p kettle-ctl agent_launch`, `cargo test -p kettle agent_setup`
-and `cargo test -p kettle-ui codex_shell`. Container tests exercise Linux kernel
-behavior, not GNOME or official CLI acceptance. Native card, hook and live
-Ubuntu acceptance must be recorded separately before release.
-
-`check-agent-cards-smoke.py` drives native and npm-style Codex routes plus
-Claude's native route with a compiled simulated harness. It checks real TTY
-launches, MCP receipt privacy, rendered chart pixels, agent exit and unscoped
-shelf fallback. CI runs it under Xvfb; Ubuntu GNOME Wayland acceptance is
-recorded separately. The fixture makes no model calls and is not official CLI
-acceptance. It requires existing Rust, Python and Node; it installs nothing.
-The npm fixture copies Node into its private directory with mode 0700 so hosted
-toolcache ownership and permissions do not weaken production admission.
-Native identity fixtures wait for the final `/proc` image before admission.
-Audio device fixtures allow transient missing timestamps across pause/resume,
-within the same two-second clock budget; they still require real clock samples.
-Guard reversals cover pane identity, peer-file stamp, late process validation,
-relative PATH selection, descriptor closure, receipt privacy and CLI option
-exclusion. Each produced an assertion failure, followed by source restoration.
-
-## Pattern: audit-driven hardening
-
-kettle's test count grows mostly through targeted bug hunts — each pass
-finds a silent-fallback bug, parity gap, or docs-drift on a specific surface,
-extracts a pure helper if applicable, wires it in, and pins the contract
-with a test. See [CHANGELOG.md](../CHANGELOG.md) for the full list;
-the pattern is documented in `### Tests` and `### Fixed` entries that
-name the shape of bug each pass caught.
+Use [PERFORMANCE.md](PERFORMANCE.md) for measurement tools and limitations.
+Do not infer a latency or memory improvement from a responsive-looking demo.
+The owner-controlled standing method has its own publication gates below.
 
 ## CI
 
-`.github/workflows/ci.yml` runs supported runtime checks on **ubuntu/macos** and
-retained compile/regression checks on **windows**:
+This map describes the checked-in workflow definitions, not a claim that a
+particular revision has passed them. Open the linked YAML for exact commands,
+path filters, permissions, and artifact retention.
+All schedule times below are UTC.
+A path-filtered workflow may not run for a source-only change outside its filter.
 
-- `fmt --check`, `build --all-targets`, `clippy -D warnings`,
-  `cargo test --workspace` on every OS.
-- `.github/workflows/fuzz.yml` runs the fuzz targets each night
-  (see Fuzzing).
-- `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings` (Linux only —
-  catches broken intra-doc-links, malformed examples; rustdoc is
-  platform-agnostic so one runner suffices).
-- A **headless GPU smoke** under Xvfb + software Vulkan on Linux.
-- A quarantined Linux **live-UI `search-history` smoke** launches the release
-  binary under Xvfb, drives ctl, validates search state, and compares controlled
-  screenshots against reported geometry. Query/status pixels must change inside
-  an unchanged search rectangle; then a focused match is compared with a
-  no-match capture at the identical row count and display offset, and pixels
-  must change inside the exact active match-cell rectangles reported by
-  `ui_geometry`. PNG/screen/cell/geometry evidence is uploaded for
-  seven days. It remains
-  `continue-on-error` only during its initial one-week flake-rate observation;
-  do not count it as a required gate until that quarantine is removed.
-- A quarantined Linux **live-UI `text-presentation` smoke** prints `⏺` U+23FA
-  alone in a pane and asserts every pixel in that glyph's own cell is a blend of
-  one ink and the background. A monochrome glyph stays on that line; a colour
-  glyph carries more than one hue and leaves it. Both reference colours are read
-  out of the screenshot, so the oracle does not depend on the theme. It **skips**
-  when `ui_geometry` reports a null `text_presentation_face`, as on a host with
-  no monochrome font carrying U+23FA (GitHub's Linux runner included). Kettle
-  leaves such a host on the platform cascade, so there is nothing to assert. A
-  missing field is a hard failure, so the skip cannot quietly become
-  unconditional.
-- A quarantined Linux **live-UI `split-exit-resize` smoke** splits a pane,
-  lets the new pane's own shell exit, and asserts the survivor returns to its
-  exact pre-split columns and rows, then reads the tty winsize back with
-  `stty size` because the grid commits even when the native resize fails.
-  Quarantined for the same reason as `search-history`: creating a window under
-  Xvfb on a hosted runner is the flake source, not the assertion.
-- A quarantined Linux **live-UI `color-scheme` smoke** runs a recorder that
-  turns on DEC mode 2031 and asks for the scheme once, then flips the theme
-  with `toggle_light_dark` twice and asserts exactly one report per flip.
-- A quarantined Linux **live-UI `program-keys` smoke** gives a split pane to a
-  byte recorder that holds the alternate screen and kitty flags, and asserts
-  through `dispatch_keybind` that `Shift+Left` falls through to it and resizes
-  the split again once it lets go. Only the macOS run presses real keys,
-  because Xvfb without a window manager cannot focus the window.
-- The **`--screenshot` end-to-end** +
-  **`--screenshot-menu` visual regression** smokes on Linux
-  (both run the release binary under `LIBGL_ALWAYS_SOFTWARE=1`).
-- Native shell-integration fixtures: stock interactive `zsh -f` and system
-  Bash 3.2 on macOS, Fish 3.7/4.2/4.8 behavior on Linux, plus PowerShell
-  prompt/Enter behavior on Windows. The Fish leg drives real Emacs and Vi key
-  maps, requires the private completion OSC within 750 ms, and pins release
-  archives by SHA-256. Geometry and renderer tests cover prompt-relative
-  anchoring to the editable command column, right-edge clamping, the header
-  lane, lookahead, scroll math, content-fit width,
-  middle-ellipsized paths, readable theme colors, and bounded token emphasis;
-  pointer hit tests ensure a click dismisses it instead of acting on obscured
-  terminal content. Parser coverage also pins selection when an otherwise safe
-  PowerShell row carries a multiline tooltip. Fish fixtures require ambiguous
-  leading-dash candidates to publish without option-parser noise, re-page from
-  a selected row that crosses the wire budget, and preserve absolute positions
-  across an omitted unsafe label. This shell fixture does not claim a live card
-  was drawn.
-- The tracked-file integrity audit on Linux, including UTF-8/LF hygiene,
-  Markdown targets, and PNG/SFNT structural checks.
-- The macOS comparator score self-test, the macOS standing self-test, and the
-  mandatory Kettle-owned portion of
-  `just agent-cli-smoke` on macOS; unavailable third-party clients are recorded
-  as skips rather than claimed as covered.
-- A CLI smoke on every OS: locked rebuild plus exact 12-character Git/dirty
-  identity matching, `--version` shape,
-  `--check-config` lead line, `--config-path`, `--list-themes`
-  > 400, `--list-actions` > 50, `--list-keybinds` > 40,
-  `--list-ssh-hosts` empty fallback, `--print-default-config`
-  round-trip, `--shell-integration <bash|zsh|fish|powershell>` snippets,
-  `--print-completions <bash|zsh|fish|powershell>` scripts,
-  malformed-profile diagnostics from an owner-private fixture created under a
-  deliberate Unix `002` umask (every directory/file mode is named explicitly),
-  `--config /<typo>` + `--working-directory /<typo>` hard-fail
-  exit codes, happy-path basename round-trip
-  (Windows path-translation parity).
-- The **MSRV verification job** builds and tests the workspace on the
-  declared Rust 1.95 floor (`dtolnay/rust-toolchain` with `toolchain: "1.95"`),
-  so a transitive-dep MSRV bump fails at PR time instead of release time.
-  `kettle-test-support`'s `msrv_consistency` test keeps the floor declared
-  once: the job's name, toolchain, cache key and locked build and test
-  commands, the Nix toolchain derived from `Cargo.toml`, every member
-  inheriting the workspace floor, and the README, CONTRIBUTING, INSTALL and
-  Nix docs must all agree with `rust-version`, and none of them may name
-  another floor.
-- The **icon raster, actool, and ico packaging smokes** — the cross-platform
-  generator gate compares the Linux SVG, `AppIcon.icon`, every PNG, and
-  all seven ICO resolutions. The macOS leg compiles the Icon Composer document
-  and requires `Assets.car`, `AppIcon.icns`, `CFBundleIconName`, and
-  `CFBundleIconFile`; the Windows leg validates and embeds the existing `.ico`.
-  Source guards pin that window creation plus palette changes synchronize the
-  native titlebar and Windows/X11 icon. These checks prove wiring and input
-  assets; they pin the two strokes of `>_` at 16 and 24 px, exact dark/light
-  palette inversion, separate adaptive Icon Composer sources, and the inset
-  face geometry. These checks
-  do not prove AppKit's visual treatment. Before release, compile the asset with
-  Xcode 26 and inspect both 256 px appearances plus a normal-size Dock item:
-  the system mask and inset face should remain parallel with clear rim space.
-  Then run the native
-  macOS Dock and rounded-window check in
-  [RELEASING.md](RELEASING.md#macos-appearance-gate).
-- The adaptive directional-focus matrix pins all four exact
-  `Alt+Arrow`/`Focus*` pairs, rejects extra modifiers and mismatched customized
-  actions, and keeps the macOS policy disabled. Mux geometry tests separately
-  prove both real-neighbour selection and each outside-edge no-op; together
-  they cover the two branches in the physical keyboard route without making a
-  synthetic window event the source of pane geometry. Zoom is pinned from both
-  sides: the mux test proves `pane_in_direction` answers `None` in every
-  direction while a multi-leaf tab is zoomed (and for a one-leaf tab with the
-  zoom bit set), and the App-level test drives the real predicate through a
-  two-pane `Mux` across `toggle_zoom` to prove the chord falls through while
-  the siblings are hidden and returns to a focus move afterwards. The
-  `alt-arrow-zoom` live smoke exercises the same decision through the
-  `dispatch_keybind` control route. Key-release state tests reproduce
-  auto-repeat in both directions across the consume/pass-through boundary; the
-  eventual release must follow the terminal-owned repeat rather than a stale
-  consumed press, and a later UI-owned repeat cannot reclaim it.
-  Every modal branch of the keyboard path records the key whose press closed
-  the modal, so its repeats are dropped rather than reaching the terminal
-  (a source guard counts the branches), and a truth table pins which keys
-  act once per press in each modal. A HID-level check holding Enter in the
-  command palette recorded no stray Enter behind it, where main sent one per
-  repeat.
-- The legacy modifier sweep walks all 16 subsets of Shift/Alt/Control/Super
-  across arrows, navigation, function, editing, keypad and character keys, in
-  legacy, DECCKM, DECKPAM, both `modifyOtherKeys` levels and five Kitty flag
-  combinations. It asserts a shape property rather than a byte table: output is
-  always `None`, plain text/C0, one ESC prefix plus such a payload, a
-  well-formed SS3, or a well-formed CSI whose legacy modifier parameter is
-  exactly `1 + shift + 2*alt + 4*ctrl`. The shape and parameter properties
-  catch any Super bit or any modifier folded into a parameterized sequence, the
-  class of the Command bug. They do **not** catch a modifier dropped from a
-  payload with no parameter (encoding `Ctrl+A` as a plain `a` still satisfies
-  them), so the per-chord exact-byte tests are still required. `Alt` implying
-  an ESC prefix holds for every legacy chord it emits, Enter included. Source
-  drift guards pin that each legacy entry point consults the Super predicate
-  and that the Kitty path still reports Super, so a later cleanup cannot
-  "fix" the protocol that is entitled to it.
-- Confirm-bar contrast is checked against every bundled theme rather than
-  spot-checked, because the failure is per-theme: the bar paints `palette[1]`
-  and the shipped default's foreground sits at roughly 1.6:1 on it. A second
-  test pins that regression directly — the raw foreground fails and the
-  helper's output passes — so the guard cannot be satisfied by a helper that
-  quietly stops lifting.
-- **Cross-platform record for the Super/Command encoder change (2026-08-21).**
-  macOS: `just gauntlet`, plus a live `kettle ctl send_keys` sweep before and
-  after against an isolated debug instance. Linux: the encoder suite was run in
-  a local Ubuntu 26.04 aarch64 VM (48 → 59 tests, all passing); the 34 unrelated
-  failures there are filesystem/XDG tests that fail identically on `main` in the
-  same VM (`session::` 6 failed on both, `paste_image::` 13 failed on both),
-  because the VM runs them as root on tmpfs. Windows: **not run locally** — the
-  Windows 11 VM could not build `ring`'s custom build script for lack of a C/asm
-  toolchain. Windows coverage for this change comes from
-  `build (windows-latest)` in `ci.yml`, not from a local run.
-- The modified-Enter matrix pairs the live line-discipline result with a
-  recognized foreground composer, rejects nested/raw shell and readline cases,
-  and exercises direct versus shell-hosted Windows clients. Process-snapshot
-  tests prove the Windows breadth-first scan selects the closest recognized
-  composer before its helper children even when that subtree forks, and rejects
-  ambiguous sibling branches directly under the shell. Native PTY readiness
-  markers are assembled from separate shell words so the shell's own input echo
-  cannot satisfy the assertion before the child actually prints them.
-- The Windows CI leg does not install, upgrade, uninstall, or package Kettle.
-  The retired Windows installer and fault-injection smoke remain in the
-  `v3.3.0` source and documentation.
-- **Session recording** — recording is a runtime toggle (`record = on` /
-  `--record`) compiled into every build, so the default build/clippy/test
-  exercise the GUI recording flags, input tokens, markers, and status UI
-  directly (no separate feature leg). See [RECORDING.md](RECORDING.md).
+### Core matrix: `ci.yml`
 
-Separate workflows:
+[.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on every PR and push
+to `main`. Its jobs are:
 
-- `.github/workflows/audit.yml` — pull requests run the editable lru scope
-  guard and both `cargo audit` scans in a read-only job whose
-  checkout does not persist credentials. Pushes to `main` and the daily
-  06:00 UTC schedule run `rustsec/audit-check` in a separate trusted job;
-  Checks/issues writes are job-scoped and the token is passed only to the
-  RustSec action step.
-- `.github/workflows/nix.yml` — on every pull request and push to `main`,
-  installs upstream Nix, rejects lock-file drift, evaluates every supported
-  system, builds the x86_64 Linux cargo-test check, launches the installed
-  package under Xvfb with Mesa software Vulkan and no `LD_LIBRARY_PATH`, then
-  explicitly builds the package without creating a result symlink. A separate
-  Linux-only package-content derivation byte-compares the installed Desktop
-  Entry, scalable and raster hicolor icons, man page, and shell-integration
-  snippets with their checked-in sources; it also verifies their store modes
-  and exact `share/` file count. The Nix
-  derivation executes tests only for the root-independent `kettle-vt` and
-  `kettle-remote` crates: its Linux sandbox presents `/` as uid 65534 while the
-  builder is uid 1000, so Kettle's private-path policy intentionally rejects
-  positive private-file operations beneath that ancestry. Native Linux, macOS,
-  and Windows CI plus the Linux Rust 1.95 MSRV job remain authoritative for the
-  complete workspace, including private-state, configuration persistence,
-  screenshots, recording, local IPC, and updater tests. The separately named
-  launch check proves the appended
-  RUNPATH retains Nix's glibc/libgcc paths and contains the dynamically loaded
-  GUI dependencies rather than borrowing them from the runner. ARM Linux and
-  Apple Silicon outputs are evaluation-only in this workflow and are not
-  reported as native Nix build/runtime passes.
-- `.github/workflows/release.yml` — mandatory macOS, Linux x86_64, and Linux
-  aarch64 packaging on every verified `v*` tag. One protected
-  Linux packaging baseline builds both GNU targets on Ubuntu 22.04 and rejects
-  any binary whose `readelf --version-info` requirements exceed glibc 2.35.
-  This keeps the one-line installer compatible with the documented ABI floor.
-  Each Linux tarball and the macOS app resources include the root
-  `CHANGELOG.md` plus `docs/changelog/`, so the root changelog's archive links
-  keep the same paths in the packaged documentation. Linux updater coverage
-  adds a synthetic `CHANGELOG-4.x.md`, then checks deterministic publication,
-  mode normalization, invalid names, nested entries, collisions, and a
-  symlinked destination with rollback.
-  The
-  finalizer validates all archives and sidecars, requires the signing secret
-  to match the checked-in production trust root, signs and verifies the update
-  manifest with that root, renders Homebrew/AUR metadata from the archive
-  bytes, verifies the exact twelve-file draft, and publishes it once. Those
-  files are three packages and sidecars, the manifest and signature with their
-  sidecars, plus the rendered Homebrew formula and Arch `PKGBUILD`.
-- `scripts/check-macos-update-smoke.sh` — downloads a published
-  `kettle-macos-universal.zip`, checks it against its sidecar, and runs the
-  macOS bundle updater over it with the real `codesign` and `spctl`. Unit tests
-  cover staging, refusal, and the swap against a stub verifier, because no
-  synthesized bundle can be notarized; this is the only check that proves a
-  real archive keeps its seal through plain zip extraction and an atomic
-  directory swap. `KETTLE_MACOS_ARCHIVE_REQUIRED=1` turns a missing archive
-  into a failure so the check cannot quietly stop running. macOS only, and a
-  documented release gate rather than a `gauntlet-full` dependency, since it
-  needs the network.
-- `scripts/check-package-templates.sh` — tests deterministic Homebrew/AUR
-  rendering from source `.in` files. At an exact clean release tag, auto mode
-  also checks its generated `kettle.rb` and `PKGBUILD` against the published
-  `.sha256` sidecars; `--require-release` makes that publication check
-  unconditional. CI runs auto mode on Linux.
-- `scripts/check-linux-installers.sh` — starts from the release binary produced
-  by CI, installs into throwaway custom prefixes, and verifies desktop, man,
-  icon, no-follow helper, provenance, and `local-dev` ownership state. It
-  preserves unrelated shared-prefix content and reproduces the audited
-  `share/kettle` symlink replacement, proving uninstall refuses before mutation
-  and the external victim sentinel survives. It then installs the same binary
-  with `--record-dir` into prefix/record paths containing every Desktop Entry
-  quoting edge (`\\`, `%`, `$`, `"`, and backtick), plus private mode and
-  symlink-refusal checks. A simulated stable release-tarball install refuses
-  `--record-dir`, then installs and uninstalls with the `stable` marker. When
-  the matching release tag and platform asset are
-  both published, the script also runs `install-online.sh` and verifies SHA-256
-  and prefix-local uninstall behavior. A tag whose asset still returns 404 is
-  treated as an in-progress release; other asset-probe failures remain fatal.
+| Job ID | Host | What it runs |
+| --- | --- | --- |
+| `fish-shell-integration` | Ubuntu 24.04 | Shell fixtures with Fish 3.7.x, 4.2.1, and 4.8.1; Apple payload fixture |
+| `macos-26-release-icon` | macOS 26 | Release AppIcon compilation with Xcode 26.x and retained assets |
+| `build` | Ubuntu, macOS, Windows latest | Stable workspace and native checks described below |
+| `msrv` | Ubuntu latest | Locked workspace build and tests with Rust 1.95 |
+| `nightly` | Ubuntu latest | Workspace build/tests with current nightly; nonblocking early warning |
+| `aarch64-linux` | Ubuntu latest | ARM64 GNU cross-build; nonblocking early warning |
 
-### Native image paste routes
+The `build` matrix runs formatting, locked workspace build, warnings-denied
+Clippy, and tests. It adds the media stub-worker and panic-fault feature legs.
+It validates Justfile parsing and current-platform recipe visibility.
+It runs portable-pty tests/Clippy on each native OS, shell snippets in installed
+native interpreters, and the live-helper and Wayland-trace self-tests.
 
-`python3 scripts/check-image-paste-parity.py --kettle ./target/release/kettle`
-replaces the desktop clipboard with generated test pixels. Run it in an isolated
-Xvfb display on Linux (`env -u WAYLAND_DISPLAY xvfb-run -a python3
-scripts/check-image-paste-parity.py --kettle ./target/release/kettle`) or on a
-dedicated macOS runner. Linux needs `xclip`,
-`xwininfo`, `xprop`, and libXtst; macOS needs native event-posting permission.
-The required native CI steps run it after building the release binary.
+Linux adds these checks inside `build`:
 
-The test checks regular paste, native Ctrl+Shift+V, macOS Cmd+V, PRIMARY fallback,
-and middle-click. It verifies a delivered managed PNG path, thumbnail dimensions,
-and receipt survival after key release. Bare Ctrl+V must reach the client through
-Kitty keyboard encoding and dismiss the previous receipt. This offline client
-proves terminal routing. Optional `--codex /path/to/codex` also tests Codex
-0.155.1's real composer with an empty private profile, a trusted empty directory,
-and an offline provider. It pastes only once the screen names the model: Codex
-first draws a startup draft with the same placeholder, whose composer inserts a
-pasted image path as text, and the draft names no model. Readiness polls the
-placeholder and named model together within a 20-second deadline. It does not
-require an unchanged screen: composer animations keep changing the text even
-while image attachment is ready. The ordinary headless helper self-test covers
-continuous animation, rejection of the initial draft, and finite failures when
-the model or placeholder never appears. Its animated fixture failed against the
-former quiet-screen wait before that redundant wait was removed.
-Each shortcut must add
-a new numbered attachment; Kettle thumbnails must follow the documented
-shortcut policy. No prompt is
-submitted and no credentials are needed. CI downloads the fixed official release
-and checks its pinned SHA-256 before execution. `results.json` records the actual
-OS, render surface, grid, and outcomes; `codex-results.json` records the client
-version and attachment outcomes.
+- Direct vendor parser tests/Clippy and the clipboard URI patch.
+- Tracked-file audit, required Mermaid rendering, and generated icons.
+- Package templates, update-manifest, draft-asset, release-script, package/media
+  installation, and online-installer fixtures.
+- Fuzz guards and live-probe/menu-screenshot fixtures.
+- Warnings-denied workspace rustdoc.
+- Independent release application and media-worker builds.
+- Native image-paste routes under Xvfb with the pinned offline composer client.
+- Simulated launch-scoped cards and centered media viewer under Xvfb.
+- Isolated Linux install/uninstall, including the online path when available.
+- Hidden main/alternate/split job-control fixtures and negative controls.
+- A windowed Xvfb GPU launch plus offscreen GPU-info, menu, and PNG checks.
+- The quarantined search-history live step, with artifacts retained even when
+  it fails. That step uses `continue-on-error`; it does not gate the matrix.
+
+macOS adds these checks inside `build`:
+
+- Comparator scoring, standing-method, and A/V-sync self-tests.
+- Release AppIcon compilation through the Xcode-selection helper.
+- Update-manifest and release-script fixtures, including native-only cases.
+- Package-manifest and media-installation fixtures.
+- Independent release application and worker builds.
+- Native image-paste routes with the pinned offline composer client.
+- Modal-shortcut and light-titlebar native checks.
+- Required Kettle-owned agent CLI probes; unavailable third-party clients skip.
+- Hidden zsh job-control fixtures and negative controls.
+- Offscreen GPU-info, menu, and PNG checks on the runner's Metal adapter.
+
+Windows retains these additional checks inside `build`:
+
+- Native ConPTY vendor coverage and PowerShell shell integration.
+- Package-manifest extraction fixtures under Windows filesystem semantics.
+- A retained multi-resolution ICO resource check.
+- A release-profile build and piped version output through PowerShell.
+
+All three hosts run CLI introspection and error-path checks.
+The shared CLI helper rebuilds and compares the exact Git/dirty identity.
+Windows CI does not install, update, uninstall, package, or publish Kettle.
+Cross-compilation does not establish native ARM runtime behavior.
+
+The MSRV and nightly jobs need software Vulkan because workspace tests include
+offscreen rendering. Their build/test result is separate from live desktop
+acceptance. The nightly job here is not the timed libFuzzer workflow.
+
+### Workflow syntax: `actionlint.yml`
+
+[.github/workflows/actionlint.yml](../.github/workflows/actionlint.yml)
+runs for PRs and `main` pushes touching workflows, labeler configuration, or
+Dependabot configuration.
+
+- Job `actionlint` rejects external action/workflow references without immutable
+  40-character commit SHAs, installs shellcheck, and runs pinned actionlint.
+- It checks workflow syntax and embedded shell blocks on Ubuntu.
+- It does not execute every workflow or prove runner-specific behavior.
+
+### Advisories: `audit.yml`
+
+[.github/workflows/audit.yml](../.github/workflows/audit.yml) runs for PRs and
+`main` pushes touching Cargo manifests/locks, the lru scope scripts/tests, or
+this workflow. It also runs daily at 06:00.
+
+- Job `pull-request-audit` runs only for PRs. It checks the lru exception scope
+  and audits the product and vendor lock graphs with read-only permissions.
+- Job `trusted-audit` runs for pushes/schedules. Its matrix covers `product`
+  and `vendor-validation`; RustSec reports checks/issues in this trusted job.
+- Trusted legs also run explicit warnings-denied audit commands so a scheduled
+  report cannot leave an affected graph green merely because an issue opened.
+
+The product command explicitly ignores `RUSTSEC-2026-0253` under the scope guard.
+The vendor graph does not inherit that product exception.
+Read the Cargo audit configuration and guard before changing an exception.
+A changed or resolved dependency path must trigger reassessment and cleanup.
+
+### Dependency policy: `deny.yml` and `machete.yml`
+
+[.github/workflows/deny.yml](../.github/workflows/deny.yml) runs on PRs and
+`main` pushes touching Cargo manifests/locks, `deny.toml`, or itself.
+It also runs Sundays at 06:00.
+
+- Job `cargo-deny` has `product` and `vendor-validation` matrix entries.
+- Each checks licenses, sources, and bans against its manifest.
+- Advisory scanning belongs to the audit workflow.
+
+[.github/workflows/machete.yml](../.github/workflows/machete.yml) runs on PRs
+and `main` pushes touching Cargo manifests/locks or itself, plus Sundays at
+06:00.
+
+- Job `machete` runs the upstream unused-dependency action on Ubuntu.
+- The weekly run catches source-only removal of a dependency's last use even
+  when a manifest change did not trigger immediate feedback.
+
+### Timed fuzzing: `fuzz.yml`
+
+[.github/workflows/fuzz.yml](../.github/workflows/fuzz.yml) runs daily at
+07:41, on manual dispatch, and for its fuzz-related PR path filter.
+See [Fuzzing](#fuzzing) for targets, durations, limits, and reproduction.
+
+- Job `plan` tests the planner and emits its target matrix.
+- Job `fuzz` runs each target on Ubuntu with the pinned nightly, restored
+  corpus, sweep seeds, optional dictionary, and sanitizer runtime limits.
+- Job `report` runs only after a failed scheduled plan/fuzz result and opens
+  or updates the tracking issue. PR and dispatch failures do not use it.
+
+### Native Linux audio: `linux-audio.yml`
+
+[.github/workflows/linux-audio.yml](../.github/workflows/linux-audio.yml)
+runs on manual dispatch and PRs touching media crates, the audio checker,
+root Cargo files, or the workflow.
+
+- Job `audio` installs ffmpeg and PulseAudio on Ubuntu.
+- It builds the worker independently in the `media-worker` profile.
+- It builds matching worker, decoder, and audio-output test executables and
+  passes Cargo's JSON artifact records to `scripts/check-linux-audio.py`.
+- The checker requires native playback and preserves its results as artifacts.
+
+This native service path is stronger evidence than parser-only audio fixtures.
+It still does not replace listening on the release user's hardware.
+
+### Native macOS window: `native-window.yml`
+
+[.github/workflows/native-window.yml](../.github/workflows/native-window.yml)
+runs on manual dispatch and PRs touching `kettle-ui`, the named native checker
+helpers, modal-shortcut helper, live-UI helper, or the workflow.
+
+- Job `titlebar` runs on macOS 26.
+- It runs checker unit tests, builds a debug Kettle fixture, and drives the
+  native caption/fullscreen check in the logged-in user's session.
+- It preserves JSON, logs, and PNG evidence even after failure.
+
+The modal-shortcut helper is in the trigger filter; this job does not run that
+helper. The core CI macOS leg runs it separately.
+Do not infer release-bundle acceptance from this debug fixture.
+
+### Nix package: `nix.yml`
+
+[.github/workflows/nix.yml](../.github/workflows/nix.yml) runs on every PR and
+push to `main`.
+
+- Job `check` runs on Ubuntu 24.04 with upstream Nix installed by the action.
+- It evaluates all supported systems without updating the lockfile.
+- It builds the x86_64 Linux cargo-test and package-content checks.
+- It launches the installed package under Xvfb, then explicitly builds the
+  package without creating a result symlink.
+
+[flake.nix](../flake.nix) limits its sandboxed Rust tests to `kettle-vt` and
+`kettle-remote`. The sandbox's root ancestry does not meet positive private-path
+fixtures' ownership policy. Native CI remains responsible for the full workspace.
+
+The package-content derivation compares installed desktop assets, icons, man
+page, and shell snippets against the checked-in sources, including modes and
+file count. The runtime derivation checks the installed package's dynamic GUI
+libraries under Xvfb without borrowing `LD_LIBRARY_PATH`.
+Other-system evaluation is not a native package build or runtime pass.
+
+### Release pipeline: `release.yml`
+
+[.github/workflows/release.yml](../.github/workflows/release.yml) runs on
+`v*` tag pushes and manual dispatch. Publication jobs require a `v` tag ref.
+The jobs execute in this order:
+
+1. `pretest` runs locked workspace tests and direct vendor tests on Ubuntu
+   24.04. It checks that no shipped binary enables fuzzing features.
+   On a release tag, it requires a GitHub-verified annotated tag at current
+   `origin/main`, with matching Cargo, Nix, and changelog versions.
+2. `package` waits for pretest. Its required matrix builds Linux x86_64,
+   Linux aarch64, and a universal macOS package, including the separate worker.
+   Native legs also run the vendor suites.
+3. `finalize` waits for all packages. The protected signer verifies the complete
+   platform set and extracted packages, signs the canonical update feed with
+   the production trust root, and renders package-manager metadata.
+4. `publish` waits for finalization. It re-verifies the staged set without the
+   signing secret, uploads a complete draft, checks the exact remote assets,
+   and publishes once.
+5. `upgrade` waits for publication on push-triggered runs and calls the reusable
+   upgrade workflow against the new release.
+
+Both Linux GNU packages build on Ubuntu 22.04.
+The workflow rejects glibc requirements above 2.35 in the binaries.
+The aarch64 package is cross-built; packaging is not native runtime acceptance.
+The macOS leg runs on macOS 26, builds both architectures, compiles icons,
+signs nested code and the app, notarizes, and staples the bundle.
+
+The finalized set contains twelve files: three archives and their sidecars,
+the signed manifest and signature with their sidecars, and Homebrew/AUR metadata.
+Every platform package is required before publication.
+An upgrade failure happens after publication and needs follow-up; it cannot
+retroactively block the release that has already become public.
+
+### Published upgrades: `upgrade.yml`
+
+[.github/workflows/upgrade.yml](../.github/workflows/upgrade.yml) is callable
+from another workflow and supports manual dispatch with `to` and optional
+`from` release tags.
+
+- Job `linux` has Ubuntu 24.04 x86_64 and ARM runner entries. It installs the
+  older release with that release's installer into a private prefix, updates
+  to the newest release, checks a second update is a no-op, then uninstalls.
+- Job `macos` checks out the selected release and runs the published notarized
+  archive swap/seal smoke.
+
+Linux requires `to` to be the newest published stable release.
+When `from` is empty, it selects the previous stable tag.
+These jobs need published assets and network access.
+They prove the deployed feed/package route, unlike fixture-only updater tests.
+
+### Review and repository maintenance
+
+[.github/workflows/claude-review.yml](../.github/workflows/claude-review.yml)
+handles PR opened/synchronize/reopened/ready-for-review events.
+
+- Job `review` runs only for non-draft PRs opened by `Reddimus` from the same
+  repository. It requests advisory review under the repository review policy.
+- It may post concrete inline findings; it does not build or test the product.
+- Its error-reporting step surfaces suppressed review failures.
+
+[.github/workflows/labeler.yml](../.github/workflows/labeler.yml) handles
+`pull_request_target` opened/synchronize/reopened events.
+
+- Job `label` adds path-based labels using `.github/labeler.yml`.
+- It reads changed paths without checking out PR code and does not remove labels.
+- This is repository automation, not test evidence.
+
+[.github/workflows/stale.yml](../.github/workflows/stale.yml) runs daily at
+06:30 and on manual dispatch.
+
+- Job `stale` marks issues after 90 inactive days and PRs after 60 days.
+- It closes them after another 14 days, subject to exemption labels.
+- It is tracker maintenance, not a product validation gate.
+
+### Interpreting CI evidence
+
+Check the job and step, not only the workflow badge.
+A green matrix can include an explicitly skipped native prerequisite or a
+quarantined step. Read the output for the behavior you intend to claim.
+
+Keep the failing input or artifact directory when reporting a failure.
+Include the exact revision and runner, and say whether the result came from
+portable fixtures, software GPU rendering, native hardware, or a package.
+A passing old commit is not evidence for a changed candidate.
 
 ## Settings text and column layout
 
-Settings text comes from the `kettle-i18n` catalogue. Run
-`cargo test -p kettle-ui settings` and `cargo test -p kettle-render settings`
-in a normal checkout. Column widths are measured in the panel's language, and
-the footer hints, notes and GPU kinds are tested in English and Spanish. The
-regressions
-cover sentence case, unchanged config serialization, all-category column widths,
-long GPU names, a two-cell label/value gap, separate ellipsizing with wide
-characters, stable category text, and hit testing of clipped category names.
-Footer tests check that ordinary rows have no note, completion mentions new
-shells, blur mentions its opacity dependency, and pending wording stays neutral
-when Graphics is selected. Renderer regressions check the painted line selection
-and text bounds at a 284-pixel surface height with four Graphics rows and at a
-200-pixel height with scrolling fields. Pending and contextual notes must stay
-visible, footer clicks must be inert, and the focused field must remain visible.
+Settings text comes from `kettle-i18n`.
+Use the existing focused suites while changing text, measurement, or clipping:
 
-For live acceptance, open Settings on Linux with the Intel Iris Xe Vulkan
-adapter. Check Appearance, Behavior, and Graphics at a wide and a narrow window
-size. Confirm **Completion overlay** has a gap before **Automatic**, the value
-column stays aligned across categories, and an underline marks the active
-category. Set a long image path and inspect both its stored value and inline
-editor. Confirm `13 pt`, `6 px`, `120 MB`, `24 h`, `10 s`, and `99%` formatting.
-Check the **Window blur** row's dependency note, then move to **Font size** and
-confirm the dependency note disappears. Change a GPU setting and confirm the
-active adapter remains visible alongside "Restart Kettle or open a new window
-to apply pending changes." Change only opacity or blur, then switch to Graphics
-and confirm the notice uses the same neutral wording. Reduce the surface height
-to 284 pixels, focus each Graphics row, and check that the notice remains painted.
-In a 200-pixel-tall window, scroll Appearance fields and check that the blur and
-pending notes stay below them. Check arrow keys, Tab, Shift+Tab, mouse clicks,
-and Vim navigation.
+```sh
+cargo test -p kettle-ui settings
+cargo test -p kettle-render settings
+```
 
-The 4.9.0 cut's appearance gate must inspect this new Settings text and layout
-in the exact release bundle. Existing appearance captures do not verify these
-changes. Historical appearance, audit, and changelog records remain as written.
-Run the normal format and gauntlet gates before merging.
+UI tests cover translated labels, notes, footer text, and accessibility names.
+Renderer tests cover column measurement, separate label/value clipping, category
+hit targets, focused-row visibility, and notes in short panels.
+The short-panel regressions include 284-pixel and 200-pixel surfaces.
 
-### Cursor latency and exit evidence
+For live acceptance, use the exact candidate and actual target GPU:
 
-The standing self-test covers both latency namespaces, Kettle-only cursor
-rotation, long-gap budgets at maximum key counts, duplicate CLI selection,
-and separate cursor A/A method identity. Native synthetic campaigns use the
-production calibration and measurement loops with virtual frames and time.
-They check the acknowledgment-based initial delay, seeded long gaps, typing
-epoch boundaries and post-query lease/deadline refusal. Cursor frames have
-independent byte hashes. Block payload bytes and the classifier retain their
-existing regression checks.
+- [ ] Inspect Appearance, Behavior, and Graphics in both wide and narrow windows.
+- [ ] Check the label/value gap, aligned values, active-category underline,
+  long paths, wide characters, and long adapter names.
+- [ ] Change blur/opacity and GPU settings. Confirm contextual notes disappear
+  when irrelevant and pending changes keep neutral restart/new-window wording.
+- [ ] Reduce height and scroll fields. Keep the focused row and both contextual
+  and pending notes visible; footer clicks must stay inert.
+- [ ] Check keyboard, mouse, Tab/Shift+Tab, and Vim navigation in each language
+  affected by the change.
 
-`cursor-exits.fixture` documents the `cursor_exit_v1` capability and per-key
-JSONL format. Tests join launch, pane, window, sequence and clock-converted
-key intervals. They reject missing/excess/duplicate/shifted/calibration exits,
-wrong identities, inactive layers, negative or nonfinite costs, inconsistent
-endpoints, torn JSONL and torn/duplicate payload records. A mocked complete
-cursor round verifies retained artifact names and digests, catches changed raw
-bytes, and clears an interrupted acknowledgment before reuse. Tests distinguish
-legacy absence from capable empty evidence, exclude only warmup keys, pool
-measured durations and test both sides of the 4000 us limit. Every counted
-round must have complete exits before a pooled exit gate is available.
-
-Native macOS scratch tests compile `keyblock.c` and exercise its real control,
-poll, read and binary-log loop on a private socket replacing the tty device.
-They check all six hidden calibration frames, ENABLE without a key or sequence,
-ack timing, parked cursor bytes, early/duplicate/torn requests and bounded
-missing control. Every spawned child is reaped. These tests use no GUI or
-input-event posting. The dedicated probe's pure `--self-test` checks gap parsing,
-ack validation and the existing synthetic capture classifier without grants.
-`--self-test-cursor OUTPUT SCENARIO LEASE` exercises the shared cursor loops and
-posting gate before AppKit or permission checks. Its lease belongs to a separate
-owned test process; a lock held by the probe itself cannot model that lifetime.
-
-The `compatibility/` fixtures pin complete schema-1/2/3 result, analysis,
-summary and combined output files with cursor latency absent. Comparisons use
-explicit unittest checks, including under `python3 -O`; optimization cannot
-remove them. Stored expectations contain exact output plus one LF, and the
-comparison appends that LF to generated output. Markdown expectations use
-JSON strings to retain output trailing LFs while the tracked fixture itself
-ends with exactly one LF. Schema-1 mtime dates are pinned to local noon. Fixture data is method-neutral and excluded from the runtime
-hash by the existing `.fixture` rule. Snapshot tests use `snapshot.gitignore`
-beside the self-test and keep temporary files inside that snapshot.
-
-Live acceptance remains separate. The owner runs an excluded 4.8.0 cursor
-pilot for calibration, focus guards and completion, then a C2 integration for
-actual layer handoffs and exactly one complete exit frame per stream key.
-Do not infer native capability, permissions, an A/A pass or numeric acceptance
-from the parser fixtures.
+A previous appearance capture does not verify new settings text or layout.
+Keep current native evidence with the change instead of carrying a historical
+release's acceptance forward.
 
 ## Standing publication contract
 
-Run `just macos-standing-self-test` for the repository's portable parser,
-statistical, identity, coverage and publication fixtures. Run it under
-`TZ=Pacific/Kiritimati` as well. Whole-file schema-1/2 compatibility checks use
-explicit unittest comparisons and remain active with `python3 -O`.
+The standing method has portable parser/statistical fixtures and separate
+native measurement requirements. Use
+[scripts/perf/standing-method.md](../scripts/perf/standing-method.md) as the
+complete freeze, control, pilot, and publication protocol.
+Do not copy its owner invocation into an automatic gate.
 
-`PublicationFreeze` exercises all workload/control rows, scalar MiB dispatch,
-distribution exclusions, block/cursor method matching, referenced config assets,
-missing artifacts, complete pairs/keys, first dates, stamp observer equivalence,
-all-zero controls, strict fill IDs/units, transcription errors, privacy and
-owned caffeinate cancellation. Its fixed JSON fixture contains synthetic
-values; it is not measurement or acceptance evidence. The separate factcheck
-arithmetic recomputes typing sample intervals and pooled block/cursor key
-percentiles. Publication retains only the current PR #409 statistics, checked
-against raw-session analysis. Cursor method matching includes exit logging
-and the wire contract. The exit publication fixture parses all six calibration
-input records and every warmup/measured exit before pooling measured frames.
+Run the portable suite in the normal timezone and the date-boundary timezone:
 
-The format and complete owner A/A protocol are documented in
-[scripts/perf/standing-method.md](../scripts/perf/standing-method.md).
-`macos-standing-publication.py` has fill and factcheck modes. Both require
-original session directories and one matching ordinary shared control and
-regenerate the typed extraction before using it. The fixture template is
-`macos-standing/publication-template.fixture`. No preview waiver is supported.
+```sh
+just macos-standing-self-test
+TZ=Pacific/Kiritimati just macos-standing-self-test
+```
 
-Native CI must also cover the launch helper, observer, printing/keyblock
-payloads and the probe's permission-free self-test, seal, reuse and tamper
-refusal. Controlling-tty, defaults, packaging and workspace checks require an
-authorized repository runner. Functional/TCC, before/after blink, timestamp,
-observer-cost and real C2 exit-producer pilots run only in an owner measurement
-window. A parser fixture cannot establish those gates.
+These tests cover result compatibility, statistical rules, identities, coverage,
+publication extraction, method matching, and rejection of incomplete artifacts.
+Schema compatibility checks use explicit unittest comparisons so optimization
+cannot remove the assertions.
+Synthetic fixture values are not measurement or acceptance evidence.
 
-Before freeze, run `cargo fmt --all --check`, `just macos-standing-self-test`,
-`just gauntlet`, `just tracked-audit` and the integrity `just gauntlet-strict`
-gate, plus native/portable CI and independent review. Check every owned child
-is reaped. Do not start the owner control in CI or from a default recipe.
+The publication tool is
+`scripts/perf/macos-standing-publication.py`.
+Its fill and factcheck modes both require original session directories and a
+matching ordinary shared control. They regenerate the typed extraction before
+using it. The template lives at
+`scripts/perf/macos-standing/publication-template.fixture`.
+There is no preview waiver for missing raw evidence.
+
+The local report recipes do analysis rather than launch the ordinary control:
+
+- `just macos-standing-control-report`: combines sessions against a supplied A/A
+  control; provide the required control and session arguments from Justfile.
+- `just macos-standing-observer-report`: analyzes stamp or observer equivalence;
+  provide its input and output arguments.
+- `just macos-standing-publication`: explicit fill/factcheck entry point;
+  provide the publication tool's required arguments.
+
+Before freeze, finish the harness changes, required repository gates, native
+and portable CI, and independent review on the fixed candidate.
+Keep path/mode/content identities and verify owned children are reaped.
+Do not change runtime harness code during an open measurement set.
+
+Only the owner starts the ordinary shared A/A in a scheduled measurement window.
+Functional permissions, focus/visibility, before/after blink, timestamps,
+observer cost, and real cursor-exit production need native pilots.
+A parser fixture cannot establish TCC grants or native timing capability.
+
+Cursor-exit tests validate identities, complete frames, calibration/warmup
+handling, hashes, and pooled costs. Empty or missing native evidence cannot
+become a pass merely because its parser accepts the format.
+Keep the raw per-key evidence and the matching method identity.
+Native exit publication remains diagnostic until producer perturbation is
+independently validated under the standing protocol.
+
+Do not start the owner control from CI or a default just recipe.
+Do not claim calibrated performance, an A/A pass, or publication acceptance
+from the portable self-test alone.

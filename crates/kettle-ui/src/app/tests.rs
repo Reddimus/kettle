@@ -15415,9 +15415,7 @@ fn count_leaves_for_nested_splits() {
     assert_eq!(four.leaf_ids().len(), 4);
 }
 
-/// Drift guard. `confirm_dialog_keypress` is the pure
-/// state machine for the confirm dialog's keyboard handler.
-/// Phase 4 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md.
+/// Regression coverage for confirmation-dialog keyboard navigation.
 #[test]
 fn confirm_dialog_keypress_walks_state_machine() {
     use super::{ConfirmKey, ConfirmKeyResult, confirm_dialog_keypress};
@@ -15734,8 +15732,7 @@ fn confirm_dialog_button_hit_measures_translated_labels() {
     );
 }
 
-/// Drift guard. `content_rect_for` is the pure helper
-/// behind `App::area`. Phase 2 of TERMINATOR-VERTICAL-TABS-DESIGN.md.
+/// Regression coverage for content geometry at every tab-bar position.
 /// Walks the 4 (tab_pos)×3 (status_pos) cases.
 #[test]
 fn content_rect_for_carves_out_tab_and_status_bands() {
