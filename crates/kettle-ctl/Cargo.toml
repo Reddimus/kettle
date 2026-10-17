@@ -64,4 +64,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+# Checks the published JSON Schema against the parsers and replies it
+# describes; tests only, in no shipped binary.
+boon = "=0.6.1"
 kettle-test-support.workspace = true

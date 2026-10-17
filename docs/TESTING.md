@@ -178,7 +178,7 @@ All paths below are relative to the repository root.
 | `kettle-ui` | `crates/kettle-ui/src/app.rs`, `crates/kettle-ui/src/app/`, `crates/kettle-ui/src/` | Input routing, windows, settings, control actions |
 | `kettle-i18n` | `crates/kettle-i18n/src/`, `crates/kettle-i18n/tests/` | Locale selection and catalogue/build rules |
 | `kettle-state` | `crates/kettle-state/src/` | Private state and filesystem policy |
-| `kettle-ctl` | `crates/kettle-ctl/src/`, `crates/kettle-ctl/tests/pipe_instances.rs` | Local IPC, framing, permissions, liveness |
+| `kettle-ctl` | `crates/kettle-ctl/src/`, `crates/kettle-ctl/tests/pipe_instances.rs` | Local IPC, framing, permissions, liveness, the published JSON Schema |
 | `kettle-update` | `crates/kettle-update/src/`, `crates/kettle-update/tests/` | Trust root, manifests, archive/update boundaries |
 | `kettle-remote` | `crates/kettle-remote/src/` | Process ancestry and remote-session detection |
 | `kettle-test-support` | `crates/kettle-test-support/src/`, `crates/kettle-test-support/tests/` | Shared fixtures, source scans, MSRV drift |
