@@ -11,8 +11,9 @@
 //! it is decoded. A GIF frame declares its own size, which can exceed the
 //! logical screen, and the decoder allocates the first frame at that size
 //! with only a byte budget, so every frame's size is checked against the
-//! edge cap too. Anything these checks cannot read is left to the decoder,
-//! which refuses it.
+//! edge cap too. A TIFF's first directory is read for its first image's size
+//! and sample format before the decoder sees it. Anything these checks
+//! cannot read is left to the decoder, which refuses it.
 
 use image::ImageFormat;
 use kettle_media::{FailureCode, MAX_DECODED_BYTES, MAX_DECODED_EDGE};
@@ -24,6 +25,90 @@ pub(crate) fn check(format: ImageFormat, bytes: &[u8]) -> Result<(), FailureCode
         ImageFormat::Bmp => bmp_size(bytes).map_or(Ok(()), within_caps),
         ImageFormat::WebP => webp(bytes),
         ImageFormat::Gif => gif(bytes),
+        ImageFormat::Tiff => tiff(bytes),
+        _ => Ok(()),
+    }
+}
+
+/// Most entries read from a TIFF's first directory; a real image has a few
+/// dozen.
+const MAX_TIFF_ENTRIES: u16 = 512;
+/// The TIFF tags read: the first image's width and height, and its samples'
+/// format.
+const TIFF_WIDTH: u16 = 256;
+const TIFF_HEIGHT: u16 = 257;
+const TIFF_SAMPLE_FORMAT: u16 = 339;
+/// `SampleFormat` 3: IEEE floating point.
+const TIFF_FLOAT_SAMPLES: u32 = 3;
+
+/// A TIFF's first image, the only one decoded, as its first directory
+/// declares it: a directory with more entries than any real image's is
+/// refused before it is read, the size is checked against the caps, and a
+/// floating-point image, whose values have no range Kettle could map to
+/// colors faithfully, is not drawn.
+fn tiff(bytes: &[u8]) -> Result<(), FailureCode> {
+    let big_endian = match bytes.get(..4) {
+        Some(b"II*\0") => false,
+        Some(b"MM\0*") => true,
+        _ => return Ok(()),
+    };
+    let u16_at = |at: u64| {
+        let b: [u8; 2] = slice(bytes, at, 2)?.try_into().ok()?;
+        Some(if big_endian {
+            u16::from_be_bytes(b)
+        } else {
+            u16::from_le_bytes(b)
+        })
+    };
+    let u32_at = |at: u64| {
+        let b: [u8; 4] = slice(bytes, at, 4)?.try_into().ok()?;
+        Some(if big_endian {
+            u32::from_be_bytes(b)
+        } else {
+            u32::from_le_bytes(b)
+        })
+    };
+    let Some(directory) = u32_at(4).map(u64::from) else {
+        return Ok(());
+    };
+    let Some(entries) = u16_at(directory) else {
+        return Ok(());
+    };
+    if entries > MAX_TIFF_ENTRIES {
+        return Err(FailureCode::RenderResource);
+    }
+    let (mut width, mut height) = (None, None);
+    for index in 0..u64::from(entries) {
+        let entry = directory + 2 + 12 * index;
+        let (Some(tag), Some(kind), Some(count)) =
+            (u16_at(entry), u16_at(entry + 2), u32_at(entry + 4))
+        else {
+            return Ok(());
+        };
+        // A SHORT (3) or LONG (4) value; the first of a few fits the entry
+        // itself, more are where its last four bytes point.
+        let read = |at: u64| match kind {
+            3 => u16_at(at).map(u32::from),
+            4 => u32_at(at),
+            _ => None,
+        };
+        let inline = (kind == 3 && count <= 2) || (kind == 4 && count <= 1);
+        let first = if inline {
+            read(entry + 8)
+        } else {
+            u32_at(entry + 8).and_then(|offset| read(u64::from(offset)))
+        };
+        match tag {
+            TIFF_WIDTH => width = first,
+            TIFF_HEIGHT => height = first,
+            TIFF_SAMPLE_FORMAT if first == Some(TIFF_FLOAT_SAMPLES) => {
+                return Err(FailureCode::UnsupportedMedia);
+            }
+            _ => {}
+        }
+    }
+    match (width, height) {
+        (Some(width), Some(height)) => within_caps((width.into(), height.into())),
         _ => Ok(()),
     }
 }

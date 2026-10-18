@@ -74,9 +74,9 @@ const ABSOLUTE_PATH_PATTERN: &str = if cfg!(windows) {
 fn show_tool_spec() -> Value {
     json!({
         "name": "kettle_show",
-        "description": "Send an image, SVG, Mermaid file, Markdown Mermaid gallery or video path \
-            to the user's Kettle display, or render inline Mermaid source. A video shows as its \
-            poster, with its length. Interactive supported harnesses get a card under \
+        "description": "Send an image, SVG, Mermaid file, Markdown Mermaid gallery, PDF or video \
+            path to the user's Kettle display, or render inline Mermaid source. A video shows as its \
+            poster, with its length; a PDF its first page. Interactive supported harnesses get a card under \
             the call and a shelf entry; other modes use the shelf. Clicking opens it in the \
             media viewer. Tested diagram families: flowchart, sequence, state, class, \
             ER, gantt, pie, mindmap, gitGraph, timeline, journey and quadrant. Give exactly one \
@@ -95,7 +95,7 @@ fn show_tool_spec() -> Value {
                     "minLength": 1,
                     "maxLength": kettle_media::MAX_PATH_BYTES,
                     "pattern": ABSOLUTE_PATH_PATTERN,
-                    "description": "absolute path of an image, SVG, Mermaid, Markdown or video file, at most 4 KiB"
+                    "description": "absolute path of an image, SVG, Mermaid, Markdown, PDF or video file, at most 4 KiB"
                 },
                 "title": {
                     "type": "string",

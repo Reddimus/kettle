@@ -178,9 +178,7 @@ mod tests {
         let answer = body(&worker, "answer(");
         assert!(
             answer.find("confine(job, decoders.as_ref())").unwrap()
-                < answer
-                    .find("kettle_media_render::render_with_decoder(")
-                    .unwrap()
+                < answer.find("kettle_media_render::render_with(").unwrap()
         );
         // A job pins its processor time before its input is read; a
         // session confines the worker before reading or decoding its file,

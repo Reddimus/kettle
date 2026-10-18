@@ -1,6 +1,6 @@
-//! The entry point for fuzzing what the worker renders from untrusted
-//! bytes: a raster, an SVG, a Mermaid diagram, a Markdown gallery, or bytes
-//! the worker classifies itself. Each case is a job the parent could send,
+//! The entry points for fuzzing what the worker renders from untrusted
+//! bytes: a raster, an SVG, a Mermaid diagram, a Markdown gallery, a PDF
+//! page, or bytes the worker classifies itself. Each case is a job the parent could send,
 //! rendered into a small box. It must not panic outside a guarded library
 //! call (whose panic the renderer answers with a fixed failure, as the
 //! worker does), and what it renders must pass the checks the parent
@@ -14,13 +14,16 @@ use kettle_media::wire::{self, Direction, Frame};
 use kettle_media::{Canvas, Job, JobKind, MediaKind, Source, Target, Theme};
 
 /// What a case's first byte picks.
-const KINDS: [JobKind; 5] = [
+const KINDS: [JobKind; 6] = [
     JobKind::Auto,
     JobKind::Raster,
     JobKind::Svg,
     JobKind::Mermaid,
     JobKind::MarkdownDiagrams { index: 0 },
+    JobKind::PdfPage { index: 0 },
 ];
+/// The PDF pages a `pdf` case's first byte picks among.
+const PDF_PAGES: u32 = 4;
 /// The box each case renders into: small, so a case costs little.
 const EDGE: u32 = 64;
 
@@ -55,7 +58,25 @@ pub fn render(data: &[u8]) {
     let Some((&pick, bytes)) = data.split_first() else {
         return;
     };
-    let kind = KINDS[usize::from(pick) % KINDS.len()];
+    check(KINDS[usize::from(pick) % KINDS.len()], bytes);
+}
+
+/// Render `data` past its first byte as a PDF, at the page that byte picks:
+/// the PDF parser and interpreter get a target of their own.
+pub fn pdf(data: &[u8]) {
+    let Some((&pick, bytes)) = data.split_first() else {
+        return;
+    };
+    check(
+        JobKind::PdfPage {
+            index: u32::from(pick) % PDF_PAGES,
+        },
+        bytes,
+    );
+}
+
+/// Render `bytes` as `kind` and hold the result to the parent's checks.
+fn check(kind: JobKind, bytes: &[u8]) {
     let job = Job {
         kind,
         source: Source::Bytes(bytes.to_vec()),
@@ -91,6 +112,7 @@ pub fn render(data: &[u8]) {
         JobKind::Svg => Some(MediaKind::Svg),
         JobKind::Mermaid => Some(MediaKind::Mermaid),
         JobKind::MarkdownDiagrams { .. } => Some(MediaKind::Markdown),
+        JobKind::PdfPage { .. } => Some(MediaKind::Pdf),
         _ => None,
     };
     if let Some(asked) = asked {
@@ -156,6 +178,7 @@ mod tests {
         const SVG: usize = 2;
         const MERMAID: usize = 3;
         const MARKDOWN: usize = 4;
+        const PDF: usize = 5;
         let mut seeds = Vec::new();
         for format in [
             ImageFormat::Png,
@@ -163,6 +186,7 @@ mod tests {
             ImageFormat::Jpeg,
             ImageFormat::WebP,
             ImageFormat::Bmp,
+            ImageFormat::Tiff,
         ] {
             seeds_for(&[AUTO, RASTER], &picture(format, 12, 8), &mut seeds);
         }
@@ -208,10 +232,90 @@ mod tests {
         ] {
             seeds_for(&[AUTO], text, &mut seeds);
         }
+        for document in pdf_seeds() {
+            seeds_for(&[AUTO, PDF], &document, &mut seeds);
+        }
         let seeds: Vec<&[u8]> = seeds.iter().map(Vec::as_slice).collect();
         save_seeds("render", &seeds);
         for case in cases(&seeds, 800, 0x5eed_0004) {
             render(&case);
+        }
+    }
+
+    /// A PDF of `pages`, each a 200 by 100 point page drawn by its content
+    /// stream, with its cross-reference table at the offsets written.
+    fn document(pages: &[&str]) -> Vec<u8> {
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            format!(
+                "<< /Type /Pages /Kids [{}] /Count {} >>",
+                (0..pages.len())
+                    .map(|page| format!("{} 0 R", 3 + 2 * page))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                pages.len()
+            ),
+        ];
+        for (page, content) in pages.iter().enumerate() {
+            objects.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents {} 0 R >>",
+                4 + 2 * page
+            ));
+            objects.push(format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len() + 1
+            ));
+        }
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (number, object) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend(format!("{} 0 obj\n{object}\nendobj\n", number + 1).into_bytes());
+        }
+        let xref = out.len();
+        out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).into_bytes());
+        for offset in offsets {
+            out.extend(format!("{offset:010} 00000 n \n").into_bytes());
+        }
+        out.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .into_bytes(),
+        );
+        out
+    }
+
+    /// PDFs for the sweeps: paths, text in a standard font, a gradient-free
+    /// clip and transform, several pages, and upstream's nested object
+    /// streams, which the vendored parser refuses.
+    fn pdf_seeds() -> Vec<Vec<u8>> {
+        vec![
+            document(&["1 0 0 rg 0 0 100 100 re f"]),
+            document(&["BT /F1 24 Tf 10 40 Td (Kettle) Tj ET"]),
+            document(&["q 0.5 0 0 0.5 50 25 cm 0 0 1 rg 0 0 200 100 re W n 0 0 100 50 re f Q"]),
+            document(&["0 1 0 rg 0 0 50 50 re f", "1 1 0 rg 10 10 m 190 90 l S", ""]),
+            include_bytes!("../tests/fixtures/pdf/nested_object_streams.pdf").to_vec(),
+        ]
+    }
+
+    /// The PDF target's seeds, mutated: nothing panics outside a guarded
+    /// call, and every page rendered passes the parent's checks.
+    #[test]
+    fn mutated_pdfs_never_break_the_renderer() {
+        let mut seeds = Vec::new();
+        for document in pdf_seeds() {
+            for page in 0..PDF_PAGES as u8 {
+                let mut seed = vec![page];
+                seed.extend_from_slice(&document);
+                seeds.push(seed);
+            }
+        }
+        let seeds: Vec<&[u8]> = seeds.iter().map(Vec::as_slice).collect();
+        save_seeds("pdf", &seeds);
+        for case in cases(&seeds, 400, 0x5eed_0005) {
+            pdf(&case);
         }
     }
 

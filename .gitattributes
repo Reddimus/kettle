@@ -34,3 +34,9 @@ crates/kettle-core/tests/fixtures/diagram-copy/** -text
 # merman-core's sankey tests parse CSV rows that end in spaces; the vendored
 # source keeps them as upstream ships it.
 vendor/merman-core-0.8.0/src/diagrams/sankey.rs -text
+
+# hayro-syntax is the crates.io 0.8.0 release plus one upstream commit
+# (vendor/README.md), kept byte for byte so `diff -r` against the release shows
+# only that commit: upstream files end without newlines and carry trailing
+# spaces.
+vendor/hayro-syntax-0.8.0/** -text

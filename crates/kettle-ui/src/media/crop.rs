@@ -50,7 +50,8 @@ pub(crate) fn plan_crop(
 ) -> Option<Target> {
     let (source_width, source_height) = (layout.source_width, layout.source_height);
     let usable = |value: f64| value.is_finite() && value > 0.0;
-    if !(matches!(kind, MediaKind::Raster | MediaKind::Svg) || super::draws_as_diagram(kind))
+    if !(matches!(kind, MediaKind::Raster | MediaKind::Svg | MediaKind::Pdf)
+        || super::draws_as_diagram(kind))
         || !(usable(source_width) && usable(source_height))
     {
         return None;

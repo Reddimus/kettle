@@ -28,6 +28,10 @@ pub const MAX_MERMAID_BYTES: usize = 64 * 1024;
 pub const MAX_SVG_BYTES: usize = 2 * 1024 * 1024;
 /// Encoded raster input limit.
 pub const MAX_RASTER_BYTES: usize = 32 * 1024 * 1024;
+/// PDF input limit: a document is read whole before a page renders. Peak
+/// memory on a corpus stays far inside the worker's group budget at this
+/// size.
+pub const MAX_PDF_BYTES: usize = 64 * 1024 * 1024;
 /// Decoded raster dimension limit per side.
 pub const MAX_DECODED_EDGE: u32 = 8192;
 /// Decoded raster RGBA storage limit.
@@ -91,7 +95,7 @@ pub const MAX_VERSION_BYTES: usize = 64;
 /// Hex digest of the source a binary was built from, up to 256 bits.
 pub const MAX_SOURCE_HASH_BYTES: usize = 64;
 /// No version negotiation. A header skew requires restart.
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 /// Longest textual source a reply returns as it was read: the SVG input
 /// cap, the largest textual kind's.
 pub const MAX_EXACT_SOURCE_BYTES: usize = MAX_SVG_BYTES;
@@ -945,6 +949,10 @@ pub enum JobKind {
     /// A video's cached thumbnail, rendered as a raster only when it is of
     /// the video named.
     CachedThumbnail(ThumbnailOf),
+    /// Page `index`, from 0, of a PDF.
+    PdfPage {
+        index: u32,
+    },
 }
 impl JobKind {
     pub fn input_cap(self) -> usize {
@@ -952,11 +960,19 @@ impl JobKind {
             Self::Mermaid => MAX_MERMAID_BYTES,
             Self::Svg => MAX_SVG_BYTES,
             Self::MarkdownDiagrams { .. } => MAX_MARKDOWN_BYTES,
-            // The largest kind Auto can turn out to be; the worker applies
-            // the actual kind's own cap once it knows it.
+            Self::PdfPage { .. } => MAX_PDF_BYTES,
+            // The largest kind Auto can turn out to be from bytes a job
+            // carries; the worker applies the actual kind's own cap once it
+            // knows it, and reads a PDF named by its path under its own.
             Self::Auto => MAX_RASTER_BYTES.max(MAX_SVG_BYTES),
             _ => MAX_RASTER_BYTES,
         }
+    }
+    /// The most bytes a job of this kind carries in its own frame: its input
+    /// cap, but never more than a parent frame holds, a raster's. A PDF
+    /// larger than that is shown by its path.
+    pub fn inline_cap(self) -> usize {
+        self.input_cap().min(MAX_RASTER_BYTES)
     }
     /// How long a worker may take from this job's arrival to its reply. An
     /// Auto job starts with the longest of the kinds it can turn out to be,
@@ -989,6 +1005,8 @@ pub enum MediaKind {
     Mermaid,
     Markdown,
     Video,
+    /// A page of a PDF, drawn as the vector content it is.
+    Pdf,
 }
 impl MediaKind {
     pub(crate) fn for_job(kind: JobKind) -> Option<Self> {
@@ -999,19 +1017,20 @@ impl MediaKind {
             JobKind::Mermaid => Some(Self::Mermaid),
             JobKind::MarkdownDiagrams { .. } => Some(Self::Markdown),
             JobKind::VideoProbe | JobKind::VideoStills(_) => Some(Self::Video),
+            JobKind::PdfPage { .. } => Some(Self::Pdf),
         }
     }
 
-    /// Refuse a result size past this kind's ceiling. SVG renders, Mermaid
-    /// and Markdown pages included, stay within `MAX_SVG_RENDERED_EDGE` and
-    /// `MAX_SVG_RENDERED_PIXELS`; the general caps, which every kind meets,
-    /// are [`Rendered::validate`]'s.
+    /// Refuse a result size past this kind's ceiling. Vector renders (SVG,
+    /// Mermaid and Markdown pages, and PDF pages) stay within
+    /// `MAX_SVG_RENDERED_EDGE` and `MAX_SVG_RENDERED_PIXELS`; the general
+    /// caps, which every kind meets, are [`Rendered::validate`]'s.
     pub(crate) fn validate_result_size(
         self,
         width: u32,
         height: u32,
     ) -> Result<(), ValidationError> {
-        let svg = matches!(self, Self::Svg | Self::Mermaid | Self::Markdown);
+        let svg = matches!(self, Self::Svg | Self::Mermaid | Self::Markdown | Self::Pdf);
         if svg
             && (width > MAX_SVG_RENDERED_EDGE
                 || height > MAX_SVG_RENDERED_EDGE
@@ -1029,7 +1048,7 @@ impl MediaKind {
             Self::Svg => Some(MAX_SVG_BYTES),
             Self::Mermaid => Some(MAX_MERMAID_BYTES),
             Self::Markdown => Some(MAX_MARKDOWN_BYTES),
-            Self::Raster | Self::Video => None,
+            Self::Raster | Self::Video | Self::Pdf => None,
         }
     }
 
@@ -1041,6 +1060,7 @@ impl MediaKind {
             Self::Mermaid => "mermaid",
             Self::Markdown => "markdown",
             Self::Video => "video",
+            Self::Pdf => "pdf",
         }
     }
 
@@ -1049,7 +1069,9 @@ impl MediaKind {
     pub fn render_deadline(self) -> Duration {
         match self {
             Self::Raster => Duration::from_secs(2),
-            Self::Svg | Self::Mermaid | Self::Markdown | Self::Video => Duration::from_secs(3),
+            Self::Svg | Self::Mermaid | Self::Markdown | Self::Video | Self::Pdf => {
+                Duration::from_secs(3)
+            }
         }
     }
 }
@@ -1389,7 +1411,7 @@ impl FailureCode {
                 "Media worker is unavailable. Keep the text version. Do not retry."
             }
             Self::SandboxUnavailable => {
-                "Kettle decodes video only inside its sandbox, which this system cannot provide. Keep the text version; do not retry, and never ask the user to turn off security."
+                "Kettle decodes this kind of file only inside its sandbox, which this system cannot provide. Keep the text version; do not retry, and never ask the user to turn off security."
             }
         }
     }
@@ -1511,6 +1533,23 @@ pub struct Rendered {
     pub warnings: Vec<Warning>,
     /// For video stills: the video, and the times of the frames shown.
     pub video: Option<VideoStillsResult>,
+    /// For a PDF: the page shown and how many the document has.
+    pub page: Option<PageOf>,
+}
+
+/// A page of a document: which, from 0, and of how many.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageOf {
+    pub index: u32,
+    pub count: u32,
+}
+impl PageOf {
+    pub fn validate(self) -> Result<(), ValidationError> {
+        if self.count == 0 || self.index >= self.count {
+            return Err(ValidationError::IndexOutOfRange);
+        }
+        Ok(())
+    }
 }
 /// A rendered job and what it turned out to be.
 #[derive(Clone, Debug, PartialEq)]
@@ -1551,6 +1590,9 @@ impl Rendered {
         if let Some(video) = &self.video {
             video.validate()?;
         }
+        if let Some(page) = self.page {
+            page.validate()?;
+        }
         Ok(())
     }
 }
@@ -1558,12 +1600,14 @@ impl Rendered {
     /// [`Self::validate`], and as a render of `kind`: within the kind's
     /// result ceiling, and a textual kind returns its source as read, within
     /// the kind's input cap; any other kind none.
-    /// Video stills return what the video is and their frames' times; no
-    /// other kind does.
+    /// Video stills return what the video is and their frames' times, and a
+    /// PDF page which page it is of how many; no other kind does either.
     pub fn validate_as(&self, kind: MediaKind) -> Result<(), ValidationError> {
         self.validate()?;
         kind.validate_result_size(self.width, self.height)?;
-        if (kind == MediaKind::Video) != self.video.is_some() {
+        if (kind == MediaKind::Video) != self.video.is_some()
+            || (kind == MediaKind::Pdf) != self.page.is_some()
+        {
             return Err(ValidationError::BadParams);
         }
         match (kind.exact_source_cap(), &self.exact_source) {

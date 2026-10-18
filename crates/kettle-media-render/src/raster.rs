@@ -1,4 +1,5 @@
-//! Raster jobs: PNG, JPEG, WebP, BMP and the first frame of a GIF.
+//! Raster jobs: PNG, JPEG, WebP, BMP, the first image of a TIFF and the first
+//! frame of a GIF.
 //!
 //! The format comes from the content, never a name. The container's own
 //! header is checked first where a decoder would not check it soundly
@@ -56,6 +57,7 @@ pub(crate) fn render_loaded(
         uncovered_scripts: Vec::new(),
         warnings: Vec::new(),
         video: None,
+        page: None,
     };
     rendered
         .validate()
@@ -83,6 +85,7 @@ fn supported(format: ImageFormat) -> bool {
             | ImageFormat::WebP
             | ImageFormat::Bmp
             | ImageFormat::Gif
+            | ImageFormat::Tiff
     )
 }
 
