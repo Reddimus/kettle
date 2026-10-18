@@ -329,6 +329,45 @@ impl Method {
             _ => Execution::Ui,
         }
     }
+
+    /// Who may build on this method: any client, as the published schema
+    /// and `docs/AGENT.md` describe it, or only Kettle's own adapters, which
+    /// change with them.
+    pub const fn visibility(self) -> Visibility {
+        match self {
+            Self::AgentLaunch | Self::CardPickup => Visibility::Internal,
+            // Listed rather than defaulted, so a new method must be classified.
+            Self::GetState
+            | Self::ListTabs
+            | Self::ListPanes
+            | Self::ReadScreen
+            | Self::ReadCells
+            | Self::UiGeometry
+            | Self::Screenshot
+            | Self::Subscribe
+            | Self::SendText
+            | Self::SendKeys
+            | Self::DispatchUiKey
+            | Self::DispatchKeybind
+            | Self::SendMouse
+            | Self::ResizeWindow
+            | Self::PerformAction
+            | Self::RunCommand
+            | Self::WaitFor
+            | Self::Show => Visibility::Public,
+        }
+    }
+}
+
+/// Who a method is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    /// Any client: published in the schema (`kettle ctl schema`) and in
+    /// `docs/AGENT.md`, and kept compatible within protocol v1.
+    Public,
+    /// Kettle's own MCP adapters and card hooks: absent from the schema,
+    /// and free to change with them.
+    Internal,
 }
 
 /// Parsed additive paging controls. Cursors are decimal item offsets so v1
@@ -583,6 +622,23 @@ pub mod error_codes {
     pub const RESPONSE_TOO_LARGE: &str = "response_too_large";
     /// A paged live-state read continued after the underlying snapshot changed.
     pub const STALE_SNAPSHOT: &str = "stale_snapshot";
+
+    /// Every code above; `show` adds the media failures' own
+    /// (`kettle_media::FailureCode::code`).
+    pub const ALL: [&str; 12] = [
+        BAD_REQUEST,
+        UNSUPPORTED_VERSION,
+        UNKNOWN_METHOD,
+        BAD_PARAMS,
+        NO_SUCH_PANE,
+        READ_ONLY,
+        DISPLAY_ONLY,
+        DISPLAY_DISABLED,
+        BUSY,
+        INTERNAL,
+        RESPONSE_TOO_LARGE,
+        STALE_SNAPSHOT,
+    ];
 }
 
 /// Parse one ALREADY-BUFFERED NDJSON request line, validating the size cap +

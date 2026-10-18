@@ -37,6 +37,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - TIFF images show like the other formats: the first image of the file, 8 or
   16 bits a channel. A floating-point TIFF is not drawn, since its values
   have no range Kettle could map to colors faithfully.
+- `kettle ctl schema` prints the control protocol's JSON Schema (draft
+  2020-12), with no running Kettle needed: each public method's params and
+  result, the error codes and the event messages, so a tool driving
+  `kettle ctl METHOD --json … --raw` can check what it sends and what it gets
+  back. Kettle's tests keep the schema true to the code and to AGENT.md's
+  method table.
 
 ### Fixed
 

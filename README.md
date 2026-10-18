@@ -7,8 +7,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Kettle is a GPU-accelerated terminal for macOS and Linux. It has tabs, splits,
-search, session restore and themes, and it shows the pictures, diagrams and
-videos your coding agents make right in the chat.
+search, session restore and themes, and it shows the pictures, diagrams,
+documents and videos your coding agents make right in the chat.
 
 ![Kettle with a two pane split and the TokyoNight Night theme](docs/images/kettle-hero.png)
 
@@ -78,8 +78,11 @@ agent:
 - **Claude Code**: new panes load Kettle's plugin. No setup, no prompts.
 - **Codex**: Kettle defines a `codex` shell function in new zsh and fish
   panes. Codex asks once, in its own dialog, before trusting Kettle's hook.
-- **Any program**: `kettle show plot.png` (or `.svg`, `.md`, `.mp4`) puts a
-  file on the pane's media shelf.
+- **Any program**: `kettle show plot.png` (or `.svg`, `.md`, `.mp4`, `.pdf`,
+  `.heic`) puts a file on the pane's media shelf, and `kettle show --inline`
+  prints its card right under the command. A file Kettle does not draw shows
+  as a card you can open in its folder. `kettle ctl schema` prints the JSON
+  Schema of the control API that `kettle ctl` drives.
 
 Click a card to open it in a viewer centered over its split; press Esc to
 close it or **Pin** to keep it beside the terminal. Video plays only when you
