@@ -5,6 +5,37 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 5.3.0 cut - 2026-10-17
+
+macOS 27.0.1, M5 Max, 1920x1080 at 1x, system appearance Dark. The candidate
+is the release workflow's macOS package from the `workflow_dispatch` dry run
+39095632272 on `616f9797`: universal (x86_64, arm64, worker included),
+Developer ID signed, notarized and stapled, accepted by `spctl`. The release
+tree adds to it only #631's change to `kettle show`'s output order, the
+changelog and this cut's version bump. 5.3 changes no window chrome (titlebar,
+material, fullscreen, Dock or accent code) since 5.2.0's live run earlier the
+same day.
+
+Passed:
+
+- `scripts/check-native-titlebar.py` against the candidate's binary: a light
+  theme started under Dark draws its caption clear of the traffic lights at
+  startup, after a resize and with the pointer over it; native fullscreen
+  entered with the green button leaves on one toggle and restores 740x480; a
+  window started in fullscreen leaves it on one toggle; a borderless window
+  round-trips programmatic fullscreen back to 740x480.
+- The new cards, live in the candidate: `kettle show --inline` printed a
+  recognized card under the command for a PNG, an SVG, a Mermaid file, a PDF
+  (`pdf 875x583 2/2` with `--page 2`), a HEIC, a tiled HEIC, an AVIF, a TIFF
+  and a `.docx` file card (`File · 2.3 kB`), each drawn by the signed worker;
+  through a pipe it went to the shelf alone with its note.
+- `just macos-update-smoke` passed against the published v5.2.0 archive and
+  against this candidate's archive.
+
+Not run: the material, corner and opacity captures (unchanged window code;
+5.2.0's run covers them), live Reduce Transparency, Dock, Finder and
+app-switcher icons, and HiDPI or physical Intel hardware.
+
 ## 5.2.0 cut - 2026-10-17
 
 macOS 27.0.1, M5 Max, 1920x1080 at 1x, system appearance Dark. The candidate
