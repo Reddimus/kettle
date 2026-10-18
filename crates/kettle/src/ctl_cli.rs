@@ -4,6 +4,8 @@
 //! `--pid`), issues one method call, and prints the result — or, for
 //! `kettle ctl events`, streams the event feed as NDJSON. A scripting + manual
 //! debugging front-end for the same surface `kettle mcp` exposes to agents.
+//! `kettle ctl schema` prints the protocol's JSON Schema and connects to
+//! nothing.
 
 use kettle_ctl::Client;
 use serde_json::Value;
@@ -12,6 +14,10 @@ use crate::CtlArgs;
 
 /// Run `kettle ctl …`; returns the process exit code (0 ok, 1 on error).
 pub fn run_ctl(args: CtlArgs) -> i32 {
+    if args.method == "schema" {
+        print!("{}", kettle_ctl::schema::CONTROL_V1);
+        return 0;
+    }
     let mut client = match Client::discover(args.pid) {
         Ok(c) => c,
         Err(e) => {

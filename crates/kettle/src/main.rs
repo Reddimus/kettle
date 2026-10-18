@@ -687,7 +687,8 @@ struct CtlArgs {
     /// The method to call (`get_state`, `list_tabs`, `list_panes`,
     /// `read_screen`, `read_cells`, `ui_geometry`, `screenshot`, `send_text`,
     /// `send_keys`, `dispatch_ui_key`, `dispatch_keybind`, `send_mouse`, `resize_window`,
-    /// `perform_action`, `wait_for`, `run_command`), or `events` to stream the event feed.
+    /// `perform_action`, `wait_for`, `run_command`), `events` to stream the event feed,
+    /// or `schema` to print the protocol's JSON Schema, which needs no running Kettle.
     method: String,
     /// Target a specific pane id (else the focused pane).
     #[arg(long)]
