@@ -148,6 +148,7 @@ fn profile(policy: &Policy<'_>) -> Result<(String, Parameters), SandboxError> {
         // needed.
         profile.push_str(AUDIO_OUTPUT);
     }
+
     for (index, tree) in policy.trees.iter().enumerate() {
         let name = format!("TREE{index}");
         profile.push_str(&format!(
@@ -220,6 +221,7 @@ mod tests {
         let (with_sound, _) = super::profile(&sound).unwrap();
         assert!(with_sound.ends_with(AUDIO_OUTPUT), "{with_sound}");
         assert_eq!(with_sound.matches("com.apple.audio").count(), 2);
+
         assert!(parameters.iter().any(|(name, value)| name == "PROGRAM0"
             && value.ends_with(b"(allow default) ((\"")));
         assert_eq!(

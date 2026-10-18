@@ -78,8 +78,8 @@ trusted decoder's programs and the trees they load from
 (`Decoders::sandbox_needs`, each program's package prefix from
 `tools::library_tree`); the watchdog thread confines itself to nothing when
 it starts and reports whether it did, and a job counts as confined only if
-it did. A video or PDF job in a worker that could not confine every thread
-is refused with `SandboxUnavailable`; other kinds still render. It
+it did. A video, PDF, HEIF or AVIF job in a worker that could not confine
+every thread is refused with `SandboxUnavailable`; other kinds still render. It
 renders through `kettle-media-render`: the source is read once
 through one held descriptor, the format comes from the content, the decoded
 size is checked before any pixel is decoded, and the image is fitted into the
@@ -108,7 +108,12 @@ poster or sheet with each frame's time. The source is held rather than read
 (`source::Held`): an open descriptor, the identity it had when opened and
 its first bytes, which classify it. An animated GIF, APNG or WebP is decoded
 here (`animation.rs`); a video container needs a decoder this crate does not
-have and returns `BackendUnavailable` unless the worker supplies one.
+have and returns `BackendUnavailable` unless the worker supplies one. A HEIF
+or AVIF still (`still.rs`), known by its file-type box's brands alone
+(`kettle_media::video::still_image`, within the first 4 KiB), is drawn only
+in a confined worker by `VideoDecoder::still_image`, a method whose default
+answers `CodecUnavailable`, then checked and fitted as a raster, its layout
+keeping the still's own size.
 
 `kettle-media-native` supplies the decoders, as `Decoders`: on macOS
 AVFoundation first for MP4 and QuickTime, behind the `avfoundation`
@@ -117,6 +122,16 @@ and must not load the frameworks), then the user's own ffmpeg and ffprobe.
 Its unsafe code is libc and Objective-C calls, each with a SAFETY comment.
 AVFoundation demuxes in the worker and decodes in Apple's decoder service;
 it opens the held file by descriptor and returns each frame's actual time.
+Beside it `imageio` draws HEIF and AVIF stills through ImageIO, declared
+by hand (`CGImageSourceCreateWithData` and the rest, linked from the
+framework): from the bytes held, its declared size checked before anything
+decodes, as a thumbnail no longer than asked with its orientation applied,
+drawn into sRGB by the same `pixels` the video frames use. It needs nothing
+beyond the worker's base sandbox: confined, ImageIO scales in software
+rather than with the hardware scaler, within 2 levels of it on average. A
+still ImageIO cannot read (AVIF before macOS 13) goes to ffmpeg, as a video
+AVFoundation cannot read does; a still ImageIO found broken stays a parse
+failure (`still_falls_through`).
 ffmpeg and ffprobe are never bundled or linked: Kettle's launcher finds them
 in fixed places and names them in the worker's environment
 (`KETTLE_MEDIA_DECODER`), which no request can set, and they are trusted
