@@ -6,11 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.3.0] — 2026-10-17
+
 ### Added
 
 - `kettle show --inline` prints a card under the command, for any program
-  in a Kettle pane: an image, SVG, Mermaid or Markdown file, a video, or
-  bytes on stdin, which opens in the viewer when clicked. It needs the
+  in a Kettle pane: an image, SVG, Mermaid or Markdown file, a PDF page, a
+  video, a file Kettle does not draw, or bytes on stdin, which opens in the
+  viewer when clicked. It needs the
   command to write straight to its pane's own terminal from the foreground;
   through a pipe, a file or tmux the item goes to the shelf alone and a note
   says why.
@@ -26,8 +29,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   API's `page_index` open another page; Home and End go to the first and
   last. The card's menu and the lane's `↗` open a private copy of the PDF in
   Preview on macOS, or Papers (else Evince) on Linux. The renderer is hayro,
-  run only in the confined media worker, with a fix for a crafted file that
-  overflowed its parser's stack.
+  run only in the confined media worker, with a fix for a crafted file whose
+  object streams nest, which overflowed its parser's stack.
 - A file Kettle does not draw, such as a document, an archive, audio, or a
   video this system has no decoder for, shows as a file card instead of an
   error: its name and size, a page for a picture, and in the lane why
