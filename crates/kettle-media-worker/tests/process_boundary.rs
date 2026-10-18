@@ -353,14 +353,31 @@ fn worker_with_decoder(ffmpeg: &std::path::Path) -> Child {
 }
 
 /// The one reply to `frame` from `child`, which then exits quietly.
-fn reply_from(mut child: Child, frame: &Frame) -> Option<Frame> {
+fn reply_from(child: Child, frame: &Frame) -> Option<Frame> {
+    reply_from_letting(child, frame, &[])
+}
+
+/// What ImageIO writes to the worker's standard error in a virtual machine,
+/// as GitHub's macOS runners are, finding no hardware scaler there. The GUI
+/// discards the worker's standard error; nothing of Kettle's is in it.
+#[cfg(target_os = "macos")]
+const IMAGEIO_IN_A_VIRTUAL_MACHINE: &str =
+    "IOServiceMatchingfailed for: AppleM2ScalerParavirtDriver";
+
+/// As [`reply_from`], letting through only these whole lines a system
+/// framework the worker loads writes to its standard error.
+fn reply_from_letting(mut child: Child, frame: &Frame, framework: &[&str]) -> Option<Frame> {
     handshake(&mut child);
     send(&mut child, frame);
     let reply = receive(&mut child);
     drop(child.stdin.take());
     assert_eq!(receive(&mut child), None);
     assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
-    assert_eq!(finish(&mut child), "");
+    let stderr = finish(&mut child);
+    assert!(
+        stderr.lines().all(|line| framework.contains(&line)),
+        "the worker wrote: {stderr:?}"
+    );
     reply
 }
 
@@ -559,6 +576,58 @@ fn apples_decoder_reads_mp4_in_the_worker() {
     }
 }
 
+/// A HEIF and an AVIF still shown as they are (Auto jobs) are drawn in the
+/// confined worker by Apple's own decoder: a raster fitted to the job's box,
+/// in the file's own colour, whatever the file is called.
+#[cfg(target_os = "macos")]
+#[test]
+fn heif_and_avif_stills_are_drawn_on_macos() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let stills = kettle_test_support::private_tempdir("kettle-worker-still-");
+    for name in ["solid.heic", "solid.avif", "grid.heic"] {
+        let path = stills.path().join(format!("{name}.jpg"));
+        std::fs::copy(
+            format!(
+                "{}/../kettle-media-native/tests/fixtures/still/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            &path,
+        )
+        .unwrap();
+        let Frame::Job(mut job) = job_of(JobKind::Auto, b"") else {
+            unreachable!()
+        };
+        job.source = Source::user_pull(
+            NativePath::new(path.as_os_str().as_bytes().to_vec()).unwrap(),
+            kettle_media::GuiActionWitness::from_explicit_gui_action(),
+        );
+        job.target.width = 64;
+        job.target.height = 64;
+        let reply = reply_from_letting(worker(), &Frame::Job(job), &[IMAGEIO_IN_A_VIRTUAL_MACHINE]);
+        let Some(Frame::DetectedRendered { kind, rendered }) = reply else {
+            panic!("{name} was not drawn: {reply:?}");
+        };
+        assert_eq!(kind, MediaKind::Raster, "{name}");
+        rendered.validate_as(MediaKind::Raster).unwrap();
+        assert_eq!((rendered.width, rendered.height), (64, 48), "{name}");
+        assert_eq!(
+            (rendered.layout.source_width, rendered.layout.source_height),
+            if name == "grid.heic" {
+                (1024.0, 768.0)
+            } else {
+                (640.0, 480.0)
+            }
+        );
+        let centre = &rendered.rgba[(24 * 64 + 32) * 4..][..4];
+        assert!(
+            centre[0].abs_diff(230) <= 4
+                && centre[1].abs_diff(40) <= 4
+                && centre[2].abs_diff(20) <= 4,
+            "{name}: {centre:?}"
+        );
+    }
+}
+
 /// A video shown as it is (an Auto job) comes back as a video: its poster
 /// fitted to the job's box and its metadata, from the decoder the parent
 /// named, whatever the file is called.
@@ -597,6 +666,61 @@ fn an_auto_job_on_a_video_replies_with_its_poster() {
         (1000, 500),
         "the middle frame"
     );
+}
+
+/// On Linux a real ffmpeg from 7.1, when one is installed, draws a HEIF
+/// and an AVIF still through the confined worker as Auto jobs: a raster
+/// fitted to the box in the file's own colour, whatever the file is called.
+/// An older ffmpeg answers `CodecUnavailable`, a file card.
+#[cfg(target_os = "linux")]
+#[test]
+fn heif_and_avif_stills_are_drawn_on_linux_by_ffmpeg() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let home = std::env::var_os("HOME");
+    let Some(found) =
+        kettle_media_native::ffmpeg::Ffmpeg::search(home.as_deref().map(std::path::Path::new))
+    else {
+        eprintln!("skipped: no trusted ffmpeg is installed");
+        return;
+    };
+    let stills = kettle_test_support::private_tempdir("kettle-worker-still-");
+    for name in ["solid.heic", "solid.avif", "grid.heic"] {
+        let path = stills.path().join(format!("{name}.jpg"));
+        std::fs::copy(
+            format!(
+                "{}/../kettle-media-native/tests/fixtures/still/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            &path,
+        )
+        .unwrap();
+        let Frame::Job(mut job) = job_of(JobKind::Auto, b"") else {
+            unreachable!()
+        };
+        job.source = Source::user_pull(
+            NativePath::new(path.as_os_str().as_bytes().to_vec()).unwrap(),
+            kettle_media::GuiActionWitness::from_explicit_gui_action(),
+        );
+        job.target.width = 64;
+        job.target.height = 64;
+        let reply = reply_from(worker_with_decoder(found.path()), &Frame::Job(job));
+        if reply == failure(FailureCode::CodecUnavailable) {
+            eprintln!("skipped {name}: this ffmpeg reads no stills");
+            continue;
+        }
+        let Some(Frame::DetectedRendered { kind, rendered }) = reply else {
+            panic!("{name} was not drawn: {reply:?}");
+        };
+        assert_eq!(kind, MediaKind::Raster, "{name}");
+        assert_eq!((rendered.width, rendered.height), (64, 48), "{name}");
+        let centre = &rendered.rgba[(24 * 64 + 32) * 4..][..4];
+        assert!(
+            centre[0].abs_diff(230) <= 4
+                && centre[1].abs_diff(40) <= 4
+                && centre[2].abs_diff(20) <= 4,
+            "{name}: {centre:?}"
+        );
+    }
 }
 
 /// A real ffmpeg, when one is installed, decodes through the worker under

@@ -75,6 +75,18 @@ Reports that fit any of these are welcome:
   worker's limits. A PDF is `SandboxUnavailable` when the worker could not
   confine itself (`kettle-media-render`'s `pdf` and `auto`, the worker's
   `answer`).
+- **HEIF and AVIF stills** — a still's decoder parsing it anywhere but a
+  confined media worker, or the worker granting it anything beyond its base
+  sandbox: on macOS ImageIO decodes it from bytes in memory, never a path,
+  after its declared size is checked, and measured on macOS 27 it needs no
+  grant the base profile lacks; elsewhere, and on macOS for a still ImageIO
+  cannot read (AVIF before macOS 13), the worker's trusted ffmpeg (7.1 or
+  later) reads it from a fresh descriptor of the held file, contained as a
+  video's decode is, its output read to exactly the size asked. Kettle's own
+  code reads only the file-type box's brands, within the first 4 KiB
+  (`kettle-media`'s `video::still_image`, fuzzed with the other sniffers),
+  and ffprobe's bounded answer (`kettle-media-native`'s `imageio` and
+  `ffmpeg`).
 - **Command-line cards** — `kettle show --inline` getting a card although
   its standard output is not its pane's own terminal device, it runs outside
   the pane's foreground process group, or a full-screen program owns the

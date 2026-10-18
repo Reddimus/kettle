@@ -2,7 +2,9 @@
 //! then rendered as what it is. Its first bytes are read through the held
 //! descriptor; a PDF's signature there (and no image) is a PDF, read whole
 //! under its own cap and drawn only in a confined worker, its first page
-//! shown; a video container there (and no image) is a video, whose
+//! shown; a HEIF or AVIF brand there (and no image) is a still, drawn by the
+//! platform's own decoder only in a confined worker and reported as a raster
+//! in its reply; a video container there (and no image) is a video, whose
 //! poster, the middle frame fitted to the job's box, the worker's decoder
 //! takes from the held file with the video's metadata. Anything else is one
 //! snapshot read through the same descriptor, within the largest input cap of
@@ -19,12 +21,12 @@
 
 use std::time::Instant;
 
-use kettle_media::video::{MAX_VIDEO_PREFIX_BYTES, sniff_video_container};
+use kettle_media::video::{MAX_VIDEO_PREFIX_BYTES, sniff_video_container, still_image};
 use kettle_media::{
     FailureCode, Job, JobKind, MAX_MARKDOWN_BYTES, MAX_PDF_BYTES, MediaKind, Rendered,
 };
 
-use crate::{Means, markdown, mermaid, pdf, raster, source, stills, svg};
+use crate::{Means, markdown, mermaid, pdf, raster, source, still, stills, svg};
 
 pub(crate) fn render(
     job: &Job,
@@ -42,6 +44,14 @@ pub(crate) fn render(
         }
         let snapshot = held.snapshot(MAX_PDF_BYTES)?;
         return pdf::render_loaded(job, snapshot, 0).map(|rendered| (MediaKind::Pdf, rendered));
+    }
+    // A HEIF or AVIF still is drawn by this platform's own decoder, only in
+    // a confined worker. Its kind is in the reply alone: reported as a raster
+    // first, it would cut the decoder's time to a raster's 2 s, where its own
+    // deadline sits inside an Auto job's 3 s, as a video poster's does.
+    if !image && let Some(kind) = still_image(held.prefix(), held.size()) {
+        return still::render(job, &held, kind, means)
+            .map(|rendered| (MediaKind::Raster, rendered));
     }
     let decoder = means.decoder;
     if !image && let Some(container) = sniff_video_container(held.prefix(), held.size()) {
@@ -742,6 +752,162 @@ mod tests {
                 frames,
                 tolerance_ms: 0,
             })
+        }
+    }
+
+    /// A decoder in process standing in for the platform's still decoder:
+    /// a 4000x3000 photo, drawn solid no larger than it is asked for.
+    struct Photo;
+
+    impl kettle_media::video::VideoDecoder for Photo {
+        fn stills(
+            &self,
+            _input: kettle_media::video::VideoInput<'_>,
+            _plan: &mut dyn FnMut(
+                &kettle_media::VideoInfo,
+            )
+                -> Result<kettle_media::video::StillsPlan, FailureCode>,
+            _deadline: std::time::Instant,
+        ) -> Result<kettle_media::video::DecodedStills, FailureCode> {
+            Err(FailureCode::CodecUnavailable)
+        }
+
+        fn still_image(
+            &self,
+            input: kettle_media::video::StillInput<'_>,
+            still: kettle_media::video::StillImage,
+            max_edge: u32,
+            _deadline: std::time::Instant,
+        ) -> Result<kettle_media::video::DecodedStill, FailureCode> {
+            assert_eq!(still, kettle_media::video::StillImage::Heif);
+            assert_eq!(&input.bytes[4..12], b"ftypheic", "the held bytes, whole");
+            let (_, identity) = input.file.expect("the file they were read from");
+            assert_eq!(identity.size, input.bytes.len() as u64);
+            let width = max_edge.min(4000);
+            let height = width * 3 / 4;
+            Ok(kettle_media::video::DecodedStill {
+                width,
+                height,
+                rgba: [60, 120, 200, 255].repeat((width * height) as usize),
+                source_width: 4000,
+                source_height: 3000,
+            })
+        }
+    }
+
+    /// The platform's decoder while the file it reads is rewritten under it.
+    struct Rewritten(std::path::PathBuf);
+
+    impl kettle_media::video::VideoDecoder for Rewritten {
+        fn stills(
+            &self,
+            input: kettle_media::video::VideoInput<'_>,
+            plan: &mut dyn FnMut(
+                &kettle_media::VideoInfo,
+            )
+                -> Result<kettle_media::video::StillsPlan, FailureCode>,
+            deadline: std::time::Instant,
+        ) -> Result<kettle_media::video::DecodedStills, FailureCode> {
+            Photo.stills(input, plan, deadline)
+        }
+
+        fn still_image(
+            &self,
+            input: kettle_media::video::StillInput<'_>,
+            still: kettle_media::video::StillImage,
+            max_edge: u32,
+            deadline: std::time::Instant,
+        ) -> Result<kettle_media::video::DecodedStill, FailureCode> {
+            use std::io::Write as _;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&self.0)
+                .unwrap()
+                .write_all(b"!")
+                .unwrap();
+            Photo.still_image(input, still, max_edge, deadline)
+        }
+    }
+
+    /// A still whose file changes while its decoder reads it is `Changed`,
+    /// never pixels of one file under the digest of another.
+    #[test]
+    fn a_still_rewritten_while_drawn_is_changed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("photo.heic");
+        heic(&path);
+        let decoder = Rewritten(path.clone());
+        let result = render(
+            &job(&path),
+            &mut |_| {},
+            crate::Means {
+                decoder: Some(&decoder),
+                confined: true,
+            },
+        );
+        assert_eq!(result.unwrap_err(), FailureCode::Changed);
+    }
+
+    /// A HEIF still: its file-type box, and room for what would follow.
+    fn heic(path: &Path) {
+        let mut bytes = vec![0, 0, 0, 24];
+        bytes.extend_from_slice(b"ftypheic\0\0\0\0mif1heic");
+        bytes.extend_from_slice(&[0; 64]);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// A HEIF still is a raster whatever the file is called, drawn by the
+    /// platform's decoder at no more than the box needs and fitted to it as
+    /// a raster is, laid out against the photo's own size. A decoder that
+    /// reads no stills cannot draw it, nor can a worker with no decoder, nor
+    /// an unconfined one, which asks no decoder at all.
+    #[test]
+    fn a_heif_still_is_drawn_by_the_platforms_decoder() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("photo.jpg");
+        heic(&path);
+        let mut boxed = job(&path);
+        boxed.target.width = 400;
+        boxed.target.height = 400;
+        let mut kinds = Vec::new();
+        let (kind, rendered) = render(
+            &boxed,
+            &mut |kind| kinds.push(kind),
+            crate::Means {
+                decoder: Some(&Photo),
+                confined: true,
+            },
+        )
+        .unwrap();
+        // Reported in the reply alone: a raster's 2 s, reported first, would
+        // cut short the decoder's own deadline.
+        assert_eq!((kind, kinds), (MediaKind::Raster, vec![]));
+        assert_eq!((rendered.width, rendered.height), (400, 300));
+        assert_eq!(rendered.rgba[..4], [60, 120, 200, 255]);
+        assert_eq!(
+            (rendered.layout.source_width, rendered.layout.source_height),
+            (4000.0, 3000.0)
+        );
+        rendered.validate_as(MediaKind::Raster).unwrap();
+        for (means, failure) in [
+            (
+                crate::Means {
+                    decoder: Some(&Clip),
+                    confined: true,
+                },
+                FailureCode::CodecUnavailable,
+            ),
+            (CONFINED, FailureCode::BackendUnavailable),
+            (
+                crate::Means {
+                    decoder: Some(&Photo),
+                    confined: false,
+                },
+                FailureCode::SandboxUnavailable,
+            ),
+        ] {
+            let result = render(&boxed, &mut |_| {}, means);
+            assert_eq!(result.unwrap_err(), failure);
         }
     }
 
