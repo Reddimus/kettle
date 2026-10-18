@@ -88,13 +88,12 @@ pub fn run_show(args: ShowArgs) -> i32 {
     match show(args, stdout_is_terminal) {
         Ok(Shown { result, note }) => match &result.inline {
             Some(card) => print_card(&mut std::io::stdout().lock(), &card.message),
-            None => {
-                println!("{}", confirmation(&result));
-                if let Some(note) = note {
-                    eprintln!("kettle show: {note}");
-                }
-                0
-            }
+            None => print_shelved(
+                &mut std::io::stdout().lock(),
+                &mut std::io::stderr().lock(),
+                &confirmation(&result),
+                note,
+            ),
         },
         Err(refusal) => {
             eprintln!("kettle show: {}", refusal.text());
@@ -115,6 +114,28 @@ fn print_card(out: &mut impl Write, card: &str) -> i32 {
     {
         eprintln!("kettle show: could not print the card; the item is on the shelf");
     }
+    0
+}
+
+/// Say the item went to the shelf: first, on `err`, why there is no card,
+/// then the confirmation on `out`, each in one write. In that order a pipe on
+/// `out` (`kettle show --inline plot.png | cat`) cannot print the confirmation
+/// in the middle of the note, which reaches the same terminal another way.
+/// The item is on the shelf whatever either write does, so the exit code is 0.
+fn print_shelved(
+    out: &mut impl Write,
+    err: &mut impl Write,
+    confirmation: &str,
+    note: Option<&str>,
+) -> i32 {
+    if let Some(note) = note {
+        let _ = err
+            .write_all(format!("kettle show: {note}\n").as_bytes())
+            .and_then(|()| err.flush());
+    }
+    let _ = out
+        .write_all(format!("{confirmation}\n").as_bytes())
+        .and_then(|()| out.flush());
     0
 }
 
@@ -675,6 +696,39 @@ mod tests {
         let path = Path::new("caf\u{e9}");
         let want = if cfg!(windows) { 8 } else { 5 };
         assert_eq!(native_len(path), want);
+    }
+
+    /// The note comes out whole before the confirmation, as one terminal
+    /// shows both when the confirmation goes through a pipe; with no note,
+    /// the confirmation alone.
+    #[test]
+    fn the_note_is_written_before_the_confirmation() {
+        #[derive(Clone, Default)]
+        struct Terminal(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+        impl Write for Terminal {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let terminal = Terminal::default();
+        let (mut out, mut err) = (terminal.clone(), terminal.clone());
+        let note = "no inline card: its output is not the pane's own terminal";
+        assert_eq!(
+            print_shelved(&mut out, &mut err, "Sent to the shelf.", Some(note)),
+            0
+        );
+        assert_eq!(
+            String::from_utf8(terminal.0.borrow().clone()).unwrap(),
+            format!("kettle show: {note}\nSent to the shelf.\n")
+        );
+        let terminal = Terminal::default();
+        let (mut out, mut err) = (terminal.clone(), terminal.clone());
+        print_shelved(&mut out, &mut err, "Sent to the shelf.", None);
+        assert_eq!(&*terminal.0.borrow(), b"Sent to the shelf.\n");
     }
 
     /// A card that cannot be printed still exits 0: the item is on the
