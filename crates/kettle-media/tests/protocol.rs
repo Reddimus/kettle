@@ -419,6 +419,9 @@ fn input_caps_fonts_and_video_options() {
         (JobKind::Svg, MAX_SVG_BYTES),
         (JobKind::Raster, MAX_RASTER_BYTES),
         (JobKind::MarkdownDiagrams { index: 0 }, MAX_MARKDOWN_BYTES),
+        // A PDF's bytes in the frame are held to what a frame carries; a
+        // larger one goes by path, under its own 64 MiB cap.
+        (JobKind::PdfPage { index: 0 }, MAX_RASTER_BYTES),
     ] {
         let mut j = common::job();
         j.kind = kind;
@@ -428,10 +431,10 @@ fn input_caps_fonts_and_video_options() {
         j.source = Source::Bytes(vec![b'a'; max + 1]);
         assert!(encode(&Frame::Job(j), Direction::ParentToWorker).is_err());
         // An over-limit blob is rejected even with a short physical frame.
-        let offset = if matches!(kind, JobKind::MarkdownDiagrams { .. }) {
-            14
-        } else {
-            13
+        let offset = match kind {
+            JobKind::MarkdownDiagrams { .. } => 14,
+            JobKind::PdfPage { .. } => 17,
+            _ => 13,
         };
         let mut hostile = valid[..offset + 5].to_vec();
         hostile[offset..offset + 4].copy_from_slice(&u32::try_from(max + 1).unwrap().to_le_bytes());
@@ -943,7 +946,7 @@ fn typed_reply_refuses_unknown_kinds_and_other_directions() {
             WireError::WrongDirection
         );
     }
-    encoded[HEADER_BYTES] = 5;
+    encoded[HEADER_BYTES] = 6;
     assert_eq!(
         decode(&encoded, Direction::WorkerToParent).unwrap_err(),
         WireError::UnknownEnum
@@ -958,6 +961,7 @@ fn actual_kind_roundtrips_without_altering_pixels_or_source() {
         MediaKind::Mermaid,
         MediaKind::Markdown,
         MediaKind::Video,
+        MediaKind::Pdf,
     ] {
         roundtrip(
             Frame::DetectedRendered {
@@ -967,6 +971,59 @@ fn actual_kind_roundtrips_without_altering_pixels_or_source() {
             Direction::WorkerToParent,
         );
     }
+}
+
+/// A PDF page job names its page, and a PDF reply which page it is of how
+/// many: only a PDF reply does, a PDF reply always does, and the page is one
+/// of the document's, on encode and decode alike.
+#[test]
+fn a_pdf_page_says_which_page_it_is() {
+    let mut job = common::job();
+    job.kind = JobKind::PdfPage { index: 7 };
+    job.source = Source::Bytes(b"%PDF-1.7".to_vec());
+    roundtrip(Frame::Job(job), Direction::ParentToWorker);
+    let pdf = |page| {
+        let mut rendered = common::rendered_as(MediaKind::Pdf);
+        rendered.page = page;
+        Frame::DetectedRendered {
+            kind: MediaKind::Pdf,
+            rendered,
+        }
+    };
+    roundtrip(
+        pdf(Some(PageOf {
+            index: 11,
+            count: 12,
+        })),
+        Direction::WorkerToParent,
+    );
+    for frame in [
+        pdf(None),
+        pdf(Some(PageOf {
+            index: 12,
+            count: 12,
+        })),
+        pdf(Some(PageOf { index: 0, count: 0 })),
+        Frame::DetectedRendered {
+            kind: MediaKind::Raster,
+            rendered: common::rendered_as(MediaKind::Pdf),
+        },
+    ] {
+        assert!(frame.validate().is_err(), "{frame:?}");
+        assert!(encode(&frame, Direction::WorkerToParent).is_err());
+    }
+    // A raster reply that carries a page anyway is refused on decode.
+    let mut bytes = encode(
+        &pdf(Some(PageOf { index: 0, count: 1 })),
+        Direction::WorkerToParent,
+    )
+    .unwrap();
+    assert_eq!(
+        bytes[HEADER_BYTES], 5,
+        "the Pdf media-kind byte leads the payload"
+    );
+    bytes[HEADER_BYTES] = 0;
+    assert!(decode(&bytes, Direction::WorkerToParent).is_err());
 }
 
 /// A reply's source goes with its kind: a textual kind returns its source
@@ -1005,13 +1062,13 @@ fn a_replys_source_goes_with_its_kind() {
     assert!(decode(&bytes, Direction::WorkerToParent).is_err());
 }
 
-/// Neither end reads the other version's frames: a version 7 worker or
+/// Neither end reads the other version's frames: a version 8 worker or
 /// parent is restarted, never half understood, and so is a newer one.
 #[test]
 fn version_skew_either_way_is_restart_required() {
-    assert_eq!(PROTOCOL_VERSION, 8);
+    assert_eq!(PROTOCOL_VERSION, 9);
     for (_, direction, golden) in vectors() {
-        for version in [1u16, 2, 3, 4, 5, 6, 7, 9] {
+        for version in [1u16, 2, 3, 4, 5, 6, 7, 8, 10] {
             let mut skewed = bytes(golden);
             skewed[4..6].copy_from_slice(&version.to_le_bytes());
             assert_eq!(
@@ -1101,14 +1158,15 @@ fn a_stills_reply_carries_its_video_and_frame_times() {
         // Written past the encoder's checks, the decoder refuses it too.
         let mut bytes = typed(common::rendered_as(MediaKind::Video), MediaKind::Video).unwrap();
         let good = common::rendered_as(MediaKind::Video).video.unwrap();
-        let tail = video_tail(&good);
+        // The video, then the flag that says no page follows.
+        let tail = [video_tail(&good), vec![0]].concat();
         let at = bytes.len() - tail.len();
         assert_eq!(
             &bytes[at..],
             tail.as_slice(),
             "{name}: the tail is the video"
         );
-        let worse = video_tail(bad.video.as_ref().unwrap());
+        let worse = [video_tail(bad.video.as_ref().unwrap()), vec![0]].concat();
         bytes.truncate(at);
         bytes.extend_from_slice(&worse);
         let length = u32::try_from(bytes.len() - HEADER_BYTES).unwrap();
@@ -1122,7 +1180,8 @@ fn a_stills_reply_carries_its_video_and_frame_times() {
     }
     // Unknown codec and container tags are refused.
     let mut bytes = typed(common::rendered_as(MediaKind::Video), MediaKind::Video).unwrap();
-    let tail = video_tail(&common::video_result());
+    // The video, then the flag that says no page follows.
+    let tail = [video_tail(&common::video_result()), vec![0]].concat();
     let codec_at = bytes.len() - tail.len() + 1 + 8 + 4 + 4 + 2;
     let mut unknown_codec = bytes.clone();
     unknown_codec[codec_at] = VideoCodec::ALL.len() as u8;
@@ -1138,8 +1197,8 @@ fn a_stills_reply_carries_its_video_and_frame_times() {
     );
 }
 
-/// The bytes a video result takes at the end of a reply, as the codec
-/// writes them.
+/// The bytes a video result takes near the end of a reply, before the page
+/// flag, as the codec writes them.
 fn video_tail(video: &VideoStillsResult) -> Vec<u8> {
     let mut out = vec![1];
     out.extend(video.info.duration_ms.to_le_bytes());

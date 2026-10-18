@@ -225,6 +225,7 @@ pub(crate) fn render_admitted_svg(
         uncovered_scripts: coverage.scripts,
         warnings: coverage.warnings,
         video: None,
+        page: None,
     };
     rendered
         .validate()
@@ -300,11 +301,11 @@ pub(crate) fn render_label(text: &str, size: u32) -> Result<(u32, u32, Vec<u8>),
 /// Where the image lands: the canvas to allocate and the transform onto it,
 /// and where both sit in the target box.
 #[derive(Debug, PartialEq)]
-struct Placement {
-    width: u32,
-    height: u32,
-    transform: Transform,
-    layout: RenderLayout,
+pub(crate) struct Placement {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) transform: Transform,
+    pub(crate) layout: RenderLayout,
 }
 
 /// `edge * scale`, rounded, kept within 1..=`limit`.
@@ -330,7 +331,7 @@ fn within_ceiling(width: u32, height: u32) -> bool {
 /// Fit an image of `size` into `target`: within the box keeping its aspect
 /// ratio, and without a crop within the SVG ceiling too. A crop selects
 /// target-box pixels around the centered image and must fit the ceiling.
-fn place(size: usvg::Size, target: Target) -> Result<Placement, FailureCode> {
+pub(crate) fn place(size: usvg::Size, target: Target) -> Result<Placement, FailureCode> {
     let (width, height) = (size.width(), size.height());
     if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
         return Err(FailureCode::RenderParse);

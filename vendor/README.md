@@ -5,8 +5,8 @@ here only when a released dependency has a correctness defect on Kettle's
 supported path and no fixed upstream release is available.
 
 The patched packages remain outside the product workspace, but
-`vendor/Cargo.toml` groups them, all but `cosmic-text` and `merman-core` (see
-their sections), into a validation-only workspace.
+`vendor/Cargo.toml` groups them, all but `cosmic-text`, `hayro-syntax` and
+`merman-core` (see their sections), into a validation-only workspace.
 `vendor/Cargo.lock` is committed so direct package tests never resolve a fresh
 dependency graph; package-local `Cargo.lock` files and `target/` directories
 remain generated noise and must not be committed. Run every retained unit
@@ -200,6 +200,30 @@ upstream release that contains all of these fixes.
 
 Remove the `[patch.crates-io]` entry and this directory after upgrading to a
 cosmic-text release that contains both commits.
+
+## `hayro-syntax-0.8.0`
+
+- Source: crates.io `hayro-syntax` 0.8.0.
+- Upstream revision recorded in the crate's `.cargo_vcs_info.json`.
+- License: Apache-2.0 OR MIT; both upstream license files and the README are
+  retained.
+- Local change: `XRef::get_with` refuses an object stream that is not itself a
+  top-level object, as ISO 32000-2 7.5.7 says an object stream is. The released
+  parser resolved an object stored in an object stream stored in another, and
+  so on, by recursing once per level with no bound, so a 939-byte document
+  overflowed the stack, an abort no guard catches, or ran out of memory or
+  time first (LaurenzV/hayro#1509). The change is upstream's
+  LaurenzV/hayro#1510 (a1569b33) alone: `src/xref.rs`, +11 -0.
+- Upstream status, checked 2026-10-17: the fix is on LaurenzV/hayro's `main`;
+  no release carries it yet. Drop this copy for the first release that does.
+- Excluded: the registry marker and generated lockfile.
+- Validation: not a member of `vendor/Cargo.toml`, for the reason
+  `cosmic-text` is not: its dependency graph would enter `vendor/Cargo.lock`.
+  The product workspace compiles it through `[patch.crates-io]`, and so does
+  `fuzz/Cargo.toml`. `kettle-media-render`'s
+  `nested_object_streams_are_refused_without_overflowing` renders upstream's
+  regression file (`tests/fixtures/pdf/`); against the released crate the
+  test binary aborts on a stack overflow.
 
 ## `merman-core-0.8.0`
 

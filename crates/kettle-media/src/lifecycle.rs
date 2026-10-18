@@ -852,6 +852,7 @@ mod tests {
             uncovered_scripts: vec![],
             warnings: vec![],
             video: None,
+            page: None,
         }
     }
 

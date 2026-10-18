@@ -77,6 +77,7 @@ fn every_supported_format_renders() {
         ImageFormat::WebP,
         ImageFormat::Bmp,
         ImageFormat::Gif,
+        ImageFormat::Tiff,
     ] {
         let rendered = render(&job(
             Source::Bytes(encode(&image, format)),
@@ -105,15 +106,37 @@ fn spoofed_extension_uses_content() {
         render(&job(user_pull(&text_as_png), target(2, 2, None))).unwrap_err(),
         FailureCode::UnsupportedMedia
     );
-    // A format the job does not take (TIFF) is refused by content too.
+    // A format the job does not take (QOI) is refused by content too.
     assert_eq!(
         render(&job(
-            Source::Bytes(b"II*\0\x08\0\0\0".to_vec()),
+            Source::Bytes(b"qoif\0\0\0\x02\0\0\0\x02\x04\0".to_vec()),
             target(2, 2, None)
         ))
         .unwrap_err(),
         FailureCode::UnsupportedMedia
     );
+}
+
+/// A TIFF shows its first image, in the colors it holds, a 16-bit one too.
+#[test]
+fn a_tiff_renders_its_first_image() {
+    let image = solid(4, 2, [10, 200, 30, 255]);
+    let rendered = render(&job(
+        Source::Bytes(encode(&image, ImageFormat::Tiff)),
+        target(4, 2, None),
+    ))
+    .unwrap();
+    assert_eq!(rendered.rgba, [10, 200, 30, 255].repeat(8));
+    let deep = DynamicImage::ImageRgb16(image::ImageBuffer::from_pixel(
+        3,
+        3,
+        // Each 8-bit value times 257, the 16-bit value it converts back from.
+        image::Rgb([10 * 257_u16, 200 * 257, 30 * 257]),
+    ));
+    let mut bytes = Cursor::new(Vec::new());
+    deep.write_to(&mut bytes, ImageFormat::Tiff).unwrap();
+    let rendered = render(&job(Source::Bytes(bytes.into_inner()), target(3, 3, None))).unwrap();
+    assert_eq!(rendered.rgba, [10, 200, 30, 255].repeat(9));
 }
 
 /// A PNG that is little more than a header claiming `width` by `height` RGBA

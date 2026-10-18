@@ -19,7 +19,8 @@ kettle-media.workspace = true
 # The raster codecs a job may hold. A build that links in more (arboard adds
 # TIFF to a workspace build) changes nothing: the renderer names the formats
 # it decodes and refuses the rest.
-image = { workspace = true, features = ["png", "jpeg", "webp", "bmp", "gif"] }
+# TIFF is decoded by the pure-Rust `tiff` crate, which the lock already holds.
+image = { workspace = true, features = ["png", "jpeg", "webp", "bmp", "gif", "tiff"] }
 # O_NONBLOCK and O_NOCTTY for the source open; no unsafe call is made.
 libc = "0.2"
 # A cached thumbnail's text chunks, read before its pixels are decoded: the
@@ -55,10 +56,19 @@ roughr-merman = { version = "=0.12.3", default-features = false }
 # CommonMark, for the Mermaid fences in a Markdown gallery: the version
 # merman-render already locks, with no HTML writer or command line.
 pulldown-cmark = { version = "=0.13.4", default-features = false }
+# PDF pages, pinned exactly with its parser and interpreter: a young renderer
+# whose bounds a version change must be checked against again, used only in a
+# confined worker (see `pdf`). Its own crates forbid unsafe code; it pulls in
+# zlib-rs and SIMD rasterizing that do not. Defaults off: no SIMD image
+# scaler. The fonts and CMaps the PDF standard requires are embedded, so
+# nothing is read from the system. hayro-syntax is the patched local copy.
+hayro = { version = "=0.8.0", default-features = false, features = ["embed-fonts", "embed-cmaps"] }
+hayro-interpret = { version = "=0.8.0", default-features = false }
+hayro-syntax = { version = "=0.8.0", default-features = false }
 
 [package.metadata.cargo-machete]
 # These dependencies constrain the renderer family rather than expose APIs.
-ignored = ["merman-core", "merman-render", "dugong", "dugong-graphlib", "manatee", "roughr-merman"]
+ignored = ["merman-core", "merman-render", "dugong", "dugong-graphlib", "manatee", "roughr-merman", "hayro-interpret", "hayro-syntax"]
 
 [features]
 # The entry point the fuzz targets (fuzz/) call. Never in a shipped build.

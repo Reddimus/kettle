@@ -508,7 +508,8 @@ and `keybind = ctrl+shift+_=decrease_font_size`.
 The pointer works the same way. While a program has mouse reporting on, it
 gets your clicks, and Shift keeps a click Kettle's: Shift+drag selects text,
 and Shift+right-click opens Kettle's menu, which also offers "Preview Copied
-File" when the clipboard names an image, SVG, Mermaid or Markdown file. With text
+File" when the clipboard names an image, SVG, Mermaid, Markdown, PDF or video
+file. With text
 selected, Shift+right-click off the selection extends it, as in xterm, and on
 the selection opens the menu. With `putty-paste-style` on, a right-click
 pastes instead, Shift or not.

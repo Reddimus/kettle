@@ -163,6 +163,13 @@ alacritty_terminal = { path = "vendor/alacritty_terminal-0.26.0" }
 # 1e0074c8, which no release carries yet; the local copy backports that commit
 # alone. `vendor/README.md` records the scope.
 cosmic-text = { path = "vendor/cosmic-text-0.19.0" }
+# hayro-syntax 0.8.0 resolves an object stored in an object stream stored in
+# another, and so on, by recursing once per level with no bound: a small
+# crafted PDF overflows the stack (an abort no guard catches), or exhausts
+# memory or time first. Upstream LaurenzV/hayro#1510 refuses an object stream
+# that is not a top-level object; no release carries it yet, so the local copy
+# backports that commit alone. `vendor/README.md` records the scope.
+hayro-syntax = { path = "vendor/hayro-syntax-0.8.0" }
 # merman-core 0.8.0's sequence lexer matched a line feed followed by `%%` as
 # a comment it then never consumed, so a diagram with a bare `%%` line spun
 # until the worker's watchdog killed it (#584). Mermaid's grammar reads that

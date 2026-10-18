@@ -70,6 +70,11 @@ Reports that fit any of these are welcome:
   connection, or opening anything on screen. Routing lives in `kettle-ui`'s
   `media::route`; display discovery is `kettle-ctl`'s
   `Client::discover_display`.
+- **PDF pages** — hayro, the PDF renderer, parsing a document anywhere but a
+  confined media worker, or a page rendered past the vector ceiling or the
+  worker's limits. A PDF is `SandboxUnavailable` when the worker could not
+  confine itself (`kettle-media-render`'s `pdf` and `auto`, the worker's
+  `answer`).
 - **Command-line cards** — `kettle show --inline` getting a card although
   its standard output is not its pane's own terminal device, it runs outside
   the pane's foreground process group, or a full-screen program owns the

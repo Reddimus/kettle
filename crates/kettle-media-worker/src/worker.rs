@@ -225,22 +225,27 @@ fn answer(
     } else {
         Err(kettle_media_native::sandbox::SandboxError::Failed)
     });
+    let is_confined = confined.is_ok();
     let refusing = Refusing(FailureCode::SandboxUnavailable);
-    // A video is never decoded unconfined. Raster, SVG and Mermaid, which
-    // only Kettle's own code parses, still render in this bounded process.
+    // A video is never decoded unconfined, nor a PDF parsed. Raster, SVG and
+    // Mermaid, which only Kettle's own code parses, still render in this
+    // bounded process.
     let decoder: Option<&dyn kettle_media::video::VideoDecoder> = match (&decoders, confined) {
         (Some(decoders), Ok(())) => Some(decoders),
         (Some(_), Err(_)) => Some(&refusing),
         (None, _) => None,
     };
-    kettle_media_render::render_with_decoder(
+    kettle_media_render::render_with(
         job,
         |kind| {
             classified(kind);
             #[cfg(feature = "test-faults")]
             faults::after_classification(job);
         },
-        decoder,
+        kettle_media_render::Means {
+            decoder,
+            confined: is_confined,
+        },
     )
 }
 
