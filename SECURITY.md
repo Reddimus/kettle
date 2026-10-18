@@ -70,6 +70,15 @@ Reports that fit any of these are welcome:
   connection, or opening anything on screen. Routing lives in `kettle-ui`'s
   `media::route`; display discovery is `kettle-ctl`'s
   `Client::discover_display`.
+- **Command-line cards** — `kettle show --inline` getting a card although
+  its standard output is not its pane's own terminal device, it runs outside
+  the pane's foreground process group, or a full-screen program owns the
+  screen; or card text reaching a pipe, file or other terminal that way.
+  The server reads the sender's descriptor 1 from the kernel
+  (`kettle_ctl::process::standard_output`) at admission and again after the
+  render (`cli_card_owner` in `kettle-ui`). The check keeps card text out of
+  output something captures by accident, such as a model's shell tool; code
+  running as you can already do what Kettle's own command line does.
 - **Opening media outside Kettle** — a card menu's Open in Preview
   (macOS) or Open in Image Viewer (Linux) handing anything but a fresh PNG
   of the pixels Kettle shows to anything but the one permitted viewer:

@@ -31,6 +31,7 @@ kettle \- fast GPU-accelerated terminal emulator for Linux and macOS
 .IR TITLE ]
 .RI [ \-\-key
 .IR KEY ]
+.RB [ \-\-inline ]
 .br
 .B kettle video\-frames
 .I PATH
@@ -557,7 +558,7 @@ which sends an image, SVG, Mermaid or Markdown file to the media shelf of the
 kettle pane the
 server runs in and needs agent previews, never full control.
 .TP
-.B kettle show \fR[\fIPATH\fR|\fB\-\fR] [\fB\-\-mermaid\fR] [\fB\-\-title \fITITLE\fR] [\fB\-\-key \fIKEY\fR]
+.B kettle show \fR[\fIPATH\fR|\fB\-\fR] [\fB\-\-mermaid\fR] [\fB\-\-title \fITITLE\fR] [\fB\-\-key \fIKEY\fR] [\fB\-\-inline\fR]
 Send a local image, SVG, Mermaid diagram, Markdown diagram gallery (the
 Mermaid diagrams of a Markdown file, paged in the preview lane) or video
 (shown as its poster, with its length; it plays in the lane, without
@@ -577,8 +578,13 @@ path longer than 4 KiB is refused before anything looks for it. A later
 .B show
 with the same
 .B \-\-key
-(default: the file's path) replaces the item. Nothing opens on screen. Needs
-agent previews
+(default: the file's path) replaces the item. Nothing opens on screen.
+.B \-\-inline
+also prints a card under the command, which opens the item when clicked:
+only when the command writes straight to its pane's own terminal from the
+foreground and no full-screen program owns the screen (not through a pipe, a
+file or tmux). Otherwise the item goes to the shelf alone and a note on
+stderr says why. Needs agent previews
 .RB ( agent\-display ),
 never full control. Exits 0 once the item is on the shelf, 1 otherwise.
 .TP

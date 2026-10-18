@@ -1606,6 +1606,7 @@ mod tests {
             height: 480,
             warnings: vec!["font_fallback".into()],
             inline: None,
+            inline_refused: None,
             video: None,
         };
         let sent = show_sent(&result);

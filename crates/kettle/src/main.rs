@@ -611,6 +611,12 @@ struct ShowArgs {
     /// adding another (default: the file's path).
     #[arg(long, value_name = "KEY")]
     key: Option<String>,
+    /// Also print a card here, under the command, which opens the item when
+    /// clicked. Only when this command writes straight to its pane's own
+    /// terminal from the foreground; otherwise the item goes to the shelf
+    /// alone and a note on stderr says why.
+    #[arg(long)]
+    inline: bool,
 }
 
 #[derive(clap::Args, Debug)]

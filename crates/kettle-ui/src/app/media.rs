@@ -152,6 +152,7 @@ impl App {
             request: show,
             sender,
             harness,
+            terminal,
         }) = request.take_show()
         else {
             refuse(FailureCode::BadParams);
@@ -196,6 +197,7 @@ impl App {
         #[cfg(target_os = "linux")]
         let native_grant = show
             .inline
+            .filter(|&target| target != kettle_ctl::show::InlineTarget::Cli)
             .zip(sender.as_ref())
             .and_then(|(target, sender)| {
                 let caller = self.scoped_card_caller(ws, request.caller(), sender, target)?;
@@ -203,6 +205,9 @@ impl App {
             });
         #[cfg(target_os = "linux")]
         let harness = native_grant.as_ref().map(|grant| grant.owner());
+        // The command that would print a command-line card, checked again
+        // once the render is done.
+        let printer = sender.as_ref().map(|sender| sender.process);
         // An unverified push counts against its sending process; one whose
         // sender the kernel could not name has no one to count against or
         // to show as its sender.
@@ -288,23 +293,43 @@ impl App {
                     .into()
             });
         // A card only for the harness Kettle checked, which runs in this very
-        // pane; everyone else's push goes to the shelf alone.
-        let inline = match (inline, harness) {
-            (Some(target), Some(owner)) if route.verified => Some(crate::media::InlineDraft {
-                #[cfg(target_os = "linux")]
-                launch: native_grant,
-                owner,
-                harness: match target {
-                    kettle_ctl::show::InlineTarget::ClaudeHook => {
-                        kettle_render::CardHarness::ClaudeHook
-                    }
-                    kettle_ctl::show::InlineTarget::CodexHook => {
-                        kettle_render::CardHarness::CodexHook
-                    }
-                },
-                name: card_name,
-            }),
-            _ => None,
+        // pane, or for `kettle show --inline` writing to the pane's own
+        // terminal from its foreground; everyone else's push goes to the
+        // shelf alone.
+        let (inline, inline_refused) = match (inline, harness) {
+            (Some(kettle_ctl::show::InlineTarget::Cli), _) => {
+                let checked = self
+                    .all_windows(ws)
+                    .find_map(|window| window.mux.panes.get(&route.pane))
+                    .ok_or(kettle_ctl::show::InlineRefusal::Unverified)
+                    .and_then(|pane| cli_card_owner(pane, route.verified, terminal));
+                match checked {
+                    Ok(owner) => (
+                        Some(crate::media::InlineDraft {
+                            #[cfg(target_os = "linux")]
+                            launch: None,
+                            owner,
+                            harness: kettle_render::CardHarness::Cli,
+                            name: card_name,
+                            printer,
+                        }),
+                        None,
+                    ),
+                    Err(refusal) => (None, Some(refusal)),
+                }
+            }
+            (Some(target), Some(owner)) if route.verified => (
+                Some(crate::media::InlineDraft {
+                    #[cfg(target_os = "linux")]
+                    launch: native_grant,
+                    owner,
+                    harness: printed_by(target),
+                    name: card_name,
+                    printer: None,
+                }),
+                None,
+            ),
+            _ => (None, None),
         };
         // The bytes a push carried are kept, charged, for the item to be
         // rendered again: no room for them is no room for the push.
@@ -332,6 +357,7 @@ impl App {
                 title,
                 provenance,
                 inline,
+                inline_refused,
                 gallery: None,
             },
             spec,
@@ -911,6 +937,7 @@ impl App {
                 title,
                 provenance: crate::media::Provenance::User,
                 inline: None,
+                inline_refused: None,
                 gallery,
             },
             spec,
@@ -927,27 +954,26 @@ impl App {
         if self.media.cards.is_empty() {
             return;
         }
-        let gone: Vec<kettle_ctl::process::ProcessIdentity> = self
-            .media
-            .cards
-            .owners()
-            .into_iter()
-            .filter(|owner| {
-                let gone = kettle_ctl::process::identity(owner.pid()) != Ok(*owner);
-                #[cfg(target_os = "linux")]
-                {
-                    gone || !self.agent_launches.owner_live(*owner)
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    gone
-                }
-            })
+        let owners = self.media.cards.owners();
+        let gone: Vec<kettle_ctl::process::ProcessIdentity> = owners
+            .iter()
+            .copied()
+            .filter(|owner| kettle_ctl::process::identity(owner.pid()) != Ok(*owner))
+            .collect();
+        // A launched harness's cards also go with its launch's scope; a
+        // command-line card has none.
+        #[cfg(target_os = "linux")]
+        let lapsed: Vec<kettle_ctl::process::ProcessIdentity> = owners
+            .iter()
+            .copied()
+            .filter(|owner| !self.agent_launches.owner_live(*owner))
             .collect();
         #[cfg(target_os = "linux")]
-        if !gone.is_empty() {
+        if !gone.is_empty() || !lapsed.is_empty() {
             self.agent_launches.prune(std::time::Instant::now());
         }
+        #[cfg(not(target_os = "linux"))]
+        let lapsed: Vec<kettle_ctl::process::ProcessIdentity> = Vec::new();
         // Each live pane's items, by id and generation.
         let shelves: std::collections::HashMap<u64, Vec<(u64, u64)>> = self
             .all_windows(ws)
@@ -964,7 +990,7 @@ impl App {
             })
             .collect();
         let retired = self.media.cards.retire(|card| {
-            gone.contains(&card.owner)
+            card.owner_retires(&gone, &lapsed)
                 || !shelves
                     .get(&card.pane)
                     .is_some_and(|items| items.contains(&card.item))
@@ -1289,6 +1315,7 @@ impl App {
             title,
             provenance,
             inline,
+            mut inline_refused,
             gallery,
         } = draft;
         let textual = matches!(
@@ -1354,12 +1381,31 @@ impl App {
         };
         #[cfg(target_os = "linux")]
         let inline = inline.filter(|draft| {
-            draft
-                .launch
-                .as_ref()
-                .zip(pane.caller_root)
-                .is_some_and(|(grant, root)| grant.valid(route.pane, root))
+            draft.printer.is_some()
+                || draft
+                    .launch
+                    .as_ref()
+                    .zip(pane.caller_root)
+                    .is_some_and(|(grant, root)| grant.valid(route.pane, root))
         });
+        // `kettle show --inline` is checked again now the render is done: the
+        // command may have left the foreground, or a program taken the screen.
+        let inline = inline.and_then(|draft| {
+            let Some(printer) = draft.printer else {
+                return Some(draft);
+            };
+            match crate::ctl_server::CliTerminal::of(printer)
+                .ok_or(kettle_ctl::show::InlineRefusal::NotTerminal)
+                .and_then(|terminal| cli_card_owner(pane, route.verified, Some(terminal)))
+            {
+                Ok(_) => Some(draft),
+                Err(refusal) => {
+                    inline_refused = Some(refusal);
+                    None
+                }
+            }
+        });
+        let cli = inline.as_ref().is_some_and(|draft| draft.printer.is_some());
         #[cfg(target_os = "linux")]
         let native_pickup = inline
             .as_ref()
@@ -1392,29 +1438,42 @@ impl App {
             debug_assert_eq!(pane_id, route.pane);
             pane.inline_cards.remove(nonce);
         }
-        let grid = pane
-            .term
-            .term
-            .lock()
-            .ok()
-            .map(|term| (term.grid().columns(), term.grid().screen_lines()));
+        // The pane's size, and the column its cursor stands at, where the
+        // command line's card will start printing.
+        let grid = pane.term.term.lock().ok().map(|term| {
+            let grid = term.grid();
+            (
+                (grid.columns(), grid.screen_lines()),
+                grid.cursor.point.column.0,
+            )
+        });
         let delivery = match (inline, current, cell, grid) {
-            (Some(inline), Some((generation, Some(image))), Some(cell), Some(grid)) => {
-                register_card(
+            (Some(inline), Some((generation, Some(image))), Some(cell), Some((grid, column))) => {
+                match register_card(
                     cards,
-                    (route.pane, &mut pane.inline_cards, grid),
+                    (route.pane, &mut pane.inline_cards, grid, column),
                     cell,
                     (published.id, generation),
                     (kind, video.as_ref()),
                     &image,
                     inline,
                     std::time::Instant::now(),
-                )
+                ) {
+                    Ok(delivery) => Some(delivery),
+                    Err(refusal) => {
+                        inline_refused = cli.then_some(refusal).or(inline_refused);
+                        None
+                    }
+                }
             }
             _ => None,
         };
         #[cfg(target_os = "linux")]
         let delivery = delivery.and_then(|mut delivery| {
+            // The command prints its own card: there is nothing to pick up.
+            if cli {
+                return Some(delivery);
+            }
             let (grant, root) = native_pickup?;
             delivery.permit = Some(self.agent_launches.issue(
                 grant,
@@ -1449,6 +1508,7 @@ impl App {
             &warnings,
         );
         result.inline = delivery;
+        result.inline_refused = inline_refused;
         result.video = video.map(kettle_ctl::show::ShowVideo::from);
         let id = origin.request_id;
         origin.answer(kettle_ctl::protocol::Response::ok(
@@ -1477,4 +1537,63 @@ impl App {
             .and_then(|window| window.mux.panes.get_mut(&pane))
             .is_some_and(|pane| pane.media_shelf.evict_pixels(item))
     }
+}
+
+/// The card kind a harness's adapter, or `kettle show --inline`, asks for.
+fn printed_by(target: kettle_ctl::show::InlineTarget) -> kettle_render::CardHarness {
+    match target {
+        kettle_ctl::show::InlineTarget::ClaudeHook => kettle_render::CardHarness::ClaudeHook,
+        kettle_ctl::show::InlineTarget::CodexHook => kettle_render::CardHarness::CodexHook,
+        kettle_ctl::show::InlineTarget::Cli => kettle_render::CardHarness::Cli,
+    }
+}
+
+/// Whether `kettle show --inline` may print a card in `pane`, and whose the
+/// card is. Its sender must run in the pane (`verified`) and, as `terminal`
+/// says, write to the pane's own terminal from its foreground while no
+/// full-screen program owns the screen: then the card text reaches the screen
+/// and nothing that captures output, and lands under the command. The card
+/// is the pane's own child's, so a script's cards outlive the script.
+#[cfg(unix)]
+pub(super) fn cli_card_owner(
+    pane: &crate::mux::Pane,
+    verified: bool,
+    terminal: Option<crate::ctl_server::CliTerminal>,
+) -> Result<kettle_ctl::process::ProcessIdentity, kettle_ctl::show::InlineRefusal> {
+    use kettle_ctl::show::InlineRefusal;
+    let owner = pane
+        .caller_root
+        .filter(|_| verified)
+        .ok_or(InlineRefusal::Unverified)?;
+    let terminal = terminal.ok_or(InlineRefusal::NotTerminal)?;
+    let device = pane
+        .term
+        .tty_path()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|metadata| kettle_ctl::process::device_number(&metadata));
+    if !device.is_some_and(|device| {
+        terminal.output == kettle_ctl::process::StandardOutput::Device(device)
+    }) {
+        return Err(InlineRefusal::NotTerminal);
+    }
+    if pane.term.foreground_process_group().ok() != Some(terminal.group) {
+        return Err(InlineRefusal::Background);
+    }
+    let full_screen = pane.term.term.lock().map_or(true, |term| {
+        term.mode().contains(kettle_core::TermMode::ALT_SCREEN)
+    });
+    if full_screen {
+        return Err(InlineRefusal::AlternateScreen);
+    }
+    Ok(owner)
+}
+
+/// No command-line cards where Kettle cannot tell a pane's terminal apart.
+#[cfg(not(unix))]
+pub(super) fn cli_card_owner(
+    _: &crate::mux::Pane,
+    _: bool,
+    _: Option<crate::ctl_server::CliTerminal>,
+) -> Result<kettle_ctl::process::ProcessIdentity, kettle_ctl::show::InlineRefusal> {
+    Err(kettle_ctl::show::InlineRefusal::Unsupported)
 }

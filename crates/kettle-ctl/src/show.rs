@@ -34,8 +34,9 @@ pub const MAX_SHOW_TITLE_BYTES: usize = 4 * 1024;
 /// hook message into a stub instead of printing it.
 pub const MAX_INLINE_MESSAGE_UTF16: usize = 9_900;
 
-/// An inline card a harness's adapter asks for along with the shelf item.
-/// Kettle decides whether the caller may have one; asking grants nothing.
+/// An inline card asked for along with the shelf item: by a harness's
+/// adapter, or by `kettle show --inline`. Kettle decides whether the caller
+/// may have one; asking grants nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InlineTarget {
@@ -43,6 +44,9 @@ pub enum InlineTarget {
     ClaudeHook,
     /// Codex: a card printed by a `PostToolUse` hook under the call.
     CodexHook,
+    /// `kettle show --inline`: a card the command prints itself, straight
+    /// to the pane's own terminal.
+    Cli,
 }
 
 impl InlineTarget {
@@ -50,6 +54,7 @@ impl InlineTarget {
         match self {
             Self::ClaudeHook => "claude_hook",
             Self::CodexHook => "codex_hook",
+            Self::Cli => "cli",
         }
     }
 
@@ -57,7 +62,60 @@ impl InlineTarget {
         match text {
             "claude_hook" => Some(Self::ClaudeHook),
             "codex_hook" => Some(Self::CodexHook),
+            "cli" => Some(Self::Cli),
             _ => None,
+        }
+    }
+}
+
+/// Why `kettle show --inline` got no card, its item on the shelf all the
+/// same. Fixed words, said in [`InlineRefusal::text`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InlineRefusal {
+    /// The command does not run in the pane it is shown in, as its process
+    /// ancestry says.
+    Unverified,
+    /// Its standard output is not the pane's own terminal: a pipe, a file,
+    /// or another terminal (`tmux`, `script`).
+    NotTerminal,
+    /// It does not run in the pane's foreground.
+    Background,
+    /// A full-screen program owns the pane's screen.
+    AlternateScreen,
+    /// The pane is too small for a card with its label and caption.
+    TooSmall,
+    /// The pane holds, or just registered, as many cards as it may.
+    Limit,
+    /// This platform has no inline cards from the command line.
+    Unsupported,
+}
+
+impl InlineRefusal {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unverified => "unverified",
+            Self::NotTerminal => "not_terminal",
+            Self::Background => "background",
+            Self::AlternateScreen => "alternate_screen",
+            Self::TooSmall => "too_small",
+            Self::Limit => "limit",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    /// What the command says on standard error, its item on the shelf.
+    pub const fn text(self) -> &'static str {
+        match self {
+            Self::Unverified => "no inline card: this command does not run in that pane",
+            Self::NotTerminal => {
+                "no inline card: its output is not the pane's own terminal (a pipe, a file, tmux)"
+            }
+            Self::Background => "no inline card: it does not run in the pane's foreground",
+            Self::AlternateScreen => "no inline card: a full-screen program owns the pane",
+            Self::TooSmall => "no inline card: the pane is too small for one",
+            Self::Limit => "no inline card: the pane has as many cards as it may for now",
+            Self::Unsupported => "no inline card: this platform has none from the command line",
         }
     }
 }
@@ -415,6 +473,9 @@ pub struct ShowResult {
     /// registered it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline: Option<InlineDelivery>,
+    /// Why `kettle show --inline` got no card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_refused: Option<InlineRefusal>,
     /// What a video is, beside its poster's `width` and `height`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<ShowVideo>,
@@ -504,6 +565,7 @@ impl ShowResult {
                 .map(|warning| warning.as_str().into())
                 .collect(),
             inline: None,
+            inline_refused: None,
             video: None,
         }
     }
@@ -931,11 +993,52 @@ mod tests {
             parse("codex_hook".into()),
             Ok(Some(InlineTarget::CodexHook))
         );
+        assert_eq!(parse("cli".into()), Ok(Some(InlineTarget::Cli)));
         assert_eq!(parse("codex".into()), Err(FailureCode::BadParams));
         assert_eq!(
             parse(serde_json::json!({"target": "claude_hook"})),
             Err(FailureCode::BadParams)
         );
+        // Each target reads back as itself.
+        for target in [
+            InlineTarget::ClaudeHook,
+            InlineTarget::CodexHook,
+            InlineTarget::Cli,
+        ] {
+            assert_eq!(InlineTarget::parse(target.as_str()), Some(target));
+        }
+    }
+
+    /// Why a command-line card was refused travels as its wire word, only
+    /// when there is a refusal, and each word has its own fixed note.
+    #[test]
+    fn an_inline_refusal_is_its_wire_word_and_only_when_there_is_one() {
+        let mut result = ShowResult::new((1, true, 1), 2, MediaKind::Svg, (64, 48), &[]);
+        assert!(
+            serde_json::to_value(&result)
+                .unwrap()
+                .get("inline_refused")
+                .is_none()
+        );
+        let all = [
+            InlineRefusal::Unverified,
+            InlineRefusal::NotTerminal,
+            InlineRefusal::Background,
+            InlineRefusal::AlternateScreen,
+            InlineRefusal::TooSmall,
+            InlineRefusal::Limit,
+            InlineRefusal::Unsupported,
+        ];
+        let mut notes = std::collections::HashSet::new();
+        for refusal in all {
+            result.inline_refused = Some(refusal);
+            let value = serde_json::to_value(&result).unwrap();
+            assert_eq!(value["inline_refused"], refusal.as_str());
+            let back: ShowResult = serde_json::from_value(value).unwrap();
+            assert_eq!(back.inline_refused, Some(refusal));
+            assert!(refusal.text().starts_with("no inline card: "));
+            assert!(notes.insert(refusal.text()));
+        }
     }
 
     /// A result carries an inline delivery only when there is one, so an

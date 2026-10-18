@@ -2322,6 +2322,19 @@ transcript, a harness's reprint after a resize), only the lowest complete copy
 in the captured band, the latest one, is accepted, and the others draw blank.
 A newer copy outside the band does not hide an older one in view.
 
+`kettle show --inline` registers a third kind of card, the command line's,
+whose whole text Kettle builds (`kettle_render::cli_card_text`: a fixed
+`kettle show` label, the rows four columns in for the provenance tab, the
+caption, CR LF line ends) and the command prints itself, so no pickup or
+hook is involved. Its text must reach the pane's screen and nothing that
+captures output, so the server reads the sender's standard output from the
+kernel (`/proc/<pid>/fd/1` on Linux, `proc_pidfdinfo` on macOS) and requires
+the pane's own terminal device, the pane's foreground process group and no
+alternate screen, when the request arrives and again once the render is done.
+The card belongs to the pane's own child, so a script's cards outlive the
+script and the per-owner limits count per pane; no launch scope applies, so
+it retires only with its pane, its item or that child.
+
 Capture copies the viewport first and, only for a pane with registrations,
 at most 13 retained terminal rows above and below it. This band covers a
 12-row card and its label and caption without scanning scrollback. Offscreen
