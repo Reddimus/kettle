@@ -316,6 +316,25 @@ impl ItemSource {
         }
     }
 
+    /// The source of a file shown as itself, read from `spec`'s path: no
+    /// content was read, so its digest holds only the file's `identity`,
+    /// and nothing renders from it but a reload, which reads the file again.
+    pub(crate) fn undrawn(spec: JobSpec, identity: kettle_media::PathIdentity) -> Self {
+        Self {
+            spec,
+            digest: Digest {
+                sha256: [0; 32],
+                path_identity: Some(identity),
+            },
+            rows: None,
+            file_text: None,
+            changed: false,
+            gallery: None,
+            origin: None,
+            document: None,
+        }
+    }
+
     /// This source as page `page` of a document, which pages through by
     /// reading it again.
     pub(crate) fn with_pages(mut self, page: Option<kettle_media::PageOf>) -> Self {

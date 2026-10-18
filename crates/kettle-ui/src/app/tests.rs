@@ -5822,7 +5822,7 @@ fn a_mermaid_item_gets_a_card_from_source_or_file() {
             (3, &mut pane_cards, (80, 40), 0),
             (8.0, 16.0),
             (9, 0),
-            (kettle_media::MediaKind::Mermaid, None, None),
+            (kettle_media::MediaKind::Mermaid.into(), None, None),
             &image,
             crate::media::InlineDraft {
                 #[cfg(target_os = "linux")]
@@ -5864,7 +5864,7 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
         (3, &mut pane_cards, (80, 40), 0),
         (8.0, 16.0),
         (9, 0),
-        (kettle_media::MediaKind::Raster, None, None),
+        (kettle_media::MediaKind::Raster.into(), None, None),
         &image,
         draft(),
         now,
@@ -5886,7 +5886,7 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
             (3, &mut pane_cards, (80, 4), 0),
             (8.0, 16.0),
             (9, 0),
-            (kettle_media::MediaKind::Raster, None, None),
+            (kettle_media::MediaKind::Raster.into(), None, None),
             &image,
             draft(),
             now,
@@ -5900,7 +5900,7 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
             (3, &mut pane_cards, (80, 40), 0),
             (8.0, 16.0),
             (9, 0),
-            (kettle_media::MediaKind::Raster, None, None),
+            (kettle_media::MediaKind::Raster.into(), None, None),
             &image,
             draft(),
             now,
@@ -5913,7 +5913,7 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
             (3, &mut pane_cards, (80, 40), 0),
             (8.0, 16.0),
             (9, 0),
-            (kettle_media::MediaKind::Raster, None, None),
+            (kettle_media::MediaKind::Raster.into(), None, None),
             &image,
             draft(),
             now,
@@ -6037,8 +6037,10 @@ fn cards_are_for_verified_harnesses_and_retire_with_their_item() {
         body("ctl_show").contains("name: card_name,"),
         "a card's caption names only a file, never a title the sender chose"
     );
-    assert!(body("finish_show").contains(".publish(item, shown, &visible)"));
-    let finish = body("finish_show");
+    // A drawn item and a file shown as itself go through one door.
+    assert!(body("finish_show").contains("self.publish_show("));
+    assert!(body("publish_show").contains(".publish(item, shown, &visible)"));
+    let finish = body("publish_show");
     let retired = finish.find("cards.retire(").expect("replaced cards retire");
     let registered = finish.find("register_card(").expect("a card registers");
     assert!(

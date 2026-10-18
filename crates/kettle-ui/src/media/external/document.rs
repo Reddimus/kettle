@@ -159,7 +159,7 @@ impl DocumentSource {
     /// What opening `item` needs, when it is a PDF whose file Kettle can
     /// name or whose bytes it still holds.
     pub(crate) fn of(item: &ShelfItem) -> Option<Self> {
-        if item.kind != kettle_media::MediaKind::Pdf {
+        if item.kind != crate::media::ItemKind::Media(kettle_media::MediaKind::Pdf) {
             return None;
         }
         let digest = item.source.digest.clone();
@@ -442,9 +442,11 @@ mod tests {
         file.set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(9))
             .unwrap();
         assert_eq!(copy(&copies, &document), Err(OpenFailure::Changed));
-        // Another file put in its place.
-        std::fs::remove_file(&path).unwrap();
-        std::fs::write(&path, PDF).unwrap();
+        // Another file put in its place, made before the original goes so
+        // it cannot take its inode.
+        let next = dir.path().join("next.pdf");
+        std::fs::write(&next, PDF).unwrap();
+        std::fs::rename(&next, &path).unwrap();
         assert_eq!(copy(&copies, &document), Err(OpenFailure::Changed));
         // Gone.
         std::fs::remove_file(&path).unwrap();

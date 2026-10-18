@@ -786,7 +786,46 @@ started on first use that drives `WorkerClient::render_media_with_control`.
 Each `Pane` owns its `Shelf`, so a shelf travels with its tab; completions
 come back through `UserEvent::MediaRendered`, the item's pixels are charged
 to the process preview account (releasing the least recently viewed off-screen
-pixels when it is full), and only then is the push answered.
+pixels when it is full), and only then is the push answered. `finish_show`
+makes the item and `publish_show` puts any item on its shelf, registers its
+card and answers, one door for both kinds of item.
+
+A file shown by its path that the worker, classifying it (an Auto job),
+refuses as one Kettle does not draw (`media::FileWhy::of_job`:
+`UnsupportedMedia`; `CodecUnavailable`, `UnsupportedContainer` or
+`BackendUnavailable`, no decoder here, though never `SandboxUnavailable`;
+`FileTooLarge`) becomes an item for the file itself rather than a failure. A
+job that asked for a kind (a PDF's page, a Markdown gallery's, Mermaid) and
+failed keeps its failure: the file is not that kind. `media::file_facts` opens the path as
+the worker opens a source (read-only, non-blocking, no controlling
+terminal), requires a regular file, and for an `ExternalAttested` request
+the device and inode the caller attested; anything else leaves the failure
+as it was. The item's `ItemKind::File` carries its `FileFacts` (length,
+`PathIdentity`, why), its pixels are `ItemPixels::Undrawn`, which nothing
+charges and eviction never picks, and its source is
+`ItemSource::undrawn`, which holds the job for a reload and a digest of the
+identity alone. `ShelfItem::card_image` gives its card the one page
+`file_card::poster` draws (192×240, smoothed by 4×4 samples, charged once
+and shared by every file card); `card_caption` says `file` and its size
+(`kettle_ctl::show::size_label`, decimal units). The reply is
+`ShowResult::file` (`kind: "file"`, no size, `file: {bytes, reason}`), and
+`list_panes` says `pixels: "none"` with the same `file`. The lane shows no
+picture, only why (its status line), and offers no canvas, zoom or copy;
+its `↗` is `Outside::Reveal`.
+
+`media::external::reveal` shows such a file in its folder. `RevealTarget`
+takes its path and identity from the item, and `hand_over` reopens the path
+and requires a regular file with the same device and inode before anything
+runs. On macOS `Revealer::Finder` runs `/usr/bin/open -R` on the path, with
+fixed arguments. On Linux `Revealer::FileManager` (offered when the session
+bus has a `org.freedesktop.FileManager1` service file) asks the bus for that
+name's owner without starting it, has the bus start the desktop's file
+manager when none runs, and sends `ShowItems` with the file's URI only to
+the unique connection whose user is the user's own and whose process, read
+from the kernel and read again before the call, runs one of the known file
+managers at its system path, which only root may change
+(`file_manager::permitted`). The bus helpers and their bounds are Loupe's
+(`loupe::owner`, `bus_query`, `bounded`; a second per call, five overall).
 
 A push that asks for an inline card (`ShowRequest::inline`, sent only by
 `kettle mcp --display` with `--claude-card-hook` or `--codex-card-hook`)

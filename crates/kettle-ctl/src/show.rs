@@ -470,6 +470,10 @@ fn optional_text(
     }
 }
 
+/// The kind a reply, `list_panes` and a card's caption say for a file Kettle
+/// does not draw, shown as itself.
+pub const FILE_KIND: &str = "file";
+
 /// A successful `show`: where the item went and what it turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShowResult {
@@ -481,7 +485,9 @@ pub struct ShowResult {
     pub window: u64,
     /// The shelf item, stable while it stays on the shelf.
     pub item: u64,
-    /// What the media turned out to be: `raster` or `svg`.
+    /// What the media turned out to be: `raster`, `svg`, `mermaid`,
+    /// `markdown`, `video` or `pdf`; or `file` for a file Kettle does not
+    /// draw, shown as itself, whose `width` and `height` are 0.
     pub kind: String,
     pub width: u32,
     pub height: u32,
@@ -499,6 +505,41 @@ pub struct ShowResult {
     /// What a video is, beside its poster's `width` and `height`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<ShowVideo>,
+    /// For a file shown as itself: its size, and why nothing was drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<ShowFile>,
+}
+
+/// A file Kettle does not draw, shown as itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShowFile {
+    /// Its length in bytes.
+    pub bytes: u64,
+    /// Why nothing was drawn: `unsupported_media` (Kettle draws no file of
+    /// its kind), `codec_unavailable` (no decoder on this system for its
+    /// codec or its container) or `too_large` (larger than Kettle draws).
+    pub reason: String,
+}
+
+/// A file's size as people read it, in decimal units: `812 B`, `2.4 MB`,
+/// `38 MB`. The same in every language, as a card's caption is.
+pub fn size_label(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["kB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1000.0;
+    let mut unit = 0;
+    // A value that would round to 1000 reads in the next unit.
+    while value >= 999.5 && unit + 1 < UNITS.len() {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if value < 9.95 {
+        format!("{value:.1} {}", UNITS[unit])
+    } else {
+        format!("{value:.0} {}", UNITS[unit])
+    }
 }
 
 /// A PDF page shown: which, from 0, of how many.
@@ -551,6 +592,17 @@ impl ShowResult {
     /// or for a video its own size, codec, length and sound, `video 1280x720
     /// VP8 0:12, no audio`. Numbers and Kettle's own names only.
     pub fn summary(&self) -> String {
+        if let Some(file) = &self.file {
+            let why = match file.reason.as_str() {
+                "codec_unavailable" => {
+                    "no decoder for it on this system; the user can install ffmpeg, which you \
+                     must not install yourself"
+                }
+                "too_large" => "larger than Kettle draws",
+                _ => "a kind Kettle does not draw",
+            };
+            return format!("{FILE_KIND} {}, {why}", size_label(file.bytes));
+        }
         let Some(video) = &self.video else {
             let summary = format!("{} {}x{}", self.kind, self.width, self.height);
             return match self.page {
@@ -608,6 +660,19 @@ impl ShowResult {
             inline_refused: None,
             page: None,
             video: None,
+            file: None,
+        }
+    }
+
+    /// A file shown as itself, `bytes` long, not drawn for `reason`.
+    pub fn file(route: (u64, bool, u64), item: u64, bytes: u64, reason: &str) -> Self {
+        Self {
+            kind: FILE_KIND.into(),
+            file: Some(ShowFile {
+                bytes,
+                reason: reason.into(),
+            }),
+            ..Self::new(route, item, MediaKind::Raster, (0, 0), &[])
         }
     }
 }
@@ -1239,6 +1304,56 @@ mod tests {
         assert_eq!(error.code, "not_in_kettle_pane");
         assert_eq!(error.reason, None);
         assert!(!error.message.contains("full"));
+    }
+
+    /// A file shown as itself says so, with its size and why nothing was
+    /// drawn, and no size of its own; its line reads as people read sizes.
+    #[test]
+    fn a_file_result_says_it_drew_nothing() {
+        let result = ShowResult::file((4, true, 2), 11, 2_400_000, "unsupported_media");
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            json!({"pane": 4, "verified": true, "window": 2, "item": 11, "kind": "file",
+                "width": 0, "height": 0, "warnings": [],
+                "file": {"bytes": 2_400_000, "reason": "unsupported_media"}})
+        );
+        assert_eq!(result.summary(), "file 2.4 MB, a kind Kettle does not draw");
+        for (reason, line) in [
+            (
+                "codec_unavailable",
+                "file 2.4 MB, no decoder for it on this system; the user can install ffmpeg, \
+                 which you must not install yourself",
+            ),
+            ("too_large", "file 2.4 MB, larger than Kettle draws"),
+        ] {
+            assert_eq!(
+                ShowResult::file((4, true, 2), 11, 2_400_000, reason).summary(),
+                line
+            );
+        }
+        let back: ShowResult =
+            serde_json::from_value(serde_json::to_value(&result).unwrap()).unwrap();
+        assert_eq!(back, result);
+    }
+
+    /// Sizes read in decimal units, one decimal below ten.
+    #[test]
+    fn sizes_read_as_people_read_them() {
+        for (bytes, label) in [
+            (0, "0 B"),
+            (812, "812 B"),
+            (999, "999 B"),
+            (1000, "1.0 kB"),
+            (2_400_000, "2.4 MB"),
+            (9_949_999, "9.9 MB"),
+            (9_950_000, "10 MB"),
+            (38_200_000, "38 MB"),
+            (999_499_999, "999 MB"),
+            (999_500_000, "1.0 GB"),
+            (u64::MAX, "18446744 TB"),
+        ] {
+            assert_eq!(size_label(bytes), label, "{bytes}");
+        }
     }
 
     #[test]
