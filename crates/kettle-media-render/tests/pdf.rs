@@ -183,6 +183,25 @@ fn nested_object_streams_are_refused_without_overflowing() {
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
+/// A page asked of what is no PDF by its bytes is unsupported, not broken.
+#[test]
+fn a_page_of_something_else_is_unsupported() {
+    for bytes in [
+        b"<svg/>".to_vec(),
+        b"flowchart TD\nA-->B".to_vec(),
+        vec![0xff; 64],
+    ] {
+        assert_eq!(
+            render_with_kind(
+                &job(JobKind::PdfPage { index: 0 }, bytes, 64, 64, None),
+                |_| {}
+            )
+            .unwrap_err(),
+            FailureCode::UnsupportedMedia
+        );
+    }
+}
+
 /// What is not a PDF, or is a broken one, fails as one.
 #[test]
 fn a_broken_pdf_is_a_parse_failure() {

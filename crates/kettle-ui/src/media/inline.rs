@@ -66,18 +66,19 @@ pub(crate) fn card_message(nonce: InlineNonce, size: (u8, u8), caption: &str) ->
 }
 
 /// What a card says under it: the file's name, when it came from a file, and
-/// what Kettle made of it (a video's own size and length), on one line no
-/// wider than `columns`. Nothing else the sender sent, such as a title,
-/// reaches a caption.
+/// what Kettle made of it (a video's own size and length, a document's page
+/// of how many), on one line no wider than `columns`. Nothing else the
+/// sender sent, such as a title, reaches a caption.
 pub(crate) fn card_caption(
     name: Option<&str>,
     kind: MediaKind,
     size: (u32, u32),
     duration_ms: Option<u64>,
+    page: Option<kettle_media::PageOf>,
     columns: usize,
 ) -> String {
     let (width, height) = size;
-    let detail = match duration_ms {
+    let mut detail = match duration_ms {
         Some(ms) => format!(
             "{} {width}x{height} {}",
             kind.as_str(),
@@ -85,6 +86,9 @@ pub(crate) fn card_caption(
         ),
         None => format!("{} {width}x{height}", kind.as_str()),
     };
+    if let Some(page) = page.filter(|page| page.count > 1) {
+        detail.push_str(&format!(" {}/{}", u64::from(page.index) + 1, page.count));
+    }
     let caption = match name.map(caption_name).filter(|name| !name.is_empty()) {
         Some(name) => {
             let detail = format!(" - {detail}");
@@ -308,31 +312,71 @@ mod tests {
     #[test]
     fn a_caption_names_the_file_and_fits_one_line() {
         assert_eq!(
-            card_caption(Some("plot.png"), MediaKind::Raster, (640, 480), None, 80),
+            card_caption(
+                Some("plot.png"),
+                MediaKind::Raster,
+                (640, 480),
+                None,
+                None,
+                80
+            ),
             "plot.png - raster 640x480"
         );
         assert_eq!(
-            card_caption(None, MediaKind::Svg, (64, 48), None, 80),
+            card_caption(None, MediaKind::Svg, (64, 48), None, None, 80),
             "svg 64x48",
             "no file, no name"
         );
-        let long = card_caption(Some(&"x".repeat(200)), MediaKind::Svg, (1, 2), None, 30);
+        let long = card_caption(
+            Some(&"x".repeat(200)),
+            MediaKind::Svg,
+            (1, 2),
+            None,
+            None,
+            30,
+        );
         assert!(
             unicode_width::UnicodeWidthStr::width(long.as_str()) <= 30,
             "{long}"
         );
         assert!(long.ends_with("… - svg 1x2"), "{long}");
-        let tight = card_caption(Some("plot.png"), MediaKind::Raster, (640, 480), None, 8);
+        let tight = card_caption(
+            Some("plot.png"),
+            MediaKind::Raster,
+            (640, 480),
+            None,
+            None,
+            8,
+        );
         assert_eq!(
             card_caption(
                 Some("clip.webm"),
                 MediaKind::Video,
                 (1280, 720),
                 Some(12_400),
+                None,
                 80
             ),
             "clip.webm - video 1280x720 0:12",
             "a video's own size and length"
+        );
+        // A document of several pages says which page of how many; one
+        // page says nothing more.
+        let page = |index, count| Some(kettle_media::PageOf { index, count });
+        assert_eq!(
+            card_caption(
+                Some("report.pdf"),
+                MediaKind::Pdf,
+                (816, 1056),
+                None,
+                page(2, 12),
+                80
+            ),
+            "report.pdf - pdf 816x1056 3/12"
+        );
+        assert_eq!(
+            card_caption(None, MediaKind::Pdf, (816, 1056), None, page(0, 1), 80),
+            "pdf 816x1056"
         );
         assert!(
             unicode_width::UnicodeWidthStr::width(tight.as_str()) <= 8,

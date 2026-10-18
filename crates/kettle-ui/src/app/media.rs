@@ -867,10 +867,10 @@ impl App {
                 None,
             ),
         };
-        let kind = match page {
-            Some(index) => kettle_media::JobKind::MarkdownDiagrams { index },
-            None => kettle_media::JobKind::Auto,
-        };
+        let kind = page.map_or(
+            kettle_media::JobKind::Auto,
+            crate::media::ReadPage::job_kind,
+        );
         let source = kettle_media::Source::user_pull(
             native,
             kettle_media::GuiActionWitness::from_explicit_gui_action(),
@@ -1124,9 +1124,9 @@ impl App {
         };
         // Another page of the gallery becomes the item's source; the page
         // shown, drawn again, stays it.
-        let paged = render.page.is_some_and(|ask| {
-            item.source.gallery_page().map(|(shown, _)| shown) != Some(ask.page)
-        });
+        let paged = render
+            .page
+            .is_some_and(|ask| item.source.shown_page().map(|(shown, _)| shown) != Some(ask.page));
         if let Some(ask) = render.page
             && !item.source.select(ask.page)
         {
@@ -1304,6 +1304,7 @@ impl App {
         let layout = rendered.layout;
         let warnings = rendered.warnings;
         let video = rendered.video.as_ref().map(|video| video.info);
+        let page = rendered.page;
         let image = match self.admit_preview_pixels(ws, width, height, rendered.rgba) {
             Ok(image) => image,
             Err(failure) => return notify_preview_failure(tr, origin.refuse(failure)),
@@ -1347,7 +1348,8 @@ impl App {
                 rendered.digest,
                 textual,
                 rendered.exact_source,
-            );
+            )
+            .with_pages(page);
             (kind, source)
         };
         let mut item = crate::media::ShelfItem::new(
@@ -1454,7 +1456,7 @@ impl App {
                     (route.pane, &mut pane.inline_cards, grid, column),
                     cell,
                     (published.id, generation),
-                    (kind, video.as_ref()),
+                    (kind, video.as_ref(), page),
                     &image,
                     inline,
                     std::time::Instant::now(),
@@ -1509,6 +1511,7 @@ impl App {
         );
         result.inline = delivery;
         result.inline_refused = inline_refused;
+        result.page = page.map(kettle_ctl::show::ShowPage::from);
         result.video = video.map(kettle_ctl::show::ShowVideo::from);
         let id = origin.request_id;
         origin.answer(kettle_ctl::protocol::Response::ok(

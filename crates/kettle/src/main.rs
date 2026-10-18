@@ -617,6 +617,10 @@ struct ShowArgs {
     /// alone and a note on stderr says why.
     #[arg(long)]
     inline: bool,
+    /// Show page N of a PDF, counting from 1 (default: the first). Needs the
+    /// file's path.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "mermaid")]
+    page: Option<u32>,
 }
 
 #[derive(clap::Args, Debug)]

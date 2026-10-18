@@ -16,7 +16,7 @@ mod pcm_client;
 pub mod session;
 pub mod video;
 pub mod wire;
-pub use digest::content_digest;
+pub use digest::{content_digest, content_digest_read};
 
 use std::time::Duration;
 

@@ -76,7 +76,7 @@ fn show_tool_spec() -> Value {
         "name": "kettle_show",
         "description": "Send an image, SVG, Mermaid file, Markdown Mermaid gallery, PDF or video \
             path to the user's Kettle display, or render inline Mermaid source. A video shows as its \
-            poster, with its length; a PDF its first page. Interactive supported harnesses get a card under \
+            poster, with its length; a PDF its first page, or the page asked for. Interactive supported harnesses get a card under \
             the call and a shelf entry; other modes use the shelf. Clicking opens it in the \
             media viewer. Tested diagram families: flowchart, sequence, state, class, \
             ER, gantt, pie, mindmap, gitGraph, timeline, journey and quadrant. Give exactly one \
@@ -96,6 +96,12 @@ fn show_tool_spec() -> Value {
                     "maxLength": kettle_media::MAX_PATH_BYTES,
                     "pattern": ABSOLUTE_PATH_PATTERN,
                     "description": "absolute path of an image, SVG, Mermaid, Markdown, PDF or video file, at most 4 KiB"
+                },
+                "page": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": u32::MAX,
+                    "description": "for a PDF path, the page to show, counting from 1 (default 1)"
                 },
                 "title": {
                     "type": "string",
@@ -662,11 +668,31 @@ fn tool_kettle_show(
     let card = session.card_for(params, std::time::Instant::now());
     // Exactly one source: Mermaid text, which the request checks as Kettle
     // does, or an absolute path.
+    // A page, counting from 1, in any JSON spelling of a whole number: only
+    // of a path.
+    let page = match args.get("page") {
+        None => None,
+        Some(value) => match value.as_u64().or_else(|| {
+            // A whole number past what a u64 holds saturates, and is past
+            // any page all the same.
+            value
+                .as_f64()
+                .filter(|number| number.fract() == 0.0 && *number >= 1.0)
+                .map(|number| number as u64)
+        }) {
+            // Past any page a document can have, as ctl's `page_index` says.
+            Some(page @ 1..) if args.get("path").is_some() => match u32::try_from(page) {
+                Ok(page) => Some(page),
+                Err(_) => return show_failed(FailureCode::IndexOutOfRange.into()),
+            },
+            _ => return show_failed(FailureCode::BadParams.into()),
+        },
+    };
     let source = match (args.get("mermaid"), args.get("path")) {
         (Some(Value::String(text)), None) => kettle_ctl::show::ShowSource::Mermaid(text.clone()),
         (None, Some(Value::String(path))) if std::path::Path::new(path).is_absolute() => {
             match crate::show_cli::file_source(std::path::Path::new(path), false) {
-                Ok(source) => source,
+                Ok(source) => crate::show_cli::with_page(source, page),
                 Err(refusal) => return show_failed(refusal),
             }
         }
@@ -1104,6 +1130,8 @@ fn tool_argument_fields(name: &str) -> Option<&'static [(&'static str, ArgKind)]
             ("path", ArgKind::String),
             ("title", ArgKind::String),
             ("key", ArgKind::String),
+            // An integer by the schema, which a client may write as 3.0.
+            ("page", ArgKind::Number),
         ],
         "kettle_card" => &[("tool_use_id", ArgKind::String)],
         "kettle_allow" => &[],
@@ -1291,7 +1319,7 @@ mod tests {
         assert_eq!(schema["additionalProperties"], json!(false));
         let properties: Vec<_> = schema["properties"].as_object().unwrap().keys().collect();
         // In the order the schema lists them, as JSON objects keep it.
-        assert_eq!(properties, ["mermaid", "path", "title", "key"]);
+        assert_eq!(properties, ["mermaid", "path", "page", "title", "key"]);
         for name in names(ToolSelection::Full)
             .into_iter()
             .filter(|name| name != "kettle_show")
@@ -1464,6 +1492,26 @@ mod tests {
             ),
             (json!({"mermaid": ""}), FailureCode::BadParams),
             (json!({"mermaid": null}), FailureCode::BadParams),
+            // A page counts from 1, and only of a path.
+            (json!({"path": file, "page": 0}), FailureCode::BadParams),
+            (json!({"path": file, "page": 1.5}), FailureCode::BadParams),
+            (json!({"path": file, "page": "2"}), FailureCode::BadParams),
+            (
+                json!({"path": file, "page": u64::from(u32::MAX) + 1}),
+                FailureCode::IndexOutOfRange,
+            ),
+            (
+                json!({"path": file, "page": 4_294_967_296.0}),
+                FailureCode::IndexOutOfRange,
+            ),
+            (
+                json!({"path": file, "page": 1e300}),
+                FailureCode::IndexOutOfRange,
+            ),
+            (
+                json!({"mermaid": "graph LR", "page": 1}),
+                FailureCode::BadParams,
+            ),
             (
                 json!({"mermaid": "%".repeat(kettle_media::MAX_MERMAID_BYTES + 1)}),
                 FailureCode::TooLarge,
@@ -1607,6 +1655,7 @@ mod tests {
             warnings: vec!["font_fallback".into()],
             inline: None,
             inline_refused: None,
+            page: None,
             video: None,
         };
         let sent = show_sent(&result);

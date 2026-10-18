@@ -783,6 +783,8 @@ pub fn action_names() -> Vec<&'static str> {
         "preview_clipboard_path",
         "preview_next",
         "preview_previous",
+        "preview_next_page",
+        "preview_previous_page",
         "preview_next_diagram",
         "preview_previous_diagram",
         "close_preview",
@@ -1096,8 +1098,15 @@ impl Action {
             "preview_clipboard_path" | "preview-clipboard-path" => PreviewClipboardPath,
             "preview_next" | "preview-next" => PreviewNext,
             "preview_previous" | "preview-previous" => PreviewPrevious,
-            "preview_next_diagram" | "preview-next-diagram" => PreviewNextDiagram,
-            "preview_previous_diagram" | "preview-previous-diagram" => PreviewPreviousDiagram,
+            // Pages of a PDF or a diagram gallery; the diagram names came first.
+            "preview_next_page"
+            | "preview-next-page"
+            | "preview_next_diagram"
+            | "preview-next-diagram" => PreviewNextDiagram,
+            "preview_previous_page"
+            | "preview-previous-page"
+            | "preview_previous_diagram"
+            | "preview-previous-diagram" => PreviewPreviousDiagram,
             "close_preview" | "close-preview" => ClosePreview,
             "preview_source" | "preview-source" => PreviewSource,
             "preview_canvas" | "preview-canvas" => PreviewCanvas,
@@ -2863,6 +2872,28 @@ mod tests {
             assert!(
                 matches!(Action::from_name(s), Some(Action::PrevTab)),
                 "alias {s:?} should parse to PrevTab"
+            );
+        }
+        // A preview pages a PDF as well as a gallery's diagrams; the
+        // diagram names came first and still bind.
+        for s in [
+            "preview_next_page",
+            "preview-next-page",
+            "preview_next_diagram",
+        ] {
+            assert!(
+                matches!(Action::from_name(s), Some(Action::PreviewNextDiagram)),
+                "alias {s:?} should parse to PreviewNextDiagram"
+            );
+        }
+        for s in [
+            "preview_previous_page",
+            "preview-previous-page",
+            "preview_previous_diagram",
+        ] {
+            assert!(
+                matches!(Action::from_name(s), Some(Action::PreviewPreviousDiagram)),
+                "alias {s:?} should parse to PreviewPreviousDiagram"
             );
         }
     }

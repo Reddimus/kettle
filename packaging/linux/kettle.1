@@ -32,6 +32,8 @@ kettle \- fast GPU-accelerated terminal emulator for Linux and macOS
 .RI [ \-\-key
 .IR KEY ]
 .RB [ \-\-inline ]
+.RI [ \-\-page
+.IR N ]
 .br
 .B kettle video\-frames
 .I PATH
@@ -559,7 +561,7 @@ shelf of the
 kettle pane the
 server runs in and needs agent previews, never full control.
 .TP
-.B kettle show \fR[\fIPATH\fR|\fB\-\fR] [\fB\-\-mermaid\fR] [\fB\-\-title \fITITLE\fR] [\fB\-\-key \fIKEY\fR] [\fB\-\-inline\fR]
+.B kettle show \fR[\fIPATH\fR|\fB\-\fR] [\fB\-\-mermaid\fR] [\fB\-\-title \fITITLE\fR] [\fB\-\-key \fIKEY\fR] [\fB\-\-inline\fR] [\fB\-\-page \fIN\fR]
 Send a local image (PNG, JPEG, WebP, BMP, GIF or TIFF), SVG, Mermaid diagram,
 Markdown diagram gallery (the Mermaid diagrams of a Markdown file, paged in the
 preview lane), PDF or video
@@ -586,7 +588,9 @@ also prints a card under the command, which opens the item when clicked:
 only when the command writes straight to its pane's own terminal from the
 foreground and no full-screen program owns the screen (not through a pipe, a
 file or tmux). Otherwise the item goes to the shelf alone and a note on
-stderr says why. Needs agent previews
+stderr says why. A PDF shows its first page, or with
+.BI \-\-page " N"
+page N, counting from 1; the preview pages through the rest. Needs agent previews
 .RB ( agent\-display ),
 never full control. Exits 0 once the item is on the shelf, 1 otherwise.
 .TP

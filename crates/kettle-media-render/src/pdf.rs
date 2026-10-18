@@ -36,12 +36,17 @@ pub(crate) fn is_pdf(prefix: &[u8]) -> bool {
         .any(|window| window == b"%PDF-")
 }
 
-/// Page `index` of the job's PDF, read under the PDF cap.
+/// Page `index` of the job's PDF, read under the PDF cap. A file that is no
+/// PDF by its bytes is `UnsupportedMedia`, whatever it was asked as.
 pub(crate) fn render(job: &Job, index: u32, confined: bool) -> Result<Rendered, FailureCode> {
     if !confined {
         return Err(FailureCode::SandboxUnavailable);
     }
-    render_loaded(job, source::load(&job.source, MAX_PDF_BYTES)?, index)
+    let snapshot = source::load(&job.source, MAX_PDF_BYTES)?;
+    if !is_pdf(&snapshot.bytes) {
+        return Err(FailureCode::UnsupportedMedia);
+    }
+    render_loaded(job, snapshot, index)
 }
 
 /// Page `index` of the PDF `snapshot` holds, its bytes handed to the parser

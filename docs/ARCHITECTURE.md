@@ -577,13 +577,39 @@ checked; `VideoSource`, built from the shelf item's path, digest, title and
 the worker's `VideoInfo`; and `Held`, which reopens the file as the worker
 did and checks its identity, its first 64 KiB against the poster's digest,
 and its sniffed container before anything is copied, then checks the copy
-the same way and the source unchanged. The App holds the store in
-`VideoCopies`; its `close` sets the flag a copy asks about and then takes
-the store, which nothing holds while a copy is made or checked, so exit
-waits only on Kettle's own temporary directory; `start` asks the flag last,
-just before the spawn. `watch` waits for what was started (`open` on macOS,
+the same way and the source unchanged. The App holds the store in a
+`media::external::PrivateCopies`; its `close` sets the flag a copy asks
+about and then takes the store, which nothing holds while a copy is made or
+checked, so exit waits only on Kettle's own temporary directory; `start`
+asks the flag last, just before the spawn. `private_copy`, shared by the
+video and document copies, reserves the copy, makes it and runs the
+caller's check without the store, then keeps and marks it under the store,
+releasing or deleting it on any failure; `copy_failure` turns why it
+failed into the notice. `watch` waits for what was started (`open` on macOS,
 mpv or a newly started image viewer on Linux) and reports one that exits with an error. Nothing in the GUI parses video: what a video is
 comes from the worker, and its bytes are only compared.
+
+A fourth `PastedImages`, of kind `paste_image::DOCUMENTS` (prefix
+`kettle-document-`, `.pdf` only, 8 files and 512 MiB, oldest dropped once
+five minutes old), holds the copies of PDFs a card menu or the lane's `↗`
+hands to the document viewer, in its own `PrivateCopies`.
+`media::external::document` owns `Reader` (Preview, verified as the image
+viewer is; Papers at `/usr/bin/papers`, else Evince at `/usr/bin/evince`,
+each trusted as the image viewers are and given the copy's path: both are
+non-unique applications, so a launch never forwards its file to one already
+running, and the program checked is the one that opens it) and `DocumentSource`, which a PDF item gives as its file and digest or
+its held bytes and digest, and nothing once its bytes were released.
+`Outside::of` sends a PDF there, never to the image viewer. A file is
+reopened as a video's is and copied only while its identity is the one
+shown and it is no larger than `MAX_PDF_BYTES`; held bytes are first
+checked to have the digest shown, then written by `Reservation::write`,
+which goes through the same chunked path as a byte copy (`Origin::Bytes`,
+read through `ChunkSource`), keeping the same 2 GiB free. Either copy is
+read back whole through `kettle_media::content_digest_read` and kept only
+when its digest, with the shown identity, is the one the pages were
+rendered under, and a file's identity is checked again after the copy.
+`hand_over` checks the viewer before copying and hands the copy over under
+the store's lock once it is still Kettle's and exit has not begun.
 
 Crash cleanup recognizes only
 `kettle-paste-<canonical-pid>-<canonical-u128-nonce>` and
@@ -970,14 +996,18 @@ all work on the page as on any diagram the item carried. No room for the
 pages refuses the reply as over budget. A gallery read from a file keeps
 its path and the page shown (`reload_file`), which a reload reads again as
 `MarkdownDiagrams { index }`; evicting the item's pixels gives back the
-pages but keeps that path. `‹` and `›` on the detail line, Page Up and Page
-Down in a focused lane, and the palette's diagram actions call
+pages but keeps that path. `‹` and `›` on the detail line, Page Up, Page
+Down, Home and End in a focused lane, and the palette's page actions call
 `page_preview`, which asks for a page (`gallery_step`, counting from the
-page asked for and not yet shown, `PreviewPanel::page` with the item's
+page asked for and not yet shown, or naming the first or last; a page
+already on its way is not asked for again, `PreviewPanel::page` with the item's
 generation, `page_waited_on`) as a lane render carrying it with a ticket
-of its own (`LaneRender::page`, a `PageAsk`) from the bytes kept, never the
-file, on the canvas the user chose; the counter shows that page while it
-renders. A canvas change while a page is waited on asks for that page again
+of its own (`LaneRender::page`, a `PageAsk`), on the canvas the user chose: a
+gallery's page from the bytes kept, never the file; a PDF's page from the
+bytes a request carried while they are kept, or, for a PDF shown by its path,
+from its file read again (`ItemSource::page_spec`), which, as a reload,
+happens only on the user's own gesture, never a control client's, and not
+once the file is found changed. The counter shows that page while it renders. A canvas change while a page is waited on asks for that page again
 on the new canvas under a new ticket, taking the waiting request's place,
 since a newer lane render displaces a waiting one unsaid; the request it
 supersedes, if already running, can then neither clear the wait nor stand

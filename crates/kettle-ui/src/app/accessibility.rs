@@ -209,12 +209,20 @@ impl App {
                         kettle_render::MediaLaneHit::Next => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yNext)
                         }
-                        kettle_render::MediaLaneHit::PreviousPage => self
-                            .ui_text
-                            .text(kettle_i18n::Text::MediaLaneA11yPreviousDiagram),
-                        kettle_render::MediaLaneHit::NextPage => self
-                            .ui_text
-                            .text(kettle_i18n::Text::MediaLaneA11yNextDiagram),
+                        kettle_render::MediaLaneHit::PreviousPage => {
+                            self.ui_text.text(if lane.document {
+                                kettle_i18n::Text::MediaLaneA11yPreviousPage
+                            } else {
+                                kettle_i18n::Text::MediaLaneA11yPreviousDiagram
+                            })
+                        }
+                        kettle_render::MediaLaneHit::NextPage => {
+                            self.ui_text.text(if lane.document {
+                                kettle_i18n::Text::MediaLaneA11yNextPage
+                            } else {
+                                kettle_i18n::Text::MediaLaneA11yNextDiagram
+                            })
+                        }
                         kettle_render::MediaLaneHit::Pin => {
                             self.ui_text.text(kettle_i18n::Text::MediaViewerA11yPin)
                         }
