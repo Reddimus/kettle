@@ -172,6 +172,21 @@ Reports that fit any of these are welcome:
   file Kettle did not check, any viewer but the permitted one, or a copy
   past those bounds, is in scope. The store is `paste_image::DOCUMENTS`;
   the hand-off is `media::external::document`.
+- **Showing a file Kettle does not draw** — a file shown as itself (a
+  file card) reading anything of the file but its metadata, or showing a
+  file other than the one a request named: the GUI opens the path itself,
+  read-only and without blocking, requires a regular file and, for a
+  request that attested a device and inode, those; otherwise the request
+  fails as before. Its Show in Finder (macOS) or Show in Folder (Linux)
+  opening the file rather than its folder, or acting on another file: the
+  path is reopened and must name the same device and inode, then macOS
+  runs `/usr/bin/open -R` with fixed arguments, and Linux sends the file's
+  URI to `org.freedesktop.FileManager1.ShowItems` only on the unique bus
+  connection of the user's own process running a known file manager at its
+  system path that only root may change (`/usr/bin/nautilus`, `nemo`,
+  `caja`, `dolphin` or `thunar`), checked again just before the call. A
+  process running as the user can already show any file, so a reveal is
+  only ever a reveal. The hand-off is `media::external::reveal`.
 - **Codex's startup** — with `agent-display-codex` on, the zsh a new pane
   starts reads a Kettle-owned, read-only `.zshenv` that Kettle checks before
   each pane and points zsh at by borrowing `ZDOTDIR`, and the fish one runs

@@ -14,8 +14,8 @@ use super::{LOUPE, OpenFailure, Viewer};
 
 const NAME: &str = "org.gnome.Loupe";
 const OBJECT: &str = "/org/gnome/Loupe";
-const CALL_TIMEOUT: Duration = Duration::from_secs(1);
-const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(1);
+pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REPLY: usize = 4096;
 
 struct Receiver {
@@ -50,7 +50,9 @@ pub(super) fn open(file: &Path) -> Result<Option<Child>, OpenFailure> {
                 .build()
                 .await
                 .map_err(|_| OpenFailure::Viewer)?;
-            let mut owner = owner(&connection).await.map_err(|_| OpenFailure::Viewer)?;
+            let mut owner = owner(&connection, NAME)
+                .await
+                .map_err(|_| OpenFailure::Viewer)?;
             if owner.is_none() {
                 // No file reaches a launcher that could forward it to an alias.
                 started.0 = Some(
@@ -60,7 +62,7 @@ pub(super) fn open(file: &Path) -> Result<Option<Child>, OpenFailure> {
                         .map_err(|_| OpenFailure::Viewer)?,
                 );
                 while owner.is_none() {
-                    owner = self::owner(&connection)
+                    owner = self::owner(&connection, NAME)
                         .await
                         .map_err(|_| OpenFailure::Viewer)?;
                     if owner.is_some() {
@@ -95,14 +97,18 @@ pub(super) fn open(file: &Path) -> Result<Option<Child>, OpenFailure> {
 #[cfg(test)]
 mod tests;
 
-fn bounded(reply: Message) -> zbus::Result<Message> {
+pub(super) fn bounded(reply: Message) -> zbus::Result<Message> {
     if reply.body().len() > MAX_REPLY {
         return Err(zbus::Error::Failure("image viewer reply too large".into()));
     }
     Ok(reply)
 }
 
-async fn bus_query(connection: &Connection, method: &str, name: &str) -> zbus::Result<Message> {
+pub(super) async fn bus_query(
+    connection: &Connection,
+    method: &str,
+    name: &str,
+) -> zbus::Result<Message> {
     bounded(
         connection
             .call_method(
@@ -116,8 +122,12 @@ async fn bus_query(connection: &Connection, method: &str, name: &str) -> zbus::R
     )
 }
 
-async fn owner(connection: &Connection) -> zbus::Result<Option<OwnedUniqueName>> {
-    match bus_query(connection, "GetNameOwner", NAME).await {
+/// The unique connection that owns `name`, if one does; never starts it.
+pub(super) async fn owner(
+    connection: &Connection,
+    name: &str,
+) -> zbus::Result<Option<OwnedUniqueName>> {
+    match bus_query(connection, "GetNameOwner", name).await {
         Ok(reply) => reply.body().deserialize().map(Some),
         Err(zbus::Error::MethodError(name, _, _))
             if name.as_str() == "org.freedesktop.DBus.Error.NameHasNoOwner" =>

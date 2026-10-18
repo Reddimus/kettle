@@ -164,6 +164,12 @@ context = "crates/kettle-ui/src/media/external/video.rs: right-click menu row on
 [messages.menu_open_in_document_viewer]
 context = "crates/kettle-ui/src/media/external/document.rs: right-click menu row on an inline media card, and the media lane button's accessible name, Linux only, that opens a private copy of a shown PDF in GNOME's document viewer (Papers, or Evince on older systems). Title case as the image viewer's row."
 
+[messages.menu_show_in_finder]
+context = "crates/kettle-ui/src/media/external/reveal.rs: right-click menu row on a file's inline card, and the preview lane button's accessible name, macOS only, that opens the file's folder in Finder with the file selected; it never opens the file. 'Finder' is the app's name; Spanish macOS says 'Mostrar en el Finder'."
+
+[messages.menu_show_in_folder]
+context = "crates/kettle-ui/src/media/external/reveal.rs: right-click menu row on a file's inline card, and the preview lane button's accessible name, Linux only, that opens the file's folder in the desktop's file manager with the file selected; it never opens the file. Title case as the other menu rows."
+
 [messages.notify_title_open_image]
 context = "crates/kettle-ui/src/app/preview.rs act_on_media: desktop notification title when opening a copy of a media item in the image viewer did not work."
 
@@ -211,6 +217,21 @@ context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when copy
 
 [messages.notify_body_open_document_refused]
 context = "crates/kettle-ui/src/media/external/document.rs open: body when the document viewer started but exited with an error, or did not take the copy it was given, instead of opening it."
+
+[messages.notify_title_reveal_file]
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: desktop notification title when showing a file in its folder did not work. 'kettle' is the product name, lowercase as in the other notification titles."
+
+[messages.notify_body_reveal_busy]
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when two opens are already under way."
+
+[messages.notify_body_reveal_changed]
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when the file was moved, replaced or removed after Kettle showed it, so Kettle does not show the file now at that path."
+
+[messages.notify_body_reveal_manager]
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when no file manager is available to show the file, or the program answering for it is not a file manager Kettle permits."
+
+[messages.notify_body_reveal_refused]
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when the file manager started but could not show the file."
 
 [messages.notify_title_preview_failed]
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: title of the desktop notification when a preview the user asked for (from a file a pane's output names) could not be shown. 'kettle' is the product name, lowercase as in the other notification titles."
@@ -1822,6 +1843,9 @@ context = "crates/kettle-ui/src/app/preview.rs media_item_kind_and_sender: kind 
 [messages.media_viewer_kind_pdf]
 context = "crates/kettle-ui/src/app/preview.rs media_item_kind_and_sender: kind of a PDF document's page shown in the media viewer's detail line, which lists kind, size and sender. 'PDF' is a format name."
 
+[messages.media_viewer_kind_file]
+context = "crates/kettle-ui/src/app/preview.rs media_item_kind_and_sender: kind of a file Kettle does not draw, shown on the shelf as itself, in the media viewer's detail line, which lists kind, size and sender."
+
 [messages.media_viewer_from_pane]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line, under the kind and size, when Kettle verified the item came from a program running in this pane. It starts its own line."
 
@@ -1841,6 +1865,15 @@ context = "crates/kettle-ui/src/app.rs media_viewer_projection: stands in for pr
 
 [messages.media_viewer_released]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: shown in the media viewer in place of an image whose pixels Kettle released to stay within its memory budget."
+
+[messages.media_viewer_file_unsupported]
+context = "crates/kettle-ui/src/app/preview.rs preview_lane_panel: shown in the preview lane in place of a picture for a file Kettle shows as itself because it draws no file of that kind (a document, an archive, audio). The lane's detail line gives its size."
+
+[messages.media_viewer_file_no_decoder]
+context = "crates/kettle-ui/src/app/preview.rs preview_lane_panel: shown in the preview lane in place of a picture for a file of a kind Kettle draws (a video, a HEIC or AVIF image) when this system lacks the decoder for it. 'ffmpeg' is a program's name, lowercase; 'brew install ffmpeg' is a command and stays as it is."
+
+[messages.media_viewer_file_too_large]
+context = "crates/kettle-ui/src/app/preview.rs preview_lane_panel: shown in the preview lane in place of a picture for a file larger than Kettle draws."
 
 [messages.media_lane_a11y]
 context = "crates/kettle-ui/src/app.rs media_lane_accessibility: screen-reader name of a pane's preview lane, the strip below the terminal that shows one media item: the item's place on the shelf (index of count, counting from 1), its title and its detail line."
