@@ -150,7 +150,7 @@ context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click men
 context = "crates/kettle-ui/src/app.rs card menu: right-click menu row on an inline media card that opens its item in Kettle's own media viewer."
 
 [messages.menu_open_in_preview]
-context = "crates/kettle-ui/src/media/external.rs: right-click menu row on an inline media card or in the media viewer, macOS only, that opens a copy of the image in Apple's Preview app. 'Preview' is the app's name; Spanish macOS calls it 'Vista Previa'."
+context = "crates/kettle-ui/src/media/external.rs: right-click menu row on an inline media card or in the media viewer, macOS only, that opens a copy of the image, or a private copy of a PDF, in Apple's Preview app. 'Preview' is the app's name; Spanish macOS calls it 'Vista Previa'."
 
 [messages.menu_open_in_image_viewer]
 context = "crates/kettle-ui/src/media/external.rs: right-click menu row on an inline media card or in the media viewer, Linux only, that opens a copy of the image in GNOME's image viewer."
@@ -160,6 +160,9 @@ context = "crates/kettle-ui/src/media/external/video.rs: right-click menu row on
 
 [messages.menu_open_in_mpv]
 context = "crates/kettle-ui/src/media/external/video.rs: right-click menu row on an inline media card, and the media lane button's accessible name, Linux only, that opens a private copy of a shown video in the mpv video player. 'mpv' is the program's name, lowercase."
+
+[messages.menu_open_in_document_viewer]
+context = "crates/kettle-ui/src/media/external/document.rs: right-click menu row on an inline media card, and the media lane button's accessible name, Linux only, that opens a private copy of a shown PDF in GNOME's document viewer (Papers, or Evince on older systems). Title case as the image viewer's row."
 
 [messages.notify_title_open_image]
 context = "crates/kettle-ui/src/app/preview.rs act_on_media: desktop notification title when opening a copy of a media item in the image viewer did not work."
@@ -187,6 +190,27 @@ context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when the 
 
 [messages.notify_body_open_video_refused]
 context = "crates/kettle-ui/src/media/external/video.rs open: body when the video player started but exited with an error instead of opening the copy, for example because its build lacks the codec or it cannot reach the display."
+
+[messages.notify_title_open_document]
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: desktop notification title when opening a private copy of a shown PDF in the permitted document viewer did not work. 'kettle' is the product name, lowercase as in the other notification titles; 'PDF' stays as it is."
+
+[messages.notify_body_open_document_busy]
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when two opens are already under way, or Kettle's store of PDF copies is full of copies made in the last five minutes."
+
+[messages.notify_body_open_document_copy]
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when the private copy of the PDF could not be made, was changed before the viewer got it, or the PDF's bytes were let go to save memory."
+
+[messages.notify_body_open_document_viewer]
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when the permitted document viewer (Preview on macOS, Papers or Evince on Linux) is missing or failed its check."
+
+[messages.notify_body_open_document_changed]
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when the PDF's file was changed, moved or replaced after Kettle showed it, or its copy did not match it byte for byte, so Kettle does not hand it over. Showing it again renders the current file."
+
+[messages.notify_body_open_document_room]
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when copying the PDF would leave less than 2 GiB free on the disk. GiB is the binary unit; keep the number."
+
+[messages.notify_body_open_document_refused]
+context = "crates/kettle-ui/src/media/external/document.rs open: body when the document viewer started but exited with an error, or did not take the copy it was given, instead of opening it."
 
 [messages.notify_title_preview_failed]
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: title of the desktop notification when a preview the user asked for (from a file a pane's output names) could not be shown. 'kettle' is the product name, lowercase as in the other notification titles."
@@ -1702,10 +1726,10 @@ context = "crates/kettle-config/src/palette.rs: command palette entry that shows
 context = "crates/kettle-config/src/palette.rs: command palette entry that shows the previous item of the focused pane's media shelf in its preview lane."
 
 [messages.palette_preview_next_diagram]
-context = "crates/kettle-config/src/palette.rs: command palette entry that shows the next diagram of the gallery in the focused pane's preview lane: the Mermaid diagrams of one Markdown file, or several copied together."
+context = "crates/kettle-config/src/palette.rs: command palette entry that shows the next page in the focused pane's preview lane: of a PDF, or of a gallery of diagrams (the Mermaid diagrams of one Markdown file, or several copied together)."
 
 [messages.palette_preview_previous_diagram]
-context = "crates/kettle-config/src/palette.rs: command palette entry that shows the previous diagram of the gallery in the focused pane's preview lane: the Mermaid diagrams of one Markdown file, or several copied together."
+context = "crates/kettle-config/src/palette.rs: command palette entry that shows the previous page in the focused pane's preview lane: of a PDF, or of a gallery of diagrams (the Mermaid diagrams of one Markdown file, or several copied together)."
 
 [messages.palette_close_preview]
 context = "crates/kettle-config/src/palette.rs: command palette entry that closes the focused pane's media preview."
@@ -1877,6 +1901,16 @@ context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-
 context = "crates/kettle-ui/src/app.rs media_lane_accessibility: part of a preview lane's screen-reader name for a gallery of diagrams: which diagram it shows (index of count, counting from 1). Lowercase, as it sits between other parts separated by middle dots."
 args = [{ name = "index", type = "u64" }, { name = "count", type = "u64" }]
 
+[messages.media_lane_a11y_previous_page]
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a preview lane's button that shows the page before this one of a PDF. Unavailable on the first page."
+
+[messages.media_lane_a11y_next_page]
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a preview lane's button that shows the page after this one of a PDF. Unavailable on the last page."
+
+[messages.media_lane_a11y_page]
+context = "crates/kettle-ui/src/app.rs media_lane_accessibility: part of a preview lane's screen-reader name for a PDF: which page it shows (index of count, counting from 1). Lowercase, as it sits between other parts separated by middle dots."
+args = [{ name = "index", type = "u64" }, { name = "count", type = "u64" }]
+
 [messages.media_lane_notice_image_copied]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer after its image was copied to the clipboard."
 
@@ -1975,6 +2009,9 @@ context = "crates/kettle-ui/src/app.rs lane_notice_text: Kettle decodes video on
 
 [messages.media_lane_notice_rendering_page]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer while the next or previous diagram of a gallery (several diagrams from one Markdown file or copy) is drawn; the diagram shown stays until then."
+
+[messages.media_lane_notice_rendering_document_page]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer while another page of a PDF is drawn; the page shown stays until then."
 
 [messages.media_lane_notice_render_failed]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer when rendering the item again (for another background) failed; the old picture stays."

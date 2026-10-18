@@ -51,9 +51,10 @@ pub(crate) fn draws_as_diagram(kind: kettle_media::MediaKind) -> bool {
 #[cfg(test)]
 pub(crate) use external::Viewer;
 pub(crate) use external::{
-    OpenFailure, Outside, VideoCopies, VideoSource, open as open_externally, open_video,
+    DocumentSource, OpenFailure, Outside, PrivateCopies, VideoSource, open as open_externally,
+    open_document, open_video,
 };
-pub(crate) use focus::{PreviewFocus, PreviewKey, ViewerKey, preview_key, viewer_key};
+pub(crate) use focus::{PageStep, PreviewFocus, PreviewKey, ViewerKey, preview_key, viewer_key};
 pub(crate) use inline::{card_caption, card_message, card_size};
 pub(crate) use playback::{
     Button as PlaybackButton, LanePlayback, MAX_PLAYING, Notice as PlaybackNotice,
@@ -72,7 +73,7 @@ pub(crate) use shelf::{
     signer_name,
 };
 pub(crate) use sightings::{CardSightings, MAX_CARD_INSTANCE};
-pub(crate) use source::{Gallery, ItemSource, JobSpec, SourceInput};
+pub(crate) use source::{Gallery, ItemSource, JobSpec, ReadPage, SourceInput};
 pub(crate) use tip::CardsTip;
 
 use queue::{Admitted, Queue};
@@ -136,7 +137,7 @@ pub(crate) struct LaneRender {
 /// two requests for the same page apart: only the latest is waited on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PageAsk {
-    pub page: u8,
+    pub page: u32,
     pub ticket: u64,
 }
 

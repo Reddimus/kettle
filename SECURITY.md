@@ -145,6 +145,33 @@ Reports that fit any of these are welcome:
   not check, any player but the permitted one, or a copy past those
   bounds, is in scope. The store is `paste_image::VIDEOS`; the hand-off is
   `media::external::video`.
+- **Opening a PDF outside Kettle** — a PDF's Open in Preview (macOS) or
+  Open in Document Viewer (Linux) handing anything but a checked private
+  copy of the PDF shown to anything but the one permitted viewer: Preview,
+  checked as for an image, or a root-owned Linux viewer, `/usr/bin/papers`
+  or `/usr/bin/evince`, with fixed arguments, no shell or search path, never
+  the default association, and never a picture of the page shown. Papers
+  and Evince are both non-unique applications (`G_APPLICATION_NON_UNIQUE`),
+  so a launch never forwards its file to a viewer already running: the
+  program Kettle checked, given the copy's path, is the one that opens it.
+  A PDF shown from a file is copied as a
+  video is, only while the file is still the one shown (the same device,
+  inode, size and modification time) and never past the largest PDF Kettle
+  shows; a PDF shown from bytes a request carried is written from the bytes
+  Kettle still holds, in chunks, keeping the same 2 GiB free. Either copy
+  is kept only once its every byte, read back, has the digest the pages
+  were rendered under, and, for a file, the source did not change while it
+  was copied; it is then marked downloaded on macOS and checked to still
+  be Kettle's just before the viewer gets it, under the store's lock. Both
+  viewers take a path or URI, so a process running as the user could swap
+  the copy in its owner-only directory before the viewer reads it, as it
+  could Preview's PNG. Copies are given up at exit or after thirty seconds.
+  The store keeps 8 copies and 512 MiB, drops its oldest once five minutes
+  old, and is closed, deleted and swept as the others are. Nothing in the
+  GUI parses the PDF. A copy that reaches another user, a viewer given a
+  file Kettle did not check, any viewer but the permitted one, or a copy
+  past those bounds, is in scope. The store is `paste_image::DOCUMENTS`;
+  the hand-off is `media::external::document`.
 - **Codex's startup** — with `agent-display-codex` on, the zsh a new pane
   starts reads a Kettle-owned, read-only `.zshenv` that Kettle checks before
   each pane and points zsh at by borrowing `ZDOTDIR`, and the fish one runs

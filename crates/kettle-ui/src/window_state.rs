@@ -781,6 +781,8 @@ pub(crate) enum LaneNotice {
     Rendering,
     /// Rendering the gallery page asked for.
     RenderingPage,
+    /// Another page of a document is being drawn.
+    RenderingDocumentPage,
     /// That render failed; the item shows as it was.
     RenderFailed,
     /// The file changed since the item was rendered.

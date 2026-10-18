@@ -724,11 +724,12 @@ notification says it was copied, or why not: another shell, a translocated
 copy whose path would not last, or a clipboard Kettle could not reach. `preview_next`,
 `preview_previous` and `close_preview` browse and close the focused pane's
 lane as its `›`, `‹` and `×` do ("Next preview", "Previous preview" and
-"Close media preview" in the palette), `preview_next_diagram` and
-`preview_previous_diagram` show a gallery's next or previous diagram (a
-Markdown file's Mermaid diagrams, or several copied together) as the `›` and
-`‹` on its detail line do ("Next diagram in preview" and "Previous diagram
-in preview"), and `preview_source`,
+"Close media preview" in the palette), `preview_next_page` and
+`preview_previous_page` show the next or previous page of a PDF or of a
+gallery (a Markdown file's Mermaid diagrams, or several copied together) as
+the `›` and `‹` on its detail line, PageDown and PageUp do ("Next page in
+preview" and "Previous page in preview"; `preview_next_diagram` and
+`preview_previous_diagram`, their first names, still bind), and `preview_source`,
 `preview_canvas`, `preview_copy`, `preview_reload`, `preview_zoom_in`,
 `preview_zoom_out` and `preview_fit` as its `≡`, `◐`, `⧉`, `↻`, `+`, `−` and
 `⤢` do ("Show preview source", "Next preview canvas", "Copy preview",
@@ -744,8 +745,9 @@ video") works as the lane's `♪` does, once the video's sound can play: it
 mutes the sound, and lets it be heard again, the video playing on; a control
 request or a Lua script's action may mute it, but never unmute it. `focus_preview` ("Focus preview") gives the focused pane's expanded
 lane the keyboard, and its footer says "Keyboard: preview": the arrows move
-the picture (or scroll a source), Page Up and Page Down show a gallery's
-previous and next diagram, `+` and `-` zoom, `0` fits it (or shows a source
+the picture (or scroll a source), Page Up and Page Down show the previous
+and next page of a PDF or gallery, Home and End its first and last, `+` and
+`-` zoom, `0` fits it (or shows a source
 from its start), `c` copies, Space plays or pauses a video (or stops its
 silent preview), `m` mutes or unmutes its sound, Left and Right step a video five seconds while it shows
 in the lane, and every other key and chord, Enter,

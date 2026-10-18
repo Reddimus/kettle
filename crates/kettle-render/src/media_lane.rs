@@ -173,9 +173,13 @@ pub struct MediaLanePanel {
     pub hint: String,
     /// The item's place on its shelf, 1-based, and the shelf's length.
     pub position: (usize, usize),
-    /// For a page of a gallery: the page shown, 1-based, and how many there
-    /// are. The detail line offers the others when there is more than one.
+    /// For a page of a gallery or document: the page shown, 1-based, and how
+    /// many there are. The detail line offers the others when there is more
+    /// than one.
     pub page: Option<(usize, usize)>,
+    /// Whether those are a document's pages rather than a gallery's
+    /// diagrams: what paging is called.
+    pub document: bool,
     /// The pixels, or `None` when they were released.
     pub image: Option<kettle_core::ImageData>,
     /// Shown in the image's place when there are no pixels.
@@ -1222,6 +1226,7 @@ mod tests {
             hint: "Esc closes".into(),
             position,
             page: None,
+            document: false,
             image: image.map(|(w, h)| {
                 kettle_core::ImageData::new(w, h, vec![0; (w * h * 4) as usize]).unwrap()
             }),

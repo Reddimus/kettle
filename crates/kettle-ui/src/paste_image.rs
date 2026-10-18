@@ -40,6 +40,13 @@
 //! is made owner-only, named with the extension of the container its bytes
 //! are, checked by the caller through a fresh handle before it is kept, and
 //! then held, marked, deleted and swept as the image copies are.
+//!
+//! **Copies for a document viewer.** A fourth store ([`DOCUMENTS`]) holds
+//! private copies of the PDFs Kettle showed, for the permitted document
+//! viewer: of the file a PDF was shown from, made as a video's copy is, or of
+//! the bytes a request carried, written a chunk at a time while the same free
+//! space stays. Each is named `.pdf`, checked by the caller, and held,
+//! marked, deleted and swept as the others are.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
@@ -133,14 +140,38 @@ pub(crate) const VIDEOS_ANY_DISK: StoreKind = StoreKind {
     ..VIDEOS
 };
 
-/// Every store, for the crash sweep.
-const KINDS: [StoreKind; 3] = [PASTED, OPENED, VIDEOS];
+/// Private copies of PDFs handed to the document viewer, each no larger
+/// than the largest PDF Kettle shows. A viewer reads its copy for as long as
+/// it shows it, and a copy dropped while open stays readable to it, so the
+/// oldest go first when the store is full, once they have been there five
+/// minutes.
+pub(crate) const DOCUMENTS: StoreKind = StoreKind {
+    prefix: "kettle-document-",
+    extensions: &["pdf"],
+    max_files: 8,
+    max_bytes: 8 * kettle_media::MAX_PDF_BYTES as u64,
+    max_sequence: 999_999,
+    evicts: true,
+    min_age: Duration::from_secs(5 * 60),
+    keep_free: MIN_FREE_AFTER_COPY,
+};
 
-/// The free space a byte copy of a video must leave on its volume.
+/// The document store with no free space to keep, for tests.
+#[cfg(all(test, unix))]
+pub(crate) const DOCUMENTS_ANY_DISK: StoreKind = StoreKind {
+    keep_free: 0,
+    ..DOCUMENTS
+};
+
+/// Every store, for the crash sweep.
+const KINDS: [StoreKind; 4] = [PASTED, OPENED, VIDEOS, DOCUMENTS];
+
+/// The free space a byte copy of a video or a document must leave on its
+/// volume.
 const MIN_FREE_AFTER_COPY: u64 = 2 * 1024 * 1024 * 1024;
 
-/// How much of a video a byte copy reads and writes at a time, between
-/// asking whether to stop.
+/// How much of a video or a document a byte copy reads and writes at a
+/// time, between asking whether to stop.
 #[cfg_attr(not(unix), allow(dead_code))]
 const COPY_CHUNK: usize = 1024 * 1024;
 
@@ -193,6 +224,48 @@ enum Copying {
     /// Bytes, a chunk at a time.
     #[cfg_attr(not(all(test, unix)), allow(dead_code))]
     Bytes,
+}
+
+/// What a reserved private file is made from.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(unix), allow(dead_code))]
+enum Origin<'a> {
+    /// An open regular file, copied as the [`Copying`] says.
+    File(&'a File, Copying),
+    /// Bytes already held, written a chunk at a time.
+    Bytes(&'a [u8]),
+}
+
+/// What a byte copy reads its chunks from, by offset.
+#[cfg(unix)]
+trait ChunkSource {
+    /// Read into `buffer` from `offset`: how many bytes, 0 at the end.
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<usize>;
+}
+
+#[cfg(unix)]
+impl ChunkSource for File {
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+        std::os::unix::fs::FileExt::read_at(self, buffer, offset)
+    }
+}
+
+#[cfg(unix)]
+impl ChunkSource for Origin<'_> {
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+        match self {
+            Self::File(file, _) => ChunkSource::read_at(*file, buffer, offset),
+            Self::Bytes(bytes) => {
+                let rest = usize::try_from(offset)
+                    .ok()
+                    .and_then(|offset| bytes.get(offset..))
+                    .unwrap_or_default();
+                let read = rest.len().min(buffer.len());
+                buffer[..read].copy_from_slice(&rest[..read]);
+                Ok(read)
+            }
+        }
+    }
 }
 
 /// An image the store dropped but could not delete. It still counts against
@@ -277,8 +350,34 @@ impl Reservation {
         copy_into_session(
             &self.directory,
             self.next.name.as_os_str(),
-            source,
-            (self.size, how, self.keep_free),
+            Origin::File(source, how),
+            (self.size, self.keep_free),
+            (stop, deadline),
+            &self.pending,
+        )
+    }
+
+    /// Write `bytes`, exactly as many as reserved, into the reserved private
+    /// file and return it, as a byte copy is made: a chunk at a time, only
+    /// while the store's free space stays, with `stop` and `deadline` asked
+    /// as a copy asks them, and a write either ends discarded.
+    pub(crate) fn write(
+        &self,
+        bytes: &[u8],
+        stop: &dyn Fn() -> bool,
+        deadline: Instant,
+    ) -> io::Result<File> {
+        if u64::try_from(bytes.len()).ok() != Some(self.size) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the bytes are not the size reserved",
+            ));
+        }
+        copy_into_session(
+            &self.directory,
+            self.next.name.as_os_str(),
+            Origin::Bytes(bytes),
+            (self.size, self.keep_free),
             (stop, deadline),
             &self.pending,
         )
@@ -1819,15 +1918,15 @@ fn discard_private_file(file: File, path: &Path) {
     }
 }
 
-/// Copy `size` bytes of `source` into a new private file `name` in the held
-/// session `directory`, as `how` says, and return the file. A clone the file
-/// system cannot make falls back to bytes.
+/// Copy `size` bytes of `origin` into a new private file `name` in the held
+/// session `directory`, and return the file: a file cloned where its
+/// [`Copying`] asks and the file system can, else bytes.
 #[cfg(unix)]
 fn copy_into_session(
     directory: &SessionDirectory,
     name: &OsStr,
-    source: &File,
-    (size, how, keep_free): (u64, Copying, u64),
+    origin: Origin<'_>,
+    (size, keep_free): (u64, u64),
     (stop, deadline): (&dyn Fn() -> bool, Instant),
     pending: &std::sync::atomic::AtomicU64,
 ) -> io::Result<File> {
@@ -1856,7 +1955,7 @@ fn copy_into_session(
     };
     asked_to_end()?;
     #[cfg(target_os = "macos")]
-    if how == Copying::CloneFirst {
+    if let Origin::File(source, Copying::CloneFirst) = origin {
         match clone_into_session(directory, name, source) {
             Err(error) if clone_unsupported(&error) => {}
             Ok(file) => return keep_unless_ended(file),
@@ -1865,7 +1964,7 @@ fn copy_into_session(
     }
     let file = create_private_file_in_session(directory, name)?;
     #[cfg(target_os = "linux")]
-    if how == Copying::CloneFirst {
+    if let Origin::File(source, Copying::CloneFirst) = origin {
         use std::os::fd::AsRawFd as _;
         // SAFETY: both descriptors are open, and FICLONE only reads the
         // source's and writes the new file's blocks.
@@ -1878,8 +1977,6 @@ fn copy_into_session(
             return Err(error);
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let _ = how;
     // What every byte copy of the store has left to write must fit before
     // each chunk, keeping the reserve: two copies never count it twice.
     let share = Pending::new(pending, size);
@@ -1891,7 +1988,7 @@ fn copy_into_session(
             keep_free,
         )
     };
-    match copy_chunks(source, &file, size, &asked_to_end, &room) {
+    match copy_chunks(&origin, &file, size, &asked_to_end, &room) {
         Ok(()) => keep_unless_ended(file),
         Err(error) => {
             discard_private_file_in_session(directory, file, name);
@@ -1904,14 +2001,14 @@ fn copy_into_session(
 fn copy_into_session(
     _directory: &SessionDirectory,
     _name: &OsStr,
-    _source: &File,
-    _size: (u64, Copying, u64),
+    _origin: Origin<'_>,
+    _size: (u64, u64),
     _stop: (&dyn Fn() -> bool, Instant),
     _pending: &std::sync::atomic::AtomicU64,
 ) -> io::Result<File> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "videos are copied only on Unix",
+        "videos and documents are copied only on Unix",
     ))
 }
 
@@ -2046,7 +2143,7 @@ fn require_free(directory: &SessionDirectory, size: u64, keep: u64) -> io::Resul
 /// left still fits. A source that ends early is refused.
 #[cfg(unix)]
 fn copy_chunks(
-    source: &File,
+    source: &impl ChunkSource,
     dest: &File,
     size: u64,
     ended: &dyn Fn() -> io::Result<()>,
@@ -3095,7 +3192,7 @@ mod tests {
         images.cleanup();
 
         // The crash sweep covers every store.
-        assert_eq!(KINDS, [PASTED, OPENED, VIDEOS]);
+        assert_eq!(KINDS, [PASTED, OPENED, VIDEOS, DOCUMENTS]);
         let root = scratch("opened-sweep");
         let pid = std::process::id();
         let nonce = SystemTime::now()
@@ -3623,6 +3720,54 @@ mod tests {
             copies.cleanup();
             assert!(!dir.exists());
         }
+    }
+
+    /// Held bytes written as a document copy are exactly those bytes,
+    /// owner-only and named `.pdf`; bytes not the size reserved are refused
+    /// before anything is made, and a write ended meanwhile leaves nothing.
+    #[cfg(unix)]
+    #[test]
+    fn held_bytes_are_written_as_a_private_copy() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let bytes: Vec<u8> = (0..COPY_CHUNK * 2 + 17).map(|i| (i % 253) as u8).collect();
+        let dir = scratch("document-write");
+        let mut copies = PastedImages::of_kind_in(DOCUMENTS_ANY_DISK, dir.clone());
+        let reservation = copies.reserve_copy(bytes.len() as u64, "pdf").unwrap();
+        let file = reservation.write(&bytes, &never, soon()).unwrap();
+        let path = copies.keep_copy(reservation, file, |_| Ok(())).unwrap();
+        assert_eq!(path.extension(), Some(OsStr::new("pdf")));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        let reservation = copies.reserve_copy(4, "pdf").unwrap();
+        let error = reservation.write(b"abc", &never, soon()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "short");
+        copies.release(reservation);
+
+        let asked = std::cell::Cell::new(0);
+        let stop = || {
+            asked.set(asked.get() + 1);
+            asked.get() > 2
+        };
+        let reservation = copies.reserve_copy(bytes.len() as u64, "pdf").unwrap();
+        let error = reservation.write(&bytes, &stop, soon()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted, "ended");
+        copies.release(reservation);
+        let directory = copies.directory.as_ref().unwrap();
+        assert_eq!(
+            session_directory_entry_names(directory, 8).unwrap().len(),
+            1,
+            "only the copy kept"
+        );
+        let refused = copies.reserve_copy(4, "png").map(|_| ());
+        assert_eq!(
+            refused.map_err(|error| error.kind()),
+            Err(io::ErrorKind::InvalidInput),
+            "only .pdf"
+        );
+        copies.cleanup();
+        assert!(!dir.exists());
     }
 
     /// A byte copy asks, before every chunk, whether to end and whether what
