@@ -669,6 +669,10 @@ media_viewer_pin_short = "Fijar"
 media_viewer_overlay_hint = "Tab selecciona controles · Esc cierra · P fija"
 media_viewer_a11y = "Visor multimedia, {index} de {count}: {title}, {detail}"
 
+media_viewer_video_hint = "Clic / K: reproducir o pausar · T: cine · F: pantalla completa · Esc: volver · P: fijar"
+media_viewer_theater = "Alternar modo cine (T)"
+media_viewer_fullscreen = "Alternar pantalla completa (F)"
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"

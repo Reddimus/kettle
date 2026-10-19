@@ -6163,6 +6163,7 @@ pub(super) fn test_lane_panel() -> kettle_render::MediaLanePanel {
         focused_control: None,
         pin_label: None,
         play: None,
+        play_feedback: None,
         sound: None,
         frame: None,
         scrubber: None,

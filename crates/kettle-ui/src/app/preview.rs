@@ -98,6 +98,8 @@ impl App {
                     pane,
                     origin: ws.mux.active_focus(),
                     control: None,
+                    theater: false,
+                    fullscreen: false,
                 });
             }
             self.release_held_buttons(ws, |_| true);
@@ -143,6 +145,11 @@ impl App {
 
     pub(super) fn restore_overlay_origin(&mut self, ws: &mut WindowState, pane: u64) {
         if let Some(open) = ws.preview_overlay.filter(|open| open.pane == pane) {
+            if open.fullscreen
+                && let Some(window) = &ws.window
+            {
+                window.set_fullscreen(None);
+            }
             ws.preview_overlay = None;
             if ws.preview_focus.is_some_and(|focus| focus.pane == pane) {
                 self.exit_preview_focus(ws);
@@ -171,6 +178,34 @@ impl App {
         };
         let resized = ws.mux.open_lane(pane, side);
         self.lanes_changed(ws, resized);
+    }
+
+    pub(super) fn toggle_preview_theater(&mut self, ws: &mut WindowState, pane: u64) {
+        if !preview_item(ws, pane)
+            .is_some_and(|item| item.kind.media() == Some(kettle_media::MediaKind::Video))
+        {
+            return;
+        }
+        if let Some(open) = ws.preview_overlay.as_mut().filter(|open| open.pane == pane) {
+            open.theater = !open.theater;
+            self.lanes_changed(ws, false);
+        }
+    }
+
+    pub(super) fn toggle_preview_fullscreen(&mut self, ws: &mut WindowState, pane: u64) {
+        if !ws.preview_overlay.is_some_and(|open| open.fullscreen)
+            && !preview_item(ws, pane)
+                .is_some_and(|item| item.kind.media() == Some(kettle_media::MediaKind::Video))
+        {
+            return;
+        }
+        if let Some(open) = ws.preview_overlay.as_mut().filter(|open| open.pane == pane)
+            && let Some(window) = &ws.window
+        {
+            let fullscreen = open.toggle_fullscreen(window.fullscreen().is_some());
+            window.set_fullscreen(fullscreen.then_some(Fullscreen::Borderless(None)));
+            self.lanes_changed(ws, false);
+        }
     }
 
     /// After a lane opened, closed, collapsed or changed item: give the
@@ -1417,6 +1452,9 @@ impl App {
         let Some(geometry) = self.preview_lane_geometry_of(ws, pane) else {
             return false;
         };
+        if geometry.video {
+            return false;
+        }
         let (Some(fit), Some(panel)) = (geometry.fit, ws.preview_panels.get_mut(&pane)) else {
             return false;
         };
@@ -1980,6 +2018,15 @@ impl App {
                 .is_some_and(|playback| playback.serves(item.id, item.generation))
         });
         match action {
+            K::Exit if ws.preview_overlay.is_some_and(|open| open.fullscreen) => {
+                if let Some(open) = &mut ws.preview_overlay {
+                    open.fullscreen = false;
+                }
+                if let Some(window) = &ws.window {
+                    window.set_fullscreen(None);
+                }
+                self.lanes_changed(ws, false);
+            }
             K::Exit if ws.preview_overlay.is_some() => self.close_preview(ws, pane),
             K::Exit => self.exit_preview_focus(ws),
             K::Move(right, 0) if playing && !source => {
@@ -2027,6 +2074,8 @@ impl App {
             K::Copy => self.copy_preview(ws, pane),
             K::Play => self.toggle_lane_play(ws, pane),
             K::Mute => self.toggle_lane_sound(ws, pane),
+            K::Theater => self.toggle_preview_theater(ws, pane),
+            K::Fullscreen => self.toggle_preview_fullscreen(ws, pane),
             K::Swallow => {}
         }
         if let Some(window) = &ws.window {
@@ -2404,10 +2453,16 @@ impl App {
         pane: u64,
         partition: crate::pane_partition::PanePartition,
     ) -> Option<(Rect, bool)> {
-        if ws
-            .preview_overlay
-            .is_some_and(|overlay| overlay.pane == pane)
-        {
+        if let Some(open) = ws.preview_overlay.filter(|open| open.pane == pane) {
+            if open.theater || open.fullscreen {
+                let surface = ws.renderer.as_ref()?.surface_size();
+                let rect = (0.0, 0.0, surface.0 as f32, surface.1 as f32);
+                return if open.fullscreen {
+                    Some((rect, false))
+                } else {
+                    crate::media::centered_preview_rect(rect).map(|rect| (rect, false))
+                };
+            }
             return crate::media::centered_preview_rect(partition.terminal)
                 .map(|rect| (rect, false));
         }
@@ -2448,6 +2503,7 @@ impl App {
                 .filter(|open| open.pane == pane)
                 .map(|_| tr.text(kettle_i18n::Text::MediaViewerPinShort).to_string()),
             play: None,
+            play_feedback: None,
             sound: None,
             frame,
             scrubber: None,
@@ -2462,7 +2518,11 @@ impl App {
             hint: tr
                 .text(
                     if ws.preview_overlay.is_some_and(|open| open.pane == pane) {
-                        kettle_i18n::Text::MediaViewerOverlayHint
+                        if item.kind.media() == Some(kettle_media::MediaKind::Video) {
+                            kettle_i18n::Text::MediaViewerVideoHint
+                        } else {
+                            kettle_i18n::Text::MediaViewerOverlayHint
+                        }
                     } else if ws.preview_focus.is_some_and(|focus| focus.pane == pane) {
                         kettle_i18n::Text::MediaLaneHintFocused
                     } else {
@@ -2647,6 +2707,17 @@ impl App {
                 .find(|(part, _, _)| *part == control)
                 .map(|(_, rect, _)| rect);
         }
+        lane.play_feedback = match lane.play {
+            Some(kettle_render::MediaLanePlay::Play) => Some(kettle_render::MediaLanePlay::Play),
+            Some(kettle_render::MediaLanePlay::Pause)
+                if ws.lane_playbacks.get(&pane).is_some_and(|playback| {
+                    playback.touched.elapsed() < std::time::Duration::from_millis(600)
+                }) =>
+            {
+                Some(kettle_render::MediaLanePlay::Play)
+            }
+            _ => None,
+        };
         Some(lane)
     }
 
@@ -2730,6 +2801,16 @@ impl App {
             "rect": rect.map(rect_json),
             "state": state,
         });
+        if let Some(open) = ws.preview_overlay.filter(|open| open.pane == pane) {
+            lane["presentation"] = if open.fullscreen {
+                "fullscreen"
+            } else if open.theater {
+                "theater"
+            } else {
+                "pane"
+            }
+            .into();
+        }
         // What the lane shows and where its controls are: names and
         // rectangles only, never a title, a source or pixels.
         if let Some(panel) =
@@ -2986,6 +3067,8 @@ impl App {
             Hit::Reload => self.reload_preview(ws, pane),
             Hit::Play => self.toggle_lane_play(ws, pane),
             Hit::Sound => self.toggle_lane_sound(ws, pane),
+            Hit::Theater => self.toggle_preview_theater(ws, pane),
+            Hit::Fullscreen => self.toggle_preview_fullscreen(ws, pane),
             Hit::ZoomOut => self.zoom_preview(ws, pane, 1.0 / kettle_render::MEDIA_ZOOM_STEP),
             Hit::ZoomIn => self.zoom_preview(ws, pane, kettle_render::MEDIA_ZOOM_STEP),
             Hit::Fit => self.fit_preview(ws, pane),

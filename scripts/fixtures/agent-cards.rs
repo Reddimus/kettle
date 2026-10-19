@@ -13,14 +13,12 @@ impl Drop for Server {
 fn main() {
     let target = std::env::var("FIXTURE_AGENT").unwrap();
     if std::env::args().any(|arg| arg == "--version") {
-        println!(
-            "{}",
-            if target == "codex" {
-                "codex-cli 0.162.0"
-            } else {
-                "2.1.280 (Claude Code)"
-            }
-        );
+        let default = if target == "codex" {
+            "codex-cli 0.163.0"
+        } else {
+            "2.1.303 (Claude Code)"
+        };
+        println!("{}", std::env::var("FIXTURE_AGENT_VERSION").unwrap_or_else(|_| default.into()));
         return;
     }
     let root = std::path::PathBuf::from(std::env::var_os("FIXTURE_CASE").unwrap());

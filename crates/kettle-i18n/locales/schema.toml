@@ -2084,3 +2084,12 @@ context = "Empty destination chooser when there are no other windows in this Ket
 
 [messages.notify_body_drop_unreadable]
 context = "Desktop notification when a Wayland file drop cannot be read or exceeds local-file limits."
+
+[messages.media_viewer_video_hint]
+context = "Video viewer keyboard hint. K or click toggles play; T toggles theater size; F toggles fullscreen; Esc exits fullscreen before closing; P pins."
+
+[messages.media_viewer_theater]
+context = "Accessible video button: toggle between pane-sized and window-sized viewer, without changing native fullscreen."
+
+[messages.media_viewer_fullscreen]
+context = "Accessible video button: toggle native display fullscreen; Esc exits before closing the viewer."

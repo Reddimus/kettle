@@ -1,15 +1,13 @@
-//! Launch-local card support. Profiles describe tested hook output, not vendor identity.
+//! Launch-local card support. Version floors describe compatibility, not vendor identity.
 
 use crate::show::InlineTarget;
 
 pub const CODEX_CARD_MINOR: u64 = 162;
 
-/// The first Claude Code release whose plugin and hook output Kettle's cards
-/// are placed for. Later 2.1 releases keep that layout, as on macOS; 2.2 and
-/// later are untested.
+/// The minimum Claude Code release for cards within the 2.x line.
 pub const CLAUDE_CARD_FIRST: (u64, u64, u64) = (2, 1, 280);
 
-/// Whether the version output names a tested card-hook layout.
+/// Whether the version is at the card floor within a supported major line.
 pub fn card_version(target: InlineTarget, output: &str) -> bool {
     if output.len() > 128 {
         return false;
@@ -20,13 +18,12 @@ pub fn card_version(target: InlineTarget, output: &str) -> bool {
             .strip_suffix(" (Claude Code)")
             .and_then(release)
             .is_some_and(|(major, minor, patch)| {
-                (major, minor) == (CLAUDE_CARD_FIRST.0, CLAUDE_CARD_FIRST.1)
-                    && patch >= CLAUDE_CARD_FIRST.2
+                major == CLAUDE_CARD_FIRST.0 && (major, minor, patch) >= CLAUDE_CARD_FIRST
             }),
         InlineTarget::CodexHook => output
             .strip_prefix("codex-cli ")
             .and_then(release)
-            .is_some_and(|(major, minor, _)| major == 0 && minor == CODEX_CARD_MINOR),
+            .is_some_and(|(major, minor, _)| major == 0 && minor >= CODEX_CARD_MINOR),
         // `kettle show --inline` prints its own card; no harness launches it.
         InlineTarget::Cli => false,
     }
@@ -163,21 +160,30 @@ mod tests {
     }
 
     #[test]
-    fn card_profiles_accept_only_tested_hook_versions() {
+    fn card_profiles_accept_supported_release_lines() {
         assert!(card_version(InlineTarget::CodexHook, "codex-cli 0.162.0\n"));
         // No harness launch is ever registered for a command-line card.
         for output in ["2.1.280 (Claude Code)", "codex-cli 0.162.0", "kettle 5.3.0"] {
             assert!(!card_version(InlineTarget::Cli, output), "{output}");
         }
         assert!(card_version(InlineTarget::CodexHook, "codex-cli 0.162.7"));
-        for output in ["2.1.280 (Claude Code)\n", "2.1.300 (Claude Code)"] {
+        assert!(card_version(InlineTarget::CodexHook, "codex-cli 0.163.0"));
+        assert!(card_version(InlineTarget::CodexHook, "codex-cli 0.163.7"));
+        assert!(card_version(InlineTarget::CodexHook, "codex-cli 0.164.0"));
+        assert!(card_version(InlineTarget::CodexHook, "codex-cli 0.999.0"));
+        for output in [
+            "2.1.280 (Claude Code)\n",
+            "2.1.303 (Claude Code)",
+            "2.2.0 (Claude Code)",
+            "2.99.1 (Claude Code)",
+        ] {
             assert!(card_version(InlineTarget::ClaudeHook, output), "{output}");
         }
         for output in [
             "codex-cli 0.161.0",
-            "codex-cli 0.163.0",
             "codex-cli 1.162.0",
             "codex-cli 0.162.0-dev",
+            "codex-cli 0.163.0-dev",
             "codex-cli 0.162.0 extra",
             "codex-cli +0.162.0",
             "codex-cli 0.0162.0",
@@ -191,7 +197,6 @@ mod tests {
             "2.1.226 (Claude Code)",
             "2.1.279 (Claude Code)",
             "2.0.300 (Claude Code)",
-            "2.2.0 (Claude Code)",
             "3.1.280 (Claude Code)",
             "2.1.0280 (Claude Code)",
             "2.1.280.1 (Claude Code)",

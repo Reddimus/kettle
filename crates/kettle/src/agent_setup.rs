@@ -934,11 +934,11 @@ fn print_status() {
     println!(
         "Delivery: {}",
         if cards {
-            "a known card-hook version; interactive launches get a card under the call \
+            "a supported card-hook release line; interactive launches get a card under the call \
              after platform checks and Codex's hook review, otherwise the pane's shelf"
         } else if launched {
             "the media shelf of the pane Codex runs in; cards under the call need \
-             a supported Codex CLI 0.162 launch on macOS or Linux"
+             a supported Codex CLI 0.162 or newer 0.x launch on macOS or Linux"
         } else {
             "none from this shell"
         }
@@ -1282,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn cards_are_for_the_codex_whose_hook_output_kettle_knows() {
+    fn cards_require_a_supported_codex_release_line() {
         // macOS checks signatures; Linux checks an explicit launch scope.
         assert_eq!(
             card_version("codex-cli 0.162.0\n"),
@@ -1292,12 +1292,15 @@ mod tests {
             card_version("codex-cli 0.162.7"),
             cfg!(any(target_os = "macos", target_os = "linux"))
         );
-        for version in [
-            "codex-cli 0.161.9",
-            "codex-cli 0.163.0",
-            "codex-cli 1.162.0",
-            "",
-        ] {
+        assert_eq!(
+            card_version("codex-cli 0.163.0"),
+            cfg!(any(target_os = "macos", target_os = "linux"))
+        );
+        assert_eq!(
+            card_version("codex-cli 0.999.0"),
+            cfg!(any(target_os = "macos", target_os = "linux"))
+        );
+        for version in ["codex-cli 0.161.9", "codex-cli 1.162.0", ""] {
             assert!(!card_version(version), "{version}");
         }
     }

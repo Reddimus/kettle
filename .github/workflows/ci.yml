@@ -105,7 +105,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb fish xclip x11-utils libxtst6 dbus-daemon
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb fish xclip x11-utils libxtst6 dbus-daemon ffmpeg
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
       - run: cargo build --locked --workspace --all-targets
@@ -351,7 +351,7 @@ jobs:
             --codex "$CODEX_PASTE_TEST_BIN"
       - name: Launch-scoped agent cards (Linux)
         if: runner.os == 'Linux'
-        timeout-minutes: 3
+        timeout-minutes: 5
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |

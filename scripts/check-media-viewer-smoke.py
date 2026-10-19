@@ -42,6 +42,155 @@ def grid(screen):
     return screen["cols"], screen["rows"], screen["text"], screen["cursor"]
 
 
+def check_pages(app, native, binary, assets, out):
+    def show(path):
+        command = shlex.join([binary, "show", str(path)])
+        command += " && printf 'MEDIA_READY_%s\\n' " + shlex.quote(path.name) + "\n"
+        app.json_ctl("send_text", {"text": command})
+        wait_for(lambda: "MEDIA_READY_" + path.name in app.json_ctl("read_screen")["text"])
+        app.json_ctl("perform_action", {"action": "open_media_shelf"})
+        wait_for(lambda: app.json_ctl("ui_geometry")["preview_overlay"])
+
+    def color_page(name, blue):
+        path = out / name
+        path.unlink(missing_ok=True)
+        app.screenshot(path)
+        _, _, rows = live.read_rgba_png(path)
+        if blue:
+            count = sum(1 for row in rows for i in range(0, len(row), 4)
+                        if row[i + 2] > 170 and row[i] < 85 and row[i + 1] < 120)
+        else:
+            count = sum(1 for row in rows for i in range(0, len(row), 4)
+                        if abs(row[i] - 40) < 6 and abs(row[i + 1] - 108) < 6 and abs(row[i + 2] - 88) < 6)
+        return count > 5000
+
+    show(assets["pdf"])
+    wait_for(lambda: color_page("pdf-first.png", False))
+    native.keys("Next")
+    wait_for(lambda: color_page("pdf-second.png", True))
+    native.keys("Next")
+    assert color_page("pdf-last-boundary.png", True)
+    native.keys("Home")
+    wait_for(lambda: color_page("pdf-home.png", False))
+    native.keys("Prior")
+    assert color_page("pdf-first-boundary.png", False)
+    native.keys("End")
+    wait_for(lambda: color_page("pdf-end.png", True))
+    native.keys("Escape")
+    wait_for(lambda: app.json_ctl("ui_geometry")["preview_overlay"] is None)
+    show(assets["markdown"])
+    wait_for(lambda: color_page("gallery-first.png", False))
+    native.keys("Next")
+    wait_for(lambda: not color_page("gallery-second.png", False) and
+             app.json_ctl("ui_geometry")["preview_overlay"]["image"])
+    assert (out / "gallery-first.png").read_bytes() != (out / "gallery-second.png").read_bytes()
+    native.keys("Escape")
+    wait_for(lambda: app.json_ctl("ui_geometry")["preview_overlay"] is None)
+
+
+def check_video(app, native, binary, path, out):
+    command = shlex.join([binary, "show", str(path)]) + " && printf 'VIDEO_%s\\n' READY\n"
+    app.json_ctl("send_text", {"text": command})
+    wait_for(lambda: "VIDEO_READY" in app.json_ctl("read_screen")["text"])
+    app.json_ctl("perform_action", {"action": "open_media_shelf"})
+    geometry = lambda: app.json_ctl("ui_geometry")
+    viewer = lambda: geometry()["preview_overlay"]
+    opened = wait_for(viewer)
+    pane = next(p["terminal"] for p in geometry()["panes"] if p["id"] == opened["pane"])
+    assert opened["presentation"] == "pane"
+    for axis, size in (("x", "width"), ("y", "height")):
+        assert abs(opened["rect"][size] / pane[size] - 0.9) < 0.0001
+        assert abs(opened["rect"][axis] - pane[axis] - pane[size] * 0.05) < 0.01
+    assert opened["image"]["width"] > 480, "video did not expand beyond its source size"
+    assert "playback" not in opened, "opening a card started playback"
+    assert opened["controls"]["play"]["y"] >= opened["image"]["y"] + opened["image"]["height"]
+    app.screenshot(out / "video-center-play.png")
+    terminal = grid(app.json_ctl("read_screen"))
+    window = native.windows(app.pid)[-1]
+
+    def picture_click():
+        image = viewer()["image"]
+        native.move(window, int(image["x"] + image["width"] / 2),
+                    int(image["y"] + image["height"] / 2))
+        native.button(1, True)
+        native.button(1, False)
+
+    def playback(state):
+        value = viewer().get("playback", {})
+        return value if value.get("state") == state and value.get("frame") else None
+
+    def frame(name):
+        image = viewer()["image"]
+        file = out / name
+        app.screenshot(file)
+        _, _, rows = live.read_rgba_png(file)
+        return [rows[y][x * 4:x * 4 + 4]
+                for y in range(int(image["y"]), int(image["y"] + image["height"]), 16)
+                for x in range(int(image["x"]), int(image["x"] + image["width"]), 16)
+                if not (abs(x - image["x"] - image["width"] / 2) < 60 and
+                        abs(y - image["y"] - image["height"] / 2) < 60)]
+
+    picture_click()
+    wait_for(lambda: playback("playing"))
+    first = frame("video-playing-first.png")
+    time.sleep(0.4)
+    assert first != frame("video-playing-next.png"), "playing video pixels did not change"
+    picture_click()
+    paused = wait_for(lambda: playback("paused"))
+    time.sleep(0.8)
+    still = frame("video-paused-first.png")
+    time.sleep(0.4)
+    assert still == frame("video-paused-next.png"), "paused video pixels kept changing"
+    at = paused["position_ms"]
+    native.keys("Right")
+    seeked = wait_for(lambda: (lambda p: p if p and p["position_ms"] > at + 4000 else None)(playback("paused")))
+    native.keys("Left")
+    wait_for(lambda: (lambda p: p if p and p["position_ms"] < seeked["position_ms"] - 4000 else None)(playback("paused")))
+    native.keys("k")
+    wait_for(lambda: playback("playing"))
+    native.keys("k")
+    wait_for(lambda: playback("paused"))
+    native.keys("t")
+    larger = wait_for(lambda: (lambda v: v if v["presentation"] == "theater" else None)(viewer()))
+    assert larger["rect"]["height"] > opened["rect"]["height"]
+    assert larger["rect"]["x"] > 0 and larger["rect"]["y"] > 0
+    native.keys("t")
+    wait_for(lambda: viewer()["presentation"] == "pane")
+    assert viewer()["rect"] == opened["rect"]
+    # Verify the viewer's fullscreen request/exit stack even without a WM.
+    # Native compositor acceptance separately verifies display fullscreen.
+    native.keys("f")
+    wait_for(lambda: viewer()["presentation"] == "fullscreen")
+    native.keys("Escape")
+    wait_for(lambda: viewer() and viewer()["presentation"] == "pane")
+    assert grid(app.json_ctl("read_screen")) == terminal, "video controls changed the terminal"
+    app.screenshot(out / "video-paused-theater.png")
+    (out / "video-controls.json").write_text(json.dumps(viewer(), indent=2) + "\n")
+    native.keys("Escape")
+    wait_for(lambda: geometry()["preview_overlay"] is None)
+
+    app.json_ctl("perform_action", {"action": "split_vert"})
+    wait_for(lambda: len(geometry()["panes"]) == 2)
+    app.json_ctl("send_text", {"text": command})
+    wait_for(lambda: "VIDEO_READY" in app.json_ctl("read_screen")["text"])
+    app.json_ctl("perform_action", {"action": "open_media_shelf"})
+    split = wait_for(viewer)
+    pane = next(p["terminal"] for p in geometry()["panes"] if p["id"] == split["pane"])
+    assert abs(split["rect"]["width"] / pane["width"] - 0.9) < 0.0001
+    native.keys("t")
+    theater = wait_for(lambda: (lambda v: v if v["presentation"] == "theater" else None)(viewer()))
+    assert theater["rect"]["width"] > split["rect"]["width"] * 1.5
+    file = out / "video-split-theater.png"
+    app.screenshot(file)
+    _, _, rows = live.read_rgba_png(file)
+    row = rows[int(theater["content"]["y"] - 3)]
+    left = int(theater["rect"]["x"] + 2) * 4
+    right = int(theater["rect"]["x"] + theater["rect"]["width"] - 3) * 4
+    assert row[left:left + 4] == row[right:right + 4], "backdrop shades part of the expanded viewer"
+    native.keys("Escape")
+    wait_for(lambda: geometry()["preview_overlay"] is None)
+
+
 def check(kettle, worker, out, case):
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     result = {"case": case, "pass": False, "checks": []}
@@ -146,6 +295,14 @@ def check(kettle, worker, out, case):
                 assert pinned["preview_lanes"][0]["zoom"] == expected_zoom
                 assert screen()["rows"] < before["rows"], "pinning did not make room beside the terminal"
                 result["checks"].append("pin retains preview and resizes the grid only at pin")
+                if case == "all":
+                    app.json_ctl("perform_action", {"action": "open_media_shelf"})
+                    wait_for(lambda: not geometry()["preview_lanes"])
+                    assets = media.card_fixtures(root / "assets")
+                    check_pages(app, native, binary, assets, out)
+                    check_video(app, native, binary, assets["video"], out)
+                    result["checks"].append("video fits window; native picture click and K toggle; paused seek; theater toggle; no terminal input")
+                    result["checks"].append("PDF distinct pages, Home/End and first/last boundaries; Markdown gallery paging")
                 result["pass"] = True
     finally:
         (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")

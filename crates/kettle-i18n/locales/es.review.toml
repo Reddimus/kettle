@@ -18,6 +18,10 @@
 # The drop-error notification was checked in the GNOME notification list,
 # expanded and readable, after a rejected 33-file batch left input unchanged.
 [status]
+media_viewer_video_hint = "draft"
+media_viewer_theater = "draft"
+media_viewer_fullscreen = "draft"
+
 ctl_screenshot_pane_not_visible = "draft"
 ctl_run_command_busy = "draft"
 screenshot_dimensions_too_large = "draft"

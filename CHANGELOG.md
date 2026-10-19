@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- Video cards open paused within 90% of their split, with padding on every side
+  and the picture fitted as large as possible without cropping. A central Play
+  button and controls beneath the picture keep playback within reach. Click the
+  picture or press K to play or pause, T for a larger Theater view, and F for
+  fullscreen. Esc leaves fullscreen before closing; closing or pinning restores
+  fullscreen entered by the viewer.
+
+### Fixed
+
+- Keep agent media cards enabled after routine client updates. Codex 0.162
+  and newer in the 0.x line and Claude Code 2.1.280 and newer in the 2.x line
+  use inline cards, subject to the existing launch and hook checks. A new
+  major version needs a compatibility review before it is supported.
+
 ## [5.3.0] — 2026-10-17
 
 ### Added

@@ -870,10 +870,17 @@ exited, whose pane closed, or whose item left the shelf or was replaced.
 Codex has no plugin route. `kettle`'s `agent_setup` module prints a shell
 function that hands each launch to `agent-setup --launch-codex`, which
 classifies the arguments without a shell and execs `codex`, adding
-per-launch `-c` server options to interactive sessions only. On macOS, for
-the Codex release whose hook output Kettle has measured, it also adds a
-`PostToolUse` `mcp_tool` hook (elsewhere no card could be admitted); the display server then keys cards by Codex's call id, and
+per-launch `-c` server options to interactive sessions only. On macOS and
+Linux, supported Codex launches also add a `PostToolUse` `mcp_tool` hook;
+the display server then keys cards by Codex's call id, and
 `kettle_card` hands each to that hook once, as for Claude Code.
+
+`kettle-ctl` owns the card version floors used by Linux launch scopes and
+the Codex launcher: Codex 0.162 and later in 0.x, and Claude Code 2.1.280 and
+later in 2.x. Minor updates need no allowlist change. New major lines need
+compatibility review. macOS keeps its signed-process admission for Claude.
+Version admission does not establish that a client still prints the expected
+hook label and indentation; native client acceptance verifies that separately.
 
 Both the plugin and Codex's startup files are kept by `kettle-ui`'s
 `owned_dir`: a set of files (`OwnedFiles`) written once, under a lock shared
@@ -1107,7 +1114,7 @@ shorter one shows from a row it has (`lane_source`), and source rows are
 bounded in bytes as well as columns, so marks that take no column cannot
 make one long.
 
-A rendered item zooms and pans through `kettle_render::MediaViewport`, which
+A rendered still image zooms and pans through `kettle_render::MediaViewport`, which
 the panel keeps and the renderer and the UI share: a zoom relative to the
 item's fit, bounded to an eighth and 32 times it, and the image point at the
 content's center, so a resized lane keeps showing the same part. Every
@@ -3659,3 +3666,31 @@ Several archived boundaries were deliberate:
 
 At `v3.3.0`, `docs/TESTING.md` defines the suite's validation gates and
 `docs/PERFORMANCE.md` defines the claims that could be made from a passing run.
+
+### Video viewer presentation
+
+A video uses the same shelf item, sandboxed playback session and rendering
+pipeline as a pinned preview. Opening keeps the 90% split frame and padding.
+The overlay owns only presentation state: Theater uses 90% of the window surface
+without changing pane or PTY sizes, and native fullscreen
+is restored on close or pin only if entered by that viewer. Video posters and
+frames share an aspect-preserving fit that can upscale; still images retain the
+native-pixel cap. A decorative central Play affordance shares the picture's hit
+target; playback briefly shows feedback using its existing gesture timestamp.
+Controls follow the bottom edge of the fitted picture through letterboxing,
+reserving their row before playback so the picture does not jump when it starts.
+The hit target routes through the existing play action, including its native
+user file access guard. Controls take priority over the picture, so scrubbing
+never toggles playback. The backdrop reuses the projected viewer rectangle;
+painting and hit testing therefore share the presentation's geometry.
+Post-terminal effects (inactive-pane dimming, scrollbars and focus decoration)
+are clipped around that rectangle. Each affected quad yields at most four
+disjoint pieces in blend order, keeping the pass count unchanged and clipping
+time and storage linear in the existing overlay count.
+
+The interaction model follows YouTube's documented distinction between
+[window-adaptive sizing and Theater mode](https://support.google.com/youtube/answer/6052392?hl=en)
+and [fullscreen and player keyboard controls](https://support.google.com/youtube/answer/7631406?hl=en).
+Kettle uses K, Space, T, F and Esc within the focused viewer. It opens paused,
+keeps controls visible, and preserves terminal input ownership. It does not
+implement YouTube's streaming, recommendation or advertising behavior.

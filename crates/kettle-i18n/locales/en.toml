@@ -668,6 +668,10 @@ media_viewer_pin_short = "Pin"
 media_viewer_overlay_hint = "Tab selects controls · Esc closes · P pins"
 media_viewer_a11y = "Media viewer, {index} of {count}: {title}, {detail}"
 
+media_viewer_video_hint = "Click / K: play or pause · T: theater · F: fullscreen · Esc: back · P: pin"
+media_viewer_theater = "Toggle theater mode (T)"
+media_viewer_fullscreen = "Toggle fullscreen (F)"
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"

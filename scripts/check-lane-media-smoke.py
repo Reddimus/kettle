@@ -113,6 +113,58 @@ def fixtures(dir_):
     return files
 
 
+def card_fixtures(directory):
+    """Small, local-only examples shared by card acceptance and its demo."""
+    directory.mkdir(parents=True, exist_ok=True)
+    files = {"png": directory / "gradient.png"}
+    png(files["png"], 160, 100)
+    for suffix in ("jpg", "webp"):
+        files[suffix] = directory / f"gradient.{suffix}"
+        subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-n", "-i",
+                        str(files["png"]), "-threads", "1", str(files[suffix])], check=True, timeout=20)
+    files["svg"] = directory / "chart.svg"
+    files["svg"].write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="240">'
+        '<rect width="480" height="240" fill="#286c58"/>'
+        '<rect x="40" y="100" width="90" height="100" fill="#ffcc66"/>'
+        '<rect x="190" y="50" width="90" height="150" fill="#88ccff"/>'
+        '<rect x="340" y="25" width="90" height="175" fill="#ff8899"/></svg>'
+    )
+    diagram = "flowchart LR\n A[Input] --> B[Rendered]\n style A fill:#286c58,color:#fff\n"
+    files["mermaid"] = directory / "flow.mmd"
+    files["mermaid"].write_text(diagram)
+    files["markdown"] = directory / "gallery.md"
+    files["markdown"].write_text(f"# Diagram gallery\n\n```mermaid\n{diagram}```\n\n"
+                                 "```mermaid\nsequenceDiagram\n A->>B: Second diagram\n```\n")
+    files["pdf"] = directory / "pages.pdf"
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>",
+               b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>"]
+    for index, color in enumerate((b"0.157 0.424 0.345", b"0.2 0.35 0.8")):
+        stream = color + b" rg 0 0 480 240 re f\n"
+        objects.extend([
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 480 240] /Contents {4 + index * 2} 0 R >>".encode(),
+            b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"endstream",
+        ])
+    data = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for number, obj in enumerate(objects, 1):
+        offsets.append(len(data))
+        data.extend(f"{number} 0 obj\n".encode() + obj + b"\nendobj\n")
+    start = len(data)
+    data.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]:
+        data.extend(f"{offset:010d} 00000 n \n".encode())
+    data.extend(f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n".encode())
+    files["pdf"].write_bytes(data)
+    files["video"] = directory / "motion.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-n", "-f", "lavfi", "-i",
+                    "testsrc2=s=480x240:r=15:d=12", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-threads", "1",
+                    str(files["video"])], check=True, timeout=30)
+    files["file"] = directory / "example.kettle-demo"
+    files["file"].write_text("A harmless file-card example.\n")
+    return files
+
+
 def launch(home, language):
     config = home / "config"
     config.write_text("\n".join([

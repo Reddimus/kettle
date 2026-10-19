@@ -656,7 +656,15 @@ python3 scripts/check-media-viewer-smoke.py --kettle ./target/release/kettle --w
 ```
 
 The card fixture needs Rust, Python, and Node already installed.
-It uses a simulated harness and makes no model calls.
+It also needs FFmpeg to make its JPEG, WebP, and MP4 fixtures.
+It uses simulated Codex 0.163 and Claude Code 2.1.303 harnesses and makes no
+model calls. Both native profiles must render and open PNG, JPEG, WebP, SVG,
+Mermaid, Markdown gallery, PDF, video, and generic-file cards. The npm profile
+and unscoped shelf fallback use SVG. Separate SVG cases retain Codex 0.162.0
+and Claude Code 2.1.280 coverage, and simulate later minor versions to check
+minimum-version admission. Every launch must clean up its cards on exit.
+The viewer helper checks distinct PDF pages, Home/End and first/last page
+boundaries, and Markdown gallery paging in addition to focus, pan, and pin.
 Xvfb fixture success does not establish official-client or GNOME Wayland
 acceptance. The viewer helper uses native X11 input.
 
@@ -1195,3 +1203,22 @@ independently validated under the standing protocol.
 Do not start the owner control from CI or a default just recipe.
 Do not claim calibrated performance, an A/A pass, or publication acceptance
 from the portable self-test alone.
+
+The media viewer smoke also exercises video with native X11 input: opening stays
+paused, the padded 90% split viewer expands the picture without cropping, picture clicks and K toggle
+playback, Left/Right seek while paused, and T switches to a padded Theater view without
+changing terminal contents. Native fullscreen transitions and restoration require
+a desktop compositor and must be checked on each native platform; Xvfb without a
+window manager does not prove fullscreen presentation.
+
+For native video acceptance, open a video card in a split and check that its
+poster fits inside 90% of its owning split without cropping. Check the central
+Play affordance and transport row beneath the picture. Play and pause with the picture and
+K, then seek with Left/Right while paused. Toggle T and check the pane-sized and
+window-sized views. Enter fullscreen with F; the first Esc must restore the
+window while leaving the viewer open, and the second must close it. Repeat with
+the Close and Pin controls while fullscreen. Finally, open and close a viewer
+in a window that was already fullscreen: it must leave that window fullscreen.
+Check the accessible names and toggle states for both size controls, including
+Spanish. Preserve the original pane focus and verify that player keys do not
+reach its terminal.

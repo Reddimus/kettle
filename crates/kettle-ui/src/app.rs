@@ -1424,10 +1424,10 @@ const ACCESSIBILITY_LANE_ID_MASK: u64 = 1 << 56;
 const MAX_LANE_ACCESSIBILITY_PANE: u64 = 1 << 51;
 const LANE_ACCESSIBILITY_PARTS: u64 = 32;
 /// A lane's controls, at parts 1 and on (see [`lane_controls`]).
-const LANE_CONTROLS: usize = 16;
+const LANE_CONTROLS: usize = 18;
 /// A playing video's bar, a slider: the part after the controls', below
 /// the stride.
-const LANE_SCRUBBER_PART: u64 = LANE_CONTROLS as u64 + 1;
+const LANE_SCRUBBER_PART: u64 = 17;
 const LANE_PIN_PART: u64 = LANE_SCRUBBER_PART + 1;
 const _: () = assert!(LANE_PIN_PART < LANE_ACCESSIBILITY_PARTS);
 
@@ -1489,6 +1489,8 @@ fn lane_controls(
         (14, geometry.page_next, Hit::NextPage),
         (15, geometry.play, Hit::Play),
         (16, geometry.sound, Hit::Sound),
+        (19, geometry.theater, Hit::Theater),
+        (20, geometry.fullscreen, Hit::Fullscreen),
     ]
 }
 
@@ -1569,6 +1571,8 @@ fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
         Hit::Reload => "reload",
         Hit::Play => "play",
         Hit::Sound => "sound",
+        Hit::Theater => "theater",
+        Hit::Fullscreen => "fullscreen",
         Hit::Scrub => "scrubber",
         Hit::ZoomOut => "zoom_out",
         Hit::ZoomIn => "zoom_in",
@@ -13220,10 +13224,10 @@ impl App {
         // room in the pane stays carved either way.
         let media_lanes = self.preview_lane_projections(ws);
         let media_viewer_rect = ws.preview_overlay.and_then(|open| {
-            self.pane_layout(ws, self.area(ws))
-                .into_iter()
-                .find(|(pane, _)| *pane == open.pane)
-                .and_then(|(_, partition)| crate::media::centered_preview_rect(partition.terminal))
+            media_lanes
+                .iter()
+                .find(|lane| lane.pane == open.pane)
+                .map(|lane| lane.rect)
         });
         let ime_preedit = preedit.filter(|_| terminal_surface).and_then(|text| {
             let (row, col) = self.terminal_cursor_cell(ws)?;

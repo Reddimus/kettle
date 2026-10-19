@@ -1277,6 +1277,8 @@ fn lane_controls_have_distinct_names_and_node_ids() {
         Hit::NextPage,
         Hit::Play,
         Hit::Sound,
+        Hit::Theater,
+        Hit::Fullscreen,
         Hit::Scrub,
         Hit::Resize,
         Hit::Inside,
@@ -1286,12 +1288,12 @@ fn lane_controls_have_distinct_names_and_node_ids() {
     assert_eq!(names.len(), hits.len());
     // The lane, each control, and the bar after them.
     use super::{LANE_CONTROLS, LANE_SCRUBBER_PART, lane_controls};
-    let parts = 0..=LANE_SCRUBBER_PART;
+    let parts = 0..=20;
     let ids: std::collections::HashSet<_> = parts
         .clone()
         .map(|part| super::accessibility_lane_id(7, part).expect("in range"))
         .collect();
-    assert_eq!(ids.len(), LANE_CONTROLS + 2);
+    assert_eq!(ids.len(), LANE_CONTROLS + 3);
     let controls: std::collections::HashSet<_> = lane_controls(
         &kettle_render::media_lane_geometry(
             &super::tests::test_lane_panel(),
@@ -1303,7 +1305,8 @@ fn lane_controls_have_distinct_names_and_node_ids() {
     .iter()
     .map(|(part, _, _)| *part)
     .collect();
-    assert_eq!(controls, (1..=LANE_CONTROLS as u64).collect());
+    assert_eq!(controls, (1..=16).chain([19, 20]).collect());
+    assert!(!controls.contains(&LANE_SCRUBBER_PART));
     for part in parts {
         let id = super::accessibility_lane_id(7, part).unwrap();
         assert_eq!(super::accessibility_lane_part(id), Some((7, part)));

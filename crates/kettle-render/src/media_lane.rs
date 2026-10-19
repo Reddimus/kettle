@@ -3,7 +3,8 @@
 //! next, open outside, collapse and close; below it, when the lane is
 //! expanded, the item's kind and sender, with a gallery's page before and
 //! after it on the same line, the image fitted on its canvas and
-//! never scaled past its own pixels until the user zooms it, and a footer
+//! still images never scaled past their own pixels until the user zooms,
+//! videos fitted to the available room, and a footer
 //! saying where keys go. A
 //! collapsed lane is its header alone. The renderer gets only display text
 //! and pixels, never a path or a source.
@@ -208,6 +209,8 @@ pub struct MediaLanePanel {
     pub edge: Option<MediaLaneEdge>,
     /// The silent-preview button the header offers, for a video.
     pub play: Option<MediaLanePlay>,
+    /// A central play affordance or brief playback feedback; no decoding state.
+    pub play_feedback: Option<MediaLanePlay>,
     /// The sound button beside it, while the video's sound can play.
     pub sound: Option<MediaLaneSound>,
     /// While a silent preview or the video plays, the frame shown instead
@@ -314,6 +317,12 @@ pub struct MediaLaneGeometry {
     pub reload: Option<Rect4>,
     /// Plays or pauses a video, or starts or stops its silent preview.
     pub play: Option<Rect4>,
+    pub theater: Option<Rect4>,
+    pub fullscreen: Option<Rect4>,
+    /// The picture itself toggles playback for video only.
+    pub video: bool,
+    /// Decorative central affordance/feedback, clipped to the picture.
+    pub play_feedback: Option<(Rect4, MediaLanePlay)>,
     /// Mutes the video's sound, or lets it be heard again.
     pub sound: Option<Rect4>,
     /// The bar under a playing video's picture, which a press or drag
@@ -364,6 +373,8 @@ pub struct MediaLaneGeometry {
 /// What a pointer press at a point in a lane means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaLaneHit {
+    Theater,
+    Fullscreen,
     Close,
     Previous,
     Next,
@@ -454,6 +465,10 @@ impl MediaLaneGeometry {
             })
         } else if self.play.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::Play)
+        } else if self.theater.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::Theater)
+        } else if self.fullscreen.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::Fullscreen)
         } else if self.sound.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::Sound)
         } else if self.scrubber.is_some_and(|rect| contains(rect, x, y)) {
@@ -482,6 +497,8 @@ impl MediaLaneGeometry {
             Some(MediaLaneHit::PreviousPage)
         } else if self.page_next.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::NextPage)
+        } else if self.video && self.shown().is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::Play)
         } else {
             Some(MediaLaneHit::Inside)
         }
@@ -563,6 +580,17 @@ pub fn media_lane_geometry(
     } else {
         None
     };
+    let video = lane.play.is_some() && lane.mode == MediaLaneMode::Rendered;
+    let fullscreen = if video && lane.pin_label.is_some() {
+        take(button, false)
+    } else {
+        None
+    };
+    let theater = if video && lane.pin_label.is_some() {
+        take(button, false)
+    } else {
+        None
+    };
     let sound = if lane.sound.is_some() {
         take(button, false)
     } else {
@@ -599,7 +627,8 @@ pub fn media_lane_geometry(
     let zooms = full
         && lane.mode == MediaLaneMode::Rendered
         && lane.image.is_some()
-        && lane.frame.is_none();
+        && lane.frame.is_none()
+        && !video;
     let mut zoom_control = || if zooms { take(button, false) } else { None };
     let zoom_fit = zoom_control();
     let zoom_in = zoom_control();
@@ -627,6 +656,10 @@ pub fn media_lane_geometry(
             copy,
             reload,
             play,
+            theater,
+            fullscreen,
+            video,
+            play_feedback: None,
             sound,
             scrubber: None,
             scrub_label: None,
@@ -677,8 +710,13 @@ pub fn media_lane_geometry(
     // end, when the picture keeps a line of its own above it and the bar
     // keeps a few columns beside its time.
     let (mut scrubber, mut scrub_label) = (None, None);
+    let transport = video && lane.pin_label.is_some();
     let mut area_bottom = hint.1 - pad;
+    if transport {
+        area_bottom -= lh + pad;
+    }
     if let Some(bar) = &lane.scrubber
+        && !transport
         && area_bottom - lh - pad >= area_top + lh
     {
         let row = hint.1 - pad - lh;
@@ -699,18 +737,18 @@ pub fn media_lane_geometry(
     let content = whole_pixels(image_area);
     // A preview's frame takes the place the item's pixels would, unzoomed.
     let (fit, source_rows) = match (lane.mode, &lane.frame) {
-        (MediaLaneMode::Rendered, Some(frame)) => (fit_size(frame.size, content), 0),
+        (MediaLaneMode::Rendered, Some(frame)) => (fit_size(frame.size, content, video), 0),
         (MediaLaneMode::Rendered, None) => (
             lane.image
                 .as_ref()
-                .and_then(|image| fit_size((image.width, image.height), content)),
+                .and_then(|image| fit_size((image.width, image.height), content, video)),
             0,
         ),
         (MediaLaneMode::Source, _) => (None, (image_area.3 / lh).floor() as usize),
     };
-    let image = match &lane.frame {
-        Some(_) => fit,
-        None => fit.and_then(|fit| lane.view.place(fit, content)),
+    let image = match (&lane.frame, video) {
+        (Some(_), _) | (_, true) => fit,
+        (None, false) => fit.and_then(|fit| lane.view.place(fit, content)),
     };
     let mut geometry = MediaLaneGeometry {
         pinning: lane.pin_label.is_some(),
@@ -725,6 +763,10 @@ pub fn media_lane_geometry(
         copy,
         reload,
         play,
+        theater,
+        fullscreen,
+        video,
+        play_feedback: None,
         sound,
         scrubber,
         scrub_label,
@@ -753,6 +795,49 @@ pub fn media_lane_geometry(
         tile: None,
         source_rows,
     };
+    if transport && let Some(picture) = geometry.image {
+        // Controls follow the picture through letterboxing. Tiny pictures
+        // retain the header controls rather than overlapping them below.
+        if picture.2 >= 5.0 * button + 2.0 * pad {
+            let row = picture.1 + picture.3 + pad;
+            let mut left = picture.0;
+            let mut right = picture.0 + picture.2;
+            geometry.play = Some((left, row, button, lh));
+            left += button;
+            geometry.sound = lane.sound.map(|_| {
+                let rect = (left, row, button, lh);
+                left += button;
+                rect
+            });
+            right -= button;
+            geometry.fullscreen = Some((right, row, button, lh));
+            right -= button;
+            geometry.theater = Some((right, row, button, lh));
+            if let Some(bar) = &lane.scrubber {
+                let label_width = (bar.label.chars().count() as f32 + 1.0) * tw;
+                right -= label_width + pad;
+                let width = right - pad - left;
+                if width >= MIN_SCRUBBER_COLUMNS * tw {
+                    geometry.scrub_label = Some((right, row, label_width, lh));
+                    geometry.scrubber = Some((left, row, width, lh));
+                }
+            }
+        }
+        if let Some(feedback) = lane.play_feedback {
+            let size = (3.5 * lh).min(picture.2 / 2.0).min(picture.3 / 2.0);
+            if size >= lh * 2.0 {
+                geometry.play_feedback = Some((
+                    (
+                        picture.0 + (picture.2 - size) / 2.0,
+                        picture.1 + (picture.3 - size) / 2.0,
+                        size,
+                        size,
+                    ),
+                    feedback,
+                ));
+            }
+        }
+    }
     geometry.tile = lane
         .tile
         .as_ref()
@@ -809,20 +894,21 @@ fn whole_pixels(area: Rect4) -> Rect4 {
 
 /// Where an image `size` large sits fitted in `content`, which is in whole
 /// pixels.
-fn fit_size(size: (u32, u32), content: Rect4) -> Option<Rect4> {
+fn fit_size(size: (u32, u32), content: Rect4, upscale: bool) -> Option<Rect4> {
     let (width, height) = (size.0 as f32, size.1 as f32);
     let (left, top, room) = (content.0, content.1, (content.2, content.3));
     if width <= 0.0 || height <= 0.0 || room.0 < 1.0 || room.1 < 1.0 {
         return None;
     }
-    // Fit inside that room, never past the image's own pixels, at one
+    // Fit inside that room, with still images capped at their own pixels, at one
     // scale. The longer edge is floored to stay inside and the shorter
     // one follows from the image's shape, rounded, so the shape is off by
     // under half a pixel. When rounding would take the shorter edge past
     // the room, it takes the whole room instead and the longer edge
     // follows it. An image too thin to keep its shape and fit still keeps
     // one pixel, so it stays visible.
-    let scale = (room.0 / width).min(room.1 / height).min(1.0);
+    let scale = (room.0 / width).min(room.1 / height);
+    let scale = if upscale { scale } else { scale.min(1.0) };
     let fit = |long: f32, short: f32, short_room: f32| {
         let long_edge = (long * scale).floor().max(1.0);
         let short_edge = (long_edge * short / long).round().max(1.0);
@@ -861,7 +947,7 @@ pub(crate) struct LaneText {
     /// show rendered, canvas, copy, reload, zoom out, zoom in, fit, a
     /// gallery's page before and after, and a video's play, stop, pause and
     /// sound.
-    controls: [TextBuffer; 20],
+    controls: [TextBuffer; 23],
     pin_label: Option<String>,
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
@@ -918,6 +1004,9 @@ impl LaneText {
                 control(font_system, "■"),
                 control(font_system, "‖"),
                 control(font_system, "♪"),
+                control(font_system, "T"),
+                control(font_system, "F"),
+                control(font_system, "●"),
             ],
             pin_label: None,
             shaped: Default::default(),
@@ -1149,6 +1238,8 @@ impl LaneText {
             geometry.play.filter(|_| play == Some(MediaLanePlay::Stop)),
             geometry.play.filter(|_| play == Some(MediaLanePlay::Pause)),
             geometry.sound,
+            geometry.theater,
+            geometry.fullscreen,
         ];
         let (first, last) =
             page.map_or((true, true), |(shown, count)| (shown <= 1, shown >= count));
@@ -1165,6 +1256,35 @@ impl LaneText {
                 };
                 glyph.left = rect.0 + ((rect.2 - control_width) / 2.0).max(0.0);
                 glyph.top = rect.1 + ((rect.3 - line_height) / 2.0).max(0.0);
+                areas.push(glyph);
+            }
+        }
+        if let Some((rect, feedback)) = geometry.play_feedback {
+            let glyph = match feedback {
+                MediaLanePlay::Play => 16,
+                MediaLanePlay::Pause => 18,
+                MediaLanePlay::Stop => 17,
+            };
+            for (buffer, scale, color) in [
+                (
+                    &self.controls[22],
+                    rect.3 / line_height,
+                    GColor::rgba(0, 0, 0, 210),
+                ),
+                (
+                    &self.controls[glyph],
+                    rect.3 / line_height * 0.45,
+                    GColor::rgb(255, 255, 255),
+                ),
+            ] {
+                let width = buffer
+                    .layout_runs()
+                    .map(|run| run.line_w)
+                    .fold(0.0, f32::max);
+                let mut glyph = area(buffer, rect, color);
+                glyph.scale = scale;
+                glyph.left = rect.0 + (rect.2 - width * scale) / 2.0;
+                glyph.top = rect.1 + (rect.3 - line_height * scale) / 2.0;
                 areas.push(glyph);
             }
         }
@@ -1203,6 +1323,115 @@ pub fn checker_squares(rect: Rect4, square: f32) -> Vec<Rect4> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn video_poster_and_frame_fill_available_room_without_cropping() {
+        let mut lane = viewer((1, 1), Some((160, 90)));
+        lane.play = Some(MediaLanePlay::Play);
+        let geometry = media_lane_geometry(&lane, (8.0, 16.0), (8.0, 16.0)).unwrap();
+        let fit = geometry.fit.unwrap();
+        assert!(fit.2 > 160.0 && fit.3 > 90.0);
+        assert!((fit.2 / fit.3 - 16.0 / 9.0).abs() < 0.02);
+        assert!(fit.2 <= geometry.content.2 && fit.3 <= geometry.content.3);
+        assert_eq!(
+            geometry.hit_test(fit.0 + fit.2 / 2.0, fit.1 + fit.3 / 2.0),
+            Some(MediaLaneHit::Play)
+        );
+        lane.frame = Some(MediaLaneFrame {
+            sheet: lane.image.clone().unwrap(),
+            source: (0, 0, 160, 90),
+            size: (160, 90),
+        });
+        assert_eq!(
+            media_lane_geometry(&lane, (8.0, 16.0), (8.0, 16.0))
+                .unwrap()
+                .fit,
+            Some(fit)
+        );
+        lane.play = None;
+        lane.frame = None;
+        assert_eq!(
+            media_lane_geometry(&lane, (8.0, 16.0), (8.0, 16.0))
+                .unwrap()
+                .fit
+                .unwrap()
+                .2,
+            160.0
+        );
+    }
+
+    #[test]
+    fn video_fit_stays_inside_landscape_portrait_and_narrow_windows() {
+        for size in [(1920, 1080), (1080, 1920), (1, 20000), (20000, 1)] {
+            for room in [(1920.0, 1080.0), (1080.0, 1920.0), (80.0, 40.0)] {
+                let content = (11.0, 13.0, room.0, room.1);
+                let fit = fit_size(size, content, true).unwrap();
+                assert!(fit.2 >= 1.0 && fit.3 >= 1.0);
+                assert!(contains(content, fit.0, fit.1));
+                assert!(fit.0 + fit.2 <= content.0 + content.2);
+                assert!(fit.1 + fit.3 <= content.1 + content.3);
+            }
+        }
+    }
+
+    #[test]
+    fn video_size_controls_are_separate_hit_targets_and_keep_play_priority() {
+        let mut lane = viewer((1, 1), Some((160, 90)));
+        lane.play = Some(MediaLanePlay::Play);
+        lane.pin_label = Some("Pin".into());
+        let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        for (rect, hit) in [
+            (geometry.theater, MediaLaneHit::Theater),
+            (geometry.fullscreen, MediaLaneHit::Fullscreen),
+        ] {
+            let (x, y, w, h) = rect.unwrap();
+            assert_eq!(geometry.hit_test(x + w / 2.0, y + h / 2.0), Some(hit));
+        }
+        assert!(geometry.zoom_in.is_none());
+        lane.pin_label = None;
+        let pinned = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        assert!(pinned.theater.is_none() && pinned.fullscreen.is_none());
+        assert!(pinned.play.is_some());
+    }
+
+    #[test]
+    fn video_viewer_centers_play_and_keeps_transport_beside_the_picture() {
+        let mut lane = viewer((1, 1), Some((160, 90)));
+        lane.pin_label = Some("Pin".into());
+        lane.play = Some(MediaLanePlay::Play);
+        lane.play_feedback = Some(MediaLanePlay::Play);
+        let poster = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        let picture = poster.image.unwrap();
+        let (center, glyph) = poster.play_feedback.unwrap();
+        assert_eq!(glyph, MediaLanePlay::Play);
+        assert!((center.0 + center.2 / 2.0 - picture.0 - picture.2 / 2.0).abs() < 0.01);
+        assert!((center.1 + center.3 / 2.0 - picture.1 - picture.3 / 2.0).abs() < 0.01);
+        assert!(poster.play.unwrap().1 >= picture.1 + picture.3);
+        assert!(
+            poster.fullscreen.unwrap().0 + poster.fullscreen.unwrap().2 <= picture.0 + picture.2
+        );
+        lane.play = Some(MediaLanePlay::Pause);
+        lane.play_feedback = None;
+        lane.scrubber = Some(MediaLaneScrubber {
+            position_ms: 1000,
+            duration_ms: 12000,
+            label: "0:01 / 0:12".into(),
+        });
+        let playing = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        assert_eq!(
+            playing.image, poster.image,
+            "starting playback does not move the picture"
+        );
+        assert!(playing.play_feedback.is_none());
+        let bar = playing.scrubber.unwrap();
+        assert_eq!(bar.1, playing.play.unwrap().1);
+        assert!(bar.0 >= playing.play.unwrap().0 + playing.play.unwrap().2);
+        assert!(bar.0 + bar.2 <= playing.scrub_label.unwrap().0);
+        assert!(
+            playing.scrub_label.unwrap().0 + playing.scrub_label.unwrap().2
+                < playing.theater.unwrap().0
+        );
+    }
+
     const CELL: (f32, f32) = (10.0, 20.0);
 
     fn viewer(position: (usize, usize), image: Option<(u32, u32)>) -> MediaLanePanel {
@@ -1210,6 +1439,7 @@ mod tests {
             focused_control: None,
             pin_label: None,
             play: None,
+            play_feedback: None,
             sound: None,
             frame: None,
             scrubber: None,
@@ -1334,6 +1564,7 @@ mod tests {
         );
         let single = MediaLanePanel {
             play: None,
+            play_feedback: None,
             frame: None,
             position: (1, 1),
             page: None,
@@ -1416,6 +1647,7 @@ mod tests {
     #[test]
     fn a_preview_frame_takes_the_items_place_unzoomed() {
         let mut lane = viewer((1, 1), Some((640, 360)));
+        lane.play = Some(MediaLanePlay::Play);
         let poster = media_lane_geometry(&lane, CELL, CELL).unwrap();
         lane.view = crate::MediaViewport::FIT.zoomed(2.0, poster.fit.unwrap(), poster.content);
         lane.tile = Some(MediaLaneTile {
@@ -1919,6 +2151,7 @@ mod tests {
                 focused_control: None,
                 pin_label: None,
                 play: None,
+                play_feedback: None,
                 frame: None,
                 mode: MediaLaneMode::Source,
                 source: Some(MediaLaneSource::default()),
@@ -1928,6 +2161,7 @@ mod tests {
                 focused_control: None,
                 pin_label: None,
                 play: None,
+                play_feedback: None,
                 frame: None,
                 image: None,
                 ..lane.clone()
@@ -1936,6 +2170,7 @@ mod tests {
                 focused_control: None,
                 pin_label: None,
                 play: None,
+                play_feedback: None,
                 frame: None,
                 collapsed: true,
                 ..lane.clone()
@@ -2009,6 +2244,7 @@ mod tests {
         // header centered down it.
         let short = MediaLanePanel {
             play: None,
+            play_feedback: None,
             frame: None,
             rect: (0.0, 0.0, 800.0, 74.0),
             edge: Some(MediaLaneEdge::Top),
@@ -2106,18 +2342,21 @@ mod tests {
         };
         assert!(none(&MediaLanePanel {
             play: None,
+            play_feedback: None,
             frame: None,
             page: Some((1, 1)),
             ..lane.clone()
         }));
         assert!(none(&MediaLanePanel {
             play: None,
+            play_feedback: None,
             frame: None,
             collapsed: true,
             ..lane.clone()
         }));
         assert!(none(&MediaLanePanel {
             play: None,
+            play_feedback: None,
             frame: None,
             page: None,
             ..lane.clone()
@@ -2125,6 +2364,7 @@ mod tests {
         // The detail keeps four columns beside the controls, or they go.
         let room = |width: f32| MediaLanePanel {
             play: None,
+            play_feedback: None,
             frame: None,
             rect: (0.0, 0.0, width, 600.0),
             ..lane.clone()
@@ -2229,6 +2469,7 @@ mod tests {
         collapsed.collapsed = true;
         let short = MediaLanePanel {
             play: None,
+            play_feedback: None,
             frame: None,
             rect: (0.0, 100.0, 800.0, 30.0),
             collapsed: false,

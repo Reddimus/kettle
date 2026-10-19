@@ -14,6 +14,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from native_x11 import X11Input
+
 SCRIPTS = Path(__file__).resolve().parent
 
 
@@ -51,7 +53,7 @@ def npm_fixture(root, agent, node):
     shutil.copy2(agent, program)
     # npm installs the native package through an alias, so its own
     # package.json names @openai/codex at the platform version.
-    for directory, version in ((package, "0.162.0"), (native, f"0.162.0-linux-{architecture}")):
+    for directory, version in ((package, "0.163.0"), (native, f"0.163.0-linux-{architecture}")):
         metadata = directory / "package.json"
         metadata.write_text(json.dumps({"name": "@openai/codex", "version": version}))
         metadata.chmod(0o600)
@@ -74,7 +76,7 @@ def npm_fixture(root, agent, node):
     return binary
 
 
-def check_case(app, binary, root, out, name, target, scoped, path, asset):
+def check_case(app, binary, root, out, name, target, scoped, path, asset, native, kind="svg", version=None):
     case = root / name
     case.mkdir(mode=0o700)
     meta = "callId" if target == "codex" else "claudecode/toolUseId"
@@ -88,6 +90,8 @@ def check_case(app, binary, root, out, name, target, scoped, path, asset):
         "FIXTURE_CASE": str(case), "FIXTURE_SHOW_REQUEST": json.dumps(request),
         "CLAUDE_CODE_ENTRYPOINT": "cli", "PATH": str(path) + ":" + os.environ["PATH"],
     }
+    if version:
+        environment["FIXTURE_AGENT_VERSION"] = version
     command = ["env", *(key + "=" + value for key, value in environment.items())]
     command += [binary, "agent-setup", "--launch-" + target, "--"] if scoped else [str(root / "agent")]
     script = case / "run.sh"
@@ -98,24 +102,41 @@ def check_case(app, binary, root, out, name, target, scoped, path, asset):
         wait_for(lambda: (case / "ready").exists())
         model = json.loads((case / "model.json").read_text())
         hook = json.loads((case / "hook.json").read_text())
-        delivery = model["result"]["structuredContent"]["delivery"]
         assert "permit" not in json.dumps(model) and "systemMessage" not in json.dumps(model)
         destination = out / name
         destination.mkdir()
         (destination / "model.json").write_text(json.dumps(model, indent=2) + "\n")
+        assert model["result"]["structuredContent"]["status"] == "sent", model
+        delivery = model["result"]["structuredContent"]["delivery"]
         assert delivery == ("card" if scoped else "shelf"), model
+        receipt = model["result"]["structuredContent"]
+        assert receipt["model_has_seen"] is False and receipt["verified"] is True
+        assert receipt["kind"] == {"png": "raster", "jpg": "raster", "webp": "raster"}.get(kind, kind)
         if scoped:
             wait_for(lambda: app.json_ctl("ui_geometry")["inline_cards"])
             wait_for(lambda: all(card["settled"] for card in app.json_ctl("ui_geometry")["inline_cards"]))
             image = destination / "rendered.png"
             app.screenshot(image)
             _, _, rows = live.read_rgba_png(image)
-            green = sum(
-                1 for row in rows for i in range(0, len(row), 4)
-                if all(abs(row[i + channel] - value) < 4 for channel, value in enumerate((40, 108, 88)))
-            )
-            assert green > 500, f"chart pixels missing: {green}"
-            (destination / "geometry.json").write_text(json.dumps(app.json_ctl("ui_geometry"), indent=2) + "\n")
+            geometry = app.json_ctl("ui_geometry")
+            card = geometry["inline_cards"][-1]
+            rect = card["rect"]
+            left, top = int(rect["x"] + 12), int(rect["y"] + 12)
+            right, bottom = int(rect["x"] + rect["width"] - 12), int(rect["y"] + rect["height"] / 2)
+            colored = sum(1 for row in rows[top:bottom] for i in range(left * 4, right * 4, 4)
+                          if max(row[i:i + 3]) - min(row[i:i + 3]) > 45 or
+                          (kind == "file" and max(row[i:i + 3]) > 140))
+            assert colored > 100, f"{kind} card pixels missing: {colored}"
+            (destination / "geometry.json").write_text(json.dumps(geometry, indent=2) + "\n")
+            window = wait_for(lambda: native.windows(app.pid))[-1]
+            native.focus(window)
+            native.move(window, int(rect["x"] + rect["width"] / 2), int(rect["y"] + rect["height"] / 2))
+            native.button(1, True)
+            native.button(1, False)
+            wait_for(lambda: app.json_ctl("ui_geometry")["preview_overlay"])
+            app.screenshot(destination / "opened.png")
+            native.keys("Escape")
+            wait_for(lambda: app.json_ctl("ui_geometry")["preview_overlay"] is None)
         else:
             assert not app.json_ctl("ui_geometry")["inline_cards"]
             assert json.loads(hook["result"]["content"][0]["text"]) == {}
@@ -145,14 +166,7 @@ def check(kettle, worker, node, out):
             for name in ("codex", "claude"):
                 (direct / name).symlink_to(agent)
             npm = npm_fixture(root, agent, node)
-            asset = root / "chart.svg"
-            asset.write_text(
-                '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="240">'
-                '<rect width="480" height="240" fill="#286c58"/>'
-                '<rect x="40" y="100" width="90" height="100" fill="#ffcc66"/>'
-                '<rect x="190" y="50" width="90" height="150" fill="#88ccff"/>'
-                '<rect x="340" y="25" width="90" height="175" fill="#ff8899"/></svg>'
-            )
+            assets = media.card_fixtures(root / "assets")
             config = root / "kettle.conf"
             config.write_text(
                 "restore-session = false\nupdate-policy = off\nrecord = off\n"
@@ -169,7 +183,8 @@ def check(kettle, worker, node, out):
                 runtime = root / "runtime"
                 runtime.mkdir(mode=0o700)
                 environment["XDG_RUNTIME_DIR"] = str(runtime)
-            with live.LiveKettle(binary, config, out / "kettle.log", extra_env=environment) as app:
+            with (live.LiveKettle(binary, config, out / "kettle.log", extra_env=environment) as app,
+                  X11Input() as native):
                 wait_for(lambda: app.json_ctl("get_state")["media"]["availability"] == "available")
                 for name, target, scoped, path in [
                     ("native-codex", "codex", True, direct),
@@ -177,7 +192,19 @@ def check(kettle, worker, node, out):
                     ("native-claude", "claude", True, direct),
                     ("unscoped-codex", "codex", False, direct),
                 ]:
-                    record = check_case(app, binary, root, out, name, target, scoped, path, asset)
+                    for kind, asset in (assets.items() if scoped and path == direct else [("svg", assets["svg"])]):
+                        record = check_case(app, binary, root, out, name + "-" + kind, target,
+                                            scoped, path, asset, native, kind)
+                        result["cases"].append(record)
+                        print(json.dumps(record), flush=True)
+                for label, target, version in [
+                    ("codex-minimum", "codex", "codex-cli 0.162.0"),
+                    ("claude-minimum", "claude", "2.1.280 (Claude Code)"),
+                    ("codex-later-minor", "codex", "codex-cli 0.200.0"),
+                    ("claude-later-minor", "claude", "2.2.0 (Claude Code)"),
+                ]:
+                    record = check_case(app, binary, root, out, label, target,
+                                        True, direct, assets["svg"], native, version=version)
                     result["cases"].append(record)
                     print(json.dumps(record), flush=True)
         result["pass"] = True

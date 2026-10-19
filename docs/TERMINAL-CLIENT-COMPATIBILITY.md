@@ -232,8 +232,8 @@ Delivery depends on the harness and how it was started:
 
 | Harness | How it gets `kettle_show` | What the user sees |
 |---|---|---|
-| Claude Code in a Kettle pane | Kettle's plugin, offered to new panes with Claude Code previews on | a card under the call, and the pane's media shelf |
-| Codex in a Kettle pane | the `codex` function `kettle agent-setup --print` prints, or Codex previews | a card under the call with Codex CLI 0.162 on macOS once its hook is trusted; the shelf otherwise |
+| Claude Code in a Kettle pane | Kettle's plugin, offered to new panes with Claude Code previews on | a card under the call with native Claude Code 2.1.280 or newer within 2.x, and the pane's media shelf |
+| Codex in a Kettle pane | the `codex` function `kettle agent-setup --print` prints, or Codex previews | a card under the call with Codex CLI 0.162 or newer within 0.x on macOS or Linux once its hook is trusted; the shelf otherwise |
 | Any MCP client registered by hand | `kettle mcp --display` | the shelf |
 | A shell, or an agent's shell tool | `kettle show` | the shelf; Codex's command sandbox blocks Kettle's socket, so it uses MCP |
 

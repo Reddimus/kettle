@@ -291,12 +291,30 @@ impl App {
                         kettle_render::MediaLaneHit::Fit => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yFit)
                         }
+                        kettle_render::MediaLaneHit::Theater => {
+                            self.ui_text.text(kettle_i18n::Text::MediaViewerTheater)
+                        }
+                        kettle_render::MediaLaneHit::Fullscreen => {
+                            self.ui_text.text(kettle_i18n::Text::MediaViewerFullscreen)
+                        }
                         kettle_render::MediaLaneHit::Resize
                         | kettle_render::MediaLaneHit::Scrub
                         | kettle_render::MediaLaneHit::Inside => continue,
                     };
                     let mut button = Node::new(Role::Button);
                     button.set_label(text);
+                    if hit == kettle_render::MediaLaneHit::Theater {
+                        button.set_toggled(
+                            ws.preview_overlay.is_some_and(|open| open.theater).into(),
+                        );
+                    } else if hit == kettle_render::MediaLaneHit::Fullscreen {
+                        button.set_toggled(
+                            ws.window
+                                .as_ref()
+                                .is_some_and(|window| window.fullscreen().is_some())
+                                .into(),
+                        );
+                    }
                     button.add_action(AccessibilityAction::Click);
                     if lane.pin_label.is_some() {
                         button.add_action(AccessibilityAction::Focus);
@@ -772,6 +790,13 @@ impl App {
             }
         }
         overlay.media_lanes.len().hash(&mut hasher);
+        ws.preview_overlay
+            .map(|open| (open.theater, open.fullscreen))
+            .hash(&mut hasher);
+        ws.window
+            .as_ref()
+            .is_some_and(|window| window.fullscreen().is_some())
+            .hash(&mut hasher);
         for lane in &overlay.media_lanes {
             lane.pane.hash(&mut hasher);
             lane.collapsed.hash(&mut hasher);

@@ -7899,6 +7899,10 @@ impl Renderer {
                 continue;
             };
             for button in [
+                geometry.play,
+                geometry.sound,
+                geometry.theater,
+                geometry.fullscreen,
                 geometry.previous,
                 geometry.next,
                 geometry.open_outside,
@@ -9179,6 +9183,9 @@ impl Renderer {
         }
         self.lane_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &lane_q);
+        if let Some(viewer) = overlay.media_viewer_rect {
+            quad::exclude_rect(&mut over, viewer);
+        }
         self.overlay_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &over);
         self.menu_quads
