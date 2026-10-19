@@ -107,7 +107,8 @@ def check(binary, out):
                 "agent-server = full\nask-before-closing = always\n"
                 "window-width = 100\nwindow-height = 32\ncursor-blink = false\n"
             )
-            environment = {"SHELL": "/bin/sh", "ENV": None, "BASH_ENV": None}
+            environment = {"SHELL": "/bin/sh", "ENV": None, "BASH_ENV": None,
+                           "WAYLAND_DISPLAY": None, "WAYLAND_SOCKET": None}
             for key in ("CONFIG", "STATE", "DATA", "CACHE", "RUNTIME"):
                 path = root / key.lower()
                 path.mkdir(mode=0o700)

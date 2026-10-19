@@ -236,7 +236,8 @@ def check(kettle, worker, out, case):
                 "agent-server = full\nagent-display = true\ncursor-blink = false\n"
                 "window-width = 120\nwindow-height = 40\nstatus-bar = off\n"
             )
-            environment = {"SHELL": "/bin/sh", "ENV": None, "BASH_ENV": None}
+            environment = {"SHELL": "/bin/sh", "ENV": None, "BASH_ENV": None,
+                           "WAYLAND_DISPLAY": None, "WAYLAND_SOCKET": None}
             for key in ("CONFIG", "STATE", "DATA", "CACHE", "RUNTIME"):
                 path = root / key.lower()
                 path.mkdir(mode=0o700)

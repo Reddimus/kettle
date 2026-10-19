@@ -177,6 +177,8 @@ def launch(home, language):
                XDG_CONFIG_HOME=str(home / ".config"), XDG_STATE_HOME=str(home / ".state"),
                XDG_DATA_HOME=str(home / ".data"), XDG_CACHE_HOME=str(home / ".cache"),
                XDG_RUNTIME_DIR=str(home / "run"))
+    env.pop("WAYLAND_DISPLAY", None)
+    env.pop("WAYLAND_SOCKET", None)
     for name in (".config", ".state", ".data", ".cache", "run"):
         (home / name).mkdir(mode=0o700, exist_ok=True)
     for name in ("ENV", "BASH_ENV"):

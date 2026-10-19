@@ -1226,6 +1226,10 @@ Do not start the owner control from CI or a default just recipe.
 Do not claim calibrated performance, an A/A pass, or publication acceptance
 from the portable self-test alone.
 
+Linux X11 smoke helpers remove inherited `WAYLAND_DISPLAY` and `WAYLAND_SOCKET`
+from their child environments. This keeps windows and input inside the selected
+X11 display, including Xvfb launched from a Wayland desktop.
+
 The media viewer smoke also exercises video with native X11 input: opening stays
 paused, the padded 90% split viewer expands the picture without cropping, picture clicks and K toggle
 playback, Left/Right seek while paused, and T switches to a padded Theater view without
