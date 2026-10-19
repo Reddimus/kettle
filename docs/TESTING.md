@@ -624,6 +624,21 @@ Prerequisites beyond the desktop are included in the proof column.
 | Native image paste routes | - | Native paste shortcuts, PRIMARY/middle-click, managed image path, and optional real composer attachments | Linux/macOS |
 | Launch-scoped cards | - | Simulated agent TTY launches, receipt privacy, card pixels, exit, and shelf fallback | Linux |
 | Centered media viewer | - | Worker-backed viewer routing and live pixels through native X11 input | Linux X11 |
+| Centered confirmations | `just confirmation-smoke` | Two-pane close, safe Cancel, pointer/Space release, scrolling, retained Settings, visible text, and input isolation | Linux X11 |
+
+Confirmation acceptance checks the centered panel and button bounds, initial
+Cancel focus, Enter-repeat isolation, Space activation on release, explicit
+confirmation, and blocked outside clicks. Pressing a button and releasing
+outside it or over a different button must leave the question open. Exercise
+a two-pane close request, scrolling in a short window, and an actual keybinding
+conflict opened over Settings. Cancellation must preserve both panes and the
+configuration. Geometry tests cover narrow windows, translated labels, and
+scaled text. Native screenshots must show heading and button text; GPU checks
+verify retained Settings beneath the dimming. The accessibility projection must
+contain only the modal controls and restore Settings after cancellation.
+The visibility checker must reject a filled button without label pixels. A
+native Kitty recorder verifies a held Space release, and SGR mouse reports
+verify that opening the dialog ends each of five held buttons exactly once.
 
 ### Run a helper directly
 
@@ -653,6 +668,7 @@ Run the viewer helper inside an isolated X11 server, such as Xvfb:
 ```sh
 python3 scripts/check-agent-cards-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker --out target/diagnostics/agent-cards
 python3 scripts/check-media-viewer-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker --out target/diagnostics/media-viewer
+env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/check-confirmation-smoke.py --kettle ./target/release/kettle --out target/diagnostics/confirmations
 ```
 
 The card fixture needs Rust, Python, and Node already installed.

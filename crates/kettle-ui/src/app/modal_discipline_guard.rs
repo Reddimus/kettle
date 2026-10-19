@@ -15,22 +15,25 @@ fn confirmation_owns_presses_before_settings() {
     assert!(flat.contains(
         "ws.held_buttons.pressed(sgr,None,(0,0));ifself.confirm_mouse_press(ws,event_loop,sgr){return;"
     ));
-    let helper = src
+    let press = src
         .split_once("fn confirm_mouse_press(")
         .unwrap()
         .1
-        .split("\n    fn ")
+        .split("fn confirm_mouse_release(")
         .next()
         .unwrap();
-    let helper: String = helper.split_whitespace().collect();
-    assert!(helper.contains("ifws.confirm_dialog.is_none(){returnfalse;}"));
-    assert!(helper.contains("ifbcode==0&&letSome(result)=self.confirm_button_click_result(ws)"));
-    assert!(helper.contains("self.cancel_confirm_dialog(ws)"));
-    assert!(helper.contains("self.dispatch_confirm_action(ws,to_run,event_loop)"));
-    assert!(
-        helper.ends_with("true}"),
-        "an active confirmation must also consume non-button presses"
-    );
+    assert!(press.contains("dialog.armed_press = armed"));
+    assert!(!press.contains("self.dispatch_confirm_action("));
+    let release = src
+        .split_once("fn confirm_mouse_release(")
+        .unwrap()
+        .1
+        .split("fn resolve_confirm_button(")
+        .next()
+        .unwrap();
+    assert!(release.contains("confirm_release_target("));
+    assert!(release.contains("self.resolve_confirm_button(ws, index)"));
+    assert!(release.contains("std::mem::take(&mut ws.confirm_pointer_release)"));
 }
 
 #[test]

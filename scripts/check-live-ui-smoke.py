@@ -16908,13 +16908,11 @@ def run_interaction(kettle: str, root: Path) -> Path:
             raise SystemExit(
                 f"interaction smoke: confirmation changed too few pixels ({confirm_changes})"
             )
-        confirm_bar_top = float(confirm_geo["surface"]["height"]) - (  # type: ignore[index]
-            float(confirm_geo["cell"]["height"]) + 10.0  # type: ignore[index]
-        )
+        confirmation_rect = confirm_geo["confirmation"]["rect"]
         confirm_foreground_pixels = foreground_pixels_on_solid_bar(
             out / "confirm-open.png",
-            confirm_bar_top,
-            float(confirm_geo["surface"]["height"]),  # type: ignore[index]
+            float(confirmation_rect["y"]),
+            float(confirmation_rect["y"] + confirmation_rect["height"]),
         )
         if confirm_foreground_pixels < 100:
             raise SystemExit(

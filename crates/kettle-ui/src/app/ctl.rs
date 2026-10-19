@@ -1163,6 +1163,22 @@ impl App {
                 "visible_lines": geometry.visible_lines,
             })
         });
+        let confirmation = diagnostic_overlay.confirm_dialog.as_ref().map(|dialog| {
+            let geometry = kettle_render::ConfirmDialogLayout::new(
+                (surface.0 as f32, surface.1 as f32),
+                (self.overlay_text_cell_width(target), self.overlay_text_line_height(target)),
+                target.window.as_ref().map_or(1.0, |window| window.scale_factor() as f32), dialog,
+            );
+            serde_json::json!({
+                "rect": rect_json(geometry.rect),
+                "heading_rect": rect_json(geometry.heading_rect),
+                "body_rect": rect_json(geometry.body_rect),
+                "max_scroll": geometry.max_scroll,
+                "scroll_offset": geometry.scroll_offset,
+                "whole_scroll": geometry.whole_scroll,
+                "buttons": geometry.buttons.iter().enumerate().map(|(index, rect)| serde_json::json!({"rect":rect_json(*rect), "label": dialog.buttons[index].label, "focused":index == dialog.focus_idx, "destructive":dialog.buttons[index].destructive, "hovered":dialog.hover_idx == Some(index), "pressed":dialog.pressed_idx == Some(index)})).collect::<Vec<_>>(),
+            })
+        });
         let modal_name = if diagnostic_overlay.confirm_dialog.is_some() {
             Some("confirm_dialog")
         } else if diagnostic_overlay.palette_query.is_some() {
@@ -1187,6 +1203,14 @@ impl App {
         let modal_projection = modal_accessibility_projection(
             &diagnostic_overlay,
             (surface.0 as f32, surface.1 as f32),
+            (
+                self.overlay_text_cell_width(target),
+                self.overlay_text_line_height(target),
+            ),
+            target
+                .window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor() as f32),
             &self.ui_text,
         );
         let accessibility = modal_name.map(|modal| {
@@ -1390,6 +1414,7 @@ impl App {
                 // (macOS). Timing, geometry and counts only.
                 "cursor_blink": self.cursor_blink_diagnostics(target),
         });
+        geometry["confirmation"] = serde_json::json!(confirmation);
         if let serde_json::Value::Object(fields) = &mut geometry {
             if let Some(serde_json::Value::Object(tab_bar)) = fields.get_mut("tab_bar") {
                 tab_bar.insert("update_chip".into(), update_chip.into());
@@ -1731,7 +1756,12 @@ impl App {
                 _ => None,
             };
             match modal {
-                TextModal::Confirm => self.confirm_dialog_key(ws, key, event_loop),
+                TextModal::Confirm => {
+                    self.confirm_dialog_key(ws, key, event_loop);
+                    if confirmation_space_key(key) {
+                        self.confirm_space_release(ws, true);
+                    }
+                }
                 TextModal::Hint => self.hint_key(ws, key, text),
                 TextModal::Palette => self.palette_key(ws, key, text, event_loop),
                 TextModal::ThemePicker => self.theme_picker_key(ws, key, text),
@@ -2169,7 +2199,6 @@ impl App {
                         Some(ws.mux.tab_anchor_panes(seg.idx)).filter(|a| !a.is_empty())
                         && self.confirm_close(
                             ws,
-                            self.ui_text.confirm_close_tab(panes as u64),
                             panes,
                             busy,
                             ConfirmAction::CloseTabHolding(anchor),
@@ -2235,6 +2264,9 @@ impl App {
     pub(super) fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
         // As natively: a gesture of Kettle's own ends with its release.
         ws.held_buttons.end_own(bcode);
+        if self.confirm_mouse_release(ws, bcode) {
+            return true;
+        }
         if bcode == 0 && ws.lane_resize.is_some() {
             self.end_lane_resize(ws);
             return true;

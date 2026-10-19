@@ -433,7 +433,7 @@ gauntlet-full: gauntlet-strict full-native-gates
     @echo "This is not a PASS for native legs on other operating systems."
 
 [linux]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke confirmation-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke
     @echo "NOT APPLICABLE on Linux: macOS actool and native appearance gates."
 
 [macos]
@@ -845,6 +845,11 @@ modal-shortcuts-smoke: release
 [unix]
 interaction-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release interaction
+
+# Confirm centered modal focus and input isolation using a private X11 display.
+[linux]
+confirmation-smoke: release
+    env -u WAYLAND_DISPLAY LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a python3 scripts/check-confirmation-smoke.py --kettle ./target/release/kettle --out target/diagnostics/confirmations-$(date +%Y%m%d-%H%M%S)
 
 # Exercise a pointer-held selection at both vertical pane edges. macOS uses the
 # native pointer; Linux and Windows use the same portable control path that

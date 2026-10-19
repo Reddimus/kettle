@@ -737,6 +737,9 @@ impl App {
         steps: input::WheelSteps,
     ) -> bool {
         self.sync_pane_focus_reports(ws);
+        if self.confirm_wheel(ws, steps.lines) {
+            return true;
+        }
         // Wheel over an open context menu scrolls its rows, one row per notch
         // (Terminator menu UX). It pre-empts every other wheel dispatch so a
         // 512-entry Theme submenu scrolls instead of leaking through to the

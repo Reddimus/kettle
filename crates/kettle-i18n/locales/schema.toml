@@ -45,6 +45,52 @@ context = "crates/kettle-render/src/lib.rs completion_header_count: completion c
 args = [{ name = "count", type = "u64" }]
 plural = "count"
 
+[messages.confirm_title_close_pane]
+context = "crates/kettle-ui/src/app.rs: Heading of confirmation before closing the focused pane."
+
+[messages.confirm_title_close_tab]
+context = "crates/kettle-ui/src/app.rs: Heading of confirmation before closing the focused tab."
+
+[messages.confirm_title_close_window]
+context = "crates/kettle-ui/src/app.rs: Heading of confirmation before closing the window."
+
+[messages.confirm_button_close_pane]
+context = "crates/kettle-ui/src/app.rs: Destructive button that closes the focused pane."
+
+[messages.confirm_button_close_tab]
+context = "crates/kettle-ui/src/app.rs: Destructive button that closes the focused tab."
+
+[messages.confirm_button_close_window]
+context = "crates/kettle-ui/src/app.rs: Destructive button that closes the window."
+
+[messages.confirm_close_consequences]
+context = "crates/kettle-ui/src/app.rs: Body explaining possible consequences of closing terminal panes; does not claim a running process was detected."
+
+[messages.confirm_close_both_panes]
+context = "crates/kettle-ui/src/app.rs: Scope summary for closing a tab or window containing exactly two panes."
+
+[messages.confirm_rebind_generic]
+context = "crates/kettle-ui/src/app.rs: Rebind body when safe action labels are equal and cannot distinguish the actions."
+
+[messages.confirm_action_send_text]
+context = "crates/kettle-ui/src/app.rs: Safe action label for SendText. Never include its payload, which may contain secrets or control characters."
+
+[messages.confirm_action_custom]
+context = "crates/kettle-ui/src/app.rs: Safe fallback action label. Never show config tokens or debug representations."
+
+[messages.confirm_rebind_title]
+context = "crates/kettle-ui/src/app.rs: Rebind heading. chord is a normalized keyboard combination such as Ctrl+Shift+T."
+args = [{ name = "chord", type = "str" }]
+
+[messages.confirm_rebind_body]
+context = "crates/kettle-ui/src/app.rs: Rebind body. taken and action are safe localized action labels, never raw config/debug names or SendText payloads."
+args = [{ name = "taken", type = "str" }, { name = "action", type = "str" }]
+
+[messages.confirm_close_scope]
+context = "crates/kettle-ui/src/app.rs: Scope summary for a tab or window close; count is the number of panes. The caller uses a separate message for exactly two panes."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
 [messages.confirm_button_cancel]
 context = "crates/kettle-ui/src/app.rs: Confirmation button that closes the dialog and does nothing."
 

@@ -3,76 +3,146 @@
 use super::*;
 
 impl App {
-    pub(super) fn confirm_button_hovered(&self, ws: &WindowState) -> bool {
-        let Some(dialog) = ws.confirm_dialog.as_ref() else {
-            return false;
-        };
-        let Some(window) = ws.window.as_ref() else {
-            return false;
-        };
-        let size = window.inner_size();
-        let (cw, ch) = (
-            self.overlay_text_cell_width(ws),
-            self.overlay_text_line_height(ws),
-        );
-        confirm_dialog_button_hit(
-            &dialog.buttons,
-            (ws.cursor.x as f32, ws.cursor.y as f32),
-            (size.width as f32, size.height as f32),
-            (cw, ch),
-            &self.ui_text,
-        )
-        .is_some()
-    }
-
-    pub(super) fn confirm_button_click_result(&self, ws: &WindowState) -> Option<ConfirmKeyResult> {
+    pub(super) fn confirmation_layout(
+        &self,
+        ws: &WindowState,
+    ) -> Option<kettle_render::ConfirmDialogLayout> {
         let dialog = ws.confirm_dialog.as_ref()?;
+        let overlay = confirm_dialog_overlay(dialog, &self.ui_text);
         let window = ws.window.as_ref()?;
         let size = window.inner_size();
-        let (cw, ch) = (
-            self.overlay_text_cell_width(ws),
-            self.overlay_text_line_height(ws),
-        );
-        let idx = confirm_dialog_button_hit(
-            &dialog.buttons,
-            (ws.cursor.x as f32, ws.cursor.y as f32),
+        Some(kettle_render::ConfirmDialogLayout::new(
             (size.width as f32, size.height as f32),
-            (cw, ch),
-            &self.ui_text,
-        )?;
-        match dialog.buttons.get(idx)? {
-            ConfirmButton::Cancel => Some(ConfirmKeyResult::Cancel),
-            ConfirmButton::Confirm { .. } => Some(ConfirmKeyResult::Confirm),
-        }
+            (
+                self.overlay_text_cell_width(ws),
+                self.overlay_text_line_height(ws),
+            ),
+            window.scale_factor() as f32,
+            &overlay,
+        ))
+    }
+
+    pub(super) fn confirm_button_hovered(&self, ws: &WindowState) -> bool {
+        self.confirmation_layout(ws).is_some_and(|layout| {
+            confirm_dialog_button_hit(&layout, ws.cursor.x as f32, ws.cursor.y as f32).is_some()
+        })
     }
 
     pub(super) fn confirm_mouse_press(
         &mut self,
         ws: &mut WindowState,
-        event_loop: &ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
         if ws.confirm_dialog.is_none() {
+            if bcode == 0 {
+                ws.confirm_pointer_release = false;
+            }
             return false;
         }
-        if bcode == 0
-            && let Some(result) = self.confirm_button_click_result(ws)
-        {
-            match result {
-                ConfirmKeyResult::Confirm => {
-                    if let Some(to_run) = ws.confirm_dialog.as_ref().map(|s| s.on_confirm.clone()) {
-                        ws.confirm_dialog = None;
-                        self.dispatch_confirm_action(ws, to_run, event_loop);
-                    }
+        if bcode == 0 {
+            ws.confirm_pointer_release = true;
+            let armed = self.confirmation_layout(ws).and_then(|layout| {
+                let index =
+                    confirm_dialog_button_hit(&layout, ws.cursor.x as f32, ws.cursor.y as f32)?;
+                Some((index, layout.buttons[index]))
+            });
+            if let Some(dialog) = ws.confirm_dialog.as_mut() {
+                dialog.armed_press = armed;
+                dialog.space_pressed = None;
+                if let Some((index, _)) = armed {
+                    dialog.focus_idx = index;
                 }
-                ConfirmKeyResult::Cancel => self.cancel_confirm_dialog(ws),
-                ConfirmKeyResult::Move(_) | ConfirmKeyResult::Ignore => {}
             }
         }
-        if let Some(w) = &ws.window {
-            w.request_redraw();
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
         }
         true
+    }
+
+    pub(super) fn confirm_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
+        let captured = bcode == 0 && std::mem::take(&mut ws.confirm_pointer_release);
+        if !captured && ws.confirm_dialog.is_none() {
+            return false;
+        }
+        if bcode == 0 {
+            let armed = ws
+                .confirm_dialog
+                .as_mut()
+                .and_then(|dialog| dialog.armed_press.take());
+            let target = self.confirmation_layout(ws).and_then(|layout| {
+                confirm_release_target(armed, &layout, ws.cursor.x as f32, ws.cursor.y as f32)
+            });
+            if let Some(index) = target {
+                self.resolve_confirm_button(ws, index);
+            }
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn resolve_confirm_button(&mut self, ws: &mut WindowState, index: usize) {
+        let Some(dialog) = ws.confirm_dialog.as_ref() else {
+            return;
+        };
+        let Some(button) = dialog.buttons.get(index) else {
+            return;
+        };
+        match button {
+            ConfirmButton::Cancel => self.cancel_confirm_dialog(ws),
+            ConfirmButton::Confirm { .. } => {
+                let action = dialog.on_confirm.clone();
+                ws.confirm_dialog = None;
+                self.dispatch_confirm_action(ws, action);
+            }
+        }
+        ws.wheel.reset();
+        ws.lane_wheel.reset();
+        ws.accessibility_pending = true;
+    }
+
+    pub(super) fn confirm_cancel_press(&self, ws: &mut WindowState) {
+        if let Some(dialog) = ws.confirm_dialog.as_mut() {
+            dialog.armed_press = None;
+            dialog.space_pressed = None;
+        }
+    }
+
+    pub(super) fn confirm_scroll(&self, ws: &mut WindowState, delta: isize, focus: bool) {
+        let Some(layout) = self.confirmation_layout(ws) else {
+            return;
+        };
+        if let Some(dialog) = ws.confirm_dialog.as_mut() {
+            dialog.scroll = if focus {
+                layout.scroll_to_button(dialog.focus_idx)
+            } else {
+                layout
+                    .scroll_offset
+                    .saturating_add_signed(delta)
+                    .min(layout.max_scroll)
+            };
+            dialog.armed_press = None;
+        }
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    pub(super) fn confirm_space_release(&mut self, ws: &mut WindowState, ui_owned: bool) {
+        let target = ws.confirm_dialog.as_mut().and_then(|dialog| {
+            confirmation_space_release_target(&mut dialog.space_pressed, dialog.focus_idx, ui_owned)
+        });
+        if let Some(index) = target {
+            self.resolve_confirm_button(ws, index);
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
     }
 
     pub(super) fn install_confirm_dialog(
@@ -86,9 +156,20 @@ impl App {
         // silently lost.
         self.finish_selection_gesture(ws);
         ws.card_press = None;
+        // The press that opens a question also owns its later release.
+        ws.confirm_pointer_release |= ws
+            .held_buttons
+            .dragging()
+            .is_some_and(|held| held.button == 0);
+        // A modal ends the terminal's mouse gesture now. Its physical release
+        // is consumed later, so send each program its owed release first.
+        self.release_held_buttons(ws, |_| true);
         // And the keyboard, from a preview lane holding it.
         self.exit_preview_focus(ws);
+        ws.wheel.reset();
+        ws.lane_wheel.reset();
         ws.confirm_dialog = Some(dialog);
+        ws.accessibility_pending = true;
     }
 
     /// Scan the focused pane's visible grid for quick-select targets and
@@ -389,7 +470,6 @@ impl App {
     pub(super) fn confirm_close(
         &mut self,
         ws: &mut WindowState,
-        prompt: String,
         scope: usize,
         busy: usize,
         on_confirm: ConfirmAction,
@@ -403,23 +483,49 @@ impl App {
         if busy == 0 || !self.cfg.ask_before_closing.should_prompt(scope) {
             return false;
         }
+        use kettle_i18n::Text;
+        let (title, affirmative) = match &on_confirm {
+            ConfirmAction::CloseWindow { .. } => (
+                Text::ConfirmTitleCloseWindow,
+                Text::ConfirmButtonCloseWindow,
+            ),
+            ConfirmAction::CloseTabHolding(_) => {
+                (Text::ConfirmTitleCloseTab, Text::ConfirmButtonCloseTab)
+            }
+            ConfirmAction::ClosePane(_) => {
+                (Text::ConfirmTitleClosePane, Text::ConfirmButtonClosePane)
+            }
+            ConfirmAction::RebindKeybind { .. } => return false,
+        };
+        let consequence = self.ui_text.text(Text::ConfirmCloseConsequences);
+        let body = if matches!(&on_confirm, ConfirmAction::ClosePane(_)) {
+            consequence.to_string()
+        } else {
+            let scope_label = if scope == 2 {
+                self.ui_text.text(Text::ConfirmCloseBothPanes).to_string()
+            } else {
+                self.ui_text.confirm_close_scope(scope as u64)
+            };
+            format!("{scope_label} {consequence}")
+        };
         self.close_all_modals(ws);
         self.install_confirm_dialog(
             ws,
             ConfirmDialogState {
-                prompt,
+                heading: self.ui_text.text(title).to_string(),
+                body,
                 buttons: vec![
                     ConfirmButton::Cancel,
                     ConfirmButton::Confirm {
-                        label: self
-                            .ui_text
-                            .text(kettle_i18n::Text::ConfirmButtonClose)
-                            .to_string(),
+                        label: self.ui_text.text(affirmative).to_string(),
                         destructive: true,
                     },
                 ],
                 focus_idx: 0, // Cancel — safe default.
                 on_confirm,
+                scroll: 0,
+                armed_press: None,
+                space_pressed: None,
             },
         );
         if let Some(w) = &ws.window {
@@ -429,15 +535,7 @@ impl App {
     }
 
     /// Dispatch the accepted confirmation action without asking again.
-    pub(super) fn dispatch_confirm_action(
-        &mut self,
-        ws: &mut WindowState,
-        action: ConfirmAction,
-        // Closes route through the window-scoped pending set, so the loop
-        // handle is unused. It stays so the dispatch signature matches the
-        // other key handlers.
-        _event_loop: &winit::event_loop::ActiveEventLoop,
-    ) {
+    pub(super) fn dispatch_confirm_action(&mut self, ws: &mut WindowState, action: ConfirmAction) {
         self.dispatch_confirm_action_arms(ws, action);
         self.hoover_groups(ws);
         // Resize, as `handle_action`'s tail does for every keybind and menu
@@ -455,6 +553,9 @@ impl App {
 
     pub(super) fn cancel_confirm_dialog(&mut self, ws: &mut WindowState) {
         ws.confirm_dialog = None;
+        ws.wheel.reset();
+        ws.lane_wheel.reset();
+        ws.accessibility_pending = true;
     }
 
     pub(super) fn dispatch_confirm_action_arms(
@@ -548,18 +649,46 @@ impl App {
         &mut self,
         ws: &mut WindowState,
         key: &Key,
-        event_loop: &ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
     ) {
+        if confirmation_space_key(key) {
+            if !ws.mods.control_key()
+                && !ws.mods.alt_key()
+                && !ws.mods.super_key()
+                && let Some(dialog) = ws.confirm_dialog.as_mut()
+            {
+                dialog.space_pressed = Some(dialog.focus_idx);
+                dialog.armed_press = None;
+            }
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+            return;
+        }
+        let page = self.confirmation_layout(ws).map_or(1, |layout| {
+            (layout.body_rect.3 / layout.body_line).floor().max(1.0) as isize
+        });
+        let scroll = match key {
+            Key::Named(NamedKey::ArrowUp) => Some(-1),
+            Key::Named(NamedKey::ArrowDown) => Some(1),
+            Key::Named(NamedKey::PageUp) => Some(-page),
+            Key::Named(NamedKey::PageDown) => Some(page),
+            Key::Named(NamedKey::Home) => Some(isize::MIN),
+            Key::Named(NamedKey::End) => Some(isize::MAX),
+            _ => None,
+        };
+        if let Some(delta) = scroll {
+            self.confirm_scroll(ws, delta, false);
+            return;
+        }
         let key = match key {
             Key::Named(NamedKey::Escape) => Some(ConfirmKey::Escape),
             Key::Named(NamedKey::Enter) => Some(ConfirmKey::Enter),
-            Key::Named(NamedKey::Tab) => {
-                if ws.mods.shift_key() {
-                    Some(ConfirmKey::ShiftTab)
-                } else {
-                    Some(ConfirmKey::Tab)
-                }
-            }
+            Key::Named(NamedKey::Tab) => Some(if ws.mods.shift_key() {
+                ConfirmKey::ShiftTab
+            } else {
+                ConfirmKey::Tab
+            }),
             Key::Named(NamedKey::ArrowLeft) => Some(ConfirmKey::Left),
             Key::Named(NamedKey::ArrowRight) => Some(ConfirmKey::Right),
             Key::Character(s)
@@ -578,29 +707,51 @@ impl App {
             }
             _ => None,
         };
-        if let Some(k) = key
+        if let Some(key) = key
             && let Some(state) = ws.confirm_dialog.as_ref()
         {
-            let n = state.buttons.len();
-            let focus = state.focus_idx;
-            let action = state.on_confirm.clone();
-            match confirm_dialog_keypress(focus, n, k) {
-                ConfirmKeyResult::Move(idx) => {
-                    if let Some(s) = ws.confirm_dialog.as_mut() {
-                        s.focus_idx = idx;
+            let result = confirm_dialog_keypress(state.focus_idx, state.buttons.len(), key);
+            match result {
+                ConfirmKeyResult::Move(index) => {
+                    if let Some(dialog) = ws.confirm_dialog.as_mut() {
+                        dialog.focus_idx = index;
+                        dialog.space_pressed = None;
+                        dialog.armed_press = None;
                     }
+                    self.confirm_scroll(ws, 0, true);
                 }
                 ConfirmKeyResult::Confirm => {
-                    ws.confirm_dialog = None;
-                    self.dispatch_confirm_action(ws, action, event_loop);
+                    let index = state
+                        .buttons
+                        .iter()
+                        .position(|button| matches!(button, ConfirmButton::Confirm { .. }));
+                    if let Some(index) = index {
+                        self.resolve_confirm_button(ws, index);
+                    }
                 }
                 ConfirmKeyResult::Cancel => self.cancel_confirm_dialog(ws),
                 ConfirmKeyResult::Ignore => {}
             }
-            if let Some(w) = &ws.window {
-                w.request_redraw();
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
             }
         }
+    }
+
+    pub(super) fn confirm_wheel(&self, ws: &mut WindowState, lines: i32) -> bool {
+        let Some(layout) = self.confirmation_layout(ws) else {
+            return false;
+        };
+        let viewport = if layout.whole_scroll {
+            layout.rect
+        } else {
+            layout.body_rect
+        };
+        if rect_contains(viewport, ws.cursor.x as f32, ws.cursor.y as f32) {
+            self.confirm_scroll(ws, lines.saturating_neg() as isize, false);
+        }
+        true
     }
 
     /// Key handling for the title-edit overlay (`Edit tab/window/pane title`
@@ -1117,16 +1268,22 @@ impl App {
                         self.cfg.keybinds.get(&trig).filter(|v| **v != act).cloned()
                     {
                         let chord_label = trig.label();
-                        let stolen_name = kettle_config::keybinds::action_label(&stolen_from);
-                        let new_name = kettle_config::keybinds::action_label(&act);
+                        let stolen_name =
+                            crate::settings::confirmation_action_label(&stolen_from, &self.ui_text);
+                        let new_name =
+                            crate::settings::confirmation_action_label(&act, &self.ui_text);
+                        let body = if stolen_name == new_name {
+                            self.ui_text
+                                .text(kettle_i18n::Text::ConfirmRebindGeneric)
+                                .to_string()
+                        } else {
+                            self.ui_text.confirm_rebind_body(&stolen_name, &new_name)
+                        };
                         self.install_confirm_dialog(
                             ws,
                             ConfirmDialogState {
-                                prompt: self.ui_text.confirm_rebind(
-                                    &chord_label,
-                                    &stolen_name,
-                                    &new_name,
-                                ),
+                                heading: self.ui_text.confirm_rebind_title(&chord_label),
+                                body,
                                 buttons: vec![
                                     ConfirmButton::Cancel,
                                     ConfirmButton::Confirm {
@@ -1138,6 +1295,9 @@ impl App {
                                     },
                                 ],
                                 focus_idx: 0,
+                                scroll: 0,
+                                armed_press: None,
+                                space_pressed: None,
                                 on_confirm: ConfirmAction::RebindKeybind {
                                     trig,
                                     act,

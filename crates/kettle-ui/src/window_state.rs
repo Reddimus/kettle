@@ -1079,6 +1079,8 @@ pub(crate) struct WindowState {
     /// When `Some`, a confirm modal is open. Keyboard input routes
     /// to modal dispatch and the renderer paints the centered modal panel.
     pub(crate) confirm_dialog: Option<ConfirmDialogState>,
+    /// A modal press owns its release even if a key dismisses the dialog first.
+    pub(crate) confirm_pointer_release: bool,
     pub(crate) window_focused: bool,
     /// The pane that held the keyboard at the last focus-report
     /// reconciliation (DEC mode 1004), whether or not it asked for reports,
@@ -1548,6 +1550,7 @@ impl WindowState {
             editing_title: None,
             pending_resize: false,
             confirm_dialog: None,
+            confirm_pointer_release: false,
             window_focused: true,
             focus_reported_pane: None,
             os_focus_known: false,

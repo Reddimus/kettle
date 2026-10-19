@@ -793,6 +793,32 @@ pub fn keybind_action(field: &Field) -> Option<&'static str> {
     }
 }
 
+/// A safe localized label for confirmation copy. Payloads and raw action names
+/// must never enter a prompt through the debug or CLI action formatter.
+pub(crate) fn confirmation_action_label(action: &kettle_config::Action, tr: &Translator) -> String {
+    use kettle_config::Action;
+    let key = match action {
+        Action::SplitRight => Text::SettingsKeybindSplitRight,
+        Action::SplitDown => Text::SettingsKeybindSplitDown,
+        Action::ClosePane => Text::SettingsKeybindClosePane,
+        Action::NewTab => Text::SettingsKeybindNewTab,
+        Action::NextTab => Text::SettingsKeybindNextTab,
+        Action::PrevTab => Text::SettingsKeybindPreviousTab,
+        Action::StartSearch => Text::SettingsKeybindStartSearch,
+        Action::CommandPalette => Text::SettingsKeybindCommandPalette,
+        Action::OpenSettings => Text::SettingsKeybindOpenSettings,
+        Action::ToggleZoom => Text::SettingsKeybindToggleZoom,
+        Action::Copy => Text::SettingsKeybindCopy,
+        Action::Paste => Text::SettingsKeybindPaste,
+        Action::CloseTab => Text::PaletteCloseTab,
+        Action::CloseWindow => Text::PaletteCloseWindow,
+        Action::NewWindow => Text::PaletteNewWindow,
+        Action::SendText(_) => Text::ConfirmActionSendText,
+        _ => Text::ConfirmActionCustom,
+    };
+    tr.text(key).to_string()
+}
+
 /// Is this a free-text field (the inline-prompt path entry)? The overlay
 /// handler routes Enter / Space / click into a text prompt for these.
 pub fn is_text(field: &Field) -> bool {
@@ -1570,6 +1596,61 @@ mod tests {
             "Ctrl+Shift+W"
         };
         assert_eq!(shown.into_iter().collect::<Vec<_>>(), [stable]);
+    }
+
+    #[test]
+    fn confirmation_action_labels_localize_every_settings_action() {
+        for tr in [EN, Translator::new(Language::Es)] {
+            for field in categories(&[]).iter().flat_map(|category| &category.fields) {
+                if let Some(token) = keybind_action(field) {
+                    let action = kettle_config::Action::from_name(token).unwrap();
+                    assert_eq!(
+                        confirmation_action_label(&action, &tr),
+                        tr.text(field.label)
+                    );
+                }
+            }
+            assert_eq!(
+                confirmation_action_label(&kettle_config::Action::CloseWindow, &tr),
+                tr.text(Text::PaletteCloseWindow)
+            );
+        }
+        assert_eq!(
+            confirmation_action_label(&kettle_config::Action::Copy, &Translator::new(Language::Es)),
+            "Copiar"
+        );
+    }
+
+    #[test]
+    fn confirmation_action_labels_never_reveal_send_text_payloads() {
+        for payload in [
+            "private-token-123".to_string(),
+            "\x1b[31msecret\n\r\0".to_string(),
+            "huge-private-payload".repeat(100_000),
+        ] {
+            let action = kettle_config::Action::SendText(payload);
+            for tr in [EN, Translator::new(Language::Es)] {
+                assert_eq!(
+                    confirmation_action_label(&action, &tr),
+                    tr.text(Text::ConfirmActionSendText)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn confirmation_action_labels_use_safe_localized_fallbacks() {
+        for tr in [EN, Translator::new(Language::Es)] {
+            for action in [
+                kettle_config::Action::GotoTab(255),
+                kettle_config::Action::NewTabShell(255),
+            ] {
+                assert_eq!(
+                    confirmation_action_label(&action, &tr),
+                    tr.text(Text::ConfirmActionCustom)
+                );
+            }
+        }
     }
 
     #[test]

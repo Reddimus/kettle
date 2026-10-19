@@ -1435,7 +1435,7 @@ fn lane_gestures_are_wired() {
         "ws.selection_autoscroll_edge = 0; // A press the lane took owns the pointer's motion until its // release: it resizes the lane or pans its item, and nothing // else sees it. if self.resize_preview_lane(ws) || self.drag_preview_lane(ws) { self.sync_cursor_icon(ws); return; }",
         "ws.selection_autoscroll_edge = 0; if self.resize_preview_lane(ws) || self.drag_preview_lane(ws) { return; }",
         "// The release of a press a lane took is the lane's. if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); self.sync_cursor_icon(ws); return; } if bcode == 0 && let Some(drag) = ws.lane_drag.take() { self.end_lane_drag(ws, drag); self.sync_cursor_icon(ws); return; } // The release of a press a card took is the card's too.",
-        "ws.held_buttons.end_own(bcode); if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); return true; } if bcode == 0 && let Some(drag) = ws.lane_drag.take() { self.end_lane_drag(ws, drag); return true; }",
+        "ws.held_buttons.end_own(bcode); if self.confirm_mouse_release(ws, bcode) { return true; } if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); return true; } if bcode == 0 && let Some(drag) = ws.lane_drag.take() { self.end_lane_drag(ws, drag); return true; }",
         "Self::hide_cursor_layer(ws); // Its release may never come here. ws.lane_drag = None; self.end_lane_resize(ws);",
         // Any press ends a drag whose release went elsewhere, natively
         // and from a control client, as does a menu opening; a menu or

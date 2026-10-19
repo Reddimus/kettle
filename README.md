@@ -103,6 +103,7 @@ setting allows, and the local control API.
 ## Features
 
 - Tabs, splits, multiple windows, and tabs you can drag between windows
+- Centered close confirmations with Cancel focused to protect running work
 - Search, bounded scrollback, broadcast input and session restore
 - Inline images (kitty, iTerm2 and Sixel), file drop and pasted screenshots
 - Shell-driven completion cards, recording and SSH profiles

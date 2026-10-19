@@ -1,124 +1,7 @@
 use super::{
-    CONFIRM_BAR_MIN_CONTRAST, ConfirmDialogButton, color, compose_confirm_bar_label,
-    confirm_bar_buttons, confirm_bar_spans, confirm_bar_text_color, display_width,
-    fit_pane_titlebar_title, fit_single_line_label, fit_tab_path, fit_tab_segment_title,
-    fit_tab_title, middle_ellipsis, overlay_label_cols, production_source,
+    color, display_width, fit_pane_titlebar_title, fit_single_line_label, fit_tab_path,
+    fit_tab_segment_title, fit_tab_title, middle_ellipsis, overlay_label_cols, production_source,
 };
-
-fn button(label: &str, destructive: bool) -> ConfirmDialogButton {
-    ConfirmDialogButton {
-        label: label.to_string(),
-        destructive,
-    }
-}
-
-#[test]
-fn confirmation_geometry_keeps_fractional_chrome_metrics() {
-    let geometry = super::ConfirmBarGeometry::new((800.0, 600.0), (8.25, 16.5));
-    assert_eq!(geometry.columns, 95);
-    assert_eq!(
-        geometry.button_rects(&[10, 9]),
-        [(610.5, 573.5, 82.5, 26.5), (709.5, 573.5, 74.25, 26.5)]
-    );
-    assert!(geometry.button_rects(&[100]).is_empty());
-}
-
-/// Destructive buttons (Close, Delete) draw their label in bold. The whole
-/// bar is already `palette[1]`, so a red accent on one button could not
-/// show. Only the label is bold; the brackets and focus marker stay
-/// regular, and every byte of the bar lands in exactly one span.
-#[test]
-fn confirm_bar_bolds_only_destructive_labels() {
-    let buttons = [button("Cancel", false), button("Close", true)];
-    let (row, bold) = confirm_bar_buttons(&buttons, 0);
-    assert_eq!(row, "[▶ Cancel]  [  Close]");
-
-    let label = compose_confirm_bar_label("  ⚠ Close this pane?", "  Tab", &row, 60);
-    let spans = confirm_bar_spans(&label, &row, &bold);
-    assert_eq!(
-        spans.iter().map(|(text, _)| *text).collect::<String>(),
-        label
-    );
-    let bold_text: Vec<&str> = spans
-        .iter()
-        .filter(|(_, bold)| *bold)
-        .map(|(text, _)| *text)
-        .collect();
-    assert_eq!(bold_text, ["Close"]);
-}
-
-/// A bar too narrow for its buttons paints nothing, and a dialog without a
-/// destructive button stays regular weight.
-#[test]
-fn confirm_bar_spans_handle_narrow_bars_and_safe_dialogs() {
-    let (row, bold) = confirm_bar_buttons(&[button("Delete", true)], 0);
-    let empty = compose_confirm_bar_label("  ⚠ Delete it?", "", &row, 3);
-    assert!(confirm_bar_spans(&empty, &row, &bold).is_empty());
-
-    let (row, bold) = confirm_bar_buttons(&[button("OK", false)], 0);
-    let label = compose_confirm_bar_label("  ⚠ Apply?", "", &row, 40);
-    let spans = confirm_bar_spans(&label, &row, &bold);
-    assert!(!spans.is_empty());
-    assert!(spans.iter().all(|(_, bold)| !bold));
-
-    // No buttons at all still shows the prompt.
-    let (row, bold) = confirm_bar_buttons(&[], 0);
-    let label = compose_confirm_bar_label("  ⚠ Working...", "", &row, 40);
-    assert_eq!(
-        confirm_bar_spans(&label, &row, &bold),
-        [(label.as_str(), false)]
-    );
-}
-
-/// The span helpers prove nothing unless the bar is drawn from them.
-#[test]
-fn the_confirm_bar_draws_destructive_labels_bold() {
-    let src = production_source();
-    assert!(
-        src.contains(
-            "let (buttons_label, bold_labels) = confirm_bar_buttons(&dlg.buttons, dlg.focus_idx);"
-        ),
-        "the confirm bar must build its button row with confirm_bar_buttons"
-    );
-    assert!(
-        src.contains("let spans = confirm_bar_spans(&label, &buttons_label, &bold_labels);")
-            && src.contains("let bold = regular.clone().weight(Weight::BOLD);"),
-        "the confirm bar must draw its spans, with destructive labels bold"
-    );
-}
-
-/// A destructive confirmation has to be readable in EVERY bundled theme.
-///
-/// The bar paints `palette[1]`, but the theme's ordinary foreground is
-/// picked to contrast with the theme BACKGROUND. On the shipped TokyoNight
-/// Night default, that foreground on the bar is `#c0caf5` on `#f7768e`,
-/// about 1.6:1. It would hide the prompt, its buttons, and its focus
-/// marker, so the question could not be answered and the window would not
-/// close. The failure is per-theme, so iterate the whole bundled set
-/// instead of spot-checking one.
-#[test]
-fn confirm_bar_text_is_readable_in_every_bundled_theme() {
-    let mut worst: Option<(&str, f64)> = None;
-    for name in kettle_config::Theme::list() {
-        let theme = kettle_config::Theme::by_name(name);
-        let fg = confirm_bar_text_color(&theme);
-        let ratio = color::contrast_ratio(fg, theme.palette[1]);
-        assert!(
-            ratio >= CONFIRM_BAR_MIN_CONTRAST,
-            "confirm bar text is unreadable in theme {name:?}: {ratio:.2}:1 \
-                 (fg {fg:?} on palette[1] {:?})",
-            theme.palette[1]
-        );
-        if worst.is_none_or(|(_, w)| ratio < w) {
-            worst = Some((name, ratio));
-        }
-    }
-    let (name, ratio) = worst.expect("the bundled theme set must not be empty");
-    assert!(
-        ratio >= CONFIRM_BAR_MIN_CONTRAST,
-        "worst bundled theme {name:?} at {ratio:.2}:1"
-    );
-}
 
 /// Every bar that asks for input keeps the theme foreground readable on
 /// its fill, and its accent edge visible against it, in every bundled
@@ -187,33 +70,7 @@ fn the_title_editor_reads_in_dracula() {
     assert!(color::contrast_ratio(theme.foreground, fill) + 1e-6 >= 4.5);
 }
 
-/// On the exact shipped default, not whatever `Theme::default()` happens
-/// to be, the raw theme foreground fails on the confirm bar and the
-/// helper's output passes.
-#[test]
-fn tokyonight_night_confirm_bar_was_unreadable_before_the_lift() {
-    let theme = kettle_config::Theme::by_name("TokyoNight Night");
-    let raw = color::contrast_ratio(theme.foreground, theme.palette[1]);
-    assert!(
-        raw < CONFIRM_BAR_MIN_CONTRAST,
-        "expected the shipped default's raw foreground to fail on palette[1], got {raw:.2}:1"
-    );
-    let lifted = color::contrast_ratio(confirm_bar_text_color(&theme), theme.palette[1]);
-    assert!(
-        lifted >= CONFIRM_BAR_MIN_CONTRAST,
-        "confirm_bar_text_color did not reach AA on the shipped default: {lifted:.2}:1"
-    );
-}
-
-/// Wiring guards. Value tests prove `confirm_bar_text_color` and
-/// `bell-flash-intensity` compute the right values; neither proves the
-/// renderer USES them. Reverting the bar's text color to `theme.foreground`
-/// or hard-coding the bell peak back to a literal would leave every value
-/// test green.
-///
-/// The bar's opacity is pinned here too, because the AA guarantee is
-/// computed against opaque `palette[1]`: a translucent bar composites over
-/// live terminal content and the real ratio drifts with the scrollback.
+/// Chrome must use its contrast helpers rather than raw accent fills.
 #[test]
 fn the_renderer_actually_consumes_the_contrast_and_bell_helpers() {
     let src = production_source();
@@ -253,23 +110,7 @@ fn the_renderer_actually_consumes_the_contrast_and_bell_helpers() {
             "no input bar may go back to a translucent raw palette[{slot}] fill"
         );
     }
-    assert!(
-        src.contains("let bar_fg = confirm_bar_text_color(theme);"),
-        "the confirm bar must take its text color from confirm_bar_text_color"
-    );
-    assert!(
-        src.contains("search_text_color = Some(GColor::rgb(bar_fg.r, bar_fg.g, bar_fg.b));"),
-        "the computed bar color must reach the shared bottom-bar text area"
-    );
-    assert!(
-        src.contains("search_text_color.unwrap_or(GColor::rgb(fg.r, fg.g, fg.b))"),
-        "the text area must prefer the per-overlay color over the theme foreground"
-    );
-    assert!(
-        src.contains("sh - bar_h, sw, bar_h, theme.palette[1], 1.0)"),
-        "the confirm bar must be painted opaque; the AA guarantee is \
-             computed against palette[1] itself"
-    );
+
     assert!(
         src.contains("let alpha = bell_flash_alpha(theme, cfg, pv.bell_flash);")
             && src.contains("quads.push(rect(rx, ry, rw, rh, theme.foreground, alpha));"),
@@ -289,96 +130,19 @@ fn the_renderer_actually_consumes_the_contrast_and_bell_helpers() {
 #[test]
 fn confirm_text_renders_above_its_menu_chrome_background() {
     let src = production_source();
+    let scene = src
+        .split_once("fn encode_scene_pass(")
+        .unwrap()
+        .1
+        .split("fn create_screenshot_target")
+        .next()
+        .unwrap();
+    let menu = scene.find("self.menu_text_renderer").unwrap();
+    let surfaces = scene.find("self.confirmation_surfaces.draw").unwrap();
+    let text = scene.find("self.confirmation_text_renderer").unwrap();
     assert!(
-        src.contains("search_text_on_menu = true;"),
-        "the confirmation arm must select the topmost text pass"
-    );
-    assert!(
-        src.contains("if search_text_on_menu {\n                menu_areas.push(area);"),
-        "confirmation text must be queued after menu chrome, not under it"
-    );
-}
-
-/// The confirm bar must never clip its own button row.
-///
-/// Compose it to the budget it is fitted to, `overlay_label_cols(sw, cw)`
-/// = `floor(sw/cw) - 1`. Composing to `floor(sw/cw)` overflows by one
-/// column at every window size, so `fit_single_line_label` drops two
-/// columns for an ellipsis, the rightmost button renders as `[  Clos…`,
-/// and the click target from `confirm_dialog_button_hit` extends past the
-/// last painted glyph.
-#[test]
-fn confirm_bar_never_clips_its_button_row() {
-    let buttons = "[▶ Cancel]  [  Close]";
-    // Real geometries: 800/8.0, 1512/7.8 (this laptop), 1920/9.0, 640/8.0.
-    for (sw, cw) in [
-        (800.0f32, 8.0f32),
-        (1512.0, 7.8),
-        (1920.0, 9.0),
-        (640.0, 8.0),
-    ] {
-        let cols = overlay_label_cols(sw, cw);
-        let label = compose_confirm_bar_label(
-            "  ⚠ Close this pane?",
-            "  Tab/←→ · Enter · Esc",
-            buttons,
-            cols,
-        );
-        assert!(
-            label.ends_with(buttons),
-            "confirm bar clipped its buttons at {sw}x{cw} (cols={cols}): {label:?}"
-        );
-        assert!(
-            !label.contains('…'),
-            "confirm bar was ellipsised at {sw}x{cw}: {label:?}"
-        );
-        assert!(
-            display_width(&label) <= cols,
-            "confirm bar overflowed its budget at {sw}x{cw}: {} > {cols}",
-            display_width(&label)
-        );
-    }
-}
-
-/// A genuinely narrow window must keep the interactive row intact or paint
-/// none of it. A clipped button row would disagree with the App hit-test.
-#[test]
-fn confirm_bar_still_fits_when_the_window_cannot_hold_the_buttons() {
-    for buttons in ["[▶ Cancel]  [  Close]", "[▶ OK]"] {
-        let buttons_cols = display_width(buttons);
-        for cols in 0..buttons_cols {
-            assert_eq!(
-                compose_confirm_bar_label("  ⚠ Close this pane?", "  Tab", buttons, cols),
-                "",
-                "a {cols}-column bar must not paint a partial {buttons_cols}-column button row"
-            );
-        }
-        for cols in buttons_cols..=buttons_cols + 2 {
-            let label = compose_confirm_bar_label("  ⚠ Close this pane?", "  Tab", buttons, cols);
-            assert!(
-                label.ends_with(buttons),
-                "the complete button row must win at cols={cols}: {label:?}"
-            );
-            assert_eq!(
-                display_width(&label),
-                cols,
-                "the intact button row must remain right-aligned"
-            );
-        }
-    }
-}
-
-#[test]
-fn confirm_bar_uses_display_columns_for_wide_button_labels() {
-    let prompt = "P";
-    let buttons = "[▶ Cancel]  [  界]";
-    let cols = display_width(prompt) + 2 + display_width(buttons);
-    let label = compose_confirm_bar_label(prompt, "", buttons, cols);
-
-    assert_eq!(display_width(&label), cols);
-    assert!(
-        label.ends_with(buttons),
-        "a wide label must not make the fitter clip the button row: {label:?}"
+        menu < surfaces && surfaces < text,
+        "final modal geometry and text must cover retained Settings text"
     );
 }
 
@@ -623,4 +387,23 @@ fn pane_title_uses_path_tiers_after_metadata_sheds() {
 
     let tail = fit_pane_titlebar_title(None, "", raw, Some(path), None, None, 12);
     assert_eq!(tail, "  …server-go");
+}
+
+#[test]
+fn confirmation_panel_text_and_outline_are_readable_in_every_bundled_theme() {
+    for name in kettle_config::Theme::list() {
+        let theme = kettle_config::Theme::by_name(name);
+        assert!(
+            color::contrast_ratio(super::confirm_dialog_text_color(&theme), theme.background)
+                + 1e-6
+                >= 4.5,
+            "{name}"
+        );
+        assert!(
+            color::contrast_ratio(super::confirm_dialog_border_color(&theme), theme.background)
+                + 1e-6
+                >= 1.5,
+            "{name}"
+        );
+    }
 }

@@ -232,7 +232,7 @@ fn the_picker_reads_out_its_name_and_each_rows_appearance() {
             ),
             ..kettle_render::Overlay::default()
         };
-        modal_accessibility_projection(&overlay, (800.0, 600.0), tr)
+        modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, tr)
     };
     let es = projection(&ES);
     assert!(

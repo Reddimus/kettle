@@ -1404,52 +1404,173 @@ fn block_cursor_preserves_cell_font_attributes_and_invalidates_style() {
     }
 }
 
+fn confirmation_overlay() -> Overlay {
+    Overlay {
+        confirm_dialog: Some(ConfirmDialogOverlay {
+            heading: "Close this window?".into(),
+            body:
+                "Both panes will close. Commands may be interrupted and unsaved work may be lost."
+                    .into(),
+            buttons: vec![
+                ConfirmDialogButton {
+                    label: "Cancel".into(),
+                    destructive: false,
+                },
+                ConfirmDialogButton {
+                    label: "Close window".into(),
+                    destructive: true,
+                },
+            ],
+            focus_idx: 0,
+            hover_idx: None,
+            pressed_idx: None,
+            scroll: 0,
+        }),
+        ..focused(true)
+    }
+}
+
 #[test]
-fn confirmation_uses_chrome_columns_with_scaled_terminal_cells() {
+fn confirmation_uses_chrome_metrics_and_separate_text_roles() {
     let _serialized = gpu_test_guard();
     let mut cfg = gpu_test_config();
     cfg.cell_width = 0.5;
     cfg.cell_height = 0.5;
-    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 800, 600, 1.25, false)
-        .expect("headless renderer builds")
+    let Some(mut renderer) =
+        Renderer::headless_for_tests_with(&cfg, 800, 600, 1.25, false).unwrap()
     else {
-        eprintln!("no GPU adapter on this host; skipped");
         return;
     };
-    let snap = snapshot_of(20, 4, b"");
-    let buttons = vec![
-        ConfirmDialogButton {
-            label: "Cancel".into(),
-            destructive: false,
-        },
-        ConfirmDialogButton {
-            label: "Close".into(),
-            destructive: true,
-        },
-    ];
-    let (row, _) = confirm_bar_buttons(&buttons, 0);
-    let overlay = Overlay {
-        confirm_dialog: Some(ConfirmDialogOverlay {
-            prompt: "Close this pane?".into(),
-            buttons,
-            focus_idx: 0,
-        }),
-        ..focused(true)
-    };
+    let snap = snapshot_of(80, 24, b"terminal context");
+    let overlay = confirmation_overlay();
     capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
-    let cw = renderer.overlay_text_cell_width();
-    let ch = renderer.overlay_text_line_height();
-    let text = renderer.search_buffer.lines[0].text();
-    assert!(text.ends_with(&row));
-    assert_eq!(display_width(text), confirm_bar_columns(800.0, cw));
-    let geometry = ConfirmBarGeometry::new((800.0, 600.0), (cw, ch));
-    let rects = geometry.button_rects(&[10, 9]);
-    assert_eq!(
-        rects[0].0,
-        (display_width(text) - display_width(&row)) as f32 * cw
+    let layout = ConfirmDialogLayout::new(
+        (800.0, 600.0),
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.overlay_text_line_height(),
+        ),
+        renderer.scale,
+        overlay.confirm_dialog.as_ref().unwrap(),
     );
-    assert!(rects[1].0 + rects[1].2 <= 800.0);
-    assert_eq!(geometry.rect.3, ch + 10.0);
+    assert!(layout.heading_font > layout.body_font);
+    assert!(layout.body_font >= 14.0 * renderer.scale);
+    assert_eq!(layout.buttons.len(), 2);
+    assert!(renderer.confirmation_text.key()[0].contains("Close this window?"));
+    assert_eq!(renderer.confirmation_text.key()[2], "Cancel");
+    assert_eq!(renderer.confirmation_text.key()[3], "Close window");
+}
+
+#[test]
+fn confirmation_preserves_settings_below_opaque_panel() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(800, 600) else {
+        return;
+    };
+    let snap = snapshot_of(80, 24, b"terminal context");
+    let mut overlay = confirmation_overlay();
+    let plain = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    let layout = ConfirmDialogLayout::new(
+        (800.0, 600.0),
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.overlay_text_line_height(),
+        ),
+        renderer.scale,
+        overlay.confirm_dialog.as_ref().unwrap(),
+    );
+    overlay.settings = Some(SettingsOverlay {
+        categories: vec!["Keys".into()],
+        label_cols: 20,
+        value_cols: 20,
+        active_category: 0,
+        background_page: false,
+        rows: vec![SettingsRow {
+            label: "A conflicting key binding".into(),
+            value: "Ctrl+W".into(),
+            disabled: false,
+        }],
+        focused_row: 0,
+        title: "Settings: Keys".into(),
+        hints: "Settings keyboard hints".into(),
+        footer_note: None,
+    });
+    let raised = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    let (x, y, w, h) = layout.rect;
+    for py in (y + 8.0 * layout.unit).ceil() as u32..(y + h - 8.0 * layout.unit).floor() as u32 {
+        for px in (x + 8.0 * layout.unit).ceil() as u32..(x + w - 8.0 * layout.unit).floor() as u32
+        {
+            assert_eq!(
+                plain.get_pixel(px, py),
+                raised.get_pixel(px, py),
+                "Settings must not cover the opaque modal interior"
+            );
+        }
+    }
+    assert_ne!(
+        plain, raised,
+        "Settings context must remain visible outside the dialog"
+    );
+}
+
+#[test]
+fn confirmation_retains_uploads_and_clears_text_when_closed() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(800, 600) else {
+        return;
+    };
+    let snap = snapshot_of(80, 24, b"terminal context");
+    let overlay = confirmation_overlay();
+    let shown = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    let uploads = renderer.confirmation_surfaces.upload_counts();
+    let prepares = renderer.chrome_prepares;
+    let repeated = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    assert_eq!(shown, repeated);
+    let repeated_uploads = renderer.confirmation_surfaces.upload_counts();
+    assert_eq!(uploads.buffer_writes, repeated_uploads.buffer_writes);
+    assert_eq!(uploads.buffer_bytes, repeated_uploads.buffer_bytes);
+    assert!(repeated_uploads.skipped_writes > uploads.skipped_writes);
+    assert_eq!(
+        prepares, renderer.chrome_prepares,
+        "idle dialog should retain shaped glyphs"
+    );
+    renderer.text_prepare_dirty = true;
+    let before_forced = renderer.chrome_prepares;
+    capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    let active_prepares = renderer.chrome_prepares - before_forced;
+    assert!(renderer.confirmation_labels_prepared);
+    let closed = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 800, 600)],
+        &focused(true),
+    );
+    assert_ne!(closed, shown);
+    assert!(!renderer.confirmation_labels_prepared);
+    let closed_again = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 800, 600)],
+        &focused(true),
+    );
+    assert_eq!(
+        closed, closed_again,
+        "closed modal must clear its retained text vertices"
+    );
+    renderer.text_prepare_dirty = true;
+    let before_closed_prepare = renderer.chrome_prepares;
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 800, 600)],
+        &focused(true),
+    );
+    let inactive_prepares = renderer.chrome_prepares - before_closed_prepare;
+    assert_eq!(
+        active_prepares,
+        inactive_prepares + 1,
+        "a visible modal prepare is counted, and an already-cleared modal performs no empty prepare"
+    );
 }
 
 #[test]

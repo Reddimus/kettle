@@ -214,3 +214,46 @@ fn the_desktop_entry_speaks_spanish() {
     }
     assert!(value("Keywords[es]").ends_with(';'));
 }
+
+#[test]
+fn structured_confirmation_copy_is_localized_and_pluralized() {
+    let en = Translator::new(Language::En);
+    let es = Translator::new(Language::Es);
+    assert_eq!(en.text(Text::ConfirmTitleClosePane), "Close this pane?");
+    assert_eq!(es.text(Text::ConfirmTitleClosePane), "¿Cerrar este panel?");
+    assert_eq!(en.text(Text::ConfirmTitleCloseTab), "Close this tab?");
+    assert_eq!(
+        es.text(Text::ConfirmTitleCloseWindow),
+        "¿Cerrar esta ventana?"
+    );
+    assert_eq!(en.text(Text::ConfirmButtonCloseWindow), "Close window");
+    assert_eq!(es.text(Text::ConfirmButtonCloseTab), "Cerrar pestaña");
+    for count in [0, 1, 2, 1000, u64::MAX] {
+        assert_eq!(
+            en.confirm_close_scope(count),
+            if count == 1 {
+                "The pane will close.".to_string()
+            } else {
+                format!("All {count} panes will close.")
+            }
+        );
+        assert_eq!(
+            es.confirm_close_scope(count),
+            if count == 1 {
+                "Se cerrará el panel.".to_string()
+            } else {
+                format!("Se cerrarán los {count} paneles.")
+            }
+        );
+    }
+    assert_eq!(en.confirm_rebind_title("Ctrl+T"), "Reassign Ctrl+T?");
+    assert_eq!(es.confirm_rebind_title("Ctrl+T"), "¿Reasignar Ctrl+T?");
+    assert_eq!(
+        en.confirm_rebind_body("Copy", "Paste"),
+        "Assign this shortcut to \"Paste\". \"Copy\" will lose this shortcut."
+    );
+    assert_eq!(
+        es.confirm_rebind_body("Copiar", "Pegar"),
+        "Asignar este atajo a \"Pegar\". \"Copiar\" perderá este atajo."
+    );
+}

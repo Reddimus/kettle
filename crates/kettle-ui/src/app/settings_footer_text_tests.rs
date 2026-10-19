@@ -40,7 +40,8 @@ fn settings_accessibility_names_follow_the_ui_language() {
         ..kettle_render::Overlay::default()
     };
     let labels = |overlay: &kettle_render::Overlay, tr: &Translator| {
-        let projection = modal_accessibility_projection(overlay, (800.0, 600.0), tr);
+        let projection =
+            modal_accessibility_projection(overlay, (800.0, 600.0), (8.0, 16.0), 1.0, tr);
         let mut labels: Vec<String> = projection
             .nodes
             .iter()

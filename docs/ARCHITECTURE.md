@@ -3277,6 +3277,36 @@ current wall clock so sleep does not turn them into elapsed-time countdowns.
 Close-confirmation dialogs open with Cancel focused, and Enter activates the
 focused button. While a dialog is open, consume its keyboard input before
 application bindings or terminal input so another close chord cannot bypass it.
+The shared confirmation layout centers a bounded panel in the owning window,
+with a heading, consequence text, and equal-width buttons. It applies the
+window scale once and keeps body text at least 14 logical pixels. Text wraps;
+short windows scroll the body, or the whole dialog when its controls cannot
+fit. Keyboard focus scrolls its button into view. Painting, pointer targets,
+and accessibility use the same geometry.
+
+A separate bounded rounded-surface pipeline and retained text renderer draw
+the backdrop and dialog after all Settings text in the existing render pass.
+Settings retains its geometry and content beneath the dimming. Inactive dialogs
+skip text preparation; closing clears their text once. Terminal quad instances
+do not grow to carry modal styling.
+
+Primary-button presses arm a button; only a release inside that same unchanged
+button activates it. Dragging off, resizing, or losing focus cancels the press.
+Space activates on release; Enter activates once on press. Closing-key repeats
+and captured pointer releases remain consumed after dismissal. Outside clicks
+never reach the terminal. Opening a question ends existing terminal mouse
+gestures by sending each program its owed release once. A key release for a
+press already sent to the terminal retains its terminal ownership. AccessKit
+exposes a modal alert dialog, its heading,
+description, and buttons; background nodes and queued background actions are
+excluded until the question closes.
+
+The presentation follows the
+[GNOME confirmation-dialog guidance](https://developer.gnome.org/hig/patterns/feedback/dialogs.html):
+closing a running terminal process has no reliable undo, so an explicit question
+is appropriate. Keep passive notifications separate from confirmations. The
+existing `ask-before-closing` policy and integrated-shell idle detection decide
+when a question appears.
 
 Use the tab rectangles produced by `App::tab_bar` for painting, hit-testing and
 reorder targets. Do not reconstruct tab indices from an independently calculated

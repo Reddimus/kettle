@@ -232,6 +232,13 @@ includes them. Negative coordinates are valid on monitors left of or above
 the primary display. Use the reported scale factor when converting screenshot
 or logical coordinates, and sample each target window independently.
 
+When a confirmation is open, `ui_geometry.confirmation` reports its centered
+panel, heading, and body rectangles; scroll offset and limit; and each button's
+label, bounds, focus, hover, pressed, and destructive state. It is null otherwise.
+These bounds come from the layout used for painting, pointer input, and
+accessibility. Rebinding confirmations use friendly action names and never
+include the payload of a SendText action.
+
 The control server lets another process inspect and drive a *running* kettle
 window. It is **off by default**; enable it per launch or in config:
 

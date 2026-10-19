@@ -36,6 +36,9 @@ fn shipping_inputs_generate_every_api() {
     );
     assert!(code.contains("pub fn settings_value_not_detected(&self, name: &str)"));
     assert!(code.contains("pub fn settings_a11y_dialog(&self, category: &str)"));
+    assert!(code.contains("pub fn confirm_close_scope(&self, count: u64)"));
+    assert!(code.contains("pub fn confirm_rebind_title(&self, chord: &str)"));
+    assert!(code.contains("pub fn confirm_rebind_body(&self, taken: &str, action: &str)"));
     // `text` plus one method per message with arguments.
     let schema: toml::Table = include_str!("../locales/schema.toml").parse().unwrap();
     let with_args = schema["messages"]
@@ -67,10 +70,6 @@ fn completeness_and_placeholder_parity_reject_bad_catalogues() {
             "placeholders",
         ),
         (format!("{EN}\n[title]\nother = \"duplicate\""), "es:"),
-        (
-            EN.replace("one = \"Close {count} pane?\"", "one = \"Close pane?\""),
-            "placeholders",
-        ),
     ];
     for (bad, diagnostic) in cases {
         let error = generate(SCHEMA, EN, &bad).unwrap_err();
@@ -140,4 +139,30 @@ fn translator_text_is_a_rust_literal_with_braces_and_control_characters_escaped(
             .unwrap()
             .contains("{{literal}} \\\"{container}\\\" \\\\ {runtime}")
     );
+}
+
+#[test]
+fn plural_discriminator_may_be_omitted_without_weakening_other_arguments() {
+    let singular = EN.replace("Close {count} pane?", "Close this pane?");
+    let code = generate(SCHEMA, &singular, &singular).unwrap();
+    assert!(code.contains("String::from(\"Close this pane?\")"));
+    assert!(!code.contains("format!(\"Close this pane?\", count = count)"));
+    let schema = SCHEMA.replace(
+        "args = [{ name = \"count\", type = \"u64\" }]",
+        "args = [{ name = \"count\", type = \"u64\" }, { name = \"target\", type = \"str\" }]",
+    );
+    let complete = singular
+        .replace("Close this pane?", "Close {target}?")
+        .replace("Close {count} panes?", "Close {count} {target} panes?");
+    assert!(generate(&schema, &complete, &complete).is_ok());
+    for bad in [
+        complete.replace("Close {target}?", "Close pane?"),
+        complete.replace("{target}", "{unknown}"),
+    ] {
+        assert!(
+            generate(&schema, &complete, &bad)
+                .unwrap_err()
+                .contains("placeholders")
+        );
+    }
 }
