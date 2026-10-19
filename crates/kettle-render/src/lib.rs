@@ -36,6 +36,8 @@ pub use inline_cards::{
     MAX_PANE_CARDS, cli_card_text,
 };
 mod color;
+mod confirm;
+pub use confirm::ConfirmDialogLayout;
 mod cursor_patch;
 mod cursor_policy;
 mod glyphpipe;
@@ -43,10 +45,12 @@ mod glyphpipe;
 mod headless_tests;
 mod imgpipe;
 mod media_lane;
+mod media_transport;
 mod media_viewport;
 mod outline;
 mod present;
 mod quad;
+mod rounded_surface;
 mod snapshot;
 mod starfield;
 mod upload;
@@ -505,7 +509,6 @@ fn text_overlay_requires_continuous_prepare(overlay: &Overlay) -> bool {
         || overlay.layout_picker_query.is_some()
         || overlay.theme_picker_query.is_some()
         || overlay.edit_title.is_some()
-        || overlay.confirm_dialog.is_some()
         || overlay.settings.is_some()
         || overlay.resize_overlay.is_some()
 }
@@ -956,6 +959,9 @@ pub struct Overlay {
     pub media_lanes: Vec<MediaLanePanel>,
     /// The centered viewer excluded from the window-modal backdrop.
     pub media_viewer_rect: Option<Rect4>,
+    /// Native pointer for hover feedback in a focused video player.
+    pub media_pointer: Option<(f32, f32)>,
+    pub media_scrubbing: bool,
     /// The inline card a click at the pointer would open, as a frame drew
     /// it; its visible part is outlined in the accent.
     pub card_hover: Option<PaintedCard>,
@@ -1025,15 +1031,19 @@ fn cursor_focus_gate(window_focused: bool, terminal_requests_cursor: bool) -> bo
 #[derive(Debug, Clone)]
 pub struct ConfirmDialogOverlay {
     /// Prompt text shown at the top of the modal.
-    pub prompt: String,
+    pub heading: String,
+    pub body: String,
     /// Button labels in display order (Cancel typically first).
     pub buttons: Vec<ConfirmDialogButton>,
     /// Which button has focus (idx into `buttons`).
     pub focus_idx: usize,
+    pub hover_idx: Option<usize>,
+    pub pressed_idx: Option<usize>,
+    pub scroll: usize,
 }
 
-/// Paint-side button shape. `destructive: true` draws the label in bold
-/// (Close / Delete buttons).
+/// Paint-side button shape. Destructive buttons use a warning accent;
+/// the focused button also has a visible outline.
 #[derive(Debug, Clone)]
 pub struct ConfirmDialogButton {
     pub label: String,
@@ -1100,7 +1110,7 @@ const MAX_LANE_IMAGES: usize = 64;
 pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
     MediaLanePanel, MediaLanePlay, MediaLaneScrubber, MediaLaneSender, MediaLaneSound,
-    MediaLaneSource, MediaLaneTile, media_lane_geometry,
+    MediaLaneSource, MediaLaneTile, media_lane_geometry, media_lane_geometry_scaled,
 };
 pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
 
@@ -2799,6 +2809,11 @@ pub struct Renderer {
     /// renderers against one atlas); rendered after `menu_quads` so menu labels
     /// sit above the panel bg.
     menu_text_renderer: TextRenderer,
+    rounded_surfaces: rounded_surface::RoundedSurfacePipeline,
+    transport_surface_count: u32,
+    confirmation_text_renderer: TextRenderer,
+    confirmation_text: confirm::ConfirmText,
+    confirmation_labels_prepared: bool,
     imgs: imgpipe::ImagePipeline,
     card_base: QuadPipeline,
     card_cursors: QuadPipeline,
@@ -4514,6 +4529,10 @@ impl Renderer {
         let menu_quads = shared.quads.blend(&device);
         let menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let rounded_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
+        let confirmation_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let confirmation_text = confirm::ConfirmText::new();
         let cursor_glyph_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let cursor_glyph_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -4664,6 +4683,11 @@ impl Renderer {
             overlay_quads,
             menu_quads,
             menu_text_renderer,
+            rounded_surfaces,
+            transport_surface_count: 0,
+            confirmation_text_renderer,
+            confirmation_text,
+            confirmation_labels_prepared: false,
             imgs,
             card_base,
             card_cursors,
@@ -6547,17 +6571,19 @@ impl Renderer {
         // `search_bar_geometry(...).reserved_height` from pane layout; paint and
         // hit-testing then consume these exact same rectangles. Other legacy
         // modals remain single-line overlays.
+        let confirmation_layout = overlay.confirm_dialog.as_ref().map(|dialog| {
+            ConfirmDialogLayout::new(
+                (sw, sh),
+                (
+                    self.overlay_text_cell_width(),
+                    self.overlay_text_line_height(),
+                ),
+                self.scale,
+                dialog,
+            )
+        });
         let mut have_search = false;
         let mut search_rect = (0.0, sh - (ch + 10.0), sw, ch + 10.0);
-        // Confirmation chrome is drawn in the final menu pass, so its text
-        // must use the companion menu text renderer. Other bottom bars remain
-        // in the ordinary chrome text pass.
-        let mut search_text_on_menu = false;
-        // Text color for the shared bottom-bar buffer. `None` means "theme
-        // foreground", which is right for every arm that paints itself on the
-        // ordinary chrome background. The confirm bar is the exception: it
-        // paints a saturated `palette[1]` and has to raise its own contrast.
-        let mut search_text_color = None;
         // The search lane draws each control's text in its own area:
         // (segment index, left, top, clip bounds).
         let mut search_segment_places: Vec<(usize, f32, f32, TextBounds, Option<Rgb>)> = Vec::new();
@@ -6910,102 +6936,6 @@ impl Renderer {
                     None,
                 );
                 self.search_buffer_text = label;
-            }
-            self.search_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-        } else if let Some(dlg) = &overlay.confirm_dialog {
-            // Render confirmation as a bottom bar with visible buttons and a focus indicator.
-            // The UI hit-test path mirrors this text layout so keyboard and
-            // mouse activation
-            // dispatch through the same confirmation state machine.
-            have_search = true;
-            search_text_on_menu = true;
-            let geometry = ConfirmBarGeometry::new(
-                (sw, sh),
-                (
-                    self.overlay_text_cell_width(),
-                    self.overlay_text_line_height(),
-                ),
-            );
-            let bar_h = geometry.rect.3;
-            search_rect = geometry.rect;
-            // Red-ish accent (palette[1]) to signal "destructive
-            // confirmation pending" vs the palette/ssh/
-            // edit-title yellows/blues/cyans.
-            //
-            // Queued with the menu chrome rather than the base overlay quads:
-            // the settings panel washes the surface in a dim backdrop from
-            // `menu_q`, which is drawn last, so a bar in `quads` would come out
-            // greyed under it. A modal question has to be the most legible
-            // thing on screen, and rebinding onto an already-bound chord raises
-            // one from inside that very panel.
-            // Opaque, and that is load-bearing: `confirm_bar_text_color`
-            // guarantees AA against `palette[1]` itself. A translucent bar
-            // composites `palette[1]` over the terminal content underneath, so
-            // the real ratio drifts with the scrollback and a valid custom theme
-            // could land under the floor the helper advertises.
-            menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 1.0));
-            let (buttons_label, bold_labels) = confirm_bar_buttons(&dlg.buttons, dlg.focus_idx);
-            // The bar is `palette[1]`, not the chrome background, so the theme
-            // foreground is not guaranteed to be readable on it. On the shipped
-            // TokyoNight Night default it is light lavender (#c0caf5) on light
-            // red (#f7768e), about 1.6:1, too low to read a close confirmation.
-            // Lift it to WCAG AA the same way the completion panel does
-            // (`confirm_bar_text_color`). The bar is opaque, so measuring
-            // against the flat color is right.
-            let bar_fg = confirm_bar_text_color(theme);
-            search_text_color = Some(GColor::rgb(bar_fg.r, bar_fg.g, bar_fg.b));
-            let prompt = format!("{CONFIRM_PROMPT_PREFIX}{}", dlg.prompt);
-            // `y`/`n` answer the question directly regardless of which button
-            // has focus, while Enter fires the FOCUSED button (which is the
-            // safe `Cancel` on every close prompt). A user who cannot tell
-            // which button is focused needs the unambiguous pair advertised —
-            // but only when it actually works: the App gates `y`/`n` on
-            // `vim-menu-nav`, so advertising them unconditionally would name a
-            // key that does nothing for anyone who turned that off.
-            let help = if cfg.vim_menu_nav {
-                "  Tab/←→ · Enter · Esc · y/n"
-            } else {
-                "  Tab/←→ · Enter · Esc"
-            };
-            let label = compose_confirm_bar_label(&prompt, help, &buttons_label, geometry.columns);
-            let spans = confirm_bar_spans(&label, &buttons_label, &bold_labels);
-            self.search_buffer.set_metrics(metrics);
-            self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // Same equality gate as the other chrome buffers. Only one arm of
-            // this `if`/`else if` chain runs per frame, so a single cache is
-            // enough (see `search_buffer_text`'s doc comment). The key marks
-            // the bold spans, so the same text with different weights still
-            // re-sets the buffer.
-            let key: String = spans
-                .iter()
-                .map(|&(text, bold)| {
-                    if bold {
-                        format!("\u{1}{text}\u{1}")
-                    } else {
-                        text.to_string()
-                    }
-                })
-                .collect();
-            if self.search_buffer_text != key {
-                let regular = Attrs::new().family(Family::Name(&family));
-                let bold = regular.clone().weight(Weight::BOLD);
-                self.search_buffer.set_rich_text(
-                    spans.iter().map(|&(text, is_bold)| {
-                        (
-                            text,
-                            if is_bold {
-                                bold.clone()
-                            } else {
-                                regular.clone()
-                            },
-                        )
-                    }),
-                    &regular,
-                    Shaping::Advanced,
-                    None,
-                );
-                self.search_buffer_text = key;
             }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
@@ -7503,7 +7433,8 @@ impl Renderer {
             }
         }
 
-        if let Some(receipt) = &overlay.media_paste_receipt
+        if overlay.confirm_dialog.is_none()
+            && let Some(receipt) = &overlay.media_paste_receipt
             && let Some(geometry) = media_paste_receipt_geometry(
                 receipt,
                 overlay.completion.as_ref(),
@@ -7574,10 +7505,11 @@ impl Renderer {
         self.lane_texts
             .retain(|pane, _| overlay.media_lanes.iter().any(|lane| lane.pane == *pane));
         for lane in &overlay.media_lanes {
-            let Some(geometry) = media_lane_geometry(
+            let Some(geometry) = media_lane_geometry_scaled(
                 lane,
                 (cw, ch),
                 (self.overlay_text_cell_width(), self.metrics.line_height),
+                self.scale,
             ) else {
                 continue;
             };
@@ -7700,7 +7632,8 @@ impl Renderer {
                 custom_glyphs: &[],
             });
         }
-        if let Some(receipt) = &overlay.media_paste_receipt
+        if overlay.confirm_dialog.is_none()
+            && let Some(receipt) = &overlay.media_paste_receipt
             && let Some(geometry) = media_paste_receipt_geometry(
                 receipt,
                 overlay.completion.as_ref(),
@@ -7862,6 +7795,7 @@ impl Renderer {
         // along the edge it shares with the terminal. Drawn in their own layer
         // above the terminal and below every overlay, so a menu or dialog
         // covers a lane's text as well as its frame.
+        let mut transport_surfaces = Vec::new();
         let mut lane_areas: Vec<TextArea> = Vec::with_capacity(overlay.media_lanes.len() * 8);
         // Inside the pane's focus border, as the terminal's backdrop is.
         let lane_border = if cfg.handle_size < 0 {
@@ -7891,14 +7825,30 @@ impl Renderer {
                 1.0,
             ));
             lane_q.push(rect(inner.0, inner.1, inner.2, 1.0, palette.border, 1.0));
-            let Some(geometry) = media_lane_geometry(
+            let Some(geometry) = media_lane_geometry_scaled(
                 lane,
                 (cw, ch),
                 (self.overlay_text_cell_width(), self.metrics.line_height),
+                self.scale,
             ) else {
                 continue;
             };
+            let transport_paint = media_transport::paint(
+                lane,
+                &geometry,
+                palette,
+                overlay.media_pointer,
+                overlay.media_scrubbing,
+                self.scale,
+            );
+            if let Some(paint) = transport_paint {
+                transport_surfaces.extend(paint.shapes);
+            }
             for button in [
+                geometry.play,
+                geometry.sound,
+                geometry.theater,
+                geometry.fullscreen,
                 geometry.previous,
                 geometry.next,
                 geometry.open_outside,
@@ -7917,6 +7867,12 @@ impl Renderer {
             .into_iter()
             .flatten()
             {
+                if geometry
+                    .transport
+                    .is_some_and(|transport| button.1 >= transport.1)
+                {
+                    continue;
+                }
                 lane_q.push(rect(
                     button.0,
                     button.1,
@@ -8010,7 +7966,9 @@ impl Renderer {
             }
             // A playing video's bar: the track, the part played in the
             // accent, and a knob where the video is.
-            if let (Some(bar), Some(track)) = (&lane.scrubber, geometry.scrubber) {
+            if let (Some(bar), Some(track)) = (&lane.scrubber, geometry.scrubber)
+                && geometry.transport.is_none()
+            {
                 let thick = (3.0 * self.scale).round().max(2.0);
                 let top = track.1 + ((track.3 - thick) / 2.0).round();
                 let along = if bar.duration_ms == 0 {
@@ -8463,7 +8421,11 @@ impl Renderer {
             let area = TextArea {
                 buffer: &self.search_buffer,
                 left: search_rect.0,
-                top: search_rect.1 + ((search_rect.3 - text_h) * 0.5).max(0.0),
+                top: if overlay.confirm_dialog.is_some() {
+                    search_rect.1
+                } else {
+                    search_rect.1 + ((search_rect.3 - text_h) * 0.5).max(0.0)
+                },
                 scale: 1.0,
                 bounds: TextBounds {
                     left: search_rect.0 as i32,
@@ -8471,14 +8433,10 @@ impl Renderer {
                     right: (search_rect.0 + search_rect.2) as i32,
                     bottom: (search_rect.1 + search_rect.3) as i32,
                 },
-                default_color: search_text_color.unwrap_or(GColor::rgb(fg.r, fg.g, fg.b)),
+                default_color: GColor::rgb(fg.r, fg.g, fg.b),
                 custom_glyphs: &[],
             };
-            if search_text_on_menu {
-                menu_areas.push(area);
-            } else {
-                areas.push(area);
-            }
+            areas.push(area);
         }
         // Status-bar text area. Left-padded 8 px, baseline
         // nudged 3 px below the strip top so descenders don't clip.
@@ -8646,26 +8604,7 @@ impl Renderer {
             // animated starfield / image) shows around the panel as a genuine
             // preview while you change `background-type`.
             let backdrop_a = set.backdrop_alpha();
-            // Stop the dim above a confirm bar when one is showing. The bar is
-            // pushed to this same list earlier in the frame, so a full-height
-            // backdrop lands on top of it and greys out the one thing that has
-            // to stay legible — and the dialog raised by rebinding onto an
-            // already-bound chord comes from inside this very panel.
-            let dim_h = if overlay.confirm_dialog.is_some() {
-                ConfirmBarGeometry::new(
-                    (sw, sh),
-                    (
-                        self.overlay_text_cell_width(),
-                        self.overlay_text_line_height(),
-                    ),
-                )
-                .rect
-                .1
-                .max(0.0)
-            } else {
-                sh
-            };
-            menu_q.push(rect(0.0, 0.0, sw, dim_h, theme.background, backdrop_a));
+            menu_q.push(rect(0.0, 0.0, sw, sh, theme.background, backdrop_a));
             // Panel background (near-opaque) + accent border.
             menu_q.push(rect(px, py, panel_w, panel_h, theme.background, 0.99));
             menu_q.push(rect(px, py, panel_w, 2.0, acc, 1.0));
@@ -8740,6 +8679,130 @@ impl Renderer {
                 menu_q.push(rect(cue_x, content_bottom - 3.0, cue_w, 3.0, acc, 0.85));
             }
         }
+
+        let mut confirmation_surfaces = Vec::new();
+        let mut confirmation_colors = Vec::new();
+        if let (Some(dialog), Some(layout)) = (&overlay.confirm_dialog, &confirmation_layout) {
+            self.confirmation_text
+                .prepare(&mut self.font_system, &family, layout, dialog);
+            let rgba = |color: Rgb, alpha: f32| {
+                [
+                    color.r as f32 / 255.0,
+                    color.g as f32 / 255.0,
+                    color.b as f32 / 255.0,
+                    alpha,
+                ]
+            };
+            let mut shape = |rect: Rect4,
+                             fill: Rgb,
+                             alpha: f32,
+                             stroke: Rgb,
+                             stroke_alpha: f32,
+                             radius: f32,
+                             border: f32| {
+                if rect.2 > 0.0 && rect.3 > 0.0 {
+                    confirmation_surfaces.push(rounded_surface::RoundedSurface {
+                        pos: [rect.0, rect.1],
+                        size: [rect.2, rect.3],
+                        fill: rgba(fill, alpha),
+                        stroke: rgba(stroke, stroke_alpha),
+                        params: [radius, border, 0.0, 0.0],
+                    });
+                }
+            };
+            let black = Rgb::new(0, 0, 0);
+            shape((0.0, 0.0, sw, sh), black, 0.45, black, 0.0, 0.0, 0.0);
+            shape(
+                layout.rect,
+                theme.background,
+                1.0,
+                confirm_dialog_border_color(theme),
+                1.0,
+                6.0 * layout.unit,
+                layout.unit,
+            );
+            let foreground = confirm_dialog_text_color(theme);
+            confirmation_colors.extend([GColor::rgb(foreground.r, foreground.g, foreground.b); 2]);
+            for (index, &rect) in layout.buttons.iter().enumerate() {
+                let (fill, label) =
+                    confirm::button_colors(theme, self.ui_accent(cfg, theme), dialog, index);
+                let stroke = color::with_min_contrast(fill, theme.background, 3.0);
+                shape(rect, fill, 1.0, stroke, 1.0, 6.0 * layout.unit, layout.unit);
+                if index == dialog.focus_idx && rect.2 > 0.0 && rect.3 > 0.0 {
+                    let focus = confirm::focus_color(theme, self.ui_accent(cfg, theme));
+                    let ring = confirm::intersect(
+                        (
+                            rect.0 - 4.0 * layout.unit,
+                            rect.1 - 4.0 * layout.unit,
+                            rect.2 + 8.0 * layout.unit,
+                            rect.3 + 8.0 * layout.unit,
+                        ),
+                        layout.rect,
+                    );
+                    shape(
+                        ring,
+                        black,
+                        0.0,
+                        focus,
+                        1.0,
+                        8.0 * layout.unit,
+                        2.0 * layout.unit,
+                    );
+                }
+                confirmation_colors.push(GColor::rgb(label.r, label.g, label.b));
+            }
+            if layout.max_scroll > 0 {
+                let region = if layout.whole_scroll {
+                    layout.rect
+                } else {
+                    layout.body_rect
+                };
+                let color = color::with_min_contrast(theme.foreground, theme.background, 3.0);
+                if layout.scroll_offset > 0 {
+                    shape(
+                        confirm::intersect(
+                            (
+                                region.0 + region.2 - 20.0 * layout.unit,
+                                region.1,
+                                20.0 * layout.unit,
+                                2.0 * layout.unit,
+                            ),
+                            region,
+                        ),
+                        color,
+                        1.0,
+                        black,
+                        0.0,
+                        0.0,
+                        0.0,
+                    );
+                }
+                if layout.scroll_offset < layout.max_scroll {
+                    shape(
+                        confirm::intersect(
+                            (
+                                region.0 + region.2 - 20.0 * layout.unit,
+                                region.1 + region.3 - 2.0 * layout.unit,
+                                20.0 * layout.unit,
+                                2.0 * layout.unit,
+                            ),
+                            region,
+                        ),
+                        color,
+                        1.0,
+                        black,
+                        0.0,
+                        0.0,
+                        0.0,
+                    );
+                }
+            }
+        }
+        let confirmation_areas = if let Some(layout) = &confirmation_layout {
+            self.confirmation_text.areas(layout, &confirmation_colors)
+        } else {
+            Vec::new()
+        };
 
         let label_count = self.card_scene.labels.len();
         if self.card_label_buffers.len() < label_count {
@@ -8847,6 +8910,10 @@ impl Renderer {
             // list changes, so the text-area identity alone cannot detect new
             // labels or descriptions.
             prepared_text_areas_damage_key(&menu_areas).hash(&mut h);
+            prepared_text_areas_damage_key(&confirmation_areas).hash(&mut h);
+            self.confirmation_text.key().hash(&mut h);
+            bytemuck::cast_slice::<rounded_surface::RoundedSurface, u8>(&confirmation_surfaces)
+                .hash(&mut h);
             completion_text_damage_key(
                 &self.completion_header_text,
                 &self.completion_count_text,
@@ -8988,6 +9055,21 @@ impl Renderer {
                     &mut self.swash,
                 )?;
                 self.lane_labels_prepared = has_labels;
+            }
+            if !confirmation_areas.is_empty() || self.confirmation_labels_prepared {
+                self.chrome_prepares += 1;
+                self.text_prepares += 1;
+                let has_labels = !confirmation_areas.is_empty();
+                self.confirmation_text_renderer.prepare(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    confirmation_areas,
+                    &mut self.swash,
+                )?;
+                self.confirmation_labels_prepared = has_labels;
             }
             self.menu_text_renderer.prepare(
                 &self.gpu.device,
@@ -9179,8 +9261,19 @@ impl Renderer {
         }
         self.lane_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &lane_q);
+        if let Some(viewer) = overlay.media_viewer_rect {
+            quad::exclude_rect(&mut over, viewer);
+        }
         self.overlay_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &over);
+        self.transport_surface_count = transport_surfaces.len() as u32;
+        transport_surfaces.extend_from_slice(&confirmation_surfaces);
+        self.rounded_surfaces.upload(
+            &self.gpu.device,
+            &self.gpu.queue,
+            [sw, sh],
+            &transport_surfaces,
+        );
         self.menu_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &menu_q);
 
@@ -9432,6 +9525,7 @@ impl Renderer {
             self.pane_outlines.upload_counts(),
             self.overlay_quads.upload_counts(),
             self.menu_quads.upload_counts(),
+            self.rounded_surfaces.upload_counts(),
             self.imgs.upload_counts(),
             self.card_base.upload_counts(),
             self.card_cursors.upload_counts(),
@@ -9624,6 +9718,8 @@ impl Renderer {
         if let Some(lanes) = &self.lane_img {
             lanes.draw(&mut pass);
         }
+        self.rounded_surfaces
+            .draw_range(&mut pass, 0..self.transport_surface_count);
         self.lane_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         // Dimming + scrollbar sit on top of glyphs.
@@ -9634,6 +9730,10 @@ impl Renderer {
         self.menu_quads.draw(&mut pass);
         self.media_receipt_img.draw(&mut pass);
         self.menu_text_renderer
+            .render(&self.atlas, &self.viewport, &mut pass)?;
+        self.rounded_surfaces
+            .draw_range(&mut pass, self.transport_surface_count..u32::MAX);
+        self.confirmation_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         Ok(())
     }
@@ -12701,7 +12801,7 @@ fn search_focused_label(
     let fill = tint.map_or(fill, |(tint, alpha)| {
         color::over(fill, tint, f64::from(alpha), linear)
     });
-    color::with_min_contrast(cursor_text, fill, CONFIRM_BAR_MIN_CONTRAST)
+    color::with_min_contrast(cursor_text, fill, 4.5)
 }
 
 /// One cluster of the painted search query: the bytes it covers and the x
@@ -13096,205 +13196,17 @@ fn drop_cols_front(s: &str, cols: usize) -> String {
     s[byte..].to_string()
 }
 
-/// Minimum contrast the confirm bar's text holds against its own background.
-/// WCAG AA for body text. A destructive question the user cannot read is worse
-/// than no question at all.
-pub const CONFIRM_BAR_MIN_CONTRAST: f64 = 4.5;
+/// Text on the opaque confirmation panel keeps WCAG AA contrast in custom themes.
+pub fn confirm_dialog_text_color(theme: &kettle_config::Theme) -> Rgb {
+    color::with_min_contrast(theme.foreground, theme.background, 4.5)
+}
 
-/// Text color for the `palette[1]` confirm bar.
-///
-/// The theme's ordinary foreground is chosen to contrast with the theme
-/// BACKGROUND, not with a saturated red. On the shipped TokyoNight Night
-/// default that pairing is `#c0caf5` on `#f7768e`, roughly 1.6:1, far under any
-/// legibility floor, so a bar painted with it could not be read or answered.
-///
-/// Start from the theme's own cursor-text color, which is the same choice the
-/// tab close chip already makes on this same `palette[1]` background, then lift
-/// it to AA. Starting from a theme color rather than flat black keeps the bar
-/// looking like part of the theme; `with_min_contrast` preserves as much of
-/// that tint as the ratio allows. Pure, so the whole bundled theme set can be
-/// checked without a GPU.
-///
-/// This holds only because the bar is painted OPAQUE. A translucent bar
-/// composites `palette[1]` over live terminal content, so the real ratio would
-/// depend on the scrollback underneath and the AA guarantee would not hold.
-pub fn confirm_bar_text_color(theme: &kettle_config::Theme) -> Rgb {
+fn confirm_dialog_border_color(theme: &kettle_config::Theme) -> Rgb {
     color::with_min_contrast(
-        theme.cursor_text,
-        theme.palette[1],
-        CONFIRM_BAR_MIN_CONTRAST,
+        color::dim(theme.foreground, theme.background),
+        theme.background,
+        1.5,
     )
-}
-
-/// What the confirm bar puts before its prompt.
-pub const CONFIRM_PROMPT_PREFIX: &str = "  ⚠ ";
-
-/// The least space between the confirm bar's prompt and its buttons.
-const CONFIRM_BAR_MIN_GAP: usize = 2;
-
-/// The columns a confirmation's own prompt text has in a bar of `max_cols`
-/// (see [`confirm_bar_columns`]) beside a button row `buttons_cols` wide,
-/// past [`CONFIRM_PROMPT_PREFIX`]: a longer prompt is cut.
-pub fn confirm_prompt_columns(max_cols: usize, buttons_cols: usize) -> usize {
-    max_cols
-        .saturating_sub(buttons_cols + CONFIRM_BAR_MIN_GAP + display_width(CONFIRM_PROMPT_PREFIX))
-}
-
-/// Lay out the confirm bar: prompt (plus help text when it fits) on the left,
-/// the button row flush right, within exactly `max_cols` columns.
-///
-/// `max_cols` must be the budget the bar is painted and hit-tested in
-/// (`confirm_bar_columns`, the most columns a single-line overlay buffer may
-/// use after reserving one for glyph overhang and fractional cell metrics), or
-/// the button row clips or drifts from its click targets. Taking the budget as
-/// a parameter keeps a second, mismatched width from creeping back in silently.
-fn compose_confirm_bar_label(
-    prompt: &str,
-    help: &str,
-    buttons_label: &str,
-    max_cols: usize,
-) -> String {
-    let buttons_cols = display_width(buttons_label);
-    if buttons_cols > max_cols {
-        return String::new();
-    }
-
-    let min_gap = CONFIRM_BAR_MIN_GAP;
-    let full_left = format!("{prompt}{help}");
-    let max_left = max_cols.saturating_sub(buttons_cols + min_gap);
-    let left = if display_width(&full_left) <= max_left {
-        full_left
-    } else if display_width(prompt) <= max_left {
-        prompt.to_string()
-    } else if max_left > 3 {
-        let mut truncated = take_cols_front(prompt, max_left - 3);
-        truncated.push_str("...");
-        truncated
-    } else {
-        String::new()
-    };
-    let gap = max_cols - buttons_cols - display_width(&left);
-    format!("{left}{}{buttons_label}", " ".repeat(gap))
-}
-
-/// The confirm bar's button row, and the byte range of each destructive
-/// button's label within it.
-///
-/// Destructive labels (Close, Delete) are drawn bold. The whole bar is already
-/// `palette[1]`, so a red accent on one button would not show.
-fn confirm_bar_buttons(
-    buttons: &[ConfirmDialogButton],
-    focus_idx: usize,
-) -> (String, Vec<std::ops::Range<usize>>) {
-    let mut row = String::new();
-    let mut bold = Vec::new();
-    for (i, btn) in buttons.iter().enumerate() {
-        if !row.is_empty() {
-            row.push_str("  ");
-        }
-        row.push('[');
-        row.push_str(if i == focus_idx { "▶" } else { " " });
-        row.push(' ');
-        let start = row.len();
-        row.push_str(&btn.label);
-        if btn.destructive {
-            bold.push(start..row.len());
-        }
-        row.push(']');
-    }
-    (row, bold)
-}
-
-/// Split the fitted bar `label` into `(text, bold)` spans.
-///
-/// `compose_confirm_bar_label` keeps the button `row` intact and flush right,
-/// or returns an empty label, so the row's `bold` ranges shift by the row's
-/// offset in `label`.
-fn confirm_bar_spans<'a>(
-    label: &'a str,
-    row: &str,
-    bold: &[std::ops::Range<usize>],
-) -> Vec<(&'a str, bool)> {
-    if label.is_empty() {
-        return Vec::new();
-    }
-    if !label.ends_with(row) {
-        return vec![(label, false)];
-    }
-    let offset = label.len() - row.len();
-    let mut spans = Vec::new();
-    let mut at = 0;
-    for range in bold {
-        let (start, end) = (offset + range.start, offset + range.end);
-        if start > at {
-            spans.push((&label[at..start], false));
-        }
-        if end > start {
-            spans.push((&label[start..end], true));
-        }
-        at = end;
-    }
-    if at < label.len() {
-        spans.push((&label[at..], false));
-    }
-    spans
-}
-
-/// Columns in which the confirm bar is painted. The App uses this same budget
-/// for mouse hit-testing so the live row cannot extend past visible glyphs.
-pub fn confirm_bar_columns(width: f32, cell_width: f32) -> usize {
-    overlay_label_cols(width, cell_width)
-}
-
-/// Confirmation geometry in surface pixels, using unrounded chrome metrics.
-pub struct ConfirmBarGeometry {
-    pub rect: Rect4,
-    pub columns: usize,
-    cell_width: f32,
-}
-
-impl ConfirmBarGeometry {
-    pub fn new((width, height): (f32, f32), (cell_width, line_height): (f32, f32)) -> Self {
-        let bar_h = line_height + 10.0;
-        Self {
-            rect: (0.0, height - bar_h, width, bar_h),
-            columns: confirm_bar_columns(width, cell_width),
-            cell_width,
-        }
-    }
-
-    pub fn button_rects(&self, button_columns: &[usize]) -> Vec<Rect4> {
-        let gap = 2usize;
-        let gaps = gap.saturating_mul(button_columns.len().saturating_sub(1));
-        let Some(total) = button_columns
-            .iter()
-            .try_fold(gaps, |n, w| n.checked_add(*w))
-        else {
-            return Vec::new();
-        };
-        if button_columns.is_empty()
-            || total > self.columns
-            || !self.rect.1.is_finite()
-            || !self.rect.3.is_finite()
-            || self.rect.3 <= 10.0
-        {
-            return Vec::new();
-        }
-        let mut column = self.columns - total;
-        button_columns
-            .iter()
-            .map(|&width| {
-                let rect = (
-                    column as f32 * self.cell_width,
-                    self.rect.1,
-                    width as f32 * self.cell_width,
-                    self.rect.3,
-                );
-                column += width + gap;
-                rect
-            })
-            .collect()
-    }
 }
 
 fn overlay_label_cols(width: f32, cell_width: f32) -> usize {

@@ -870,10 +870,17 @@ exited, whose pane closed, or whose item left the shelf or was replaced.
 Codex has no plugin route. `kettle`'s `agent_setup` module prints a shell
 function that hands each launch to `agent-setup --launch-codex`, which
 classifies the arguments without a shell and execs `codex`, adding
-per-launch `-c` server options to interactive sessions only. On macOS, for
-the Codex release whose hook output Kettle has measured, it also adds a
-`PostToolUse` `mcp_tool` hook (elsewhere no card could be admitted); the display server then keys cards by Codex's call id, and
+per-launch `-c` server options to interactive sessions only. On macOS and
+Linux, supported Codex launches also add a `PostToolUse` `mcp_tool` hook;
+the display server then keys cards by Codex's call id, and
 `kettle_card` hands each to that hook once, as for Claude Code.
+
+`kettle-ctl` owns the card version floors used by Linux launch scopes and
+the Codex launcher: Codex 0.162 and later in 0.x, and Claude Code 2.1.280 and
+later in 2.x. Minor updates need no allowlist change. New major lines need
+compatibility review. macOS keeps its signed-process admission for Claude.
+Version admission does not establish that a client still prints the expected
+hook label and indentation; native client acceptance verifies that separately.
 
 Both the plugin and Codex's startup files are kept by `kettle-ui`'s
 `owned_dir`: a set of files (`OwnedFiles`) written once, under a lock shared
@@ -1107,7 +1114,7 @@ shorter one shows from a row it has (`lane_source`), and source rows are
 bounded in bytes as well as columns, so marks that take no column cannot
 make one long.
 
-A rendered item zooms and pans through `kettle_render::MediaViewport`, which
+A rendered still image zooms and pans through `kettle_render::MediaViewport`, which
 the panel keeps and the renderer and the UI share: a zoom relative to the
 item's fit, bounded to an eighth and 32 times it, and the image point at the
 content's center, so a resized lane keeps showing the same part. Every
@@ -3270,6 +3277,52 @@ current wall clock so sleep does not turn them into elapsed-time countdowns.
 Close-confirmation dialogs open with Cancel focused, and Enter activates the
 focused button. While a dialog is open, consume its keyboard input before
 application bindings or terminal input so another close chord cannot bypass it.
+The shared confirmation layout centers a bounded panel in the owning window,
+with a heading, consequence text, and equal-width buttons. It applies the
+window scale once and keeps body text at least 14 logical pixels. Text wraps;
+short windows scroll the body, or the whole dialog when its controls cannot
+fit. Keyboard focus scrolls its button into view. Painting, pointer targets,
+and accessibility use the same geometry.
+
+A bounded shape pipeline serves player controls and confirmations without
+enlarging terminal-cell instances. Its 32-instance buffer draws two ordered
+ranges in the existing render pass: player shapes after lane images, and
+confirmation shapes after all Settings text. Signed-distance shapes draw the
+player's white icons without depending on terminal-font glyphs. The central
+affordance uses a 48-logical-pixel circle and the same play geometry, with a
+small rightward optical offset and vertically centered visible bounds. Its
+visible triangle height is about 42% of the circle; transport Play and Pause
+share an 18-logical-pixel visible height in a 24-pixel icon canvas. The larger
+invisible hit targets remain independent of that icon canvas and of terminal
+text size. Duration metadata reserves the longest timestamp before playback,
+without exposing a seek action until a session exists. Elapsed-time digit
+changes therefore keep the picture and controls in place. A dark strip
+provides consistent contrast across themes; its thin seek track reveals the
+handle on hover or drag. Progress follows the active theme accent, adjusted
+only when necessary to retain 3:1 contrast against the strip. Playback
+progress and hover update only shape instances, retaining prepared text.
+Retained confirmation text follows that final range.
+Settings retains its geometry and content beneath the dimming. Inactive dialogs
+skip text preparation; closing clears their text once. Terminal quad instances
+do not grow to carry modal styling.
+
+Primary-button presses arm a button; only a release inside that same unchanged
+button activates it. Dragging off, resizing, or losing focus cancels the press.
+Space activates on release; Enter activates once on press. Closing-key repeats
+and captured pointer releases remain consumed after dismissal. Outside clicks
+never reach the terminal. Opening a question ends existing terminal mouse
+gestures by sending each program its owed release once. A key release for a
+press already sent to the terminal retains its terminal ownership. AccessKit
+exposes a modal alert dialog, its heading,
+description, and buttons; background nodes and queued background actions are
+excluded until the question closes.
+
+The presentation follows the
+[GNOME confirmation-dialog guidance](https://developer.gnome.org/hig/patterns/feedback/dialogs.html):
+closing a running terminal process has no reliable undo, so an explicit question
+is appropriate. Keep passive notifications separate from confirmations. The
+existing `ask-before-closing` policy and integrated-shell idle detection decide
+when a question appears.
 
 Use the tab rectangles produced by `App::tab_bar` for painting, hit-testing and
 reorder targets. Do not reconstruct tab indices from an independently calculated
@@ -3659,3 +3712,34 @@ Several archived boundaries were deliberate:
 
 At `v3.3.0`, `docs/TESTING.md` defines the suite's validation gates and
 `docs/PERFORMANCE.md` defines the claims that could be made from a passing run.
+
+### Video viewer presentation
+
+A video uses the same shelf item, sandboxed playback session and rendering
+pipeline as a pinned preview. Opening keeps the 90% split frame and padding.
+The overlay owns only presentation state: Theater uses 90% of the window surface
+without changing pane or PTY sizes, and native fullscreen
+is restored on close or pin only if entered by that viewer. Video posters and
+frames share an aspect-preserving fit that can upscale; still images retain the
+native-pixel cap. A decorative central Play affordance shares the picture's hit
+target; playback briefly shows feedback using its existing gesture timestamp.
+Controls follow the bottom edge of the fitted picture through letterboxing,
+reserving their row before playback so the picture does not jump when it starts.
+For portrait video, the centered row can extend into the side letterboxing to
+retain seeking and time. A short viewer keeps its picture and header controls
+instead of reserving a row that would leave no picture.
+The hit target routes through the existing play action, including its native
+user file access guard. Controls take priority over the picture, so scrubbing
+never toggles playback. The backdrop reuses the projected viewer rectangle;
+painting and hit testing therefore share the presentation's geometry.
+Post-terminal effects (inactive-pane dimming, scrollbars and focus decoration)
+are clipped around that rectangle. Each affected quad yields at most four
+disjoint pieces in blend order, keeping the pass count unchanged and clipping
+time and storage linear in the existing overlay count.
+
+The interaction model follows YouTube's documented distinction between
+[window-adaptive sizing and Theater mode](https://support.google.com/youtube/answer/6052392?hl=en)
+and [fullscreen and player keyboard controls](https://support.google.com/youtube/answer/7631406?hl=en).
+Kettle uses K, Space, T, F and Esc within the focused viewer. It opens paused,
+keeps controls visible, and preserves terminal input ownership. It does not
+implement YouTube's streaming, recommendation or advertising behavior.

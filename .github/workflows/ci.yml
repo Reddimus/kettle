@@ -81,12 +81,11 @@ jobs:
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # Per-job timeout. GitHub Actions defaults each job to 360 min, so a
-    # hung test or runaway loop would burn six hours before failing. This
-    # job takes ~25-30 min with a warm cache, and ~45 min on macOS when the
-    # cache was evicted (the repository's 10 GiB limit fills on busy days),
-    # with the media worker, its native and render crates and their tests;
-    # 60 min leaves headroom for a cold build on a slow runner.
-    timeout-minutes: 60
+    # hung test or runaway loop would burn six hours before failing.
+    # macOS also runs native helper suites and builds both optimized binaries.
+    # A cold-cache run reached the final CLI smoke at the old 60-minute limit.
+    # Keep Linux/Windows at 60 minutes and allow macOS 90 for the complete gate.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 90 || 60 }}
     strategy:
       fail-fast: false
       matrix:
@@ -105,7 +104,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb fish xclip x11-utils libxtst6 dbus-daemon
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb fish xclip x11-utils libxtst6 dbus-daemon ffmpeg
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
       - run: cargo build --locked --workspace --all-targets
@@ -351,7 +350,7 @@ jobs:
             --codex "$CODEX_PASTE_TEST_BIN"
       - name: Launch-scoped agent cards (Linux)
         if: runner.os == 'Linux'
-        timeout-minutes: 3
+        timeout-minutes: 5
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
@@ -380,6 +379,22 @@ jobs:
         with:
           name: media-viewer-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/media-viewer
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Centered confirmation dialogs (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 2
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/check-confirmation-smoke.py \
+            --kettle ./target/release/kettle --out "$RUNNER_TEMP/confirmations"
+      - name: Upload confirmation evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: confirmations-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/confirmations
           if-no-files-found: warn
           retention-days: 7
       - name: Native image paste routes (macOS)
@@ -431,8 +446,10 @@ jobs:
         # The mandatory Kettle-owned PTY/JSON/MCP probes run on every attempt.
         # Third-party CLIs are machine-local and report explicit skips when the
         # hosted runner does not provide them.
+        # Reuse the release binary built above; the Just recipe's release
+        # prerequisite would rebuild it before running this same smoke body.
         if: runner.os == 'macOS'
-        run: just agent-cli-smoke
+        run: KETTLE_BIN=./target/release/kettle ./scripts/check-agent-cli-smoke.sh
       - name: Linux installer smoke
         # Exercise the no-sudo Linux install/uninstall paths in an isolated
         # prefix. If the matching release tag already exists, also run the

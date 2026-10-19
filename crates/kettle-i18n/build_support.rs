@@ -190,7 +190,14 @@ fn validate(schema: &Schema, catalogue: &Catalogue, locale: &str) -> Result<(), 
                     Token::Literal(_) => None,
                 })
                 .collect();
-            if actual != expected {
+            // A plural count selects the branch even when its text does not name it.
+            let optional = message.plural.as_deref();
+            let required: BTreeSet<_> = expected
+                .iter()
+                .copied()
+                .filter(|name| Some(*name) != optional)
+                .collect();
+            if !actual.is_subset(&expected) || !required.is_subset(&actual) {
                 return Err(format!(
                     "{locale}/{key}: placeholders {actual:?}, expected {expected:?}"
                 ));
@@ -270,14 +277,25 @@ fn template(text: &str, pseudo: bool, formatted: bool) -> String {
 
 fn expression(entry: &Entry, message: &Message, pseudo: bool) -> String {
     let render = |text: &str| {
-        let text = template(text, pseudo, !message.args.is_empty());
+        let used: BTreeSet<_> = tokens(text)
+            .expect("validated template")
+            .into_iter()
+            .filter_map(|token| match token {
+                Token::Argument(name) => Some(name),
+                Token::Literal(_) => None,
+            })
+            .collect();
+        let text = template(text, pseudo, !used.is_empty());
         if message.args.is_empty() {
             format!("{text:?}")
+        } else if used.is_empty() {
+            format!("String::from({text:?})")
         } else {
             // Only validated schema identifiers enter syntax. Text is always a Rust literal.
             let args = message
                 .args
                 .iter()
+                .filter(|arg| used.contains(&arg.name))
                 .map(|arg| format!(", {} = {}", arg.name, arg.name))
                 .collect::<String>();
             format!("format!({text:?}{args})")

@@ -3432,7 +3432,8 @@ mod tests {
         symlink("/tmp", root_dir.join("cwd")).unwrap();
 
         let mut tree = LinuxProcessTree::default();
-        assert!(!tree.refresh_from(&root, &[scan_root]));
+        // Exercise the byte ceiling independently of the production time budget.
+        assert!(!tree.refresh_from_within(&root, &[scan_root], std::time::Duration::from_secs(5)));
 
         // Structure survives for every descendant regardless of the aggregate
         // budget, and cwd remains available through an on-demand read.

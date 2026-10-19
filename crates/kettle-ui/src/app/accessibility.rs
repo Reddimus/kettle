@@ -88,6 +88,42 @@ impl App {
     }
 
     pub(super) fn accessibility_tree(&self, ws: &WindowState, overlay: &Overlay) -> TreeUpdate {
+        if overlay.confirm_dialog.is_some() {
+            let (surface, scale) = ws.window.as_ref().map_or(((800.0, 600.0), 1.0), |window| {
+                let size = window.inner_size();
+                (
+                    (size.width as f32, size.height as f32),
+                    window.scale_factor() as f32,
+                )
+            });
+            let modal = modal_accessibility_projection(
+                overlay,
+                surface,
+                (
+                    self.overlay_text_cell_width(ws),
+                    self.overlay_text_line_height(ws),
+                ),
+                scale,
+                &self.ui_text,
+            );
+            let mut root = Node::new(Role::Window);
+            root.set_label(self.ui_text.text(kettle_i18n::Text::A11yWindow));
+            root.set_children(modal.roots);
+            root.set_bounds(accesskit::Rect::new(
+                0.0,
+                0.0,
+                surface.0 as f64,
+                surface.1 as f64,
+            ));
+            let mut nodes = modal.nodes;
+            nodes.push((ACCESSIBILITY_ROOT_ID, root));
+            return TreeUpdate {
+                nodes,
+                tree: None,
+                tree_id: TreeId::ROOT,
+                focus: modal.focus.unwrap_or(ACCESSIBILITY_ROOT_ID),
+            };
+        }
         let area = self.area(ws);
         let layout = self.pane_layout(ws, area);
         let focused = ws.mux.active_focus();
@@ -291,12 +327,30 @@ impl App {
                         kettle_render::MediaLaneHit::Fit => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yFit)
                         }
+                        kettle_render::MediaLaneHit::Theater => {
+                            self.ui_text.text(kettle_i18n::Text::MediaViewerTheater)
+                        }
+                        kettle_render::MediaLaneHit::Fullscreen => {
+                            self.ui_text.text(kettle_i18n::Text::MediaViewerFullscreen)
+                        }
                         kettle_render::MediaLaneHit::Resize
                         | kettle_render::MediaLaneHit::Scrub
                         | kettle_render::MediaLaneHit::Inside => continue,
                     };
                     let mut button = Node::new(Role::Button);
                     button.set_label(text);
+                    if hit == kettle_render::MediaLaneHit::Theater {
+                        button.set_toggled(
+                            ws.preview_overlay.is_some_and(|open| open.theater).into(),
+                        );
+                    } else if hit == kettle_render::MediaLaneHit::Fullscreen {
+                        button.set_toggled(
+                            ws.window
+                                .as_ref()
+                                .is_some_and(|window| window.fullscreen().is_some())
+                                .into(),
+                        );
+                    }
                     button.add_action(AccessibilityAction::Click);
                     if lane.pin_label.is_some() {
                         button.add_action(AccessibilityAction::Focus);
@@ -561,7 +615,18 @@ impl App {
                 })
             })
             .unwrap_or((800.0, 600.0));
-        let modal = modal_accessibility_projection(overlay, surface, &self.ui_text);
+        let modal = modal_accessibility_projection(
+            overlay,
+            surface,
+            (
+                self.overlay_text_cell_width(ws),
+                self.overlay_text_line_height(ws),
+            ),
+            ws.window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor() as f32),
+            &self.ui_text,
+        );
         let modal_focus = modal.focus;
         children.extend(modal.roots);
         nodes.extend(modal.nodes);
@@ -626,6 +691,7 @@ impl App {
             let size = window.inner_size();
             size.width.hash(&mut hasher);
             size.height.hash(&mut hasher);
+            window.scale_factor().to_bits().hash(&mut hasher);
         }
         ws.search.open.hash(&mut hasher);
         if ws.search.open {
@@ -644,7 +710,13 @@ impl App {
         }
         overlay.confirm_dialog.is_some().hash(&mut hasher);
         if let Some(dialog) = overlay.confirm_dialog.as_ref() {
-            dialog.prompt.hash(&mut hasher);
+            self.overlay_text_cell_width(ws).to_bits().hash(&mut hasher);
+            self.overlay_text_line_height(ws)
+                .to_bits()
+                .hash(&mut hasher);
+            dialog.heading.hash(&mut hasher);
+            dialog.body.hash(&mut hasher);
+            dialog.scroll.hash(&mut hasher);
             dialog.focus_idx.hash(&mut hasher);
             for button in &dialog.buttons {
                 button.label.hash(&mut hasher);
@@ -772,6 +844,13 @@ impl App {
             }
         }
         overlay.media_lanes.len().hash(&mut hasher);
+        ws.preview_overlay
+            .map(|open| (open.theater, open.fullscreen))
+            .hash(&mut hasher);
+        ws.window
+            .as_ref()
+            .is_some_and(|window| window.fullscreen().is_some())
+            .hash(&mut hasher);
         for lane in &overlay.media_lanes {
             lane.pane.hash(&mut hasher);
             lane.collapsed.hash(&mut hasher);
@@ -852,31 +931,35 @@ impl App {
         request: ActionRequest,
         event_loop: &ActiveEventLoop,
     ) {
-        if let Some(index) = accessibility_confirm_button_index(request.target_node) {
-            let Some(dialog) = ws.confirm_dialog.as_mut() else {
-                return;
-            };
-            if index >= dialog.buttons.len() {
-                return;
-            }
-            match request.action {
-                AccessibilityAction::Focus => dialog.focus_idx = index,
-                AccessibilityAction::Click => {
-                    let confirm = matches!(dialog.buttons[index], ConfirmButton::Confirm { .. });
-                    if confirm {
-                        let action = dialog.on_confirm.clone();
-                        ws.confirm_dialog = None;
-                        self.dispatch_confirm_action(ws, action, event_loop);
-                    } else {
-                        self.cancel_confirm_dialog(ws);
+        if let Some(dialog) = ws.confirm_dialog.as_ref() {
+            match confirmation_accessibility_action(
+                request.target_node,
+                request.action,
+                dialog.buttons.len(),
+            ) {
+                Some(ConfirmAccessibilityAction::Focus(index)) => {
+                    if let Some(dialog) = ws.confirm_dialog.as_mut() {
+                        dialog.focus_idx = index;
+                        dialog.armed_press = None;
+                        dialog.space_pressed = None;
                     }
+                    self.confirm_scroll(ws, 0, true);
                 }
-                _ => return,
+                Some(ConfirmAccessibilityAction::Activate(index)) => {
+                    self.resolve_confirm_button(ws, index)
+                }
+                Some(ConfirmAccessibilityAction::Scroll(delta)) => {
+                    self.confirm_scroll(ws, delta, false)
+                }
+                None => return,
             }
             ws.accessibility_pending = true;
             if let Some(window) = &ws.window {
                 window.request_redraw();
             }
+            return;
+        }
+        if accessibility_confirm_button_index(request.target_node).is_some() {
             return;
         }
         if let Some(index) = accessibility_context_menu_item_index(request.target_node, ws) {

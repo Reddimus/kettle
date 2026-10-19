@@ -18,6 +18,10 @@
 # The drop-error notification was checked in the GNOME notification list,
 # expanded and readable, after a rejected 33-file batch left input unchanged.
 [status]
+media_viewer_video_hint = "draft"
+media_viewer_theater = "draft"
+media_viewer_fullscreen = "draft"
+
 ctl_screenshot_pane_not_visible = "draft"
 ctl_run_command_busy = "draft"
 screenshot_dimensions_too_large = "draft"
@@ -140,6 +144,20 @@ completion_a11y_list = "accepted"
 completion_kind_completions = "accepted"
 completion_kind_prediction = "accepted"
 completion_matches = "accepted"
+confirm_title_close_pane = "draft"
+confirm_title_close_tab = "draft"
+confirm_title_close_window = "draft"
+confirm_button_close_pane = "draft"
+confirm_button_close_tab = "draft"
+confirm_button_close_window = "draft"
+confirm_close_consequences = "draft"
+confirm_close_both_panes = "draft"
+confirm_rebind_generic = "draft"
+confirm_action_send_text = "draft"
+confirm_action_custom = "draft"
+confirm_rebind_title = "draft"
+confirm_rebind_body = "draft"
+confirm_close_scope = "draft"
 confirm_button_cancel = "accepted"
 confirm_button_close = "accepted"
 confirm_button_reassign = "accepted"
@@ -700,6 +718,20 @@ keys = [
     "card_a11y",
     "card_a11y_open",
     "completion_a11y_list",
+    "confirm_title_close_pane",
+    "confirm_title_close_tab",
+    "confirm_title_close_window",
+    "confirm_button_close_pane",
+    "confirm_button_close_tab",
+    "confirm_button_close_window",
+    "confirm_close_consequences",
+    "confirm_close_both_panes",
+    "confirm_rebind_generic",
+    "confirm_action_send_text",
+    "confirm_action_custom",
+    "confirm_rebind_title",
+    "confirm_rebind_body",
+    "confirm_close_scope",
     "confirm_button_cancel",
     "confirm_button_close",
     "confirm_button_reassign",

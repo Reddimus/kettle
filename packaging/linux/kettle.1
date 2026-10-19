@@ -567,8 +567,8 @@ server runs in and needs agent previews, never full control.
 Send a local image (PNG, JPEG, WebP, BMP, GIF or TIFF), SVG, Mermaid diagram,
 Markdown diagram gallery (the Mermaid diagrams of a Markdown file, paged in the
 preview lane), PDF or video
-(shown as its poster, with its length; it plays in the lane, without
-sound, only when the user plays it) to the media
+(shown as its poster, with its length; it plays only after the user starts
+it, with sound when available) to the media
 shelf of the pane this runs in, in the kettle it runs inside; never another
 kettle. Without a
 .IR PATH ,
@@ -592,7 +592,19 @@ foreground and no full-screen program owns the screen (not through a pipe, a
 file or tmux). Otherwise the item goes to the shelf alone and a note on
 stderr says why. A PDF shows its first page, or with
 .BI \-\-page " N"
-page N, counting from 1; the preview pages through the rest. Needs agent previews
+page N, counting from 1; the preview pages through the rest.
+A video card opens paused in a centered viewer using 90% of its owning split,
+with padding on every side. The picture fits without cropping, with a central
+Play button and compact white controls on a dark strip beneath it. The thin
+timeline uses the theme accent and spans the player; hover or drag reveals its
+round seek handle. Narrow players put the time label on its own line. Click
+the picture or press K to
+play or pause. T toggles a larger, padded Theater view across the window;
+F toggles native fullscreen. Esc leaves fullscreen first, then closes the
+viewer. Closing or pinning leaves fullscreen only if the viewer entered it.
+Portrait controls can use the side margins to keep seeking and time visible;
+short viewers keep their header controls and picture.
+Needs agent previews
 .RB ( agent\-display ),
 never full control. Exits 0 once the item is on the shelf, 1 otherwise.
 .TP
@@ -651,7 +663,8 @@ and
 and enabling
 .B kettle_show
 alone, without approving it; every other Codex command runs unchanged. On
-macOS or a checked Linux launch with Codex CLI 0.162 it also adds a hook that prints a card for each
+macOS or a checked Linux launch with Codex CLI 0.162 or newer within 0.x,
+it also adds a hook that prints a card for each
 .B kettle_show
 under the call, once you trust that hook in Codex's own hook review.
 With
@@ -667,7 +680,9 @@ or
 .BR \-\-uninstall .
 On Linux, enabled Claude Code previews also define this function in new zsh
 and fish panes. It keeps arguments unchanged, respects managed plugin policy,
-and admits cards only for a supported native executable and hook version.
+and admits cards only for a supported native executable and hook version:
+Claude Code 2.1.280 or newer within 2.x. A new major version needs a
+compatibility review.
 Unknown launches keep the media shelf. Linux card provenance is local launch
 identity, not vendor authentication.
 .B \-\-status
@@ -732,6 +747,11 @@ close window
 .TP
 .B F11
 toggle fullscreen
+.PP
+Close confirmations appear in a centered dialog with Cancel focused.
+Enter activates the focused button; Space activates on release; Esc cancels.
+Tab, Shift+Tab, Left and Right move focus. Clicking outside leaves the question
+open. Short dialogs scroll with the wheel, Up/Down, Page Up/Page Down or Home/End.
 .PP
 The new-tab button's dropdown lists detected shells plus Settings, Command
 palette, and About rows; it is always visible.

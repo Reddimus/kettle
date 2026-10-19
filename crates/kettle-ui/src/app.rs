@@ -1424,10 +1424,10 @@ const ACCESSIBILITY_LANE_ID_MASK: u64 = 1 << 56;
 const MAX_LANE_ACCESSIBILITY_PANE: u64 = 1 << 51;
 const LANE_ACCESSIBILITY_PARTS: u64 = 32;
 /// A lane's controls, at parts 1 and on (see [`lane_controls`]).
-const LANE_CONTROLS: usize = 16;
+const LANE_CONTROLS: usize = 18;
 /// A playing video's bar, a slider: the part after the controls', below
 /// the stride.
-const LANE_SCRUBBER_PART: u64 = LANE_CONTROLS as u64 + 1;
+const LANE_SCRUBBER_PART: u64 = 17;
 const LANE_PIN_PART: u64 = LANE_SCRUBBER_PART + 1;
 const _: () = assert!(LANE_PIN_PART < LANE_ACCESSIBILITY_PARTS);
 
@@ -1489,6 +1489,8 @@ fn lane_controls(
         (14, geometry.page_next, Hit::NextPage),
         (15, geometry.play, Hit::Play),
         (16, geometry.sound, Hit::Sound),
+        (19, geometry.theater, Hit::Theater),
+        (20, geometry.fullscreen, Hit::Fullscreen),
     ]
 }
 
@@ -1569,6 +1571,8 @@ fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
         Hit::Reload => "reload",
         Hit::Play => "play",
         Hit::Sound => "sound",
+        Hit::Theater => "theater",
+        Hit::Fullscreen => "fullscreen",
         Hit::Scrub => "scrubber",
         Hit::ZoomOut => "zoom_out",
         Hit::ZoomIn => "zoom_in",
@@ -1722,6 +1726,8 @@ fn push_picker_accessibility(
 fn modal_accessibility_projection(
     overlay: &Overlay,
     surface: (f32, f32),
+    metrics: (f32, f32),
+    scale_factor: f32,
     tr: &kettle_i18n::Translator,
 ) -> ModalAccessibilityProjection {
     let full_bounds = accesskit::Rect::new(0.0, 0.0, f64::from(surface.0), f64::from(surface.1));
@@ -1732,27 +1738,42 @@ fn modal_accessibility_projection(
     };
 
     if let Some(dialog) = overlay.confirm_dialog.as_ref() {
+        let layout =
+            kettle_render::ConfirmDialogLayout::new(surface, metrics, scale_factor, dialog);
+        let bounds = |(x, y, w, h): (f32, f32, f32, f32)| {
+            accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
+        };
         let container_id = accessibility_modal_id(1, 0);
         let mut children = Vec::with_capacity(dialog.buttons.len());
         for (index, button) in dialog.buttons.iter().enumerate() {
             let id = accessibility_modal_id(1, index + 1);
             let mut node = Node::new(Role::Button);
             node.set_label(button.label.clone());
+            if let Some(rect) = layout.buttons.get(index) {
+                node.set_bounds(bounds(*rect));
+            }
             node.add_action(AccessibilityAction::Focus);
             node.add_action(AccessibilityAction::Click);
             children.push(id);
             projection.nodes.push((id, node));
         }
         let mut node = Node::new(Role::AlertDialog);
-        node.set_label(dialog.prompt.clone());
+        node.set_label(dialog.heading.clone());
+        node.set_description(dialog.body.clone());
+        node.set_modal();
+        if layout.max_scroll > 0 {
+            node.add_action(AccessibilityAction::ScrollUp);
+            node.add_action(AccessibilityAction::ScrollDown);
+        }
         node.set_children(children.clone());
-        node.set_bounds(full_bounds);
+        node.set_bounds(bounds(layout.rect));
         projection.roots.push(container_id);
         projection.nodes.push((container_id, node));
         projection.focus = children
             .get(dialog.focus_idx.min(children.len().saturating_sub(1)))
             .copied()
             .or(Some(container_id));
+        return projection;
     }
 
     let picker_open = overlay.palette_query.is_some()
@@ -4394,32 +4415,99 @@ fn title_edit_rect_for(
     }
 }
 
-fn confirm_dialog_button_cells(button: &ConfirmButton, tr: &kettle_i18n::Translator) -> usize {
-    // Renderer format is `[<marker> <label>]`, where marker is either `▶` or a
-    // single space. The hit-test uses the same cell budget so clicks track the
-    // visible right-aligned button row.
-    confirm_button_label(button, tr).width() + 4
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfirmAccessibilityAction {
+    Focus(usize),
+    Activate(usize),
+    Scroll(isize),
+}
+
+fn confirmation_accessibility_action(
+    target: NodeId,
+    action: AccessibilityAction,
+    count: usize,
+) -> Option<ConfirmAccessibilityAction> {
+    if let Some(index) = accessibility_confirm_button_index(target) {
+        if index >= count {
+            return None;
+        }
+        return match action {
+            AccessibilityAction::Focus => Some(ConfirmAccessibilityAction::Focus(index)),
+            AccessibilityAction::Click => Some(ConfirmAccessibilityAction::Activate(index)),
+            _ => None,
+        };
+    }
+    if target == accessibility_modal_id(1, 0) {
+        return match action {
+            AccessibilityAction::ScrollUp => Some(ConfirmAccessibilityAction::Scroll(-1)),
+            AccessibilityAction::ScrollDown => Some(ConfirmAccessibilityAction::Scroll(1)),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn confirm_dialog_overlay(
+    dialog: &ConfirmDialogState,
+    tr: &kettle_i18n::Translator,
+) -> kettle_render::ConfirmDialogOverlay {
+    kettle_render::ConfirmDialogOverlay {
+        heading: dialog.heading.clone(),
+        body: dialog.body.clone(),
+        buttons: dialog
+            .buttons
+            .iter()
+            .map(|button| kettle_render::ConfirmDialogButton {
+                label: confirm_button_label(button, tr).to_string(),
+                destructive: matches!(
+                    button,
+                    ConfirmButton::Confirm {
+                        destructive: true,
+                        ..
+                    }
+                ),
+            })
+            .collect(),
+        focus_idx: dialog.focus_idx,
+        hover_idx: None,
+        pressed_idx: dialog.space_pressed,
+        scroll: dialog.scroll,
+    }
 }
 
 fn confirm_dialog_button_hit(
-    buttons: &[ConfirmButton],
-    (px, py): (f32, f32),
-    (window_w, window_h): (f32, f32),
-    (cell_w, cell_h): (f32, f32),
-    tr: &kettle_i18n::Translator,
+    layout: &kettle_render::ConfirmDialogLayout,
+    px: f32,
+    py: f32,
 ) -> Option<usize> {
-    if buttons.is_empty() || window_w <= 0.0 || window_h <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
-        return None;
-    }
-    let geometry = kettle_render::ConfirmBarGeometry::new((window_w, window_h), (cell_w, cell_h));
-    let widths: Vec<_> = buttons
+    layout
+        .buttons
         .iter()
-        .map(|button| confirm_dialog_button_cells(button, tr))
-        .collect();
-    geometry
-        .button_rects(&widths)
-        .iter()
-        .position(|&(x, y, w, h)| px >= x && px < x + w && py >= y && py < y + h)
+        .position(|&rect| rect_contains(rect, px, py))
+}
+
+fn confirmation_space_key(key: &Key) -> bool {
+    key == &Key::Named(NamedKey::Space) || matches!(key, Key::Character(text) if text == " ")
+}
+
+fn confirmation_space_release_target(
+    armed: &mut Option<usize>,
+    focused: usize,
+    ui_owned: bool,
+) -> Option<usize> {
+    armed.take().filter(|index| ui_owned && *index == focused)
+}
+
+fn confirm_release_target(
+    armed: Option<(usize, (f32, f32, f32, f32))>,
+    layout: &kettle_render::ConfirmDialogLayout,
+    px: f32,
+    py: f32,
+) -> Option<usize> {
+    let (index, original_rect) = armed?;
+    (layout.buttons.get(index) == Some(&original_rect)
+        && confirm_dialog_button_hit(layout, px, py) == Some(index))
+    .then_some(index)
 }
 
 /// Pure: which tab segment's close-button (`✕`) rect contains the cursor,
@@ -7832,9 +7920,7 @@ pub enum ConfirmAction {
 pub enum ConfirmButton {
     /// Dismiss the modal without action. Always the safe default.
     Cancel,
-    /// Dispatch the dialog's `on_confirm` action. `destructive: true`
-    /// draws the label in bold (Close/Delete); `false` keeps the regular
-    /// weight (OK/Apply).
+    /// Dispatch the dialog's action using destructive or ordinary styling.
     Confirm { label: String, destructive: bool },
 }
 
@@ -7842,10 +7928,14 @@ pub enum ConfirmButton {
 /// points into `buttons` and the renderer / keyboard nav follow it.
 #[derive(Debug, Clone)]
 pub struct ConfirmDialogState {
-    pub prompt: String,
+    pub heading: String,
+    pub body: String,
     pub buttons: Vec<ConfirmButton>,
     pub focus_idx: usize,
     pub on_confirm: ConfirmAction,
+    pub scroll: usize,
+    pub armed_press: Option<(usize, (f32, f32, f32, f32))>,
+    pub space_pressed: Option<usize>,
 }
 
 /// UI-side context-menu state (Terminator / GNOME / iTerm2 parity).
@@ -13220,10 +13310,10 @@ impl App {
         // room in the pane stays carved either way.
         let media_lanes = self.preview_lane_projections(ws);
         let media_viewer_rect = ws.preview_overlay.and_then(|open| {
-            self.pane_layout(ws, self.area(ws))
-                .into_iter()
-                .find(|(pane, _)| *pane == open.pane)
-                .and_then(|(_, partition)| crate::media::centered_preview_rect(partition.terminal))
+            media_lanes
+                .iter()
+                .find(|lane| lane.pane == open.pane)
+                .map(|lane| lane.rect)
         });
         let ime_preedit = preedit.filter(|_| terminal_surface).and_then(|text| {
             let (row, col) = self.terminal_cursor_cell(ws)?;
@@ -13298,29 +13388,19 @@ impl App {
         // Project the App's confirm_dialog into the
         // renderer's projection (so it shows even when no
         // search is open — confirm modals are independent).
-        let confirm_dialog_early =
-            ws.confirm_dialog
-                .as_ref()
-                .map(|d| kettle_render::ConfirmDialogOverlay {
-                    prompt: d.prompt.clone(),
-                    buttons: d
-                        .buttons
-                        .iter()
-                        .map(|b| match b {
-                            ConfirmButton::Cancel => kettle_render::ConfirmDialogButton {
-                                label: confirm_button_label(b, tr).to_string(),
-                                destructive: false,
-                            },
-                            ConfirmButton::Confirm { label, destructive } => {
-                                kettle_render::ConfirmDialogButton {
-                                    label: label.clone(),
-                                    destructive: *destructive,
-                                }
-                            }
-                        })
-                        .collect(),
-                    focus_idx: d.focus_idx,
-                });
+        let confirm_dialog_early = ws.confirm_dialog.as_ref().map(|dialog| {
+            let mut overlay = confirm_dialog_overlay(dialog, tr);
+            if let Some(layout) = self.confirmation_layout(ws) {
+                let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                overlay.hover_idx = ws
+                    .native_pointer
+                    .and_then(|_| confirm_dialog_button_hit(&layout, x, y));
+                if overlay.pressed_idx.is_none() {
+                    overlay.pressed_idx = confirm_release_target(dialog.armed_press, &layout, x, y);
+                }
+            }
+            overlay
+        });
         // Project the settings overlay (independent of search, like
         // the confirm dialog). Values are read from the live Config so the
         // panel reflects the current state (incl. external reloads).
@@ -13359,6 +13439,11 @@ impl App {
                 media_paste_receipt,
                 media_lanes,
                 media_viewer_rect,
+                media_pointer: (!self.non_search_modal_open(ws))
+                    .then_some(ws.native_pointer)
+                    .flatten()
+                    .map(|p| (p.x as f32, p.y as f32)),
+                media_scrubbing: ws.lane_drag.is_some_and(|drag| drag.scrub),
                 card_hover,
                 window_focused,
                 scrollbar_active,
@@ -13478,6 +13563,8 @@ impl App {
             media_paste_receipt: None,
             media_lanes,
             media_viewer_rect: None,
+            media_pointer: None,
+            media_scrubbing: false,
             card_hover,
             window_focused,
             scrollbar_active,
@@ -14814,15 +14901,7 @@ impl App {
                 // Name the pane now — by the time the prompt is answered,
                 // "focused" may mean a different one.
                 if let Some(target) = ws.mux.active_focus()
-                    && self.confirm_close(
-                        ws,
-                        self.ui_text
-                            .text(kettle_i18n::Text::ConfirmClosePane)
-                            .to_string(),
-                        1,
-                        busy,
-                        ConfirmAction::ClosePane(target),
-                    )
+                    && self.confirm_close(ws, 1, busy, ConfirmAction::ClosePane(target))
                 {
                     return;
                 }
@@ -14860,7 +14939,6 @@ impl App {
                 let (panes_in_tab, busy_in_tab) = tab_close_scope(ws, ws.mux.active);
                 if self.confirm_close(
                     ws,
-                    self.ui_text.confirm_close_tab(panes_in_tab as u64),
                     panes_in_tab,
                     busy_in_tab,
                     ConfirmAction::CloseTabHolding(ws.mux.tab_anchor_panes(ws.mux.active)),
@@ -14888,7 +14966,6 @@ impl App {
                 let (scope, busy) = window_close_scope(ws);
                 if self.confirm_close(
                     ws,
-                    self.ui_text.confirm_close_window(scope as u64),
                     scope,
                     busy,
                     ConfirmAction::CloseWindow {
@@ -19919,7 +19996,6 @@ impl App {
                     let (scope, busy) = window_close_scope(ws);
                     if self.confirm_close(
                         ws,
-                        self.ui_text.confirm_close_window(scope as u64),
                         scope,
                         busy,
                         ConfirmAction::CloseWindow {
@@ -19932,6 +20008,8 @@ impl App {
                 self.close_window_now(ws, DropPanes::No);
             }
             WindowEvent::Resized(size) => {
+                self.confirm_cancel_press(ws);
+                self.confirm_scroll(ws, 0, true);
                 self.sync_output_frame_budget(ws, false);
                 // Minimizing a window delivers Resized(0, 0) on Windows.
                 // Reconfiguring the surface + `resize_all` to a 0×0 area would
@@ -20100,6 +20178,9 @@ impl App {
                 self.update_dock_target(cursor, torn_hwnd, None);
             }
             WindowEvent::CursorLeft { .. } => {
+                if let Some(dialog) = ws.confirm_dialog.as_mut() {
+                    dialog.armed_press = None;
+                }
                 let prev = std::mem::take(&mut ws.detach_drag);
                 ws.detach_drag = prev.on_cursor_leave_window();
                 if ws.selecting
@@ -20415,7 +20496,10 @@ impl App {
                     let area = self.area(ws);
                     self.update_selection(ws, area);
                 }
-                if (ws.selecting || !ws.links.is_empty())
+                if (ws.selecting
+                    || !ws.links.is_empty()
+                    || ws.confirm_dialog.is_some()
+                    || ws.preview_overlay.is_some())
                     && let Some(w) = &ws.window
                 {
                     w.request_redraw();
@@ -20655,7 +20739,6 @@ impl App {
                                 Some(ws.mux.tab_anchor_panes(seg.idx)).filter(|a| !a.is_empty())
                                 && self.confirm_close(
                                     ws,
-                                    self.ui_text.confirm_close_tab(panes as u64),
                                     panes,
                                     busy,
                                     ConfirmAction::CloseTabHolding(anchor),
@@ -20920,6 +21003,9 @@ impl App {
                 // that surface closed while the button was held.
                 if let Some(sgr) = extra_mouse_sgr(button) {
                     ws.held_buttons.end_own(sgr);
+                    if self.confirm_mouse_release(ws, sgr) {
+                        return;
+                    }
                     self.send_mouse(ws, sgr, false, false);
                     return;
                 }
@@ -20933,6 +21019,9 @@ impl App {
                 // handler below takes it; a program's goes on to get its
                 // release from `report_mouse`.
                 ws.held_buttons.end_own(bcode);
+                if self.confirm_mouse_release(ws, bcode) {
+                    return;
+                }
                 // A release ends an editor drag inside the search bar; any
                 // other release while the bar is open belongs to the grid
                 // gesture it started (selection end, copy-on-select, mouse
@@ -21154,6 +21243,12 @@ impl App {
                     ws.wheel.reset();
                     ws.lane_wheel.reset();
                 }
+                if ws.confirm_dialog.is_some() {
+                    ws.lane_wheel.reset();
+                    let steps = ws.wheel.feed(&delta, self.cfg.scroll_multiplier);
+                    self.confirm_wheel(ws, steps.lines);
+                    return;
+                }
                 // A preview lane owns the wheel over it. Its motion is dropped
                 // from the terminal's account rather than banked there, so no
                 // part of it reaches the terminal once the lane closes; the
@@ -21230,6 +21325,8 @@ impl App {
                     self.focused_seq = ws.seq;
                 }
                 if !f {
+                    self.confirm_cancel_press(ws);
+                    ws.confirm_pointer_release = false;
                     // An unfocused window draws no cursor, and the Metal layer
                     // beneath already shows the off phase.
                     Self::hide_cursor_layer(ws);
@@ -21451,13 +21548,23 @@ impl App {
                 ) {
                     return;
                 }
-                if track_consumed_key_release(
+                let release_consumed = track_consumed_key_release(
                     &mut ws.suppressed_key_releases,
                     &mut ws.terminal_owned_key_releases,
                     event.physical_key,
                     event.state,
                     ui_owns_key,
-                ) {
+                );
+                if event.state == ElementState::Released
+                    && ws.confirm_dialog.is_some()
+                    && confirmation_space_key(&event.logical_key)
+                {
+                    self.confirm_space_release(ws, release_consumed);
+                    if release_consumed {
+                        return;
+                    }
+                }
+                if release_consumed {
                     return;
                 }
                 if event.state == ElementState::Released {

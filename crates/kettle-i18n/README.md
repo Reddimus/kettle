@@ -40,13 +40,15 @@ never go through it. Unit symbols (`px`, `pt`, `%`, `MB`) and proper names
 3. For arguments, declare `args` in caller order. Types are `str` (`&str`) and
    `u64`. Use `{name}` in every language; Spanish may reorder them. For an
    integer plural, set `plural` to a `u64` argument and give `one` and `other`
-   tables. Only 1 selects `one`.
+   tables. Only 1 selects `one`. The plural argument may be omitted from
+   a branch's text; it still selects the branch. Other arguments are required
+   in every branch.
 4. Test the message in both languages where it is shown.
 
 Only named placeholders exist. `{{` and `}}` are literal braces. Format
 specifiers, positional placeholders and expressions fail the build, as do a
 key missing from or extra in one language, a missing plural branch, a
-placeholder set that differs between languages, a duplicate TOML key and an
+missing required placeholder, an undeclared placeholder, a duplicate TOML key and an
 unknown schema field. Catalogue text is escaped as Rust string literals; it can
 never become code.
 

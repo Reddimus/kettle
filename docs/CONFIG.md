@@ -392,6 +392,13 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `ask-before-closing` | enum | `multiple-terminals` | Close-confirmation policy: `always`, `multiple-terminals`, or `never`. Applies to the close-window, close-tab, and close-pane **actions** (`Ctrl+Shift+W`, `Ctrl+Shift+Q`, the tab-bar `✕`, middle-clicking a tab); panes sitting idle at an integrated-shell prompt do not count as work to lose. The **titlebar `✕` and `Alt+F4` are exempt** and close immediately: those are OS window-destroy requests rather than Kettle commands, and a terminal has no unsaved-document state to veto them with. Set `always` if you want them to ask too. Also on the right-click **Preferences ▸** menu as a radio group |
 | `lua-sandbox` | enum | `safe` | Lua plugin trust level. `restricted` blocks `kettle.send_text` and `kettle.exec_action`. `safe` also removes command and file APIs from the Lua standard library, but a plugin can still run a command by typing it into the pane. `trusted` restores the command and file APIs (`os.execute`, `io.open`, `io.popen`, `loadfile`, `dofile`); the `debug` library and native C-module loading stay unavailable at every level because the VM is always mlua's safe state. Read any plugin before enabling it. See [Lua plugins](PLUGINS.md) |
 
+Close confirmations appear in a centered dialog with Cancel focused. Enter
+activates the focused button, Space activates on release, and Esc cancels. Tab,
+Shift+Tab, Left, or Right moves focus between buttons. Clicking outside the
+dialog leaves the question open. A button activates when the pointer is released
+inside the button where the press began. In short windows, use the wheel,
+Up/Down, Page Up/Page Down, or Home/End to scroll the dialog.
+
 The automatically discovered `<config-dir>/init.lua` uses the same trusted
 directory and leaf checks as the default config because even `safe` Lua can type
 commands into the shell. A dotfile-manager link remains supported only when the

@@ -54,6 +54,8 @@ pub(crate) enum PreviewKey {
     Play,
     /// Mute a playing video's sound, or let it be heard, as M.
     Mute,
+    Theater,
+    Fullscreen,
     /// Nothing: the key is the lane's all the same.
     Swallow,
 }
@@ -68,6 +70,8 @@ impl PreviewKey {
                 | Self::Fit
                 | Self::Play
                 | Self::Mute
+                | Self::Theater
+                | Self::Fullscreen
                 | Self::Page(PageStep::First | PageStep::Last)
         )
     }
@@ -110,6 +114,9 @@ pub(crate) fn preview_key(key: &Key, mods: ModifiersState) -> PreviewKey {
             ("0", false) => PreviewKey::Fit,
             ("c", false) => PreviewKey::Copy,
             ("m", false) => PreviewKey::Mute,
+            ("k", false) => PreviewKey::Play,
+            ("t", false) => PreviewKey::Theater,
+            ("f", false) => PreviewKey::Fullscreen,
             _ => PreviewKey::Swallow,
         },
         _ => PreviewKey::Swallow,
@@ -119,6 +126,29 @@ pub(crate) fn preview_key(key: &Key, mods: ModifiersState) -> PreviewKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_shortcuts_toggle_once_and_never_accept_modified_chords() {
+        for (key, action) in [
+            ("k", PreviewKey::Play),
+            ("t", PreviewKey::Theater),
+            ("f", PreviewKey::Fullscreen),
+        ] {
+            assert_eq!(
+                preview_key(&character(key), ModifiersState::empty()),
+                action
+            );
+            assert!(action.once());
+            for mods in [
+                ModifiersState::SHIFT,
+                ModifiersState::ALT,
+                ModifiersState::CONTROL,
+                ModifiersState::SUPER,
+            ] {
+                assert_eq!(preview_key(&character(key), mods), PreviewKey::Swallow);
+            }
+        }
+    }
 
     fn character(text: &str) -> Key {
         Key::Character(text.into())

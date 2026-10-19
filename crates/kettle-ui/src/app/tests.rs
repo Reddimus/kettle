@@ -7,23 +7,30 @@ const EN_TEXT: kettle_i18n::Translator = kettle_i18n::Translator::new(kettle_i18
 #[test]
 fn confirmation_hits_use_the_painted_chrome_metrics() {
     let source = include_str!("modals.rs");
-    for function in [
-        "pub(super) fn confirm_button_hovered(",
-        "pub(super) fn confirm_button_click_result(",
+    let layout = source
+        .split("pub(super) fn confirmation_layout(")
+        .nth(1)
+        .unwrap()
+        .split("pub(super) fn confirm_button_hovered(")
+        .next()
+        .unwrap();
+    assert!(layout.contains("self.overlay_text_cell_width(ws)"));
+    assert!(layout.contains("self.overlay_text_line_height(ws)"));
+    assert!(layout.contains("window.scale_factor()"));
+    assert!(!layout.contains("cell_px("));
+    for name in [
+        "confirm_button_hovered",
+        "confirm_mouse_press",
+        "confirm_mouse_release",
     ] {
         let body = source
-            .split_once(function)
+            .split(&format!("pub(super) fn {name}("))
+            .nth(1)
             .unwrap()
-            .1
-            .split("confirm_dialog_button_hit(")
+            .split("\n    pub(super) fn ")
             .next()
             .unwrap();
-        assert!(
-            body.contains(concat!("self.overlay_text_", "cell_width(ws)"))
-                && body.contains(concat!("self.overlay_text_", "line_height(ws)"))
-                && !body.contains("cell_px("),
-            "{function}"
-        );
+        assert!(body.contains("self.confirmation_layout(ws)"), "{name}");
     }
 }
 
@@ -1730,36 +1737,16 @@ fn a_confirm_dialog_outranks_every_overlay_including_the_one_that_raised_it() {
         );
     }
 
-    // And it stays legible: the confirm bar is queued with the menu chrome
-    // (so it clears the base overlay quads), and the settings panel's dim
-    // backdrop — pushed to the same list afterwards, therefore drawn over
-    // it — stops above the bar rather than greying it out.
     let render =
         kettle_test_support::production_source(include_str!("../../../kettle-render/src/lib.rs"));
-    for guarded_arm in [
-        "overlay.confirm_dialog.is_none()\n            && let Some(search) = overlay.search.as_ref()",
-        "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.palette_query",
-        "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.theme_picker_query",
-        "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.layout_picker_query",
-        "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.ssh_query",
-        "overlay.confirm_dialog.is_none()\n            && let Some(edit) = &overlay.edit_title",
-    ] {
-        assert!(
-            render.contains(guarded_arm),
-            "the renderer must suppress {guarded_arm} while a confirm dialog owns the keyboard"
-        );
-    }
+    let pass = render.split("fn encode_scene_pass(").nth(1).unwrap();
+    let settings_text = pass.find("self.menu_text_renderer").unwrap();
+    let surfaces = pass.rfind("self.rounded_surfaces").unwrap();
+    let modal_text = pass.find("self.confirmation_text_renderer").unwrap();
+    assert!(settings_text < surfaces && surfaces < modal_text);
     assert!(
-        render.contains("menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 1.0));"),
-        "the confirm bar must be queued into the menu-chrome pass, and \
-             painted opaque so its AA contrast guarantee against palette[1] \
-             is not diluted by whatever terminal content sits underneath"
-    );
-    assert!(
-        render.contains("menu_q.push(rect(0.0, 0.0, sw, dim_h, theme.background, backdrop_a));")
-            && render.contains("let dim_h = if overlay.confirm_dialog.is_some() {"),
-        "the settings backdrop must stop above a live confirm bar; a \
-             full-height dim would cover the question being asked"
+        !render
+            .contains("menu_areas.retain(|area| std::ptr::eq(area.buffer, &self.search_buffer))")
     );
 }
 
@@ -3537,7 +3524,11 @@ fn accessibility_initial_tree_is_complete_and_pane_ids_are_stable() {
 fn confirm_dialog_accessibility_focuses_the_selected_button() {
     let overlay = kettle_render::Overlay {
         confirm_dialog: Some(kettle_render::ConfirmDialogOverlay {
-            prompt: "Close 3 running panes?".to_string(),
+            body: "Commands may be interrupted.".into(),
+            hover_idx: None,
+            pressed_idx: None,
+            scroll: 0,
+            heading: "Close 3 running panes?".to_string(),
             buttons: vec![
                 kettle_render::ConfirmDialogButton {
                     label: "Cancel".to_string(),
@@ -3556,6 +3547,8 @@ fn confirm_dialog_accessibility_focuses_the_selected_button() {
     let projection = super::modal_accessibility_projection(
         &overlay,
         (800.0, 600.0),
+        (8.0, 16.0),
+        1.0,
         &kettle_i18n::Translator::new(kettle_i18n::Language::En),
     );
     let dialog = projection
@@ -3571,6 +3564,82 @@ fn confirm_dialog_accessibility_focuses_the_selected_button() {
         .expect("focused modal node");
     assert_eq!(focused.1.role(), accesskit::Role::Button);
     assert_eq!(focused.1.label(), Some("Close"));
+}
+
+#[test]
+fn confirmation_accessibility_bounds_follow_chrome_metrics() {
+    let overlay = kettle_render::Overlay {
+        confirm_dialog: Some(kettle_render::ConfirmDialogOverlay {
+            body: "Commands may be interrupted.".into(),
+            hover_idx: None,
+            pressed_idx: None,
+            scroll: 0,
+            heading: "Close window with 2 panes?".into(),
+            buttons: vec![
+                kettle_render::ConfirmDialogButton {
+                    label: "Cancel".into(),
+                    destructive: false,
+                },
+                kettle_render::ConfirmDialogButton {
+                    label: "Close".into(),
+                    destructive: true,
+                },
+            ],
+            focus_idx: 0,
+        }),
+        ..Default::default()
+    };
+    let first = super::modal_accessibility_projection(
+        &overlay,
+        (1600.0, 1200.0),
+        (8.0, 16.0),
+        1.0,
+        &EN_TEXT,
+    );
+    let second = super::modal_accessibility_projection(
+        &overlay,
+        (1600.0, 1200.0),
+        (16.0, 32.0),
+        1.0,
+        &EN_TEXT,
+    );
+    let dialog_bounds = |projection: &super::ModalAccessibilityProjection| {
+        projection
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == accesskit::Role::AlertDialog)
+            .unwrap()
+            .1
+            .bounds()
+            .unwrap()
+    };
+    assert_ne!(dialog_bounds(&first), dialog_bounds(&second));
+    for projection in [&first, &second] {
+        let bounds = dialog_bounds(projection);
+        assert!(bounds.x0 > 0.0 && bounds.y0 > 0.0 && bounds.x1 < 1600.0 && bounds.y1 < 1200.0);
+        for (_, node) in &projection.nodes {
+            if node.role() == accesskit::Role::Button {
+                let button = node.bounds().unwrap();
+                assert!(
+                    button.x0 >= bounds.x0
+                        && button.y0 >= bounds.y0
+                        && button.x1 <= bounds.x1
+                        && button.y1 <= bounds.y1
+                );
+            }
+        }
+    }
+    let source = super::production_source();
+    let hash = source
+        .split_once("fn accessibility_key(")
+        .unwrap()
+        .1
+        .split("fn publish_accessibility_if_due(")
+        .next()
+        .unwrap();
+    let hash: String = hash.split_whitespace().collect();
+    assert!(hash.contains("self.overlay_text_cell_width(ws).to_bits().hash(&muthasher);"));
+    assert!(hash.contains("self.overlay_text_line_height(ws).to_bits().hash(&muthasher);"));
 }
 
 #[test]
@@ -3631,7 +3700,8 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
         }),
         ..kettle_render::Overlay::default()
     };
-    let projection = super::modal_accessibility_projection(&overlay, (800.0, 600.0), &EN_TEXT);
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &EN_TEXT);
     for index in [0, 2, 3] {
         let id = super::accessibility_modal_id(2, index + 1);
         let (_, node) = projection.nodes.iter().find(|(at, _)| *at == id).unwrap();
@@ -5282,8 +5352,20 @@ fn a_preview_lane_drops_wheel_motion_before_it_is_banked() {
     let native = source
         .split("WindowEvent::MouseWheel { delta, phase, .. } => {")
         .nth(1)
+        .and_then(|body| body.split("WindowEvent::DroppedFile(").next())
         .expect("native wheel");
     for (path, body) in [("ctl", ctl), ("native", native)] {
+        let body = if path == "native" {
+            let (modal, terminal) = body
+                .split_once("// A preview lane owns the wheel over it.")
+                .expect("native modal routing precedes terminal scrolling");
+            assert!(
+                modal.contains("self.confirm_wheel(ws, steps.lines);\n                    return;")
+            );
+            terminal
+        } else {
+            body
+        };
         let gate = body
             .find("if self.lane_takes_wheel(ws) {\n")
             .unwrap_or_else(|| panic!("{path} asks the lanes"));
@@ -6140,6 +6222,7 @@ fn preview_accessibility_key_tracks_controls_and_video_position() {
     );
 
     lane.scrubber = Some(kettle_render::MediaLaneScrubber {
+        seekable: true,
         position_ms: 1_000,
         duration_ms: 10_000,
         label: String::new(),
@@ -6163,6 +6246,7 @@ pub(super) fn test_lane_panel() -> kettle_render::MediaLanePanel {
         focused_control: None,
         pin_label: None,
         play: None,
+        play_feedback: None,
         sound: None,
         frame: None,
         scrubber: None,
@@ -11360,7 +11444,7 @@ fn side_button_forward_is_modal_gated_and_releases_pair_with_presses() {
     );
     assert!(
         src.contains(
-            "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); self.send_mouse(ws, sgr, false, false); return; }"
+            "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); if self.confirm_mouse_release(ws, sgr) { return; } self.send_mouse(ws, sgr, false, false); return; }"
         ),
         "its release goes only where a press went: report_mouse declines one no program had"
     );
@@ -11469,8 +11553,8 @@ fn a_held_buttons_reports_stay_with_the_pane_its_press_went_to() {
         "self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, bcode) { return; } // Context menu:",
         "if bcode == 0 { ws.card_press = None; } if ws.card_focus.take().is_some() { ws.accessibility_pending = true; } self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, bcode) { return true; } let bar",
         // Each release ends a gesture of Kettle's own first.
-        "ws.held_buttons.end_own(bcode); // A release ends an editor drag inside the search bar;",
-        "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); self.send_mouse(ws, sgr, false, false); return; }",
+        "ws.held_buttons.end_own(bcode); if self.confirm_mouse_release(ws, bcode) { return; } // A release ends an editor drag inside the search bar;",
+        "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); if self.confirm_mouse_release(ws, sgr) { return; } self.send_mouse(ws, sgr, false, false); return; }",
         "// As natively: a gesture of Kettle's own ends with its release. ws.held_buttons.end_own(bcode);",
     ] {
         assert!(flat.contains(needle), "{needle}");
@@ -12770,6 +12854,10 @@ fn native_and_control_selection_motion_share_the_drag_threshold() {
     let install_at = install_confirm
         .find("ws.confirm_dialog = Some(dialog);")
         .expect("confirmation stores the modal");
+    let release_at = install_confirm
+        .find("self.release_held_buttons(ws, |_| true);")
+        .expect("program mouse gestures receive their releases before modal ownership");
+    assert!(finish_at < release_at && release_at < install_at);
     assert!(
         finish_at < install_at,
         "selection ownership must end before a confirmation becomes visible"
@@ -15699,133 +15787,209 @@ fn title_edit_overlay_is_wide_enough_to_show_the_input() {
     assert_eq!(none, (0.0, 0.0, sw, row_h));
 }
 
-#[test]
-fn confirm_dialog_button_hit_tracks_right_aligned_button_row() {
-    use super::{ConfirmButton, confirm_dialog_button_hit};
-
-    let buttons = vec![
-        ConfirmButton::Cancel,
-        ConfirmButton::Confirm {
-            label: "Close".into(),
-            destructive: true,
-        },
-    ];
-    let sw = 800.0;
-    let sh = 600.0;
-    let cw = 8.0;
-    let ch = 16.0;
-    let y = sh - (ch + 10.0) + 4.0;
-
-    // `[  Cancel]  [  Close]` consumes 10 + 2 + 9 = 21 cells, right-aligned
-    // inside the PAINTED width. An 800px window at cw=8 is 100 cells, but
-    // the renderer fits bottom-bar overlays to `overlay_label_cols` =
-    // floor(w/cw) - 1 = 99, so the row occupies columns 78..99:
-    // Cancel 78..88, gap 88..90, Close 90..99. Hit-testing against the full
-    // window width would shift the live region one column right, past the
-    // last painted glyph.
-    assert_eq!(
-        confirm_dialog_button_hit(&buttons, (78.0 * cw + 1.0, y), (sw, sh), (cw, ch), &EN_TEXT),
-        Some(0),
-        "clicking the visible Cancel button should cancel"
-    );
-    assert_eq!(
-        confirm_dialog_button_hit(&buttons, (90.0 * cw + 1.0, y), (sw, sh), (cw, ch), &EN_TEXT),
-        Some(1),
-        "clicking the visible Close button should confirm"
-    );
-    assert_eq!(
-        confirm_dialog_button_hit(&buttons, (88.0 * cw + 1.0, y), (sw, sh), (cw, ch), &EN_TEXT),
-        None,
-        "the gap between buttons is not a button"
-    );
-    assert_eq!(
-        confirm_dialog_button_hit(&buttons, (99.0 * cw + 1.0, y), (sw, sh), (cw, ch), &EN_TEXT),
-        None,
-        "the column past the painted bar is not a button"
-    );
-    assert_eq!(
-        confirm_dialog_button_hit(
-            &buttons,
-            (91.0 * cw + 1.0, sh - ch - 20.0),
-            (sw, sh),
-            (cw, ch),
-            &EN_TEXT
-        ),
-        None,
-        "clicks above the confirm bar are still generic modal clicks"
-    );
-
-    // The painted budget is 21 columns when the window provides 22. The
-    // complete row is visible and live at that exact boundary; one column
-    // narrower paints no buttons and therefore must expose no target.
-    assert_eq!(
-        confirm_dialog_button_hit(&buttons, (1.0, y), (22.0 * cw, sh), (cw, ch), &EN_TEXT),
-        Some(0)
-    );
-    assert_eq!(
-        confirm_dialog_button_hit(&buttons, (1.0, y), (21.0 * cw, sh), (cw, ch), &EN_TEXT),
-        None
-    );
-}
-
-#[test]
-fn confirm_dialog_button_hit_uses_display_columns() {
-    use super::{ConfirmButton, confirm_dialog_button_cells, confirm_dialog_button_hit};
-
-    let buttons = vec![
-        ConfirmButton::Cancel,
-        ConfirmButton::Confirm {
-            label: "界".into(),
-            destructive: true,
-        },
-    ];
-    let sw = 800.0;
-    let sh = 600.0;
-    let cw = 8.0;
-    let ch = 16.0;
-    let y = sh - (ch + 10.0) + 4.0;
-
-    assert_eq!(confirm_dialog_button_cells(&buttons[1], &EN_TEXT), 6);
-    assert_eq!(
-        confirm_dialog_button_hit(&buttons, (81.0 * cw + 1.0, y), (sw, sh), (cw, ch), &EN_TEXT),
-        Some(0),
-        "the hit row must start where the wide-glyph button row is painted"
-    );
-}
-
-/// Hit testing measures the buttons in the UI's language, as the renderer
-/// paints them. A 24-column window fits `[  Cancel]  [  Close]` (21 cells)
-/// but not `[  Cancelar]  [  Cerrar]` (24 cells), so in Spanish the row is
-/// hidden and must expose no target: an invisible Close would confirm.
-#[test]
-fn confirm_dialog_button_hit_measures_translated_labels() {
-    use super::{ConfirmButton, confirm_dialog_button_hit};
-    let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
-    let buttons = |close: &str| {
-        vec![
-            ConfirmButton::Cancel,
-            ConfirmButton::Confirm {
-                label: close.to_string(),
+fn confirmation_test_overlay() -> kettle_render::ConfirmDialogOverlay {
+    kettle_render::ConfirmDialogOverlay {
+        heading: "Close this window?".into(),
+        body: "Both panes will close. Commands may be interrupted and unsaved work may be lost."
+            .into(),
+        buttons: vec![
+            kettle_render::ConfirmDialogButton {
+                label: "Cancel".into(),
+                destructive: false,
+            },
+            kettle_render::ConfirmDialogButton {
+                label: "Close window".into(),
                 destructive: true,
             },
-        ]
-    };
-    let (sh, cw, ch) = (600.0, 8.0, 16.0);
-    let y = sh - (ch + 10.0) + 4.0;
-    let sw = 24.0 * cw;
+        ],
+        focus_idx: 0,
+        hover_idx: None,
+        pressed_idx: None,
+        scroll: 0,
+    }
+}
+
+#[test]
+fn confirm_dialog_pointer_targets_match_centered_translated_geometry() {
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let mut dialog = confirmation_test_overlay();
+        dialog.buttons[0].label = tr.text(kettle_i18n::Text::ConfirmButtonCancel).into();
+        dialog.buttons[1].label = "Cerrar ventana 界".into();
+        for surface in [(800.0, 600.0), (192.0, 600.0), (80.0, 100.0)] {
+            for index in 0..dialog.buttons.len() {
+                let initial =
+                    kettle_render::ConfirmDialogLayout::new(surface, (8.25, 16.5), 1.0, &dialog);
+                dialog.scroll = initial.scroll_to_button(index);
+                let layout =
+                    kettle_render::ConfirmDialogLayout::new(surface, (8.25, 16.5), 1.0, &dialog);
+                let (x, y, w, h) = layout.buttons[index];
+                if w > 0.0 && h > 0.0 {
+                    assert_eq!(
+                        super::confirm_dialog_button_hit(&layout, x + w * 0.5, y + h * 0.5),
+                        Some(index)
+                    );
+                }
+                assert_eq!(super::confirm_dialog_button_hit(&layout, 0.0, 0.0), None);
+            }
+        }
+    }
+}
+
+#[test]
+fn confirmation_pointer_activation_requires_the_armed_target_and_unchanged_geometry() {
+    let dialog = confirmation_test_overlay();
+    let layout =
+        kettle_render::ConfirmDialogLayout::new((800.0, 600.0), (8.25, 16.5), 1.0, &dialog);
+    let center = |(x, y, w, h): (f32, f32, f32, f32)| (x + w / 2.0, y + h / 2.0);
+    let (close_x, close_y) = center(layout.buttons[1]);
+    let (cancel_x, cancel_y) = center(layout.buttons[0]);
+    let armed = Some((1, layout.buttons[1]));
     assert_eq!(
-        confirm_dialog_button_hit(
-            &buttons("Close"),
-            (20.0 * cw, y),
-            (sw, sh),
-            (cw, ch),
-            &EN_TEXT
-        ),
+        super::confirm_release_target(armed, &layout, close_x, close_y),
         Some(1)
     );
     assert_eq!(
-        confirm_dialog_button_hit(&buttons("Cerrar"), (20.0 * cw, y), (sw, sh), (cw, ch), &es),
+        super::confirm_release_target(armed, &layout, cancel_x, cancel_y),
         None
+    );
+    assert_eq!(
+        super::confirm_release_target(armed, &layout, 0.0, 0.0),
+        None
+    );
+    assert_eq!(
+        super::confirm_release_target(None, &layout, close_x, close_y),
+        None
+    );
+    let resized =
+        kettle_render::ConfirmDialogLayout::new((800.0, 700.0), (8.25, 16.5), 1.0, &dialog);
+    let (x, y) = center(resized.buttons[1]);
+    assert_eq!(super::confirm_release_target(armed, &resized, x, y), None);
+}
+
+#[test]
+fn confirmation_space_accepts_native_and_control_key_forms() {
+    use winit::keyboard::{Key, NamedKey};
+    assert!(super::confirmation_space_key(&Key::Character(" ".into())));
+    assert!(super::confirmation_space_key(&Key::Named(NamedKey::Space)));
+    assert!(!super::confirmation_space_key(&Key::Named(NamedKey::Enter)));
+    assert!(!super::confirmation_space_key(&Key::Character("x".into())));
+}
+
+#[test]
+fn confirmation_space_release_preserves_terminal_ownership() {
+    use crate::window_state::{track_consumed_key_release, track_terminal_key_press};
+    use std::collections::HashSet;
+    use winit::event::ElementState;
+    use winit::keyboard::{KeyCode, PhysicalKey};
+
+    let key = PhysicalKey::Code(KeyCode::Space);
+    for terminal_press in [false, true] {
+        let mut suppressed = HashSet::new();
+        let mut terminal = HashSet::new();
+        if terminal_press {
+            track_terminal_key_press(&mut suppressed, &mut terminal, key);
+        }
+        // A repeat after the modal opens cannot steal an existing PTY press.
+        track_consumed_key_release(
+            &mut suppressed,
+            &mut terminal,
+            key,
+            ElementState::Pressed,
+            true,
+        );
+        let ui_owned = track_consumed_key_release(
+            &mut suppressed,
+            &mut terminal,
+            key,
+            ElementState::Released,
+            true,
+        );
+        assert_eq!(ui_owned, !terminal_press);
+        let mut armed = Some(0);
+        assert_eq!(
+            super::confirmation_space_release_target(&mut armed, 0, ui_owned),
+            (!terminal_press).then_some(0)
+        );
+        assert!(armed.is_none());
+        assert!(suppressed.is_empty() && terminal.is_empty());
+    }
+    let mut armed = Some(0);
+    assert_eq!(
+        super::confirmation_space_release_target(&mut armed, 1, true),
+        None
+    );
+    assert!(armed.is_none());
+    let source = production_source();
+    assert!(source.contains("self.confirm_space_release(ws, release_consumed);\n                    if release_consumed {\n                        return;\n                    }"));
+}
+
+#[test]
+fn confirmation_accessibility_excludes_the_retained_settings_subtree() {
+    let overlay = kettle_render::Overlay {
+        confirm_dialog: Some(confirmation_test_overlay()),
+        settings: Some(kettle_render::SettingsOverlay {
+            categories: vec!["Keybinds".into()],
+            label_cols: 20,
+            value_cols: 20,
+            active_category: 0,
+            background_page: false,
+            rows: Vec::new(),
+            focused_row: 0,
+            title: "Settings".into(),
+            hints: String::new(),
+            footer_note: None,
+        }),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    assert_eq!(projection.roots.len(), 1);
+    let (_, dialog) = projection
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == accesskit::Role::AlertDialog)
+        .unwrap();
+    assert!(dialog.is_modal());
+    assert_eq!(dialog.label(), Some("Close this window?"));
+    assert!(dialog.description().unwrap().contains("unsaved work"));
+    assert_eq!(projection.nodes.len(), 3);
+}
+
+#[test]
+fn confirmation_accessibility_rejects_background_and_stale_targets() {
+    use super::{ConfirmAccessibilityAction as C, confirmation_accessibility_action as route};
+    use accesskit::Action;
+    for target in [
+        super::ACCESSIBILITY_ROOT_ID,
+        super::accessibility_pane_id(1),
+        super::accessibility_modal_id(5, 2),
+        super::ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID,
+    ] {
+        for action in [
+            Action::Focus,
+            Action::Click,
+            Action::ScrollUp,
+            Action::SetValue,
+        ] {
+            assert_eq!(route(target, action, 2), None);
+        }
+    }
+    assert_eq!(
+        route(super::accessibility_modal_id(1, 1), Action::Focus, 2),
+        Some(C::Focus(0))
+    );
+    assert_eq!(
+        route(super::accessibility_modal_id(1, 2), Action::Click, 2),
+        Some(C::Activate(1))
+    );
+    assert_eq!(
+        route(super::accessibility_modal_id(1, 3), Action::Click, 2),
+        None
+    );
+    assert_eq!(
+        route(super::accessibility_modal_id(1, 0), Action::ScrollDown, 2),
+        Some(C::Scroll(1))
     );
 }
 

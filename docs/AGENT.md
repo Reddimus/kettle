@@ -232,6 +232,20 @@ includes them. Negative coordinates are valid on monitors left of or above
 the primary display. Use the reported scale factor when converting screenshot
 or logical coordinates, and sample each target window independently.
 
+When a confirmation is open, `ui_geometry.confirmation` reports its centered
+panel, heading, and body rectangles; scroll offset and limit; and each button's
+label, bounds, focus, hover, pressed, and destructive state. It is null otherwise.
+These bounds come from the layout used for painting, pointer input, and
+accessibility. Rebinding confirmations use friendly action names and never
+include the payload of a SendText action.
+
+Video viewer geometry also reports `transport`, `timeline`, and `time_label`
+rectangles, plus `hovered_control` and `scrubbing`. `timeline` describes the
+painted row; `time_label` includes the initial duration before playback, and
+`controls.scrubber` is present once seeking is available. All rectangles are
+physical pixels and use the same display scale as pointer and accessibility
+targets.
+
 The control server lets another process inspect and drive a *running* kettle
 window. It is **off by default**; enable it per launch or in config:
 
@@ -408,7 +422,7 @@ playback into a lane; `media-open-mode = lane` opens there directly.
 
 The pinned lane takes about 40% of its pane and resizes the terminal; keys
 still go to the terminal unless the user focuses the lane.
-The lane shows one item fitted, never enlarged past its pixels, on white for
+The lane shows one item fitted, with still images never enlarged past their pixels, on white for
 SVG and a checkerboard for raster, with its title, kind, size and sender,
 and `‹ ›` to browse, `▾` to collapse the lane to a one-row strip and `×` to
 close it. Where this platform permits an image viewer and the item still
@@ -480,7 +494,26 @@ length on the poster's foot, and a caption with its own size and length
 (`clip.webm - video 1280x720 0:12`); the lane's detail line gives its own
 size, codec, length and whether it has sound, and a screen reader hears the
 same. Nothing plays on its own and nothing makes a sound: a card never
-starts a video. The lane's `▶` (Space while it holds the keyboard;
+starts a video. A video opens paused within the same padded 90% split viewer.
+Its picture scales up to fit without cropping. A central Play affordance
+appears while paused; playback feedback fades after starting. The Play/Pause,
+sound, seek, time, Theater and Fullscreen controls sit beneath the picture
+when there is room, including when letterboxing leaves a large gap to the
+viewer's footer. For portrait video, the controls use the side margins to keep
+seeking and time visible. Play/Pause has a 44-logical-pixel target. The
+timeline spans its own row with a 24-logical-pixel hit area; its thin track in
+the theme accent grows and reveals a round seek handle on hover or drag. The
+accent retains contrast against the dark strip. Narrow players move the time
+label to its own line. Short viewers keep their header controls.
+
+Click the picture, press K, or use Play/Pause to toggle.
+T switches to a larger Theater view within 90% of the window, preserving padding.
+F toggles native fullscreen; Esc leaves fullscreen first, then closes the viewer.
+Closing or pinning restores fullscreen only when the viewer entered it. Images
+and documents retain their existing fit and pan behavior. `preview_overlay`
+reports `presentation` as `pane`, `theater`, or `fullscreen`.
+
+The lane's `▶` (Space while it holds the keyboard;
 `perform_action` `video_play`) plays the video in the lane in a sandboxed
 worker of its own. On Linux, trusted ffmpeg decodes picture and sound; a
 separate PCM broker plays the sound through a PulseAudio-compatible service.
@@ -1203,7 +1236,7 @@ with its arguments unchanged:
   says.
 
 Codex then sends media to the shelf of the pane it runs in. With Codex CLI
-0.162, whose hook output Kettle's cards are placed for, supported launches
+0.162 or newer in the 0.x line, supported launches
 on macOS and Linux also add:
 - `--codex-card-hook` to the server, and `kettle_card` to its enabled tools;
 - a `PostToolUse` hook (`-c hooks.PostToolUse=…`) that, after each
@@ -1216,8 +1249,10 @@ a new hook only after you trust it, so the first such launch opens Codex's
 alone; "Trust all and continue" trusts every hook waiting for review. Codex
 saves that choice in its own configuration, and Kettle's hook stays the same
 across launches and updates, so you are asked once. Kettle never trusts it
-for you. Until it is trusted, or with another Codex version, media goes to the
-shelf alone. So does a launch that sets hooks itself with `-c hooks…`, which
+for you. Until it is trusted, media goes to the shelf alone. Codex 0.159
+through 0.161 also get the shelf alone; an unsupported CLI major gets no
+Kettle launch options. A launch that sets hooks itself with `-c hooks…` gets
+the shelf alone, because its hooks
 would replace Kettle's.
 
 A session started this way does not show in `codex agents`. The function names the Kettle that
@@ -1244,15 +1279,23 @@ binding; closing the agent or restarting its pane invalidates it. Codex's
 native install and `npm install -g @openai/codex` are supported; files a
 user's own private group may write (Ubuntu's default umask 002) count as the
 user's. Unknown
-versions, layouts and invocation forms keep shelf delivery.
+release lines, executable layouts and invocation forms get no card scope.
 
 On Linux, Claude Code previews also offer a `claude` function in new zsh and
 fish panes. For another shell, review `kettle agent-setup --print --agent
 claude --shell bash`. It forwards arguments unchanged and respects the
 existing plugin policy. Print, background and unknown command forms get no
-card scope. The current card profiles are Codex 0.162 and native Claude Code
-2.1.280 or a later 2.1 release; these describe hook layouts, not vendor
-authenticity.
+card scope. Cards support Codex 0.162 or newer within 0.x, and native Claude
+Code 2.1.280 or newer within 2.x. A new major version needs a compatibility
+review. These minimum versions describe compatibility, not vendor authenticity.
+
+Support ranges and verification are separate. The offline fixture exercises
+Codex 0.162.0 and 0.163.0 and Claude Code 2.1.280 and 2.1.303. It simulates
+their hook output and does not establish official-client acceptance. A later
+client can change its metadata or printed hook layout even within a supported
+major version. That can prevent the inline card from appearing; the item stays
+on the media shelf. Kettle does not automatically detect a client that fails
+to print a recognizable card.
 
 The hook retrieves each card once through its own display connection with a
 five-second permit. Neither the permit nor card text enters the model's

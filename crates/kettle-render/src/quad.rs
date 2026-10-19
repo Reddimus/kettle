@@ -19,6 +19,46 @@ pub struct QuadInstance {
     pub color: [f32; 4],
 }
 
+/// Keep post-terminal effects outside a modal viewer. A quad yields at most
+/// four disjoint pieces, preserving blend order and alpha without another pass.
+pub(crate) fn exclude_rect(quads: &mut Vec<QuadInstance>, hole: crate::Rect4) {
+    let (hx, hy, hw, hh) = hole;
+    if ![hx, hy, hw, hh, hx + hw, hy + hh]
+        .into_iter()
+        .all(f32::is_finite)
+        || hw <= 0.0
+        || hh <= 0.0
+    {
+        return;
+    }
+    let original = std::mem::take(quads);
+    quads.reserve(original.len());
+    for quad in original {
+        let [x, y] = quad.pos;
+        let [w, h] = quad.size;
+        let (left, top) = (x.max(hx), y.max(hy));
+        let (right, bottom) = ((x + w).min(hx + hw), (y + h).min(hy + hh));
+        if left >= right || top >= bottom {
+            quads.push(quad);
+            continue;
+        }
+        for (x, y, w, h) in [
+            (x, y, w, top - y),
+            (x, bottom, w, y + h - bottom),
+            (x, top, left - x, bottom - top),
+            (right, top, x + w - right, bottom - top),
+        ] {
+            if w > 0.0 && h > 0.0 {
+                quads.push(QuadInstance {
+                    pos: [x, y],
+                    size: [w, h],
+                    ..quad
+                });
+            }
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Screen {
@@ -499,6 +539,65 @@ pub(crate) fn visible_instance_ranges(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modal_hole_clips_terminal_effects_without_overlap_or_alpha_changes() {
+        let quad = QuadInstance {
+            pos: [0.0, 0.0],
+            size: [100.0, 100.0],
+            color: [0.1, 0.2, 0.3, 0.4],
+        };
+        let mut quads = vec![quad];
+        exclude_rect(&mut quads, (20.0, 30.0, 60.0, 40.0));
+        assert_eq!(quads.len(), 4);
+        assert_eq!(
+            quads.iter().map(|q| q.size[0] * q.size[1]).sum::<f32>(),
+            7600.0
+        );
+        for (i, q) in quads.iter().enumerate() {
+            assert_eq!(q.color, quad.color);
+            assert!(
+                q.pos[0] + q.size[0] <= 20.0
+                    || q.pos[0] >= 80.0
+                    || q.pos[1] + q.size[1] <= 30.0
+                    || q.pos[1] >= 70.0
+            );
+            for other in &quads[i + 1..] {
+                assert!(
+                    q.pos[0] + q.size[0] <= other.pos[0]
+                        || other.pos[0] + other.size[0] <= q.pos[0]
+                        || q.pos[1] + q.size[1] <= other.pos[1]
+                        || other.pos[1] + other.size[1] <= q.pos[1]
+                );
+            }
+        }
+        exclude_rect(&mut quads, (0.0, 0.0, 100.0, 100.0));
+        assert!(quads.is_empty());
+    }
+
+    #[test]
+    fn clipping_retains_blend_order_and_does_not_touch_disjoint_effects() {
+        let mut quads = vec![
+            QuadInstance {
+                pos: [0.0, 0.0],
+                size: [100.0, 100.0],
+                color: [1.0, 0.0, 0.0, 0.5],
+            },
+            QuadInstance {
+                pos: [0.0, 0.0],
+                size: [100.0, 100.0],
+                color: [0.0, 0.0, 1.0, 0.5],
+            },
+        ];
+        exclude_rect(&mut quads, (20.0, 20.0, 60.0, 60.0));
+        assert!(quads[..4].iter().all(|q| q.color[0] == 1.0));
+        assert!(quads[4..].iter().all(|q| q.color[2] == 1.0));
+        let before = bytemuck::cast_slice::<_, u8>(&quads).to_vec();
+        exclude_rect(&mut quads, (200.0, 200.0, 100.0, 100.0));
+        assert_eq!(bytemuck::cast_slice::<_, u8>(&quads), before);
+        exclude_rect(&mut quads, (f32::NAN, 0.0, 100.0, 100.0));
+        assert_eq!(bytemuck::cast_slice::<_, u8>(&quads), before);
+    }
 
     /// The blink's off phase draws everything but the cursor, in the same
     /// order, as two contiguous ranges around it.

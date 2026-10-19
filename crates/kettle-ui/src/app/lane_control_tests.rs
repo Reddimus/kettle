@@ -1277,6 +1277,8 @@ fn lane_controls_have_distinct_names_and_node_ids() {
         Hit::NextPage,
         Hit::Play,
         Hit::Sound,
+        Hit::Theater,
+        Hit::Fullscreen,
         Hit::Scrub,
         Hit::Resize,
         Hit::Inside,
@@ -1286,12 +1288,12 @@ fn lane_controls_have_distinct_names_and_node_ids() {
     assert_eq!(names.len(), hits.len());
     // The lane, each control, and the bar after them.
     use super::{LANE_CONTROLS, LANE_SCRUBBER_PART, lane_controls};
-    let parts = 0..=LANE_SCRUBBER_PART;
+    let parts = 0..=20;
     let ids: std::collections::HashSet<_> = parts
         .clone()
         .map(|part| super::accessibility_lane_id(7, part).expect("in range"))
         .collect();
-    assert_eq!(ids.len(), LANE_CONTROLS + 2);
+    assert_eq!(ids.len(), LANE_CONTROLS + 3);
     let controls: std::collections::HashSet<_> = lane_controls(
         &kettle_render::media_lane_geometry(
             &super::tests::test_lane_panel(),
@@ -1303,7 +1305,8 @@ fn lane_controls_have_distinct_names_and_node_ids() {
     .iter()
     .map(|(part, _, _)| *part)
     .collect();
-    assert_eq!(controls, (1..=LANE_CONTROLS as u64).collect());
+    assert_eq!(controls, (1..=16).chain([19, 20]).collect());
+    assert!(!controls.contains(&LANE_SCRUBBER_PART));
     for part in parts {
         let id = super::accessibility_lane_id(7, part).unwrap();
         assert_eq!(super::accessibility_lane_part(id), Some((7, part)));
@@ -1432,7 +1435,7 @@ fn lane_gestures_are_wired() {
         "ws.selection_autoscroll_edge = 0; // A press the lane took owns the pointer's motion until its // release: it resizes the lane or pans its item, and nothing // else sees it. if self.resize_preview_lane(ws) || self.drag_preview_lane(ws) { self.sync_cursor_icon(ws); return; }",
         "ws.selection_autoscroll_edge = 0; if self.resize_preview_lane(ws) || self.drag_preview_lane(ws) { return; }",
         "// The release of a press a lane took is the lane's. if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); self.sync_cursor_icon(ws); return; } if bcode == 0 && let Some(drag) = ws.lane_drag.take() { self.end_lane_drag(ws, drag); self.sync_cursor_icon(ws); return; } // The release of a press a card took is the card's too.",
-        "ws.held_buttons.end_own(bcode); if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); return true; } if bcode == 0 && let Some(drag) = ws.lane_drag.take() { self.end_lane_drag(ws, drag); return true; }",
+        "ws.held_buttons.end_own(bcode); if self.confirm_mouse_release(ws, bcode) { return true; } if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); return true; } if bcode == 0 && let Some(drag) = ws.lane_drag.take() { self.end_lane_drag(ws, drag); return true; }",
         "Self::hide_cursor_layer(ws); // Its release may never come here. ws.lane_drag = None; self.end_lane_resize(ws);",
         // Any press ends a drag whose release went elsewhere, natively
         // and from a control client, as does a menu opening; a menu or
@@ -1563,6 +1566,7 @@ fn viewer_pin_node_cannot_be_reused_as_a_lane_collapse() {
 fn viewer_keyboard_controls_include_the_video_seek_slider() {
     let mut lane = super::tests::test_lane_panel();
     lane.scrubber = Some(kettle_render::MediaLaneScrubber {
+        seekable: true,
         position_ms: 0,
         duration_ms: 1000,
         label: "0:00".into(),

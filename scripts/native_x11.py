@@ -68,6 +68,12 @@ class X11Input:
                 self.xt.XTestFakeKeyEvent(self.display, code, 0, 0)
             self.sync()
 
+    def key(self, name, down):
+        code = self.x.XKeysymToKeycode(self.display, self.x.XStringToKeysym(name.encode()))
+        if not code or not self.xt.XTestFakeKeyEvent(self.display, code, int(down), 0):
+            raise RuntimeError("X11 refused native key input")
+        self.sync()
+
     def move(self, window, x, y):
         self.x.XWarpPointer(self.display, 0, window, 0, 0, 0, 0, x, y)
         self.sync()

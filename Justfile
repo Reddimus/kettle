@@ -433,7 +433,7 @@ gauntlet-full: gauntlet-strict full-native-gates
     @echo "This is not a PASS for native legs on other operating systems."
 
 [linux]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke confirmation-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke
     @echo "NOT APPLICABLE on Linux: macOS actool and native appearance gates."
 
 [macos]
@@ -489,7 +489,7 @@ headless-gpu-smoke: release
     log="{{TMPDIR}}/kettle-headless-smoke.log"
     # The `bash -c '…$rc…'` invocation is single-quoted on purpose so
     # the inner `$rc` expands inside the *nested* bash, not this one.
-    xvfb-run -a bash -c 'timeout 10 ./target/release/kettle >'"$log"' 2>&1; rc=$?; \
+    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET xvfb-run -a bash -c 'timeout 10 ./target/release/kettle >'"$log"' 2>&1; rc=$?; \
       grep -qiE "panic|thread .* panicked" '"$log"' && { echo "panic in run"; cat '"$log"'; exit 1; }; \
       test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat '"$log"'; exit 1; }; \
       echo "headless run OK (exit $rc)"'
@@ -712,7 +712,7 @@ macos-perf:
 # results go under target/diagnostics/lane-media-smoke/.
 [linux]
 lane-media-smoke: release media-worker
-    xvfb-run -a -s "-screen 0 1600x1000x24" env LIBGL_ALWAYS_SOFTWARE=1 python3 scripts/check-lane-media-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker
+    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET xvfb-run -a -s "-screen 0 1600x1000x24" env LIBGL_ALWAYS_SOFTWARE=1 python3 scripts/check-lane-media-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker
 
 # === Install / uninstall ===========================================
 
@@ -845,6 +845,11 @@ modal-shortcuts-smoke: release
 [unix]
 interaction-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release interaction
+
+# Confirm centered modal focus and input isolation using a private X11 display.
+[linux]
+confirmation-smoke: release
+    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a python3 scripts/check-confirmation-smoke.py --kettle ./target/release/kettle --out target/diagnostics/confirmations-$(date +%Y%m%d-%H%M%S)
 
 # Exercise a pointer-held selection at both vertical pane edges. macOS uses the
 # native pointer; Linux and Windows use the same portable control path that

@@ -7,9 +7,18 @@ pub(crate) struct Overlay {
     pub pane: u64,
     pub origin: Option<u64>,
     pub control: Option<u64>,
+    pub theater: bool,
+    /// Only fullscreen entered by this viewer is restored when it closes.
+    pub fullscreen: bool,
 }
 
 impl Overlay {
+    pub fn toggle_fullscreen(&mut self, current: bool) -> bool {
+        let next = !current;
+        self.fullscreen = next;
+        next
+    }
+
     pub fn step_control(&mut self, shown: &[u64], forward: bool) {
         let index = self
             .control
@@ -57,8 +66,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn viewer_owns_only_fullscreen_it_entered() {
+        let mut overlay = Overlay {
+            pane: 1,
+            origin: None,
+            control: None,
+            theater: true,
+            fullscreen: false,
+        };
+        assert!(overlay.toggle_fullscreen(false));
+        assert!(overlay.fullscreen);
+        assert!(!overlay.toggle_fullscreen(true));
+        assert!(!overlay.fullscreen);
+        assert!(overlay.theater);
+        assert!(!overlay.toggle_fullscreen(true));
+        assert!(!overlay.fullscreen);
+        assert!(overlay.toggle_fullscreen(false));
+        // The compositor may already have exited fullscreen independently.
+        assert!(overlay.toggle_fullscreen(false));
+        assert!(overlay.fullscreen);
+    }
+
+    #[test]
     fn keyboard_focus_wraps_only_through_shown_controls() {
         let mut overlay = Overlay {
+            theater: false,
+            fullscreen: false,
             pane: 9,
             origin: Some(3),
             control: None,
@@ -77,6 +110,8 @@ mod tests {
     #[test]
     fn disappearing_controls_do_not_keep_keyboard_focus() {
         let mut overlay = Overlay {
+            theater: false,
+            fullscreen: false,
             pane: 9,
             origin: None,
             control: Some(4),

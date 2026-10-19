@@ -84,9 +84,19 @@ agent:
   as a card you can open in its folder. `kettle ctl schema` prints the JSON
   Schema of the control API that `kettle ctl` drives.
 
-Click a card to open it in a viewer centered over its split; press Esc to
-close it or **Pin** to keep it beside the terminal. Video plays only when you
-press Play. On Linux, sound needs FFmpeg and PulseAudio or PipeWire.
+Click a card to open its viewer within 90% of its split, with padding on every
+side. Videos fit the available space and offer a central Play button and
+controls below the picture, with compact white icons on a dark strip and a
+thin timeline in the theme accent. Hover or drag the timeline to reveal its
+round seek handle; narrow players keep time on a separate line. Click the
+video or press K to play/pause, T for a larger Theater view, and F for
+fullscreen. Press Esc to close or **Pin** to keep it beside the terminal.
+Video plays only on your play gesture. On Linux, sound needs FFmpeg and
+PulseAudio or PipeWire.
+
+Inline cards support Codex 0.162 and newer within 0.x, and native Claude Code
+2.1.280 and newer within 2.x. Support for a new major version needs a
+compatibility review.
 
 ![An SVG chart in Kettle's centered viewer on Ubuntu](docs/images/media-viewer.png)
 
@@ -96,6 +106,7 @@ setting allows, and the local control API.
 ## Features
 
 - Tabs, splits, multiple windows, and tabs you can drag between windows
+- Centered close confirmations with Cancel focused to protect running work
 - Search, bounded scrollback, broadcast input and session restore
 - Inline images (kitty, iTerm2 and Sixel), file drop and pasted screenshots
 - Shell-driven completion cards, recording and SSH profiles

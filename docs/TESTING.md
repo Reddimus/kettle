@@ -624,6 +624,21 @@ Prerequisites beyond the desktop are included in the proof column.
 | Native image paste routes | - | Native paste shortcuts, PRIMARY/middle-click, managed image path, and optional real composer attachments | Linux/macOS |
 | Launch-scoped cards | - | Simulated agent TTY launches, receipt privacy, card pixels, exit, and shelf fallback | Linux |
 | Centered media viewer | - | Worker-backed viewer routing and live pixels through native X11 input | Linux X11 |
+| Centered confirmations | `just confirmation-smoke` | Two-pane close, safe Cancel, pointer/Space release, scrolling, retained Settings, visible text, and input isolation | Linux X11 |
+
+Confirmation acceptance checks the centered panel and button bounds, initial
+Cancel focus, Enter-repeat isolation, Space activation on release, explicit
+confirmation, and blocked outside clicks. Pressing a button and releasing
+outside it or over a different button must leave the question open. Exercise
+a two-pane close request, scrolling in a short window, and an actual keybinding
+conflict opened over Settings. Cancellation must preserve both panes and the
+configuration. Geometry tests cover narrow windows, translated labels, and
+scaled text. Native screenshots must show heading and button text; GPU checks
+verify retained Settings beneath the dimming. The accessibility projection must
+contain only the modal controls and restore Settings after cancellation.
+The visibility checker must reject a filled button without label pixels. A
+native Kitty recorder verifies a held Space release, and SGR mouse reports
+verify that opening the dialog ends each of five held buttons exactly once.
 
 ### Run a helper directly
 
@@ -653,10 +668,19 @@ Run the viewer helper inside an isolated X11 server, such as Xvfb:
 ```sh
 python3 scripts/check-agent-cards-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker --out target/diagnostics/agent-cards
 python3 scripts/check-media-viewer-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker --out target/diagnostics/media-viewer
+env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/check-confirmation-smoke.py --kettle ./target/release/kettle --out target/diagnostics/confirmations
 ```
 
 The card fixture needs Rust, Python, and Node already installed.
-It uses a simulated harness and makes no model calls.
+It also needs FFmpeg to make its JPEG, WebP, and MP4 fixtures.
+It uses simulated Codex 0.163 and Claude Code 2.1.303 harnesses and makes no
+model calls. Both native profiles must render and open PNG, JPEG, WebP, SVG,
+Mermaid, Markdown gallery, PDF, video, and generic-file cards. The npm profile
+and unscoped shelf fallback use SVG. Separate SVG cases retain Codex 0.162.0
+and Claude Code 2.1.280 coverage, and simulate later minor versions to check
+minimum-version admission. Every launch must clean up its cards on exit.
+The viewer helper checks distinct PDF pages, Home/End and first/last page
+boundaries, and Markdown gallery paging in addition to focus, pan, and pin.
 Xvfb fixture success does not establish official-client or GNOME Wayland
 acceptance. The viewer helper uses native X11 input.
 
@@ -863,6 +887,12 @@ Clippy, and tests. It adds the media stub-worker and panic-fault feature legs.
 It validates Justfile parsing and current-platform recipe visibility.
 It runs portable-pty tests/Clippy on each native OS, shell snippets in installed
 native interpreters, and the live-helper and Wayland-trace self-tests.
+
+The `build` job allows 60 minutes on Linux and Windows and 90 minutes on macOS.
+The macOS budget covers cold-cache compilation, native helper suites and both
+optimized binaries. Its agent CLI smoke uses the release binary already built
+in that job, invoking the same script as `just agent-cli-smoke` without a second
+release build. All mandatory PTY, JSON and MCP probes remain enabled.
 
 Linux adds these checks inside `build`:
 
@@ -1195,3 +1225,37 @@ independently validated under the standing protocol.
 Do not start the owner control from CI or a default just recipe.
 Do not claim calibrated performance, an A/A pass, or publication acceptance
 from the portable self-test alone.
+
+Linux X11 smoke helpers remove inherited `WAYLAND_DISPLAY` and `WAYLAND_SOCKET`
+from their child environments. This keeps windows and input inside the selected
+X11 display, including Xvfb launched from a Wayland desktop.
+
+The media viewer smoke also exercises video with native X11 input: opening stays
+paused, the padded 90% split viewer expands the picture without cropping, picture clicks and K toggle
+playback, Left/Right seek while paused, and T switches to a padded Theater view without
+changing terminal contents. Native fullscreen transitions and restoration require
+a desktop compositor and must be checked on each native platform; Xvfb without a
+window manager does not prove fullscreen presentation. Renderer regressions also
+check that short viewers retain a picture and portrait video retains seeking
+and time by using the available letterbox width.
+
+For native video acceptance, open a video card in a split and check that its
+poster fits inside 90% of its owning split without cropping. Check the central
+Play affordance and controls beneath the picture. Check the compact white
+Play/Pause and display icons on their dark strip, the full-width thin timeline
+in the theme accent, and the seek handle on hover. Click Play/Pause and the
+picture, press K, then drag across the timeline's hit area and seek with
+Left/Right while paused. Check narrow and scaled layouts: targets stay usable,
+time labels stay visible, and the picture remains uncropped. GPU tests verify
+that progress and timeline hover reuse prepared text. Pixel checks at 1x,
+1.25x, and 2x verify the central Play's vertical alignment, optical offset,
+and size; all bundled themes retain a visible accent. Check the initial
+timestamp and unchanged picture/control geometry when playback starts. Tests with narrow layouts cross elapsed-time digit boundaries; larger text retains fixed
+icon sizes, and an active silent preview shows Stop. Toggle T and check the
+pane-sized and window-sized views. Enter fullscreen with F; the first Esc must
+restore the window while leaving the viewer open, and the second must close
+it. Repeat with the Close and Pin controls while fullscreen. Finally, open and
+close a viewer in a window that was already fullscreen: it must leave that
+window fullscreen. Check the accessible names and toggle states for both size
+controls, including Spanish. Preserve the original pane focus and verify that
+player keys do not reach its terminal.
