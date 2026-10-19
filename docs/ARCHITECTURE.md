@@ -3679,6 +3679,9 @@ native-pixel cap. A decorative central Play affordance shares the picture's hit
 target; playback briefly shows feedback using its existing gesture timestamp.
 Controls follow the bottom edge of the fitted picture through letterboxing,
 reserving their row before playback so the picture does not jump when it starts.
+For portrait video, the centered row can extend into the side letterboxing to
+retain seeking and time. A short viewer keeps its picture and header controls
+instead of reserving a row that would leave no picture.
 The hit target routes through the existing play action, including its native
 user file access guard. Controls take priority over the picture, so scrubbing
 never toggles playback. The backdrop reuses the projected viewer rectangle;

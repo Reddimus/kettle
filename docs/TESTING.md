@@ -1209,7 +1209,9 @@ paused, the padded 90% split viewer expands the picture without cropping, pictur
 playback, Left/Right seek while paused, and T switches to a padded Theater view without
 changing terminal contents. Native fullscreen transitions and restoration require
 a desktop compositor and must be checked on each native platform; Xvfb without a
-window manager does not prove fullscreen presentation.
+window manager does not prove fullscreen presentation. Renderer regressions also
+check that short viewers retain a picture and portrait video retains seeking
+and time by using the available letterbox width.
 
 For native video acceptance, open a video card in a split and check that its
 poster fits inside 90% of its owning split without cropping. Check the central

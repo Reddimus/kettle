@@ -516,6 +516,8 @@ const MIN_TITLE_COLUMNS: f32 = 4.0;
 /// The fewest columns a playing video's bar keeps beside its time; with
 /// fewer the lane shows no bar.
 const MIN_SCRUBBER_COLUMNS: f32 = 4.0;
+/// Use letterboxing for a useful drag target before falling back to the minimum.
+const PREFERRED_SCRUBBER_COLUMNS: f32 = 24.0;
 
 /// Where a bar's knob `knob` wide sits on `track` with `played` pixels of it
 /// played: centered on where the video is, kept on the track, and at its
@@ -710,8 +712,12 @@ pub fn media_lane_geometry(
     // end, when the picture keeps a line of its own above it and the bar
     // keeps a few columns beside its time.
     let (mut scrubber, mut scrub_label) = (None, None);
-    let transport = video && lane.pin_label.is_some();
     let mut area_bottom = hint.1 - pad;
+    let transport_buttons = (3.0 + f32::from(lane.sound.is_some())) * button;
+    let transport = video
+        && lane.pin_label.is_some()
+        && area_bottom - lh - pad >= area_top + lh
+        && right - left >= transport_buttons;
     if transport {
         area_bottom -= lh + pad;
     }
@@ -796,12 +802,18 @@ pub fn media_lane_geometry(
         source_rows,
     };
     if transport && let Some(picture) = geometry.image {
-        // Controls follow the picture through letterboxing. Tiny pictures
-        // retain the header controls rather than overlapping them below.
-        if picture.2 >= 5.0 * button + 2.0 * pad {
+        // Portrait pictures lend their letterbox width to the controls, so
+        // seeking remains available without pushing the row down to the hint.
+        let minimum = transport_buttons
+            + lane.scrubber.as_ref().map_or(0.0, |bar| {
+                (bar.label.chars().count() as f32 + 1.0 + PREFERRED_SCRUBBER_COLUMNS) * tw
+                    + 2.0 * pad
+            });
+        let width = picture.2.max(minimum).min(content.2);
+        if width >= transport_buttons {
             let row = picture.1 + picture.3 + pad;
-            let mut left = picture.0;
-            let mut right = picture.0 + picture.2;
+            let mut left = picture.0 + (picture.2 - width) / 2.0;
+            let mut right = left + width;
             geometry.play = Some((left, row, button, lh));
             left += button;
             geometry.sound = lane.sound.map(|_| {
@@ -1430,6 +1442,56 @@ mod tests {
             playing.scrub_label.unwrap().0 + playing.scrub_label.unwrap().2
                 < playing.theater.unwrap().0
         );
+    }
+
+    #[test]
+    fn short_video_viewers_keep_the_picture_and_header_controls() {
+        let mut lane = viewer((1, 1), Some((160, 90)));
+        lane.rect.3 = 140.0;
+        lane.pin_label = Some("Pin".into());
+        lane.play = Some(MediaLanePlay::Play);
+        let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        let picture = geometry.image.expect("short viewer retains its picture");
+        assert!(picture.3 >= CELL.1);
+        assert_eq!(geometry.play.unwrap().1, geometry.title.1);
+        assert!(picture.1 + picture.3 <= geometry.hint.1);
+    }
+
+    #[test]
+    fn portrait_video_transport_uses_letterbox_width_to_keep_seeking() {
+        for (height, cell) in [(600.0, CELL), (500.0, (8.2, 20.0)), (600.0, (7.8, 16.25))] {
+            let mut lane = viewer((1, 1), Some((1080, 1920)));
+            lane.pin_label = Some("Pin".into());
+            lane.play = Some(MediaLanePlay::Pause);
+            lane.sound = Some(MediaLaneSound::Heard);
+            lane.scrubber = Some(MediaLaneScrubber {
+                position_ms: 1000,
+                duration_ms: 12000,
+                label: "0:01 / 0:12".into(),
+            });
+            lane.rect.3 = height;
+            let geometry = media_lane_geometry(&lane, cell, cell).unwrap();
+            let picture = geometry.image.unwrap();
+            let bar = geometry.scrubber.expect("portrait video keeps seeking");
+            let label = geometry.scrub_label.unwrap();
+            let play = geometry.play.unwrap();
+            let fullscreen = geometry.fullscreen.unwrap();
+            assert!(bar.2 >= PREFERRED_SCRUBBER_COLUMNS * cell.0 - 0.001);
+            assert!(bar.1 >= picture.1 + picture.3);
+            assert_eq!(bar.1, play.1);
+            assert!(bar.0 + bar.2 <= label.0);
+            assert!(label.0 + label.2 < geometry.theater.unwrap().0);
+            assert!(play.0 < picture.0 && fullscreen.0 + fullscreen.2 > picture.0 + picture.2);
+            assert!(play.0 >= geometry.content.0);
+            assert!(fullscreen.0 + fullscreen.2 <= geometry.content.0 + geometry.content.2);
+            assert!(
+                (play.0 + (fullscreen.0 + fullscreen.2 - play.0) / 2.0
+                    - picture.0
+                    - picture.2 / 2.0)
+                    .abs()
+                    < 0.01
+            );
+        }
     }
 
     const CELL: (f32, f32) = (10.0, 20.0);

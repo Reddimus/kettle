@@ -480,12 +480,14 @@ length on the poster's foot, and a caption with its own size and length
 (`clip.webm - video 1280x720 0:12`); the lane's detail line gives its own
 size, codec, length and whether it has sound, and a screen reader hears the
 same. Nothing plays on its own and nothing makes a sound: a card never
-starts a video. A video opens paused within the same padded 90% split viewer. Its picture scales
-up to fit without cropping. A central Play affordance appears while paused;
+starts a video. A video opens paused within the same padded 90% split viewer.
+Its picture scales up to fit without cropping. A central Play affordance appears while paused;
 playback feedback fades after starting. The Play/Pause, sound, seek, time, Theater
 and Fullscreen controls sit beneath the picture when there is room, including
-when letterboxing leaves a large gap to the viewer's footer. Tiny pictures keep
-their header controls. Click the picture, press K, or use Play/Pause to toggle.
+when letterboxing leaves a large gap to the viewer's footer. For portrait video,
+the centered control row can extend beyond the picture into its side margins
+to keep seeking and time visible. Short viewers keep their header controls.
+Click the picture, press K, or use Play/Pause to toggle.
 T switches to a larger Theater view within 90% of the window, preserving padding.
 F toggles native fullscreen; Esc leaves fullscreen first, then closes the viewer.
 Closing or pinning restores fullscreen only when the viewer entered it. Images
