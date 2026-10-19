@@ -81,12 +81,11 @@ jobs:
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # Per-job timeout. GitHub Actions defaults each job to 360 min, so a
-    # hung test or runaway loop would burn six hours before failing. This
-    # job takes ~25-30 min with a warm cache, and ~45 min on macOS when the
-    # cache was evicted (the repository's 10 GiB limit fills on busy days),
-    # with the media worker, its native and render crates and their tests;
-    # 60 min leaves headroom for a cold build on a slow runner.
-    timeout-minutes: 60
+    # hung test or runaway loop would burn six hours before failing.
+    # macOS also runs native helper suites and builds both optimized binaries.
+    # A cold-cache run reached the final CLI smoke at the old 60-minute limit.
+    # Keep Linux/Windows at 60 minutes and allow macOS 90 for the complete gate.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 90 || 60 }}
     strategy:
       fail-fast: false
       matrix:
@@ -431,8 +430,10 @@ jobs:
         # The mandatory Kettle-owned PTY/JSON/MCP probes run on every attempt.
         # Third-party CLIs are machine-local and report explicit skips when the
         # hosted runner does not provide them.
+        # Reuse the release binary built above; the Just recipe's release
+        # prerequisite would rebuild it before running this same smoke body.
         if: runner.os == 'macOS'
-        run: just agent-cli-smoke
+        run: KETTLE_BIN=./target/release/kettle ./scripts/check-agent-cli-smoke.sh
       - name: Linux installer smoke
         # Exercise the no-sudo Linux install/uninstall paths in an isolated
         # prefix. If the matching release tag already exists, also run the

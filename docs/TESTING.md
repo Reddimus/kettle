@@ -872,6 +872,12 @@ It validates Justfile parsing and current-platform recipe visibility.
 It runs portable-pty tests/Clippy on each native OS, shell snippets in installed
 native interpreters, and the live-helper and Wayland-trace self-tests.
 
+The `build` job allows 60 minutes on Linux and Windows and 90 minutes on macOS.
+The macOS budget covers cold-cache compilation, native helper suites and both
+optimized binaries. Its agent CLI smoke uses the release binary already built
+in that job, invoking the same script as `just agent-cli-smoke` without a second
+release build. All mandatory PTY, JSON and MCP probes remain enabled.
+
 Linux adds these checks inside `build`:
 
 - Direct vendor parser tests/Clippy and the clipboard URI patch.
