@@ -104,6 +104,9 @@ def check_video(app, native, binary, path, out):
     assert opened["image"]["width"] > 480, "video did not expand beyond its source size"
     assert "playback" not in opened, "opening a card started playback"
     assert opened["controls"]["play"]["y"] >= opened["image"]["y"] + opened["image"]["height"]
+    assert opened["controls"]["play"]["width"] >= 44 and opened["controls"]["play"]["height"] >= 44
+    assert opened["timeline"]["height"] >= 24
+    assert opened["time_label"], "poster reserves its timestamp before playback"
     app.screenshot(out / "video-center-play.png")
     terminal = grid(app.json_ctl("read_screen"))
     window = native.windows(app.pid)[-1]
@@ -132,6 +135,8 @@ def check_video(app, native, binary, path, out):
 
     picture_click()
     wait_for(lambda: playback("playing"))
+    assert viewer()["image"] == opened["image"], "starting playback moved the picture"
+    assert viewer()["transport"] == opened["transport"], "starting playback moved the controls"
     first = frame("video-playing-first.png")
     time.sleep(0.4)
     assert first != frame("video-playing-next.png"), "playing video pixels did not change"
@@ -150,6 +155,32 @@ def check_video(app, native, binary, path, out):
     wait_for(lambda: playback("playing"))
     native.keys("k")
     wait_for(lambda: playback("paused"))
+
+    def click_control(name):
+        rect = viewer()["controls"][name]
+        native.move(window, int(rect["x"] + rect["width"] / 2), int(rect["y"] + rect["height"] / 2))
+        native.button(1, True)
+        native.button(1, False)
+
+    click_control("play")
+    wait_for(lambda: playback("playing"))
+    click_control("play")
+    wait_for(lambda: playback("paused"))
+    track = viewer()["controls"]["scrubber"]
+    assert track["width"] >= viewer()["content"]["width"] * 0.8
+    assert track["height"] >= 24 and track["y"] + track["height"] <= viewer()["controls"]["play"]["y"]
+    native.move(window, int(track["x"] + track["width"] * 0.25), int(track["y"] + track["height"] / 2))
+    wait_for(lambda: viewer()["hovered_control"] == "scrubber")
+    app.screenshot(out / "video-timeline-hover.png")
+    native.button(1, True)
+    try:
+        wait_for(lambda: viewer()["scrubbing"])
+        native.move(window, int(track["x"] + track["width"] * 0.75), int(track["y"] + track["height"] - 2))
+    finally:
+        native.button(1, False)
+    seeked = wait_for(lambda: (lambda p: p if p and abs(p["position_ms"] / p["duration_ms"] - 0.75) < 0.04 else None)(playback("paused")))
+    assert not viewer()["scrubbing"]
+    app.screenshot(out / "video-timeline-seeked.png")
     native.keys("t")
     larger = wait_for(lambda: (lambda v: v if v["presentation"] == "theater" else None)(viewer()))
     assert larger["rect"]["height"] > opened["rect"]["height"]

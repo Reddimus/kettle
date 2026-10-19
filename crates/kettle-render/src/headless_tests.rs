@@ -1522,11 +1522,11 @@ fn confirmation_retains_uploads_and_clears_text_when_closed() {
     let snap = snapshot_of(80, 24, b"terminal context");
     let overlay = confirmation_overlay();
     let shown = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
-    let uploads = renderer.confirmation_surfaces.upload_counts();
+    let uploads = renderer.rounded_surfaces.upload_counts();
     let prepares = renderer.chrome_prepares;
     let repeated = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
     assert_eq!(shown, repeated);
-    let repeated_uploads = renderer.confirmation_surfaces.upload_counts();
+    let repeated_uploads = renderer.rounded_surfaces.upload_counts();
     assert_eq!(uploads.buffer_writes, repeated_uploads.buffer_writes);
     assert_eq!(uploads.buffer_bytes, repeated_uploads.buffer_bytes);
     assert!(repeated_uploads.skipped_writes > uploads.skipped_writes);
@@ -3203,6 +3203,7 @@ fn a_playing_lane_draws_its_frame_and_bar() {
             size: (160, 80),
         }),
         scrubber: Some(crate::MediaLaneScrubber {
+            seekable: true,
             position_ms: 2000,
             duration_ms: 8000,
             label: "0:02 / 0:08".into(),
@@ -3266,6 +3267,163 @@ fn a_playing_lane_draws_its_frame_and_bar() {
         center.2 > 200 && center.0 < 40,
         "the frame, blue: {center:?}"
     );
+
+    let mut player = overlay;
+    player.media_lanes[0].pin_label = Some("Pin".into());
+    player.media_lanes[0].rect = (0.0, 0.0, 480.0, 320.0);
+    let geometry = media_lane_geometry_scaled(
+        &player.media_lanes[0],
+        (renderer.cell_w, renderer.cell_h),
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.metrics.line_height,
+        ),
+        renderer.scale,
+    )
+    .unwrap();
+    let play = geometry.play.unwrap();
+    let timeline = geometry.scrubber.unwrap();
+    assert!(play.3 >= 44.0 && timeline.3 >= 24.0);
+    let painted = capture(&mut renderer, &cfg, &[view()], &player);
+    let primary =
+        crate::media_transport::paint(&player.media_lanes[0], &geometry, palette, None, false, 1.0)
+            .unwrap()
+            .shapes[0]
+            .fill;
+    let fill = [primary[0], primary[1], primary[2]].map(|v| (v * 255.0).round() as i32);
+    let mut glyph_pixels = 0;
+    for y in (play.1 + play.3 / 2.0 - 10.0) as u32..(play.1 + play.3 / 2.0 + 10.0) as u32 {
+        for x in (play.0 + play.2 / 2.0 - 8.0) as u32..(play.0 + play.2 / 2.0 + 8.0) as u32 {
+            let pixel = painted.get_pixel(x, y);
+            glyph_pixels += usize::from(
+                (0..3)
+                    .map(|c| (pixel[c] as i32 - fill[c]).abs())
+                    .sum::<i32>()
+                    > 96,
+            );
+        }
+    }
+    assert!(
+        glyph_pixels > 20,
+        "white Play/Pause icon is visible on the dark player strip"
+    );
+    for control in [geometry.theater.unwrap(), geometry.fullscreen.unwrap()] {
+        let white = (control.1 as u32..(control.1 + control.3) as u32)
+            .flat_map(|y| (control.0 as u32..(control.0 + control.2) as u32).map(move |x| (x, y)))
+            .filter(|&(x, y)| painted.get_pixel(x, y).0[..3].iter().all(|&v| v > 220))
+            .count();
+        assert!(white > 30, "display control has a visible vector outline");
+        let center = painted.get_pixel(
+            (control.0 + control.2 / 2.0) as u32,
+            (control.1 + control.3 / 2.0) as u32,
+        );
+        assert!(
+            center.0[..3].iter().all(|&v| v < 40),
+            "outlined icons have an open center, not letter glyphs"
+        );
+    }
+    assert!(
+        painted
+            .get_pixel((play.0 + 3.0) as u32, (play.1 + play.3 / 2.0) as u32)
+            .0[..3]
+            .iter()
+            .all(|&v| v < 40),
+        "Play has no accent-filled disc"
+    );
+    player.media_lanes[0].play = Some(MediaLanePlay::Stop);
+    let stop = capture(&mut renderer, &cfg, &[view()], &player);
+    assert!(
+        stop.get_pixel(
+            (play.0 + play.2 / 2.0 + 5.0) as u32,
+            (play.1 + play.3 / 2.0 - 5.0) as u32
+        )
+        .0[..3]
+            .iter()
+            .all(|&v| v > 220),
+        "silent preview advertises Stop with a square"
+    );
+    player.media_lanes[0].play = Some(MediaLanePlay::Pause);
+    player.media_lanes[0].focused_control = Some(play);
+    let keyboard_focus = capture(&mut renderer, &cfg, &[view()], &player);
+    let edge = keyboard_focus.get_pixel((play.0 + 1.0) as u32, (play.1 + play.3 / 2.0) as u32);
+    assert!(
+        edge.0[..3].iter().all(|&v| v > 220),
+        "keyboard focus is visible above the dark transport"
+    );
+    player.media_lanes[0].focused_control = None;
+    capture(&mut renderer, &cfg, &[view()], &player);
+    let prepares = renderer.text_prepares;
+    let writes = renderer.rounded_surfaces.upload_counts().buffer_writes;
+    player.media_lanes[0].scrubber.as_mut().unwrap().position_ms += 100;
+    let progressed = capture(&mut renderer, &cfg, &[view()], &player);
+    assert_eq!(
+        renderer.text_prepares, prepares,
+        "progress-only updates reuse prepared text"
+    );
+    assert!(renderer.rounded_surfaces.upload_counts().buffer_writes > writes);
+    player.media_pointer = Some((timeline.0 + timeline.2 / 2.0, timeline.1 + timeline.3 / 2.0));
+    let hovered = capture(&mut renderer, &cfg, &[view()], &player);
+    let changed = (timeline.1 as u32..(timeline.1 + timeline.3) as u32)
+        .flat_map(|y| (timeline.0 as u32..(timeline.0 + timeline.2) as u32).map(move |x| (x, y)))
+        .filter(|&(x, y)| progressed.get_pixel(x, y) != hovered.get_pixel(x, y))
+        .count();
+    assert!(
+        changed > 100,
+        "thin timeline grows and reveals its thumb on hover"
+    );
+    assert_eq!(
+        renderer.text_prepares, prepares,
+        "timeline hover does not reshape text"
+    );
+    for scale in [1.0, 1.25, 2.0] {
+        let mut scaled = Renderer::headless_for_tests_with(
+            &cfg,
+            (480.0 * scale) as u32,
+            (320.0 * scale) as u32,
+            scale,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        player.media_pointer = None;
+        player.media_lanes[0].rect = (0.0, 0.0, 480.0 * scale, 320.0 * scale);
+        player.media_lanes[0].play = Some(MediaLanePlay::Play);
+        player.media_lanes[0].play_feedback = Some(MediaLanePlay::Play);
+        let geometry = media_lane_geometry_scaled(
+            &player.media_lanes[0],
+            (scaled.cell_w, scaled.cell_h),
+            (scaled.overlay_text_cell_width(), scaled.metrics.line_height),
+            scale,
+        )
+        .unwrap();
+        let circle = geometry.play_feedback.unwrap().0;
+        let rendered = capture(&mut scaled, &cfg, &[view()], &player);
+        let white: Vec<_> = (circle.1.floor() as u32..(circle.1 + circle.3).ceil() as u32)
+            .flat_map(|y| {
+                (circle.0.floor() as u32..(circle.0 + circle.2).ceil() as u32).map(move |x| (x, y))
+            })
+            .filter(|&(x, y)| rendered.get_pixel(x, y).0[..3].iter().all(|&v| v > 220))
+            .collect();
+        assert!(white.len() > 20);
+        let min_x = white.iter().map(|p| p.0).min().unwrap() as f32;
+        let max_x = white.iter().map(|p| p.0).max().unwrap() as f32 + 1.0;
+        let min_y = white.iter().map(|p| p.1).min().unwrap() as f32;
+        let max_y = white.iter().map(|p| p.1).max().unwrap() as f32 + 1.0;
+        assert!(
+            ((min_y + max_y) / 2.0 - (circle.1 + circle.3 / 2.0)).abs() < 0.8,
+            "central Play is vertically centered at scale {scale}: {min_y}..{max_y} in {circle:?}"
+        );
+        let offset = ((min_x + max_x) / 2.0 - (circle.0 + circle.2 / 2.0)) / circle.2;
+        assert!(
+            (0.02..0.065).contains(&offset),
+            "central Play has a small rightward optical offset at scale {scale}: {offset}"
+        );
+        let height = (max_y - min_y) / circle.3;
+        assert!(
+            (0.38..0.46).contains(&height),
+            "central Play has consistent visible proportions at scale {scale}: {height}"
+        );
+    }
 }
 
 #[test]

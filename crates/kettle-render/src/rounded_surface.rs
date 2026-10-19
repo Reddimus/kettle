@@ -1,9 +1,9 @@
-//! Bounded filled and stroked rounded surfaces for the final modal layer.
+//! Bounded filled and stroked rounded surfaces for ordered UI layers.
 use crate::upload::{RetainedBytes, UploadCounters, UploadCounts, write_buffer_if_changed};
 use bytemuck::{Pod, Zeroable};
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-pub(crate) struct ModalSurface {
+pub(crate) struct RoundedSurface {
     pub pos: [f32; 2],
     pub size: [f32; 2],
     pub fill: [f32; 4],
@@ -42,16 +42,35 @@ fn linear(c:vec3<f32>) -> vec3<f32> {
 @fragment fn fs(in:Out) -> @location(0) vec4<f32> {
  let radius=clamp(in.params.x,0.0,min(in.size.x,in.size.y)*0.5);
  let q=abs(in.local-in.size*0.5)-(in.size*0.5-vec2<f32>(radius));
- let distance=length(max(q,vec2<f32>(0.0)))+min(max(q.x,q.y),0.0)-radius;
+ var distance=length(max(q,vec2<f32>(0.0)))+min(max(q.x,q.y),0.0)-radius;
+ let p=(in.local-in.size*0.5)/(in.size*0.5);
+ if in.params.z == 1.0 {
+  // Play is vertically centered with a small rightward optical offset.
+  distance=max(-p.x-0.5416667,p.x+abs(p.y)*1.7777778-0.7916667)*min(in.size.x,in.size.y)*0.5;
+ } else if in.params.z == 2.0 {
+  // Four fullscreen corners, each an L with a transparent center.
+  let a=abs(p);
+  distance=max(max(a.x,a.y)-0.85,max(0.4-min(a.x,a.y),0.65-max(a.x,a.y)))*min(in.size.x,in.size.y)*0.5;
+ } else if in.params.z == 3.0 {
+  // Speaker body plus sound wave, or diagonal mute stroke.
+  let body=max(max(abs(p.x+0.45)-0.25,abs(p.y)-0.3),-p.x-0.8);
+  let cone=max(abs(p.x+0.15)-0.3,abs(p.y)-(p.x+0.8));
+  var sound=max(abs(length(p-vec2<f32>(-0.25,0.0))-0.95)-0.07,0.35-p.x);
+  if in.params.w == 1.0 {
+   sound=max(abs(p.x+p.y)-0.09,max(abs(p.x),abs(p.y))-0.85);
+  }
+  distance=min(min(body,cone),sound)*min(in.size.x,in.size.y)*0.5;
+ }
  let aa=max(fwidth(distance)*0.5,0.25);
  let outer=1.0-smoothstep(-aa,aa,distance);
  let inner=1.0-smoothstep(-aa,aa,distance+max(in.params.y,0.0));
- let fa=in.fill.a*inner;
+ let opacity=select(1.0,in.params.w,in.params.z==4.0);
+ let fa=in.fill.a*inner*opacity;
  let sa=in.stroke.a*max(outer-inner,0.0);
  return vec4<f32>(linear(in.fill.rgb)*fa+linear(in.stroke.rgb)*sa,fa+sa);
 }
 "#;
-pub struct ModalSurfacePipeline {
+pub struct RoundedSurfacePipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     screen_buf: wgpu::Buffer,
@@ -63,20 +82,20 @@ pub struct ModalSurfacePipeline {
     counters: UploadCounters,
 }
 
-impl ModalSurfacePipeline {
+impl RoundedSurfacePipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("kettle-modal-surface"),
+            label: Some("kettle-rounded-surface"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("kettle-modal-surface-screen"),
+            label: Some("kettle-rounded-surface-screen"),
             size: std::mem::size_of::<Screen>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("kettle-modal-surface-bgl"),
+            label: Some("kettle-rounded-surface-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX,
@@ -89,7 +108,7 @@ impl ModalSurfacePipeline {
             }],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("kettle-modal-surface-bg"),
+            label: Some("kettle-rounded-surface-bg"),
             layout: &bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -97,19 +116,19 @@ impl ModalSurfacePipeline {
             }],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("kettle-modal-surface-layout"),
+            label: Some("kettle-rounded-surface-layout"),
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("kettle-modal-surface-pipeline"),
+            label: Some("kettle-rounded-surface-pipeline"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<ModalSurface>() as u64,
+                    array_stride: std::mem::size_of::<RoundedSurface>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4],
                 })],
@@ -133,10 +152,10 @@ impl ModalSurfacePipeline {
             multiview_mask: None,
             cache: None,
         });
-        let capacity = 16;
+        let capacity = 32;
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("kettle-modal-surface-instances"),
-            size: (capacity * std::mem::size_of::<ModalSurface>()) as u64,
+            label: Some("kettle-rounded-surface-instances"),
+            size: (capacity * std::mem::size_of::<RoundedSurface>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -164,7 +183,7 @@ impl ModalSurfacePipeline {
         _device: &wgpu::Device,
         queue: &wgpu::Queue,
         screen: [f32; 2],
-        data: &[ModalSurface],
+        data: &[RoundedSurface],
     ) {
         write_buffer_if_changed(
             queue,
@@ -177,7 +196,7 @@ impl ModalSurfacePipeline {
             &self.counters,
         );
         if data.len() > self.capacity {
-            log::warn!("confirmation surface budget exceeded; skipping frame");
+            log::warn!("rounded surface budget exceeded; skipping frame");
             self.count = 0;
             return;
         }
@@ -190,20 +209,22 @@ impl ModalSurfacePipeline {
         );
         self.count = u32::try_from(data.len()).unwrap_or_else(|_| {
             log::warn!(
-                "pane outline instance count {} exceeds u32; skipping upload",
+                "rounded surface instance count {} exceeds u32; skipping upload",
                 data.len()
             );
             0
         });
     }
 
-    pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
-        if self.count == 0 {
+    pub fn draw_range<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, range: std::ops::Range<u32>) {
+        let start = range.start.min(self.count);
+        let end = range.end.min(self.count);
+        if start >= end {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
-        pass.draw(0..4, 0..self.count);
+        pass.draw(0..4, start..end);
     }
 }

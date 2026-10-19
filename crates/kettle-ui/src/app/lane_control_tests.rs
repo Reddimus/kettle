@@ -1566,6 +1566,7 @@ fn viewer_pin_node_cannot_be_reused_as_a_lane_collapse() {
 fn viewer_keyboard_controls_include_the_video_seek_slider() {
     let mut lane = super::tests::test_lane_panel();
     lane.scrubber = Some(kettle_render::MediaLaneScrubber {
+        seekable: true,
         position_ms: 0,
         duration_ms: 1000,
         label: "0:00".into(),

@@ -239,6 +239,13 @@ These bounds come from the layout used for painting, pointer input, and
 accessibility. Rebinding confirmations use friendly action names and never
 include the payload of a SendText action.
 
+Video viewer geometry also reports `transport`, `timeline`, and `time_label`
+rectangles, plus `hovered_control` and `scrubbing`. `timeline` describes the
+painted row; `time_label` includes the initial duration before playback, and
+`controls.scrubber` is present once seeking is available. All rectangles are
+physical pixels and use the same display scale as pointer and accessibility
+targets.
+
 The control server lets another process inspect and drive a *running* kettle
 window. It is **off by default**; enable it per launch or in config:
 
@@ -488,12 +495,17 @@ length on the poster's foot, and a caption with its own size and length
 size, codec, length and whether it has sound, and a screen reader hears the
 same. Nothing plays on its own and nothing makes a sound: a card never
 starts a video. A video opens paused within the same padded 90% split viewer.
-Its picture scales up to fit without cropping. A central Play affordance appears while paused;
-playback feedback fades after starting. The Play/Pause, sound, seek, time, Theater
-and Fullscreen controls sit beneath the picture when there is room, including
-when letterboxing leaves a large gap to the viewer's footer. For portrait video,
-the centered control row can extend beyond the picture into its side margins
-to keep seeking and time visible. Short viewers keep their header controls.
+Its picture scales up to fit without cropping. A central Play affordance
+appears while paused; playback feedback fades after starting. The Play/Pause,
+sound, seek, time, Theater and Fullscreen controls sit beneath the picture
+when there is room, including when letterboxing leaves a large gap to the
+viewer's footer. For portrait video, the controls use the side margins to keep
+seeking and time visible. Play/Pause has a 44-logical-pixel target. The
+timeline spans its own row with a 24-logical-pixel hit area; its thin track in
+the theme accent grows and reveals a round seek handle on hover or drag. The
+accent retains contrast against the dark strip. Narrow players move the time
+label to its own line. Short viewers keep their header controls.
+
 Click the picture, press K, or use Play/Pause to toggle.
 T switches to a larger Theater view within 90% of the window, preserving padding.
 F toggles native fullscreen; Esc leaves fullscreen first, then closes the viewer.

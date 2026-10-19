@@ -138,7 +138,7 @@ fn confirm_text_renders_above_its_menu_chrome_background() {
         .next()
         .unwrap();
     let menu = scene.find("self.menu_text_renderer").unwrap();
-    let surfaces = scene.find("self.confirmation_surfaces.draw").unwrap();
+    let surfaces = scene.rfind("self.rounded_surfaces").unwrap();
     let text = scene.find("self.confirmation_text_renderer").unwrap();
     assert!(
         menu < surfaces && surfaces < text,

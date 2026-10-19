@@ -1741,7 +1741,7 @@ fn a_confirm_dialog_outranks_every_overlay_including_the_one_that_raised_it() {
         kettle_test_support::production_source(include_str!("../../../kettle-render/src/lib.rs"));
     let pass = render.split("fn encode_scene_pass(").nth(1).unwrap();
     let settings_text = pass.find("self.menu_text_renderer").unwrap();
-    let surfaces = pass.find("self.confirmation_surfaces.draw").unwrap();
+    let surfaces = pass.rfind("self.rounded_surfaces").unwrap();
     let modal_text = pass.find("self.confirmation_text_renderer").unwrap();
     assert!(settings_text < surfaces && surfaces < modal_text);
     assert!(
@@ -6222,6 +6222,7 @@ fn preview_accessibility_key_tracks_controls_and_video_position() {
     );
 
     lane.scrubber = Some(kettle_render::MediaLaneScrubber {
+        seekable: true,
         position_ms: 1_000,
         duration_ms: 10_000,
         label: String::new(),

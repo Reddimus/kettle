@@ -13,12 +13,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Buttons activate on release, short windows support scrolling, and Settings
   stays visible beneath the dimmed backdrop. Screen readers receive only the
   pending question and its controls.
-- Video cards open paused within 90% of their split, with padding on every side
-  and the picture fitted as large as possible without cropping. A central Play
-  button and controls beneath the picture keep playback within reach. Click the
-  picture or press K to play or pause, T for a larger Theater view, and F for
-  fullscreen. Esc leaves fullscreen before closing; closing or pinning restores
-  fullscreen entered by the viewer.
+- Video cards open paused within 90% of their split, with padding on every
+  side and the picture fitted as large as possible without cropping. A central
+  Play button and compact white controls on a dark strip keep playback within
+  reach. A thin timeline in the theme accent spans the player; hover or drag
+  reveals its seek handle. Narrow players put the time label on its own line.
+  Click the picture or press K to play or pause, T for a larger Theater view,
+  and F for fullscreen. Esc leaves fullscreen before closing; closing or
+  pinning restores fullscreen entered by the viewer.
 
 ### Fixed
 

@@ -13439,6 +13439,11 @@ impl App {
                 media_paste_receipt,
                 media_lanes,
                 media_viewer_rect,
+                media_pointer: (!self.non_search_modal_open(ws))
+                    .then_some(ws.native_pointer)
+                    .flatten()
+                    .map(|p| (p.x as f32, p.y as f32)),
+                media_scrubbing: ws.lane_drag.is_some_and(|drag| drag.scrub),
                 card_hover,
                 window_focused,
                 scrollbar_active,
@@ -13558,6 +13563,8 @@ impl App {
             media_paste_receipt: None,
             media_lanes,
             media_viewer_rect: None,
+            media_pointer: None,
+            media_scrubbing: false,
             card_hover,
             window_focused,
             scrollbar_active,
@@ -20489,7 +20496,10 @@ impl App {
                     let area = self.area(ws);
                     self.update_selection(ws, area);
                 }
-                if (ws.selecting || !ws.links.is_empty() || ws.confirm_dialog.is_some())
+                if (ws.selecting
+                    || !ws.links.is_empty()
+                    || ws.confirm_dialog.is_some()
+                    || ws.preview_overlay.is_some())
                     && let Some(w) = &ws.window
                 {
                     w.request_redraw();

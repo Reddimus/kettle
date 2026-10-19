@@ -2621,6 +2621,20 @@ impl App {
                 }
             }
         }
+        if let Some(info) = item
+            .video
+            .filter(|info| lane.play.is_some() && info.duration_ms > 0)
+        {
+            lane.scrubber = Some(kettle_render::MediaLaneScrubber {
+                seekable: false,
+                position_ms: 0,
+                duration_ms: info.duration_ms,
+                label: tr.media_lane_video_time(
+                    &kettle_render::duration_label(0),
+                    &kettle_render::duration_label(info.duration_ms),
+                ),
+            });
+        }
         // A video playing in its lane, paused in place, or stopped where it
         // stood, while no silent preview plays: its frame in the poster's
         // place, its bar, and what it does in the footer.
@@ -2651,6 +2665,7 @@ impl App {
             };
             let (at, length) = (playback.position_ms(), playback.duration_ms());
             lane.scrubber = Some(kettle_render::MediaLaneScrubber {
+                seekable: true,
                 position_ms: at,
                 duration_ms: length,
                 label: tr.media_lane_video_time(
@@ -2776,13 +2791,16 @@ impl App {
         ws: &WindowState,
         lane: &kettle_render::MediaLanePanel,
     ) -> Option<kettle_render::MediaLaneGeometry> {
-        kettle_render::media_lane_geometry(
+        kettle_render::media_lane_geometry_scaled(
             lane,
             self.menu_cell(ws),
             (
                 self.overlay_text_cell_width(ws),
                 self.overlay_text_line_height(ws),
             ),
+            ws.window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor() as f32),
         )
     }
 
@@ -2835,6 +2853,29 @@ impl App {
                 lane["image"] = geometry.image.map(rect_json).into();
                 lane["sharp"] = geometry.tile.map(rect_json).into();
                 lane["edge"] = geometry.resize.map(rect_json).into();
+                lane["transport"] = geometry.transport.map(rect_json).into();
+                lane["timeline"] = geometry.transport_timeline.map(rect_json).into();
+                lane["time_label"] = geometry.scrub_label.map(rect_json).into();
+                lane["scrubbing"] = ws
+                    .lane_drag
+                    .is_some_and(|drag| drag.pane == pane && drag.scrub)
+                    .into();
+                lane["hovered_control"] = ws
+                    .native_pointer
+                    .filter(|_| !self.non_search_modal_open(ws))
+                    .and_then(|p| geometry.hit_test(p.x as f32, p.y as f32))
+                    .filter(|hit| {
+                        matches!(
+                            hit,
+                            kettle_render::MediaLaneHit::Play
+                                | kettle_render::MediaLaneHit::Sound
+                                | kettle_render::MediaLaneHit::Scrub
+                                | kettle_render::MediaLaneHit::Theater
+                                | kettle_render::MediaLaneHit::Fullscreen
+                        )
+                    })
+                    .map(lane_control_name)
+                    .into();
                 lane["keyboard"] = if ws.preview_focus.is_some_and(|focus| focus.pane == pane) {
                     "preview"
                 } else {
@@ -2858,7 +2899,7 @@ impl App {
             }
             // A video playing in the lane, paused in place, or
             // stopped where it stood: where it is, never a frame.
-            if let Some(bar) = &panel.scrubber {
+            if let Some(bar) = panel.scrubber.as_ref().filter(|bar| bar.seekable) {
                 let state = match (
                     panel.play,
                     ws.lane_playbacks

@@ -3284,8 +3284,24 @@ short windows scroll the body, or the whole dialog when its controls cannot
 fit. Keyboard focus scrolls its button into view. Painting, pointer targets,
 and accessibility use the same geometry.
 
-A separate bounded rounded-surface pipeline and retained text renderer draw
-the backdrop and dialog after all Settings text in the existing render pass.
+A bounded shape pipeline serves player controls and confirmations without
+enlarging terminal-cell instances. Its 32-instance buffer draws two ordered
+ranges in the existing render pass: player shapes after lane images, and
+confirmation shapes after all Settings text. Signed-distance shapes draw the
+player's white icons without depending on terminal-font glyphs. The central
+affordance uses a 48-logical-pixel circle and the same play geometry, with a
+small rightward optical offset and vertically centered visible bounds. Its
+visible triangle height is about 42% of the circle; transport Play and Pause
+share an 18-logical-pixel visible height in a 24-pixel icon canvas. The larger
+invisible hit targets remain independent of that icon canvas and of terminal
+text size. Duration metadata reserves the longest timestamp before playback,
+without exposing a seek action until a session exists. Elapsed-time digit
+changes therefore keep the picture and controls in place. A dark strip
+provides consistent contrast across themes; its thin seek track reveals the
+handle on hover or drag. Progress follows the active theme accent, adjusted
+only when necessary to retain 3:1 contrast against the strip. Playback
+progress and hover update only shape instances, retaining prepared text.
+Retained confirmation text follows that final range.
 Settings retains its geometry and content beneath the dimming. Inactive dialogs
 skip text preparation; closing clears their text once. Terminal quad instances
 do not grow to carry modal styling.

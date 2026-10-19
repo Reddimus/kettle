@@ -45,11 +45,12 @@ mod glyphpipe;
 mod headless_tests;
 mod imgpipe;
 mod media_lane;
+mod media_transport;
 mod media_viewport;
-mod modal_surface;
 mod outline;
 mod present;
 mod quad;
+mod rounded_surface;
 mod snapshot;
 mod starfield;
 mod upload;
@@ -958,6 +959,9 @@ pub struct Overlay {
     pub media_lanes: Vec<MediaLanePanel>,
     /// The centered viewer excluded from the window-modal backdrop.
     pub media_viewer_rect: Option<Rect4>,
+    /// Native pointer for hover feedback in a focused video player.
+    pub media_pointer: Option<(f32, f32)>,
+    pub media_scrubbing: bool,
     /// The inline card a click at the pointer would open, as a frame drew
     /// it; its visible part is outlined in the accent.
     pub card_hover: Option<PaintedCard>,
@@ -1106,7 +1110,7 @@ const MAX_LANE_IMAGES: usize = 64;
 pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
     MediaLanePanel, MediaLanePlay, MediaLaneScrubber, MediaLaneSender, MediaLaneSound,
-    MediaLaneSource, MediaLaneTile, media_lane_geometry,
+    MediaLaneSource, MediaLaneTile, media_lane_geometry, media_lane_geometry_scaled,
 };
 pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
 
@@ -2805,7 +2809,8 @@ pub struct Renderer {
     /// renderers against one atlas); rendered after `menu_quads` so menu labels
     /// sit above the panel bg.
     menu_text_renderer: TextRenderer,
-    confirmation_surfaces: modal_surface::ModalSurfacePipeline,
+    rounded_surfaces: rounded_surface::RoundedSurfacePipeline,
+    transport_surface_count: u32,
     confirmation_text_renderer: TextRenderer,
     confirmation_text: confirm::ConfirmText,
     confirmation_labels_prepared: bool,
@@ -4524,7 +4529,7 @@ impl Renderer {
         let menu_quads = shared.quads.blend(&device);
         let menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let confirmation_surfaces = modal_surface::ModalSurfacePipeline::new(&device, format);
+        let rounded_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
         let confirmation_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let confirmation_text = confirm::ConfirmText::new();
@@ -4678,7 +4683,8 @@ impl Renderer {
             overlay_quads,
             menu_quads,
             menu_text_renderer,
-            confirmation_surfaces,
+            rounded_surfaces,
+            transport_surface_count: 0,
             confirmation_text_renderer,
             confirmation_text,
             confirmation_labels_prepared: false,
@@ -7499,10 +7505,11 @@ impl Renderer {
         self.lane_texts
             .retain(|pane, _| overlay.media_lanes.iter().any(|lane| lane.pane == *pane));
         for lane in &overlay.media_lanes {
-            let Some(geometry) = media_lane_geometry(
+            let Some(geometry) = media_lane_geometry_scaled(
                 lane,
                 (cw, ch),
                 (self.overlay_text_cell_width(), self.metrics.line_height),
+                self.scale,
             ) else {
                 continue;
             };
@@ -7788,6 +7795,7 @@ impl Renderer {
         // along the edge it shares with the terminal. Drawn in their own layer
         // above the terminal and below every overlay, so a menu or dialog
         // covers a lane's text as well as its frame.
+        let mut transport_surfaces = Vec::new();
         let mut lane_areas: Vec<TextArea> = Vec::with_capacity(overlay.media_lanes.len() * 8);
         // Inside the pane's focus border, as the terminal's backdrop is.
         let lane_border = if cfg.handle_size < 0 {
@@ -7817,13 +7825,25 @@ impl Renderer {
                 1.0,
             ));
             lane_q.push(rect(inner.0, inner.1, inner.2, 1.0, palette.border, 1.0));
-            let Some(geometry) = media_lane_geometry(
+            let Some(geometry) = media_lane_geometry_scaled(
                 lane,
                 (cw, ch),
                 (self.overlay_text_cell_width(), self.metrics.line_height),
+                self.scale,
             ) else {
                 continue;
             };
+            let transport_paint = media_transport::paint(
+                lane,
+                &geometry,
+                palette,
+                overlay.media_pointer,
+                overlay.media_scrubbing,
+                self.scale,
+            );
+            if let Some(paint) = transport_paint {
+                transport_surfaces.extend(paint.shapes);
+            }
             for button in [
                 geometry.play,
                 geometry.sound,
@@ -7847,6 +7867,12 @@ impl Renderer {
             .into_iter()
             .flatten()
             {
+                if geometry
+                    .transport
+                    .is_some_and(|transport| button.1 >= transport.1)
+                {
+                    continue;
+                }
                 lane_q.push(rect(
                     button.0,
                     button.1,
@@ -7940,7 +7966,9 @@ impl Renderer {
             }
             // A playing video's bar: the track, the part played in the
             // accent, and a knob where the video is.
-            if let (Some(bar), Some(track)) = (&lane.scrubber, geometry.scrubber) {
+            if let (Some(bar), Some(track)) = (&lane.scrubber, geometry.scrubber)
+                && geometry.transport.is_none()
+            {
                 let thick = (3.0 * self.scale).round().max(2.0);
                 let top = track.1 + ((track.3 - thick) / 2.0).round();
                 let along = if bar.duration_ms == 0 {
@@ -8652,7 +8680,7 @@ impl Renderer {
             }
         }
 
-        let mut confirmation_surfaces = Vec::with_capacity(12);
+        let mut confirmation_surfaces = Vec::new();
         let mut confirmation_colors = Vec::new();
         if let (Some(dialog), Some(layout)) = (&overlay.confirm_dialog, &confirmation_layout) {
             self.confirmation_text
@@ -8673,7 +8701,7 @@ impl Renderer {
                              radius: f32,
                              border: f32| {
                 if rect.2 > 0.0 && rect.3 > 0.0 {
-                    confirmation_surfaces.push(modal_surface::ModalSurface {
+                    confirmation_surfaces.push(rounded_surface::RoundedSurface {
                         pos: [rect.0, rect.1],
                         size: [rect.2, rect.3],
                         fill: rgba(fill, alpha),
@@ -8884,7 +8912,7 @@ impl Renderer {
             prepared_text_areas_damage_key(&menu_areas).hash(&mut h);
             prepared_text_areas_damage_key(&confirmation_areas).hash(&mut h);
             self.confirmation_text.key().hash(&mut h);
-            bytemuck::cast_slice::<modal_surface::ModalSurface, u8>(&confirmation_surfaces)
+            bytemuck::cast_slice::<rounded_surface::RoundedSurface, u8>(&confirmation_surfaces)
                 .hash(&mut h);
             completion_text_damage_key(
                 &self.completion_header_text,
@@ -9238,11 +9266,13 @@ impl Renderer {
         }
         self.overlay_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &over);
-        self.confirmation_surfaces.upload(
+        self.transport_surface_count = transport_surfaces.len() as u32;
+        transport_surfaces.extend_from_slice(&confirmation_surfaces);
+        self.rounded_surfaces.upload(
             &self.gpu.device,
             &self.gpu.queue,
             [sw, sh],
-            &confirmation_surfaces,
+            &transport_surfaces,
         );
         self.menu_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &menu_q);
@@ -9495,7 +9525,7 @@ impl Renderer {
             self.pane_outlines.upload_counts(),
             self.overlay_quads.upload_counts(),
             self.menu_quads.upload_counts(),
-            self.confirmation_surfaces.upload_counts(),
+            self.rounded_surfaces.upload_counts(),
             self.imgs.upload_counts(),
             self.card_base.upload_counts(),
             self.card_cursors.upload_counts(),
@@ -9688,6 +9718,8 @@ impl Renderer {
         if let Some(lanes) = &self.lane_img {
             lanes.draw(&mut pass);
         }
+        self.rounded_surfaces
+            .draw_range(&mut pass, 0..self.transport_surface_count);
         self.lane_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         // Dimming + scrollbar sit on top of glyphs.
@@ -9699,7 +9731,8 @@ impl Renderer {
         self.media_receipt_img.draw(&mut pass);
         self.menu_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
-        self.confirmation_surfaces.draw(&mut pass);
+        self.rounded_surfaces
+            .draw_range(&mut pass, self.transport_surface_count..u32::MAX);
         self.confirmation_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         Ok(())

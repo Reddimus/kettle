@@ -1237,12 +1237,21 @@ and time by using the available letterbox width.
 
 For native video acceptance, open a video card in a split and check that its
 poster fits inside 90% of its owning split without cropping. Check the central
-Play affordance and transport row beneath the picture. Play and pause with the picture and
-K, then seek with Left/Right while paused. Toggle T and check the pane-sized and
-window-sized views. Enter fullscreen with F; the first Esc must restore the
-window while leaving the viewer open, and the second must close it. Repeat with
-the Close and Pin controls while fullscreen. Finally, open and close a viewer
-in a window that was already fullscreen: it must leave that window fullscreen.
-Check the accessible names and toggle states for both size controls, including
-Spanish. Preserve the original pane focus and verify that player keys do not
-reach its terminal.
+Play affordance and controls beneath the picture. Check the compact white
+Play/Pause and display icons on their dark strip, the full-width thin timeline
+in the theme accent, and the seek handle on hover. Click Play/Pause and the
+picture, press K, then drag across the timeline's hit area and seek with
+Left/Right while paused. Check narrow and scaled layouts: targets stay usable,
+time labels stay visible, and the picture remains uncropped. GPU tests verify
+that progress and timeline hover reuse prepared text. Pixel checks at 1x,
+1.25x, and 2x verify the central Play's vertical alignment, optical offset,
+and size; all bundled themes retain a visible accent. Check the initial
+timestamp and unchanged picture/control geometry when playback starts. Tests with narrow layouts cross elapsed-time digit boundaries; larger text retains fixed
+icon sizes, and an active silent preview shows Stop. Toggle T and check the
+pane-sized and window-sized views. Enter fullscreen with F; the first Esc must
+restore the window while leaving the viewer open, and the second must close
+it. Repeat with the Close and Pin controls while fullscreen. Finally, open and
+close a viewer in a window that was already fullscreen: it must leave that
+window fullscreen. Check the accessible names and toggle states for both size
+controls, including Spanish. Preserve the original pane focus and verify that
+player keys do not reach its terminal.

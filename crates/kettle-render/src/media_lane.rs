@@ -117,6 +117,8 @@ pub enum MediaLaneSound {
 /// length in ms, and the time shown beside the bar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaLaneScrubber {
+    /// Metadata alone can reserve the time row before a session can seek.
+    pub seekable: bool,
     pub position_ms: u64,
     pub duration_ms: u64,
     pub label: String,
@@ -329,6 +331,10 @@ pub struct MediaLaneGeometry {
     /// moves the video along, and the time beside it.
     pub scrubber: Option<Rect4>,
     pub scrub_label: Option<Rect4>,
+    /// Dedicated video controls below the picture; absent in compact headers.
+    pub transport: Option<Rect4>,
+    pub transport_timeline: Option<Rect4>,
+    pub transport_text_scale: f32,
     /// Zoom the rendered item out, in, and back to its fit.
     pub zoom_out: Option<Rect4>,
     pub zoom_in: Option<Rect4>,
@@ -517,6 +523,7 @@ const MIN_TITLE_COLUMNS: f32 = 4.0;
 /// fewer the lane shows no bar.
 const MIN_SCRUBBER_COLUMNS: f32 = 4.0;
 /// Use letterboxing for a useful drag target before falling back to the minimum.
+#[cfg(test)]
 const PREFERRED_SCRUBBER_COLUMNS: f32 = 24.0;
 
 /// Where a bar's knob `knob` wide sits on `track` with `played` pixels of it
@@ -537,10 +544,20 @@ pub fn media_lane_geometry(
     cell: (f32, f32),
     text_cell: (f32, f32),
 ) -> Option<MediaLaneGeometry> {
+    media_lane_geometry_scaled(lane, cell, text_cell, 1.0)
+}
+
+/// Physical geometry with logical pointer-target sizes scaled exactly once.
+pub fn media_lane_geometry_scaled(
+    lane: &MediaLanePanel,
+    cell: (f32, f32),
+    text_cell: (f32, f32),
+    scale: f32,
+) -> Option<MediaLaneGeometry> {
     let finite = |value: f32| value.is_finite() && value > 0.0;
     let (cw, ch) = cell;
     let (tw, lh) = text_cell;
-    if !(finite(cw) && finite(ch) && finite(tw) && finite(lh)) {
+    if !(finite(cw) && finite(ch) && finite(tw) && finite(lh) && finite(scale)) {
         return None;
     }
     let rect = lane.rect;
@@ -665,6 +682,9 @@ pub fn media_lane_geometry(
             sound,
             scrubber: None,
             scrub_label: None,
+            transport: None,
+            transport_timeline: None,
+            transport_text_scale: 1.0,
             zoom_out,
             zoom_in,
             zoom_fit,
@@ -713,15 +733,32 @@ pub fn media_lane_geometry(
     // keeps a few columns beside its time.
     let (mut scrubber, mut scrub_label) = (None, None);
     let mut area_bottom = hint.1 - pad;
-    let transport_buttons = (3.0 + f32::from(lane.sound.is_some())) * button;
+    let target = (44.0 * scale).max(2.0 * lh);
+    let seek_height = (24.0 * scale).max(lh);
+    let time_scale = (14.0 * scale / (lh / 1.25)).max(1.0);
+    let label_width = lane.scrubber.as_ref().map_or(12.0, |bar| {
+        let elapsed = crate::duration_label(bar.position_ms.min(bar.duration_ms));
+        let duration = crate::duration_label(bar.duration_ms);
+        (crate::display_width(&bar.label) + duration.len().saturating_sub(elapsed.len()) + 1) as f32
+    }) * tw
+        * time_scale;
+    let label_height = lh * time_scale;
+    let separate_time = right - left < 4.0 * target + label_width + 2.0 * pad;
+    let time_row_height = if separate_time {
+        label_height + pad
+    } else {
+        0.0
+    };
+    let transport_height = time_row_height + seek_height + target;
+    let transport_buttons = 3.0 * target;
     let transport = video
         && lane.pin_label.is_some()
-        && area_bottom - lh - pad >= area_top + lh
+        && area_bottom - transport_height - pad >= area_top + lh
         && right - left >= transport_buttons;
     if transport {
-        area_bottom -= lh + pad;
+        area_bottom -= transport_height + pad;
     }
-    if let Some(bar) = &lane.scrubber
+    if let Some(bar) = lane.scrubber.as_ref().filter(|bar| bar.seekable)
         && !transport
         && area_bottom - lh - pad >= area_top + lh
     {
@@ -776,6 +813,9 @@ pub fn media_lane_geometry(
         sound,
         scrubber,
         scrub_label,
+        transport: None,
+        transport_timeline: None,
+        transport_text_scale: 1.0,
         zoom_out,
         zoom_in,
         zoom_fit,
@@ -802,42 +842,49 @@ pub fn media_lane_geometry(
         source_rows,
     };
     if transport && let Some(picture) = geometry.image {
-        // Portrait pictures lend their letterbox width to the controls, so
-        // seeking remains available without pushing the row down to the hint.
-        let minimum = transport_buttons
-            + lane.scrubber.as_ref().map_or(0.0, |bar| {
-                (bar.label.chars().count() as f32 + 1.0 + PREFERRED_SCRUBBER_COLUMNS) * tw
-                    + 2.0 * pad
-            });
-        let width = picture.2.max(minimum).min(content.2);
+        // Use the player's width, including a portrait picture's letterboxing.
+        // The timeline has its own row so larger buttons never shorten it.
+        let width = content.2;
         if width >= transport_buttons {
-            let row = picture.1 + picture.3 + pad;
-            let mut left = picture.0 + (picture.2 - width) / 2.0;
+            let top = picture.1 + picture.3;
+            let seek_row = top + time_row_height;
+            let row = seek_row + seek_height;
+            let mut left = content.0;
             let mut right = left + width;
-            geometry.play = Some((left, row, button, lh));
-            left += button;
-            geometry.sound = lane.sound.map(|_| {
-                let rect = (left, row, button, lh);
-                left += button;
-                rect
-            });
-            right -= button;
-            geometry.fullscreen = Some((right, row, button, lh));
-            right -= button;
-            geometry.theater = Some((right, row, button, lh));
-            if let Some(bar) = &lane.scrubber {
-                let label_width = (bar.label.chars().count() as f32 + 1.0) * tw;
-                right -= label_width + pad;
-                let width = right - pad - left;
-                if width >= MIN_SCRUBBER_COLUMNS * tw {
-                    geometry.scrub_label = Some((right, row, label_width, lh));
-                    geometry.scrubber = Some((left, row, width, lh));
-                }
+            let start = left;
+            geometry.transport = Some((left, top, width, transport_height));
+            geometry.transport_timeline = Some((left, seek_row, width, seek_height));
+            geometry.transport_text_scale = time_scale;
+            geometry.play = Some((left, row, target, target));
+            left += target;
+            if lane.sound.is_some() && width >= 4.0 * target {
+                let rect = (left, row, target, target);
+                left += target;
+                geometry.sound = Some(rect);
+            }
+            right -= target;
+            geometry.fullscreen = Some((right, row, target, target));
+            right -= target;
+            geometry.theater = Some((right, row, target, target));
+            if lane.scrubber.is_some() {
+                let label_top = if separate_time {
+                    top
+                } else {
+                    row + (target - label_height) / 2.0
+                };
+                let label_left = if separate_time { start } else { left + pad };
+                geometry.scrub_label =
+                    Some((label_left, label_top, label_width.min(width), label_height));
+                geometry.scrubber = lane
+                    .scrubber
+                    .as_ref()
+                    .filter(|bar| bar.seekable)
+                    .and(geometry.transport_timeline);
             }
         }
         if let Some(feedback) = lane.play_feedback {
-            let size = (3.5 * lh).min(picture.2 / 2.0).min(picture.3 / 2.0);
-            if size >= lh * 2.0 {
+            let size = (48.0 * scale).min(picture.2 / 2.0).min(picture.3 / 2.0);
+            if size >= 24.0 * scale {
                 geometry.play_feedback = Some((
                     (
                         picture.0 + (picture.2 - size) / 2.0,
@@ -959,7 +1006,7 @@ pub(crate) struct LaneText {
     /// show rendered, canvas, copy, reload, zoom out, zoom in, fit, a
     /// gallery's page before and after, and a video's play, stop, pause and
     /// sound.
-    controls: [TextBuffer; 23],
+    controls: [TextBuffer; 22],
     pin_label: Option<String>,
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
@@ -1018,7 +1065,6 @@ impl LaneText {
                 control(font_system, "♪"),
                 control(font_system, "T"),
                 control(font_system, "F"),
-                control(font_system, "●"),
             ],
             pin_label: None,
             shaped: Default::default(),
@@ -1201,7 +1247,17 @@ impl LaneText {
             areas.push(area(&self.page_counter, rect, description));
         }
         if let Some(rect) = geometry.scrub_label {
-            areas.push(area(&self.scrub_label, rect, description));
+            let mut time = area(
+                &self.scrub_label,
+                rect,
+                if geometry.transport.is_some() {
+                    GColor::rgb(255, 255, 255)
+                } else {
+                    label
+                },
+            );
+            time.scale = geometry.transport_text_scale;
+            areas.push(time);
         }
         if let Some(status) = self.shaped[4]
             .as_deref()
@@ -1261,42 +1317,21 @@ impl LaneText {
                     || (at == 15 && last)
                     || (at == 19 && sound == Some(MediaLaneSound::Muted));
                 let mut glyph = area(buffer, rect, if idle { description } else { emphasis });
+                if geometry.transport.is_some()
+                    && (16..=21).contains(&at)
+                    && rect.1 >= geometry.transport.unwrap().1
+                {
+                    // Player icons are vector shapes; retain semantic controls and
+                    // their larger pointer targets without terminal-font glyphs.
+                    continue;
+                }
                 let control_width = if at == 3 && geometry.pinning {
                     self.pin_label.as_deref().map_or(1, crate::display_width) as f32 * glyph_width
                 } else {
                     glyph_width
                 };
-                glyph.left = rect.0 + ((rect.2 - control_width) / 2.0).max(0.0);
-                glyph.top = rect.1 + ((rect.3 - line_height) / 2.0).max(0.0);
-                areas.push(glyph);
-            }
-        }
-        if let Some((rect, feedback)) = geometry.play_feedback {
-            let glyph = match feedback {
-                MediaLanePlay::Play => 16,
-                MediaLanePlay::Pause => 18,
-                MediaLanePlay::Stop => 17,
-            };
-            for (buffer, scale, color) in [
-                (
-                    &self.controls[22],
-                    rect.3 / line_height,
-                    GColor::rgba(0, 0, 0, 210),
-                ),
-                (
-                    &self.controls[glyph],
-                    rect.3 / line_height * 0.45,
-                    GColor::rgb(255, 255, 255),
-                ),
-            ] {
-                let width = buffer
-                    .layout_runs()
-                    .map(|run| run.line_w)
-                    .fold(0.0, f32::max);
-                let mut glyph = area(buffer, rect, color);
-                glyph.scale = scale;
-                glyph.left = rect.0 + (rect.2 - width * scale) / 2.0;
-                glyph.top = rect.1 + (rect.3 - line_height * scale) / 2.0;
+                glyph.left = rect.0 + ((rect.2 - control_width * glyph.scale) / 2.0).max(0.0);
+                glyph.top = rect.1 + ((rect.3 - line_height * glyph.scale) / 2.0).max(0.0);
                 areas.push(glyph);
             }
         }
@@ -1419,11 +1454,13 @@ mod tests {
         assert!((center.1 + center.3 / 2.0 - picture.1 - picture.3 / 2.0).abs() < 0.01);
         assert!(poster.play.unwrap().1 >= picture.1 + picture.3);
         assert!(
-            poster.fullscreen.unwrap().0 + poster.fullscreen.unwrap().2 <= picture.0 + picture.2
+            poster.fullscreen.unwrap().0 + poster.fullscreen.unwrap().2
+                <= poster.content.0 + poster.content.2
         );
         lane.play = Some(MediaLanePlay::Pause);
         lane.play_feedback = None;
         lane.scrubber = Some(MediaLaneScrubber {
+            seekable: true,
             position_ms: 1000,
             duration_ms: 12000,
             label: "0:01 / 0:12".into(),
@@ -1435,13 +1472,124 @@ mod tests {
         );
         assert!(playing.play_feedback.is_none());
         let bar = playing.scrubber.unwrap();
-        assert_eq!(bar.1, playing.play.unwrap().1);
-        assert!(bar.0 >= playing.play.unwrap().0 + playing.play.unwrap().2);
-        assert!(bar.0 + bar.2 <= playing.scrub_label.unwrap().0);
+        assert!(bar.1 + bar.3 <= playing.play.unwrap().1);
+        assert_eq!(bar.0, playing.play.unwrap().0);
+        assert!(bar.0 + bar.2 >= playing.fullscreen.unwrap().0 + playing.fullscreen.unwrap().2);
         assert!(
             playing.scrub_label.unwrap().0 + playing.scrub_label.unwrap().2
                 < playing.theater.unwrap().0
         );
+    }
+
+    #[test]
+    fn video_transport_has_large_targets_and_a_separate_wide_timeline() {
+        let mut lane = viewer((1, 1), Some((480, 240)));
+        lane.rect = (0.0, 0.0, 486.0, 790.0);
+        lane.pin_label = Some("Pin".into());
+        lane.play = Some(MediaLanePlay::Pause);
+        lane.sound = Some(MediaLaneSound::Heard);
+        lane.scrubber = Some(MediaLaneScrubber {
+            seekable: true,
+            position_ms: 83000,
+            duration_ms: 754000,
+            label: "1:23 / 12:34".into(),
+        });
+        let geometry = media_lane_geometry(&lane, (8.0, 16.25), (8.0, 16.25)).unwrap();
+        let play = geometry.play.unwrap();
+        let track = geometry.scrubber.unwrap();
+        assert!(
+            play.2 >= 44.0 && play.3 >= 44.0,
+            "Play needs a pointer-sized target"
+        );
+        assert!(
+            track.3 >= 24.0,
+            "timeline needs a generous vertical hit area"
+        );
+        assert!(track.1 + track.3 <= play.1, "timeline has its own row");
+        assert!(
+            track.2 >= geometry.content.2 * 0.8,
+            "timeline uses the player's width"
+        );
+        assert_eq!(
+            geometry.hit_test(play.0 + play.2 / 2.0, play.1 + play.3 / 2.0),
+            Some(MediaLaneHit::Play)
+        );
+        assert_eq!(
+            geometry.hit_test(track.0 + track.2 / 2.0, track.1 + 1.0),
+            Some(MediaLaneHit::Scrub)
+        );
+    }
+
+    #[test]
+    fn video_time_row_stays_fixed_at_timestamp_digit_boundaries() {
+        for width in [304.0, 312.0, 320.0] {
+            let mut lane = viewer((1, 1), Some((480, 240)));
+            lane.rect = (0.0, 0.0, width, 600.0);
+            lane.pin_label = Some("Pin".into());
+            lane.play = Some(MediaLanePlay::Play);
+            lane.scrubber = Some(MediaLaneScrubber {
+                seekable: false,
+                position_ms: 0,
+                duration_ms: 754000,
+                label: "0:00 / 12:34".into(),
+            });
+            let before = media_lane_geometry(&lane, (7.8, 16.25), (7.8, 16.25)).unwrap();
+            lane.play = Some(MediaLanePlay::Pause);
+            lane.scrubber = Some(MediaLaneScrubber {
+                seekable: true,
+                position_ms: 600000,
+                duration_ms: 754000,
+                label: "10:00 / 12:34".into(),
+            });
+            let after = media_lane_geometry(&lane, (7.8, 16.25), (7.8, 16.25)).unwrap();
+            assert_eq!(
+                before.image, after.image,
+                "timestamp must not shift picture at width {width}"
+            );
+            assert!(before.scrubber.is_none());
+            assert!(after.scrubber.is_some());
+            assert_eq!(before.transport, after.transport);
+            assert_eq!(before.play, after.play);
+            assert_eq!(before.scrub_label, after.scrub_label);
+        }
+    }
+
+    #[test]
+    fn video_icon_canvas_is_independent_of_large_text_targets() {
+        for scale in [1.0, 1.25, 2.0] {
+            let mut lane = viewer((1, 1), Some((480, 240)));
+            lane.pin_label = Some("Pin".into());
+            lane.play = Some(MediaLanePlay::Play);
+            lane.rect = (0.0, 0.0, 600.0 * scale, 800.0 * scale);
+            let geometry = media_lane_geometry_scaled(
+                &lane,
+                (12.0 * scale, 30.0 * scale),
+                (12.0 * scale, 30.0 * scale),
+                scale,
+            )
+            .unwrap();
+            assert_eq!(geometry.play.unwrap().3, 60.0 * scale);
+            let cfg = kettle_config::Config::default();
+            let paint = crate::media_transport::paint(
+                &lane,
+                &geometry,
+                crate::completion_palette(&cfg.theme, cfg.theme.palette[4]),
+                None,
+                false,
+                scale,
+            )
+            .unwrap();
+            let icon = paint
+                .shapes
+                .iter()
+                .find(|shape| shape.params[2] == 1.0)
+                .unwrap();
+            assert_eq!(
+                icon.size,
+                [24.0 * scale; 2],
+                "visual canvas stays independent of the enlarged hit target"
+            );
+        }
     }
 
     #[test]
@@ -1465,6 +1613,7 @@ mod tests {
             lane.play = Some(MediaLanePlay::Pause);
             lane.sound = Some(MediaLaneSound::Heard);
             lane.scrubber = Some(MediaLaneScrubber {
+                seekable: true,
                 position_ms: 1000,
                 duration_ms: 12000,
                 label: "0:01 / 0:12".into(),
@@ -1478,19 +1627,71 @@ mod tests {
             let fullscreen = geometry.fullscreen.unwrap();
             assert!(bar.2 >= PREFERRED_SCRUBBER_COLUMNS * cell.0 - 0.001);
             assert!(bar.1 >= picture.1 + picture.3);
-            assert_eq!(bar.1, play.1);
-            assert!(bar.0 + bar.2 <= label.0);
+            assert!(bar.1 + bar.3 <= play.1);
+            assert!(label.1 >= play.1);
             assert!(label.0 + label.2 < geometry.theater.unwrap().0);
             assert!(play.0 < picture.0 && fullscreen.0 + fullscreen.2 > picture.0 + picture.2);
             assert!(play.0 >= geometry.content.0);
             assert!(fullscreen.0 + fullscreen.2 <= geometry.content.0 + geometry.content.2);
             assert!(
                 (play.0 + (fullscreen.0 + fullscreen.2 - play.0) / 2.0
-                    - picture.0
-                    - picture.2 / 2.0)
+                    - geometry.content.0
+                    - geometry.content.2 / 2.0)
                     .abs()
                     < 0.01
             );
+        }
+    }
+
+    #[test]
+    fn video_transport_scales_once_and_keeps_narrow_targets_disjoint() {
+        for scale in [1.0, 1.25, 2.0] {
+            for width in [192.0, 280.0, 486.0, 1000.0] {
+                let mut lane = viewer((1, 1), Some((240, 480)));
+                lane.rect = (0.0, 0.0, width * scale, 790.0 * scale);
+                lane.pin_label = Some("Pin".into());
+                lane.play = Some(MediaLanePlay::Pause);
+                lane.sound = Some(MediaLaneSound::Heard);
+                lane.scrubber = Some(MediaLaneScrubber {
+                    seekable: true,
+                    position_ms: 1000,
+                    duration_ms: 12000,
+                    label: "0:01 / 0:12".into(),
+                });
+                let cell = (7.8 * scale, 16.25 * scale);
+                let geometry = media_lane_geometry_scaled(&lane, cell, cell, scale).unwrap();
+                let play = geometry.play.unwrap();
+                let bar = geometry
+                    .scrubber
+                    .expect("narrow video keeps a full-width timeline");
+                assert!((play.3 - 44.0 * scale).abs() < 0.001);
+                assert!((bar.3 - 24.0 * scale).abs() < 0.001);
+                for r in [
+                    play,
+                    geometry.theater.unwrap(),
+                    geometry.fullscreen.unwrap(),
+                    bar,
+                    geometry.scrub_label.unwrap(),
+                ] {
+                    assert!(
+                        r.0 >= -0.001
+                            && r.1 >= -0.001
+                            && r.0 + r.2 <= lane.rect.2 + 0.001
+                            && r.1 + r.3 <= lane.rect.3 + 0.001
+                    );
+                }
+                assert!(bar.1 + bar.3 <= play.1);
+                let time = geometry.scrub_label.unwrap();
+                assert!(
+                    time.1 + time.3 <= bar.1
+                        || (time.0 >= play.0 + play.2
+                            && time.0 + time.2 <= geometry.theater.unwrap().0)
+                );
+                assert!(
+                    geometry.image.unwrap().1 + geometry.image.unwrap().3
+                        <= geometry.transport.unwrap().1
+                );
+            }
         }
     }
 
@@ -1746,6 +1947,7 @@ mod tests {
         let poster = media_lane_geometry(&lane, CELL, CELL).unwrap();
         lane.play = Some(MediaLanePlay::Pause);
         lane.scrubber = Some(MediaLaneScrubber {
+            seekable: true,
             position_ms: 3000,
             duration_ms: 9000,
             label: "0:03 / 0:09".into(),
@@ -2015,6 +2217,7 @@ mod tests {
         let mut text = LaneText::new(&mut font_system, metrics);
         let mut lane = viewer((1, 1), Some((640, 360)));
         lane.scrubber = Some(MediaLaneScrubber {
+            seekable: true,
             position_ms: 0,
             duration_ms: 9000,
             label: "0:00 / 0:09".into(),
