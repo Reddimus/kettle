@@ -3418,10 +3418,13 @@ fn a_playing_lane_draws_its_frame_and_bar() {
             (0.02..0.065).contains(&offset),
             "central Play has a small rightward optical offset at scale {scale}: {offset}"
         );
-        let height = (max_y - min_y) / circle.3;
+        let height = max_y - min_y;
+        let expected_height = circle.3 * 0.42;
+        // Solid-white coverage omits antialiased edges, with driver-dependent
+        // rounding of a pixel per edge and fractional rectangle bounds.
         assert!(
-            (0.38..0.46).contains(&height),
-            "central Play has consistent visible proportions at scale {scale}: {height}"
+            (height - expected_height).abs() <= 2.5,
+            "central Play has consistent visible proportions at scale {scale}: {height} vs {expected_height}"
         );
     }
 }
