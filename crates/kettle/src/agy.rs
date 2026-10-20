@@ -244,7 +244,7 @@ pub(crate) fn hook(action: &str) -> i32 {
     if action == "guidance" {
         println!(
             "{}",
-            json!({"injectSteps":[{"ephemeralMessage":"When a visual helps the user's task, show the finished image, diagram, PDF or video with kettle_show without waiting for them to name the tool. Use an absolute path and omit key for normal file previews. Explicit visual artifacts written through the native artifact channel also reach Kettle's media shelf automatically. Skip unrelated assets, private scratch files and passing-test recordings. agy's own Mermaid rendering remains available. Kettle shelf previews do not mean you inspected the media; agy does not support Kettle's inline hook-card protocol."}]})
+            json!({"injectSteps":[{"ephemeralMessage":"When a visual helps the user's task, show the finished image, diagram, PDF or video with kettle_show without waiting for them to name the tool. Use an absolute path and omit key for normal file previews. In native macOS TUI sessions, explicit user-facing visual artifacts written through the native artifact channel also reach Kettle's media shelf automatically. Skip unrelated assets, private scratch files and passing-test recordings. agy's own Mermaid rendering remains available. Kettle shelf previews do not mean you inspected the media; agy does not support Kettle's inline hook-card protocol."}]})
         );
         return 0;
     }
