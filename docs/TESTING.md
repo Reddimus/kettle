@@ -80,7 +80,8 @@ Use these to isolate a failure or validate the area you changed:
 | `just script-fixture-self-test` | Live-probe timing and menu-capture ownership fixtures | Unix and Python; no desktop |
 | `just deny` | License, source, and ban policy for both lock graphs | cargo-deny |
 | `just audit` | RustSec scans of product and vendor graphs | cargo-audit and advisory database access |
-| `just lru-scope` | Reviewed dependency path for the advisory exception | Unix, Python, Cargo metadata |
+| `just lru-scope` | Reviewed dependency path for the advisory exception | Python, Cargo metadata |
+| `just dbus-scope` | Exact all-target D-Bus graph for maintenance-only exceptions | Python, Cargo metadata |
 | `just machete` | Unused workspace dependencies | cargo-machete |
 
 The live smoke recipes appear once in the [Live UI smokes](#live-ui-smokes)
@@ -926,6 +927,7 @@ macOS adds these checks inside `build`:
 
 Windows retains these additional checks inside `build`:
 
+- Native Python and Cargo metadata execution for both advisory scope guards.
 - Native ConPTY vendor coverage and PowerShell shell integration.
 - Package-manifest extraction fixtures under Windows filesystem semantics.
 - A retained multi-resolution ICO resource check.
@@ -946,6 +948,10 @@ acceptance. The nightly job here is not the timed libFuzzer workflow.
 runs for PRs and `main` pushes touching workflows, labeler configuration, or
 Dependabot configuration.
 
+The Mermaid parser, layout and paint dependencies are grouped for coordinated
+review. Their exact family contract remains enforced by renderer tests; an
+individual dependency resolving successfully does not approve a family upgrade.
+
 - Job `actionlint` rejects external action/workflow references without immutable
   40-character commit SHAs, installs shellcheck, and runs pinned actionlint.
 - It checks workflow syntax and embedded shell blocks on Ubuntu.
@@ -965,7 +971,13 @@ this workflow. It also runs daily at 06:00.
   report cannot leave an affected graph green merely because an issue opened.
 
 The product command explicitly ignores `RUSTSEC-2026-0253` under the scope guard.
-The vendor graph does not inherit that product exception.
+It also ignores the maintenance-only notices `RUSTSEC-2026-0370`,
+`RUSTSEC-2026-0371` and `RUSTSEC-2026-0372` for the exact reviewed D-Bus graph.
+`scripts/check-dbus-scope.py` verifies exact package versions, registry sources
+and every reverse dependency across all targets before admitting these notices.
+Its regression suite covers graph drift, source changes and unexpected
+consumers. `--deny warnings` remains enabled; vulnerability notices and all
+other warnings still fail. The vendor graph inherits none of these exceptions.
 Read the Cargo audit configuration and guard before changing an exception.
 A changed or resolved dependency path must trigger reassessment and cleanup.
 

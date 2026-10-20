@@ -55,6 +55,8 @@ export RUSTDOCFLAGS := "-D warnings"
 # everywhere.
 TMPDIR := if os_family() == "windows" { env_var("TEMP") } else { "/tmp" }
 
+scope_python := if os_family() == "windows" { "python" } else { "python3" }
+
 # Default recipe: show the list when `just` is invoked with no args.
 default:
     @just --list
@@ -131,11 +133,11 @@ deny:
     cargo deny --manifest-path vendor/Cargo.toml check licenses sources bans
 
 # RustSec advisory coverage for both committed lock graphs. The product graph
-# retains two narrowly guarded upstream exceptions; the vendor graph has no
+# retains narrowly guarded upstream exceptions; the vendor graph has no
 # product exceptions. Missing cargo-audit is a hard command failure.
-audit:
-    cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --ignore RUSTSEC-2026-0253
-    cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --file vendor/Cargo.lock
+audit: lru-scope dbus-scope
+    cargo audit --deny warnings --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0370 --ignore RUSTSEC-2026-0371 --ignore RUSTSEC-2026-0372
+    cargo audit --deny warnings --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --file vendor/Cargo.lock
 
 # `cargo machete` — finds unused workspace dependencies. CI runs
 # this via `.github/workflows/machete.yml` on every PR that touches a
@@ -229,9 +231,13 @@ macos-update-smoke TAG="":
 # dependency-path or reviewed-version change fails until reachability is
 # reassessed. Resolution also fails with cleanup instructions, so an obsolete
 # advisory ignore cannot linger silently.
-[unix]
 lru-scope:
-    ./scripts/check-lru-scope.sh
+    {{scope_python}} scripts/test-lru-scope.py
+    {{scope_python}} scripts/check-lru-scope.py
+
+dbus-scope:
+    {{scope_python}} scripts/test-dbus-scope.py
+    {{scope_python}} scripts/check-dbus-scope.py
 
 # === Packaging & release metadata ==================================
 # Local entry points for CI's packaging and release-metadata checks.

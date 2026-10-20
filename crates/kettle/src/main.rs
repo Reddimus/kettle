@@ -2850,7 +2850,6 @@ mod crash_log_tests {
     #[cfg(unix)]
     #[test]
     fn panic_report_survives_a_closed_stderr_pipe() {
-        use std::os::fd::{FromRawFd, OwnedFd};
         use std::os::unix::process::ExitStatusExt;
         use std::process::{Command, Stdio};
 
@@ -2861,12 +2860,10 @@ mod crash_log_tests {
             panic!("closed stderr regression");
         }
         let root = kettle_test_support::private_tempdir("kettle-panic-pipe-");
-        let mut fds = [-1; 2];
-        // SAFETY: pipe writes two descriptors into the supplied array.
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        // SAFETY: a successful pipe call returned two uniquely owned fds.
-        let reader = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        let writer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let (reader, writer) = std::io::pipe().unwrap();
+        // Model another parallel test spawning before this reader closes.
+        // Its exec must not keep the pipe readable during the panic below.
+        let mut unrelated = Command::new("/bin/sleep").arg("30").spawn().unwrap();
         drop(reader);
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -2887,10 +2884,14 @@ mod crash_log_tests {
             if std::time::Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = unrelated.kill();
+                let _ = unrelated.wait();
                 panic!("isolated panic did not terminate");
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
         assert_eq!(status.signal(), Some(libc::SIGPIPE));
         let reports: Vec<_> = std::fs::read_dir(root.path().join("kettle/crash"))
             .expect("panic hook persisted its report")

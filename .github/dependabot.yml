@@ -29,6 +29,14 @@ updates:
         patterns:
           - "accesskit"
           - "accesskit_winit"
+      # These exact pins form one audited parser/layout/paint contract.
+      # Review upgrades together; passing resolution alone is insufficient.
+      mermaid-renderer-family:
+        patterns:
+          - "merman*"
+          - "dugong*"
+          - "manatee"
+          - "roughr-merman"
       # Bundle non-breaking bumps so a slow review week doesn't pile up
       # 15 PRs. Major bumps stay on their own so we can weigh each one.
       cargo-patch-and-minor:
