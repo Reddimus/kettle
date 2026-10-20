@@ -28,7 +28,7 @@ Pin the version for a reproducible install:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh \
-  | KETTLE_VERSION=v5.4.0 sh
+  | KETTLE_VERSION=v5.5.0 sh
 ```
 
 For a custom prefix, use `KETTLE_PREFIX`. The invoking user needs write access:
@@ -145,13 +145,13 @@ recovery. Updating from macOS 3.1.1 requires a manual app replacement once.
 
 ## Verifying a download (SHA-256)
 
-Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v5.4.0)
+Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v5.5.0)
 
 Download the matching archive and sidecar before extracting. For Linux x86_64:
 
 ```sh
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v5.4.0/kettle-linux-x86_64.tar.gz
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v5.4.0/kettle-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v5.5.0/kettle-linux-x86_64.tar.gz
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v5.5.0/kettle-linux-x86_64.tar.gz.sha256
 sha256sum -c kettle-linux-x86_64.tar.gz.sha256
 ```
 
