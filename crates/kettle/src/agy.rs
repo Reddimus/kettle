@@ -1,12 +1,36 @@
 //! Native agy command hooks. Its PostToolUse contract accepts `{}` only, so
 //! previews go to the shelf instead of inventing an inline hook protocol.
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(unix, test))]
+use std::path::PathBuf;
 
 pub(crate) fn enabled() -> bool {
-    kettle_config::Config::default_path()
-        .and_then(|path| kettle_config::Config::read_from_with_diagnostics(&path).ok())
-        .is_some_and(|config| config.config.agent_display && config.config.agent_display_agy)
+    client(None).is_ok()
+}
+
+/// Bind integration permission to the active Kettle, including its profile,
+/// explicit config and launch overrides. This metadata probe grants no reads.
+pub(crate) fn client(
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<kettle_ctl::Client, crate::show_cli::Refusal> {
+    let mut client = kettle_ctl::Client::discover_display(None)
+        .map_err(|error| crate::show_cli::refusal(&error))?;
+    let timeout = std::time::Duration::from_secs(1);
+    let status = match cancelled {
+        Some(cancelled) => client.call_cancellable_with_timeout(
+            "agent_display_status",
+            json!({}),
+            cancelled,
+            timeout,
+        ),
+        None => client.call_with_timeout("agent_display_status", json!({}), timeout),
+    }
+    .map_err(|error| crate::show_cli::refusal(&error))?;
+    if status.get("agy") != Some(&Value::Bool(true)) {
+        return Err(kettle_media::FailureCode::DisplayDisabled.into());
+    }
+    Ok(client)
 }
 
 pub(crate) fn key(path: &Path, page: Option<u64>) -> String {
@@ -19,6 +43,7 @@ pub(crate) fn key(path: &Path, page: Option<u64>) -> String {
     format!("agy:{:016x}", hash.finish())
 }
 
+#[cfg(any(unix, test))]
 fn artifact(event: &Value) -> Option<PathBuf> {
     if event
         .get("error")
@@ -68,6 +93,7 @@ fn artifact(event: &Value) -> Option<PathBuf> {
 /// Native TUI provenance, independent of hook JSON and environment claims.
 /// The nearest signed agy ancestor must have a terminal for stdout. Print
 /// sessions whose output is a file/pipe do not publish automatic previews.
+#[cfg(unix)]
 fn interactive_parent() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -96,12 +122,14 @@ fn interactive_parent() -> bool {
     false
 }
 
+#[cfg(unix)]
 pub(crate) fn hook(action: &str) -> i32 {
     let empty = || {
         println!("{{}}");
         0
     };
-    if !enabled() || (action != "guidance" && !interactive_parent()) {
+    if !matches!(action, "guidance" | "artifact") || (action != "guidance" && !interactive_parent())
+    {
         return empty();
     }
     use std::io::Read as _;
@@ -119,7 +147,7 @@ pub(crate) fn hook(action: &str) -> i32 {
     };
     // Strict discovery binds the request to the Kettle in this process's
     // ancestry. No network server, pane override or user-supplied destination.
-    let Ok(mut client) = kettle_ctl::Client::discover_display(None) else {
+    let Ok(mut client) = client(None) else {
         return empty();
     };
     if action == "guidance" {
@@ -151,6 +179,7 @@ pub(crate) fn hook(action: &str) -> i32 {
     empty()
 }
 
+#[cfg(any(unix, test))]
 fn supported_version(output: &str) -> bool {
     let parts = output.trim().split('.').collect::<Vec<_>>();
     if parts.len() != 3
@@ -170,6 +199,7 @@ fn supported_version(output: &str) -> bool {
 }
 
 /// Native plugin setup must not hang the caller or collect unbounded output.
+#[cfg(unix)]
 fn plugin_command(
     mut command: std::process::Command,
     capture: bool,
@@ -225,6 +255,7 @@ fn plugin_command(
     Ok((status, bytes))
 }
 
+#[cfg(unix)]
 pub(crate) fn setup(print: bool, install: bool, uninstall: bool) -> i32 {
     if uninstall {
         println!(
@@ -234,8 +265,8 @@ pub(crate) fn setup(print: bool, install: bool, uninstall: bool) -> i32 {
     }
     if !(print || install) {
         println!(
-            "agy previews: {} in saved settings. Delivery: media shelf; agy's native hooks cannot print inline Kettle cards. Setup: kettle agent-setup --agent agy --install. Requires agy 1.4.x, agent previews, and agy previews enabled. Automatic artifact fallback currently requires a signed macOS agy TUI; MCP display also works on Linux.",
-            if enabled() { "enabled" } else { "disabled" }
+            "agy previews: {} for this process. Delivery: media shelf; agy's native hooks cannot print inline Kettle cards. Setup: kettle agent-setup --agent agy --install. Requires agy 1.4.2 or newer 1.x and an active Kettle with agent and agy previews enabled. Automatic artifact fallback currently requires a signed macOS agy process with foreground terminal output; MCP display also works on Linux.",
+            if enabled() { "enabled" } else { "unavailable" }
         );
         return 0;
     }

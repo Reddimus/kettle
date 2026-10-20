@@ -214,6 +214,8 @@ Reports that fit any of these are welcome:
   display-only admission. The agy artifact hook accepts only bounded successful
   native artifact events, checks a signed foreground-terminal ancestor on
   macOS and confines files to direct children of the artifact directory.
+  Its internal display-policy query returns only an integration flag and
+  remains in the display capability; terminal reads and geometry are refused.
   Ordinary workspace scanning, transcript scraping, symlink/FIFO reads, model
   access to the hidden hook or granting screen/input access is in scope.
 - **Resource exhaustion via a single PTY frame** — a parser path that

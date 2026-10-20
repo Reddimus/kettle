@@ -1310,6 +1310,11 @@ Only regular visual files up to 32 MiB qualify, and hook input is capped at
 The display-only MCP adapter also supports Linux; automatic hook delivery
 currently requires macOS provenance checks.
 
+The adapter checks the running Kettle instance before every display. Its
+integration switch follows that instance's active profile or `--config` file,
+including live changes; another window's default config does not decide it.
+`--status` reports whether previews are available to the calling process.
+
 agy already renders Mermaid through its own artifact UI. Its native
 `PostToolUse` response accepts no Kettle inline card output, so this integration
 uses the media shelf. Neither delivery nor a tool receipt proves the agent

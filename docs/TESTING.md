@@ -31,6 +31,16 @@ A focused test helps during development, but does not replace the gate.
 
 ### Main gates
 
+The MCP stdio integration suite exercises Codex guidance, turn-end-only fallback,
+one artifact per hook, deduplication after primary display, stable replacement
+keys and shutdown cleanup through the real server process and a fixture control
+transport. Inbox unit tests cover rotated filenames, in-flight rewrites, links,
+FIFOs, oversized entries and bounded directories. These checks do not substitute
+for native Codex hook trust and rendered-card acceptance.
+The agy process fixture deliberately disables the default config while enabling
+the active controller's policy, then switches that live policy off. This covers
+profile/config selection and makes default-file shortcuts fail the regression.
+
 - `just gauntlet`: checks formatting, locked workspace build/test/Clippy,
   default-feature core Clippy, rustdoc, media test features, and helper fixtures.
   Run before a PR; needs the source-build tools and native libraries.

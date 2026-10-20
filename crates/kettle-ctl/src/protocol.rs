@@ -217,11 +217,12 @@ pub enum Method {
     Show,
     AgentLaunch,
     CardPickup,
+    AgentDisplayStatus,
 }
 
 impl Method {
     /// Complete method table, used by tests and diagnostics.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::GetState,
         Self::ListTabs,
         Self::ListPanes,
@@ -242,6 +243,7 @@ impl Method {
         Self::Show,
         Self::AgentLaunch,
         Self::CardPickup,
+        Self::AgentDisplayStatus,
     ];
 
     /// Parse the stable protocol-v1 method spelling.
@@ -267,6 +269,7 @@ impl Method {
             "show" => Self::Show,
             "agent_launch" => Self::AgentLaunch,
             "card_pickup" => Self::CardPickup,
+            "agent_display_status" => Self::AgentDisplayStatus,
             _ => return None,
         })
     }
@@ -294,6 +297,7 @@ impl Method {
             Self::Show => "show",
             Self::AgentLaunch => "agent_launch",
             Self::CardPickup => "card_pickup",
+            Self::AgentDisplayStatus => "agent_display_status",
         }
     }
 
@@ -318,7 +322,9 @@ impl Method {
             | Self::UiGeometry
             | Self::Subscribe
             | Self::WaitFor => Capability::Read,
-            Self::Show | Self::AgentLaunch | Self::CardPickup => Capability::Display,
+            Self::Show | Self::AgentLaunch | Self::CardPickup | Self::AgentDisplayStatus => {
+                Capability::Display
+            }
         }
     }
 
@@ -335,7 +341,7 @@ impl Method {
     /// change with them.
     pub const fn visibility(self) -> Visibility {
         match self {
-            Self::AgentLaunch | Self::CardPickup => Visibility::Internal,
+            Self::AgentLaunch | Self::CardPickup | Self::AgentDisplayStatus => Visibility::Internal,
             // Listed rather than defaulted, so a new method must be classified.
             Self::GetState
             | Self::ListTabs
@@ -814,6 +820,7 @@ mod tests {
             ("show", Display, Ui),
             ("agent_launch", Display, Ui),
             ("card_pickup", Display, Ui),
+            ("agent_display_status", Display, Ui),
         ];
         assert_eq!(table.len(), Method::ALL.len());
         let mut names = std::collections::HashSet::new();
@@ -835,7 +842,12 @@ mod tests {
             .collect();
         assert_eq!(
             display,
-            [&Method::Show, &Method::AgentLaunch, &Method::CardPickup]
+            [
+                &Method::Show,
+                &Method::AgentLaunch,
+                &Method::CardPickup,
+                &Method::AgentDisplayStatus
+            ]
         );
     }
 

@@ -667,9 +667,14 @@ fn tool_kettle_show(
     session: &crate::mcp_display::DisplaySession,
 ) -> Value {
     use kettle_media::FailureCode;
-    if crate::mcp_display::is_agy() && !crate::agy::enabled() {
-        return show_failed(FailureCode::DisplayDisabled.into());
-    }
+    let agent_client = if crate::mcp_display::is_agy() {
+        match crate::agy::client(cancelled) {
+            Ok(client) => Some(client),
+            Err(refusal) => return show_failed(refusal),
+        }
+    } else {
+        None
+    };
     // A card only where this call's hook can collect it; Kettle decides
     // whether the caller may have one.
     let card = session.card_for(params, std::time::Instant::now());
@@ -741,9 +746,12 @@ fn tool_kettle_show(
         Ok(params) => params,
         Err(refusal) => return show_failed(refusal),
     };
-    let mut client = match Client::discover_display(None) {
-        Ok(client) => client,
-        Err(error) => return show_failed(crate::show_cli::refusal(&error)),
+    let mut client = match agent_client {
+        Some(client) => client,
+        None => match Client::discover_display(None) {
+            Ok(client) => client,
+            Err(error) => return show_failed(crate::show_cli::refusal(&error)),
+        },
     };
     let reply = match cancelled {
         Some(cancelled) => client.call_cancellable("show", params, cancelled),

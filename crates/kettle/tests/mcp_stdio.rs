@@ -505,6 +505,7 @@ fn mcp_stdio_names_a_malformed_modern_envelope_instead_of_blaming_the_handshake(
 struct FakeKettle {
     runtime: tempfile::TempDir,
     shows: std::sync::mpsc::Receiver<Value>,
+    agy: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -535,9 +536,12 @@ impl FakeKettle {
             kettle_ctl::discovery::RegistryEntry::registering("gui", pid, endpoint, "5.0.0", 1);
         kettle_ctl::discovery::register(&registry, &entry).expect("register");
         let (sent, shows) = std::sync::mpsc::channel();
+        let agy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let policy = agy.clone();
         std::thread::spawn(move || {
             while let Ok(stream) = listener.accept() {
                 let sent = sent.clone();
+                let policy = policy.clone();
                 std::thread::spawn(move || {
                     let mut writer = stream.try_clone().expect("clone");
                     for line in std::io::BufReader::new(stream).lines() {
@@ -548,6 +552,9 @@ impl FakeKettle {
                             json!({"v": 1, "id": request["id"], "ok": true, "result": {
                                 "pane": 1, "verified": true, "window": 1, "item": 2,
                                 "kind": "mermaid", "width": 64, "height": 48, "warnings": []}})
+                        } else if request["method"] == "agent_display_status" {
+                            json!({"v":1,"id":request["id"],"ok":true,"result":{
+                                "agy":policy.load(std::sync::atomic::Ordering::Acquire)}})
                         } else {
                             json!({"v": 1, "id": request["id"], "ok": false,
                                 "error": {"code": "unknown_method", "message": "m"}})
@@ -559,7 +566,11 @@ impl FakeKettle {
                 });
             }
         });
-        Self { runtime, shows }
+        Self {
+            runtime,
+            shows,
+            agy,
+        }
     }
 
     fn spawn(&self, args: &[&str]) -> std::process::Child {
@@ -602,11 +613,12 @@ impl FakeKettle {
 #[test]
 fn agy_guidance_is_portable_and_page_keys_use_the_validated_page() {
     let kettle = FakeKettle::start();
+    kettle.agy.store(true, std::sync::atomic::Ordering::Release);
     let config = kettle.runtime.path().join("config/kettle");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
         config.join("config"),
-        "agent-display = true\nagent-display-agy = true\n",
+        "agent-display = false\nagent-display-agy = false\n",
     )
     .unwrap();
     let mut child = kettle.spawn(&["agent-setup", "--agy-hook", "guidance"]);
@@ -643,11 +655,9 @@ fn agy_guidance_is_portable_and_page_keys_use_the_validated_page() {
     }
     assert_eq!(keys[0], keys[1], "2 and 2.0 must update the same page");
     assert_ne!(keys[0], keys[2], "distinct pages must have distinct keys");
-    std::fs::write(
-        config.join("config"),
-        "agent-display = false\nagent-display-agy = true\n",
-    )
-    .unwrap();
+    kettle
+        .agy
+        .store(false, std::sync::atomic::Ordering::Release);
     let mut child = kettle.spawn(&["agent-setup", "--agy-hook", "guidance"]);
     writeln!(child.stdin.take().unwrap(), "{{}}").unwrap();
     let output = child.wait_with_output().unwrap();
@@ -655,6 +665,21 @@ fn agy_guidance_is_portable_and_page_keys_use_the_validated_page() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         json!({})
     );
+    // Disabled integration wins before parameter validation or file access.
+    for arguments in [json!({"page": 0}), json!({"path": "/missing/preview.png"})] {
+        let replies = kettle.mcp(&["mcp", "--display", "--agy-display"], &[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"kettle_show","arguments":arguments}}),
+        ]);
+        let reply = replies.iter().find(|reply| reply["id"] == 2).unwrap();
+        assert_eq!(
+            reply["result"]["structuredContent"]["code"],
+            "display_disabled"
+        );
+    }
 }
 
 /// Real MCP process and control transport; the control server is a fixture,

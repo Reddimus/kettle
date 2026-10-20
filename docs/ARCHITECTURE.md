@@ -901,8 +901,13 @@ reported artifact directory, with a 1 MiB event and 32 MiB file limit. On
 macOS the automatic fallback requires a Google-signed agy ancestor whose
 stdout is the controlling foreground terminal. It emits only the native
 empty hook response; previews go to the shelf. MCP and fallback share stable
-path/page keys to avoid duplicate shelf items. Both are gated by saved agent
-and agy display settings. No user agent configuration is rewritten directly.
+path/page keys to avoid duplicate shelf items. Both query the active Kettle's
+internal `agent_display_status` before delivery, using the existing display-only
+capability. The response contains only the agy integration flag; it exposes no
+terminal content or geometry. This follows the active profile, explicit config,
+launch policy and live settings, instead of rereading the default config file.
+The probe has a one-second deadline, and the same checked connection delivers
+the preview. No user agent configuration is rewritten directly.
 
 `kettle-ctl` owns the card version floors used by Linux launch scopes and
 the Codex launcher: Codex 0.162 and later in 0.x, and Claude Code 2.1.280 and
