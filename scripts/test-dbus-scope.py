@@ -3,8 +3,15 @@
 
 import copy
 import importlib.util
+import io
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location(
     "dbus_scope", Path(__file__).with_name("check-dbus-scope.py")
@@ -43,6 +50,33 @@ def fixture():
 
 
 class DbusScopeTests(unittest.TestCase):
+    def test_metadata_is_utf8_under_a_legacy_host_locale(self):
+        metadata = fixture()
+        metadata["packages"][0]["description"] = "\u00c1nfora"
+        real_run = subprocess.run
+
+        def legacy_locale(*args, **kwargs):
+            if kwargs.get("text") or kwargs.get("universal_newlines"):
+                kwargs.setdefault("encoding", "cp1252")
+            return real_run(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "metadata.json"
+            path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+            command = [
+                sys.executable,
+                "-c",
+                "import sys; from pathlib import Path; "
+                "sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())",
+                str(path),
+            ]
+            with (
+                mock.patch.object(module, "metadata_command", return_value=command),
+                mock.patch.object(module.subprocess, "run", side_effect=legacy_locale),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(module.main(), 0)
+
     def test_reviewed_graph(self):
         self.assertEqual(module.scope_errors(fixture()), [])
 

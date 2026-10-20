@@ -108,6 +108,7 @@ def main():
         cwd=Path(__file__).resolve().parent.parent,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     if result.returncode:
