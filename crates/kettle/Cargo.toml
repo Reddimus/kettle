@@ -62,6 +62,8 @@ serde.workspace = true
 # `kettle exec --json` NDJSON event stream; also
 # the JSON-RPC/MCP surface and the ctl client.
 serde_json.workspace = true
+# Private, automatically cleaned artifact inbox for agent previews.
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -116,7 +118,6 @@ ignored = ["winresource"]
 kettle-test-support.workspace = true
 # Short client budgets for the media platform's end-to-end tests.
 kettle-media = { workspace = true, features = ["test-worker"] }
-tempfile = "3"
 # Reads back the TOML `agent-setup` writes for Codex.
 toml.workspace = true
 

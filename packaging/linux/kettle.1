@@ -1121,3 +1121,23 @@ kettle contributors. See
 for the full list. Bug reports + feature requests at
 .UR https://github.com/Reddimus/kettle/issues
 .UE .
+
+.SH AGENT PREVIEW ADAPTERS
+.B kettle agent\-setup \-\-agent agy \-\-install
+stages Kettle's private native agy plugin and invokes agy's installer. It requires
+agy 1.4.2 or newer within 1.x and never replaces an existing plugin named kettle.
+.B kettle agent\-setup \-\-agent agy \-\-print
+prints its install command. Enable agent-display and agent-display-agy in Settings.
+agy previews use the media shelf; its native PostToolUse contract cannot print
+Kettle's inline hook cards. Successful top-level visual artifacts in agy's explicit
+artifact channel are published automatically in a signed macOS foreground TUI.
+The private adapter flags
+.B kettle agent\-setup \-\-agy\-hook
+and
+.B kettle mcp \-\-agy\-display
+are for Kettle's plugin only. Do not invoke them as shell integration commands.
+Codex's supported card launch also adds UserPromptSubmit guidance and a Stop
+fallback for a private, non-recursive visual artifact inbox. The model has the
+whole turn to call kettle_show before fallback. Each hook admits at most one
+changed file, the inbox holds at most 32 entries of 32 MiB each, and no more than 128
+fallback attempts run per launch. Trust changed hooks in Codex's own review.

@@ -1242,6 +1242,15 @@ on macOS and Linux also add:
 - a `PostToolUse` hook (`-c hooks.PostToolUse=…`) that, after each
   `kettle_show`, calls `kettle_card` with the call's `${tool_use_id}`, so the
   card prints under the call.
+- `UserPromptSubmit` and `Stop` hooks using the hidden `kettle_agent_hook`.
+  The prompt hook encourages relevant visual previews without requiring you
+  to name the tool. It offers a private session inbox for finished user-facing
+  visuals. At turn end the fallback shows at most one changed artifact from
+  that inbox if the agent did not already show it. It checks 32 direct entries,
+  accepts regular visual files up to 32 MiB and permits 128 render attempts
+  per session. Unchanged failed files are not retried. Ordinary repository
+  assets, scratch files and passing-test recordings are excluded; no repository
+  watcher or transcript scraping is involved.
 
 Codex adds that hook to your own hooks; it does not replace them. Codex runs
 a new hook only after you trust it, so the first such launch opens Codex's
@@ -1254,6 +1263,12 @@ through 0.161 also get the shelf alone; an unsupported CLI major gets no
 Kettle launch options. A launch that sets hooks itself with `-c hooks…` gets
 the shelf alone, because its hooks
 would replace Kettle's.
+
+Hook trust applies to the exact hook definition. Adding these guidance and
+fallback hooks therefore requires a new native Codex review even if you
+trusted the earlier card hook. Kettle does not bypass that decision. Visual
+guidance improves tool selection; it cannot guarantee every model chooses a
+preview. The bounded fallback applies only to the explicit session inbox.
 
 A session started this way does not show in `codex agents`. The function names the Kettle that
 printed it, and a Kettle running from a translocated copy refuses to print
@@ -1269,6 +1284,38 @@ this Kettle cannot offer it, running from a translocated copy.
 Claude Code still write their usual history and session files, and that
 Claude Code keeps data for a plugin it loads: Kettle writes none of their
 settings or startup files, which is not the same as nothing written.
+
+### agy's native plugin
+
+Enable **Agent previews** and **agy previews**, then run:
+
+```sh
+kettle agent-setup --agent agy --print
+kettle agent-setup --agent agy --install
+kettle agent-setup --agent agy --status
+```
+
+The first command prints the native installation command for inspection. The
+second installs Kettle's private, checked plugin through `agy plugin install`;
+it refuses to replace any existing plugin named `kettle`. Requires agy 1.4.2
+or newer within 1.x. Start a new agy session in a Kettle pane afterwards.
+
+Native `PreInvocation` guidance encourages relevant `kettle_show` calls.
+On macOS, successful native writes or edits of explicit visual artifacts
+directly inside agy's artifact directory also publish to the media shelf.
+This fallback requires a Google-signed agy ancestor with foreground terminal
+stdout; sessions piped to files or other programs do not publish automatically.
+Only regular visual files up to 32 MiB qualify, and hook input is capped at
+1 MiB. Stable file/page keys keep MCP and automatic delivery on one shelf item.
+The display-only MCP adapter also supports Linux; automatic hook delivery
+currently requires macOS provenance checks.
+
+agy already renders Mermaid through its own artifact UI. Its native
+`PostToolUse` response accepts no Kettle inline card output, so this integration
+uses the media shelf. Neither delivery nor a tool receipt proves the agent
+visually inspected a preview. To disable it immediately, turn off agy previews;
+to remove registration, run `agy plugin uninstall kettle`. Kettle leaves
+native authentication and unrelated plugins alone.
 
 ### Linux card launches
 

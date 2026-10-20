@@ -45,6 +45,11 @@ impl Requirement {
         r#"anchor apple generic and identifier "codex" and certificate leaf[subject.OU] = "2DC432GLL2""#,
     );
 
+    /// Antigravity CLI as Google signs it.
+    pub const AGY: Self = Self(
+        r#"anchor apple generic and identifier "cli" and certificate leaf[subject.OU] = "EQHXZ8M8AV""#,
+    );
+
     /// Preview, Apple's image viewer, as Apple signs it: the one app Kettle
     /// hands an image to open outside it on macOS.
     pub const PREVIEW: Self = Self(r#"anchor apple and identifier "com.apple.Preview""#);
@@ -58,11 +63,12 @@ impl Requirement {
     }
 
     /// Every requirement Kettle checks, for the test that parses them all.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::APPLE_ISSUED,
         Self::APPLE_OWN,
         Self::CLAUDE_CODE,
         Self::CODEX,
+        Self::AGY,
         Self::PREVIEW,
         Self::QUICKTIME,
     ];

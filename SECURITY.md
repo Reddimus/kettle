@@ -209,6 +209,13 @@ Reports that fit any of these are welcome:
   scope.
 - **Bracketed-paste injection** — a paste payload that escapes the
   `\e[200~ … \e[201~` wrapper and runs as input.
+- **Automatic agent previews** — Codex's hidden hook may inspect only its
+  private, bounded session inbox and cannot bypass native hook trust or
+  display-only admission. The agy artifact hook accepts only bounded successful
+  native artifact events, checks a signed foreground-terminal ancestor on
+  macOS and confines files to direct children of the artifact directory.
+  Ordinary workspace scanning, transcript scraping, symlink/FIFO reads, model
+  access to the hidden hook or granting screen/input access is in scope.
 - **Resource exhaustion via a single PTY frame** — a parser path that
   panics, allocates unbounded memory, or hangs the renderer on a small
   attacker-controlled payload (e.g. a sixel/kitty/iTerm2 image, OSC 52

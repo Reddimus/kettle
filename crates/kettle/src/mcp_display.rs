@@ -60,6 +60,7 @@ pub(crate) struct DisplaySession {
     /// The hook that prints this session's cards, if any. Headless and SDK
     /// Claude Code sessions run no hook, so they get no card.
     hook: Option<CardHook>,
+    pub(crate) inbox: Mutex<Option<crate::agent_artifacts::Inbox>>,
     pending: Mutex<HashMap<String, (kettle_ctl::show::InlineDelivery, Instant)>>,
 }
 
@@ -75,6 +76,10 @@ impl DisplaySession {
     pub(crate) fn new(hook: Option<CardHook>) -> Self {
         Self {
             hook,
+            inbox: Mutex::new(
+                hook.filter(|hook| *hook == CardHook::Codex)
+                    .and_then(|_| crate::agent_artifacts::Inbox::new().ok()),
+            ),
             pending: Mutex::new(HashMap::new()),
         }
     }
@@ -180,6 +185,19 @@ pub(crate) fn session() -> &'static DisplaySession {
     SESSION.get_or_init(|| DisplaySession::new(None))
 }
 
+/// Static values are not dropped at process exit. Release the session's
+/// temporary directory explicitly after the stdio server has shut down.
+pub(crate) fn close_session() {
+    if let Some(session) = SESSION.get() {
+        let inbox = session
+            .inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(inbox);
+    }
+}
+
 /// Whether a `tools/call` came from a model: it carries a harness's call id
 /// in its metadata, which a hook's own call does not.
 pub(crate) fn from_model(params: &Value) -> bool {
@@ -200,6 +218,15 @@ fn call_id(params: &Value, key: &str) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
     plain.then(|| id.to_owned())
+}
+
+static AGY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+pub(crate) fn init_agy(enabled: bool) {
+    let _ = AGY.set(enabled);
+}
+pub(crate) fn is_agy() -> bool {
+    AGY.get().copied().unwrap_or(false)
 }
 
 #[cfg(test)]

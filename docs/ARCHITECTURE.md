@@ -875,6 +875,35 @@ Linux, supported Codex launches also add a `PostToolUse` `mcp_tool` hook;
 the display server then keys cards by Codex's call id, and
 `kettle_card` hands each to that hook once, as for Claude Code.
 
+Codex also receives hidden `kettle_agent_hook` calls at `UserPromptSubmit`
+and `Stop`. The first supplies visual guidance and the private session inbox;
+the second checks that inbox after the model has had a turn to call
+`kettle_show`. The hidden tool rejects model-originated calls and is absent
+from tool discovery. `agent_artifacts::Inbox` owns a temporary directory and
+tracks file metadata, with 32 direct entries, 32 MiB per file and 128 render
+attempts per session. It neither recurses nor reads files to calculate change
+keys. A successful primary display marks the file as delivered. An unchanged
+failed file is not retried. Normal card admission and display-only restrictions
+apply to the fallback too. Codex owns trust approval for every new hook.
+Primary and fallback previews share a stable inbox file key. Metadata is
+captured before rendering, so a concurrent rewrite remains eligible for the
+next preview. Deleted paths are pruned from the 32-entry deduplication cache.
+Sorting costs O(n log n) time and O(n) space for n at most 32; no media bytes
+are read for change detection. The stdio entry point explicitly releases the
+inbox on shutdown because Rust does not drop static session values at exit.
+
+`agy_plugin` stages an immutable native plugin through the same `owned_dir`
+boundary. Explicit `agent-setup --agent agy --install` uses agy's installer;
+it refuses to replace an existing plugin named `kettle`. Its `PreInvocation`
+hook supplies ephemeral visual guidance. The `PostToolUse` adapter accepts
+only successful native visual artifact writes or edits directly within the
+reported artifact directory, with a 1 MiB event and 32 MiB file limit. On
+macOS the automatic fallback requires a Google-signed agy ancestor whose
+stdout is the controlling foreground terminal. It emits only the native
+empty hook response; previews go to the shelf. MCP and fallback share stable
+path/page keys to avoid duplicate shelf items. Both are gated by saved agent
+and agy display settings. No user agent configuration is rewritten directly.
+
 `kettle-ctl` owns the card version floors used by Linux launch scopes and
 the Codex launcher: Codex 0.162 and later in 0.x, and Claude Code 2.1.280 and
 later in 2.x. Minor updates need no allowlist change. New major lines need

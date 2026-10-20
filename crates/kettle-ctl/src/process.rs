@@ -155,6 +155,32 @@ pub fn process_group(identity: ProcessIdentity) -> Result<u32, InspectError> {
     Err(InspectError::Unsupported)
 }
 
+/// A process's controlling terminal and its foreground group, read from XNU.
+/// `/dev/tty` is an alias vnode whose device number is not the actual PTY.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControllingTerminal {
+    /// The actual character-device number, comparable to standard output.
+    pub device: u64,
+    /// The process group currently holding this terminal's foreground.
+    pub foreground_group: u32,
+}
+
+/// Read macOS terminal ownership while the process identity remains current.
+#[cfg(target_os = "macos")]
+pub fn controlling_terminal(
+    identity: ProcessIdentity,
+) -> Result<Option<ControllingTerminal>, InspectError> {
+    if identity.pid == 0 {
+        return Err(InspectError::Unavailable);
+    }
+    let terminal = imp::controlling_terminal(identity.pid)?;
+    if self::identity(identity.pid)? != identity {
+        return Err(InspectError::Unavailable);
+    }
+    Ok(terminal)
+}
+
 /// A character device's number as [`StandardOutput::Device`] gives it, from
 /// the device file's metadata: Linux's 64-bit `dev_t`, macOS's 32-bit one.
 #[cfg(unix)]
@@ -341,6 +367,20 @@ mod imp {
 
     pub(super) fn process_group(pid: u32) -> Result<u32, InspectError> {
         bsd_info(pid).map(|info| info.pbi_pgid)
+    }
+
+    pub(super) fn controlling_terminal(
+        pid: u32,
+    ) -> Result<Option<super::ControllingTerminal>, InspectError> {
+        let info = bsd_info(pid)?;
+        Ok(
+            (info.e_tdev != u32::MAX && info.e_tpgid != 0 && info.e_tpgid != u32::MAX).then_some(
+                super::ControllingTerminal {
+                    device: u64::from(info.e_tdev),
+                    foreground_group: info.e_tpgid,
+                },
+            ),
+        )
     }
 
     pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, InspectError> {
@@ -774,6 +814,66 @@ mod tests {
             child.wait().ok();
         }
         assert_eq!(process_group(identity), Err(InspectError::Unavailable));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn controlling_terminal_names_the_real_pty_instead_of_the_dev_tty_alias() {
+        use std::os::unix::process::CommandExt as _;
+        use std::process::{Command, Stdio};
+        let (_controller, terminal) = pty();
+        let device = device_number(
+            &std::fs::File::from(terminal.try_clone().unwrap())
+                .metadata()
+                .unwrap(),
+        );
+        let mut command = Command::new("/bin/sleep");
+        command
+            .stdin(Stdio::from(terminal.try_clone().unwrap()))
+            .stdout(Stdio::from(terminal));
+        // SAFETY: the child callback uses only async-signal-safe system calls;
+        // stdin is the slave PTY already installed by Command before pre_exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1
+                    || libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY.into(), 0) == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = waiting(&mut command);
+        let identity = inspect(child.id()).unwrap().identity;
+        let observed = controlling_terminal(identity);
+        let stdout = standard_output(identity);
+        let reused = controlling_terminal(ProcessIdentity::new(
+            identity.pid(),
+            identity.start().wrapping_add(1),
+        ));
+        child.kill().ok();
+        child.wait().ok();
+        assert_eq!(
+            observed,
+            Ok(Some(ControllingTerminal {
+                device,
+                foreground_group: child.id()
+            }))
+        );
+        assert_eq!(stdout, Ok(StandardOutput::Device(device)));
+        assert_ne!(
+            device,
+            device_number(&std::fs::metadata("/dev/tty").unwrap())
+        );
+        assert_eq!(reused, Err(InspectError::Unavailable));
+        assert_eq!(
+            controlling_terminal(identity),
+            Err(InspectError::Unavailable)
+        );
+        assert_eq!(
+            controlling_terminal(ProcessIdentity::new(0, 0)),
+            Err(InspectError::Unavailable)
+        );
     }
 
     #[test]

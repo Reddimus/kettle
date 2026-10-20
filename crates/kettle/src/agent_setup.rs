@@ -243,7 +243,7 @@ fn server_table(kettle: &str, cards: bool) -> String {
     let (args, tools): (&[&str], &[&str]) = if cards {
         (
             &["mcp", "--display", "--codex-card-hook"],
-            &["kettle_show", "kettle_card"],
+            &["kettle_show", "kettle_card", "kettle_agent_hook"],
         )
     } else {
         (&["mcp", "--display"], &["kettle_show"])
@@ -295,7 +295,18 @@ fn launch_args(
     injected.push(format!("mcp_servers.kettle={}", server_table(kettle, cards)).into());
     if cards {
         injected.push("-c".into());
+        let fallback = |event: &str, matcher: &str| {
+            format!(
+                "{{matcher = {}, hooks = [{{type = \"mcp_tool\", server = \"kettle\", tool = \"kettle_agent_hook\", input = {{event = {}}}, timeout = 24}}]}}",
+                toml_string(matcher),
+                toml_string(event),
+            )
+        };
         injected.push(card_hook().into());
+        for event in ["UserPromptSubmit", "Stop"] {
+            injected.push("-c".into());
+            injected.push(format!("hooks.{event}=[{}]", fallback(event, "*")).into());
+        }
     }
     let mut launch = Vec::with_capacity(original.len() + injected.len());
     launch.extend_from_slice(&original[..classified.insert_at]);
@@ -482,7 +493,7 @@ fn installed_version() -> Option<String> {
     version_of(Path::new("codex"))
 }
 
-fn version_of(program: &Path) -> Option<String> {
+pub(crate) fn version_of(program: &Path) -> Option<String> {
     use std::io::BufRead as _;
     use std::io::Read as _;
     let mut child = std::process::Command::new(program)
@@ -574,6 +585,7 @@ enum SetupAgent {
     #[default]
     Codex,
     Claude,
+    Agy,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -679,13 +691,20 @@ fn launch_claude(argv: Vec<OsString>) -> i32 {
 }
 
 #[derive(clap::Args, Debug)]
-#[command(group(clap::ArgGroup::new("action").args(["print", "status", "uninstall"])))]
+#[command(group(clap::ArgGroup::new("action").args(["print", "status", "uninstall", "install"])))]
 #[command(group(clap::ArgGroup::new("launch").args(["launch_codex", "launch_claude"])))]
 pub(crate) struct SetupArgs {
-    /// Print the selected agent's shell function. Review it, then add it
-    /// to your shell's startup file; Kettle edits no file.
+    /// Print the selected agent's shell function, or agy's plugin install
+    /// command. agy files are staged in Kettle's private cache. Shell startup
+    /// files and agent configuration are never edited by --print.
     #[arg(long)]
     print: bool,
+    /// Install Kettle's native agy plugin. Only valid with --agent agy.
+    #[arg(long)]
+    install: bool,
+    /// Native agy command-hook adapter; not a user command.
+    #[arg(long, hide = true, conflicts_with = "action")]
+    agy_hook: Option<String>,
     /// Report whether Codex launched from this shell would get Kettle's
     /// display server, and how it delivers media.
     #[arg(long)]
@@ -698,8 +717,8 @@ pub(crate) struct SetupArgs {
     launch_codex: bool,
     #[arg(long, hide = true, conflicts_with = "action")]
     launch_claude: bool,
-    /// The agent function to print or remove.
-    #[arg(long, value_enum, default_value_t = SetupAgent::Codex, conflicts_with_all = ["status", "launch_codex", "launch_claude"])]
+    /// The agent integration to print, inspect, install or remove.
+    #[arg(long, value_enum, default_value_t = SetupAgent::Codex, conflicts_with_all = ["launch_codex", "launch_claude"])]
     agent: SetupAgent,
     /// The shell to print for (default: the one `SHELL` names).
     #[arg(long, value_enum, conflicts_with_all = ["status", "launch_codex", "launch_claude"])]
@@ -719,6 +738,20 @@ pub(crate) fn run(_: SetupArgs) -> i32 {
 
 #[cfg(unix)]
 pub(crate) fn run(args: SetupArgs) -> i32 {
+    if let Some(action) = args.agy_hook.as_deref() {
+        return crate::agy::hook(action);
+    }
+    if args.agent == SetupAgent::Agy {
+        if args.shell.is_some() {
+            eprintln!("agy uses a native plugin, not a shell function; omit --shell");
+            return 2;
+        }
+        return crate::agy::setup(args.print, args.install, args.uninstall);
+    }
+    if args.install {
+        eprintln!("--install requires --agent agy");
+        return 2;
+    }
     if args.launch_codex {
         return launch(args.argv);
     }
@@ -757,6 +790,7 @@ pub(crate) fn run(args: SetupArgs) -> i32 {
     }
     match this_kettle().and_then(|kettle| match args.agent {
         SetupAgent::Codex => print_function(&kettle, shell),
+        SetupAgent::Agy => unreachable!("agy uses native plugin setup"),
         SetupAgent::Claude => {
             use kettle_ui::codex_shell::CodexShell;
             let shell = match shell {
@@ -1206,7 +1240,7 @@ mod tests {
             .filter(|pair| pair[0] == "-c")
             .map(|pair| pair[1].to_str().unwrap())
             .collect();
-        assert_eq!(values.len(), 2, "{launch:?}");
+        assert_eq!(values.len(), 4, "{launch:?}");
         let server: toml::Table = toml::from_str(&format!(
             "server = {}",
             values[0].strip_prefix("mcp_servers.kettle=").unwrap()
@@ -1221,7 +1255,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(strings("args"), ["mcp", "--display", "--codex-card-hook"]);
-        assert_eq!(strings("enabled_tools"), ["kettle_show", "kettle_card"]);
+        assert_eq!(
+            strings("enabled_tools"),
+            ["kettle_show", "kettle_card", "kettle_agent_hook"]
+        );
         assert_eq!(
             server["server"]["tools"]["kettle_show"]["approval_mode"].as_str(),
             Some("approve"),
@@ -1243,6 +1280,14 @@ mod tests {
         );
         assert_eq!(handler["timeout"].as_integer(), Some(3));
         assert_eq!(hook["groups"].as_array().unwrap().len(), 1);
+
+        for (value, event) in values[2..].iter().zip(["UserPromptSubmit", "Stop"]) {
+            let parsed: toml::Table = toml::from_str(value).unwrap();
+            assert_eq!(
+                parsed["hooks"][event][0]["hooks"][0]["input"]["event"].as_str(),
+                Some(event)
+            );
+        }
         assert_eq!(group["hooks"].as_array().unwrap().len(), 1);
         // Without cards, neither the hook nor its retrieval.
         let shelf = launch_args(&argv(&["resume", "--last"]), &fixture("kettle"), false).unwrap();

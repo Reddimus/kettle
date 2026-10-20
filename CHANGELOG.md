@@ -6,6 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- Codex launches supply relevant visual guidance through native prompt hooks.
+  A turn-end fallback displays finished visuals from a private session inbox
+  when the agent has not already shown them. The inbox is bounded and never
+  scans the repository. New hooks require Codex's own trust review.
+- Optional agy previews through an explicitly installed native plugin. Visual
+  guidance encourages display calls; on macOS, explicit native visual artifact
+  writes and edits also reach the media shelf. agy's existing Mermaid rendering
+  remains available. Its native hooks do not support Kettle inline cards.
+
 ### Fixed
 
 - Keep RustSec warnings enforcement while scoping three informational D-Bus
