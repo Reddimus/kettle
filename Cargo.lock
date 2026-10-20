@@ -2348,6 +2348,7 @@ dependencies = [
  "md-5",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "toml",
  "tracing-subscriber",

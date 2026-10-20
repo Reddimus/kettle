@@ -77,7 +77,15 @@ agent:
 
 - **Claude Code**: new panes load Kettle's plugin. No setup, no prompts.
 - **Codex**: Kettle defines a `codex` shell function in new zsh and fish
-  panes. Codex asks once, in its own dialog, before trusting Kettle's hook.
+  panes. Codex asks in its own dialog before trusting Kettle's hooks. A
+  prompt hook supplies visual guidance. A turn-end fallback checks only the
+  session's private visual artifact inbox, giving the agent time to show the
+  artifact itself first. It never watches your repository.
+- **agy**: enable agy previews, then run
+  `kettle agent-setup --agent agy --install`. The native plugin supplies visual
+  guidance and sends explicit visual artifacts to the media shelf on macOS.
+  agy's hooks do not support Kettle's inline cards; its own Mermaid rendering
+  remains available. Requires agy 1.4.2 or newer within 1.x.
 - **Any program**: `kettle show plot.png` (or `.svg`, `.md`, `.mp4`, `.pdf`,
   `.heic`) puts a file on the pane's media shelf, and `kettle show --inline`
   prints its card right under the command. A file Kettle does not draw shows

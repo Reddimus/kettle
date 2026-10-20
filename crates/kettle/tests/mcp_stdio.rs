@@ -64,6 +64,143 @@ fn parse_responses(out: &str) -> Vec<Value> {
         .collect()
 }
 
+#[test]
+fn codex_artifact_inbox_is_removed_after_stdio_shutdown() {
+    let (code, out, err) = run_mcp_stdio_with(
+        &["mcp", "--display", "--codex-card-hook"],
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},
+                "clientInfo":{"name":"test","version":"1"}}}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"kettle_agent_hook","arguments":{"event":"UserPromptSubmit"}}}),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let responses = parse_responses(&out);
+    let response = responses.iter().find(|reply| reply["id"] == 2).unwrap();
+    let hook: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let context = hook["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    let directory = context
+        .split_once("private artifact inbox ")
+        .unwrap()
+        .1
+        .split_once(" (maximum")
+        .unwrap()
+        .0;
+    assert!(
+        !std::path::Path::new(directory).exists(),
+        "MCP shutdown leaked {directory}"
+    );
+}
+
+/// Native Codex terminates its MCP process group before closing the transport.
+/// Keep stdin open, including an unfinished request, to exercise that exit path.
+#[cfg(unix)]
+#[test]
+fn codex_artifact_inbox_is_removed_on_termination_signals() {
+    use std::io::BufRead as _;
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::time::{Duration, Instant};
+
+    struct Peer(std::process::Child);
+    impl Drop for Peer {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut peer = Peer(
+            kettle()
+                .args(["mcp", "--display", "--codex-card-hook"])
+                .env_remove("KETTLE_PID")
+                .env_remove("KETTLE_PANE_ID")
+                .env("TMPDIR", temporary.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut input = peer.0.stdin.take().unwrap();
+        let output = peer.0.stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(output).lines() {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        for message in [
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},
+                "clientInfo":{"name":"signal-test","version":"1"}}}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"kettle_agent_hook","arguments":{"event":"UserPromptSubmit"}}}),
+        ] {
+            writeln!(input, "{message}").unwrap();
+        }
+        let context = loop {
+            let line = receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            let response: Value = serde_json::from_str(&line).unwrap();
+            if response["id"] == 2 {
+                let hook: Value = serde_json::from_str(
+                    response["result"]["content"][0]["text"].as_str().unwrap(),
+                )
+                .unwrap();
+                break hook["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+            }
+        };
+        let directory = std::path::Path::new(
+            context
+                .split_once("private artifact inbox ")
+                .unwrap()
+                .1
+                .split_once(" (maximum")
+                .unwrap()
+                .0,
+        );
+        std::fs::write(directory.join("finished.svg"), "<svg/>").unwrap();
+        let outside = temporary.path().join("durable.svg");
+        std::fs::write(&outside, "durable original").unwrap();
+        std::os::unix::fs::symlink(&outside, directory.join("alias.svg")).unwrap();
+        write!(input, "{{\"unfinished\":").unwrap();
+        input.flush().unwrap();
+        // SAFETY: the owned, unreaped child still has this PID. No process
+        // group or unrelated process receives the signal.
+        assert_eq!(unsafe { libc::kill(peer.0.id() as libc::pid_t, signal) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = peer.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "MCP ignored signal {signal}");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(status.signal(), Some(signal));
+        assert!(!directory.exists(), "signal {signal} leaked {directory:?}");
+        assert_eq!(
+            std::fs::read_to_string(outside).unwrap(),
+            "durable original"
+        );
+    }
+}
+
 /// `kettle mcp --display`, over real stdio in both eras, offers exactly
 /// `kettle_show` and refuses every other tool before running it.
 #[test]
@@ -471,6 +608,7 @@ fn mcp_stdio_names_a_malformed_modern_envelope_instead_of_blaming_the_handshake(
 struct FakeKettle {
     runtime: tempfile::TempDir,
     shows: std::sync::mpsc::Receiver<Value>,
+    agy: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -501,9 +639,12 @@ impl FakeKettle {
             kettle_ctl::discovery::RegistryEntry::registering("gui", pid, endpoint, "5.0.0", 1);
         kettle_ctl::discovery::register(&registry, &entry).expect("register");
         let (sent, shows) = std::sync::mpsc::channel();
+        let agy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let policy = agy.clone();
         std::thread::spawn(move || {
             while let Ok(stream) = listener.accept() {
                 let sent = sent.clone();
+                let policy = policy.clone();
                 std::thread::spawn(move || {
                     let mut writer = stream.try_clone().expect("clone");
                     for line in std::io::BufReader::new(stream).lines() {
@@ -514,6 +655,9 @@ impl FakeKettle {
                             json!({"v": 1, "id": request["id"], "ok": true, "result": {
                                 "pane": 1, "verified": true, "window": 1, "item": 2,
                                 "kind": "mermaid", "width": 64, "height": 48, "warnings": []}})
+                        } else if request["method"] == "agent_display_status" {
+                            json!({"v":1,"id":request["id"],"ok":true,"result":{
+                                "agy":policy.load(std::sync::atomic::Ordering::Acquire)}})
                         } else {
                             json!({"v": 1, "id": request["id"], "ok": false,
                                 "error": {"code": "unknown_method", "message": "m"}})
@@ -525,14 +669,18 @@ impl FakeKettle {
                 });
             }
         });
-        Self { runtime, shows }
+        Self {
+            runtime,
+            shows,
+            agy,
+        }
     }
 
-    /// Run `kettle mcp` with `args` here, where it finds this Kettle.
-    fn mcp(&self, args: &[&str], messages: &[Value]) -> Vec<Value> {
-        let mut child = kettle()
+    fn spawn(&self, args: &[&str]) -> std::process::Child {
+        kettle()
             .args(args)
             .env("XDG_RUNTIME_DIR", self.runtime.path())
+            .env("XDG_CONFIG_HOME", self.runtime.path().join("config"))
             .env_remove("KETTLE_PID")
             .env_remove("KETTLE_PANE_ID")
             .env_remove("TMUX")
@@ -540,7 +688,12 @@ impl FakeKettle {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn kettle mcp");
+            .expect("spawn kettle mcp")
+    }
+
+    /// Run `kettle mcp` with `args` here, where it finds this Kettle.
+    fn mcp(&self, args: &[&str], messages: &[Value]) -> Vec<Value> {
+        let mut child = self.spawn(args);
         {
             let mut stdin = child.stdin.take().expect("stdin");
             for message in messages {
@@ -557,6 +710,220 @@ impl FakeKettle {
         child.wait().expect("wait");
         parse_responses(&out)
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn agy_guidance_is_portable_and_page_keys_use_the_validated_page() {
+    let kettle = FakeKettle::start();
+    kettle.agy.store(true, std::sync::atomic::Ordering::Release);
+    let config = kettle.runtime.path().join("config/kettle");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config"),
+        "agent-display = false\nagent-display-agy = false\n",
+    )
+    .unwrap();
+    let mut child = kettle.spawn(&["agent-setup", "--agy-hook", "guidance"]);
+    writeln!(child.stdin.take().unwrap(), "{{}}").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let guidance: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        guidance["injectSteps"][0]["ephemeralMessage"]
+            .as_str()
+            .unwrap()
+            .contains("kettle_show")
+    );
+    let file = kettle.runtime.path().join("pages.pdf");
+    std::fs::write(&file, "%PDF-1.4\n").unwrap();
+    let mut keys = Vec::new();
+    for page in [json!(2), json!(2.0), json!(3)] {
+        let replies = kettle.mcp(&["mcp", "--display", "--agy-display"], &[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"kettle_show","arguments":{"path":file,"page":page}}}),
+        ]);
+        let reply = replies.iter().find(|reply| reply["id"] == 2).unwrap();
+        assert_eq!(reply["result"]["structuredContent"]["status"], "sent");
+        keys.push(
+            kettle
+                .shows
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()["key"]
+                .clone(),
+        );
+    }
+    assert_eq!(keys[0], keys[1], "2 and 2.0 must update the same page");
+    assert_ne!(keys[0], keys[2], "distinct pages must have distinct keys");
+    kettle
+        .agy
+        .store(false, std::sync::atomic::Ordering::Release);
+    let mut child = kettle.spawn(&["agent-setup", "--agy-hook", "guidance"]);
+    writeln!(child.stdin.take().unwrap(), "{{}}").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({})
+    );
+    // Disabled integration wins before parameter validation or file access.
+    for arguments in [json!({"page": 0}), json!({"path": "/missing/preview.png"})] {
+        let replies = kettle.mcp(&["mcp", "--display", "--agy-display"], &[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"kettle_show","arguments":arguments}}),
+        ]);
+        let reply = replies.iter().find(|reply| reply["id"] == 2).unwrap();
+        assert_eq!(
+            reply["result"]["structuredContent"]["code"],
+            "display_disabled"
+        );
+    }
+}
+
+/// Real MCP process and control transport; the control server is a fixture,
+/// so this proves bounded delivery/deduplication, not native card rendering.
+#[cfg(unix)]
+#[test]
+fn codex_fallback_waits_for_stop_and_preserves_primary_delivery() {
+    use std::io::BufRead as _;
+    use std::time::{Duration, Instant};
+    struct Peer(std::process::Child);
+    impl Drop for Peer {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let kettle = FakeKettle::start();
+    let mut peer = Peer(kettle.spawn(&["mcp", "--display", "--codex-card-hook"]));
+    let mut input = peer.0.stdin.take().unwrap();
+    let output = peer.0.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(output).lines() {
+            let reply: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            if sender.send(reply).is_err() {
+                break;
+            }
+        }
+    });
+    let mut ask = |message: Value| {
+        writeln!(input, "{message}").unwrap();
+        input.flush().unwrap();
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("MCP reply")
+    };
+    let initialized = ask(
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+    );
+    assert!(initialized.get("error").is_none());
+    // A notification has no response; send it together with the first call.
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+    let mut ask = |id: u64, name: &str, args: Value, meta: Value| {
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+            "params":{"name":name,"arguments":args,"_meta":meta}})
+        )
+        .unwrap();
+        input.flush().unwrap();
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("MCP tool reply")
+    };
+    let guidance = ask(
+        2,
+        "kettle_agent_hook",
+        json!({"event":"UserPromptSubmit"}),
+        json!({}),
+    );
+    let hook: Value =
+        serde_json::from_str(guidance["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let context = hook["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    let directory = context
+        .split_once("private artifact inbox ")
+        .unwrap()
+        .1
+        .split_once(" (maximum")
+        .unwrap()
+        .0;
+    let path = std::path::Path::new(directory).join("a.svg");
+    let second = std::path::Path::new(directory).join("b.svg");
+    for path in [&path, &second] {
+        std::fs::write(path, "<svg/>").unwrap();
+    }
+    let post = ask(
+        3,
+        "kettle_agent_hook",
+        json!({"event":"PostToolUse"}),
+        json!({}),
+    );
+    assert_eq!(post["result"]["content"][0]["text"], "{}");
+    assert!(kettle.shows.try_recv().is_err());
+    ask(4, "kettle_agent_hook", json!({"event":"Stop"}), json!({}));
+    let first = kettle.shows.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(first["path"], path.to_str().unwrap());
+    assert!(
+        kettle.shows.try_recv().is_err(),
+        "more than one artifact per hook"
+    );
+    ask(5, "kettle_agent_hook", json!({"event":"Stop"}), json!({}));
+    assert_eq!(
+        kettle.shows.recv_timeout(Duration::from_secs(5)).unwrap()["path"],
+        second.to_str().unwrap()
+    );
+    ask(6, "kettle_agent_hook", json!({"event":"Stop"}), json!({}));
+    assert!(
+        kettle.shows.try_recv().is_err(),
+        "unchanged artifact retried"
+    );
+    std::fs::write(&path, "<svg updated/>").unwrap();
+    let primary = ask(
+        7,
+        "kettle_show",
+        json!({"path":path}),
+        json!({"callId":"primary-1"}),
+    );
+    assert_eq!(primary["result"]["structuredContent"]["status"], "sent");
+    let sent = kettle.shows.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        sent["key"], first["key"],
+        "primary and fallback must update the same item"
+    );
+    ask(8, "kettle_agent_hook", json!({"event":"Stop"}), json!({}));
+    assert!(
+        kettle.shows.try_recv().is_err(),
+        "primary delivery was duplicated"
+    );
+    drop(input);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = peer.0.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < deadline, "MCP did not close after EOF");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !std::path::Path::new(directory).exists(),
+        "session artifacts leaked"
+    );
 }
 
 /// `kettle_show` completes through the real `kettle mcp`, in both modes and

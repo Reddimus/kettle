@@ -10,6 +10,10 @@ worker separately with `--profile media-worker`, including both universal2
 slices on macOS. Its size is reported separately from the terminal. The macOS
 helper identifier is `org.kettle.terminal.media-worker`; the existing bundle
 signing and notarization steps include it before the outer app is sealed.
+Nested code uses the empty `kettle-helper.entitlements`; only the outer app
+uses `kettle.entitlements` to request per-destination Apple Events consent for
+user-run programs such as editor/PDF synchronization. Verify both signed
+entitlement sets and the app's purpose message when rehearsing the package.
 
 Linux packages also carry inert copies at
 `shell-integration/kettle-media-worker.{bin,json}`. The `worker-capsule`

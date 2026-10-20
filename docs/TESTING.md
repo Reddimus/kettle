@@ -31,6 +31,41 @@ A focused test helps during development, but does not replace the gate.
 
 ### Main gates
 
+The MCP stdio integration suite exercises Codex guidance, turn-end-only fallback,
+one artifact per hook, deduplication after primary display, stable replacement
+keys and shutdown cleanup through the real server process and a fixture control
+transport. Inbox unit tests cover rotated filenames, in-flight rewrites, links,
+FIFOs, oversized entries and bounded directories. These checks do not substitute
+for native Codex hook trust and rendered-card acceptance.
+Unix process regressions also send SIGTERM, SIGINT and SIGHUP while stdin holds
+an unfinished request. Each must remove the private inbox, preserve a linked
+durable original, and retain the signal termination status. This exercises
+native Codex's signal-before-transport-close shutdown order, beyond clean EOF.
+A barrier-controlled destructor regression verifies that simultaneous closers
+serialize resource removal before either caller can report cleanup complete.
+The agy process fixture deliberately disables the default config while enabling
+the active controller's policy, then switches that live policy off. This covers
+profile/config selection and makes default-file shortcuts fail the regression.
+Native agy payload regressions cover `write_file` with `Path` and explicit
+`ArtifactMetadata.UserFacing`, plus `edit_file` with `Path`, as captured from
+agy 1.4.3 hooks. Plugin tests exercise the emitted matcher against those names.
+Edits preserve the native sidecar's user-facing flag; private, missing,
+malformed, oversized and linked sidecars receive no automatic preview.
+The SDK's startup tool list can still advertise legacy names; use captured
+native hook inputs to verify the adapter contract. A headless payload probe
+does not substitute for foreground provenance and rendered-shelf acceptance.
+Native macOS process tests cover terminal input with stdout/stderr redirected,
+kernel launch arguments, wrong terminal devices, exited/reused identities and
+argv/environment separation. Mode tests exclude every print alias, subcommands,
+unknown flags and incomplete options. Native agy TUI acceptance must additionally
+observe an artifact-only edit update the existing shelf item without an MCP call.
+
+`python3 scripts/test-release.py` parses the macOS app and helper permission
+manifests and executes the real workflow signing loop with fixture binaries.
+It requires an Apple Events purpose message, limits the app to that entitlement,
+and keeps nested helpers unentitled. Native signed acceptance must also verify
+editor/PDF synchronization and preserve macOS's per-destination consent review.
+
 - `just gauntlet`: checks formatting, locked workspace build/test/Clippy,
   default-feature core Clippy, rustdoc, media test features, and helper fixtures.
   Run before a PR; needs the source-build tools and native libraries.

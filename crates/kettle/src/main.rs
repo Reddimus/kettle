@@ -102,7 +102,9 @@ mod exec;
 // kettle-ctl (discover a running server, call a method, or stream events).
 mod ctl_cli;
 // `kettle show` — send media to the shelf of the pane it runs in.
+mod agent_artifacts;
 mod agent_setup;
+mod agy;
 mod show_cli;
 mod video_frames;
 // Agent-first: `kettle mcp` — stdio MCP server exposing kettle as
@@ -680,6 +682,9 @@ struct McpArgs {
         conflicts_with = "claude_card_hook"
     )]
     codex_card_hook: bool,
+    /// Native agy display adapter; its command hooks publish shelf previews.
+    #[arg(long, hide = true, requires = "display", conflicts_with_all = ["claude_card_hook", "codex_card_hook"])]
+    agy_display: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1274,6 +1279,7 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(if args.self_test {
                     mcp::self_test()
                 } else if args.display {
+                    mcp_display::init_agy(args.agy_display);
                     mcp_display::init_session(if args.claude_card_hook {
                         Some(mcp_display::CardHook::Claude)
                     } else if args.codex_card_hook {
@@ -2699,6 +2705,9 @@ mod activation_cli_tests {
         for args in [
             vec!["--print", "--agent", "claude", "--shell", "zsh"],
             vec!["--uninstall", "--agent", "claude"],
+            vec!["--status", "--agent", "claude"],
+            vec!["--status", "--agent", "agy"],
+            vec!["--install", "--agent", "agy"],
             vec!["--launch-claude", "--", "--model", "opus", "hello"],
             vec!["--launch-codex", "--", "resume"],
         ] {
@@ -2708,7 +2717,7 @@ mod activation_cli_tests {
             vec!["--launch-claude", "--launch-codex"],
             vec!["--launch-claude", "--status"],
             vec!["--launch-claude", "--agent", "claude"],
-            vec!["--status", "--agent", "claude"],
+            vec!["--install", "--print", "--agent", "agy"],
             vec!["--print", "--", "hello"],
         ] {
             assert!(

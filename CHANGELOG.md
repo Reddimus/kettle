@@ -6,8 +6,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- Codex launches supply relevant visual guidance through native prompt hooks.
+  A turn-end fallback displays finished visuals from a private session inbox
+  when the agent has not already shown them. The inbox is bounded and never
+  scans the repository. New hooks require Codex's own trust review.
+- Optional agy previews through an explicitly installed native plugin. Visual
+  guidance encourages display calls; on macOS, explicit native visual artifact
+  writes and edits also reach the media shelf. agy's existing Mermaid rendering
+  remains available. Its native hooks do not support Kettle inline cards.
+
 ### Fixed
 
+- Remove Codex's private visual inbox when its MCP server receives SIGTERM,
+  SIGINT or SIGHUP, including native CLI exit before stdio closes.
+- Let programs run inside the signed macOS app request Apple Events permission,
+  restoring editor/PDF synchronization. Keep media helpers unentitled.
+- Accept agy's native artifact write/edit hook payloads, including the explicit
+  user-facing flag, so current CLI artifacts qualify for automatic previews.
+- Recognize agy's foreground TUI after it redirects stdout and stderr to its
+  log. Automatic previews still exclude print sessions and unknown launch modes.
 - Keep RustSec warnings enforcement while scoping three informational D-Bus
   maintenance notices to exact reviewed versions, sources and reverse dependencies.
 - Prevent parallel test processes from inheriting a crash-report pipe reader,

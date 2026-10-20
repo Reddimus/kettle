@@ -540,6 +540,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "agent-display-claude-code",
                 ),
                 toggle(T::SettingsFieldAgentPreviewsCodex, "agent-display-codex"),
+                toggle(T::SettingsFieldAgentPreviewsAgy, "agent-display-agy"),
                 choice(
                     T::SettingsFieldAddKettleToPath,
                     "add-kettle-to-path",
@@ -883,6 +884,7 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
         "agent-display" => cfg.agent_display,
         "agent-display-claude-code" => cfg.agent_display_claude_code,
         "agent-display-codex" => cfg.agent_display_codex,
+        "agent-display-agy" => cfg.agent_display_agy,
         _ => false,
     }
 }
@@ -1123,7 +1125,7 @@ mod tests {
             .iter()
             .find(|cat| cat.name == Text::SettingsCategoryAgents)
             .expect("Agents category");
-        assert_eq!(agents.fields.len(), 4);
+        assert_eq!(agents.fields.len(), 5);
         let rows = [
             (
                 "agent-display",
@@ -1140,6 +1142,11 @@ mod tests {
                 Text::SettingsFieldAgentPreviewsCodex,
                 |cfg: &Config| cfg.agent_display_codex,
             ),
+            (
+                "agent-display-agy",
+                Text::SettingsFieldAgentPreviewsAgy,
+                |cfg: &Config| cfg.agent_display_agy,
+            ),
         ];
         for (field, (key, label, value)) in agents.fields.iter().zip(rows) {
             assert_eq!(field.key, key);
@@ -1154,7 +1161,7 @@ mod tests {
             assert_eq!(read(&on, field, &EN), "On");
             assert_eq!(next_value(&on, field, 1), "false");
         }
-        let path = &agents.fields[3];
+        let path = &agents.fields[4];
         assert_eq!(path.key, "add-kettle-to-path");
         assert_eq!(path.label, Text::SettingsFieldAddKettleToPath);
         let auto = Config::default();

@@ -195,6 +195,25 @@ impl App {
             rec.record_marker(&format!("kettle:agent {} conn={conn_id}", method.as_str()));
         }
         let resp = match method {
+            Method::AgentDisplayStatus => {
+                if req.params.is_null()
+                    || req
+                        .params
+                        .as_object()
+                        .is_some_and(|params| params.is_empty())
+                {
+                    Response::ok(
+                        req.id,
+                        serde_json::json!({"agy": self.cfg.agent_display_agy}),
+                    )
+                } else {
+                    Response::err(
+                        req.id,
+                        ec::BAD_PARAMS,
+                        "agent_display_status takes no parameters",
+                    )
+                }
+            }
             Method::GetState => {
                 let policy = self.ctl.as_ref().map(|c| c.policy()).unwrap_or_default();
                 Response::ok(req.id, self.ctl_get_state(ws, policy, request.caller()))

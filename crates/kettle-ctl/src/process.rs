@@ -138,6 +138,80 @@ pub fn standard_output(identity: ProcessIdentity) -> Result<StandardOutput, Insp
     Err(InspectError::Unsupported)
 }
 
+/// Whether descriptor 0 opens `device`, while the process identity is current.
+/// Native TUIs may redirect stdout and stderr to their logs after saving them.
+#[cfg(target_os = "macos")]
+pub fn terminal_input(identity: ProcessIdentity, device: u64) -> Result<bool, InspectError> {
+    if identity.pid == 0 {
+        return Err(InspectError::Unavailable);
+    }
+    let input = imp::descriptor(identity.pid, 0)?;
+    if self::identity(identity.pid)? != identity {
+        return Err(InspectError::Unavailable);
+    }
+    Ok(input == StandardOutput::Device(device))
+}
+
+/// The launch arguments reported by XNU, excluding `argv[0]` and the environment.
+/// Refuse oversized/incomplete answers or an unconventional `argv[0]` basename;
+/// never log the returned arguments.
+#[cfg(target_os = "macos")]
+pub fn launch_arguments(
+    identity: ProcessIdentity,
+) -> Result<Vec<std::ffi::OsString>, InspectError> {
+    if identity.pid == 0 {
+        return Err(InspectError::Unavailable);
+    }
+    let arguments = imp::launch_arguments(identity.pid)?;
+    if self::identity(identity.pid)? != identity {
+        return Err(InspectError::Unavailable);
+    }
+    Ok(arguments)
+}
+
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn parse_launch_arguments(bytes: &[u8]) -> Result<Vec<std::ffi::OsString>, InspectError> {
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+    let invalid = || InspectError::InvalidData;
+    let count = i32::from_ne_bytes(bytes.get(..4).ok_or_else(invalid)?.try_into().unwrap());
+    if !(1..=4096).contains(&count) {
+        return Err(invalid());
+    }
+    // KERN_PROCARGS2: argc, executable path, NUL padding, argc NUL-terminated
+    // arguments, then environment. Stop at argc, never interpreting the tail.
+    let rest = &bytes[4..];
+    let path_end = rest
+        .iter()
+        .position(|&byte| byte == 0)
+        .ok_or_else(invalid)?;
+    let executable = std::path::Path::new(std::ffi::OsStr::from_bytes(&rest[..path_end]));
+    let mut rest = &rest[path_end..];
+    let first = rest
+        .iter()
+        .position(|&byte| byte != 0)
+        .ok_or_else(invalid)?;
+    rest = &rest[first..];
+    let mut arguments = Vec::new();
+    for index in 0..count {
+        let end = rest
+            .iter()
+            .position(|&byte| byte == 0)
+            .ok_or_else(invalid)?;
+        if index == 0 {
+            // Empty argv[0] is ambiguous with the kernel's padding. Requiring
+            // the executable's basename prevents silently dropping a mode flag.
+            let first = std::path::Path::new(std::ffi::OsStr::from_bytes(&rest[..end]));
+            if executable.file_name().is_none() || first.file_name() != executable.file_name() {
+                return Err(invalid());
+            }
+        } else {
+            arguments.push(std::ffi::OsString::from_vec(rest[..end].to_vec()));
+        }
+        rest = &rest[end + 1..];
+    }
+    Ok(arguments)
+}
+
 /// `identity`'s process group, while it is still that process.
 pub fn process_group(identity: ProcessIdentity) -> Result<u32, InspectError> {
     if identity.pid == 0 {
@@ -153,6 +227,32 @@ pub fn process_group(identity: ProcessIdentity) -> Result<u32, InspectError> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     Err(InspectError::Unsupported)
+}
+
+/// A process's controlling terminal and its foreground group, read from XNU.
+/// `/dev/tty` is an alias vnode whose device number is not the actual PTY.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControllingTerminal {
+    /// The actual character-device number, comparable to standard output.
+    pub device: u64,
+    /// The process group currently holding this terminal's foreground.
+    pub foreground_group: u32,
+}
+
+/// Read macOS terminal ownership while the process identity remains current.
+#[cfg(target_os = "macos")]
+pub fn controlling_terminal(
+    identity: ProcessIdentity,
+) -> Result<Option<ControllingTerminal>, InspectError> {
+    if identity.pid == 0 {
+        return Err(InspectError::Unavailable);
+    }
+    let terminal = imp::controlling_terminal(identity.pid)?;
+    if self::identity(identity.pid)? != identity {
+        return Err(InspectError::Unavailable);
+    }
+    Ok(terminal)
 }
 
 /// A character device's number as [`StandardOutput::Device`] gives it, from
@@ -316,6 +416,10 @@ mod imp {
     /// so the call fails for one, as it does for no descriptor or a process
     /// gone; the caller reads the identity again to tell the last apart.
     pub(super) fn standard_output(pid: u32) -> Result<StandardOutput, InspectError> {
+        descriptor(pid, 1)
+    }
+
+    pub(super) fn descriptor(pid: u32, fd: libc::c_int) -> Result<StandardOutput, InspectError> {
         let os_pid = libc::pid_t::try_from(pid).map_err(|_| InspectError::Unavailable)?;
         let size = std::mem::size_of::<VnodeFdInfo>();
         // SAFETY: an all-zero `VnodeFdInfo` is a valid value of this plain C
@@ -327,7 +431,7 @@ mod imp {
         let written = unsafe {
             libc::proc_pidfdinfo(
                 os_pid,
-                1,
+                fd,
                 PROC_PIDFDVNODEINFO,
                 std::ptr::from_mut(&mut info).cast(),
                 size as libc::c_int,
@@ -339,8 +443,47 @@ mod imp {
         Ok(StandardOutput::Device(u64::from(info.vnode.stat.vst_rdev)))
     }
 
+    pub(super) fn launch_arguments(pid: u32) -> Result<Vec<std::ffi::OsString>, InspectError> {
+        let os_pid = libc::c_int::try_from(pid).map_err(|_| InspectError::Unavailable)?;
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, os_pid];
+        // Bound allocation and the kernel read, including the trailing environment.
+        let mut bytes = vec![0_u8; 256 * 1024];
+        let mut size = bytes.len();
+        // SAFETY: the MIB and output buffer are live, correctly sized storage;
+        // no new value is supplied, so this sysctl only reads process metadata.
+        let status = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as u32,
+                bytes.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if status != 0 || size > bytes.len() {
+            return Err(InspectError::Unavailable);
+        }
+        bytes.truncate(size);
+        super::parse_launch_arguments(&bytes)
+    }
+
     pub(super) fn process_group(pid: u32) -> Result<u32, InspectError> {
         bsd_info(pid).map(|info| info.pbi_pgid)
+    }
+
+    pub(super) fn controlling_terminal(
+        pid: u32,
+    ) -> Result<Option<super::ControllingTerminal>, InspectError> {
+        let info = bsd_info(pid)?;
+        Ok(
+            (info.e_tdev != u32::MAX && info.e_tpgid != 0 && info.e_tpgid != u32::MAX).then_some(
+                super::ControllingTerminal {
+                    device: u64::from(info.e_tdev),
+                    foreground_group: info.e_tpgid,
+                },
+            ),
+        )
     }
 
     pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, InspectError> {
@@ -774,6 +917,136 @@ mod tests {
             child.wait().ok();
         }
         assert_eq!(process_group(identity), Err(InspectError::Unavailable));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn controlling_terminal_names_the_real_pty_instead_of_the_dev_tty_alias() {
+        use std::os::unix::process::CommandExt as _;
+        use std::process::{Command, Stdio};
+        let (_controller, terminal) = pty();
+        let device = device_number(
+            &std::fs::File::from(terminal.try_clone().unwrap())
+                .metadata()
+                .unwrap(),
+        );
+        let mut command = Command::new("/bin/sleep");
+        command
+            .stdin(Stdio::from(terminal.try_clone().unwrap()))
+            .stdout(Stdio::from(terminal));
+        // SAFETY: the child callback uses only async-signal-safe system calls;
+        // stdin is the slave PTY already installed by Command before pre_exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1
+                    || libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY.into(), 0) == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = waiting(&mut command);
+        let identity = inspect(child.id()).unwrap().identity;
+        let observed = controlling_terminal(identity);
+        let stdout = standard_output(identity);
+        let reused = controlling_terminal(ProcessIdentity::new(
+            identity.pid(),
+            identity.start().wrapping_add(1),
+        ));
+        child.kill().ok();
+        child.wait().ok();
+        assert_eq!(
+            observed,
+            Ok(Some(ControllingTerminal {
+                device,
+                foreground_group: child.id()
+            }))
+        );
+        assert_eq!(stdout, Ok(StandardOutput::Device(device)));
+        assert_ne!(
+            device,
+            device_number(&std::fs::metadata("/dev/tty").unwrap())
+        );
+        assert_eq!(reused, Err(InspectError::Unavailable));
+        assert_eq!(
+            controlling_terminal(identity),
+            Err(InspectError::Unavailable)
+        );
+        assert_eq!(
+            controlling_terminal(ProcessIdentity::new(0, 0)),
+            Err(InspectError::Unavailable)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_arguments_stop_before_environment_and_reject_incomplete_records() {
+        let record = |count: i32, body: &[u8]| {
+            let mut bytes = count.to_ne_bytes().to_vec();
+            bytes.extend_from_slice(body);
+            bytes
+        };
+        assert_eq!(
+            parse_launch_arguments(&record(
+                4,
+                b"/usr/local/bin/agy\0\0agy\0--model\0gemini-4-argon-high\0\0SECRET=not-an-argument\0"
+            )),
+            Ok(["--model", "gemini-4-argon-high", ""].map(std::ffi::OsString::from).to_vec())
+        );
+        for bytes in [
+            vec![],
+            record(-1, b""),
+            record(4097, b""),
+            record(1, b"/bin/agy"),
+            record(2, b"/bin/agy\0\0agy\0--print"),
+            record(2, b"/bin/agy\0\0--print\0--model=foo\0"),
+            record(1, b"/bin/agy\0\0different\0"),
+        ] {
+            assert_eq!(
+                parse_launch_arguments(&bytes),
+                Err(InspectError::InvalidData)
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn terminal_input_and_launch_arguments_survive_redirected_tui_output() {
+        use std::process::{Command, Stdio};
+        let (_controller, terminal) = pty();
+        let device = device_number(
+            &std::fs::File::from(terminal.try_clone().unwrap())
+                .metadata()
+                .unwrap(),
+        );
+        let mut child = waiting(
+            Command::new("/bin/sleep")
+                .stdin(Stdio::from(terminal))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
+        let identity = inspect(child.id()).unwrap().identity;
+        let input = terminal_input(identity, device);
+        let wrong_input = terminal_input(identity, device.wrapping_add(1));
+        let output = standard_output(identity);
+        let arguments = launch_arguments(identity);
+        let reused = ProcessIdentity::new(identity.pid(), identity.start().wrapping_add(1));
+        let reused_arguments = launch_arguments(reused);
+        let reused_input = terminal_input(reused, device);
+        child.kill().ok();
+        child.wait().ok();
+        assert_eq!(input, Ok(true));
+        assert_eq!(wrong_input, Ok(false));
+        assert_ne!(output, Ok(StandardOutput::Device(device)));
+        assert_eq!(arguments, Ok(vec![std::ffi::OsString::from("30")]));
+        assert_eq!(reused_arguments, Err(InspectError::Unavailable));
+        assert_eq!(reused_input, Err(InspectError::Unavailable));
+        assert_eq!(launch_arguments(identity), Err(InspectError::Unavailable));
+        assert_eq!(
+            terminal_input(identity, device),
+            Err(InspectError::Unavailable)
+        );
     }
 
     #[test]

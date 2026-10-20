@@ -193,8 +193,18 @@ fn wait_unless_stdout_stalled(
 
 /// Run the stdio MCP server loop until stdin closes. Returns zero on clean EOF.
 pub fn run_mcp(selection: ToolSelection) -> i32 {
+    let _signals = match crate::mcp_display::shutdown_signals() {
+        Ok(signals) => signals,
+        Err(error) => {
+            eprintln!("kettle mcp: cannot watch session termination: {error}");
+            crate::mcp_display::close_session();
+            return 1;
+        }
+    };
     let stdin = std::io::BufReader::new(std::io::stdin());
-    run_mcp_with(stdin, std::io::stdout(), selection)
+    let status = run_mcp_with(stdin, std::io::stdout(), selection);
+    crate::mcp_display::close_session();
+    status
 }
 
 /// The server proper, over any transport.
@@ -527,6 +537,9 @@ const SHOW_OUTSIDE: &str =
 /// What the server tells the model to do with its tools: for `kettle_show`,
 /// by where it runs.
 fn instructions(selection: ToolSelection) -> String {
+    if crate::mcp_display::is_agy() && !crate::agy::enabled() {
+        return "Kettle's agy previews are disabled. Do not call kettle_show. The user can enable Agent previews and agy previews in Kettle Settings, Agents.".into();
+    }
     let here = placement(
         |name| std::env::var(name).ok(),
         || kettle_ctl::client::display_target().is_some(),

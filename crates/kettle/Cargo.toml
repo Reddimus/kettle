@@ -62,9 +62,13 @@ serde.workspace = true
 # `kettle exec --json` NDJSON event stream; also
 # the JSON-RPC/MCP surface and the ctl client.
 serde_json.workspace = true
+# Private, automatically cleaned artifact inbox for agent previews.
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Native Codex sends termination signals before closing its MCP transport.
+signal-hook = "0.4.4"
 # The macOS ACL check the worker's file shares with the external decoder's.
 kettle-media-native.workspace = true
 
@@ -116,7 +120,6 @@ ignored = ["winresource"]
 kettle-test-support.workspace = true
 # Short client budgets for the media platform's end-to-end tests.
 kettle-media = { workspace = true, features = ["test-worker"] }
-tempfile = "3"
 # Reads back the TOML `agent-setup` writes for Codex.
 toml.workspace = true
 

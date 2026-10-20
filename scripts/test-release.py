@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import plistlib
 import shutil
 import stat
 import subprocess
@@ -107,7 +108,7 @@ kettle-i18n = { path = "crates/kettle-i18n", version = "3.3.0" }
         write(root / "docs" / "INSTALL.md", install)
         write(root / "docs" / "VERSION-HISTORY.md", history)
         if fuzz:
-            write(root / "fuzz" / "Cargo.toml", "[package]\nname = \"fixture-fuzz\"\n")
+            write(root / "fuzz" / "Cargo.toml", '[package]\nname = "fixture-fuzz"\n')
             write(
                 root / "fuzz" / "Cargo.lock",
                 '[[package]]\nname = "kettle-media"\nversion = "3.3.0"\n\n'
@@ -331,6 +332,22 @@ class ReleaseFuzzLockTests(unittest.TestCase):
             self.assertEqual(status.stdout, "")
 
 
+class MacOSPermissionManifestTests(unittest.TestCase):
+    def test_only_the_app_can_request_apple_events_permission(self) -> None:
+        macos = ROOT / "packaging" / "macos"
+        application = plistlib.loads((macos / "kettle.entitlements").read_bytes())
+        self.assertEqual(
+            application, {"com.apple.security.automation.apple-events": True}
+        )
+        self.assertIs(application["com.apple.security.automation.apple-events"], True)
+        helpers = plistlib.loads((macos / "kettle-helper.entitlements").read_bytes())
+        self.assertEqual(helpers, {})
+        info = plistlib.loads((macos / "Info.plist").read_bytes())
+        purpose = info.get("NSAppleEventsUsageDescription")
+        self.assertIsInstance(purpose, str)
+        self.assertTrue(purpose.strip())
+
+
 @unittest.skipIf(os.name == "nt", "macOS package loop requires a Unix shell")
 class MacOSWorkflowShellTests(unittest.TestCase):
     def test_native_shell_signs_nested_code_before_the_bundle(self) -> None:
@@ -405,7 +422,12 @@ with calls.open('a', encoding='utf-8') as output:
                 self.assertIn("--timestamp", args)
                 for option, value in (
                     ("--options", "runtime"),
-                    ("--entitlements", "packaging/macos/kettle.entitlements"),
+                    (
+                        "--entitlements",
+                        "packaging/macos/kettle.entitlements"
+                        if path == app
+                        else "packaging/macos/kettle-helper.entitlements",
+                    ),
                     ("--sign", "fixture signer"),
                     ("--keychain", environment["KEYCHAIN"]),
                 ):
@@ -461,11 +483,17 @@ class MacOSUpdateSmokeTests(unittest.TestCase):
                     environment = os.environ.copy()
                     environment.update(
                         PATH=f"{fake_bin}{os.pathsep}{environment['PATH']}",
-                        KETTLE_MACOS_ARCHIVE_CACHE=str(cache if absolute else cache.name),
+                        KETTLE_MACOS_ARCHIVE_CACHE=str(
+                            cache if absolute else cache.name
+                        ),
                         EXPECTED_ARCHIVE=str(archive),
                     )
                     result = subprocess.run(
-                        ["bash", str(ROOT / "scripts/check-macos-update-smoke.sh"), "v5.0.0"],
+                        [
+                            "bash",
+                            str(ROOT / "scripts/check-macos-update-smoke.sh"),
+                            "v5.0.0",
+                        ],
                         cwd=root,
                         env=environment,
                         capture_output=True,
@@ -473,7 +501,9 @@ class MacOSUpdateSmokeTests(unittest.TestCase):
                         timeout=15,
                         check=False,
                     )
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(
+                        result.returncode, 0, result.stdout + result.stderr
+                    )
 
 
 if __name__ == "__main__":

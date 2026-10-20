@@ -41,5 +41,7 @@
   <true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key>
   <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Programs you run in Kettle can request permission to control other apps, such as syncing your editor with a PDF viewer.</string>
 </dict>
 </plist>

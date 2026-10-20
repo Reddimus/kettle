@@ -1476,6 +1476,10 @@ pub struct Config {
     /// `agent-display`; panes that are already open keep what they started
     /// with, and a `codex` the user defines still wins.
     pub agent_display_codex: bool,
+    /// `agent-display-agy`: enable the explicitly installed agy display plugin.
+    /// Off by default; requires `agent-display`. agy currently delivers shelf
+    /// previews; its native hook contract cannot print inline Kettle cards.
+    pub agent_display_agy: bool,
     /// `add-kettle-to-path`: with `auto` (default), a new pane on macOS or
     /// Linux whose `PATH`, after the configured `env`, has no executable
     /// `kettle` gets the running Kettle's directory appended, never put in
@@ -2942,6 +2946,7 @@ impl Default for Config {
             agent_display: false,
             agent_display_claude_code: false,
             agent_display_codex: false,
+            agent_display_agy: false,
             add_kettle_to_path: AddKettleToPath::Auto,
             preview_lane_side: PreviewLaneSide::Bottom,
             media_open_mode: MediaOpenMode::Overlay,
@@ -3624,6 +3629,8 @@ impl Config {
         "agent_display_claude_code",
         "agent-display-codex",
         "agent_display_codex",
+        "agent-display-agy",
+        "agent_display_agy",
         "restore-session",
         "restore_session",
         "urgent-bell",
@@ -5547,6 +5554,11 @@ impl Config {
                 "agent-display-codex" | "agent_display_codex" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.agent_display_codex = b;
+                    }
+                }
+                "agent-display-agy" | "agent_display_agy" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.agent_display_agy = b;
                     }
                 }
                 "add-kettle-to-path" | "add_kettle_to_path" => {
@@ -8447,6 +8459,15 @@ cell-height = 1.2\n";
 
     /// `agent-display` defaults off, parses as a boolean in both spellings,
     /// and combines with `agent-server` into the control policy.
+    #[test]
+    fn agy_previews_are_opt_in_and_accept_both_key_spellings() {
+        assert!(!Config::default().agent_display_agy);
+        assert!(Config::BOOL_KEYS.contains(&"agent-display-agy"));
+        assert!(Config::parse_text("agent-display-agy = true").agent_display_agy);
+        assert!(Config::parse_text("agent_display_agy = on").agent_display_agy);
+        assert!(!Config::parse_text("agent-display-agy = maybe").agent_display_agy);
+    }
+
     #[test]
     fn agent_display_defaults_off_and_feeds_the_policy() {
         use kettle_ctl::protocol::Capability;

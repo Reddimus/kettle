@@ -2139,3 +2139,6 @@ context = "Accessible video button: toggle between pane-sized and window-sized v
 
 [messages.media_viewer_fullscreen]
 context = "Accessible video button: toggle native display fullscreen; Esc exits before closing the viewer."
+
+[messages.settings_field_agent_previews_agy]
+context = "Label in Settings, Agents: opt-in agy plugin previews in the media shelf; agy is a literal CLI name."

@@ -311,6 +311,17 @@ impl Client {
         cancelled: &AtomicBool,
     ) -> Result<Value, CtlError> {
         let timeout = call_timeout(method, &params);
+        self.call_cancellable_with_timeout(method, params, cancelled, timeout)
+    }
+
+    /// Issue a cancellable request with an explicit overall response deadline.
+    pub fn call_cancellable_with_timeout(
+        &mut self,
+        method: &str,
+        params: Value,
+        cancelled: &AtomicBool,
+        timeout: Duration,
+    ) -> Result<Value, CtlError> {
         self.call_inner(method, params, timeout, Some(cancelled))
     }
 
@@ -1515,7 +1526,12 @@ mod tests {
         });
         let started = Instant::now();
         assert!(matches!(
-            cancelled_client.call_cancellable("get_state", Value::Null, &cancelled),
+            cancelled_client.call_cancellable_with_timeout(
+                "get_state",
+                Value::Null,
+                &cancelled,
+                Duration::from_secs(1)
+            ),
             Err(CtlError::Cancelled)
         ));
         assert!(started.elapsed() < Duration::from_secs(1));

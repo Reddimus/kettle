@@ -473,7 +473,10 @@ fn is_known_tool(selection: ToolSelection, name: &str) -> bool {
     if selection == ToolSelection::Display {
         // `kettle_card` and `kettle_allow` are the hooks', never listed for
         // the model.
-        return matches!(name, "kettle_show" | "kettle_card" | "kettle_allow");
+        return matches!(
+            name,
+            "kettle_show" | "kettle_card" | "kettle_allow" | "kettle_agent_hook"
+        );
     }
     matches!(
         name,
@@ -522,6 +525,7 @@ fn call_tool_inner(
         "kettle_show" => tool_kettle_show(&args, params, cancelled, crate::mcp_display::session()),
         "kettle_card" => tool_kettle_card(&args, params, crate::mcp_display::session()),
         "kettle_allow" => tool_kettle_allow(params),
+        "kettle_agent_hook" => tool_kettle_agent_hook(&args, params, cancelled),
         "kettle_video_frames" => tool_kettle_video_frames(&args, fits),
         "kettle_run" => tool_kettle_run(&args, cancelled),
         "kettle_list_panes" => ctl_call(
@@ -663,6 +667,14 @@ fn tool_kettle_show(
     session: &crate::mcp_display::DisplaySession,
 ) -> Value {
     use kettle_media::FailureCode;
+    let agent_client = if crate::mcp_display::is_agy() {
+        match crate::agy::client(cancelled) {
+            Ok(client) => Some(client),
+            Err(refusal) => return show_failed(refusal),
+        }
+    } else {
+        None
+    };
     // A card only where this call's hook can collect it; Kettle decides
     // whether the caller may have one.
     let card = session.card_for(params, std::time::Instant::now());
@@ -704,10 +716,27 @@ fn tool_kettle_show(
         .and_then(|path| std::path::Path::new(path).file_name())
         .map(|name| name.to_string_lossy().into_owned());
     let text = |name: &str| args.get(name).and_then(Value::as_str).map(str::to_owned);
+    let artifact = args.get("path").and_then(Value::as_str).and_then(|path| {
+        session.inbox.lock().ok().and_then(|inbox| {
+            inbox
+                .as_ref()
+                .and_then(|inbox| inbox.capture(std::path::Path::new(path)))
+        })
+    });
     let params = match crate::show_cli::request_params(kettle_ctl::show::ShowRequest {
         source,
         title: text("title"),
-        key: text("key"),
+        key: text("key")
+            .or_else(|| artifact.as_ref().map(crate::agent_artifacts::Artifact::key))
+            .or_else(|| {
+                crate::mcp_display::is_agy()
+                    .then(|| {
+                        args.get("path").and_then(Value::as_str).map(|path| {
+                            crate::agy::key(std::path::Path::new(path), page.map(u64::from))
+                        })
+                    })
+                    .flatten()
+            }),
         pane: None,
         inline: card
             .as_ref()
@@ -717,9 +746,12 @@ fn tool_kettle_show(
         Ok(params) => params,
         Err(refusal) => return show_failed(refusal),
     };
-    let mut client = match Client::discover_display(None) {
-        Ok(client) => client,
-        Err(error) => return show_failed(crate::show_cli::refusal(&error)),
+    let mut client = match agent_client {
+        Some(client) => client,
+        None => match Client::discover_display(None) {
+            Ok(client) => client,
+            Err(error) => return show_failed(crate::show_cli::refusal(&error)),
+        },
     };
     let reply = match cancelled {
         Some(cancelled) => client.call_cancellable("show", params, cancelled),
@@ -727,6 +759,12 @@ fn tool_kettle_show(
     };
     match reply.map(serde_json::from_value::<kettle_ctl::show::ShowResult>) {
         Ok(Ok(result)) => {
+            if let Some(artifact) = artifact
+                && let Ok(mut inbox) = session.inbox.lock()
+                && let Some(inbox) = inbox.as_mut()
+            {
+                inbox.mark(artifact);
+            }
             let stored = match (card, &result.inline) {
                 (Some(id), Some(delivery)) if delivery.fits() => {
                     session.store_delivery(id, delivery.clone(), std::time::Instant::now())
@@ -874,6 +912,72 @@ fn tool_kettle_card_with(
         None => json!({}),
     };
     json!({ "content": [{ "type": "text", "text": output.to_string() }] })
+}
+
+/// Lifecycle guidance and a bounded fallback for explicitly published visual artifacts.
+/// It uses only this MCP process's private inbox, never paths from hook arguments.
+fn tool_kettle_agent_hook(
+    args: &Value,
+    params: &Value,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Value {
+    tool_kettle_agent_hook_with(args, params, cancelled, crate::mcp_display::session())
+}
+
+fn tool_kettle_agent_hook_with(
+    args: &Value,
+    params: &Value,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+    session: &crate::mcp_display::DisplaySession,
+) -> Value {
+    let empty = || json!({"content": [{"type": "text", "text": "{}"}]});
+    if crate::mcp_display::from_model(params)
+        || session.hook() != Some(crate::mcp_display::CardHook::Codex)
+    {
+        return empty();
+    }
+    let event = args.get("event").and_then(Value::as_str).unwrap_or("");
+    if event == "UserPromptSubmit" {
+        let Ok(inbox) = session.inbox.lock() else {
+            return empty();
+        };
+        let Some(inbox) = inbox.as_ref() else {
+            return empty();
+        };
+        let context = format!(
+            "When a visual explanation, image, diagram, PDF or video helps the user's task, show it with kettle_show as soon as it is ready. Do this without waiting for the user to name the tool. Skip unrelated repository assets, trivial diagrams and passing-test recordings. For generated visuals the user should see, write a finished copy directly into the private artifact inbox {} (maximum 32 files, 32 MiB each), then call kettle_show with its absolute path. This directory is removed at session end: keep durable originals in the user's requested destination. If you omit the display call, Kettle checks this inbox at turn completion, showing at most one changed visual per hook. Do not put private scratch data or unrelated test artifacts there. Showing is not inspecting: never claim to have seen an image merely because it was displayed. Respect user requests not to display media.",
+            inbox.path().display()
+        );
+        let output = json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}});
+        return json!({"content": [{"type": "text", "text": output.to_string()}]});
+    }
+    if event != "Stop" {
+        return empty();
+    }
+    let path = session
+        .inbox
+        .lock()
+        .ok()
+        .and_then(|mut inbox| inbox.as_mut().and_then(crate::agent_artifacts::Inbox::next));
+    let Some(path) = path else {
+        return empty();
+    };
+    // A private synthetic call id lets the normal one-time card path enforce
+    // admission and Linux pickup. No card bytes are sent through model output.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let id = format!("fallback-{sequence}");
+    let call = json!({"_meta": {"callId": id}});
+    let show = json!({"path": path, "key": crate::agent_artifacts::key(&path)});
+    let result = tool_kettle_show(&show, &call, cancelled, session);
+    if result
+        .pointer("/structuredContent/delivery")
+        .and_then(Value::as_str)
+        == Some("card")
+    {
+        return tool_kettle_card(&json!({"tool_use_id": id}), &json!({}), session);
+    }
+    empty()
 }
 
 /// `kettle_allow`: the PreToolUse hook's answer for `kettle_show`, an allow.
@@ -1158,6 +1262,7 @@ fn tool_argument_fields(name: &str) -> Option<&'static [(&'static str, ArgKind)]
         ],
         "kettle_card" => &[("tool_use_id", ArgKind::String)],
         "kettle_allow" => &[],
+        "kettle_agent_hook" => &[("event", ArgKind::String)],
         "kettle_video_frames" => &[
             ("path", ArgKind::String),
             ("start_s", ArgKind::Number),
@@ -1561,6 +1666,45 @@ mod tests {
                 "nothing else, and nothing of the media: {fields:?}"
             );
         }
+    }
+
+    #[test]
+    fn lifecycle_guidance_is_hidden_bounded_and_hook_only() {
+        use crate::mcp_display::{CardHook, DisplaySession};
+        let session = DisplaySession::new(Some(CardHook::Codex));
+        let args = json!({"event": "UserPromptSubmit"});
+        let result = super::tool_kettle_agent_hook_with(&args, &json!({}), None, &session);
+        let output: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        let context = output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains("private artifact inbox") && context.len() < 2500);
+        assert!(output.get("systemMessage").is_none());
+        for params in [
+            json!({"_meta":{"callId":"model-call"}}),
+            json!({"_meta":{"claudecode/toolUseId":"model-call"}}),
+        ] {
+            let refused = super::tool_kettle_agent_hook_with(&args, &params, None, &session);
+            assert_eq!(refused["content"][0]["text"], "{}");
+        }
+        let off = DisplaySession::new(None);
+        assert_eq!(
+            super::tool_kettle_agent_hook_with(&args, &json!({}), None, &off)["content"][0]["text"],
+            "{}"
+        );
+        assert!(
+            tool_specs(ToolSelection::Display)
+                .iter()
+                .all(|tool| tool["name"] != "kettle_agent_hook")
+        );
+        assert!(
+            parse_tool_call(
+                ToolSelection::Full,
+                &json!({"name":"kettle_agent_hook", "arguments":args})
+            )
+            .is_err()
+        );
     }
 
     /// `kettle_allow` answers Kettle's PreToolUse hook with an allow for
