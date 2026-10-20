@@ -6,6 +6,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep RustSec warnings enforcement while scoping three informational D-Bus
+  maintenance notices to exact reviewed versions, sources and reverse dependencies.
+- Prevent parallel test processes from inheriting a crash-report pipe reader,
+  which could make a closed-stderr test fail intermittently.
+
+### Maintenance
+
+- Update the pinned font parser, compatible dependency patches and workflow
+  actions. Keep the Mermaid renderer family on its audited versions and group
+  future proposals for coordinated review.
+
 ## [5.4.0] — 2026-10-19
 
 ### Added

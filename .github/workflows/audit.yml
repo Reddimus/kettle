@@ -21,6 +21,9 @@ on:
       - "scripts/check-lru-scope.sh"
       - "scripts/check-lru-scope.py"
       - "scripts/test-lru-scope.py"
+      - "scripts/dependency_scope.py"
+      - "scripts/check-dbus-scope.py"
+      - "scripts/test-dbus-scope.py"
       - ".github/workflows/audit.yml"
   pull_request:
     paths:
@@ -29,6 +32,9 @@ on:
       - "scripts/check-lru-scope.sh"
       - "scripts/check-lru-scope.py"
       - "scripts/test-lru-scope.py"
+      - "scripts/dependency_scope.py"
+      - "scripts/check-dbus-scope.py"
+      - "scripts/test-dbus-scope.py"
       - ".github/workflows/audit.yml"
   schedule:
     # 06:00 UTC daily — far enough off Dependabot's Monday-08:00 cadence to
@@ -57,13 +63,16 @@ jobs:
         with:
           toolchain: stable
       - name: Guard scoped lru advisory
-        run: ./scripts/check-lru-scope.sh
+        run: |
+          ./scripts/check-lru-scope.sh
+          python3 scripts/test-dbus-scope.py
+          python3 scripts/check-dbus-scope.py
       - name: Install cargo-audit
         run: cargo install cargo-audit --version 0.22.1 --locked
       - name: Audit product graph with scoped upstream exceptions
-        run: cargo audit --ignore RUSTSEC-2026-0253
+        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0370 --ignore RUSTSEC-2026-0371 --ignore RUSTSEC-2026-0372
       - name: Audit vendor validation graph without product exceptions
-        run: cargo audit --file vendor/Cargo.lock
+        run: cargo audit --deny warnings --file vendor/Cargo.lock
 
   trusted-audit:
     name: cargo audit (${{ matrix.workspace.name }})
@@ -95,7 +104,10 @@ jobs:
           toolchain: stable
       - name: Guard scoped lru advisory
         if: matrix.workspace.name == 'product'
-        run: ./scripts/check-lru-scope.sh
+        run: |
+          ./scripts/check-lru-scope.sh
+          python3 scripts/test-dbus-scope.py
+          python3 scripts/check-dbus-scope.py
       - name: Install cargo-audit enforcement CLI
         run: cargo install cargo-audit --version 0.22.1 --locked
       # Official RustSec action. It reuses the `cargo-audit` installed above,
@@ -115,7 +127,7 @@ jobs:
         uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          ignore: RUSTSEC-2026-0253
+          ignore: RUSTSEC-2026-0253,RUSTSEC-2026-0370,RUSTSEC-2026-0371,RUSTSEC-2026-0372
           working-directory: ${{ matrix.workspace.path }}
       - name: Audit vendor validation graph without product exceptions
         if: matrix.workspace.name == 'vendor-validation'
@@ -128,7 +140,7 @@ jobs:
       # result so the daily advisory window can turn this workflow red.
       - name: Enforce product audit result
         if: matrix.workspace.name == 'product'
-        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0253
+        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0370 --ignore RUSTSEC-2026-0371 --ignore RUSTSEC-2026-0372
       - name: Enforce vendor validation audit result
         if: matrix.workspace.name == 'vendor-validation'
         run: cargo audit --deny warnings --file vendor/Cargo.lock

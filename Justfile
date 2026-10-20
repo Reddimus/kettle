@@ -131,11 +131,11 @@ deny:
     cargo deny --manifest-path vendor/Cargo.toml check licenses sources bans
 
 # RustSec advisory coverage for both committed lock graphs. The product graph
-# retains two narrowly guarded upstream exceptions; the vendor graph has no
+# retains narrowly guarded upstream exceptions; the vendor graph has no
 # product exceptions. Missing cargo-audit is a hard command failure.
-audit:
-    cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --ignore RUSTSEC-2026-0253
-    cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --file vendor/Cargo.lock
+audit: lru-scope dbus-scope
+    cargo audit --deny warnings --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0370 --ignore RUSTSEC-2026-0371 --ignore RUSTSEC-2026-0372
+    cargo audit --deny warnings --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --file vendor/Cargo.lock
 
 # `cargo machete` — finds unused workspace dependencies. CI runs
 # this via `.github/workflows/machete.yml` on every PR that touches a
@@ -232,6 +232,10 @@ macos-update-smoke TAG="":
 [unix]
 lru-scope:
     ./scripts/check-lru-scope.sh
+
+dbus-scope:
+    python3 scripts/test-dbus-scope.py
+    python3 scripts/check-dbus-scope.py
 
 # === Packaging & release metadata ==================================
 # Local entry points for CI's packaging and release-metadata checks.
