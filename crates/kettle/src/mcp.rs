@@ -193,6 +193,14 @@ fn wait_unless_stdout_stalled(
 
 /// Run the stdio MCP server loop until stdin closes. Returns zero on clean EOF.
 pub fn run_mcp(selection: ToolSelection) -> i32 {
+    let _signals = match crate::mcp_display::shutdown_signals() {
+        Ok(signals) => signals,
+        Err(error) => {
+            eprintln!("kettle mcp: cannot watch session termination: {error}");
+            crate::mcp_display::close_session();
+            return 1;
+        }
+    };
     let stdin = std::io::BufReader::new(std::io::stdin());
     let status = run_mcp_with(stdin, std::io::stdout(), selection);
     crate::mcp_display::close_session();

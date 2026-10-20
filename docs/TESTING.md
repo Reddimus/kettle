@@ -37,6 +37,12 @@ keys and shutdown cleanup through the real server process and a fixture control
 transport. Inbox unit tests cover rotated filenames, in-flight rewrites, links,
 FIFOs, oversized entries and bounded directories. These checks do not substitute
 for native Codex hook trust and rendered-card acceptance.
+Unix process regressions also send SIGTERM, SIGINT and SIGHUP while stdin holds
+an unfinished request. Each must remove the private inbox, preserve a linked
+durable original, and retain the signal termination status. This exercises
+native Codex's signal-before-transport-close shutdown order, beyond clean EOF.
+A barrier-controlled destructor regression verifies that simultaneous closers
+serialize resource removal before either caller can report cleanup complete.
 The agy process fixture deliberately disables the default config while enabling
 the active controller's policy, then switches that live policy off. This covers
 profile/config selection and makes default-file shortcuts fail the regression.

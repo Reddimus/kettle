@@ -189,12 +189,63 @@ pub(crate) fn session() -> &'static DisplaySession {
 /// temporary directory explicitly after the stdio server has shut down.
 pub(crate) fn close_session() {
     if let Some(session) = SESSION.get() {
-        let inbox = session
-            .inbox
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        drop(inbox);
+        clear_session_value(&session.inbox);
+    }
+}
+
+fn clear_session_value<T>(slot: &Mutex<Option<T>>) {
+    let mut slot = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A racing signal must wait for EOF's directory removal to finish before
+    // terminating the process, even after the value has been taken.
+    drop(slot.take());
+}
+
+/// Native Codex sends SIGTERM before closing stdio. Do filesystem cleanup on
+/// a normal thread, then preserve the signal's default termination status.
+/// EOF closes and joins the watcher instead. Other MCP modes keep their normal
+/// signal behavior, and uncatchable termination cannot run cleanup.
+pub(crate) struct ShutdownSignals {
+    #[cfg(unix)]
+    watcher: Option<(signal_hook::iterator::Handle, std::thread::JoinHandle<()>)>,
+}
+
+pub(crate) fn shutdown_signals() -> std::io::Result<ShutdownSignals> {
+    #[cfg(unix)]
+    {
+        use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+        if session().hook() != Some(CardHook::Codex) {
+            return Ok(ShutdownSignals { watcher: None });
+        }
+        let mut signals = signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP])?;
+        let handle = signals.handle();
+        let watcher = std::thread::Builder::new()
+            .name("kettle-inbox-cleanup".into())
+            .spawn(move || {
+                if let Some(signal) = signals.forever().next() {
+                    close_session();
+                    // SIGTERM, SIGINT and SIGHUP terminate by default. Retain
+                    // a bounded fallback if the OS refuses to restore it.
+                    let _ = signal_hook::low_level::emulate_default_handler(signal);
+                    std::process::exit(128 + signal);
+                }
+            })?;
+        Ok(ShutdownSignals {
+            watcher: Some((handle, watcher)),
+        })
+    }
+    #[cfg(not(unix))]
+    Ok(ShutdownSignals {})
+}
+
+impl Drop for ShutdownSignals {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some((handle, watcher)) = self.watcher.take() {
+            handle.close();
+            let _ = watcher.join();
+        }
     }
 }
 
@@ -232,6 +283,43 @@ pub(crate) fn is_agy() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_cleanup_serializes_resource_removal_before_another_closer() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        struct Removal {
+            started: mpsc::Sender<()>,
+            finish: mpsc::Receiver<()>,
+        }
+        impl Drop for Removal {
+            fn drop(&mut self) {
+                self.started.send(()).unwrap();
+                self.finish.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+        }
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let slot = Arc::new(Mutex::new(Some(Removal {
+            started: started_tx,
+            finish: finish_rx,
+        })));
+        let closer_slot = Arc::clone(&slot);
+        let closer = std::thread::spawn(move || clear_session_value(&closer_slot));
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let removal_is_serialized =
+            matches!(slot.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+        finish_tx.send(()).unwrap();
+        closer.join().unwrap();
+        assert!(
+            removal_is_serialized,
+            "a signal closer could terminate while EOF removal is still running"
+        );
+        clear_session_value(&slot);
+        assert!(slot.lock().unwrap().is_none());
+    }
     use serde_json::json;
 
     fn call(id: &str) -> Value {

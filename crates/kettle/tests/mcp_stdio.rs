@@ -98,6 +98,109 @@ fn codex_artifact_inbox_is_removed_after_stdio_shutdown() {
     );
 }
 
+/// Native Codex terminates its MCP process group before closing the transport.
+/// Keep stdin open, including an unfinished request, to exercise that exit path.
+#[cfg(unix)]
+#[test]
+fn codex_artifact_inbox_is_removed_on_termination_signals() {
+    use std::io::BufRead as _;
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::time::{Duration, Instant};
+
+    struct Peer(std::process::Child);
+    impl Drop for Peer {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut peer = Peer(
+            kettle()
+                .args(["mcp", "--display", "--codex-card-hook"])
+                .env_remove("KETTLE_PID")
+                .env_remove("KETTLE_PANE_ID")
+                .env("TMPDIR", temporary.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut input = peer.0.stdin.take().unwrap();
+        let output = peer.0.stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(output).lines() {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        for message in [
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},
+                "clientInfo":{"name":"signal-test","version":"1"}}}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"kettle_agent_hook","arguments":{"event":"UserPromptSubmit"}}}),
+        ] {
+            writeln!(input, "{message}").unwrap();
+        }
+        let context = loop {
+            let line = receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            let response: Value = serde_json::from_str(&line).unwrap();
+            if response["id"] == 2 {
+                let hook: Value = serde_json::from_str(
+                    response["result"]["content"][0]["text"].as_str().unwrap(),
+                )
+                .unwrap();
+                break hook["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+            }
+        };
+        let directory = std::path::Path::new(
+            context
+                .split_once("private artifact inbox ")
+                .unwrap()
+                .1
+                .split_once(" (maximum")
+                .unwrap()
+                .0,
+        );
+        std::fs::write(directory.join("finished.svg"), "<svg/>").unwrap();
+        let outside = temporary.path().join("durable.svg");
+        std::fs::write(&outside, "durable original").unwrap();
+        std::os::unix::fs::symlink(&outside, directory.join("alias.svg")).unwrap();
+        write!(input, "{{\"unfinished\":").unwrap();
+        input.flush().unwrap();
+        // SAFETY: the owned, unreaped child still has this PID. No process
+        // group or unrelated process receives the signal.
+        assert_eq!(unsafe { libc::kill(peer.0.id() as libc::pid_t, signal) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = peer.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "MCP ignored signal {signal}");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(status.signal(), Some(signal));
+        assert!(!directory.exists(), "signal {signal} leaked {directory:?}");
+        assert_eq!(
+            std::fs::read_to_string(outside).unwrap(),
+            "durable original"
+        );
+    }
+}
+
 /// `kettle mcp --display`, over real stdio in both eras, offers exactly
 /// `kettle_show` and refuses every other tool before running it.
 #[test]

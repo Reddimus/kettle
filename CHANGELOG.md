@@ -19,6 +19,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Remove Codex's private visual inbox when its MCP server receives SIGTERM,
+  SIGINT or SIGHUP, including native CLI exit before stdio closes.
 - Let programs run inside the signed macOS app request Apple Events permission,
   restoring editor/PDF synchronization. Keep media helpers unentitled.
 - Accept agy's native artifact write/edit hook payloads, including the explicit

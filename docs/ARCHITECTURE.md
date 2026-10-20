@@ -891,6 +891,14 @@ next preview. Deleted paths are pruned from the 32-entry deduplication cache.
 Sorting costs O(n log n) time and O(n) space for n at most 32; no media bytes
 are read for change detection. The stdio entry point explicitly releases the
 inbox on shutdown because Rust does not drop static session values at exit.
+Native Codex sends SIGTERM to its MCP process group before closing stdio.
+On Unix, only the Codex card server installs a signal watcher for SIGTERM,
+SIGINT and SIGHUP. The handler wakes a dedicated thread; that thread releases
+the inbox and restores the signal's default termination behavior. No filesystem
+work or mutex locking runs in the asynchronous signal handler. Removal holds
+the session mutex so a concurrent EOF/signal cannot terminate before the other
+closer finishes deleting the directory. EOF closes and joins the watcher.
+SIGKILL and operating-system crashes cannot run cleanup.
 
 `agy_plugin` stages an immutable native plugin through the same `owned_dir`
 boundary. Explicit `agent-setup --agent agy --install` uses agy's installer;
