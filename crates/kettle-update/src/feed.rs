@@ -163,13 +163,14 @@ impl FeedClient {
         download_prefix: String,
         public_key: [u8; 32],
     ) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(CONNECT_TIMEOUT)
-            .timeout_read(IO_TIMEOUT)
-            .timeout_write(IO_TIMEOUT)
-            .timeout(TOTAL_TIMEOUT)
-            .redirects(5)
-            .build();
+        let agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_send_request(Some(IO_TIMEOUT))
+            .timeout_recv_response(Some(IO_TIMEOUT))
+            .timeout_global(Some(TOTAL_TIMEOUT))
+            .max_redirects(5)
+            .build()
+            .into();
         Self {
             manifest_url,
             signature_url,
@@ -236,11 +237,14 @@ impl FeedClient {
         let response = self
             .agent
             .get(download_url)
-            .set("User-Agent", user_agent())
-            .set("Accept", "application/octet-stream")
+            .header("User-Agent", user_agent())
+            .header("Accept", "application/octet-stream")
             .call()
             .map_err(|e| UpdateError::Request(e.to_string()))?;
-        if let Some(length) = response.header("Content-Length")
+        if let Some(length) = response
+            .headers()
+            .get("Content-Length")
+            .and_then(|value| value.to_str().ok())
             && let Ok(length) = length.parse::<u64>()
             && length != asset.size
         {
@@ -249,7 +253,7 @@ impl FeedClient {
                 actual: length,
             });
         }
-        let mut reader = response.into_reader().take(asset.size + 1);
+        let mut reader = response.into_body().into_reader().take(asset.size + 1);
         let actual = std::io::copy(&mut reader, &mut output)?;
         if actual != asset.size {
             return Err(UpdateError::SizeMismatch {
@@ -301,11 +305,14 @@ impl FeedClient {
         let response = self
             .agent
             .get(url)
-            .set("User-Agent", user_agent())
-            .set("Accept", "application/octet-stream")
+            .header("User-Agent", user_agent())
+            .header("Accept", "application/octet-stream")
             .call()
             .map_err(|e| UpdateError::Request(e.to_string()))?;
-        if let Some(length) = response.header("Content-Length")
+        if let Some(length) = response
+            .headers()
+            .get("Content-Length")
+            .and_then(|value| value.to_str().ok())
             && let Ok(length) = length.parse::<usize>()
             && length > limit
         {
@@ -313,6 +320,7 @@ impl FeedClient {
         }
         let mut bytes = Vec::new();
         response
+            .into_body()
             .into_reader()
             .take(limit as u64 + 1)
             .read_to_end(&mut bytes)?;
@@ -895,6 +903,79 @@ mod tests {
         let outcome = client.check_at("1.0.0", now).unwrap();
         assert!(matches!(outcome, CheckOutcome::UpdateAvailable(_)));
         server.join().unwrap();
+    }
+
+    fn with_http_response(response: &'static [u8], check: impl FnOnce(FeedClient, String)) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0_u8; 8192];
+            let count = stream.read(&mut request).unwrap();
+            assert!(count > 0);
+            // The client can close immediately after rejecting the headers.
+            let _ = stream.write_all(response);
+        });
+        check(FeedClient::for_test(&base, [0; 32]), base);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn http_status_and_stream_limits_fail_closed() {
+        for response in [
+            &b"HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\n123456789"[..],
+            &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\n12345\r\n0\r\n\r\n"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n12"[..],
+        ] {
+            with_http_response(response, |client, url| {
+                let result = client.get_limited(&url, 4);
+                if response.starts_with(b"HTTP/1.1 404") {
+                    assert!(matches!(result, Err(UpdateError::Request(_))));
+                } else if response.ends_with(b"\r\n\r\n12") {
+                    assert!(matches!(result, Err(UpdateError::Io(_))));
+                } else {
+                    assert!(matches!(result, Err(UpdateError::ResponseTooLarge(4))));
+                }
+            });
+        }
+        with_http_response(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nabcd\r\n0\r\n\r\n",
+            |client, url| assert_eq!(client.get_limited(&url, 4).unwrap(), b"abcd"),
+        );
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    fn artifact_download_enforces_signed_size() {
+        for response in [
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n12345"[..],
+            &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\n12345\r\n0\r\n\r\n"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n1234"[..],
+        ] {
+            with_http_response(response, |client, url| {
+                let update = AvailableUpdate {
+                    version: Version::new(99, 0, 0),
+                    tag: "v99.0.0".into(),
+                    release_url: String::new(),
+                    download_url: Some(url),
+                    asset: manifest().assets.into_iter().next(),
+                    signed_manifest: None,
+                };
+                let mut bytes = Vec::new();
+                let result = client.download_to(&update, &mut bytes);
+                if response.ends_with(b"\r\n\r\n1234") {
+                    result.unwrap();
+                    assert_eq!(bytes, b"1234");
+                } else {
+                    assert!(matches!(result, Err(UpdateError::SizeMismatch { expected: 4, actual: 5 })));
+                    assert!(bytes.len() <= 5, "read beyond the signed-size sentinel");
+                }
+            });
+        }
     }
 
     #[test]

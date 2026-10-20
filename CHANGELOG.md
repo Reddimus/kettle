@@ -19,6 +19,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Refresh the updater's TLS certificate verification and trust roots for
+  RUSTSEC-2026-0381 and RUSTSEC-2026-0382, using the current HTTP client.
 - Remove Codex's private visual inbox when its MCP server receives SIGTERM,
   SIGINT or SIGHUP, including native CLI exit before stdio closes.
 - Let programs run inside the signed macOS app request Apple Events permission,
