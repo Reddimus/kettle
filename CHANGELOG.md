@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.5.0] — 2026-10-20
+
 ### Added
 
 - Codex launches supply relevant visual guidance through native prompt hooks.
