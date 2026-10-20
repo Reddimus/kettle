@@ -137,8 +137,9 @@ fn artifact(event: &Value) -> Option<PathBuf> {
 }
 
 /// Native TUI provenance, independent of hook JSON and environment claims.
-/// The nearest signed agy ancestor must have a terminal for stdout. Print
-/// sessions whose output is a file/pipe do not publish automatic previews.
+/// The nearest signed agy ancestor must own foreground terminal input and
+/// have a recognized interactive launch. agy saves its TUI output descriptors
+/// before redirecting stdout/stderr to its log, so stdout is not a TUI signal.
 #[cfg(unix)]
 fn interactive_parent() -> bool {
     #[cfg(target_os = "macos")]
@@ -158,14 +159,58 @@ fn interactive_parent() -> bool {
             if signing::signature(process, signing::Requirement::AGY).is_ok() {
                 // The nearest signed ancestor is binding: do not borrow an
                 // outer TUI's provenance for a nested headless agy child.
-                return process::standard_output(process)
-                    == Ok(process::StandardOutput::Device(terminal.device))
+                return process::terminal_input(process, terminal.device) == Ok(true)
                     && process::process_group(process)
-                        .is_ok_and(|group| group == terminal.foreground_group);
+                        .is_ok_and(|group| group == terminal.foreground_group)
+                    && process::launch_arguments(process)
+                        .is_ok_and(|arguments| interactive_launch(&arguments));
             }
         }
     }
     false
+}
+
+/// Fail closed on print modes, subcommands and unknown future options. Values
+/// belong to their preceding option, so a prompt/model value is not a flag.
+#[cfg(any(target_os = "macos", test))]
+fn interactive_launch(arguments: &[std::ffi::OsString]) -> bool {
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        let Some(argument) = argument.to_str() else {
+            return false;
+        };
+        let (name, value) = argument
+            .split_once('=')
+            .map_or((argument, None), |(name, value)| (name, Some(value)));
+        match name {
+            "--model"
+            | "--effort"
+            | "--project"
+            | "--conversation"
+            | "--agent"
+            | "--add-dir"
+            | "--mode"
+            | "--log-file"
+            | "--prompt-interactive"
+            | "-i" => {
+                if value.is_none() && arguments.next().is_none() {
+                    return false;
+                }
+            }
+            "--continue"
+            | "-c"
+            | "--remote-control"
+            | "--sandbox"
+            | "--new-project"
+            | "--dangerously-skip-permissions" => {
+                if value.is_some_and(|value| !matches!(value, "true" | "false")) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 #[cfg(unix)]
@@ -379,6 +424,43 @@ pub(crate) fn setup(print: bool, install: bool, uninstall: bool) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_interactive_launches_exclude_print_modes_and_subcommands() {
+        let accepted = [
+            vec![],
+            vec!["--model", "gemini-4-argon-high", "--effort", "high"],
+            vec!["--continue", "--conversation=session", "--sandbox=false"],
+            vec!["-i", "A prompt containing --print as plain text"],
+            vec!["--model=gemini-4-argon-high", "--log-file", "/tmp/agy log"],
+        ];
+        let refused = [
+            vec!["-p", "draw an image"],
+            vec!["--print=draw an image"],
+            vec!["--prompt", "draw an image"],
+            vec!["-pdraw an image"],
+            vec!["--output-format", "stream-json"],
+            vec!["--model", "gemini-4-argon-high", "--print", "draw"],
+            vec!["mcp", "list"],
+            vec!["models"],
+            vec!["--future-mode"],
+            vec!["--model"],
+            vec!["--sandbox=unknown"],
+            vec!["--", "--print"],
+        ];
+        for (arguments, expected) in accepted
+            .into_iter()
+            .map(|arguments| (arguments, true))
+            .chain(refused.into_iter().map(|arguments| (arguments, false)))
+        {
+            let arguments: Vec<_> = arguments
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect();
+            assert_eq!(interactive_launch(&arguments), expected, "{arguments:?}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn native_setup_commands_bound_time_and_output() {

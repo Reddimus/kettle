@@ -906,8 +906,13 @@ and requires a JSON boolean `userFacing: true`. The adapter also
 accepts the legacy SDK write/edit names and their `TargetFile`/`IsArtifact`
 fields. Native hook payloads, rather than the SDK's advertised tool list,
 define this boundary. On
-macOS the automatic fallback requires a Google-signed agy ancestor whose
-stdout is the controlling foreground terminal. It emits only the native
+macOS the automatic fallback checks the nearest Google-signed agy ancestor,
+its terminal input device, foreground group and kernel-reported launch mode.
+agy saves its TUI output descriptors before redirecting stdout/stderr to its
+log, so those descriptors cannot classify interactive sessions. Bounded XNU
+arguments exclude print modes, subcommands and unknown flags; argument values
+are neither logged nor treated as options. Process identities are rechecked
+after metadata reads. It emits only the native
 empty hook response; previews go to the shelf. MCP and fallback share stable
 path/page keys to avoid duplicate shelf items. Both query the active Kettle's
 internal `agent_display_status` before delivery, using the existing display-only

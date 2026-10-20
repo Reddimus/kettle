@@ -48,6 +48,11 @@ malformed, oversized and linked sidecars receive no automatic preview.
 The SDK's startup tool list can still advertise legacy names; use captured
 native hook inputs to verify the adapter contract. A headless payload probe
 does not substitute for foreground provenance and rendered-shelf acceptance.
+Native macOS process tests cover terminal input with stdout/stderr redirected,
+kernel launch arguments, wrong terminal devices, exited/reused identities and
+argv/environment separation. Mode tests exclude every print alias, subcommands,
+unknown flags and incomplete options. Native agy TUI acceptance must additionally
+observe an artifact-only edit update the existing shelf item without an MCP call.
 
 - `just gauntlet`: checks formatting, locked workspace build/test/Clippy,
   default-feature core Clippy, rustdoc, media test features, and helper fixtures.

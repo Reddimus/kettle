@@ -1306,8 +1306,11 @@ directly inside agy's artifact directory also publish to the media shelf.
 Native CLI writes must mark the artifact as user-facing; ordinary file writes
 and edits outside that directory are excluded. Edits retain the native
 sidecar's user-facing flag; missing or invalid metadata grants no preview.
-This fallback requires a Google-signed agy ancestor with foreground terminal
-stdout; sessions piped to files or other programs do not publish automatically.
+This fallback requires the nearest Google-signed agy ancestor to own foreground
+terminal input and use a recognized interactive launch. Native agy redirects
+stdout and stderr to its log even in the TUI. Print sessions, subcommands and
+unknown launch options do not publish automatically; a nested print process
+cannot borrow the outer TUI's terminal ownership.
 Only regular visual files up to 32 MiB qualify, and hook input is capped at
 1 MiB. Stable file/page keys keep MCP and automatic delivery on one shelf item.
 The display-only MCP adapter also supports Linux; automatic hook delivery
