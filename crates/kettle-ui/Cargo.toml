@@ -133,7 +133,7 @@ x11rb = "0.13"
 async-channel = "2.5"
 async-io = "2.6"
 futures-lite = "2.6"
-zbus = "5.19"
+zbus = "6.0"
 md-5 = "0.11"
 url = "2.5"
 wayland-client = { version = "0.31", features = ["system"] }
