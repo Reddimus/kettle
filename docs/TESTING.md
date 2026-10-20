@@ -80,8 +80,8 @@ Use these to isolate a failure or validate the area you changed:
 | `just script-fixture-self-test` | Live-probe timing and menu-capture ownership fixtures | Unix and Python; no desktop |
 | `just deny` | License, source, and ban policy for both lock graphs | cargo-deny |
 | `just audit` | RustSec scans of product and vendor graphs | cargo-audit and advisory database access |
-| `just lru-scope` | Reviewed dependency path for the advisory exception | Unix, Python, Cargo metadata |
-| `just dbus-scope` | Exact all-target D-Bus graph for maintenance-only exceptions | Unix, Python, Cargo metadata |
+| `just lru-scope` | Reviewed dependency path for the advisory exception | Python, Cargo metadata |
+| `just dbus-scope` | Exact all-target D-Bus graph for maintenance-only exceptions | Python, Cargo metadata |
 | `just machete` | Unused workspace dependencies | cargo-machete |
 
 The live smoke recipes appear once in the [Live UI smokes](#live-ui-smokes)
@@ -927,6 +927,7 @@ macOS adds these checks inside `build`:
 
 Windows retains these additional checks inside `build`:
 
+- Native Python and Cargo metadata execution for both advisory scope guards.
 - Native ConPTY vendor coverage and PowerShell shell integration.
 - Package-manifest extraction fixtures under Windows filesystem semantics.
 - A retained multi-resolution ICO resource check.

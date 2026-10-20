@@ -55,6 +55,8 @@ export RUSTDOCFLAGS := "-D warnings"
 # everywhere.
 TMPDIR := if os_family() == "windows" { env_var("TEMP") } else { "/tmp" }
 
+scope_python := if os_family() == "windows" { "python" } else { "python3" }
+
 # Default recipe: show the list when `just` is invoked with no args.
 default:
     @just --list
@@ -229,13 +231,13 @@ macos-update-smoke TAG="":
 # dependency-path or reviewed-version change fails until reachability is
 # reassessed. Resolution also fails with cleanup instructions, so an obsolete
 # advisory ignore cannot linger silently.
-[unix]
 lru-scope:
-    ./scripts/check-lru-scope.sh
+    {{scope_python}} scripts/test-lru-scope.py
+    {{scope_python}} scripts/check-lru-scope.py
 
 dbus-scope:
-    python3 scripts/test-dbus-scope.py
-    python3 scripts/check-dbus-scope.py
+    {{scope_python}} scripts/test-dbus-scope.py
+    {{scope_python}} scripts/check-dbus-scope.py
 
 # === Packaging & release metadata ==================================
 # Local entry points for CI's packaging and release-metadata checks.
