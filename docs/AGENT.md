@@ -1303,6 +1303,9 @@ or newer within 1.x. Start a new agy session in a Kettle pane afterwards.
 Native `PreInvocation` guidance encourages relevant `kettle_show` calls.
 On macOS, successful native writes or edits of explicit visual artifacts
 directly inside agy's artifact directory also publish to the media shelf.
+Native CLI writes must mark the artifact as user-facing; ordinary file writes
+and edits outside that directory are excluded. Edits retain the native
+sidecar's user-facing flag; missing or invalid metadata grants no preview.
 This fallback requires a Google-signed agy ancestor with foreground terminal
 stdout; sessions piped to files or other programs do not publish automatically.
 Only regular visual files up to 32 MiB qualify, and hook input is capped at

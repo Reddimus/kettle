@@ -40,6 +40,14 @@ for native Codex hook trust and rendered-card acceptance.
 The agy process fixture deliberately disables the default config while enabling
 the active controller's policy, then switches that live policy off. This covers
 profile/config selection and makes default-file shortcuts fail the regression.
+Native agy payload regressions cover `write_file` with `Path` and explicit
+`ArtifactMetadata.UserFacing`, plus `edit_file` with `Path`, as captured from
+agy 1.4.3 hooks. Plugin tests exercise the emitted matcher against those names.
+Edits preserve the native sidecar's user-facing flag; private, missing,
+malformed, oversized and linked sidecars receive no automatic preview.
+The SDK's startup tool list can still advertise legacy names; use captured
+native hook inputs to verify the adapter contract. A headless payload probe
+does not substitute for foreground provenance and rendered-shelf acceptance.
 
 - `just gauntlet`: checks formatting, locked workspace build/test/Clippy,
   default-feature core Clippy, rustdoc, media test features, and helper fixtures.

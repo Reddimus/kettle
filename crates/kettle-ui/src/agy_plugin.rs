@@ -15,7 +15,7 @@ fn files(executable: &Path, version: &str) -> Result<crate::owned_dir::OwnedFile
     };
     let hooks = serde_json::json!({"kettle-previews": {
         "PreInvocation": [hook("guidance")],
-        "PostToolUse": [{"matcher": "^(write_to_file|replace_file_content|multi_replace_file_content)$", "hooks": [hook("artifact")]}]
+        "PostToolUse": [{"matcher": "^(write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content)$", "hooks": [hook("artifact")]}]
     }});
     let server = serde_json::json!({"mcpServers":{"kettle":{
         "command":command,"args":["mcp","--display","--agy-display"]
@@ -97,6 +97,16 @@ mod tests {
                 "command"
             );
             assert!(!directory.join("hooks/hooks.json").exists());
+            let matcher = regex::Regex::new(
+                hooks["kettle-previews"]["PostToolUse"][0]["matcher"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(matcher.is_match("write_file"), "agy 1.4.3 native hook name");
+            assert!(matcher.is_match("edit_file"));
+            assert!(!matcher.is_match("run_command"));
+            assert!(!matcher.is_match("not_write_file"));
         }
     }
 }

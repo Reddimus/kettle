@@ -898,6 +898,14 @@ it refuses to replace an existing plugin named `kettle`. Its `PreInvocation`
 hook supplies ephemeral visual guidance. The `PostToolUse` adapter accepts
 only successful native visual artifact writes or edits directly within the
 reported artifact directory, with a 1 MiB event and 32 MiB file limit. On
+current native CLIs, `write_file` supplies `Path` and explicit
+`ArtifactMetadata.UserFacing`; `edit_file` supplies `Path`, with its user-facing
+flag read from the native sidecar. That read accepts only a regular non-link
+file up to 16 KiB, opens without following links or blocking on special files,
+and requires a JSON boolean `userFacing: true`. The adapter also
+accepts the legacy SDK write/edit names and their `TargetFile`/`IsArtifact`
+fields. Native hook payloads, rather than the SDK's advertised tool list,
+define this boundary. On
 macOS the automatic fallback requires a Google-signed agy ancestor whose
 stdout is the controlling foreground terminal. It emits only the native
 empty hook response; previews go to the shelf. MCP and fallback share stable

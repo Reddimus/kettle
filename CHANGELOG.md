@@ -19,6 +19,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Accept agy's native artifact write/edit hook payloads, including the explicit
+  user-facing flag, so current CLI artifacts qualify for automatic previews.
 - Keep RustSec warnings enforcement while scoping three informational D-Bus
   maintenance notices to exact reviewed versions, sources and reverse dependencies.
 - Prevent parallel test processes from inheriting a crash-report pipe reader,

@@ -44,6 +44,45 @@ pub(crate) fn key(path: &Path, page: Option<u64>) -> String {
 }
 
 #[cfg(any(unix, test))]
+const ARTIFACT_METADATA_LIMIT: usize = 16 * 1024;
+
+/// Edits omit artifact metadata from the event; the native sidecar retains it.
+#[cfg(any(unix, test))]
+fn user_facing_metadata(path: &Path) -> Option<bool> {
+    use std::io::Read as _;
+    let mut name = path.file_name()?.to_os_string();
+    name.push(".metadata.json");
+    let path = path.with_file_name(name);
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() > ARTIFACT_METADATA_LIMIT as u64 {
+        return None;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > ARTIFACT_METADATA_LIMIT as u64 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(ARTIFACT_METADATA_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > ARTIFACT_METADATA_LIMIT {
+        return None;
+    }
+    serde_json::from_slice::<Value>(&bytes)
+        .ok()?
+        .get("userFacing")?
+        .as_bool()
+}
+
+#[cfg(any(unix, test))]
 fn artifact(event: &Value) -> Option<PathBuf> {
     if event
         .get("error")
@@ -54,18 +93,24 @@ fn artifact(event: &Value) -> Option<PathBuf> {
     }
     let tool = event.get("toolCall")?;
     let name = tool.get("name")?.as_str()?;
-    if !matches!(
-        name,
-        "write_to_file" | "replace_file_content" | "multi_replace_file_content"
-    ) {
-        return None;
-    }
     let args = tool.get("args")?;
-    if name == "write_to_file" && args.get("IsArtifact") != Some(&Value::Bool(true)) {
-        return None;
-    }
+    // Native hooks use the CLI schema even when the SDK's tool catalog
+    // still advertises the older names. Keep each dialect's artifact flag.
+    let target = match name {
+        "write_file"
+            if args.get("ArtifactMetadata")?.get("UserFacing") == Some(&Value::Bool(true)) =>
+        {
+            args.get("Path")
+        }
+        "edit_file" => args.get("Path"),
+        "write_to_file" if args.get("IsArtifact") == Some(&Value::Bool(true)) => {
+            args.get("TargetFile")
+        }
+        "replace_file_content" | "multi_replace_file_content" => args.get("TargetFile"),
+        _ => None,
+    }?
+    .as_str()?;
     let root = event.get("artifactDirectoryPath")?.as_str()?;
-    let target = args.get("TargetFile")?.as_str()?;
     if root.len() > 4096
         || target.len() > 4096
         || !Path::new(root).is_absolute()
@@ -83,11 +128,12 @@ fn artifact(event: &Value) -> Option<PathBuf> {
         return None;
     }
     let extension = target.extension()?.to_str()?.to_ascii_lowercase();
-    matches!(
+    let visual = matches!(
         extension.as_str(),
         "svg" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "mmd" | "pdf" | "mp4" | "webm"
-    )
-    .then_some(target)
+    );
+    (visual && (name != "edit_file" || user_facing_metadata(&target) == Some(true)))
+        .then_some(target)
 }
 
 /// Native TUI provenance, independent of hook JSON and environment claims.
@@ -393,6 +439,104 @@ mod tests {
         changed = event;
         changed["toolCall"]["args"]["TargetFile"] = json!(outside.path());
         assert!(artifact(&changed).is_none());
+    }
+    #[test]
+    fn native_cli_write_file_uses_path_and_user_facing_metadata() {
+        let root = kettle_test_support::private_tempdir("kettle-agy-native-artifact-");
+        let path = root.path().join("diagram.svg");
+        std::fs::write(&path, "<svg/>").unwrap();
+        // Captured from agy 1.4.3's successful native PostToolUse event.
+        let event = json!({
+            "artifactDirectoryPath": root.path(),
+            "error": "",
+            "toolCall": {"name": "write_file", "args": {
+                "Path": path,
+                "ArtifactMetadata": {"UserFacing": true, "RequestFeedback": false}
+            }}
+        });
+        assert_eq!(
+            artifact(&event),
+            Some(std::fs::canonicalize(&path).unwrap())
+        );
+        let mut changed = event.clone();
+        changed["toolCall"]["args"]["ArtifactMetadata"]["UserFacing"] = json!(false);
+        assert!(
+            artifact(&changed).is_none(),
+            "private artifacts stay private"
+        );
+        changed = event.clone();
+        changed["toolCall"]["args"]["ArtifactMetadata"] = Value::Null;
+        assert!(
+            artifact(&changed).is_none(),
+            "ordinary writes are not artifacts"
+        );
+        changed = event;
+        changed["error"] = json!("write failed");
+        assert!(artifact(&changed).is_none());
+    }
+    #[test]
+    fn native_cli_edit_file_uses_path_inside_the_artifact_directory() {
+        let root = kettle_test_support::private_tempdir("kettle-agy-native-edit-");
+        let path = root.path().join("diagram.svg");
+        std::fs::write(&path, "<svg/>").unwrap();
+        let metadata = root.path().join("diagram.svg.metadata.json");
+        std::fs::write(&metadata, r#"{"userFacing":true}"#).unwrap();
+        let mut event = json!({
+            "artifactDirectoryPath": root.path(), "error": "",
+            "toolCall": {"name": "edit_file", "args": {
+                "Path": path, "Target": "Old", "Replacement": "New"
+            }}
+        });
+        assert_eq!(
+            artifact(&event),
+            Some(std::fs::canonicalize(&path).unwrap())
+        );
+        std::fs::write(&metadata, r#"{"userFacing":false}"#).unwrap();
+        assert!(
+            artifact(&event).is_none(),
+            "editing a private artifact keeps it private"
+        );
+        std::fs::remove_file(&metadata).unwrap();
+        assert!(
+            artifact(&event).is_none(),
+            "missing metadata grants no preview"
+        );
+        std::fs::write(&metadata, r#"{"userFacing":true}"#).unwrap();
+        let outside = tempfile::NamedTempFile::with_suffix(".svg").unwrap();
+        std::fs::write(outside.path(), "<svg/>").unwrap();
+        event["toolCall"]["args"]["Path"] = json!(outside.path());
+        assert!(
+            artifact(&event).is_none(),
+            "ordinary repository edits stay private"
+        );
+    }
+    #[test]
+    fn native_cli_edits_require_bounded_regular_user_facing_metadata() {
+        let root = kettle_test_support::private_tempdir("kettle-agy-native-metadata-");
+        let path = root.path().join("diagram.svg");
+        std::fs::write(&path, "<svg/>").unwrap();
+        let metadata = root.path().join("diagram.svg.metadata.json");
+        let event = json!({"artifactDirectoryPath":root.path(),
+            "toolCall":{"name":"edit_file","args":{"Path":path}}});
+        for invalid in [r#"{"userFacing":"true"}"#, "{", "[]"] {
+            std::fs::write(&metadata, invalid).unwrap();
+            assert!(artifact(&event).is_none());
+        }
+        let mut oversized = br#"{"userFacing":true}"#.to_vec();
+        oversized.resize(ARTIFACT_METADATA_LIMIT + 1, b' ');
+        std::fs::write(&metadata, oversized).unwrap();
+        assert!(artifact(&event).is_none());
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&metadata).unwrap();
+            let outside = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(outside.path(), r#"{"userFacing":true}"#).unwrap();
+            std::os::unix::fs::symlink(outside.path(), &metadata).unwrap();
+            assert!(
+                artifact(&event).is_none(),
+                "metadata links grant no preview"
+            );
+        }
     }
     #[test]
     fn default_keys_are_stable_bounded_and_distinguish_pages() {
