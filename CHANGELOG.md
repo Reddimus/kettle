@@ -19,6 +19,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Let programs run inside the signed macOS app request Apple Events permission,
+  restoring editor/PDF synchronization. Keep media helpers unentitled.
 - Accept agy's native artifact write/edit hook payloads, including the explicit
   user-facing flag, so current CLI artifacts qualify for automatic previews.
 - Recognize agy's foreground TUI after it redirects stdout and stderr to its

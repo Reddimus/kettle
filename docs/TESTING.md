@@ -54,6 +54,12 @@ argv/environment separation. Mode tests exclude every print alias, subcommands,
 unknown flags and incomplete options. Native agy TUI acceptance must additionally
 observe an artifact-only edit update the existing shelf item without an MCP call.
 
+`python3 scripts/test-release.py` parses the macOS app and helper permission
+manifests and executes the real workflow signing loop with fixture binaries.
+It requires an Apple Events purpose message, limits the app to that entitlement,
+and keeps nested helpers unentitled. Native signed acceptance must also verify
+editor/PDF synchronization and preserve macOS's per-destination consent review.
+
 - `just gauntlet`: checks formatting, locked workspace build/test/Clippy,
   default-feature core Clippy, rustdoc, media test features, and helper fixtures.
   Run before a PR; needs the source-build tools and native libraries.

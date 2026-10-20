@@ -419,7 +419,7 @@ jobs:
             fi
             if file -b "$candidate" | grep -q 'Mach-O'; then
               sign_args=(--force --timestamp --options runtime
-                --entitlements packaging/macos/kettle.entitlements
+                --entitlements packaging/macos/kettle-helper.entitlements
                 --sign "$SIGNING_IDENTITY" --keychain "$KEYCHAIN")
               if [[ "$candidate" == "$APP/Contents/MacOS/kettle-media-worker" ]]; then
                 sign_args+=(--identifier org.kettle.terminal.media-worker)

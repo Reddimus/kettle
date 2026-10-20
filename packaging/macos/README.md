@@ -55,7 +55,17 @@ The order is load-bearing:
 4. Staple and validate the accepted ticket, then run Gatekeeper assessment.
 5. Create the release ZIP and SHA-256 sidecar from the final stapled bytes.
 
-`kettle.entitlements` is intentionally empty. A terminal needs `forkpty` and
-Metal, neither of which requires a hardened-runtime exception. Add no
-entitlement without a failing signed/notarized runtime test and a documented
-reason.
+The outer app uses `kettle.entitlements` to
+[request Apple Events permission](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.automation.apple-events)
+when a program the user runs needs to control another app. Its
+[`NSAppleEventsUsageDescription`](https://developer.apple.com/documentation/bundleresources/information-property-list/nsappleeventsusagedescription)
+explains the request. macOS still decides
+consent separately for each destination; this entitlement grants no approval.
+A signed native rehearsal reproduced blocked VimTeX/Skim synchronization
+without these declarations and working forward search after adding them.
+
+Nested Mach-O helpers, including `kettle-media-worker`, use the intentionally
+empty `kettle-helper.entitlements`. Their signatures carry no automation
+entitlement. `forkpty` and Metal need no hardened-runtime exception. Add no
+further entitlement without a failing signed/notarized runtime test and a
+documented reason.
