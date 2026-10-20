@@ -479,6 +479,11 @@ These suites use temporary repositories, fake services, or synthetic archives.
 They do not publish releases or require production signing credentials.
 Run the relevant recipe while iterating, then strict and full before release.
 
+`cargo test -p kettle-update` also exercises real loopback HTTP responses:
+error statuses, oversized declared and chunked bodies, truncated bodies,
+and exact signed artifact sizes. These transport checks supplement signature
+and archive validation; they do not prove public HTTPS availability.
+
 | Recipe | What it protects |
 | --- | --- |
 | `just update-manifest-test` | Signed-feed bytes, trust root, sidecars, signing command wiring |
