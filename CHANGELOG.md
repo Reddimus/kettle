@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.4.0] — 2026-10-19
+
 ### Added
 
 - Confirmations appear in a centered dialog with a clear heading, consequence
