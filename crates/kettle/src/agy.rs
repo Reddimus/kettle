@@ -356,7 +356,7 @@ pub(crate) fn setup(print: bool, install: bool, uninstall: bool) -> i32 {
     }
     if !(print || install) {
         println!(
-            "agy previews: {} for this process. Delivery: media shelf; agy's native hooks cannot print inline Kettle cards. Setup: kettle agent-setup --agent agy --install. Requires agy 1.4.2 or newer 1.x and an active Kettle with agent and agy previews enabled. Automatic artifact fallback currently requires a signed macOS agy process with foreground terminal output; MCP display also works on Linux.",
+            "agy previews: {} for this process. Delivery: media shelf; agy's native hooks cannot print inline Kettle cards. Setup: kettle agent-setup --agent agy --install. Requires agy 1.4.2 or newer 1.x and an active Kettle with agent and agy previews enabled. Automatic artifact fallback currently requires a signed macOS agy TUI with foreground terminal input; MCP display also works on Linux.",
             if enabled() { "enabled" } else { "unavailable" }
         );
         return 0;

@@ -5,6 +5,52 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 5.5.0 cut - 2026-10-20
+
+macOS 27.0.1, Apple silicon, 1920x1080 at 1x, system appearance Dark.
+The native candidate was built from `9fea81c4`, whose tree matches merged
+`0132b505`. Both the terminal and media worker contain arm64 and x86_64
+slices. The private audit bundle was Developer ID signed and passed strict
+signature verification; it was not notarized. Release signing, notarization
+and publication remain separate workflow gates. These observations cover the
+candidate's window code, with the release cut adding version, documentation and CLI status wording
+changes.
+
+Passed, using native application screenshots and accessibility controls:
+
+- Decorated default 86% opacity with native blur: material reached both rounded
+  top corners without a clear strip. Native zoom resizing and repeated full
+  screen round trips preserved terminal content, first row and pointer targets.
+  The window was explicitly raised and focused before judging full screen.
+- A fresh borderless configuration kept terminal content and input visible in
+  full screen through the sharp-alpha fallback, then returned to a window.
+- Fresh 86% opacity with blur disabled showed AppKit's standard titlebar
+  backdrop. Fresh opaque surfaces with blur both off and on had no clear strip
+  or titlebar-only material seam.
+- A TokyoNight Day preview changed the native titlebar to light; cancel restored
+  the dark theme and titlebar. A separate cold start on Day, while macOS stayed
+  Dark, placed the caption beside the traffic lights without overlap.
+- Reduce Transparency changed live from Off to On: the translucent material
+  disappeared and the theme became opaque. Restoring Off returned the material.
+  The original system setting was restored after the check.
+- Finder Get Info showed matching normal and enlarged icon previews with a
+  parallel blue rim, dark inset face and centered, legible `>_` mark.
+- The exact candidate CLI produced a native inline SVG card. Opening it showed
+  the decoded 1024x448 diagram through the signed universal media worker.
+- `just macos-update-smoke` passed against the published v5.4.0 archive with
+  its verified SHA-256 sidecar, real extraction, codesign, spctl and atomic swap.
+  The patched updater also read the public signed HTTPS feed on arm64 and
+  under Rosetta x86_64.
+
+Not run: running and closed-but-pinned Dock captures, Dock magnification and
+app-switcher icon capture. The native Dock binding timed out; supported
+app-window captures omit the Dock, and the API cannot hold a modifier while
+capturing the switcher. Native screenshots were inspected in the audit
+transcript; attempted export produced no saved image files. HiDPI and physical
+Intel acceptance were unavailable on this host; Rosetta is not physical Intel
+proof. The private fixture was normally quit and its original configuration
+restored. Existing installed Kettle windows and recordings were preserved.
+
 ## 5.4.0 cut - 2026-10-19
 
 The release was prepared on Linux (Ubuntu, Intel Iris Xe, native Wayland).
