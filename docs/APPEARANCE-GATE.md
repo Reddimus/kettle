@@ -5,6 +5,30 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 5.4.0 cut - 2026-10-19
+
+The release was prepared on Linux (Ubuntu, Intel Iris Xe, native Wayland).
+A native macOS desktop was unavailable. The macOS appearance checks and
+`just macos-update-smoke` were skipped; the Linux renderer and updater fixtures
+do not establish AppKit appearance, Gatekeeper acceptance after a live update,
+or native macOS media-player interaction.
+
+The feature PR's required macOS build and regression checks passed in CI run
+39341283460. Its separate macOS native fullscreen/caption job also passed.
+Those automated checks do not replace the manual appearance gate.
+
+On Linux, the strict repository gate, complete native gate, 24 simulated agent
+card cases, media-viewer and paging cases, and audio/confinement smoke passed.
+Native Wayland interaction verified the padded split and Theater geometry,
+compositor fullscreen, and Escape restoration. Installed Codex 0.163.0
+delivered all nine media types in a live run. Live Claude Code acceptance was
+skipped because the installed client's weekly usage quota was exhausted;
+fixtures establish Kettle's side only.
+
+Not run: native macOS material/corner/opacity captures, Reduce Transparency,
+Dock/Finder/app-switcher icon checks, manual media playback, the signed-bundle
+updater smoke, and physical Intel or HiDPI macOS acceptance.
+
 ## 5.3.0 cut - 2026-10-17
 
 macOS 27.0.1, M5 Max, 1920x1080 at 1x, system appearance Dark. The candidate
