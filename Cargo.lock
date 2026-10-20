@@ -2471,7 +2471,7 @@ dependencies = [
  "roughr-merman",
  "roxmltree 0.21.1",
  "simplecss",
- "skrifa 0.44.0",
+ "skrifa 0.46.2",
  "tempfile",
  "toml",
  "unicode-linebreak",
