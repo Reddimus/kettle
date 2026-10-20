@@ -375,7 +375,7 @@ expected to fail.
 ## Known gaps
 
 - Pre-merge checks never see the released macOS artifact. The appearance gate
-  runs a cut bundle that is not Developer ID signed, and
+  can run a local candidate whose signing differs from the final artifact, and
   `just macos-update-smoke` checks the previous published archive. Only the
   release workflow's macOS package job, in the protected `macos-signing`
   environment, signs, notarizes, staples, and Gatekeeper-assesses the app it
