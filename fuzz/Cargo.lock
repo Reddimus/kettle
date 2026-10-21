@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-config"
-version = "5.5.0"
+version = "5.5.1"
 dependencies = [
  "bitflags 2.13.2",
  "kettle-ctl",
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-core"
-version = "5.5.0"
+version = "5.5.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1171,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-ctl"
-version = "5.5.0"
+version = "5.5.1"
 dependencies = [
  "base64 0.23.1",
  "kettle-media",
@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-i18n"
-version = "5.5.0"
+version = "5.5.1"
 dependencies = [
  "serde",
  "sys-locale",
@@ -1209,14 +1209,14 @@ dependencies = [
 
 [[package]]
 name = "kettle-media"
-version = "5.5.0"
+version = "5.5.1"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "kettle-media-native"
-version = "5.5.0"
+version = "5.5.1"
 dependencies = [
  "kettle-media",
  "libc",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-media-render"
-version = "5.5.0"
+version = "5.5.1"
 dependencies = [
  "dugong",
  "dugong-graphlib",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-state"
-version = "5.5.0"
+version = "5.5.1"
 dependencies = [
  "fs4",
  "getrandom 0.4.3",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-update"
-version = "5.5.0"
+version = "5.5.1"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
@@ -1289,7 +1289,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-vt"
-version = "5.5.0"
+version = "5.5.1"
 dependencies = [
  "base64 0.23.1",
  "flate2",
