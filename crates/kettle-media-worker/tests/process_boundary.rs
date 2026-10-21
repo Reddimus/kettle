@@ -2277,6 +2277,55 @@ fn real_ffmpeg_plays_a_session_to_its_end() {
     assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
 }
 
+/// Large frames must reach the end under the worker's unchanged resource
+/// limits. Automatic rawvideo encoder threading can exhaust its address space
+/// after a few frames even though the decoder and filter threads are bounded.
+#[test]
+fn real_ffmpeg_plays_large_frames_to_the_end() {
+    let Some(ffmpeg) = installed_ffmpeg() else {
+        return;
+    };
+    let directory = kettle_test_support::private_tempdir("kettle-worker-large-session-");
+    let clip = fixture_clip(directory.path(), "large-index.webm");
+    let mut child = grouped_worker_with_decoder(&ffmpeg);
+    handshake(&mut child);
+    send(&mut child, &silent_open(&clip, (1920, 1080), 0));
+    let frames = Frames::of(&mut child);
+    let opened = match frames.next(5 * SECOND) {
+        Some(Frame::Opened(opened)) => opened,
+        other => panic!("not opened: {other:?}"),
+    };
+    assert_eq!((opened.width, opened.height), (1920, 1080));
+    assert_eq!(video_frame(frames.next(5 * SECOND)).pts_ms, 0);
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Paused))
+    );
+    command(&mut child, PlayCommand::Play);
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Playing))
+    );
+    let mut last = 0;
+    let mut count = 1;
+    loop {
+        match frames.next(5 * SECOND) {
+            Some(Frame::VideoFrame(frame)) => {
+                assert!(frame.pts_ms > last);
+                last = frame.pts_ms;
+                count += 1;
+                command(&mut child, PlayCommand::Heartbeat);
+            }
+            Some(Frame::PlayState(PlayState::Ended)) => break,
+            other => panic!("large playback stopped at {last} ms: {other:?}"),
+        }
+    }
+    assert_eq!(count, 48);
+    assert_eq!(last, 1958);
+    assert_eq!(frames.next(SECOND), None);
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+}
+
 /// A paused session whose parent goes quiet takes its ffmpeg with it: once
 /// the lease lapses no process of the group is left.
 #[test]

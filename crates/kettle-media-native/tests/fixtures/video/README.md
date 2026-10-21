@@ -1,6 +1,6 @@
 # Video fixtures
 
-Six clips of the same picture: 64x36, 10 frames a second for 4 s (40
+The small indexed clips share the same picture: 64x36, 10 frames a second for 4 s (40
 frames). Frame N shows its index in six blocks, three across and two down,
 read left to right and top to bottom as bits 0 to 5 of N: white (luma 235)
 for a one, black (16) for a zero. A block's centre survives scaling, and its
@@ -44,6 +44,20 @@ frame a decoder returned. They were made on 2026-10-10 with Homebrew's ffmpeg
   -map_metadata -1 -fflags +bitexact -flags:a +bitexact`, made on 2026-10-10
   with the same ffmpeg.
 
+
+`large-index.webm` uses the same six-bit frame pattern at 1920x1080,
+24 frames a second for 2 s (48 frames). It checks complete playback under
+production resource limits; small frames do not expose automatic raw-video
+encoder threading exhausting the worker's address space. Made on 2026-10-21
+with Ubuntu FFmpeg 8.0.1-3ubuntu2:
+
+```sh
+ffmpeg -hide_banner -loglevel error -f lavfi -i \
+  "color=c=black:s=1920x1080:r=24:d=2,format=yuv420p,geq=lum='if(mod(floor(N/pow(2,floor(X*3/W)+3*floor(Y*2/H))),2),235,16)':cb=128:cr=128" \
+  -c:v libvpx -threads 2 -crf 4 -b:v 1M -g 24 -auto-alt-ref 0 \
+  -map_metadata -1 -fflags +bitexact -flags:v +bitexact large-index.webm
+```
+
 | File | Bytes | SHA-256 |
 | --- | --- | --- |
 | index.mp4 | 4117 | `4ac5bc7783ee1e305f32272fbab83fbdc46c2a96bb72a992cf326f914c0d9b42` |
@@ -54,3 +68,4 @@ frame a decoder returned. They were made on 2026-10-10 with Homebrew's ffmpeg
 | mirrored.mp4 | 4117 | `3e7ee2243962b9cc7fc3ffa6c6459499660be6cee2b9a8fb783290e671234ffc` |
 | long-audio.mp4 | 5462 | `6f5b60a7e3ba603cd9052093893df960f3c8c77bc93a1ea700fe6720096d0e09` |
 | ticks.mp4 | 9583 | `b53795cb3fcc1266f4a5bed15867e633aad1b5707ff69701b746af857e7d6f36` |
+| large-index.webm | 113107 | `77e6aae46ae5764afd1f38e1698d67a8c4d4d26b7a49c34edbf4623cf7c7d910` |
