@@ -3053,6 +3053,7 @@ fn watcher_accepts_content_and_name_changes_to_exact_path_only() {
 #[cfg(target_os = "linux")]
 #[test]
 fn profile_switches_retarget_live_reload() {
+    use std::os::unix::fs::DirBuilderExt as _;
     use std::sync::{Arc, atomic::AtomicBool, mpsc};
     use std::time::Duration;
 
@@ -3071,7 +3072,10 @@ fn profile_switches_retarget_live_reload() {
     let root = kettle_test_support::private_tempdir("kettle-profile-watch-");
     let original = root.join("config");
     let profiles = root.join("profiles");
-    std::fs::create_dir(&profiles).unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&profiles)
+        .unwrap();
     let profile = profiles.join("work.config");
     std::fs::write(&original, "").unwrap();
     std::fs::write(&profile, "").unwrap();
