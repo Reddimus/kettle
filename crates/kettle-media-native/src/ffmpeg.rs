@@ -627,6 +627,10 @@ fn play_args(
         ),
         "-pix_fmt",
         "rgba",
+        // Raw output needs no frame-thread queue. Automatic encoder threading
+        // can exhaust the worker's address space after a few large frames.
+        "-threads:v",
+        "1",
         "-f",
         "rawvideo",
         "pipe:1",
@@ -685,7 +689,7 @@ fn sounding_args(
     args.splice(an..=an, [OsString::from("-map"), OsString::from("0:a:0")]);
     args.truncate(args.len() - 3);
     args.extend([
-        "-c:v".into(), "rawvideo".into(), "-threads:v".into(), "1".into(), "-c:a".into(), "pcm_f32le".into(),
+        "-c:v".into(), "rawvideo".into(), "-c:a".into(), "pcm_f32le".into(),
         "-ar".into(), "48000".into(), "-ac".into(), "2".into(),
         "-af".into(), format!("aresample=48000,aformat=sample_fmts=flt:channel_layouts=stereo,atrim=start_pts={start_frame}:end_pts={end_frame},asetpts=PTS-{start_frame},asetnsamples=n=960:p=1").into(), "-f".into(), "tee".into(),
         format!("[f=framecrc:flush_packets=1:max_interleave_delta=1]pipe:1|[select=v:f=rawvideo:flush_packets=1]pipe:{}|[select=a:f=f32le:flush_packets=1]pipe:{}", pipes[0], pipes[1]).into(),
@@ -1956,7 +1960,7 @@ format.duration="10.000000"
                 "-nostdin -hide_banner -loglevel error -protocol_whitelist file -threads 2 \
                  -filter_threads 1 -f mov -ss 2.500000 -i {INPUT} -map 0:1 -an -sn -dn \
                  -vf fps=29970/1000:eof_action=pass,scale=640:360:flags=bilinear,setsar=1 -pix_fmt rgba \
-                 -f rawvideo pipe:1"
+                 -threads:v 1 -f rawvideo pipe:1"
             )
         );
     }

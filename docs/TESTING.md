@@ -1285,7 +1285,12 @@ X11 display, including Xvfb launched from a Wayland desktop.
 The media viewer smoke also exercises video with native X11 input: opening stays
 paused, the padded 90% split viewer expands the picture without cropping, picture clicks and K toggle
 playback, Left/Right seek while paused, and T switches to a padded Theater view without
-changing terminal contents. Native fullscreen transitions and restoration require
+changing terminal contents. A 1920x1080 fixture also plays to its last frame
+without further input or control polling. The worker process-boundary test
+`real_ffmpeg_plays_large_frames_to_the_end` exercises the same failure under
+production resource limits with a real trusted FFmpeg. Small fixtures alone do
+not catch automatic output-encoder threading exhausting the address space.
+Native fullscreen transitions and restoration require
 a desktop compositor and must be checked on each native platform; Xvfb without a
 window manager does not prove fullscreen presentation. Renderer regressions also
 check that short viewers retain a picture and portrait video retains seeking

@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.5.1] — 2026-10-21
+
+### Fixed
+
+- Large videos no longer stop after a few frames when FFmpeg's automatic
+  raw-video encoder threading exhausts the playback sandbox's address space.
+  Output encoding now uses one thread while retaining the existing resource
+  limits, playback controls, and audio behavior.
+
 ## [5.5.0] — 2026-10-20
 
 ### Added

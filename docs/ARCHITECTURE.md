@@ -225,7 +225,11 @@ in a worker of its own: `WorkerClient::play` opens a playback session
 slot, sized to the lane's picture, and the worker serves it (`play`):
 confined to the file and its decoder before reading it, it opens paused on
 its first frame, and paces every frame at its time from a decoder that fills
-three session buffers, with bounded decoder prebuffering. The client keeps the newest frame, waking
+three session buffers, with bounded decoder prebuffering. FFmpeg playback bounds
+input decoding to two threads, filtering to one, and raw-video output encoding
+to one. The output limit also applies without audio: automatic frame threading
+can exhaust the Linux worker's 1 GiB address-space limit after a few large
+frames. The resource limits remain unchanged. The client keeps the newest frame, waking
 the window once until it looks; the lane makes it an image on the preview
 account (the frame it replaces gives its pixels back for the next) and draws
 it where the poster is, at the video's size, so the image pipeline hands each

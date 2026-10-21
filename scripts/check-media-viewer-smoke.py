@@ -222,6 +222,32 @@ def check_video(app, native, binary, path, out):
     wait_for(lambda: geometry()["preview_overlay"] is None)
 
 
+def check_large_video(app, native, binary, out):
+    path = SCRIPTS.parent / "crates/kettle-media-native/tests/fixtures/video/large-index.webm"
+    app.json_ctl("resize_window", {"width": 1920, "height": 1080})
+    wait_for(lambda: app.json_ctl("ui_geometry")["surface"] == {"width": 1920, "height": 1080})
+    command = shlex.join([binary, "show", str(path)]) + " && printf 'LARGE_VIDEO_%s\\n' READY\n"
+    app.json_ctl("send_text", {"text": command})
+    wait_for(lambda: "LARGE_VIDEO_READY" in app.json_ctl("read_screen")["text"])
+    app.json_ctl("perform_action", {"action": "open_media_shelf"})
+    viewer = lambda: app.json_ctl("ui_geometry")["preview_overlay"]
+    wait_for(viewer)
+    native.keys("t")
+    opened = wait_for(lambda: (lambda v: v if v["presentation"] == "theater" else None)(viewer()))
+    assert opened["image"]["width"] >= 1200, "large playback was tested in a small viewer"
+    native.keys("k")
+    wait_for(lambda: viewer().get("playback", {}).get("frame"))
+    # No input or control polling while it plays: a short first-frame check
+    # missed the encoder exhausting its address space a few frames later.
+    time.sleep(2.5)
+    ended = wait_for(lambda: (lambda p: p if p["state"] == "stopped" and p["position_ms"] == 1958
+                             else None)(viewer()["playback"]))
+    app.screenshot(out / "large-video-ended.png")
+    (out / "large-video-ended.json").write_text(json.dumps(ended, indent=2) + "\n")
+    native.keys("Escape")
+    wait_for(lambda: viewer() is None)
+
+
 def check(kettle, worker, out, case):
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     result = {"case": case, "pass": False, "checks": []}
@@ -333,7 +359,9 @@ def check(kettle, worker, out, case):
                     assets = media.card_fixtures(root / "assets")
                     check_pages(app, native, binary, assets, out)
                     check_video(app, native, binary, assets["video"], out)
+                    check_large_video(app, native, binary, out)
                     result["checks"].append("video fits window; native picture click and K toggle; paused seek; theater toggle; no terminal input")
+                    result["checks"].append("1920x1080 video reaches its final frame without further input or polling")
                     result["checks"].append("PDF distinct pages, Home/End and first/last boundaries; Markdown gallery paging")
                 result["pass"] = True
     finally:
