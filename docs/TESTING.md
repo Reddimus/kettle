@@ -98,6 +98,11 @@ Do not assume either gate is offline.
 
 ### Focused recipes
 
+`cargo test -p kettle --test source_id --test build_freshness` checks GUI/worker
+identity and Cargo caching. On Unix, the Cargo fixture also edits, renames and
+deletes linked sources and creates missing targets. Unchanged source-only
+libraries must stay cached; the executable refreshes its Git status each build.
+
 Use these to isolate a failure or validate the area you changed:
 
 | Recipe | What it checks; when to use it | Prerequisites |

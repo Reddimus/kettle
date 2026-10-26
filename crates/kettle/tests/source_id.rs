@@ -2,6 +2,7 @@
 //! `KETTLE_SOURCE_HASH`). The GUI and its workers must agree on it, so it has
 //! to be the same wherever one source is built and differ for any other.
 
+#[expect(dead_code, reason = "build scripts use the Cargo-tracking entry point")]
 #[path = "../build_support/source_id.rs"]
 mod source_id;
 

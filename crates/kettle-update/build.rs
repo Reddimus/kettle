@@ -13,10 +13,9 @@ mod source_id;
 fn embed_source_hash() {
     let root =
         std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
-    println!("cargo:rerun-if-changed=NONEXISTENT_FORCE_RERUN_FOR_KETTLE_SOURCE_HASH");
     println!(
         "cargo:rustc-env=KETTLE_SOURCE_HASH={:016x}",
-        source_id::source_hash(&root)
+        source_id::tracked_source_hash(&root)
     );
 }
 

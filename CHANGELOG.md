@@ -17,6 +17,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Maintenance
 
+- Reuse source-identity builds when inputs are unchanged; retain worker/GUI
+  identity checks across source and symlink changes.
 - Replace the yanked Windows clipboard dependency in both audited lockfiles.
 - Keep test-only conditional attributes and same-line documentation out of
   source guards, preventing tests from satisfying their own assertions.
