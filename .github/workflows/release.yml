@@ -265,7 +265,8 @@ jobs:
           cp target/release/kettle dist/kettle/
           cp target/release/kettle-media-worker dist/kettle/
           cp LICENSE NOTICE README.md CHANGELOG.md dist/kettle/
-          cp -R docs/changelog docs/licenses dist/kettle/docs/
+          cp -R docs/changelog dist/kettle/docs/
+          cp -R docs/licenses dist/kettle/docs/
           # Desktop integration assets — packaged at the SAME relative
           # paths the in-tree `scripts/install.sh` expects, so a user
           # who extracts the tarball can run `./kettle/install.sh` and
@@ -335,7 +336,8 @@ jobs:
           cp target/release/kettle-media-worker "$APP/Contents/MacOS/kettle-media-worker"
           cp LICENSE NOTICE README.md CHANGELOG.md "$APP/Contents/Resources/"
           mkdir -p "$APP/Contents/Resources/docs"
-          cp -R docs/changelog docs/licenses "$APP/Contents/Resources/docs/"
+          cp -R docs/changelog "$APP/Contents/Resources/docs/"
+          cp -R docs/licenses "$APP/Contents/Resources/docs/"
           # Shell-integration snippets in Resources/ so a
           # macOS user can read them alongside the LICENSE / NOTICE
           # without needing the source tree. Same content as the
