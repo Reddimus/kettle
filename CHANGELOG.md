@@ -19,6 +19,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Upgrade the diagram renderer family together and retire the released lexer backport.
 - Require the live stress test to reach its documented tab and pane counts.
+- Check media stress results against rendered pixels or metadata-only file cards.
 - Use current macOS clipboard bindings and validate their native pixel round trip.
 - Fail font FIFO tests promptly when the loader exits or stalls before opening.
 - Reuse source-identity builds when inputs are unchanged; retain worker/GUI
