@@ -105,11 +105,11 @@ jobs:
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb fish xclip x11-utils libxtst6 dbus-daemon ffmpeg
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Validate this host's recipe graph before expensive Rust builds. Run on
       # all matrix hosts: a common recipe cannot depend on a Unix-only recipe.
       - name: Install just
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: just
       # Kept as two steps on purpose. Chaining them in one `run:` block reports
@@ -962,7 +962,7 @@ jobs:
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb dbus-daemon
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: msrv-1.95
       - run: cargo build --locked --workspace --all-targets
@@ -995,7 +995,7 @@ jobs:
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb dbus-daemon
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: nightly
       - run: cargo build --locked --workspace --all-targets
@@ -1028,7 +1028,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: aarch64-linux
       - run: cargo build --workspace --target aarch64-unknown-linux-gnu
