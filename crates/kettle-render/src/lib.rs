@@ -14577,12 +14577,19 @@ fn text_layout_damage_key(
     h.finish()
 }
 
-/// The kettle version label baked into the `--screenshot` demo scene's
-/// `cargo test` compile line. It is the crate (= workspace) version, so the
-/// README hero / UX showcase screenshots never show a stale hardcoded version.
-/// `env!` resolves at compile time, so a release version bump regenerates
-/// a correct screenshot with zero code churn.
+/// The current crate version in the offscreen demo's compile line.
 pub(crate) const SCREENSHOT_DEMO_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Filled and empty cells for a bounded, 32-cell offscreen demo meter.
+fn screenshot_meter(value: u32, total: u32) -> (String, String) {
+    const CELLS: u64 = 32;
+    let filled = if total == 0 {
+        0
+    } else {
+        ((u64::from(value.min(total)) * CELLS + u64::from(total) / 2) / u64::from(total)) as usize
+    };
+    ("|".repeat(filled), "-".repeat(CELLS as usize - filled))
+}
 
 /// Which synthetic scene to render in [`capture_png_with`].
 ///
@@ -14591,8 +14598,8 @@ pub(crate) const SCREENSHOT_DEMO_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `QuadPipeline`, the active theme). The base frame is a scripted two-pane
 /// vertical split under the tab bar (active tab, per-tab `✕`, trailing `+`),
 /// with a themed shell session on the left and a monitor-style readout on the
-/// right. Content is synthetic; the rendering pipeline is identical to the
-/// live one.
+/// right. This synthetic fixture exercises the offscreen text and quad pipelines;
+/// it does not capture native window chrome.
 ///
 /// Render the synthetic showcase scene used by offscreen screenshot checks.
 /// `kettle --screenshot <out.png>` renders `Default`, the base frame with no overlay.
@@ -14864,8 +14871,7 @@ pub fn capture_png_with_annotation(
         // and the text buffer below, so the highlighted segment + separators
         // always line up with the glyphs.
         let tab_text_left = 0.0_f32;
-        // Tabs divide the FULL bar width, matching the live `tab_strip_layout`,
-        // so the README hero/showcase reflects the current style. The tab1/tab2
+        // This deterministic fixture has synthetic chrome. The tab1/tab2
         // boundary lands on the split centre (`split_x`), so the vertical split
         // divider visually continues it. Only the last tab yields room for the
         // trailing `+` button. Monospace, so a label's pixel width is its char
@@ -14885,7 +14891,7 @@ pub fn capture_png_with_annotation(
         let tab0_label = fill_tab("1: zsh", (w0 / cw).max(1.0) as usize);
         let tab1_label = fill_tab("2: ssh prod", (w1 / cw).max(1.0) as usize);
         q.push(rect(0.0, 0.0, wf, tab_h, theme.palette[8], 1.0));
-        // Active tab 0: themed background + a 2px left accent bar (live style).
+        // Active tab 0: themed background and a 2px left accent bar.
         // Cascade through the resolved accent so peacock + the theme's
         // signature accent show in --screenshot too.
         let screenshot_accent = cfg.resolved_accent(theme);
@@ -14900,7 +14906,7 @@ pub fn capture_png_with_annotation(
             theme.background,
             0.9,
         ));
-        // 1px separators at each segment's right edge (live style).
+        // 1px separators at each segment's right edge.
         q.push(rect(
             tab_text_left + w0 - 1.0,
             0.0,
@@ -15013,18 +15019,21 @@ pub fn capture_png_with_annotation(
         );
         left.shape_until_scroll(&mut font_system, false);
 
+        let (cpu_used, cpu_free) = screenshot_meter(37, 100);
+        let (memory_used, memory_free) = screenshot_meter(51, 320);
         let mut right = TextBuffer::new(&mut font_system, metrics);
         right.set_size(Some(wf - split_x - pad), Some(lh));
         right.set_rich_text(
             [
                 ("  kettle — cross-platform terminal\n\n", mag.clone()),
                 ("CPU ", fg.clone()),
-                ("|||||||||||", grn.clone()),
-                ("|||||", yel.clone()),
-                ("        37%\n", fg.clone()),
+                (cpu_used.as_str(), grn.clone()),
+                (cpu_free.as_str(), dim.clone()),
+                (" 37%\n", fg.clone()),
                 ("MEM ", fg.clone()),
-                ("||||||||", blu.clone()),
-                ("            5.1G/32G\n", fg.clone()),
+                (memory_used.as_str(), blu.clone()),
+                (memory_free.as_str(), dim.clone()),
+                (" 5.1/32GiB\n", fg.clone()),
                 ("NET ", fg.clone()),
                 ("↓ 1.2 MB/s  ↑ 88 KB/s\n\n", dim.clone()),
                 ("  GPU: ", fg.clone()),

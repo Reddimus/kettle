@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- Suppress SSH Reconnect when a configuration tag cannot be reproduced, so
+  reconnecting cannot silently select another host.
+- Make offscreen demo meters proportional to their labels and show empty capacity.
+
+### Maintenance
+
+- Replace the yanked Windows clipboard dependency in both audited lockfiles.
+- Keep test-only conditional attributes and same-line documentation out of
+  source guards, preventing tests from satisfying their own assertions.
+
 ## [5.5.1] — 2026-10-21
 
 ### Fixed
