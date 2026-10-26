@@ -12,8 +12,8 @@
 //! that ends the process when the parent stalls or a phase overruns. stdout
 //! carries frames only, through one writer.
 //!
-//! `kettle-media-render` renders raster and SVG jobs; other kinds are refused
-//! as `UnsupportedMedia`.
+//! `kettle-media-render` renders still images, diagrams and document pages;
+//! playback uses the native decoders in `kettle-media-native`.
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod early_unix;
