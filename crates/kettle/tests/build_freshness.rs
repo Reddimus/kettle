@@ -176,6 +176,14 @@ fn source_libraries_rebuild_only_when_inputs_change() {
     fs::write(directory.join("new.rs"), "// external child\n").unwrap();
     changed(&root, &mut hash);
     unchanged(&root, &hash);
+    fs::write(directory.join("new.rs"), "// edited external child\n").unwrap();
+    changed(&root, &mut hash);
+    unchanged(&root, &hash);
+    fs::rename(directory.join("new.rs"), directory.join("renamed.rs")).unwrap();
+    changed(&root, &mut hash);
+    fs::remove_file(directory.join("renamed.rs")).unwrap();
+    changed(&root, &mut hash);
+    unchanged(&root, &hash);
     let missing = external.join("missing.rs");
     std::os::unix::fs::symlink(&missing, root.join("crates/kettle-update/src/dangling.rs"))
         .unwrap();
