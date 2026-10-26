@@ -1091,6 +1091,10 @@ impl LinuxProcessTree {
                     Some(parsed.argv)
                 }
                 ProcFileRead::Unavailable => None,
+                ProcFileRead::Truncated => {
+                    self.partial_roots.insert(root);
+                    None
+                }
                 ProcFileRead::Incomplete => {
                     complete = false;
                     None
@@ -1204,7 +1208,7 @@ fn read_proc_task_children(
     let bytes = match read_proc_file_charged(&path, total_bytes) {
         ProcFileRead::Complete(bytes) => bytes,
         ProcFileRead::Unavailable => return (false, true),
-        ProcFileRead::Incomplete => return (false, false),
+        ProcFileRead::Truncated | ProcFileRead::Incomplete => return (false, false),
     };
     let mut complete = true;
     for child in parse_proc_children(&bytes) {
@@ -1226,8 +1230,9 @@ enum ProcFileRead {
     /// consumed. Process exit/permission races are normal and do not make the
     /// rest of the snapshot internally partial.
     Unavailable,
-    /// The read reached a byte ceiling or failed after opening. Publishing
-    /// this scan could erase state based on truncated evidence.
+    /// A single file reached its cap before the aggregate budget was spent.
+    Truncated,
+    /// The aggregate budget was spent or a read failed. The scan cannot publish.
     Incomplete,
 }
 
@@ -1251,11 +1256,16 @@ fn read_proc_file_charged(path: &std::path::Path, total_bytes: &mut u64) -> Proc
     let mut reader = file.take(limit);
     let result = reader.read_to_end(&mut bytes);
     *total_bytes = total_bytes.saturating_add(bytes.len() as u64);
-    if result.is_err() || bytes.len() as u64 == limit {
-        // Reaching the limit does not prove EOF without reading another byte.
-        // Reject the unproven/truncated file and charge every byte already
-        // consumed to the aggregate budget.
+    if result.is_err() {
         ProcFileRead::Incomplete
+    } else if bytes.len() as u64 == limit {
+        // EOF is unproven. Keep per-file truncation separate from a spent
+        // shared budget, while charging every byte in either case.
+        if remaining > MAX_PROC_FILE_BYTES {
+            ProcFileRead::Truncated
+        } else {
+            ProcFileRead::Incomplete
+        }
     } else {
         ProcFileRead::Complete(bytes)
     }
@@ -3294,7 +3304,63 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_proc_scanner_marks_single_oversized_metadata_files_incomplete() {
+    fn linux_proc_file_limit_does_not_hide_aggregate_exhaustion() {
+        let root = kettle_test_support::private_tempdir("kettle-proc-read-boundary-");
+        let path = root.path().join("cmdline");
+        std::fs::write(&path, vec![b'x'; MAX_PROC_FILE_BYTES as usize + 1]).unwrap();
+        let mut bytes = 0;
+        assert!(matches!(
+            read_proc_file_charged(&path, &mut bytes),
+            ProcFileRead::Truncated,
+        ));
+        assert_eq!(bytes, MAX_PROC_FILE_BYTES);
+        bytes = MAX_PROC_TREE_TOTAL_BYTES - MAX_PROC_FILE_BYTES;
+        assert!(matches!(
+            read_proc_file_charged(&path, &mut bytes),
+            ProcFileRead::Incomplete,
+        ));
+        assert_eq!(bytes, MAX_PROC_TREE_TOTAL_BYTES);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_oversized_argv_holds_back_only_its_own_root() {
+        for child in [false, true] {
+            let root = kettle_test_support::private_tempdir("kettle-proc-argv-isolation-");
+            let make_process = |pid: u32, argv: &[u8], children: &[u8]| {
+                let dir = root.path().join(pid.to_string());
+                std::fs::create_dir_all(dir.join("task").join(pid.to_string())).unwrap();
+                std::fs::write(dir.join("cmdline"), argv).unwrap();
+                std::fs::write(
+                    dir.join("task").join(pid.to_string()).join("children"),
+                    children,
+                )
+                .unwrap();
+            };
+            let oversized = vec![b'x'; MAX_PROC_FILE_BYTES as usize + 1];
+            if child {
+                make_process(10, b"bash\0", b"11");
+                make_process(11, &oversized, b"");
+            } else {
+                make_process(10, &oversized, b"");
+            }
+            make_process(20, b"ssh\0healthy.example\0", b"");
+
+            let mut tree = LinuxProcessTree::default();
+            assert!(tree.refresh_from(root.path(), &[10, 20]));
+            assert!(tree.partial_roots.contains(&10));
+            assert!(!tree.partial_roots.contains(&20));
+            assert_eq!(
+                detect_in_tree(20, &mut tree),
+                Some(ssh_ctx("healthy.example", None)),
+            );
+            assert!(tree.bytes_read < MAX_PROC_TREE_TOTAL_BYTES);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_oversized_child_lists_still_prevent_publishing() {
         for oversized_children in [false, true] {
             let root = std::env::temp_dir().join(format!(
                 "kettle-proc-single-oversize-{}-{}-{}",
@@ -3328,15 +3394,8 @@ mod tests {
             .unwrap();
 
             let mut tree = LinuxProcessTree::default();
-            assert!(
-                !tree.refresh_from(&root, &[10]),
-                "oversized {} must prevent publishing a partial scan",
-                if oversized_children {
-                    "children"
-                } else {
-                    "cmdline"
-                }
-            );
+            assert_eq!(tree.refresh_from(&root, &[10]), !oversized_children);
+            assert_eq!(tree.partial_roots.contains(&10), !oversized_children);
 
             std::fs::remove_dir_all(root).unwrap();
         }

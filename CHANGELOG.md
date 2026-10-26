@@ -8,6 +8,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep Linux process scans updating other panes when one argv exceeds its cap.
 - Preserve Bash single-dash long options when detecting shells for splits.
 - Reject shared sticky directories when trusting their contents, while retaining
   safe private-file creation there.
