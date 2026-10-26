@@ -672,6 +672,12 @@ Prerequisites beyond the desktop are included in the proof column.
 | Centered media viewer | - | Worker-backed viewer routing and live pixels through native X11 input | Linux X11 |
 | Centered confirmations | `just confirmation-smoke` | Two-pane close, safe Cancel, pointer/Space release, scrolling, retained Settings, visible text, and input isolation | Linux X11 |
 
+S9 checks held pixels for good media, refusals for broken inputs, and metadata-only
+cards for unsupported or oversized files. The worker and its parent directory
+must not allow group or other writes; stage a private executable copy if the
+build used a shared-write umask. On macOS the worker also needs the expected
+Developer ID signature. Record an unavailable worker as an unrun gate.
+
 Confirmation acceptance checks the centered panel and button bounds, initial
 Cancel focus, Enter-repeat isolation, Space activation on release, explicit
 confirmation, and blocked outside clicks. Pressing a button and releasing

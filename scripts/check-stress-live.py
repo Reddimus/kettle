@@ -14,8 +14,8 @@ the control API, and must leave it alive with no panic in its log, answering
   S7  a 16 MiB title, then 10,000 title changes
   S8  theme and language rewritten every 200 ms during a flood
   S9  hostile media through `kettle show` (corrupt, empty, huge and bomb
-      images, SVG, Mermaid and video, a FIFO, a symlink loop); each must be
-      refused within its deadline, and three good files must still render
+      images, SVG, Mermaid and video, a FIFO, a symlink loop); check refusals,
+      metadata-only file cards and real pixels for three good files
   S10 64 parallel control clients, 20 requests each; the 8-connection cap
       may refuse some, but none may fail any other way
 
@@ -37,6 +37,7 @@ import importlib.util
 import json
 import os
 import secrets
+import shlex
 import struct
 import subprocess
 import sys
@@ -452,7 +453,7 @@ def zero_rows(width, height, channels):
 
 
 def media_cases(root):
-    """S9's files: name -> (path, as Mermaid, must render)."""
+    """S9 files: name -> (path, as Mermaid, expected kind or file reason)."""
     root.mkdir(parents=True, exist_ok=True)
     good_png = png(64, 64, 2, zero_rows(64, 64, 3))
     nested_use = ['<g id="u0"><rect width="1" height="1"/></g>'] + [
@@ -463,22 +464,22 @@ def media_cases(root):
         f'<!ENTITY {chr(98 + i)} "' + f"&{chr(97 + i)};" * 10 + '">' for i in range(9)
     )
     files = {
-        "ok.png": (good_png, False, True),
-        "ok.mmd": (b"graph TD\nA-->B\n", True, True),
-        "ok.md": (b"```mermaid\ngraph TD\nA-->B\n```\n", False, True),
-        "empty.png": (b"", False, False),
-        "corrupt.png": (b"\x89PNG\r\n\x1a\n" + os.urandom(65536), False, False),
-        "truncated.png": (good_png[: len(good_png) // 2], False, False),
-        "16k.png": (png(16384, 16384, 0, zero_rows(16384, 16384, 1)), False, False),
+        "ok.png": (good_png, False, "raster"),
+        "ok.mmd": (b"graph TD\nA-->B\n", True, "mermaid"),
+        "ok.md": (b"```mermaid\ngraph TD\nA-->B\n```\n", False, "markdown"),
+        "empty.png": (b"", False, "unsupported_media"),
+        "corrupt.png": (b"\x89PNG\r\n\x1a\n" + os.urandom(65536), False, None),
+        "truncated.png": (good_png[: len(good_png) // 2], False, None),
+        "16k.png": (png(16384, 16384, 0, zero_rows(16384, 16384, 1)), False, None),
         "claims-64k.png": (
             png(65535, 65535, 6, zlib.compress(b"\x00" * 5)),
             False,
-            False,
+            None,
         ),
         "no-frames.gif": (
             b"GIF89a" + struct.pack("<HHBBB", 100, 100, 0, 0, 0) + b";",
             False,
-            False,
+            None,
         ),
         "use-bomb.svg": (
             (
@@ -487,7 +488,7 @@ def media_cases(root):
                 + '</defs><use href="#u10"/></svg>'
             ).encode(),
             False,
-            False,
+            None,
         ),
         "entity-bomb.svg": (
             (
@@ -496,7 +497,7 @@ def media_cases(root):
                 + ']><svg xmlns="http://www.w3.org/2000/svg"><text>&j;</text></svg>'
             ).encode(),
             False,
-            False,
+            None,
         ),
         "500-subgraphs.mmd": (
             (
@@ -506,66 +507,112 @@ def media_cases(root):
                 + "end\n" * 500
             ).encode(),
             True,
-            False,
+            None,
         ),
         "500-loops.mmd": (
             (
                 "sequenceDiagram\n" + "loop l\n" * 500 + "A->>B: hi\n" + "end\n" * 500
             ).encode(),
             True,
-            False,
+            None,
         ),
         "10k-edges.mmd": (
             (
                 "graph TD\n" + "".join(f"a{i}-->a{i + 1}\n" for i in range(10000))
             ).encode(),
             True,
-            False,
+            None,
         ),
         "1m-label.mmd": (
             ('graph TD\nA["' + "x" * (1 << 20) + '"]-->B\n').encode(),
             True,
-            False,
+            None,
         ),
         "40-diagrams.md": (
             "".join(
                 f"```mermaid\ngraph TD\nA{i}-->B{i}\n```\n" for i in range(40)
             ).encode(),
             False,
-            False,
+            "too_large",
         ),
         "corrupt.mp4": (
             b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isom" + os.urandom(200000),
             False,
-            False,
+            None,
         ),
     }
     cases = {}
-    for name, (data, mermaid, renders) in files.items():
+    for name, (data, mermaid, expected) in files.items():
         (root / name).write_bytes(data)
-        cases[name] = (root / name, mermaid, renders)
+        cases[name] = (root / name, mermaid, expected)
     fifo, loop = root / "fifo.png", root / "loop.png"
     if not fifo.exists():
         os.mkfifo(fifo)
     if not loop.is_symlink():
         loop.symlink_to(loop)
-    cases["fifo.png"] = (fifo, False, False)
-    cases["loop.png"] = (loop, False, False)
+    cases["fifo.png"] = (fifo, False, None)
+    cases["loop.png"] = (loop, False, None)
     return cases
+
+
+FILE_REASONS = {"unsupported_media", "too_large"}
+
+
+def media_result(status, expected, added, size=None):
+    """Check the CLI outcome and the newly published shelf item together."""
+    if not status.isdecimal() or not 0 <= int(status) <= 255:
+        return f"invalid exit status {status!r}"
+    if expected is None:
+        return None if status != "0" and not added else "refused input was published"
+    if status != "0" or len(added) != 1:
+        return f"rc={status}, expected one shelf item, got {len(added)}"
+    item = added[0]
+    if expected in FILE_REASONS:
+        if (
+            item.get("kind") == "file"
+            and item.get("pixels") == "none"
+            and item.get("width") == item.get("height") == 0
+            and item.get("file") == {"bytes": size, "reason": expected}
+        ):
+            return None
+        return f"expected metadata-only file card ({expected}), got {item!r}"
+    if (
+        item.get("kind") == expected
+        and item.get("pixels") == "held"
+        and type(item.get("width")) is int
+        and type(item.get("height")) is int
+        and item["width"] > 0
+        and item["height"] > 0
+    ):
+        return None
+    return f"expected held {expected} pixels, got {item!r}"
+
+
+def single_pane_shelf(live):
+    panes = live.json_ctl("list_panes")["panes"]
+    if len(panes) != 1:
+        raise RuntimeError("S9 requires exactly one pane")
+    return {
+        (item["item"], item["generation"]): item for item in panes[0]["media_shelf"]
+    }
 
 
 def s9_media(live):
     timeouts, unexpected = [], []
     # Absolute: the pane's shell starts in its own directory, not this one.
-    for name, (path, mermaid, renders) in media_cases(
+    for name, (path, mermaid, expected) in media_cases(
         (live.cfg.parent / "s9-media").resolve()
     ).items():
-        token = f"S9-{name}"
-        flag = "--mermaid " if mermaid else ""
+        before = single_pane_shelf(live)
+        token = f"S9-{secrets.token_hex(8)}"
+        args = [live.kettle, "show", "--title", name, "--key", token]
+        if mermaid:
+            args.append("--mermaid")
+        args.append(str(path))
         live.ctl(
             "send_text",
             params={
-                "text": f"clear; '{live.kettle}' show {flag}'{path}' >/dev/null 2>&1; echo {token} rc=$?\r"
+                "text": f"clear; {shlex.join(args)} >/dev/null 2>&1; echo {token} rc=$?\r"
             },
         )
         deadline = time.monotonic() + 30
@@ -574,17 +621,24 @@ def s9_media(live):
             lines = live.json_ctl("read_screen").get("text", "").splitlines()
             status = next(
                 (
-                    l.split("rc=")[1].strip()
-                    for l in lines
-                    if l.startswith(f"{token} rc=")
+                    line.split("rc=")[1].strip()
+                    for line in lines
+                    if line.startswith(f"{token} rc=")
                 ),
                 None,
             )
             time.sleep(0.2)
         if status is None:
             timeouts.append(name)
-        elif (status == "0") != renders:
-            unexpected.append(f"{name} rc={status}")
+            live.ctl("send_keys", params={"keys": ["ctrl+c"]})
+            break
+        added = [
+            item for key, item in single_pane_shelf(live).items() if key not in before
+        ]
+        size = path.stat().st_size if expected in FILE_REASONS else None
+        problem = media_result(status, expected, added, size)
+        if problem:
+            unexpected.append(f"{name}: {problem}")
     return {"show_timeouts": timeouts, "show_unexpected": unexpected}
 
 
@@ -668,6 +722,64 @@ def self_test():
     ]:
         result = failures({**passing, **broken})
         assert any(why in item for item in result), (broken, result)
+
+    raster = {"kind": "raster", "pixels": "held", "width": 64, "height": 64}
+    file_card = {
+        "kind": "file",
+        "pixels": "none",
+        "width": 0,
+        "height": 0,
+        "file": {"bytes": 0, "reason": "unsupported_media"},
+    }
+    assert media_result("0", "raster", [raster]) is None
+    assert media_result("0", "unsupported_media", [file_card], 0) is None
+    assert media_result("1", None, []) is None
+    for status, expected, items, size in [
+        ("0", None, [], None),
+        ("1", None, [raster], None),
+        ("1", "raster", [], None),
+        ("0", "raster", [], None),
+        ("0", "raster", [raster, raster], None),
+        ("0", "raster", [file_card], None),
+        ("0", "raster", [{**raster, "pixels": "released"}], None),
+        ("0", "raster", [{**raster, "width": 0}], None),
+        ("0", "unsupported_media", [raster], 0),
+        ("0", "too_large", [file_card], 0),
+        ("0", "unsupported_media", [file_card], 1),
+        ("0", "unsupported_media", [{**file_card, "pixels": "held"}], 0),
+        ("invalid", None, [], None),
+    ]:
+        assert media_result(status, expected, items, size), (status, expected, items)
+
+    class TimedOutMedia:
+        cfg = Path("/unused/config")
+        kettle = "/unused/kettle"
+
+        def __init__(self):
+            self.commands = []
+
+        def json_ctl(self, method):
+            assert method == "list_panes"
+            return {"panes": [{"media_shelf": []}]}
+
+        def ctl(self, method, params):
+            self.commands.append((method, params))
+
+    stalled = TimedOutMedia()
+    with (
+        patch.object(
+            sys.modules[__name__],
+            "media_cases",
+            return_value={
+                "first": (Path("/unused/first"), False, None),
+                "second": (Path("/unused/second"), False, None),
+            },
+        ),
+        patch.object(time, "monotonic", side_effect=[0, 31]),
+    ):
+        assert s9_media(stalled)["show_timeouts"] == ["first"]
+    assert len(stalled.commands) == 2
+    assert stalled.commands[-1] == ("send_keys", {"keys": ["ctrl+c"]})
 
     def failed_probe(command, **kwargs):
         if kwargs.get("check"):

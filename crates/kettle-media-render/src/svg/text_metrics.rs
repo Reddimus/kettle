@@ -34,6 +34,8 @@ impl FontSlant {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum TextShape {
     Raw,
+    RawMiddle,
+    RawHanging,
     Tspan,
     Formatted,
     FormattedMiddle,
@@ -47,7 +49,16 @@ pub(crate) enum TextWhitespace {
 
 fn text_element(id: &str, anchor: &str, text: &str, shape: TextShape, rows: &[String]) -> String {
     match shape {
-        TextShape::Raw => format!("<text id='{id}' text-anchor='{anchor}'>{text}</text>"),
+        TextShape::Raw | TextShape::RawMiddle | TextShape::RawHanging => {
+            let baseline = match shape {
+                TextShape::RawMiddle => "middle",
+                TextShape::RawHanging => "hanging",
+                _ => "auto",
+            };
+            format!(
+                "<text id='{id}' text-anchor='{anchor}' dominant-baseline='{baseline}'>{text}</text>"
+            )
+        }
         TextShape::Tspan => {
             format!("<text id='{id}' text-anchor='{anchor}'><tspan>{text}</tspan></text>")
         }
@@ -163,8 +174,10 @@ pub(crate) fn measure_shape_with_whitespace(
     escape_xml(text, &mut escaped);
     // usvg drops text with no outlines. A visible suffix retains native space
     // shaping; subtract its advance below without estimating font metrics.
-    let space_probe =
-        matches!(shape, TextShape::Raw | TextShape::Tspan) && text.chars().all(char::is_whitespace);
+    let space_probe = matches!(
+        shape,
+        TextShape::Raw | TextShape::RawMiddle | TextShape::RawHanging | TextShape::Tspan
+    ) && text.chars().all(char::is_whitespace);
     if space_probe {
         escaped.push('M');
     }
