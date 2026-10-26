@@ -36,6 +36,7 @@ import argparse
 import importlib.util
 import json
 import os
+import secrets
 import struct
 import subprocess
 import sys
@@ -218,14 +219,19 @@ def s3_many_tabs(live):
 
 
 def s5_sighup_ignorer(live):
+    # Match only this fixture; another terminal may also be running sleep.
+    nonce = secrets.randbits(128)
     live.json_ctl("perform_action", {"action": "new_tab"})
     time.sleep(0.5)
-    live.ctl("send_text", params={"text": "trap '' HUP; exec sleep 1000\r"})
+    live.ctl("send_text", params={"text": f"trap '' HUP; exec sleep 1000.{nonce}\r"})
     time.sleep(1)
     live.json_ctl("perform_action", {"action": "close_tab"})
     time.sleep(3)
     left = subprocess.run(
-        ["pgrep", "-f", "sleep 1000"], capture_output=True, text=True, check=False
+        ["pgrep", "-f", "-x", f"sleep 1000[.]{nonce}"],
+        capture_output=True,
+        text=True,
+        check=False,
     ).stdout.split()
     return {"sleep_1000_left": left}
 
