@@ -150,8 +150,8 @@ jobs:
           cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p vte --all-targets --features ansi -- -D warnings
           cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal
           cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal --all-targets -- -D warnings
-      - name: Vendored Linux clipboard URI patch
-        if: runner.os == 'Linux'
+      - name: Vendored clipboard patches
+        if: runner.os != 'Windows'
         run: python3 scripts/check-arboard-uri-list.py
       - name: Vendored portable-pty patch — native unit and doctest
         # Each OS compiles its own descriptor and pipe code. Linux uses
@@ -977,7 +977,7 @@ jobs:
     name: nightly (early warning)
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:

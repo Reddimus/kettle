@@ -380,10 +380,16 @@ fn supplied_font_fifo_is_refused_without_waiting_for_a_writer() {
             loader.join().unwrap();
             assert_eq!(result.unwrap_err(), FailureCode::FileNotRegular);
         }
-        Err(_) => {
-            drop(std::fs::OpenOptions::new().write(true).open(&path));
-            loader.join().unwrap();
-            panic!("a font FIFO with no writer blocked");
+        Err(error) => {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            // Cleanup must not wait for a reader the loader never opened.
+            drop(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&path),
+            );
+            panic!("font loader did not finish: {error}");
         }
     }
 }

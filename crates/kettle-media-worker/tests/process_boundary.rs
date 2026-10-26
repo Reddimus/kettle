@@ -1451,13 +1451,49 @@ fn command(child: &mut Child, command: PlayCommand) {
     send(child, &Frame::PlayCommand(command));
 }
 
-/// Keep the lease until this fixture's last frame, then wait for clean exit.
-/// Waiting makes a heartbeat written after completion fail deterministically.
+#[test]
+fn heartbeat_after_clean_worker_exit_keeps_the_completed_exchange_valid() {
+    let mut child = worker();
+    handshake(&mut child);
+    send(&mut child, &job(&png([10, 20, 30, 255])));
+    assert!(matches!(receive(&mut child), Some(Frame::Rendered(_))));
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+    heartbeat_before_last_frame(&mut child, 0, 1);
+    assert_eq!(receive(&mut child), None);
+    assert_eq!(finish(&mut child), "");
+}
+
+#[test]
+#[should_panic(expected = "heartbeat target did not exit cleanly")]
+fn heartbeat_after_failed_worker_exit_is_rejected() {
+    let mut child = worker();
+    send(
+        &mut child,
+        &hello(BuildId::from_embedded("0.0.0", "1111111111111111").unwrap()),
+    );
+    assert_eq!(exit_code(&mut child, 5 * SECOND), EXIT_SKEW);
+    heartbeat_before_last_frame(&mut child, 0, 1);
+}
+
+/// A clean worker may exit while earlier frames remain in the reader's queue.
+/// Only that clean exit permits a failed heartbeat; callers still check the stream.
 fn heartbeat_before_last_frame(child: &mut Child, pts_ms: u64, last_pts_ms: u64) {
     if pts_ms == last_pts_ms {
         assert_eq!(exit_code(child, 5 * SECOND), 0);
-    } else {
-        command(child, PlayCommand::Heartbeat);
+        return;
+    }
+    match write_frame(
+        child.stdin.as_mut().unwrap(),
+        &Frame::PlayCommand(PlayCommand::Heartbeat),
+        Direction::ParentToWorker,
+    ) {
+        Ok(()) => {}
+        Err(kettle_media::wire::WireError::Io) => assert_eq!(
+            exit_code(child, 5 * SECOND),
+            0,
+            "heartbeat target did not exit cleanly"
+        ),
+        Err(error) => panic!("invalid heartbeat: {error:?}"),
     }
 }
 
@@ -2314,7 +2350,7 @@ fn real_ffmpeg_plays_large_frames_to_the_end() {
                 assert!(frame.pts_ms > last);
                 last = frame.pts_ms;
                 count += 1;
-                command(&mut child, PlayCommand::Heartbeat);
+                heartbeat_before_last_frame(&mut child, frame.pts_ms, 1_958);
             }
             Some(Frame::PlayState(PlayState::Ended)) => break,
             other => panic!("large playback stopped at {last} ms: {other:?}"),

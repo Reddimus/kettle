@@ -459,7 +459,14 @@ fn is_kettle_owned_dir_name_in(path: &Path, bases: &[std::path::PathBuf]) -> boo
 /// race-resistant, platform-specific implementation.
 pub fn validate_trusted_directory(directory: &Path) -> io::Result<()> {
     let guard = guard_private_parent(&directory.join(".kettle-directory-trust-check"))?;
-    guard.verify_directory()
+    #[cfg(unix)]
+    {
+        guard.verify_trusted_directory()
+    }
+    #[cfg(not(unix))]
+    {
+        guard.verify_directory()
+    }
 }
 
 /// Open a regular file for reading while holding its verified parent chain.
@@ -2096,6 +2103,22 @@ pub(crate) mod unix {
                     ),
                 ))
             }
+        }
+
+        pub(crate) fn verify_trusted_directory(&self) -> io::Result<()> {
+            let metadata = self.directory().metadata()?;
+            if metadata.mode() & 0o022 != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "trusted directory is writable by an untrusted principal: {} (mode {:o}){}",
+                        self.path.display(),
+                        metadata.mode() & 0o7777,
+                        chmod_remedy(&self.path)
+                    ),
+                ));
+            }
+            self.verify_directory()
         }
 
         pub(crate) fn verify_directory(&self) -> io::Result<()> {
@@ -6477,6 +6500,29 @@ mod tests {
         assert!(message.contains(&format!("parent {}", writable.display())));
         assert!(message.contains("mode 0775"));
         assert!(message.contains("process umask"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_directory_rejects_sticky_shared_contents_but_private_files_remain_safe() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_tempdir();
+        let directory = root.path().join("shared");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o1777)).unwrap();
+
+        // Sticky directories protect owned leaves, not arbitrary directory contents.
+        let file = directory.join("owned");
+        drop(create_private_file_new(&file).unwrap());
+        drop(open_trusted_file_read(&file).unwrap());
+        let error = validate_trusted_directory(&directory).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o7777,
+            0o1777,
+            "validation must not repair shared permissions"
+        );
     }
 
     #[test]

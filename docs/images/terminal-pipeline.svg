@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="540" viewBox="0 0 520 540" role="img" aria-labelledby="title desc">
+<title id="title">From shell to screen</title>
+<desc id="desc">The shell exchanges bytes through a PTY. Terminal state tracks cells and scrollback. The GPU renderer draws text, images and interface. Media decoding runs in a separate worker.</desc>
+<rect width="520" height="540" fill="#1a1b26"/>
+<g font-family="JetBrains Mono, monospace">
+<text x="36" y="46" font-size="12" letter-spacing="2" fill="#7aa2f7">KETTLE / ARCHITECTURE</text>
+<text x="36" y="86" font-size="25" font-weight="700" fill="#c0caf5">From shell to screen</text>
+<g fill="#24283b" stroke="#414868"><rect x="36" y="116" width="448" height="92" rx="12"/><rect x="36" y="242" width="448" height="92" rx="12"/><rect x="36" y="368" width="448" height="92" rx="12"/></g>
+<g font-size="13"><text x="56" y="147" fill="#9ece6a">01 / SHELL + PTY</text><text x="56" y="273" fill="#7aa2f7">02 / TERMINAL STATE</text><text x="56" y="399" fill="#bb9af7">03 / GPU RENDERER</text></g>
+<g font-size="15" fill="#c0caf5"><text x="56" y="181">Input and output as bytes</text><text x="56" y="307">Cells, scrollback, escape sequences</text><text x="56" y="433">Text, images and interface</text></g>
+<g fill="none" stroke="#565f89" stroke-width="2"><path d="M260 209v25m-5-6 5 6 5-6M260 335v25m-5-6 5 6 5-6"/></g>
+<path d="M36 488h448" stroke="#414868"/><text x="36" y="516" font-size="12" fill="#a9b1d6">A separate worker decodes media.</text>
+</g></svg>

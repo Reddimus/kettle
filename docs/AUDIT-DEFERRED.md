@@ -35,11 +35,6 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   Deferred because stronger ownership needs process-creation architecture.
   Close with OS-owned containment, such as a delegated Linux cgroup or a
   supervisor/subreaper with a proven ownership contract.
-- **SSH reconnect drops `-P tag`.** `crates/kettle-remote/src/lib.rs::detect_ssh`
-  consumes the value but neither retains it nor marks the session
-  unreproducible; `clone_session_command` can therefore select another host.
-  Left out of the boundary-audit fixes as a separate low-priority change.
-  Close by reproducing the tag or suppressing Reconnect, with a regression.
 
 ## Terminal and protocol
 
@@ -132,12 +127,6 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   tests do not reach the foreign-owner refusal. Deferred because one user cannot
   create a second uid's files. Close with a second-uid fixture or a pure
   `(file_type, uid, euid)` decision test that fails without the ownership guard.
-- **Source-guard stripping limits.** `production_source` in
-  `crates/kettle-test-support/src/lib.rs` still leaves test text for
-  `#[cfg_attr(not(test), cfg(test))]` and a same-line
-  `/** needle */ #[cfg(test)] fn f() {}`. Deferred because neither form occurs
-  in workspace callers, and they can only make positive guards pass spuriously.
-  Close with parser support and regressions for both forms.
 - **Live UI gate coverage and quarantine.** `scripts/check-live-ui-smoke.py`
   has manual cases beyond CI's selection; `.github/workflows/ci.yml` still makes
   Linux search-history and several other live checks advisory. Deferred until

@@ -450,6 +450,8 @@ them.
   multiline paste prompt. Encoded `%0D` filename bytes remain intact.
   The Linux and macOS image readers also use the current `image::ImageReader`
   name for the same type, avoiding deprecated aliases in warnings-denied builds.
+  macOS uses the current typed Core Graphics constructors and removes only
+  redundant unsafe blocks; pixel layout and ownership remain unchanged.
 - Patch: read X11 INCR segments as any type, so each one is deleted and the
   owner can send the next. xclip answers every target with its own type; asked
   for a file list first, as a paste does, its 1 MiB+ transfer was left waiting
@@ -463,12 +465,11 @@ them.
 - Excluded: registry markers, generated package lock, original manifest,
   standalone examples and their tools. Only example target stanzas are removed
   from the normalized manifest; test dependencies and optional features remain.
-- Validation: `just vendor-clipboard-check` runs the retained display-free Linux
-  tests, the CRLF/encoded-CR regression, formatting and warnings-denied Clippy,
-  and the INCR regression against a real xclip under `xvfb-run` when both are
-  installed (PR CI installs them).
-  Nautilus copy/paste is a separate native GNOME check. Other platforms retain
-  their upstream implementations and product CI coverage.
+- Validation: `just vendor-clipboard-check` formats and lints on the current OS.
+  macOS round-trips native image pixels without touching the clipboard.
+  Linux also runs the display-free CRLF/encoded-CR tests and the INCR regression
+  against real xclip under `xvfb-run` when both tools are installed (PR CI
+  installs them). Nautilus copy/paste remains a separate native GNOME check.
 
 Remove this copy and its root patch entry when a released arboard includes the
 CRLF decoder correction and reads INCR segments of any type.

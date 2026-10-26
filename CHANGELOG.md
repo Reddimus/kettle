@@ -6,6 +6,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject shared sticky directories when trusting their contents, while retaining
+  safe private-file creation there.
+- Handle clean worker exit while playback tests drain buffered frames.
+- Suppress SSH Reconnect when a configuration tag cannot be reproduced, so
+  reconnecting cannot silently select another host.
+- Make offscreen demo meters proportional to their labels and show empty capacity.
+
+### Maintenance
+
+- Use current macOS clipboard bindings and validate their native pixel round trip.
+- Fail font FIFO tests promptly when the loader exits or stalls before opening.
+- Reuse source-identity builds when inputs are unchanged; retain worker/GUI
+  identity checks across source and symlink changes.
+- Bound audio CI package downloads and allow cold audio/nightly builds to finish.
+- Replace the yanked Windows clipboard dependency in both audited lockfiles.
+- Keep test-only conditional attributes and same-line documentation out of
+  source guards, preventing tests from satisfying their own assertions.
+
 ## [5.5.1] — 2026-10-21
 
 ### Fixed

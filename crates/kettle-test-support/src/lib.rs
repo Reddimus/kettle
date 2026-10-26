@@ -128,7 +128,7 @@ fn strip_test_items(src: &str) -> Result<String, ()> {
             .iter()
             .all(u8::is_ascii_whitespace);
         let removal_start = match doc_start {
-            Some(start) if attribute_starts_its_line => start,
+            Some(start) => start,
             _ => {
                 if attribute_starts_its_line {
                     line_start
@@ -252,6 +252,13 @@ impl Tri {
 /// the result is definitely `False`, i.e. the item cannot exist in a non-test
 /// build no matter what the other atoms are.
 fn cfg_is_test_only(contents: &[u8]) -> Result<bool, ()> {
+    cfg_is_test_only_at(contents, 0)
+}
+
+fn cfg_is_test_only_at(contents: &[u8], depth: usize) -> Result<bool, ()> {
+    if depth >= 128 {
+        return Err(());
+    }
     let mut cursor = skip_trivia(contents, 0)?;
     let Some((name, end)) = identifier(contents, cursor) else {
         return Ok(false);
@@ -260,14 +267,43 @@ fn cfg_is_test_only(contents: &[u8]) -> Result<bool, ()> {
     if name == b"test" && cursor == contents.len() {
         return Ok(true);
     }
-    if name != b"cfg" {
+    if name != b"cfg" && name != b"cfg_attr" {
         return Ok(false);
     }
     if contents.get(cursor) != Some(&b'(') {
         return Ok(false);
     }
-    let (value, _) = eval_predicate(contents, cursor + 1)?;
-    Ok(value == Tri::False)
+    let (value, next) = eval_predicate(contents, cursor + 1)?;
+    if name == b"cfg" {
+        return Ok(value == Tri::False);
+    }
+    // A conditional attribute can remove production only when its predicate
+    // is definitely true with `test = false`.
+    if value != Tri::True {
+        return Ok(false);
+    }
+    cursor = skip_trivia(contents, next)?;
+    while contents.get(cursor) == Some(&b',') {
+        cursor = skip_trivia(contents, cursor + 1)?;
+        let start = cursor;
+        while cursor < contents.len() {
+            if let Some(end) = skip_lexeme(contents, cursor)? {
+                cursor = end;
+                continue;
+            }
+            match contents[cursor] {
+                b'(' => cursor = matching_delimiter_end(contents, cursor, b'(', b')')?,
+                b'[' => cursor = matching_delimiter_end(contents, cursor, b'[', b']')?,
+                b'{' => cursor = matching_delimiter_end(contents, cursor, b'{', b'}')?,
+                b',' | b')' => break,
+                _ => cursor += 1,
+            }
+        }
+        if cfg_is_test_only_at(&contents[start..cursor], depth + 1)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Evaluate one predicate starting at `cursor`, returning its value and the
@@ -1031,6 +1067,33 @@ mod tests {
             production_source(src),
             "const BEFORE: u8 = 1;\n\nconst AFTER: u8 = 2;\n"
         );
+    }
+
+    #[test]
+    fn removes_same_line_documentation_on_test_items() {
+        let src = "const KEEP: u8 = 1;\n/** guard_needle */ #[cfg(test)] fn test_only() {}\n";
+        assert_eq!(production_source(src), "const KEEP: u8 = 1;\n\n");
+    }
+
+    #[test]
+    fn removes_definitely_test_only_cfg_attr_items() {
+        for attr in [
+            "cfg_attr(not(test), cfg(test))",
+            "cfg_attr(true, allow(dead_code), cfg(test))",
+            "cfg_attr(not(test), cfg_attr(true, cfg(test)))",
+        ] {
+            let src = format!("#[{attr}] fn guard_needle() {{}}\nconst KEEP: u8 = 1;\n");
+            assert_eq!(production_source(&src), "\nconst KEEP: u8 = 1;\n", "{attr}");
+        }
+        for attr in [
+            "cfg_attr(unix, cfg(test))",
+            "cfg_attr(test, cfg(false))",
+            "cfg_attr(not(test), allow(dead_code))",
+            "cfg_attr(true, cfg(not(test)))",
+        ] {
+            let src = format!("#[{attr}] fn production() {{}}\n");
+            assert_eq!(production_source(&src), src, "{attr}");
+        }
     }
 
     #[test]

@@ -1,45 +1,79 @@
-//! The source identity shared by Kettle's build scripts: a hash of the Rust
-//! sources a binary is built from. It is read without git, so it is the same
-//! in a checkout, a tarball and a Nix sandbox, staged or not. Two builds of
-//! different sources differ; a rebuild or reinstall of the same source does
-//! not. This file is under `crates/`, so it hashes itself too.
+//! Source identity shared by the GUI and workers, independent of Git metadata.
+//! Hashes logical paths and contents, including linked sources, in path order.
 
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
 
-/// A hash of the workspace's Rust sources: every file under `crates/`
-/// (through symlinks), and the workspace `Cargo.toml` and `Cargo.lock`, by
-/// path and contents, in path order. About 9 MB, read in a few tens of
-/// milliseconds.
-pub fn source_hash(repo_root: &Path) -> u64 {
-    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
-    // Symlinks are followed, so a linked source counts by what it holds;
-    // the depth bound stops a link loop.
-    fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+struct Inputs {
+    files: Vec<PathBuf>,
+    links: Vec<PathBuf>,
+}
+
+impl Inputs {
+    fn collect(repo_root: &Path) -> Self {
+        let mut inputs = Self {
+            files: Vec::new(),
+            links: Vec::new(),
+        };
+        inputs.visit(&repo_root.join("crates"), 0);
+        inputs.files.sort();
+        inputs.files.push(repo_root.join("Cargo.toml"));
+        inputs.files.push(repo_root.join("Cargo.lock"));
+        inputs.links.sort();
+        inputs
+    }
+
+    fn visit(&mut self, dir: &Path, depth: usize) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+                self.links.push(path.clone());
+            }
+            // Follow logical paths as before; bound directory-link loops.
             match std::fs::metadata(&path) {
-                Ok(kind) if kind.is_dir() && depth < 32 => collect(&path, depth + 1, out),
-                Ok(kind) if kind.is_file() => out.push(path),
+                Ok(kind) if kind.is_dir() && depth < 32 => self.visit(&path, depth + 1),
+                Ok(kind) if kind.is_file() => self.files.push(path),
                 _ => {}
             }
         }
     }
-    let mut files = Vec::new();
-    collect(&repo_root.join("crates"), 0, &mut files);
-    files.sort();
-    files.push(repo_root.join("Cargo.toml"));
-    files.push(repo_root.join("Cargo.lock"));
-    let mut hasher = DefaultHasher::new();
-    for file in &files {
-        if let Ok(bytes) = std::fs::read(file) {
-            file.strip_prefix(repo_root)
-                .unwrap_or(file)
-                .hash(&mut hasher);
-            bytes.hash(&mut hasher);
+
+    fn hash(&self, repo_root: &Path) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for file in &self.files {
+            if let Ok(bytes) = std::fs::read(file) {
+                file.strip_prefix(repo_root)
+                    .unwrap_or(file)
+                    .hash(&mut hasher);
+                bytes.hash(&mut hasher);
+            }
         }
+        hasher.finish()
     }
-    hasher.finish()
+}
+
+/// Hash all files under `crates/` plus the workspace manifest and lockfile,
+/// and register their inputs with Cargo.
+pub fn tracked_source_hash(repo_root: &Path) -> u64 {
+    let inputs = Inputs::collect(repo_root);
+    for path in [
+        repo_root.join("crates"),
+        repo_root.join("Cargo.toml"),
+        repo_root.join("Cargo.lock"),
+    ]
+    .iter()
+    .chain(&inputs.links)
+    {
+        // Explicit links also track deletion or creation of external targets.
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    inputs.hash(repo_root)
+}
+
+#[cfg(test)]
+pub fn source_hash(repo_root: &Path) -> u64 {
+    Inputs::collect(repo_root).hash(repo_root)
 }
