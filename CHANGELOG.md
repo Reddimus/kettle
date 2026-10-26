@@ -17,6 +17,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Maintenance
 
+- Require the live stress test to reach its documented tab and pane counts.
 - Use current macOS clipboard bindings and validate their native pixel round trip.
 - Fail font FIFO tests promptly when the loader exits or stalls before opening.
 - Reuse source-identity builds when inputs are unchanged; retain worker/GUI
