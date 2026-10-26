@@ -1532,15 +1532,40 @@ fn shell_flag_carries_a_command(arg: &str) -> bool {
 /// Erring toward "runs and exits" is the safe direction. The split then starts
 /// the configured shell, which is somewhere to work. The opposite error is a
 /// dead pane.
-fn posix_shell_runs_and_exits(rest: &[String]) -> bool {
+fn posix_shell_runs_and_exits(rest: &[String], bash: bool) -> bool {
     let mut args = rest.iter();
+    let mut bash_long_options = bash;
+    let mut reads_stdin = false;
     while let Some(arg) = args.next() {
+        // Bash accepts one or two hyphens for these names, before short flags.
+        if bash_long_options {
+            match arg.strip_prefix("--").or_else(|| arg.strip_prefix('-')) {
+                Some("rcfile" | "init-file") => {
+                    if args.next().is_none() {
+                        return true;
+                    }
+                    continue;
+                }
+                Some("help" | "version") => return true,
+                Some(
+                    "debug" | "debugger" | "dump-po-strings" | "dump-strings" | "login"
+                    | "noediting" | "noprofile" | "norc" | "posix" | "pretty-print" | "restricted"
+                    | "verbose",
+                ) => continue,
+                _ => bash_long_options = false,
+            }
+        }
         // After the terminator every remaining word is an operand, and the
         // first operand is the script.
         if arg == "--" {
-            return args.next().is_some();
+            return !reads_stdin && args.next().is_some();
         }
-        if shell_flag_carries_a_command(arg) {
+        if shell_flag_carries_a_command(arg)
+            || (bash
+                && arg
+                    .strip_prefix('+')
+                    .is_some_and(|flags| flags.contains('c')))
+        {
             return true;
         }
         // A bare `-` or `+` means "read from stdin", not a script to run.
@@ -1550,9 +1575,9 @@ fn posix_shell_runs_and_exits(rest: &[String]) -> bool {
         if arg.starts_with('-') || arg.starts_with('+') {
             // `-s` reads commands from stdin, which in a pane is the person
             // typing. Its operands become positional parameters, so `bash -s
-            // worker` never names a script and stays interactive.
+            // worker` never names a script. Keep scanning for a later `-c`.
             if !arg.starts_with("--") && arg[1..].contains('s') {
-                return false;
+                reads_stdin = true;
             }
             // `--opt=value` carries its own value; `--opt value` eats the next
             // word, as do the single-letter options that name a shell option.
@@ -1564,7 +1589,7 @@ fn posix_shell_runs_and_exits(rest: &[String]) -> bool {
             }
             continue;
         }
-        return true;
+        return !reads_stdin;
     }
     false
 }
@@ -1577,7 +1602,7 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
         // `-lc`), or `--command`/`--commands`. `-i`/`-l`/`-il` stay interactive.
         // The classic POSIX family, where `sh [options] command_file` is
         // standardized, so a bare operand is a script.
-        "bash" | "zsh" | "sh" | "dash" | "ksh" => posix_shell_runs_and_exits(rest),
+        "bash" | "zsh" | "sh" | "dash" | "ksh" => posix_shell_runs_and_exits(rest, base == "bash"),
         // Everything else keeps the flags-only rule. Their option grammars
         // carry value-taking flags this code has no table for (`fish -C`,
         // `nu -I`, `elvish -log`, `xonsh --rc`, and tcsh's `-i` and `-s`, which
@@ -5601,6 +5626,46 @@ mod tests {
                 !is_noninteractive_shell(&argv(a)),
                 "{a:?} should be interactive"
             );
+        }
+    }
+
+    #[test]
+    fn bash_long_options_are_not_short_flag_clusters() {
+        let argv = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for args in [
+            &["bash", "-norc", "-i"][..],
+            &["bash", "-rcfile", "/etc/bashrc", "-i"],
+            &["bash", "-init-file", "/etc/bashrc", "-i"],
+            &["bash", "-posix", "-i"],
+            &["bash", "-restricted", "-i"],
+        ] {
+            assert!(shell_launch_is_interactive(&argv(args)), "{args:?}");
+            let mut tree = MockProcessTree::new();
+            tree.add(1, None, &["zsh"]);
+            tree.add(2, Some(1), args);
+            assert_eq!(
+                find_foreground_shell(1, &mut tree),
+                Some(ShellLaunch {
+                    argv: argv(args),
+                    cwd: None,
+                }),
+            );
+        }
+        for args in [
+            &["bash", "-norc", "-c", "exit"][..],
+            &["bash", "-norc", "-s", "-c", "exit"],
+            &["bash", "-norc", "+c", "exit"],
+            &["bash", "-posix", "/tmp/hook.sh"],
+            &["bash", "-rcfile", "/etc/bashrc", "/tmp/hook.sh"],
+            &["bash", "-init-file", "/etc/bashrc", "-lc", "exit"],
+            &["bash", "--version"],
+            &["bash", "-help"],
+            &["bash", "-rcfile"],
+            &["bash", "--init-file"],
+            &["bash", "-norc", "--", "/tmp/hook.sh"],
+            &["zsh", "-rcfile", "/tmp/hook.sh"],
+        ] {
+            assert!(!shell_launch_is_interactive(&argv(args)), "{args:?}");
         }
     }
 

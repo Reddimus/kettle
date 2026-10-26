@@ -8,6 +8,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Preserve Bash single-dash long options when detecting shells for splits.
 - Reject shared sticky directories when trusting their contents, while retaining
   safe private-file creation there.
 - Handle clean worker exit while playback tests drain buffered frames.
