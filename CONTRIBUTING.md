@@ -47,6 +47,11 @@ English and Spanish together; see [Translating](TRANSLATING.md).
 
 ## Commits and pull requests
 
+Greptile reviews PRs and updates using [the repository policy](.github/review-policy.md)
+and [repository settings](.greptile/config.json). Reviews are advisory; required
+build and MSRV checks still gate merges. The optional hosted Claude review needs
+the repository variable `CLAUDE_REVIEW_ENABLED=true` and available service quota.
+
 Use `<crate>: <imperative summary>` subjects, for example:
 
 ```text

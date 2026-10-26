@@ -1155,11 +1155,14 @@ They prove the deployed feed/package route, unlike fixture-only updater tests.
 
 ### Review and repository maintenance
 
+[Greptile settings](../.greptile/config.json) enable advisory reviews on PRs,
+pushes and rebases. Automatic approval and PR-description edits are disabled.
+
 [.github/workflows/claude-review.yml](../.github/workflows/claude-review.yml)
 handles PR opened/synchronize/reopened/ready-for-review events.
 
-- Job `review` runs only for non-draft PRs opened by `Reddimus` from the same
-  repository. It requests advisory review under the repository review policy.
+- Job `review` runs only when `CLAUDE_REVIEW_ENABLED=true`, for non-draft PRs
+  opened by `Reddimus` from the same repository. It needs available service quota.
 - It may post concrete inline findings; it does not build or test the product.
 - Its error-reporting step surfaces suppressed review failures.
 

@@ -11,6 +11,7 @@ concurrency:
 jobs:
   review:
     if: >-
+      vars.CLAUDE_REVIEW_ENABLED == 'true' &&
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.login == 'Reddimus' &&
       github.event.pull_request.head.repo.full_name == github.repository
