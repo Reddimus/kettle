@@ -1857,12 +1857,6 @@ fn find_foreground_shell<T: ProcessTree + ?Sized>(
 /// Cross-platform basename of an `argv[0]` for matching against bare command
 /// names: drop any `/`- or `\`-separated path, a trailing (case-insensitive)
 /// `.exe`, and lowercase the rest.
-///
-/// On Windows `argv[0]` is a backslash path with an extension
-/// (`C:\Windows\System32\OpenSSH\ssh.exe`). Splitting only on `/`, or keeping
-/// `.exe`, would fail every `== "ssh"` check and disable remote detection
-/// (pane-title `ssh box`, right-click Reconnect / Re-attach) on Windows 11, a
-/// primary target.
 fn argv0_basename(prog: &str) -> String {
     let base = prog.rsplit(['/', '\\']).next().unwrap_or(prog);
     let lower = base.to_ascii_lowercase();
@@ -2068,13 +2062,10 @@ fn shell_single_quote(s: &str) -> String {
 ///   - `ssh -o StrictHostKeyChecking=no host` → host=host
 ///   - `sshpass -p secret ssh user@host`     → host=host, user=Some(user)
 ///
-/// Options are walked the way getopt(3) parses them (see the crate-private
-/// `parse_short_bundle`) to find the first non-option argv element, which is
-/// the target (potentially `user@host`). Along the way the options that decide
-/// which endpoint that target names — port, ProxyJump, identity, config file,
-/// login name — are captured into [`SshOptions`] instead of merely skipped,
-/// and one that cannot be reproduced marks the context so no Reconnect is
-/// offered.
+/// Parses OpenSSH options on either side of the destination. `--` ends option
+/// parsing; operands after the destination belong to the remote command.
+/// Endpoint options are captured into [`SshOptions`]; options that cannot be
+/// reproduced suppress Reconnect.
 ///
 /// Pure — takes a `&[String]` slice; unit-testable without spawning
 /// anything.
@@ -2130,17 +2121,36 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     let mut port_seen = false;
     let mut jump_seen = false;
     let mut config_seen = false;
+    let mut options_enabled = true;
     while i < argv.len() {
         let a = &argv[i];
-        if a.starts_with("--") {
-            // OpenSSH takes no long options — a `--`-prefixed token is the
-            // end-of-options marker or something this detector cannot read.
+        if options_enabled && a == "--" {
+            options_enabled = false;
             i += 1;
             continue;
         }
-        let Some(bundle) = a.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
+        if options_enabled && a.starts_with("--") {
+            return None; // OpenSSH has no long options.
+        }
+        let Some(bundle) = a
+            .strip_prefix('-')
+            .filter(|rest| options_enabled && !rest.is_empty())
+        else {
+            if target.is_some() {
+                break; // The remote command starts at the second operand.
+            }
             target = Some(a.as_str());
-            break;
+            if flag_user.is_none()
+                && let Some((user, host)) = a.split_once('@')
+                && !user.is_empty()
+                && !host.is_empty()
+            {
+                flag_user = Some(user);
+            }
+            // OpenSSH also parses options after the destination, unless `--`
+            // ended option processing. The first login name still wins.
+            i += 1;
+            continue;
         };
         let short = parse_short_bundle(bundle, argv.get(i + 1).map(String::as_str), |flag| {
             SSH_VALUE_OPTIONS.contains(flag)
@@ -4084,6 +4094,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ssh_options_after_the_destination_keep_the_endpoint_and_user_precedence() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["ssh", "box", "-p", "2222"], "ssh -p '2222' 'box'"),
+            (&["ssh", "box", "-l", "bob"], "ssh 'bob'@'box'"),
+            (&["ssh", "alice@box", "-l", "bob"], "ssh 'alice'@'box'"),
+            (&["ssh", "-l", "alice", "bob@box"], "ssh 'alice'@'box'"),
+            (
+                &["ssh", "box", "-p2222", "echo", "-Pproduction"],
+                "ssh -p '2222' 'box'",
+            ),
+            (&["ssh", "box", "--", "-Pproduction"], "ssh 'box'"),
+            (&["ssh", "--", "box", "-Pproduction"], "ssh 'box'"),
+        ];
+        for (args, expected) in cases {
+            let argv = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            let context = detect_ssh(&argv).expect("SSH destination");
+            assert_eq!(
+                clone_session_command(&context).as_deref(),
+                Some(*expected),
+                "{args:?}"
+            );
+        }
+    }
+
     /// Some options cannot be re-emitted faithfully: an `-o ProxyCommand` is
     /// an arbitrary shell command, `-W` makes the session a stdio forward
     /// rather than a shell, and a path outside the reproducible charset cannot
@@ -4101,6 +4136,9 @@ mod tests {
             &["ssh", "-P", "production", "box"],
             &["ssh", "-Pproduction", "box"],
             &["ssh", "-vPproduction", "box"],
+            &["ssh", "box", "-P", "production"],
+            &["ssh", "box", "-Pproduction"],
+            &["sshpass", "-e", "ssh", "box", "-vPproduction"],
             &["ssh", "-W", "internal.example:22", "box"],
             // An identity path with a shell metacharacter is not reproduced.
             &["ssh", "-i", "/keys/$(id -u)", "box"],
