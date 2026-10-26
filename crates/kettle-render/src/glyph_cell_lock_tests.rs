@@ -161,12 +161,8 @@ fn cell_lock_emit_is_a_single_shared_fn() {
     );
 }
 
-/// The offscreen `--screenshot` path must honor `cfg.text_renderer`. In Grid
-/// mode (the default) it builds a GlyphPipeline and routes the pane body
-/// buffers through `emit_cell_locked_glyphs` + `grid_glyphs.draw`, leaving
-/// glyphon only the annotation/menu chrome; in Legacy mode it keeps glyphon.
-/// Otherwise the README hero/showcase imagery renders through legacy glyphon
-/// regardless of the shipped default.
+/// Offscreen captures honor `cfg.text_renderer`: Grid cell-locks pane text;
+/// Legacy uses glyphon. Annotation and menu chrome use glyphon in both modes.
 #[test]
 fn screenshot_routes_pane_text_by_renderer_mode() {
     let src = super::production_source();

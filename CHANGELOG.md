@@ -8,6 +8,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Reject shared sticky directories when trusting their contents, while retaining
+  safe private-file creation there.
+- Handle clean worker exit while playback tests drain buffered frames.
 - Suppress SSH Reconnect when a configuration tag cannot be reproduced, so
   reconnecting cannot silently select another host.
 - Make offscreen demo meters proportional to their labels and show empty capacity.

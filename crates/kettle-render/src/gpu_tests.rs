@@ -1140,13 +1140,8 @@ fn screenshot_rejects_padding_larger_than_texture_limit() {
     }
 }
 
-/// The shared `emit_cell_locked_glyphs` loop, which the default (Grid)
-/// `--screenshot` path runs over its `left`/`right` pane buffers, must
-/// produce a NON-EMPTY cell-locked glyph set. The README hero/showcase
-/// imagery comes from this path; without a `GlyphPipeline` it would render
-/// through legacy glyphon and misrepresent the shipped cell-locked renderer.
-/// The test shapes a prompt-like buffer exactly as the screenshot does and
-/// asserts glyphs come out.
+/// The offscreen Grid fixture must emit cell-locked glyphs through the
+/// shared loop used by the live renderer.
 #[test]
 fn screenshot_grid_emits_cell_locked_glyphs() {
     let _serialized = gpu_test_guard();

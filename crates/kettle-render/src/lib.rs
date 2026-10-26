@@ -14770,20 +14770,9 @@ pub fn capture_png_with(
     capture_png_with_annotation(cfg, cols, rows, out, scene, None)
 }
 
-/// Extended `capture_png_with` variant that adds an
-/// optional bottom-left caption overlay (an "annotated screenshot" —
-/// useful for docs, README hero images, and bug reports that want
-/// to caption a screenshot with a version / repro / env note).
-///
-/// When `annotation` is `Some(text)`, kettle paints a translucent
-/// `theme.background` strip, at least 24px tall, across the bottom of the
-/// image and renders the text on it in `theme.foreground`. When `None`, this
-/// is identical to `capture_png_with`.
-///
-/// Hooked into the `--screenshot --annotate TEXT` CLI surface.
-/// iTerm2's *persistent* annotations (in-terminal sticky notes
-/// attached to scrollback positions) are a separate, larger
-/// feature; this is just the screenshot caption.
+/// Offscreen capture with an optional caption on a translucent bottom strip.
+/// `None` matches [`capture_png_with`]; `--annotate` supplies text from the CLI.
+/// This synthetic fixture does not include native window chrome.
 pub fn capture_png_with_annotation(
     cfg: &Config,
     cols: u32,
@@ -15072,13 +15061,9 @@ pub fn capture_png_with_annotation(
             q.push(rect(0.0, hf - annotate_h, wf, 1.0, theme.palette[8], 1.0));
         }
 
-        // The pane body text (tab bar, left + right panes) is the imagery the
-        // README hero/showcase ships, so it MUST render through whatever
-        // `text-renderer` the config selects — the same branch the live
-        // `render_frame` takes. Grid (the default) cell-locks every glyph via the
-        // shared `emit_cell_locked_glyphs`; Legacy keeps glyphon. Either way the
-        // origins below mirror the live pane layout so columns line up. The
-        // annotation + context-menu chrome always go through glyphon.
+        // Offscreen pane text follows the configured live text renderer.
+        // Shared origins keep Grid and Legacy columns aligned; annotation
+        // and menu chrome use glyphon.
         let grid = cfg.text_renderer == TextRendererMode::Grid;
         // (left, top, clip-rect) for each pane body buffer, shared between the
         // glyphon `TextArea`s (Legacy) and the GlyphPipeline emit (Grid) so the
