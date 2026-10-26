@@ -6,10 +6,9 @@ Thanks for helping keep kettle and its users safe.
 
 Please **do not** open a public GitHub issue for security reports.
 
-Use GitHub's private vulnerability reporting — open
-<https://github.com/Reddimus/kettle/security/advisories/new> and submit a
-draft advisory. That channel is encrypted to the maintainers only and lets
-us coordinate a fix + release before the issue is public.
+Use GitHub's private vulnerability reporting form:
+<https://github.com/Reddimus/kettle/security/advisories/new>.
+We can coordinate a fix before public disclosure.
 
 If you cannot use the web form, email the maintainers at the address
 listed on the GitHub profile of any active committer with the subject
@@ -21,14 +20,14 @@ Bigger or upstream-dependent issues take longer; we'll keep you in the loop.
 
 ## What's in scope
 
-kettle is a terminal emulator, so its attack surface is roughly *"a
-malicious program is running inside a tab and is trying to break out."*
-Reports that fit any of these are welcome:
+Terminal output and media can be hostile, including from remote hosts.
+Programs launched locally retain your account's permissions; Kettle does
+not sandbox ordinary terminal programs. Media workers have separate limits
+and confinement, described below.
 
-- **PTY-to-host escape** — an escape sequence, OSC payload, image protocol
-  frame, or terminal extension that causes the kettle process to
-  read/write outside the terminal sandbox (filesystem, network, OS
-  clipboard), execute attacker-controlled code, or corrupt memory.
+- **Terminal parsing** — escape sequences, OSC payloads, image frames or
+  terminal extensions that bypass documented permissions to access host
+  files, network or clipboard, execute host code, or corrupt memory.
 - **Clipboard exfiltration** — OSC 52 *read* paths that leak the host
   clipboard despite the `osc52` config gate (default `copy`).
 - **Hyperlink / URI abuse** — an `OSC 8` or auto-detected URL that
@@ -238,9 +237,8 @@ Reports that fit any of these are welcome:
   so a swap-attack with filesystem access can't OOM kettle on launch
   via these paths. Tampering that bypasses the cap (config that parses
   cleanly but escalates) remains in scope.
-- **Media protocol** — `kettle-media` defines the frames a future media
-  worker and the GUI exchange (no worker ships yet). Its decoder checks a
-  whole frame, every length, count, enum and trailing byte, before it
+- **Media protocol** — `kettle-media` defines the GUI/worker frames. Its decoder
+  checks a whole frame, every length, count, enum and trailing byte, before it
   allocates, caps each direction, keeps external requests from expressing a
   GUI user pull, and never echoes input in a failure. A frame that gets past
   those checks with oversized or hostile content is in scope.
@@ -324,7 +322,7 @@ Reports that fit any of these are welcome:
   check is refused. Getting Kettle to accept a worker that fails any of
   these is in scope. A program running as the same user that rewrites a
   user-owned install is not: it can replace Kettle itself.
-- **Media worker setup** — `kettle-media-worker` (not shipped yet) closes
+- **Media worker setup** — `kettle-media-worker` closes
   every inherited descriptor above stderr, turns off core dumps and, on
   Linux, becomes non-dumpable before it reads anything, then lowers its CPU,
   file-size, descriptor and (Linux) address-space limits and starts a
