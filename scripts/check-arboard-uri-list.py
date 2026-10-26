@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the vendored Linux clipboard patches.
+"""Check the vendored clipboard patches.
 
 The URI-list tests need no display. The X11 INCR test needs one and xclip, so
 it runs under `xvfb-run` when both are installed and is skipped otherwise.
@@ -19,13 +19,16 @@ def run(*args, timeout=600):
 
 def main():
     run("fmt", "--manifest-path", "vendor/Cargo.toml", "-p", "arboard", "--check", timeout=60)
-    if platform.system() != "Linux":
-        print("SKIP: clipboard URI unit tests require Linux; native Linux CI runs them")
-        return
     common = [
         "--locked", "--manifest-path", "vendor/Cargo.toml",
         "--target-dir", "target/vendor-check", "-p", "arboard",
     ]
+    if platform.system() != "Linux":
+        print("SKIP: clipboard URI and INCR tests require Linux")
+        if platform.system() == "Darwin":
+            run("test", *common, "--lib", "platform::osx::tests::")
+        run("clippy", *common, "--all-targets", "--", "-D", "warnings")
+        return
     run("test", *common, "--lib", "platform::linux::")
     # The INCR test takes the clipboard, so it runs only on a private X
     # server; on a desktop the run above skips it.
