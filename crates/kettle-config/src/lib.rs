@@ -36,6 +36,9 @@ pub use color::Rgb;
 pub use keybinds::{Action, Bindings, Key, Mods, Trigger};
 pub use theme::Theme;
 
+/// Default OS window title template.
+pub const DEFAULT_WINDOW_TITLE_FORMAT: &str = "{title} — kettle";
+
 /// Practical stand-in for "infinite" scrollback: ~10M lines (keeps memory
 /// bounded while never realistically clipping history).
 pub const INFINITE_SCROLLBACK: usize = 10_000_000;
@@ -1841,9 +1844,8 @@ pub struct Config {
     pub scroll_multiplier: f32,
     /// WCAG minimum contrast ratio (text vs background); `0.0` = off.
     pub minimum_contrast: f32,
-    /// Template for the OS window title. Placeholders: `{title}` (the
-    /// active pane's OSC title or "kettle"), `{cwd}` (active pane's cwd
-    /// or empty), `{tab}` (1-based active tab index).
+    /// OS window title template. `{title}` uses the pane title, cwd basename,
+    /// or "kettle"; `{cwd}` abbreviates home; `{tab}` is the 1-based tab index.
     pub window_title_format: String,
     /// Prefix shown on a per-pane titlebar while an
     /// agent control connection has the pane attached. Default `"[agent] "`
@@ -3029,7 +3031,7 @@ impl Default for Config {
             bell_flash_intensity: 0.03,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
-            window_title_format: "{title} — kettle".to_string(),
+            window_title_format: DEFAULT_WINDOW_TITLE_FORMAT.to_string(),
             agent_badge: "[agent] ".to_string(),
             tab_format: "{n}: {title}".to_string(),
             scrollbar: ScrollbarMode::Auto,
