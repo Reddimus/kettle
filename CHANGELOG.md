@@ -8,6 +8,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Apply custom window title templates at filesystem roots and when cwd is unknown.
 - Reject shared sticky directories when trusting their contents, while retaining
   safe private-file creation there.
 - Handle clean worker exit while playback tests drain buffered frames.
