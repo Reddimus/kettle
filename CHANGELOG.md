@@ -19,6 +19,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Reuse source-identity builds when inputs are unchanged; retain worker/GUI
   identity checks across source and symlink changes.
+- Bound audio CI package downloads and allow cold audio/nightly builds to finish.
 - Replace the yanked Windows clipboard dependency in both audited lockfiles.
 - Keep test-only conditional attributes and same-line documentation out of
   source guards, preventing tests from satisfying their own assertions.

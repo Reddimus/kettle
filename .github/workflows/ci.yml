@@ -977,7 +977,7 @@ jobs:
     name: nightly (early warning)
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:

@@ -23,7 +23,7 @@ concurrency:
 jobs:
   audio:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "8"
       CARGO_INCREMENTAL: "0"
@@ -38,9 +38,17 @@ jobs:
         with:
           shared-key: linux-native-audio
       - name: Native decoder and audio service
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg pulseaudio
+          # The Azure HTTP mirror has stalled until the job timeout.
+          for source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+            if [ -f "$source" ]; then
+              sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$source"
+            fi
+          done
+          apt_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y ffmpeg pulseaudio
           if [ ! -d "/run/user/$(id -u)" ]; then
             sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "/run/user/$(id -u)"
           fi
