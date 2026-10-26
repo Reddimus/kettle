@@ -31,9 +31,10 @@ crates/kettle-media-render/tests/fixtures/mermaid/*.mmd -text
 # were selected or copied: most end where the selection did, mid-line.
 crates/kettle-core/tests/fixtures/diagram-copy/** -text
 
-# merman-core's sankey tests parse CSV rows that end in spaces; the vendored
-# source keeps them as upstream ships it.
-vendor/merman-core-0.8.0/src/diagrams/sankey.rs -text
+# Preserve upstream license and notice bytes, including their final newlines.
+docs/licenses/merman/*/LICENSE* -text
+docs/licenses/merman/*/THIRD_PARTY_NOTICES.md -text
+docs/licenses/merman/*/THIRD_PARTY_LICENSES/** -text
 
 # hayro-syntax is the crates.io 0.8.0 release plus one upstream commit
 # (vendor/README.md), kept byte for byte so `diff -r` against the release shows

@@ -1,16 +1,16 @@
 use std::path::Path;
 
 const FAMILY: &[(&str, &str)] = &[
-    ("merman", "0.8.0"),
-    ("merman-core", "0.8.0"),
-    ("merman-render", "0.8.0"),
-    ("dugong", "0.8.0"),
-    ("dugong-graphlib", "0.8.0"),
-    ("manatee", "0.8.0"),
+    ("merman", "0.9.2"),
+    ("merman-core", "0.9.2"),
+    ("merman-render", "0.9.2"),
+    ("dugong", "0.9.2"),
+    ("dugong-graphlib", "0.9.2"),
+    ("manatee", "0.9.2"),
     // Not merman's own, but merman-render's Markdown parser, which the
     // gallery extraction shares rather than locking a second copy.
     ("pulldown-cmark", "0.13.4"),
-    ("roughr-merman", "0.12.3"),
+    ("roughr-merman", "0.12.4"),
     // The PDF renderer, its interpreter and its parser, which is the patched
     // local copy: one version of each.
     ("hayro", "0.8.0"),

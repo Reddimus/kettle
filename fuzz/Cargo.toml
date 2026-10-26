@@ -33,7 +33,6 @@ kettle-vt = { path = "../crates/kettle-vt", features = ["fuzzing"] }
 [patch.crates-io]
 alacritty_terminal = { path = "../vendor/alacritty_terminal-0.26.0" }
 hayro-syntax = { path = "../vendor/hayro-syntax-0.8.0" }
-merman-core = { path = "../vendor/merman-core-0.8.0" }
 portable-pty = { path = "../vendor/portable-pty-0.9.0" }
 vte = { path = "../vendor/vte-0.15.0" }
 

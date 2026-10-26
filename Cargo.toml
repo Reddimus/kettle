@@ -27,7 +27,6 @@ exclude = [
     "vendor/alacritty_terminal-0.26.0",
     "vendor/arboard-3.6.1",
     "vendor/cosmic-text-0.19.0",
-    "vendor/merman-core-0.8.0",
     "vendor/portable-pty-0.9.0",
     "vendor/vte-0.15.0",
 ]
@@ -36,7 +35,7 @@ exclude = [
 version = "5.5.1"
 edition = "2024"
 # MSRV. `sysinfo` 0.39 (kettle-remote's process walk) requires Rust 1.95,
-# and so does the 5.0 Mermaid renderer. Declaring the floor gives
+# and so does the Mermaid renderer. Declaring the floor gives
 # `cargo install` users cargo's clean "package requires rustc 1.95" message
 # instead of a confusing transitive-dep failure. The `msrv` CI job builds +
 # tests on exactly the declared rustc, and the Nix toolchain is derived from
@@ -170,12 +169,6 @@ cosmic-text = { path = "vendor/cosmic-text-0.19.0" }
 # that is not a top-level object; no release carries it yet, so the local copy
 # backports that commit alone. `vendor/README.md` records the scope.
 hayro-syntax = { path = "vendor/hayro-syntax-0.8.0" }
-# merman-core 0.8.0's sequence lexer matched a line feed followed by `%%` as
-# a comment it then never consumed, so a diagram with a bare `%%` line spun
-# until the worker's watchdog killed it (#584). Mermaid's grammar reads that
-# line feed as a newline first; the local copy does the same. No release
-# carries the fix yet; `vendor/README.md` records the scope.
-merman-core = { path = "vendor/merman-core-0.8.0" }
 # portable-pty's ConPTY writer uses a synchronous anonymous-pipe handle.
 # Kettle's bounded priority workers require partial/nonblocking progress so a
 # full child-input buffer cannot monopolize the worker ahead of protocol

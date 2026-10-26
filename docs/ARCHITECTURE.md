@@ -152,7 +152,7 @@ start their own worker through the same client and launcher the GUI uses,
 and encode the sheet as one JPEG sized to its destination (any size for the
 command's file, the 768 KiB response line for MCP) with a text index of each
 frame's time.
-Mermaid goes through merman 0.8.0, pinned exactly with its layout and
+Mermaid goes through merman 0.9.2, pinned exactly with its layout and
 painting family, under a resource-constrained policy and a two-second
 `OperationControl` deadline that starts before its fonts load. Kettle
 measures every label itself (`svg::text_host`, with `text_metrics`,

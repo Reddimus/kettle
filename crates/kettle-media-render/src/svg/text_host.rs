@@ -302,7 +302,10 @@ impl NativeTextHost {
                     Op::TitleBBoxX
                     | Op::RawBBoxWidth
                     | Op::BoundingClientRectWidth
-                    | Op::RawBBoxHeight => Shape::Raw,
+                    | Op::RawBBoxHeight
+                    | Op::RawBBoxYOffset => Shape::Raw,
+                    Op::RawMiddleBBoxYOffset => Shape::RawMiddle,
+                    Op::RawHangingBBoxYOffset => Shape::RawHanging,
                     _ => return Err(FailureCode::RenderParse),
                 };
                 let facts = self.facts(request.text, request.style, shape, Space::SvgDefault)?;
@@ -329,9 +332,11 @@ impl NativeTextHost {
                     Op::TspanBBoxHeight | Op::SimpleBBoxHeight | Op::RawBBoxHeight => {
                         Ok(HostTextMeasurement::Length(height))
                     }
-                    Op::CreateTextBBoxYOffset | Op::CreateTextMiddleBBoxYOffset => {
-                        Ok(HostTextMeasurement::Length(y))
-                    }
+                    Op::CreateTextBBoxYOffset
+                    | Op::CreateTextMiddleBBoxYOffset
+                    | Op::RawBBoxYOffset
+                    | Op::RawMiddleBBoxYOffset
+                    | Op::RawHangingBBoxYOffset => Ok(HostTextMeasurement::Length(y)),
                     Op::MermaidCalculateTextDimensions => {
                         Ok(HostTextMeasurement::Metrics(TextMetrics {
                             width,
@@ -399,7 +404,10 @@ mod tests {
         for text in ["", "AV ffi", "A & <B>", "\u{301}"] {
             for operation in TextMeasurementOperation::ALL {
                 let request = request(operation, text, &style);
-                let value = host.measure(request).unwrap().unwrap();
+                let value = host
+                    .measure(request)
+                    .unwrap_or_else(|error| panic!("{operation:?} for {text:?}: {error:?}"))
+                    .unwrap();
                 validate_host_text_measurement(&request, &value).unwrap();
             }
         }
@@ -443,6 +451,38 @@ mod tests {
         assert_eq!(advance, actual.advance);
         assert_eq!(width, f64::from(actual.bounds.width()));
         assert!(!actual.faces.is_empty());
+    }
+
+    #[test]
+    fn raw_y_offsets_match_native_svg_baselines() {
+        let host = fixture();
+        let style = TextStyle {
+            font_size: 24.0,
+            ..TextStyle::default()
+        };
+        for (operation, baseline) in [
+            (TextMeasurementOperation::RawBBoxYOffset, "auto"),
+            (TextMeasurementOperation::RawMiddleBBoxYOffset, "middle"),
+            (TextMeasurementOperation::RawHangingBBoxYOffset, "hanging"),
+        ] {
+            let svg = format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100'><text id='sample' font-family='{}' font-size='24' dominant-baseline='{baseline}'>AV</text></svg>",
+                host.fonts.family,
+            );
+            let tree = usvg::Tree::from_str(&svg, &super::super::options(&host.fonts)).unwrap();
+            let Some(usvg::Node::Text(text)) = tree.node_by_id("sample") else {
+                panic!("native text node");
+            };
+            let HostTextMeasurement::Length(actual) = host
+                .measure(request(operation, "AV", &style))
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("signed length result");
+            };
+            assert_eq!(actual, f64::from(text.bounding_box().y()), "{baseline}");
+        }
+        host.finish().unwrap();
     }
 
     #[test]

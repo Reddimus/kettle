@@ -27,12 +27,18 @@ This product depends on and/or adapts ideas from the following projects:
   geometry; the code is original.
 
 * Merman, merman-core, merman-render, dugong, dugong-graphlib and manatee
-  0.8.0 - MIT OR Apache-2.0
+  0.9.2 - MIT OR Apache-2.0
   https://github.com/Latias94/merman
   The media worker uses its SVG and Cytoscape layout adapters with package
   defaults disabled. Native diagram measurements use Kettle's SVG font database.
+  Package licenses and complete upstream notices are in docs/licenses/merman/.
 
-* roughr-merman 0.12.3 - MIT
+* merman-unicode-linebreak 0.9.2 - Apache-2.0
+  https://github.com/axelf4/unicode-linebreak
+  Merman's cancellable fork of unicode-linebreak 0.1.5, using its Unicode 15.0
+  tables. Its license and provenance notice are in docs/licenses/merman/.
+
+* roughr-merman 0.12.4 - MIT
   https://github.com/Latias94/merman
   Deterministic sketch primitives used by the pinned diagram renderer.
 
