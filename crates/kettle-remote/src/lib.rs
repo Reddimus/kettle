@@ -2195,10 +2195,9 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
                     field_is_safe(value, FILE_PATH_EXTRA),
                 ),
                 'o' => options.unreproducible |= ssh_option_selects_endpoint(value),
-                // `-W host:port` forwards stdio to a third host instead of
-                // opening a shell on the destination, so `ssh destination`
-                // would be a different session entirely.
-                'W' => options.unreproducible = true,
+                // Tags select Match blocks; stdio forwarding selects another
+                // host. Neither can be dropped from a safe reconnect.
+                'P' | 'W' => options.unreproducible = true,
                 // Everything else (ciphers, forwards, log files, control
                 // sockets) leaves the endpoint where it was.
                 _ => {}
@@ -4099,6 +4098,9 @@ mod tests {
             &["ssh", "-o", "ProxyJump=bastion.example", "box"],
             &["ssh", "-o", "HostName=10.0.0.9", "box"],
             &["ssh", "-o", "Port=2222", "box"],
+            &["ssh", "-P", "production", "box"],
+            &["ssh", "-Pproduction", "box"],
+            &["ssh", "-vPproduction", "box"],
             &["ssh", "-W", "internal.example:22", "box"],
             // An identity path with a shell metacharacter is not reproduced.
             &["ssh", "-i", "/keys/$(id -u)", "box"],
