@@ -50,7 +50,7 @@ merman = { version = "=0.8.0", default-features = false, features = ["svg", "lay
 merman-core = { version = "=0.8.0", default-features = false }
 merman-render = { version = "=0.8.0", default-features = false }
 dugong = { version = "=0.8.0", default-features = false }
-dugong-graphlib = { version = "=0.8.0", default-features = false }
+dugong-graphlib = { version = "=0.9.2", default-features = false }
 manatee = { version = "=0.8.0", default-features = false }
 roughr-merman = { version = "=0.12.3", default-features = false }
 # CommonMark, for the Mermaid fences in a Markdown gallery: the version
