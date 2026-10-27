@@ -8,6 +8,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Wait for final shell argv before checking macOS process-scan limits in tests.
+- Keep installer test fixtures private regardless of the invoking shell's umask.
 - Restore the parent menu's selected row and scroll position after leaving a submenu.
 - Fix dark-theme contrast in event-model headings and event-model/Cynefin cards.
 - Apply custom window title templates at filesystem roots and when cwd is unknown.

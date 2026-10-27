@@ -1,11 +1,8 @@
 //! Pane-rooted process tree for macOS, read through libproc and `sysctl`.
 //!
-//! The app polls on redraw, and a blinking cursor redraws about twice a
-//! second, so reading the argv and cwd of every process on the machine would
-//! make an idle window walk the whole process table. This walk visits only the
-//! pane roots and their descendants: one `proc_listchildpids` and a sized
-//! `KERN_PROCARGS2` read per process, plus a cwd read for the shell a caller
-//! asks about.
+//! The background scan visits pane roots and descendants instead of the whole
+//! process table: one `proc_listchildpids` and a sized `KERN_PROCARGS2` read per
+//! process, plus cwd reads on request.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -37,6 +34,7 @@ struct MacProcessEntry {
     argv: Option<Vec<String>>,
 }
 
+#[cfg_attr(test, derive(Debug))]
 enum ArgvRead {
     Complete(Vec<String>),
     /// The process exited, is a zombie, or belongs to another user. This is
@@ -456,6 +454,9 @@ mod tests {
             }
         }
         let _cleanup = Stop(long, short);
+        for pid in [long, short] {
+            crate::wait_for_detached_exec(pid, "/bin/sleep 30; true");
+        }
         let mut tree = MacProcessTree::default();
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -479,16 +480,18 @@ mod tests {
             .sum::<usize>()
             + (0..300).map(|i| format!("a{i}").len() + 1).sum::<usize>();
         let mut total = 0;
-        assert!(matches!(
-            tree.read_argv(long, &mut total),
-            ArgvRead::Truncated
-        ));
+        let actual = tree.read_argv(long, &mut total);
+        assert!(
+            matches!(&actual, ArgvRead::Truncated),
+            "unexpected argv classification: {actual:?}"
+        );
         assert_eq!(total, expected as u64);
         let mut total = MAX_PROC_TREE_TOTAL_BYTES - expected as u64 + 1;
-        assert!(matches!(
-            tree.read_argv(long, &mut total),
-            ArgvRead::OverBudget
-        ));
+        let actual = tree.read_argv(long, &mut total);
+        assert!(
+            matches!(&actual, ArgvRead::OverBudget),
+            "unexpected near-budget argv classification: {actual:?}"
+        );
     }
 
     #[test]

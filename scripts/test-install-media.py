@@ -1,15 +1,13 @@
-#!/usr/bin/env python3
 """Hermetic paired-binary installation and removal tests."""
 
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -24,7 +22,9 @@ class MediaInstallTests(unittest.TestCase):
         self.prefix = self.root / "prefix"
         for name in ("install.sh", "install-unix.py"):
             shutil.copy2(ROOT / "scripts" / name, self.package / name)
-        shutil.copytree(ROOT / "packaging" / "linux", self.package / "packaging" / "linux")
+        shutil.copytree(
+            ROOT / "packaging" / "linux", self.package / "packaging" / "linux"
+        )
         self.gui = self.package / "kettle"
         self.gui.write_text("#!/bin/sh\nprintf 'kettle 5.0.0\\n'\n", encoding="ascii")
         self.gui.chmod(0o755)
@@ -38,8 +38,14 @@ class MediaInstallTests(unittest.TestCase):
 
     def run_installer(self, *arguments):
         return subprocess.run(
-            ["bash", str(self.package / "install.sh"), f"--prefix={self.prefix}", *arguments],
+            [
+                "bash",
+                str(self.package / "install.sh"),
+                f"--prefix={self.prefix}",
+                *arguments,
+            ],
             capture_output=True,
+            check=False,
             text=True,
             timeout=30,
         )
@@ -51,7 +57,10 @@ class MediaInstallTests(unittest.TestCase):
         for name in ("install.sh", "install-unix.py"):
             shutil.copy2(self.package / name, scripts / name)
         shutil.copytree(self.package / "packaging", source / "packaging")
-        for profile, binary in (("release", "kettle"), ("media-worker", "kettle-media-worker")):
+        for profile, binary in (
+            ("release", "kettle"),
+            ("media-worker", "kettle-media-worker"),
+        ):
             stale = source / "target" / profile / binary
             stale.parent.mkdir(parents=True)
             stale.write_text("#!/bin/sh\nprintf 'kettle 0.0.0\\n'\n", encoding="ascii")
@@ -61,38 +70,46 @@ class MediaInstallTests(unittest.TestCase):
         cargo = fake_bin / "cargo"
         cargo.write_text(
             "#!/bin/sh\nset -eu\n"
-            'target_dir=${CARGO_TARGET_DIR:-target}\nprofile=debug\n'
+            "target_dir=${CARGO_TARGET_DIR:-target}\nprofile=debug\n"
             'while [ "$#" -gt 0 ]; do\n'
             '  case "$1" in\n'
-            '    --target-dir) target_dir=$2; shift ;;\n'
-            '    --release) profile=release ;;\n'
-            '    --profile) profile=$2; shift ;;\n'
-            '  esac\n  shift\ndone\n'
+            "    --target-dir) target_dir=$2; shift ;;\n"
+            "    --release) profile=release ;;\n"
+            "    --profile) profile=$2; shift ;;\n"
+            "  esac\n  shift\ndone\n"
             'case "$profile" in\n'
-            '  release) binary=kettle ;;\n'
-            '  media-worker) binary=kettle-media-worker ;;\n'
-            '  *) exit 2 ;;\n'
-            'esac\n'
+            "  release) binary=kettle ;;\n"
+            "  media-worker) binary=kettle-media-worker ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n"
             'mkdir -p "$target_dir/$profile"\n'
             'cp "$KETTLE_TEST_PACKAGE/$binary" "$target_dir/$profile/$binary"\n',
             encoding="ascii",
         )
         cargo.chmod(0o755)
         environment = os.environ.copy()
-        environment.update({
-            "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
-            "CARGO_TARGET_DIR": str(self.root / "configured-target"),
-            "KETTLE_TEST_PACKAGE": str(self.package),
-        })
+        environment.update(
+            {
+                "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                "CARGO_TARGET_DIR": str(self.root / "configured-target"),
+                "KETTLE_TEST_PACKAGE": str(self.package),
+            }
+        )
         for arguments in ([], ["--skip-build"]):
             with self.subTest(arguments=arguments):
                 result = subprocess.run(
                     [
-                        "bash", str(scripts / "install.sh"),
-                        f"--prefix={self.prefix}", *arguments,
+                        "bash",
+                        str(scripts / "install.sh"),
+                        f"--prefix={self.prefix}",
+                        *arguments,
                     ],
-                    cwd=source, env=environment, capture_output=True,
-                    text=True, timeout=30,
+                    cwd=source,
+                    env=environment,
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    timeout=30,
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 for name in ("kettle", "kettle-media-worker"):
@@ -112,24 +129,31 @@ class MediaInstallTests(unittest.TestCase):
         worker.chmod(0o755)
         terminal = release / "kettle"
         terminal.write_text(
-            '#!/bin/sh\nset -eu\n'
-            'test -x "$(dirname "$0")/kettle-media-worker"\n',
+            '#!/bin/sh\nset -eu\ntest -x "$(dirname "$0")/kettle-media-worker"\n',
             encoding="ascii",
         )
         terminal.chmod(0o755)
         cargo = fake_bin / "cargo"
         cargo.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
         cargo.chmod(0o755)
-        recipe = (ROOT / "docs/INSTALL.md").read_text().split(
-            "## From source\n", 1
-        )[1].split("```sh\n", 1)[1].split("\n```", 1)[0].split(
-            "\ncd kettle\n", 1
-        )[1]
+        recipe = (
+            (ROOT / "docs/INSTALL.md")
+            .read_text()
+            .split("## From source\n", 1)[1]
+            .split("```sh\n", 1)[1]
+            .split("\n```", 1)[0]
+            .split("\ncd kettle\n", 1)[1]
+        )
         environment = os.environ.copy()
         environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
         result = subprocess.run(
-            ["bash", "-c", recipe], cwd=source, env=environment,
-            capture_output=True, text=True, timeout=30,
+            ["bash", "-c", recipe],
+            cwd=source,
+            env=environment,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
@@ -143,8 +167,12 @@ class MediaInstallTests(unittest.TestCase):
             installed = self.prefix / "bin" / name
             self.assertEqual(installed.read_bytes(), (self.package / name).read_bytes())
             self.assertEqual(installed.stat().st_mode & 0o777, 0o755)
-        manifest = json.loads((self.prefix / "share/kettle/install-files.json").read_text())
-        self.assertIn("bin/kettle-media-worker", {record["path"] for record in manifest["files"]})
+        manifest = json.loads(
+            (self.prefix / "share/kettle/install-files.json").read_text()
+        )
+        self.assertIn(
+            "bin/kettle-media-worker", {record["path"] for record in manifest["files"]}
+        )
         result = self.run_installer("--uninstall")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.prefix / "bin/kettle").exists())
@@ -152,32 +180,45 @@ class MediaInstallTests(unittest.TestCase):
 
     def test_documented_uninstall_works_from_an_extracted_tarball(self):
         home = self.root / "home"
-        home.mkdir()
+        home.mkdir(mode=0o700)
         self.prefix = home / ".local"
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        recipe = (ROOT / "docs/INSTALL.md").read_text().split(
-            'type **"kettle"** to launch. To remove everything later:', 1
-        )[1].split("```sh\n", 1)[1].split("\n```", 1)[0]
+        recipe = (
+            (ROOT / "docs/INSTALL.md")
+            .read_text()
+            .split('type **"kettle"** to launch. To remove everything later:', 1)[1]
+            .split("```sh\n", 1)[1]
+            .split("\n```", 1)[0]
+        )
         environment = os.environ.copy()
         environment["HOME"] = str(home)
         result = subprocess.run(
-            ["bash", "-c", recipe], cwd=self.package, env=environment,
-            capture_output=True, text=True, timeout=30,
+            ["bash", "-c", recipe],
+            cwd=self.package,
+            env=environment,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for relative in (
-            "bin/kettle", "bin/kettle-media-worker",
-            "share/kettle/install.sh", "share/kettle/install-files.json",
+            "bin/kettle",
+            "bin/kettle-media-worker",
+            "share/kettle/install.sh",
+            "share/kettle/install-files.json",
         ):
             self.assertFalse((self.prefix / relative).exists(), relative)
 
     def test_uninstall_smoke_distinguishes_legacy_and_current_locks(self):
         source = (ROOT / "scripts/check-linux-installers.sh").read_text()
-        function = "assert_uninstalled_prefix() {" + source.split(
-            "assert_uninstalled_prefix() {", 1
-        )[1].split("\n}\n", 1)[0] + "\n}\n"
-        program = "set -euo pipefail\nfail() { echo \"$*\" >&2; exit 1; }\n" + function
+        function = (
+            "assert_uninstalled_prefix() {"
+            + source.split("assert_uninstalled_prefix() {", 1)[1].split("\n}\n", 1)[0]
+            + "\n}\n"
+        )
+        program = 'set -euo pipefail\nfail() { echo "$*" >&2; exit 1; }\n' + function
         program += 'assert_uninstalled_prefix "$1" "$2"\n'
         self.prefix.mkdir()
         lock = self.prefix / ".kettle-update.lock"
@@ -185,7 +226,10 @@ class MediaInstallTests(unittest.TestCase):
         def check(policy):
             return subprocess.run(
                 ["bash", "-c", program, "lock-smoke", str(self.prefix), policy],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=10,
             )
 
         self.assertEqual(check("removed").returncode, 0)
@@ -202,7 +246,9 @@ class MediaInstallTests(unittest.TestCase):
         target.unlink()
         self.assertNotEqual(check("removed").returncode, 0)
 
-    @unittest.skipUnless(sys.platform == "linux" and shutil.which("just"), "requires just on Linux")
+    @unittest.skipUnless(
+        sys.platform == "linux" and shutil.which("just"), "requires just on Linux"
+    )
     def test_local_install_recipes_build_both_binaries(self):
         expected = [
             "cargo build --locked --release -p kettle",
@@ -214,13 +260,16 @@ class MediaInstallTests(unittest.TestCase):
                     ["just", "--justfile", str(ROOT / "Justfile"), "--dry-run", recipe],
                     cwd=ROOT,
                     capture_output=True,
+                    check=False,
                     text=True,
                     timeout=10,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 commands = result.stderr.splitlines()
                 self.assertEqual(commands[:2], expected)
-                self.assertTrue(commands[2].startswith("./scripts/install.sh --skip-build"))
+                self.assertTrue(
+                    commands[2].startswith("./scripts/install.sh --skip-build")
+                )
                 self.assertEqual(
                     sum(command.startswith("cargo build ") for command in commands),
                     2,
@@ -277,9 +326,18 @@ assert (pathlib.Path(prefix) / "copy").read_bytes() == b"existing"
 assert not list(pathlib.Path(prefix).glob(".kettle-install-tmp-*"))
 """
         result = subprocess.run(
-            [sys.executable, "-c", child, str(ROOT / "scripts/install-unix.py"),
-             str(source), str(self.prefix)],
-            capture_output=True, text=True, timeout=10,
+            [
+                sys.executable,
+                "-c",
+                child,
+                str(ROOT / "scripts/install-unix.py"),
+                str(source),
+                str(self.prefix),
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -319,11 +377,23 @@ sys.exit(1)
                 os.mkfifo(path, mode)
                 try:
                     result = subprocess.run(
-                        [sys.executable, "-c", child,
-                         str(ROOT / "scripts/install-unix.py"), kind, str(self.prefix), str(path)],
-                        capture_output=True, text=True, timeout=2,
+                        [
+                            sys.executable,
+                            "-c",
+                            child,
+                            str(ROOT / "scripts/install-unix.py"),
+                            kind,
+                            str(self.prefix),
+                            str(path),
+                        ],
+                        capture_output=True,
+                        check=False,
+                        text=True,
+                        timeout=2,
                     )
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(
+                        result.returncode, 0, result.stdout + result.stderr
+                    )
                     self.assertTrue(result.stdout.strip())
                 finally:
                     path.unlink()
@@ -344,11 +414,21 @@ sys.exit(1)
         sources = self.root / "sources"
         sources.mkdir(exist_ok=True)
         arguments = [
-            "install", "--prefix", str(self.prefix), "--channel", "local-dev",
-            "--target", "linux", "--version", "5.0.0",
-            "--desktop-template", str(ROOT / "packaging/linux/kettle.desktop"),
-            "--desktop-binary", str(self.prefix / "bin/kettle"),
-            "--desktop-icon", "kettle",
+            "install",
+            "--prefix",
+            str(self.prefix),
+            "--channel",
+            "local-dev",
+            "--target",
+            "linux",
+            "--version",
+            "5.0.0",
+            "--desktop-template",
+            str(ROOT / "packaging/linux/kettle.desktop"),
+            "--desktop-binary",
+            str(self.prefix / "bin/kettle"),
+            "--desktop-icon",
+            "kettle",
         ]
         for index, (relative, data) in enumerate(files):
             source = sources / f"{index}-{len(data)}"
@@ -376,16 +456,34 @@ sys.argv = ["install-unix.py", *sys.argv[4:]]
 sys.exit(module.main())
 """
         return subprocess.run(
-            [sys.executable, "-c", child, str(ROOT / "scripts/install-unix.py"),
-             str(fail_at or 0), str(kill_at or 0), *arguments],
-            capture_output=True, text=True, timeout=30,
+            [
+                sys.executable,
+                "-c",
+                child,
+                str(ROOT / "scripts/install-unix.py"),
+                str(fail_at or 0),
+                str(kill_at or 0),
+                *arguments,
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
         )
 
     def uninstall(self):
         return subprocess.run(
-            [sys.executable, str(ROOT / "scripts/install-unix.py"), "uninstall",
-             "--prefix", str(self.prefix)],
-            capture_output=True, text=True, timeout=30,
+            [
+                sys.executable,
+                str(ROOT / "scripts/install-unix.py"),
+                "uninstall",
+                "--prefix",
+                str(self.prefix),
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
         )
 
     def test_an_interrupted_upgrade_can_be_retried_and_removed(self):
@@ -429,8 +527,12 @@ sys.exit(module.main())
                 # Killed with both new files in place and the old provenance.
                 killed = self.helper(*new, kill_at=2)
                 self.assertEqual(killed.returncode, 9, killed.stderr)
-                self.assertEqual((self.prefix / "share/kettle/b").read_bytes(), b"new b")
-                self.assertTrue((self.prefix / "share/kettle/install-pending.json").exists())
+                self.assertEqual(
+                    (self.prefix / "share/kettle/b").read_bytes(), b"new b"
+                )
+                self.assertTrue(
+                    (self.prefix / "share/kettle/install-pending.json").exists()
+                )
                 if then == "retry":
                     retried = self.helper(*new)
                     self.assertEqual(retried.returncode, 0, retried.stderr)
@@ -445,7 +547,8 @@ sys.exit(module.main())
         files = [("share/kettle/a", b"a")]
         # Someone else's file with exactly the bytes and mode Kettle would write.
         mine = self.prefix / "share/kettle/a"
-        mine.parent.mkdir(parents=True)
+        for directory in (self.prefix, self.prefix / "share", mine.parent):
+            directory.mkdir(mode=0o700)
         mine.write_bytes(b"a")
         mine.chmod(0o644)
         refused = self.helper(*files)
@@ -496,7 +599,9 @@ sys.exit(module.main())
                 result = self.run_installer(*arguments)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertEqual(managed.read_bytes(), before)
-                self.assertEqual((self.prefix / "bin/kettle").read_bytes(), self.gui.read_bytes())
+                self.assertEqual(
+                    (self.prefix / "bin/kettle").read_bytes(), self.gui.read_bytes()
+                )
 
     def test_untrusted_update_lock_leaves_the_installation_untouched(self):
         for kind in ["contents", "mode", "symlink", "hardlink", "directory"]:
