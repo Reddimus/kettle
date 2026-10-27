@@ -389,7 +389,8 @@ impl Feeder {
                         // A block before what is queued plays no more.
                         self.carry_at =
                             kettle_media::audio::trim(&mut self.carry, at_frame, self.next_frame);
-                        self.end_frame = self.end_frame.max(self.carry_at + frames as u64);
+                        // Trimming the start leaves the decoded end unchanged.
+                        self.end_frame = self.end_frame.max(at_frame + frames as u64);
                     }
                     Ok(AudioRead::Pending) => {
                         self.piece_filled = filled;
@@ -625,6 +626,37 @@ mod tests {
         .unwrap();
         told.lock().unwrap().free.push_back(0);
         until("failed", || sound.failed());
+    }
+
+    #[test]
+    fn trimmed_audio_finishes_when_its_remaining_samples_are_heard() {
+        for trimmed in [0, 480, 960] {
+            let start_frame = 48_000;
+            let remaining = 960 - trimmed;
+            let (speaker, told) = stand(1);
+            let source = Box::new(Blocks(VecDeque::from([(1.0, 960, start_frame - trimmed)])));
+            let mut feeder = Feeder::new(speaker, source, start_frame, false);
+            let wish = SoundWish::new(false);
+            wish.hear(PlayCommand::Play);
+            let shared = Shared {
+                wish: wish.clone(),
+                heard: Mutex::new(None),
+                state: AtomicU8::new(RUNNING),
+            };
+            feeder.round(wish.get(), &shared).unwrap();
+            if remaining > 0 {
+                told.lock().unwrap().played = Some((remaining - 1) as f64);
+                feeder.round(wish.get(), &shared).unwrap();
+                assert_eq!(shared.state.load(Ordering::Acquire), RUNNING);
+            }
+            told.lock().unwrap().played = Some(remaining as f64);
+            feeder.round(wish.get(), &shared).unwrap();
+            assert_eq!(
+                shared.state.load(Ordering::Acquire),
+                DONE,
+                "{trimmed} trimmed frames must not extend the audio tail"
+            );
+        }
     }
 
     /// A speaker started that never gives a clock, or a feeding thread

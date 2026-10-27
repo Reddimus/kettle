@@ -8,6 +8,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- End audio at its last decoded sample after a seek.
 - Fix Linux accessibility cache signals when panes or tabs change.
 - Keep Venn set labels dark on the light checkerboard canvas.
 - Use a light Mermaid palette over the checkerboard canvas.
