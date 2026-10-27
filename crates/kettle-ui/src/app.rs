@@ -4930,12 +4930,8 @@ fn open_checked_file(resolved: &std::path::Path, handler: Option<&str>) {
     }
 }
 
-/// Record a keystroke into the dev recorder as a privacy-preserving
-/// token. Named keys (`Enter`, `ArrowUp`, `Ctrl+ArrowUp`) are recorded by name;
-/// they aren't secret. A printable character, bare or with modifiers, is
-/// recorded only as a redacted class glyph (after any modifier prefix, e.g.
-/// `Ctrl+·`) unless raw-input was opted into, so a typed password never lands
-/// in the trace (its keystroke count + timing still do).
+/// Record named keys and modifiers; redact printable text unless raw input is enabled.
+/// Keystroke counts and timing remain visible.
 fn dev_record_key(
     rec: &mut crate::dev_record::Recorder,
     key: &winit::keyboard::Key,
@@ -4954,12 +4950,7 @@ fn dev_record_key(
     }
     let token = match key {
         Key::Named(nk) => Some(format!("{prefix}{nk:?}")),
-        // Redact the PAYLOAD of a modifier+printable key
-        // unless raw-input recording is on, keeping only the modifier prefix +
-        // timing. AltGr is reported as Ctrl+Alt on Windows, so a non-US-layout
-        // symbol / accented letter typed via AltGr would otherwise land in the
-        // always-on trace in cleartext — breaking the documented "a typed
-        // password never reaches the trace" guarantee.
+        // AltGr can report Ctrl+Alt; redact its printable payload too.
         Key::Character(s) if !prefix.is_empty() => Some(format!(
             "{prefix}{}",
             crate::dev_record::printable_token(s.as_str(), rec.raw_input())
@@ -9929,8 +9920,6 @@ pub struct App {
     /// Set after LuaEvent::Startup fired once (Wayland can re-emit
     /// `resumed`).
     lua_startup_fired: bool,
-    /// `Some((tag, url))` while the "a newer kettle release is
-    /// available" banner is showing. Esc dismisses; Enter opens the URL.
     /// What is true about updates for this process; see `update_notice`.
     update_facts: crate::update_notice::UpdateFacts,
     /// This process dismissed its restart notice, until it exits.
@@ -21582,10 +21571,8 @@ impl App {
                 } else {
                     None
                 };
-                // Record the keystroke (redacted token) BEFORE any
-                // modal/early-return path consumes it, so the trace captures
-                // every key. Pasted content never reaches here — it's a `paste`
-                // marker (see the paste sites), never raw bytes.
+                // Record before the remaining modal handlers consume the key.
+                // Paste uses separate markers.
                 {
                     let mods = ws.mods;
                     if let Some(rec) = self.recorder.as_mut() {
