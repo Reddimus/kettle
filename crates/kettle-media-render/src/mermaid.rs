@@ -40,10 +40,12 @@ fn theme(job: &Job, family: &str) -> Result<HostTheme, FailureCode> {
         .try_with_font_family(family)
         .map_err(|_| FailureCode::RenderParse)?;
     if job.canvas != Canvas::Theme {
-        let canvas = if job.canvas == Canvas::White {
-            "#ffffff"
+        // Transparent white keeps contrast selection light without painting
+        // an opaque background inside charts.
+        let canvas = if job.canvas == Canvas::Checker {
+            "#ffffff00"
         } else {
-            "transparent"
+            "#ffffff"
         };
         return theme
             .try_with_role(ThemeRole::Canvas, canvas)
@@ -286,7 +288,7 @@ mod tests {
         assert_eq!(white.font_family(), Some("Fira Sans"));
         job.canvas = Canvas::Checker;
         let checker = theme(&job, "Fira Sans").unwrap();
-        assert_eq!(checker.role(ThemeRole::Canvas), Some("transparent"));
+        assert_eq!(checker.role(ThemeRole::Canvas), Some("#ffffff00"));
         assert_eq!(checker.role(ThemeRole::Text), white.role(ThemeRole::Text));
         assert_eq!(checker.series_palette(), white.series_palette());
     }
@@ -422,6 +424,66 @@ mod tests {
             assert!(
                 contrast >= 4.5,
                 "checker {tile:?}: label contrast {contrast}"
+            );
+        }
+    }
+
+    #[test]
+    fn checker_venn_labels_keep_the_white_canvas_ink() {
+        let mut job = job(include_str!("../tests/fixtures/mermaid/venn.mmd"));
+        job.target.width = 960;
+        job.target.height = 600;
+        job.canvas = Canvas::White;
+        let white = render(&job).unwrap();
+        job.canvas = Canvas::Checker;
+        let checker = render(&job).unwrap();
+        assert_eq!((white.width, white.height), (checker.width, checker.height));
+        // Solid glyph interiors are comparable; antialiased edges blend
+        // with white in one image and remain translucent in the other.
+        let label_region = || {
+            (white.height * 45 / 100..white.height * 55 / 100).flat_map(|y| {
+                (white.width / 5..white.width * 2 / 5)
+                    .map(move |x| ((y * white.width + x) * 4) as usize)
+            })
+        };
+        let ink = label_region()
+            .map(|at| &white.rgba[at..at + 4])
+            .min_by(|a, b| {
+                luminance(a[..3].try_into().unwrap())
+                    .total_cmp(&luminance(b[..3].try_into().unwrap()))
+            })
+            .unwrap();
+        assert!(luminance(ink[..3].try_into().unwrap()) < 0.1);
+        let mut label_pixels = 0;
+        for at in label_region().filter(|&at| &white.rgba[at..at + 4] == ink) {
+            label_pixels += 1;
+            assert_eq!(&checker.rgba[at..at + 4], ink, "checker label ink changed");
+        }
+        assert!(label_pixels > 10, "no solid set-label ink sampled");
+        assert!(
+            checker
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] == 0)
+        );
+    }
+
+    #[test]
+    fn checker_charts_keep_their_transparent_backdrop() {
+        for source in [
+            include_str!("../tests/fixtures/mermaid/xychart.mmd"),
+            include_str!("../tests/fixtures/mermaid/wardley.mmd"),
+        ] {
+            let mut job = job(source);
+            job.canvas = Canvas::Checker;
+            let image = render(&job).unwrap();
+            let pixels = image.rgba.as_chunks::<4>().0;
+            let transparent = pixels.iter().filter(|pixel| pixel[3] == 0).count();
+            assert!(
+                transparent * 2 > pixels.len(),
+                "chart backdrop became opaque"
             );
         }
     }

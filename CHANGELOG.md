@@ -8,6 +8,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep Venn set labels dark on the light checkerboard canvas.
 - Use a light Mermaid palette over the checkerboard canvas.
 - Keep slow system URL, Help and config launchers off the UI thread.
 - Wait for final shell argv before checking macOS process-scan limits in tests.
