@@ -4998,8 +4998,9 @@ follow-ups — are tracked in
     *tokens* (named keys / chords like `Enter` / `Ctrl+c`; bare printables
     redacted to a class glyph, so a typed password is recorded as length +
     timing — never the characters; `--record-raw-input` / `KETTLE_RECORD_RAW_INPUT`
-    opts into literal capture). Pasted content is never recorded — only a
-    `kettle:paste len=N` marker. New `m` markers capture kettle's own UI
+    opts into literal capture). Paste events record only a
+    `kettle:paste len=N` marker; echoed text still appears in output. New `m`
+    markers capture kettle's own UI
     transitions the PTY stream can't show (`kettle:tab_add` / `tab_close` /
     `focus_in` / `focus_out`), spanning interactive and non-interactive states.
     A native-title `● REC` indicator appears while recording. CI now builds +

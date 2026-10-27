@@ -165,8 +165,8 @@ server lands as a `kettle:agent <method> conn=N` marker (see
 
 ## Privacy
 
-A terminal can't reliably detect a typed password (the PTY *master* never sees
-the child's `ECHO` flag), so the recorder is conservative by default:
+A terminal cannot reliably identify passwords, so recording is conservative
+by default:
 
 - **Output is captured verbatim and cannot be redacted.** The `o` channel
   records everything the terminal displays — a terminal can't tell a secret from
@@ -181,7 +181,8 @@ the child's `ECHO` flag), so the recorder is conservative by default:
   capture — ⚠ the trace can then contain typed secrets; leave it off unless you
   need byte-exact input. The window title shows **`[REC RAW]`** while raw
   capture is active so it is never silent.
-- **Pasted content is never recorded** — only a `kettle:paste len=N` marker.
+- **Paste events record only length**, in a `kettle:paste len=N` marker.
+  Pasted text echoed by the shell or application still appears in the output.
 - The native window title carries **`[REC]`** while capture is active and
   retains the limit/overload/I/O stop states described above. Borderless and
   fullscreen modes can hide OS title decorations, so overload and recording

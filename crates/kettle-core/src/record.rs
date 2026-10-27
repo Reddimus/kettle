@@ -13,7 +13,7 @@
 //! - `[t, "o", <utf8>]`   — terminal OUTPUT
 //! - `[t, "r", "CxR"]`    — resize
 //! - `[t, "m", <json>]`   — kettle UI/UX markers (players ignore them)
-//! - `[t, "i", <token>]`  — keystroke TOKENS, never raw typed chars
+//! - `[t, "i", <token>]`  — keystroke tokens, or raw text when opted in
 //!
 //! The file is owner-only (`0600` on Unix; a protected current-user DACL on
 //! Windows) and purely local — kettle never uploads it. Events cross a bounded

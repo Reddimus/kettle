@@ -25,10 +25,10 @@ Text arguments must be UTF-8.
 | `kettle.add_menu_item(label, callback)` | Adds a right-click menu row; `callback` takes no arguments. |
 | `kettle.add_url_handler(name, pattern, callback)` | Offers URLs that match `pattern` to `callback`. |
 
-Each call returns `true` when Kettle accepted it and `false` when a limit
-refused it (and logs why). Effects happen after the script returns, so
-`true` means queued, not done: `set_theme` with an unknown name is accepted
-and then fails, and `kettle.theme()` changes only once the theme is applied.
+`send_text`, `exec_action`, `notify` and `set_theme` return `true` when queued,
+or `false` when a limit or sandbox policy refuses them (and log why). Effects
+happen after the script returns: an unknown theme can queue successfully and
+fail later. `kettle.theme()` changes only after the theme is applied.
 
 ## Events
 
