@@ -158,10 +158,9 @@ measures every label itself (`svg::text_host`, with `text_metrics`,
 `text_wrap`, `text_rows` and a bounded `text_cache`) from the job's own font
 database, which adds bundled Fira Sans for proportional labels, so layout and
 painting use the same faces; a measurement merman made any other way refuses
-the diagram. Its colors follow the job's canvas: the pane's own palette
-on the pane's background, a light palette on white, or the pane's palette
-on no background at all for a checkerboard, which merman's root background,
-otherwise always white, is set to (`RootBackgroundPostprocessor`). Event-model
+the diagram. The theme canvas follows the pane's palette; white and checkerboard
+canvases use a light palette. `RootBackgroundPostprocessor` sets merman's
+otherwise-white background to the pane's, white, or transparent, respectively. Event-model
 and Cynefin cards use background-tinted palette colors; explicit diagram colors
 take precedence. Event-model headings also map text color to SVG fill. The SVG
 it produces takes the outside-SVG path in a generated
