@@ -210,7 +210,8 @@ frame's time.
 Linux sound uses the same worker executable in a separate PCM-only role.
 The confined FFmpeg worker reads encoded media and sends timestamped, fixed-size
 PCM through a four-credit parent relay. A first-audio-packet probe has a 1 KiB
-reply cap and shares the opening deadline. Whole PCM packets of leading silence
+reply cap and takes at most one second, capped at half the remaining opening
+budget. A slow scan leaves video usable without sound. Whole PCM packets of leading silence
 prime the audio clock before a delayed track; the feeder fills the remaining
 fraction from the real packet timestamp. This keeps video moving without buffering
 the whole gap or discarding audio samples. The broker alone connects to the local

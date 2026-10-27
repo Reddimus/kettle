@@ -135,7 +135,7 @@ def main():
             # The audio-path decoder tests. HEIF and AVIF stills need ffmpeg 7.1,
             # newer than this runner's, and are no part of the audio path.
             ('decoder', executable(args.decoder_tests_json, 'ffmpeg'),
-             ['--skip', 'real_ffmpeg_draws_heif_and_avif_stills'], 25),
+             ['--skip', 'real_ffmpeg_draws_heif_and_avif_stills'], 26),
             ('playback', native, ['--ignored', '--skip', stalled_case], 5),
             ('broker', executable(args.worker_tests_json, 'process_boundary'),
              ['--ignored', '--exact', 'linux_pcm_only_broker_plays_pauses_and_closes'], 1),

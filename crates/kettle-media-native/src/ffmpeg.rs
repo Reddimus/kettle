@@ -82,6 +82,8 @@ const PLAY_CPU_SECONDS: u64 = 30;
 const PLAY_CPU_PER_SECOND: u64 = 4;
 /// How long the explanation of a session that gave no frame may take.
 const EXPLAIN_WITHIN: Duration = Duration::from_secs(2);
+/// An optional audio scan must leave time for video-only playback.
+const AUDIO_PROBE_WITHIN: Duration = Duration::from_secs(1);
 
 /// ffmpeg and ffprobe, trusted, from one directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -818,7 +820,14 @@ impl Ffmpeg {
             "flat",
             INPUT,
         ];
-        let ran = Self::run_on(&self.ffprobe, input, &args, 1024, deadline)?;
+        let now = Instant::now();
+        let within = (deadline.saturating_duration_since(now) / 2).min(AUDIO_PROBE_WITHIN);
+        let ran = match Self::run_on(&self.ffprobe, input, &args, 1024, now + within) {
+            Err(FailureCode::RenderTimeout) if Instant::now() < deadline => {
+                return Err(FailureCode::RenderParse);
+            }
+            result => result?,
+        };
         if !ran.success || ran.overran {
             return Err(FailureCode::RenderParse);
         }

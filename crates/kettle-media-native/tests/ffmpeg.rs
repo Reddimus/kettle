@@ -189,6 +189,20 @@ esac
         Ffmpeg::trust(&self.directory.path().join("ffmpeg")).unwrap()
     }
 
+    fn audio_probe(&self, answer: &str) {
+        let executable = self.directory.path().join("ffprobe");
+        let script = std::fs::read_to_string(&executable).unwrap();
+        let branch = script
+            .lines()
+            .find(|line| line.contains("*packet=pts_time,dts_time:*)"))
+            .unwrap();
+        let replacement = format!("    *packet=pts_time,dts_time:*) {answer} ;;");
+        write_script(
+            &executable,
+            script.replacen(branch, &replacement, 1).as_bytes(),
+        );
+    }
+
     /// Each run's arguments, in order.
     fn calls(&self, name: &str) -> Vec<Vec<String>> {
         let log = std::fs::read_to_string(self.directory.path().join(format!("{name}.log")))
@@ -929,17 +943,7 @@ fn a_session_keeps_video_when_first_audio_timestamps_are_unusable() {
         "printf '%s\\n' 'packets.packet.0.pts_time=\"2.000000\"'",
     ] {
         let fake = Fake::new(&description, PACKETS, Answer { frames: 4, ..GOOD });
-        let executable = fake.directory.path().join("ffprobe");
-        let script = std::fs::read_to_string(&executable).unwrap();
-        let branch = script
-            .lines()
-            .find(|line| line.contains("*packet=pts_time,dts_time:*)"))
-            .unwrap();
-        let replacement = format!("    *packet=pts_time,dts_time:*) {answer} ;;");
-        write_script(
-            &executable,
-            script.replacen(branch, &replacement, 1).as_bytes(),
-        );
+        fake.audio_probe(answer);
         let clip = Clip::mp4();
         let mut playback = play(&fake.decoder(), &clip, (20, 20), 300, 10_000).unwrap();
         assert_eq!(
@@ -954,6 +958,48 @@ fn a_session_keeps_video_when_first_audio_timestamps_are_unusable() {
         );
         let calls = fake.calls("ffmpeg");
         assert_eq!(calls.len(), 1, "{answer}");
+        assert!(calls[0].iter().any(|arg| arg == "-an"));
+    }
+}
+
+#[test]
+fn a_slow_audio_probe_leaves_time_for_video_fallback() {
+    let mut description = DESCRIPTION.to_vec();
+    description.push("streams.stream.1.codec_type=\"audio\"");
+    for within in [Duration::from_secs(2), Duration::from_secs(8)] {
+        let fake = Fake::new(&description, PACKETS, Answer { frames: 4, ..GOOD });
+        fake.audio_probe("exec /bin/sleep 30");
+        let clip = Clip::mp4();
+        let mut playback = fake
+            .decoder()
+            .play(
+                clip.input(),
+                PlayRequest {
+                    max_width: 20,
+                    max_height: 20,
+                    start_ms: 300,
+                    max_fps_milli: 10_000,
+                    audio: AudioRequest::On,
+                },
+                Instant::now() + within,
+            )
+            .expect("an optional audio scan must not prevent seeking the video");
+        assert_eq!(
+            playback.opened.audio,
+            kettle_media::AudioStatus::Unsupported
+        );
+        assert!(playback.audio.is_none());
+        assert_eq!(
+            frames_of(&mut playback)
+                .unwrap()
+                .iter()
+                .map(|(pts, _)| *pts)
+                .collect::<Vec<_>>(),
+            [300, 400, 500, 600]
+        );
+        let calls = fake.calls("ffmpeg");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(arg_after(&calls[0], "-ss"), Some("0.300000"));
         assert!(calls[0].iter().any(|arg| arg == "-an"));
     }
 }
