@@ -39,8 +39,9 @@ panel. Use the keyboard:
   written to your config.
 - **Esc** — close
 
-Changes apply **instantly** and are saved automatically — no restart, no file
-to edit. For the handful of advanced options not in the panel, the
+Changes save automatically. Most apply immediately; shell startup settings
+affect new panes. See [Settings](SETTINGS.md) for exceptions. For advanced
+options not in the panel, the
 **Advanced** path opens the config file with your operating system's default app. Full reference:
 [SETTINGS.md](SETTINGS.md) and [CONFIG.md](CONFIG.md).
 
