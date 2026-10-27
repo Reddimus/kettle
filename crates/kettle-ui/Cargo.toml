@@ -15,8 +15,8 @@ description = "kettle: windowing, tabs, splits, overlays, and session restore"
 workspace = true
 
 [dependencies]
-accesskit = "0.25.0"
-accesskit_winit = "0.34.0"
+accesskit = "0.25.2"
+accesskit_winit = "0.34.2"
 anyhow.workspace = true
 # `image-data` is enabled for clipboard-bitmap PASTE (a screenshot puts a raw
 # bitmap on the clipboard with no file and no text behind it; see
