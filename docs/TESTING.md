@@ -1065,6 +1065,10 @@ See [Fuzzing](#fuzzing) for targets, durations, limits, and reproduction.
 - Job `report` runs only after a failed scheduled plan/fuzz result and opens
   or updates the tracking issue. PR and dispatch failures do not use it.
 
+Linux CI package setup rewrites Azure HTTP entries in direct sources and mirror
+lists to the Ubuntu HTTPS archive, bounds network waits and omits recommendations.
+Required Xauthority, fonts and cross-linker headers remain explicit dependencies.
+
 ### Native Linux audio: `linux-audio.yml`
 
 [.github/workflows/linux-audio.yml](../.github/workflows/linux-audio.yml)
