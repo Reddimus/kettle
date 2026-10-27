@@ -222,6 +222,38 @@ def check_preview_menu(app, native, destination, kind, asset):
         choose("Close preview")
         wait_for(lambda: not geometry()["preview_lanes"])
         checked.append("pinned lane menu, expansion after constrained resize, and close")
+    if kind == "svg":
+        open_menu()
+        choose("Pin beside terminal")
+        wait_for(lambda: not viewer() and geometry()["preview_lanes"])
+        surface = geometry()["surface"]
+        app.json_ctl("resize_window", {"width": 400, "height": surface["height"]})
+        wait_for(lambda: geometry()["surface"]["width"] == 400 and
+                 geometry()["preview_lanes"][0]["state"] == "expanded")
+        lane = geometry()["preview_lanes"][0]
+        assert lane["image"] and "copy" not in lane["controls"], lane
+        wanted = {"Copy image", "Copy source", "Show source", "Zoom in", "Zoom out", "Fit preview"}
+        wanted.update(label for label in labels if label.startswith("Open in "))
+        assert wanted <= open_menu()
+        (destination / "narrow-menu.json").write_text(json.dumps(geometry(), indent=2) + "\n")
+        app.screenshot(destination / "narrow-menu.png")
+        native.keys("Escape")
+        wait_for(lambda: not geometry().get("context_menu"))
+        copy("Copy image", "narrow-copied.png")
+        copy("Copy source", "narrow-source.txt", text=asset.read_text())
+        assert geometry()["preview_lanes"][0]["mode"] == "rendered"
+        open_menu()
+        choose("Zoom in")
+        wait_for(lambda: geometry()["preview_lanes"][0]["zoom"] > 1)
+        open_menu()
+        choose("Fit preview")
+        wait_for(lambda: geometry()["preview_lanes"][0]["zoom"] == 1)
+        app.json_ctl("resize_window", surface)
+        wait_for(lambda: geometry()["surface"] == surface)
+        open_menu()
+        choose("Close preview")
+        wait_for(lambda: not geometry()["preview_lanes"])
+        checked.append("narrow preview keeps copy, source, zoom, fit and external-viewer options")
     assert app.json_ctl("read_screen")["text"] == terminal, "preview menu typed into the terminal"
     return checked
 
@@ -327,6 +359,7 @@ def check(kettle, worker, node, out):
                 "restore-session = false\nupdate-policy = off\nrecord = off\n"
                 "shell = /bin/sh\nlogin-shell = false\nshell-integration = false\n"
                 "agent-server = full\nagent-display = true\nagent-display-claude-code = true\n"
+                "preview-lane-side = right\n"
                 "cursor-blink = false\nwindow-width = 140\nwindow-height = 45\nstatus-bar = off\n"
             )
             environment = {"SHELL": "/bin/sh", "ENV": None, "BASH_ENV": None,

@@ -47,7 +47,7 @@ impl ContextMenuState {
 pub(super) fn preview_menu_items(
     target: PreviewMenuTarget,
     lane: &kettle_render::MediaLanePanel,
-    geometry: &kettle_render::MediaLaneGeometry,
+    content_visible: bool,
     outside: Option<crate::media::Outside>,
     tr: kettle_i18n::Translator,
 ) -> Vec<ContextMenuItem> {
@@ -61,11 +61,19 @@ pub(super) fn preview_menu_items(
         target,
         action,
     };
+    // Keep supported actions available when toolbar buttons overflow.
+    let video = lane.play.is_some() && lane.mode == M::Rendered;
+    let pinning = lane.pin_label.is_some();
+    let zooms = content_visible
+        && lane.mode == M::Rendered
+        && lane.image.is_some()
+        && lane.frame.is_none()
+        && !video;
     let mut items = Vec::with_capacity(16);
-    if geometry.copy.is_some() {
+    if lane.copy {
         let label = if lane.mode == M::Source {
             T::MediaPreviewMenuCopySource
-        } else if geometry.video {
+        } else if video {
             T::MediaPreviewMenuCopyFrame
         } else if lane.document {
             T::MediaPreviewMenuCopyPage
@@ -74,13 +82,13 @@ pub(super) fn preview_menu_items(
         };
         items.push(row(tr.text(label), PreviewMenuAction::Copy(lane.mode)));
     }
-    if lane.mode == M::Rendered && geometry.mode.is_some() {
+    if lane.mode == M::Rendered && lane.source.is_some() {
         items.push(row(
             tr.text(T::MediaPreviewMenuCopySource),
             PreviewMenuAction::Copy(M::Source),
         ));
     }
-    if geometry.open_outside.is_some()
+    if lane.open_outside
         && let Some(outside) = outside
     {
         items.push(row(
@@ -91,7 +99,7 @@ pub(super) fn preview_menu_items(
     items.push(ContextMenuItem::Separator);
     let controls = [
         (
-            geometry.mode.is_some(),
+            lane.source.is_some(),
             if lane.mode == M::Source {
                 T::MediaLaneA11yRendered
             } else {
@@ -100,7 +108,7 @@ pub(super) fn preview_menu_items(
             H::Mode,
         ),
         (
-            geometry.page_previous.is_some() && lane.page.is_some_and(|(index, _)| index > 1),
+            content_visible && lane.page.is_some_and(|(index, _)| index > 1),
             if lane.document {
                 T::MediaLaneA11yPreviousPage
             } else {
@@ -109,7 +117,7 @@ pub(super) fn preview_menu_items(
             H::PreviousPage,
         ),
         (
-            geometry.page_next.is_some() && lane.page.is_some_and(|(index, count)| index < count),
+            content_visible && lane.page.is_some_and(|(index, count)| index < count),
             if lane.document {
                 T::MediaLaneA11yNextPage
             } else {
@@ -118,7 +126,7 @@ pub(super) fn preview_menu_items(
             H::NextPage,
         ),
         (
-            geometry.play.is_some(),
+            lane.play.is_some(),
             match lane.play {
                 Some(P::Pause) => T::MediaLaneA11yPauseVideo,
                 Some(P::Stop) => T::MediaLaneA11yStopPreview,
@@ -127,7 +135,7 @@ pub(super) fn preview_menu_items(
             H::Play,
         ),
         (
-            geometry.sound.is_some(),
+            lane.sound.is_some(),
             if lane.sound == Some(S::Heard) {
                 T::MediaLaneA11yMuteVideo
             } else {
@@ -135,27 +143,11 @@ pub(super) fn preview_menu_items(
             },
             H::Sound,
         ),
-        (
-            geometry.theater.is_some(),
-            T::MediaPreviewMenuTheater,
-            H::Theater,
-        ),
-        (
-            geometry.fullscreen.is_some(),
-            T::PaletteToggleFullscreen,
-            H::Fullscreen,
-        ),
-        (
-            geometry.zoom_in.is_some(),
-            T::MediaLaneA11yZoomIn,
-            H::ZoomIn,
-        ),
-        (
-            geometry.zoom_out.is_some(),
-            T::MediaLaneA11yZoomOut,
-            H::ZoomOut,
-        ),
-        (geometry.zoom_fit.is_some(), T::MediaPreviewMenuFit, H::Fit),
+        (video && pinning, T::MediaPreviewMenuTheater, H::Theater),
+        (video && pinning, T::PaletteToggleFullscreen, H::Fullscreen),
+        (zooms, T::MediaLaneA11yZoomIn, H::ZoomIn),
+        (zooms, T::MediaLaneA11yZoomOut, H::ZoomOut),
+        (zooms, T::MediaPreviewMenuFit, H::Fit),
     ];
     for (shown, label, hit) in controls {
         if shown {
@@ -174,7 +166,7 @@ pub(super) fn preview_menu_items(
         }
     }
     items.push(ContextMenuItem::Separator);
-    let (label, action) = if geometry.pinning {
+    let (label, action) = if pinning {
         (T::MediaViewerA11yPin, PreviewMenuAction::Control(H::Pin))
     } else if lane.collapsed {
         (T::MediaLaneA11yExpand, PreviewMenuAction::Expanded(true))
@@ -227,7 +219,7 @@ impl App {
             let (x, y, w, h) = geometry.content;
             (x + w / 2.0, y + h / 2.0)
         });
-        let items = preview_menu_items(target, &lane, &geometry, outside, self.ui_text);
+        let items = preview_menu_items(target, &lane, geometry.full, outside, self.ui_text);
         self.show_context_menu(ws, items, x, y);
         ws.context_menu.is_some()
     }

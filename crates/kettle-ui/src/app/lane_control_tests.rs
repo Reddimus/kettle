@@ -175,7 +175,7 @@ fn preview_menu_copy_names_describe_the_clipboard_content() {
         let rows = super::menus::preview_menu_items(
             target,
             &lane,
-            &geometry,
+            geometry.full,
             None,
             Translator::new(Language::En),
         );
@@ -204,6 +204,64 @@ fn preview_menu_copy_names_describe_the_clipboard_content() {
 }
 
 #[test]
+fn preview_menu_keeps_supported_actions_when_the_toolbar_overflows() {
+    use super::{ContextMenuItem, PreviewMenuTarget};
+    use kettle_i18n::{Language, Translator};
+    use kettle_render::{MediaLaneMode as M, MediaLanePlay as P, MediaLaneSound as S};
+
+    for kind in ["image", "document", "video"] {
+        let mut lane = super::tests::test_lane_panel();
+        lane.rect = (0.0, 0.0, 1200.0, 800.0);
+        lane.reload = true;
+        lane.open_outside = true;
+        lane.page = Some((2, 3));
+        if kind == "image" {
+            lane.source = Some(kettle_render::MediaLaneSource {
+                rows: vec!["<svg/>".into()],
+                first_row: 0,
+                total_rows: 1,
+            });
+        } else if kind == "document" {
+            lane.document = true;
+        } else {
+            lane.page = None;
+            lane.pin_label = Some("Pin".into());
+            lane.play = Some(P::Pause);
+            lane.sound = Some(S::Heard);
+        }
+        let target = PreviewMenuTarget {
+            pane: 7,
+            item: 9,
+            generation: 4,
+            mode: M::Rendered,
+        };
+        let rows = |lane: &kettle_render::MediaLanePanel,
+                    geometry: &kettle_render::MediaLaneGeometry| {
+            super::menus::preview_menu_items(
+                target,
+                lane,
+                geometry.full,
+                None,
+                Translator::new(Language::En),
+            )
+            .into_iter()
+            .filter_map(|row| match row {
+                ContextMenuItem::Preview { label, action, .. } => Some((label, action)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+        };
+        let wide = kettle_render::media_lane_geometry(&lane, (10.0, 16.0), (10.0, 16.0)).unwrap();
+        let expected = rows(&lane, &wide);
+        lane.rect.2 = 160.0;
+        let narrow = kettle_render::media_lane_geometry(&lane, (10.0, 16.0), (10.0, 16.0)).unwrap();
+        assert!(narrow.full, "{kind} still has visible content");
+        assert!(narrow.copy.is_none(), "{kind} toolbar has overflowed");
+        assert_eq!(rows(&lane, &narrow), expected, "{kind}");
+    }
+}
+
+#[test]
 fn preview_menu_uses_available_controls_and_does_not_offer_empty_copy() {
     use super::{ContextMenuItem, PreviewMenuAction as A, PreviewMenuTarget};
     use kettle_i18n::{Language, Translator};
@@ -228,7 +286,7 @@ fn preview_menu_uses_available_controls_and_does_not_offer_empty_copy() {
         super::menus::preview_menu_items(
             target,
             lane,
-            &geometry,
+            geometry.full,
             None,
             Translator::new(Language::En),
         )
@@ -284,7 +342,7 @@ fn preview_menu_pages_stop_at_document_boundaries() {
         let actions: Vec<_> = super::menus::preview_menu_items(
             target,
             &lane,
-            &geometry,
+            geometry.full,
             None,
             Translator::new(Language::En),
         )
@@ -325,7 +383,7 @@ fn preview_menu_playback_rows_capture_the_named_command() {
     let actions: Vec<_> = super::menus::preview_menu_items(
         target,
         &lane,
-        &geometry,
+        geometry.full,
         None,
         Translator::new(Language::En),
     )
@@ -358,7 +416,7 @@ fn preview_menu_expansion_rows_set_the_named_state() {
         let rows = super::menus::preview_menu_items(
             target,
             &lane,
-            &geometry,
+            geometry.full,
             None,
             Translator::new(Language::En),
         );

@@ -733,7 +733,7 @@ and unscoped shelf fallback use SVG. Separate SVG cases retain Codex 0.162.0
 and Claude Code 2.1.280 coverage, and simulate later minor versions to check
 minimum-version admission. Every launch must clean up its cards on exit.
 The native Codex fixture also checks preview context menus, keyboard dismissal,
-image/frame/page and source copying, playback, and pinned-lane actions.
+image/frame/page and source copying, playback, pinned previews, and menus in narrow previews.
 The viewer helper checks distinct PDF pages, Home/End and first/last page
 boundaries, and Markdown gallery paging in addition to focus, pan, and pin.
 Xvfb fixture success does not establish official-client or GNOME Wayland
