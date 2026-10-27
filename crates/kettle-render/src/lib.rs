@@ -2484,9 +2484,8 @@ struct BgImageAnim {
     path: String,
     /// The blur radius this was decoded with (cache key part 2).
     blur: u32,
-    /// GPU-ready frames. Each frame's `rgba` is `Arc`-shared, so the imgpipe
-    /// texture cache (keyed by `Arc::as_ptr`) reuses one GPU texture per frame
-    /// and only re-uploads when the displayed frame index actually changes.
+    /// Arc-shared pixels keyed by identity in imgpipe's texture cache.
+    /// Repeated displays can reuse the uploaded texture.
     frames: Vec<kettle_core::ImageData>,
     /// Whether every source texel in each parallel frame has alpha 255.
     /// Computed once when the decoded result enters the cache, not by scanning
@@ -5094,16 +5093,9 @@ impl Renderer {
     /// reuse the GIF's edge-trigger + wake machinery unchanged.
     const STARFIELD_FPS: u64 = 10;
 
-    /// Whether the background is ANIMATING and the event loop should proactively
-    /// keep redrawing it (feeds the app's anim tick). True for a procedural
-    /// starfield, OR a decoded MULTI-frame image (animated GIF / APNG / WebP) with
-    /// `background-animation != off`. For `background-animation = when-focused` it
-    /// is true only while the window is focused. The DEFAULT, `Always`, animates
-    /// even unfocused, but the event loop still FREEZES the wake when the window is
-    /// minimized or occluded, so a hidden window costs zero idle (the battery
-    /// behavior Ghostty's always-on custom shaders lack). The frame shown is
-    /// time-correct on any other repaint (see the bg frame-select in
-    /// `render_frame_with_status`); this only governs proactive waking.
+    /// Whether the selected background should advance proactively. Focus gates
+    /// `when-focused`; the event loop separately suppresses hidden-window wakes.
+    /// Other repaints still select the time-correct frame.
     pub fn background_is_animating(&self, cfg: &Config, window_focused: bool) -> bool {
         use kettle_config::BackgroundType;
         // Shared focus/Off gate.

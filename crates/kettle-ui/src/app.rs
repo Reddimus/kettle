@@ -21428,12 +21428,7 @@ impl App {
                 }
             }
             WindowEvent::Occluded(occluded) => {
-                // Freeze the animated background (and any proactive animation
-                // wake) while the window is fully hidden behind other windows.
-                // An invisible window must cost zero idle, which is what makes
-                // the `background-animation = always` default safe. On
-                // un-occlude, repaint at once so the wallpaper catches up to
-                // its true time.
+                // Suppress animation wakes while occluded; repaint on return.
                 ws.window_occluded = occluded;
                 if occluded {
                     Self::hide_cursor_layer(ws);
@@ -22377,21 +22372,13 @@ impl App {
         let term_anim_finished = std::mem::replace(&mut ws.term_animation_active, term_anim)
             && !term_anim
             && !render_hidden;
-        // An animated background (a starfield, or a GIF/APNG/WebP image) wakes
-        // at its OWN frame rate, not a fixed 30 fps, at which an 8 fps GIF
-        // would repaint the same frame ~22×/s (wasted present()s).
-        // `bg_anim_interval_ms` is the ms to the next frame boundary. It is
-        // `None` unless a bg is animating (and, for `when-focused`, only
-        // while focused), so an unfocused window still reaches
-        // `ControlFlow::Wait` at zero idle cost, unlike Ghostty's always-on
-        // shaders.
+        // Wake at background frame boundaries, subject to the focus policy.
+        // Output-driven repaints may still advance a focus-paused background.
         let bg_anim_interval_raw = ws
             .renderer
             .as_ref()
             .and_then(|r| r.bg_anim_interval_ms(&self.cfg, ws.window_focused));
-        // An occluded, minimized, or explicitly hidden window cannot show the
-        // animation, so it must cost zero idle. Reuse the visibility snapshot
-        // taken for frame-recovery scheduling.
+        // Hidden windows add no background-animation wakes.
         let bg_hidden = bg_anim_interval_raw.is_some() && render_hidden;
         let bg_anim_interval = if bg_hidden {
             None
