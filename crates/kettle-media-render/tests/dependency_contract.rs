@@ -9,7 +9,7 @@ const FAMILY: &[(&str, &str)] = &[
     ("manatee", "0.9.2"),
     // Not merman's own, but merman-render's Markdown parser, which the
     // gallery extraction shares rather than locking a second copy.
-    ("pulldown-cmark", "0.13.4"),
+    ("pulldown-cmark", "0.13.5"),
     ("roughr-merman", "0.12.4"),
     // The PDF renderer, its interpreter and its parser, which is the patched
     // local copy: one version of each.

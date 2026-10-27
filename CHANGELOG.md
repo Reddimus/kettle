@@ -8,6 +8,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep slow system URL, Help and config launchers off the UI thread.
+- Wait for final shell argv before checking macOS process-scan limits in tests.
+- Keep installer test fixtures private regardless of the invoking shell's umask.
 - Restore the parent menu's selected row and scroll position after leaving a submenu.
 - Fix dark-theme contrast in event-model headings and event-model/Cynefin cards.
 - Apply custom window title templates at filesystem roots and when cwd is unknown.
@@ -21,6 +24,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Make offscreen demo meters proportional to their labels and show empty capacity.
 
 ### Maintenance
+
+- Refresh reviewed Rust dependencies and pinned workflow actions.
 
 - Upgrade the diagram renderer family together and retire the released lexer backport.
 - Require the live stress test to reach its documented tab and pane counts.
@@ -74,6 +79,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   which could make a closed-stderr test fail intermittently.
 
 ### Maintenance
+
+- Refresh reviewed Rust dependencies and pinned workflow actions.
 
 - Update the pinned font parser, compatible dependency patches and workflow
   actions. Keep the Mermaid renderer family on its audited versions and group

@@ -2167,6 +2167,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/chrome.rs"),
         include_str!("app/gpu_recovery.rs"),
         include_str!("app/sessions.rs"),
+        include_str!("app/system_opener.rs"),
     ]
     .concat()
     .replace("\n    pub(super) fn ", "\n    fn ")
@@ -2239,6 +2240,7 @@ mod pointer;
 mod preview;
 mod search;
 mod sessions;
+mod system_opener;
 mod windowing;
 
 #[cfg(test)]
@@ -12112,9 +12114,9 @@ impl App {
                 Err(e) => log::warn!("custom-url-handler {cmd:?}: {e}; falling through to system"),
             }
         }
-        if let Err(e) = open::that_detached(uri) {
+        system_opener::open(uri, |e| {
             log::warn!("failed to open a terminal-supplied URL: {e}");
-        }
+        });
     }
 
     /// Resize every pane's PTY to match its tile in the layout.
@@ -15178,15 +15180,14 @@ impl App {
                     .clone()
                     .or_else(kettle_config::Config::default_path);
                 if let Some(path) = path {
-                    if let Err(e) = open::that_detached(&path) {
+                    let tr = self.ui_text;
+                    system_opener::open(path.clone(), move |e| {
                         log::warn!("Action::EditConfig: failed to open {}: {e}", path.display());
                         fire_notify(
-                            self.ui_text
-                                .text(kettle_i18n::Text::NotifyTitleConfigNotOpened),
-                            self.ui_text
-                                .text(kettle_i18n::Text::NotifyBodyConfigOpenFailed),
+                            tr.text(kettle_i18n::Text::NotifyTitleConfigNotOpened),
+                            tr.text(kettle_i18n::Text::NotifyBodyConfigOpenFailed),
                         );
-                    }
+                    });
                 } else {
                     log::warn!(
                         "Action::EditConfig: no config path resolved \
@@ -15284,14 +15285,12 @@ impl App {
                     },
                 );
             }
-            // Terminator parity (`key_help`). Terminator's F1 opens its HTML
-            // manual via xdg-open; kettle opens its GitHub README through
-            // `open::that_detached`, the cross-platform path URL clicks use.
+            // Open the README through the same background launcher as URL clicks.
             Action::ShowHelp => {
                 let url = "https://github.com/Reddimus/kettle#readme";
-                if let Err(e) = open::that_detached(url) {
+                system_opener::open(url, move |e| {
                     log::warn!("Action::ShowHelp: failed to open {url}: {e}");
-                }
+                });
             }
             // Terminator parity (`key_scaled_zoom`). Toggle pane zoom and scale
             // the font 1.5x so glyphs grow with the enlarged pane, then restore

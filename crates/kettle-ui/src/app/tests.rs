@@ -16910,7 +16910,7 @@ fn custom_url_handler_failure_falls_back_to_system_open() {
     );
     assert!(
         open_url.contains("falling through to system")
-            && open_url.contains("open::that_detached(uri)"),
+            && open_url.contains("system_opener::open(uri,"),
         "a failed custom-url-handler spawn must fall back to system open"
     );
     let failed_spawn_tail = open_url
@@ -16919,7 +16919,7 @@ fn custom_url_handler_failure_falls_back_to_system_open() {
         .expect("custom handler error arm present");
     assert!(
         !failed_spawn_tail
-            .split("open::that_detached(uri)")
+            .split("system_opener::open(uri,")
             .next()
             .unwrap_or("")
             .contains("return;"),
