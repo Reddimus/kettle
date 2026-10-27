@@ -30,7 +30,7 @@ fn mixed(a: [u8; 4], b: [u8; 4], weight: u16) -> String {
 }
 
 fn theme(job: &Job, family: &str) -> Result<HostTheme, FailureCode> {
-    let dark = job.canvas != Canvas::White && job.theme.is_dark;
+    let dark = job.canvas == Canvas::Theme && job.theme.is_dark;
     let preset = if dark {
         HostThemePreset::EditorDark
     } else {
@@ -39,21 +39,21 @@ fn theme(job: &Job, family: &str) -> Result<HostTheme, FailureCode> {
     let mut theme = HostTheme::from_preset(preset)
         .try_with_font_family(family)
         .map_err(|_| FailureCode::RenderParse)?;
-    if job.canvas == Canvas::White {
+    if job.canvas != Canvas::Theme {
+        let canvas = if job.canvas == Canvas::White {
+            "#ffffff"
+        } else {
+            "transparent"
+        };
         return theme
-            .try_with_role(ThemeRole::Canvas, "#ffffff")
+            .try_with_role(ThemeRole::Canvas, canvas)
             .map_err(|_| FailureCode::RenderParse);
     }
     let bg = job.theme.background;
     let fg = job.theme.foreground;
     let accent = job.theme.accent;
-    let canvas = if job.canvas == Canvas::Checker {
-        "transparent".to_owned()
-    } else {
-        hex(bg)
-    };
     for (role, color) in [
-        (ThemeRole::Canvas, canvas),
+        (ThemeRole::Canvas, hex(bg)),
         (ThemeRole::Surface, mixed(bg, accent, 12)),
         (ThemeRole::SurfaceAlt, mixed(bg, fg, 8)),
         (ThemeRole::SurfaceMuted, mixed(bg, fg, 4)),
@@ -90,10 +90,10 @@ fn theme(job: &Job, family: &str) -> Result<HostTheme, FailureCode> {
 
 // These families use raw series colors or light-only fills instead of surface roles.
 fn diagram_defaults(job: &Job, theme: &HostTheme) -> Result<MermaidConfig, FailureCode> {
-    let background = if job.canvas == Canvas::White {
-        [255; 4]
-    } else {
+    let background = if job.canvas == Canvas::Theme {
         job.theme.background
+    } else {
+        [255; 4]
     };
     let palette = theme
         .series_palette()
@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn white_canvas_uses_a_light_palette_while_theme_keeps_pane_colors() {
+    fn fixed_canvases_use_a_light_palette_while_theme_keeps_pane_colors() {
         let mut job = job("flowchart LR; A-->B");
         let current = theme(&job, "Fira Sans").unwrap();
         assert_eq!(current.role(ThemeRole::Canvas), Some("#14181e"));
@@ -285,10 +285,10 @@ mod tests {
         assert_ne!(white.role(ThemeRole::Text), current.role(ThemeRole::Text));
         assert_eq!(white.font_family(), Some("Fira Sans"));
         job.canvas = Canvas::Checker;
-        assert_eq!(
-            theme(&job, "Fira Sans").unwrap().role(ThemeRole::Canvas),
-            Some("transparent")
-        );
+        let checker = theme(&job, "Fira Sans").unwrap();
+        assert_eq!(checker.role(ThemeRole::Canvas), Some("transparent"));
+        assert_eq!(checker.role(ThemeRole::Text), white.role(ThemeRole::Text));
+        assert_eq!(checker.series_palette(), white.series_palette());
     }
 
     fn pixel(image: &Rendered, x: f64, y: f64) -> [u8; 3] {
@@ -381,24 +381,72 @@ mod tests {
     }
 
     #[test]
-    fn white_diagram_cards_do_not_inherit_the_pane_palette() {
+    fn checker_canvas_keeps_domain_labels_readable() {
+        let mut job = job(include_str!("../tests/fixtures/mermaid/cynefin.mmd"));
+        job.target.width = 960;
+        job.target.height = 600;
+        job.canvas = Canvas::Checker;
+        let image = render(&job).unwrap();
+        let foreground = foreground(&job);
+        let mut label_pixels = 0;
+        for y in image.height / 5..image.height / 3 {
+            for x in image.width / 5..image.width * 2 / 5 {
+                let at = ((y * image.width + x) * 4) as usize;
+                if image.rgba[at + 3] > 240
+                    && image.rgba[at..at + 3]
+                        .iter()
+                        .zip(foreground)
+                        .all(|(&actual, expected)| actual.abs_diff(expected) < 20)
+                {
+                    label_pixels += 1;
+                }
+            }
+        }
+        assert!(
+            label_pixels > 10,
+            "the domain labels have no text-colored pixels"
+        );
+
+        // Clear quadrant padding: composite its translucent fill over both
+        // fixed checker tiles, in linear light as the image pipeline does.
+        let at = ((image.height as usize * 18 / 100) * image.width as usize
+            + image.width as usize / 4)
+            * 4;
+        let alpha = f64::from(image.rgba[at + 3]) / 255.0;
+        assert!(alpha > 0.0 && alpha < 1.0);
+        let fill = luminance(image.rgba[at..at + 3].try_into().unwrap());
+        let text = luminance(foreground);
+        for tile in [[0xcc; 3], [0xee; 3]] {
+            let background = fill * alpha + luminance(tile) * (1.0 - alpha);
+            let contrast = (text.max(background) + 0.05) / (text.min(background) + 0.05);
+            assert!(
+                contrast >= 4.5,
+                "checker {tile:?}: label contrast {contrast}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_canvases_do_not_inherit_the_pane_palette() {
         for source in [
             include_str!("../tests/fixtures/mermaid/eventmodeling.mmd"),
             include_str!("../tests/fixtures/mermaid/cynefin.mmd"),
         ] {
-            let mut job = job(source);
-            job.canvas = Canvas::White;
-            let before = render(&job).unwrap();
-            job.theme.background = [3, 7, 11, 255];
-            job.theme.foreground = [19, 29, 43, 255];
-            job.theme.palette = [[255, 0, 0, 255]; 16];
-            job.theme.accent = [0, 255, 0, 255];
-            job.theme.is_dark = false;
-            let after = render(&job).unwrap();
-            assert!(
-                before.rgba == after.rgba,
-                "white canvas inherited pane colors"
-            );
+            for canvas in [Canvas::White, Canvas::Checker] {
+                let mut job = job(source);
+                job.canvas = canvas;
+                let before = render(&job).unwrap();
+                job.theme.background = [3, 7, 11, 255];
+                job.theme.foreground = [19, 29, 43, 255];
+                job.theme.palette = [[255, 0, 0, 255]; 16];
+                job.theme.accent = [0, 255, 0, 255];
+                job.theme.is_dark = false;
+                let after = render(&job).unwrap();
+                assert!(
+                    before.rgba == after.rgba,
+                    "{canvas:?} canvas inherited pane colors"
+                );
+            }
         }
     }
 
