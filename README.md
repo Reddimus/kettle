@@ -101,6 +101,7 @@ thin timeline in the theme accent. Hover or drag the timeline to reveal its
 round seek handle; narrow players keep time on a separate line. Click the
 video or press K to play/pause, T for a larger Theater view, and F for
 fullscreen. Press Esc to close or **Pin** to keep it beside the terminal.
+Right-click the preview for copy, zoom, page and playback options.
 Video plays only on your play gesture. On Linux, sound needs FFmpeg and
 PulseAudio or PipeWire.
 

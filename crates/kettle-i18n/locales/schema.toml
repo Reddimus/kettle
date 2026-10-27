@@ -2142,3 +2142,21 @@ context = "Accessible video button: toggle native display fullscreen; Esc exits 
 
 [messages.settings_field_agent_previews_agy]
 context = "Label in Settings, Agents: opt-in agy plugin previews in the media shelf; agy is a literal CLI name."
+
+[messages.media_preview_menu_copy_image]
+context = "crates/kettle-ui/src/app/menus.rs: Copies the preview's rendered image pixels to the clipboard."
+
+[messages.media_preview_menu_copy_frame]
+context = "crates/kettle-ui/src/app/menus.rs: Copies the current video frame as a still image."
+
+[messages.media_preview_menu_copy_page]
+context = "crates/kettle-ui/src/app/menus.rs: Copies the visible PDF page as an image."
+
+[messages.media_preview_menu_copy_source]
+context = "crates/kettle-ui/src/app/menus.rs: Copies retained SVG, Mermaid or Markdown source text."
+
+[messages.media_preview_menu_fit]
+context = "crates/kettle-ui/src/app/menus.rs: Fits the image or document page to the preview area."
+
+[messages.media_preview_menu_theater]
+context = "crates/kettle-ui/src/app/menus.rs: Toggles theater mode for the focused video preview."

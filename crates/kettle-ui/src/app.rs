@@ -7484,6 +7484,10 @@ enum UrlHow {
 #[derive(Clone)]
 enum ContextMenuClick {
     Action(Action),
+    Preview {
+        target: PreviewMenuTarget,
+        action: PreviewMenuAction,
+    },
     /// A media row: what it does, and to which shelf item.
     Media {
         target: MediaTarget,
@@ -7618,6 +7622,12 @@ enum ContextMenuItem {
         target: MediaTarget,
         action: MediaMenuAction,
     },
+    /// Actions bound to the preview that opened the menu.
+    Preview {
+        label: &'static str,
+        target: PreviewMenuTarget,
+        action: PreviewMenuAction,
+    },
     /// A static, non-dispatchable information line
     /// (the About panel's version/update rows). Rendered like a disabled row
     /// (dimmed), survives `filter_disabled`, never highlighted, claims no
@@ -7644,6 +7654,38 @@ enum MediaMenuAction {
     View,
     /// Open a copy of it in the permitted image viewer, or of a video in
     /// the permitted video player.
+    OpenOutside(crate::media::Outside),
+}
+
+/// Replacements and mode changes invalidate this menu's actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreviewMenuTarget {
+    pane: u64,
+    item: u64,
+    generation: u64,
+    mode: kettle_render::MediaLaneMode,
+}
+
+impl PreviewMenuTarget {
+    fn matches(
+        self,
+        item: &crate::media::ShelfItem,
+        panel: &crate::window_state::PreviewPanel,
+    ) -> bool {
+        panel.item == self.item
+            && item.id == self.item
+            && item.generation == self.generation
+            && lane_mode(item, panel) == self.mode
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreviewMenuAction {
+    Copy(kettle_render::MediaLaneMode),
+    Control(kettle_render::MediaLaneHit),
+    Expanded(bool),
+    Play(kettle_render::MediaLanePlay),
+    Sound(kettle_render::MediaLaneSound),
     OpenOutside(crate::media::Outside),
 }
 
@@ -8235,7 +8277,9 @@ fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> usize {
         | ContextMenuItem::WindowChoice { label, .. } => (label, "", false),
         ContextMenuItem::NewTabShell { label, .. } => (label, "", true),
         ContextMenuItem::UrlItem { label, .. } => (label, "", false),
-        ContextMenuItem::Media { label, .. } => (label, "", false),
+        ContextMenuItem::Media { label, .. } | ContextMenuItem::Preview { label, .. } => {
+            (label, "", false)
+        }
         ContextMenuItem::Info { label } => (label, "", false),
         ContextMenuItem::Separator => return 0,
     };
@@ -8271,7 +8315,7 @@ fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<
             | ContextMenuItem::WindowChoice { label, .. } => label.as_str(),
             ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
             ContextMenuItem::UrlItem { label, .. } => *label,
-            ContextMenuItem::Media { label, .. } => *label,
+            ContextMenuItem::Media { label, .. } | ContextMenuItem::Preview { label, .. } => *label,
             // Info rows are non-dispatchable — no mnemonic to claim.
             ContextMenuItem::Info { .. } => "",
             ContextMenuItem::Separator => "",
@@ -8287,7 +8331,9 @@ fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<
     let round = |items: &[ContextMenuItem], idx: usize| -> usize {
         usize::from(matches!(
             items[idx],
-            ContextMenuItem::UrlItem { .. } | ContextMenuItem::Media { .. }
+            ContextMenuItem::UrlItem { .. }
+                | ContextMenuItem::Media { .. }
+                | ContextMenuItem::Preview { .. }
         ))
     };
     for pass in 0..2 {
@@ -8345,9 +8391,9 @@ fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
         | ContextMenuItem::NewTabShell { label, .. } => {
             label.to_ascii_lowercase().starts_with(&needle)
         }
-        ContextMenuItem::UrlItem { label, .. } | ContextMenuItem::Media { label, .. } => {
-            label.to_ascii_lowercase().starts_with(&needle)
-        }
+        ContextMenuItem::UrlItem { label, .. }
+        | ContextMenuItem::Media { label, .. }
+        | ContextMenuItem::Preview { label, .. } => label.to_ascii_lowercase().starts_with(&needle),
         // Info rows aren't dispatchable, so typeahead skips them.
         _ => false,
     })
@@ -9050,8 +9096,9 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             // The URL-aware "Open Link" / "Copy Link Address" rows.
             | ContextMenuItem::UrlItem { .. }
             // A card's or the viewer's media rows.
-            | ContextMenuItem::Media { .. } // ContextMenuItem::Info is deliberately absent: a static info line
-                                            // (About panel) is not highlightable or clickable.
+            | ContextMenuItem::Media { .. }
+            | ContextMenuItem::Preview { .. } // ContextMenuItem::Info is deliberately absent: a static info line
+                                              // (About panel) is not highlightable or clickable.
     )
 }
 
@@ -9101,6 +9148,10 @@ fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick>
             pane: *pane,
         }),
         ContextMenuItem::Media { target, action, .. } => Some(ContextMenuClick::Media {
+            target: *target,
+            action: *action,
+        }),
+        ContextMenuItem::Preview { target, action, .. } => Some(ContextMenuClick::Preview {
             target: *target,
             action: *action,
         }),
@@ -15540,10 +15591,12 @@ impl App {
                 }
             }
             Action::OpenContextMenu => {
-                // Keyboard-triggered open: anchor at the current mouse position
-                // so the menu lands where the user is looking.
-                let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                self.open_context_menu(ws, px, py, false);
+                if let Some(focus) = ws.preview_focus {
+                    self.open_preview_menu(ws, focus.pane, None);
+                } else {
+                    let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    self.open_context_menu(ws, px, py, false);
+                }
             }
             Action::UndoCloseTab => {
                 let waker = self.waker();

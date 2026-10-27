@@ -1358,14 +1358,29 @@ impl App {
         }
     }
 
-    /// Copy what `pane`'s lane shows: the item's image, or its source in
-    /// source mode, on the clipboard thread.
+    /// Copy the displayed pixels or source on the clipboard thread.
     pub(super) fn copy_preview(&mut self, ws: &mut WindowState, pane: u64) {
+        let Some(mode) = preview_item(ws, pane)
+            .zip(ws.preview_panels.get(&pane))
+            .map(|(item, panel)| lane_mode(item, panel))
+        else {
+            return;
+        };
+        self.copy_preview_in_mode(ws, pane, mode);
+    }
+
+    /// Copy retained pixels or source without changing the preview's mode.
+    pub(super) fn copy_preview_in_mode(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        mode: kettle_render::MediaLaneMode,
+    ) {
         use crate::window_state::LaneNotice;
         let Some((item, panel)) = preview_item(ws, pane).zip(ws.preview_panels.get(&pane)) else {
             return;
         };
-        let content = match lane_mode(item, panel) {
+        let content = match mode {
             kettle_render::MediaLaneMode::Source => item
                 .source
                 .text_backing()
@@ -1886,7 +1901,13 @@ impl App {
     /// A press anywhere but on the lane holding the keyboard gives the
     /// keyboard back first, then goes where it would.
     pub(super) fn leave_preview_focus_for_press(&mut self, ws: &mut WindowState) {
-        if ws.preview_overlay.is_some() {
+        if ws.preview_overlay.is_some()
+            || ws
+                .context_menu
+                .as_ref()
+                .and_then(ContextMenuState::preview_target)
+                .is_some()
+        {
             return;
         }
         let Some(focus) = ws.preview_focus else {
@@ -1909,14 +1930,29 @@ impl App {
             .is_some_and(|window| window.preview_focus.is_some())
     }
 
-    /// Keep the keyboard with a lane only while it can use it: its pane
-    /// focused, showing the same item expanded with room, and no other modal
-    /// open over it. Run on each pass of the event loop.
+    /// Keep preview focus while its item is visible and only its own menu covers it.
     pub(super) fn check_preview_focus(&mut self, ws: &mut WindowState) {
+        if ws
+            .context_menu
+            .as_ref()
+            .and_then(ContextMenuState::preview_target)
+            .is_some_and(|target| !self.preview_menu_target_is_current(ws, target))
+        {
+            ws.context_menu = None;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
         let Some(focus) = ws.preview_focus else {
             return;
         };
-        let usable = top_modal(ws) == Some(KeyModal::Preview)
+        let own_menu = ws
+            .context_menu
+            .as_ref()
+            .and_then(ContextMenuState::preview_target)
+            .is_some_and(|target| target.pane == focus.pane && target.item == focus.item);
+        let usable = (top_modal(ws) == Some(KeyModal::Preview)
+            || (top_modal(ws) == Some(KeyModal::ContextMenu) && own_menu))
             && ws.mux.active_focus() == Some(focus.pane)
             && ws
                 .preview_panels
@@ -2076,6 +2112,9 @@ impl App {
             K::Mute => self.toggle_lane_sound(ws, pane),
             K::Theater => self.toggle_preview_theater(ws, pane),
             K::Fullscreen => self.toggle_preview_fullscreen(ws, pane),
+            K::Menu => {
+                self.open_preview_menu(ws, pane, None);
+            }
             K::Swallow => {}
         }
         if let Some(window) = &ws.window {
@@ -2088,7 +2127,12 @@ impl App {
         let Some(lane) = ws.mux.lane(pane) else {
             return;
         };
-        let resized = ws.mux.set_lane_expanded(pane, !lane.expanded);
+        let expanded = !lane.expanded;
+        self.set_preview_expanded(ws, pane, expanded);
+    }
+
+    pub(super) fn set_preview_expanded(&mut self, ws: &mut WindowState, pane: u64, expanded: bool) {
+        let resized = ws.mux.set_lane_expanded(pane, expanded);
         self.lanes_changed(ws, resized);
     }
 
@@ -3005,9 +3049,7 @@ impl App {
             .is_some()
     }
 
-    /// A press over a preview lane belongs to it, whichever button, so the
-    /// terminal beside it never receives it. The primary button acts on the
-    /// control under it. Shared by native and ctl mouse input.
+    /// Keep presses in the preview: left operates controls, right opens its menu.
     pub(super) fn press_preview_lane(
         &mut self,
         ws: &mut WindowState,
@@ -3024,11 +3066,15 @@ impl App {
             }
             return ws.preview_overlay.is_some();
         };
-        if let Some(open) = &mut ws.preview_overlay {
-            open.control = None;
+        if bcode == 2 {
+            self.open_preview_menu(ws, pane, Some((x, y)));
+            return true;
         }
         if bcode != 0 {
             return true;
+        }
+        if let Some(open) = &mut ws.preview_overlay {
+            open.control = None;
         }
         let geometry = self
             .preview_lane_panel(ws, pane, rect, collapsed)

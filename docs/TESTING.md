@@ -715,22 +715,25 @@ The mandatory recorder client proves terminal routing separately.
 A version/help probe does not prove that a real composer accepts an attachment.
 
 Linux card and viewer checks use independently built workers.
-Run the viewer helper inside an isolated X11 server, such as Xvfb:
+Run both helpers inside an isolated X11 server to protect your desktop and clipboard:
 
 ```sh
-python3 scripts/check-agent-cards-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker --out target/diagnostics/agent-cards
-python3 scripts/check-media-viewer-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker --out target/diagnostics/media-viewer
+env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/check-agent-cards-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker --out target/diagnostics/agent-cards
+env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/check-media-viewer-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker --out target/diagnostics/media-viewer
 env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/check-confirmation-smoke.py --kettle ./target/release/kettle --out target/diagnostics/confirmations
 ```
 
 The card fixture needs Rust, Python, and Node already installed.
-It also needs FFmpeg to make its JPEG, WebP, and MP4 fixtures.
+It also needs FFmpeg to make its JPEG, WebP, animated GIF, and MP4 fixtures,
+and xclip for its private clipboard.
 It uses simulated Codex 0.163 and Claude Code 2.1.303 harnesses and makes no
-model calls. Both native profiles must render and open PNG, JPEG, WebP, SVG,
+model calls. Both native profiles must render and open PNG, JPEG, WebP, GIF, SVG,
 Mermaid, Markdown gallery, PDF, video, and generic-file cards. The npm profile
 and unscoped shelf fallback use SVG. Separate SVG cases retain Codex 0.162.0
 and Claude Code 2.1.280 coverage, and simulate later minor versions to check
 minimum-version admission. Every launch must clean up its cards on exit.
+The native Codex fixture also checks preview context menus, keyboard dismissal,
+image/frame/page and source copying, playback, and pinned-lane actions.
 The viewer helper checks distinct PDF pages, Home/End and first/last page
 boundaries, and Markdown gallery paging in addition to focus, pan, and pin.
 Xvfb fixture success does not establish official-client or GNOME Wayland

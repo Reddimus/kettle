@@ -3,6 +3,13 @@
 use super::*;
 
 impl ContextMenuState {
+    pub(super) fn preview_target(&self) -> Option<PreviewMenuTarget> {
+        self.items.iter().find_map(|item| match item {
+            ContextMenuItem::Preview { target, .. } => Some(*target),
+            _ => None,
+        })
+    }
+
     fn enter_submenu(&mut self, index: usize) -> bool {
         let nested = match self.items.get(index) {
             Some(ContextMenuItem::Submenu { items, .. }) if !items.is_empty() => items.clone(),
@@ -37,7 +44,235 @@ impl ContextMenuState {
     }
 }
 
+pub(super) fn preview_menu_items(
+    target: PreviewMenuTarget,
+    lane: &kettle_render::MediaLanePanel,
+    geometry: &kettle_render::MediaLaneGeometry,
+    outside: Option<crate::media::Outside>,
+    tr: kettle_i18n::Translator,
+) -> Vec<ContextMenuItem> {
+    use kettle_i18n::Text as T;
+    use kettle_render::{
+        MediaLaneHit as H, MediaLaneMode as M, MediaLanePlay as P, MediaLaneSound as S,
+    };
+
+    let row = |label, action| ContextMenuItem::Preview {
+        label,
+        target,
+        action,
+    };
+    let mut items = Vec::with_capacity(16);
+    if geometry.copy.is_some() {
+        let label = if lane.mode == M::Source {
+            T::MediaPreviewMenuCopySource
+        } else if geometry.video {
+            T::MediaPreviewMenuCopyFrame
+        } else if lane.document {
+            T::MediaPreviewMenuCopyPage
+        } else {
+            T::MediaPreviewMenuCopyImage
+        };
+        items.push(row(tr.text(label), PreviewMenuAction::Copy(lane.mode)));
+    }
+    if lane.mode == M::Rendered && geometry.mode.is_some() {
+        items.push(row(
+            tr.text(T::MediaPreviewMenuCopySource),
+            PreviewMenuAction::Copy(M::Source),
+        ));
+    }
+    if geometry.open_outside.is_some()
+        && let Some(outside) = outside
+    {
+        items.push(row(
+            outside.label(&tr),
+            PreviewMenuAction::OpenOutside(outside),
+        ));
+    }
+    items.push(ContextMenuItem::Separator);
+    let controls = [
+        (
+            geometry.mode.is_some(),
+            if lane.mode == M::Source {
+                T::MediaLaneA11yRendered
+            } else {
+                T::MediaLaneA11ySource
+            },
+            H::Mode,
+        ),
+        (
+            geometry.page_previous.is_some() && lane.page.is_some_and(|(index, _)| index > 1),
+            if lane.document {
+                T::MediaLaneA11yPreviousPage
+            } else {
+                T::MediaLaneA11yPreviousDiagram
+            },
+            H::PreviousPage,
+        ),
+        (
+            geometry.page_next.is_some() && lane.page.is_some_and(|(index, count)| index < count),
+            if lane.document {
+                T::MediaLaneA11yNextPage
+            } else {
+                T::MediaLaneA11yNextDiagram
+            },
+            H::NextPage,
+        ),
+        (
+            geometry.play.is_some(),
+            match lane.play {
+                Some(P::Pause) => T::MediaLaneA11yPauseVideo,
+                Some(P::Stop) => T::MediaLaneA11yStopPreview,
+                _ => T::MediaLaneA11yPlayVideo,
+            },
+            H::Play,
+        ),
+        (
+            geometry.sound.is_some(),
+            if lane.sound == Some(S::Heard) {
+                T::MediaLaneA11yMuteVideo
+            } else {
+                T::MediaLaneA11yUnmuteVideo
+            },
+            H::Sound,
+        ),
+        (
+            geometry.theater.is_some(),
+            T::MediaPreviewMenuTheater,
+            H::Theater,
+        ),
+        (
+            geometry.fullscreen.is_some(),
+            T::PaletteToggleFullscreen,
+            H::Fullscreen,
+        ),
+        (
+            geometry.zoom_in.is_some(),
+            T::MediaLaneA11yZoomIn,
+            H::ZoomIn,
+        ),
+        (
+            geometry.zoom_out.is_some(),
+            T::MediaLaneA11yZoomOut,
+            H::ZoomOut,
+        ),
+        (geometry.zoom_fit.is_some(), T::MediaPreviewMenuFit, H::Fit),
+    ];
+    for (shown, label, hit) in controls {
+        if shown {
+            let action = match hit {
+                H::Play => {
+                    let Some(play) = lane.play else { continue };
+                    PreviewMenuAction::Play(play)
+                }
+                H::Sound => {
+                    let Some(sound) = lane.sound else { continue };
+                    PreviewMenuAction::Sound(sound)
+                }
+                _ => PreviewMenuAction::Control(hit),
+            };
+            items.push(row(tr.text(label), action));
+        }
+    }
+    items.push(ContextMenuItem::Separator);
+    let (label, action) = if geometry.pinning {
+        (T::MediaViewerA11yPin, PreviewMenuAction::Control(H::Pin))
+    } else if lane.collapsed {
+        (T::MediaLaneA11yExpand, PreviewMenuAction::Expanded(true))
+    } else {
+        (T::MediaLaneA11yCollapse, PreviewMenuAction::Expanded(false))
+    };
+    items.push(row(tr.text(label), action));
+    items.push(row(
+        tr.text(T::MediaLaneA11yClose),
+        PreviewMenuAction::Control(H::Close),
+    ));
+    items
+}
+
 impl App {
+    pub(super) fn preview_menu_target_is_current(
+        &self,
+        ws: &WindowState,
+        target: PreviewMenuTarget,
+    ) -> bool {
+        preview_item(ws, target.pane)
+            .zip(ws.preview_panels.get(&target.pane))
+            .is_some_and(|(item, panel)| target.matches(item, panel))
+            && self.preview_panel_of(ws, target.pane).is_some()
+    }
+
+    pub(super) fn open_preview_menu(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        at: Option<(f32, f32)>,
+    ) -> bool {
+        let Some((item, panel)) = preview_item(ws, pane).zip(ws.preview_panels.get(&pane)) else {
+            return false;
+        };
+        let target = PreviewMenuTarget {
+            pane,
+            item: item.id,
+            generation: item.generation,
+            mode: lane_mode(item, panel),
+        };
+        let outside = self.preview_opens_outside(ws, pane);
+        let Some(lane) = self.preview_panel_of(ws, pane) else {
+            return false;
+        };
+        let Some(geometry) = self.preview_lane_geometry(ws, &lane) else {
+            return false;
+        };
+        let (x, y) = at.unwrap_or_else(|| {
+            let (x, y, w, h) = geometry.content;
+            (x + w / 2.0, y + h / 2.0)
+        });
+        let items = preview_menu_items(target, &lane, &geometry, outside, self.ui_text);
+        self.show_context_menu(ws, items, x, y);
+        ws.context_menu.is_some()
+    }
+
+    pub(super) fn act_on_preview_menu(
+        &mut self,
+        ws: &mut WindowState,
+        target: PreviewMenuTarget,
+        action: PreviewMenuAction,
+    ) {
+        if !self.preview_menu_target_is_current(ws, target) {
+            return;
+        }
+        match action {
+            PreviewMenuAction::Copy(mode) => self.copy_preview_in_mode(ws, target.pane, mode),
+            PreviewMenuAction::Control(hit) => self.act_on_preview(ws, target.pane, hit),
+            PreviewMenuAction::Expanded(expanded) => {
+                self.set_preview_expanded(ws, target.pane, expanded);
+            }
+            PreviewMenuAction::Play(expected) => {
+                if self
+                    .preview_panel_of(ws, target.pane)
+                    .and_then(|lane| lane.play)
+                    == Some(expected)
+                {
+                    self.act_on_preview(ws, target.pane, kettle_render::MediaLaneHit::Play);
+                }
+            }
+            PreviewMenuAction::Sound(expected) => {
+                if self
+                    .preview_panel_of(ws, target.pane)
+                    .and_then(|lane| lane.sound)
+                    == Some(expected)
+                {
+                    self.act_on_preview(ws, target.pane, kettle_render::MediaLaneHit::Sound);
+                }
+            }
+            PreviewMenuAction::OpenOutside(outside) => {
+                if let Some(item) = preview_item(ws, target.pane) {
+                    self.open_item_outside(item, outside);
+                }
+            }
+        }
+    }
+
     /// Build the right-click context-menu item list. Each `Item`'s
     /// `enabled` flag is computed from current state: Copy needs a
     /// selection, the split rows need an unzoomed tab, and Ungroup needs
@@ -459,13 +694,8 @@ impl App {
         }
     }
 
-    /// Open the right-click context menu at `(px, py)`. Closes every other
-    /// modal except an open search bar, then `show_context_menu` sizes the
-    /// panel from the cell metrics and clamps the anchor so the menu fits
-    /// the surface (right-click near the bottom-right corner flips up-
-    /// and-left rather than rendering off-screen).
-    /// Open the right-click menu at (`px`, `py`). `offer_copied`, for a
-    /// Shift+right-click only, also offers the file the clipboard names.
+    /// Open the terminal menu, preserving search. Shift+right-click also
+    /// offers the file or diagram named by the clipboard (`offer_copied`).
     pub(super) fn open_context_menu(
         &mut self,
         ws: &mut WindowState,
@@ -573,20 +803,7 @@ impl App {
         self.show_context_menu(ws, items, px, py);
     }
 
-    /// Shared tail of context-menu opening — drop disabled rows +
-    /// collapse orphaned separators, compute panel geometry, clamp the anchor
-    /// on-screen, and install the `ContextMenuState`. Used by both the
-    /// right-click menu and the new-tab `▾` dropdown so they render
-    /// pixel-identically.
-    /// The popup menu over the grid leaves an open search bar in place, as
-    /// Terminator leaves its bar under the menu: the user right-clicks to copy
-    /// what they just selected under the query, not to abandon the query.
-    /// Search is the only modal that can be open together with the menu:
-    /// every other opener runs `close_all_modals`, which closes search, and
-    /// search's own opener closes everything else. Keys go to the menu while
-    /// it is up (its arm precedes search in the key handler) and return to the
-    /// editor when it closes. `show_context_menu` ends the pointer gestures a
-    /// modal must not leave armed.
+    /// Preserve search under a terminal menu; close other modals.
     pub(super) fn close_modals_for_context_menu(&mut self, ws: &mut WindowState) {
         if ws.search.open {
             ws.context_menu = None;
@@ -595,6 +812,7 @@ impl App {
         }
     }
 
+    /// Filter rows, clamp the shared popup and end active pointer gestures.
     pub(super) fn show_context_menu(
         &mut self,
         ws: &mut WindowState,
@@ -652,6 +870,7 @@ impl App {
                 | ContextMenuItem::NewTabShell { .. }
                 | ContextMenuItem::UrlItem { .. }
                 | ContextMenuItem::Media { .. }
+                | ContextMenuItem::Preview { .. }
                 | ContextMenuItem::Info { .. } => row_h,
             })
             .sum();
@@ -1046,6 +1265,13 @@ impl App {
                     w.request_redraw();
                 }
             }
+            ContextMenuClick::Preview { target, action } => {
+                ws.context_menu = None;
+                self.act_on_preview_menu(ws, target, action);
+                if let Some(w) = &ws.window {
+                    w.request_redraw();
+                }
+            }
             ContextMenuClick::LuaMenuItem(idx) => {
                 ws.context_menu = None;
                 // Invoke the Lua callback + drain any
@@ -1248,90 +1474,91 @@ impl App {
         // Dropdown parity: per-row shortcut hints from the LIVE keybind
         // map (computed per frame; the map only changes on reload).
         let hints = self.menu_item_hints(&menu.items);
-        let mut rows: Vec<ContextMenuRow> = menu
-            .items
-            .iter()
-            .zip(hints)
-            .map(|(it, hint)| match it {
-                ContextMenuItem::Item { label, enabled, .. } => ContextMenuRow {
-                    label: (*label).to_string(),
-                    separator: false,
-                    enabled: *enabled,
-                    hint,
-                },
-                ContextMenuItem::DynamicItem { label, enabled, .. } => ContextMenuRow {
-                    label: label.clone(),
-                    separator: false,
-                    enabled: *enabled,
-                    hint,
-                },
-                ContextMenuItem::Separator => ContextMenuRow {
-                    label: String::new(),
-                    separator: true,
-                    enabled: false,
-                    hint: String::new(),
-                },
-                ContextMenuItem::LuaItem { label, .. } => ContextMenuRow {
-                    label: label.clone(),
-                    separator: false,
-                    enabled: true,
-                    hint: String::new(),
-                },
-                ContextMenuItem::ConfigItem { label, .. } => ContextMenuRow {
-                    label: label.clone(),
-                    separator: false,
-                    enabled: true,
-                    hint: String::new(),
-                },
-                ContextMenuItem::Submenu { label, .. } => ContextMenuRow {
-                    // Append "▸" to signal "this row opens a submenu".
-                    label: format!("{label} ▸"),
-                    separator: false,
-                    enabled: true,
-                    hint: String::new(),
-                },
-                // ProfileChoice rows only live inside a Submenu, so they
-                // reach menu.items (and this arm) after a drill-in swaps the
-                // submenu's items in.
-                ContextMenuItem::ProfileChoice { label, .. }
-                | ContextMenuItem::WindowChoice { label, .. } => ContextMenuRow {
-                    label: label.clone(),
-                    separator: false,
-                    enabled: true,
-                    hint: String::new(),
-                },
-                // New-tab ▾ shell choice — a normal clickable row.
-                ContextMenuItem::NewTabShell { label, .. } => ContextMenuRow {
-                    label: label.clone(),
-                    separator: false,
-                    enabled: true,
-                    hint,
-                },
-                // URL-aware leading rows ("Open Link" /
-                // "Copy Link Address") — normal clickable rows.
-                ContextMenuItem::UrlItem { label, .. } => ContextMenuRow {
-                    label: (*label).to_string(),
-                    separator: false,
-                    enabled: true,
-                    hint: String::new(),
-                },
-                // A card's media rows — normal clickable rows.
-                ContextMenuItem::Media { label, .. } => ContextMenuRow {
-                    label: (*label).to_string(),
-                    separator: false,
-                    enabled: true,
-                    hint: String::new(),
-                },
-                // Dropdown parity: Info renders as a dimmed
-                // (disabled-style) static line.
-                ContextMenuItem::Info { label } => ContextMenuRow {
-                    label: label.clone(),
-                    separator: false,
-                    enabled: false,
-                    hint: String::new(),
-                },
-            })
-            .collect();
+        let mut rows: Vec<ContextMenuRow> =
+            menu.items
+                .iter()
+                .zip(hints)
+                .map(|(it, hint)| match it {
+                    ContextMenuItem::Item { label, enabled, .. } => ContextMenuRow {
+                        label: (*label).to_string(),
+                        separator: false,
+                        enabled: *enabled,
+                        hint,
+                    },
+                    ContextMenuItem::DynamicItem { label, enabled, .. } => ContextMenuRow {
+                        label: label.clone(),
+                        separator: false,
+                        enabled: *enabled,
+                        hint,
+                    },
+                    ContextMenuItem::Separator => ContextMenuRow {
+                        label: String::new(),
+                        separator: true,
+                        enabled: false,
+                        hint: String::new(),
+                    },
+                    ContextMenuItem::LuaItem { label, .. } => ContextMenuRow {
+                        label: label.clone(),
+                        separator: false,
+                        enabled: true,
+                        hint: String::new(),
+                    },
+                    ContextMenuItem::ConfigItem { label, .. } => ContextMenuRow {
+                        label: label.clone(),
+                        separator: false,
+                        enabled: true,
+                        hint: String::new(),
+                    },
+                    ContextMenuItem::Submenu { label, .. } => ContextMenuRow {
+                        // Append "▸" to signal "this row opens a submenu".
+                        label: format!("{label} ▸"),
+                        separator: false,
+                        enabled: true,
+                        hint: String::new(),
+                    },
+                    // ProfileChoice rows only live inside a Submenu, so they
+                    // reach menu.items (and this arm) after a drill-in swaps the
+                    // submenu's items in.
+                    ContextMenuItem::ProfileChoice { label, .. }
+                    | ContextMenuItem::WindowChoice { label, .. } => ContextMenuRow {
+                        label: label.clone(),
+                        separator: false,
+                        enabled: true,
+                        hint: String::new(),
+                    },
+                    // New-tab ▾ shell choice — a normal clickable row.
+                    ContextMenuItem::NewTabShell { label, .. } => ContextMenuRow {
+                        label: label.clone(),
+                        separator: false,
+                        enabled: true,
+                        hint,
+                    },
+                    // URL-aware leading rows ("Open Link" /
+                    // "Copy Link Address") — normal clickable rows.
+                    ContextMenuItem::UrlItem { label, .. } => ContextMenuRow {
+                        label: (*label).to_string(),
+                        separator: false,
+                        enabled: true,
+                        hint: String::new(),
+                    },
+                    // A card's media rows — normal clickable rows.
+                    ContextMenuItem::Media { label, .. }
+                    | ContextMenuItem::Preview { label, .. } => ContextMenuRow {
+                        label: (*label).to_string(),
+                        separator: false,
+                        enabled: true,
+                        hint: String::new(),
+                    },
+                    // Dropdown parity: Info renders as a dimmed
+                    // (disabled-style) static line.
+                    ContextMenuItem::Info { label } => ContextMenuRow {
+                        label: label.clone(),
+                        separator: false,
+                        enabled: false,
+                        hint: String::new(),
+                    },
+                })
+                .collect();
         // Terminator menu UX: pass through the scroll state + clamped panel
         // geometry the renderer needs to draw only the visible slice.
         let (panel_w_clamped, panel_h_clamped) = self

@@ -420,6 +420,12 @@ activates, and Esc or a primary backdrop click closes it. The click is
 consumed. Video waits for Play. **Pin** (or P) moves the same item, view and
 playback into a lane; `media-open-mode = lane` opens there directly.
 
+Right-click a preview (or press Shift+F10 while it has focus) for copy, zoom,
+page, playback and presentation options. Copy takes the displayed image,
+video frame or document page; GIFs copy as still images. **Copy source** copies
+cached diagram or SVG text without changing the view. Esc dismisses the menu
+without closing the preview.
+
 The pinned lane takes about 40% of its pane and resizes the terminal; keys
 still go to the terminal unless the user focuses the lane.
 The lane shows one item fitted, with still images never enlarged past their pixels, on white for
