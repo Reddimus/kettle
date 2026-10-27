@@ -1,12 +1,6 @@
-//! SCM_RIGHTS file-descriptor passing over Unix sockets.
-//!
-//! Just the transport. It moves bytes and open descriptors between two
-//! processes and has no idea what they are for. Deciding what to send, and
-//! whether to keep what arrives, belongs to the caller.
-//!
-//! Legacy Unix descriptor transport. Deprecated handoff receivers discard received
-//! descriptors; current live tab moves transfer ownership within one process. See
-//! docs/ARCHITECTURE.md, Detachable tabs.
+//! Legacy SCM_RIGHTS transport. Deprecated handoff receivers discard received
+//! descriptors; live tab moves transfer ownership within one process.
+//! See docs/ARCHITECTURE.md, Detachable tabs.
 
 #![allow(dead_code)]
 
@@ -19,18 +13,8 @@ use std::os::unix::net::UnixStream;
 // including NetBSD, OpenBSD, DragonFly, illumos, and Android.
 use libc::SCM_RIGHTS;
 
-/// Send `fds` over the Unix socket along with `payload`. The
-/// receiving end will get the duplicated fds via recv_fds.
-///
-/// Errors: ENOBUFS / EMSGSIZE / EBADF / etc are bubbled up via
-/// io::Error. The caller (the detachable-tabs IPC layer) decides
-/// how to recover (typically: cancel the drag, restore the source
-/// tab).
-///
-/// Safety: this uses libc::sendmsg with a populated ancillary
-/// buffer carrying SCM_RIGHTS. The unsafe block is bounded to
-/// the syscall + the iovec/cmsg pointer setup; all pointers come
-/// from owned local variables so they outlive the call.
+/// Send the full payload and duplicate `fds` for the receiver, retaining ownership
+/// of the originals. I/O errors propagate; an error may follow a partial send.
 pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Result<usize> {
     use std::os::unix::io::AsRawFd;
     if payload.is_empty() {
@@ -40,10 +24,7 @@ pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Resul
         ));
     }
     if fds.is_empty() {
-        // No fds → fall through to normal write. Saves a cmsg.
-        // `write` can short-write, dropping the tail of the serialized tab, and
-        // the caller closes the SOURCE tab once the send succeeds. `write_all`
-        // loops until the whole payload is delivered (or errors).
+        // Without ancillary data, write_all still prevents a short payload.
         use std::io::Write;
         let mut s = socket;
         s.write_all(payload)?;
@@ -81,13 +62,8 @@ pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Resul
     if sent < 0 {
         return Err(io::Error::last_os_error());
     }
-    // sendmsg can SHORT-write on a stream socket. The fds (ancillary
-    // SCM_RIGHTS data) ride with the first delivered byte and must NOT be
-    // resent, or the receiver gets duplicates. Flush the rest of the payload
-    // with a plain write_all. Otherwise the tail of the serialized tab is lost
-    // while the caller, treating the send as complete, closes the source tab.
-    // (payload is non-empty and the socket is blocking, so `sent >= 1` here
-    // and the fds were delivered.)
+    // SCM_RIGHTS accompanies the first byte. Finish a short payload without
+    // resending ancillary data, which would duplicate the descriptors again.
     let sent = sent as usize;
     if sent < payload.len() {
         use std::io::Write;
@@ -122,11 +98,8 @@ pub fn recv_fds(
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
     msg.msg_controllen = cmsg_space as _;
-    // Receive the fds close-on-exec where the platform
-    // offers atomic delivery (Linux/Android `MSG_CMSG_CLOEXEC`); macOS and
-    // others lack the flag and fall back to the `fcntl` below. Without CLOEXEC a
-    // received PTY-master fd would leak into any shell spawned between this
-    // `recvmsg` and adoption.
+    // Linux/Android set CLOEXEC atomically; other Unix platforms use fcntl below.
+    // Atomic delivery prevents inheritance by a concurrently spawned child.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     let recv_flags: libc::c_int = libc::MSG_CMSG_CLOEXEC;
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -157,16 +130,12 @@ pub fn recv_fds(
             cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
         }
     }
-    // Belt-and-suspenders CLOEXEC for platforms without the atomic flag (and a
-    // harmless no-op where the flag already set it). Best-effort: an fd that's
-    // valid enough to adopt is valid enough to keep even if this fails.
+    // Best-effort CLOEXEC fallback; the legacy receiver closes every returned fd.
     for &fd in &out {
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
-    // `MSG_CTRUNC` means the sender's ancillary data didn't fit our control
-    // buffer, so the kernel dropped (and closed) the fds that overflowed. A
-    // partial fd set would adopt the wrong PTYs — close what we got and surface
-    // it rather than silently hand back a truncated handoff.
+    // Reject incomplete descriptor sets and close every descriptor we received.
+    // The kernel closes descriptors that did not fit the ancillary buffer.
     if msg.msg_flags & libc::MSG_CTRUNC != 0 {
         for &fd in &out {
             unsafe { libc::close(fd) };

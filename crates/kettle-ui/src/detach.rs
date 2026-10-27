@@ -2,7 +2,7 @@
 //! without respawning.
 //!
 //! ```text
-//!   Idle  ──MouseDown on tab──▶  ArmedInside { tab_idx, started_at }
+//!   Idle  ──MouseDown on tab──▶  ArmedInside { tab_idx }
 //!     ▲                            │
 //!     │                            ├──MouseMove (small)──▶ stays Armed
 //!     │                            ├──MouseMove (large)──▶ DraggingInside
@@ -33,9 +33,8 @@ pub enum DragState {
     /// No drag in progress.
     #[default]
     Idle,
-    /// Mouse-down landed on the tab bar; not yet a drag. The
-    /// click-vs-drag distinguisher is pure distance from the press origin
-    /// (`DRAG_DISTANCE_THRESHOLD_PX`), matching GTK / OS drag thresholds.
+    /// Pressed a tab; dragging starts above `DRAG_DISTANCE_THRESHOLD_PX`
+    /// from the press origin.
     ArmedInside { tab_idx: usize },
     /// Mouse moved enough after ArmedInside to qualify as a drag. The
     /// cursor is still inside this kettle window. Except on Wayland,
@@ -56,10 +55,7 @@ impl DragState {
         DragState::ArmedInside { tab_idx }
     }
 
-    /// Threshold below which a MouseMove from ArmedInside stays
-    /// Armed (a hand-twitch on a precise mouse). Above which the
-    /// state transitions to DraggingInside. 4px matches GTK +
-    /// the OS-native drag-distance most desktops ship.
+    /// Travel in pixels that a press must exceed to become a drag.
     pub const DRAG_DISTANCE_THRESHOLD_PX: f32 = 4.0;
 
     /// ArmedInside → DraggingInside transition on
