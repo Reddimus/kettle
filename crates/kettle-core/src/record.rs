@@ -13,7 +13,7 @@
 //! - `[t, "o", <utf8>]`   — terminal OUTPUT
 //! - `[t, "r", "CxR"]`    — resize
 //! - `[t, "m", <json>]`   — kettle UI/UX markers (players ignore them)
-//! - `[t, "i", <token>]`  — keystroke TOKENS, never raw typed chars
+//! - `[t, "i", <token>]`  — keystroke tokens, or raw text when opted in
 //!
 //! The file is owner-only (`0600` on Unix; a protected current-user DACL on
 //! Windows) and purely local — kettle never uploads it. Events cross a bounded
@@ -522,11 +522,8 @@ impl Recorder {
         self.emit("r", &format!("{cols}x{rows}"));
     }
 
-    /// Record a keystroke as an `i` event. The caller passes a
-    /// privacy-preserving TOKEN (a named key / chord like `Enter` / `Ctrl+c`,
-    /// or a redacted printable class via `printable_token`) — never raw typed
-    /// characters unless raw-input mode was opted into. Pasted content is never
-    /// routed here (it's a `paste` marker instead).
+    /// Record an `i` event. Callers redact printable text unless raw input is enabled.
+    /// Paste uses a marker instead.
     pub fn record_input(&mut self, token: &str) {
         self.emit("i", token);
     }
@@ -1221,11 +1218,8 @@ fn event_line(time: f64, code: &str, data: &str) -> String {
     format!("[{time:.6}, \"{code}\", {data_json}]")
 }
 
-/// Redact a bare printable keystroke. In raw mode the literal text is
-/// kept (full-fidelity repro the dev explicitly opted into with
-/// `--record-raw-input`); otherwise each character collapses to a generic class
-/// glyph so a typed password never appears in the trace — only its keystroke
-/// count and timing survive. Pure (unit-tested).
+/// Keep raw input when enabled; otherwise replace each character with a dot.
+/// This redacts input events only; recorded terminal output remains verbatim.
 pub fn printable_token(text: &str, raw: bool) -> String {
     if raw {
         text.to_string()
