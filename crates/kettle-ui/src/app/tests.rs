@@ -751,18 +751,8 @@ fn pane_title_edit_never_follows_focus_to_a_sibling() {
     );
 }
 
-/// `reap` has to report a removal, and only a removal.
-///
-/// Both call sites turn `layout_changed` into a `pending_resize` plus a
-/// `request_redraw()`. A version that answered "yes" on every pass would
-/// look correct in the split-close case and quietly re-drive `resize_all`
-/// on every frame forever, which nothing else in the suite would catch.
-/// The second row below is the one that pins that.
-///
-/// It lives here rather than in `mux::node_tests` because `Pane` owns a
-/// `Terminal` and cannot be built without a PTY, and `title_test_split_mux`
-/// is the existing helper that spawns one. The name is inherited from its
-/// first caller; what it builds is a plain two-pane split.
+/// Only pane removals request a resize and redraw; idle reaps must not reflow.
+/// The shared split fixture supplies the real PTYs required by `Pane`.
 #[test]
 fn reap_reports_whether_it_removed_a_pane() {
     let (mut mux, target, sibling) = title_test_split_mux();
