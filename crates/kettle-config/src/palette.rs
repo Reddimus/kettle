@@ -282,9 +282,7 @@ mod tests {
             OpenUpdate,
             DismissUpdate,
         ];
-        // Enumerate every Action variant explicitly via this exhaustive
-        // list; if a future variant is added the match below fails to
-        // compile, forcing whoever added it to also categorize it.
+        // Keep this registry-coverage list in sync with the exhaustive match below.
         let every_action: Vec<Action> = vec![
             Copy,
             Paste,
@@ -443,9 +441,7 @@ mod tests {
             MovePaneUp,
             MovePaneDown,
         ];
-        // Compile-time exhaustiveness check: if a new Action variant is
-        // added, this match must be updated, which forces the developer
-        // to add a row to `every_action` above as well.
+        // New Action variants require a match arm; also add them to every_action.
         for a in &every_action {
             match a {
                 SelectAll

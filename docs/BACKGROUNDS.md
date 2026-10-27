@@ -1,31 +1,19 @@
 # Background images & animated wallpapers
 
-kettle can paint a **procedural starfield**, a still image, **or an animated
-loop** behind your terminal. It is the native, GPU-friendly equivalent of the
-"video background" people set up in other terminals. No terminal decodes actual
-video, so for a file you supply kettle plays an **animated GIF / APNG / animated
-WebP**, advancing frames on the media's own timestamps. By default an animated
-background **plays even when unfocused**, but it **freezes when the window is
-minimized or fully covered** (it can't be seen), so a hidden window costs nothing.
+Kettle can paint a procedural starfield, a still image, or a GIF/APNG/WebP
+animation behind the terminal. Video files are not wallpaper inputs.
+Animation continues while unfocused by default; hidden or minimized windows
+stop animation redraws when the platform reports that state. Full occlusion
+notifications are unavailable on Wayland.
 
-> **Off by default.** `background-type` is `solid` out of the box and the binary
-> embeds nothing. A background only appears once *you* choose one — keeping the
-> binary lean and startup fast for everyone who doesn't want one.
+Backgrounds are off by default (`background-type = solid`). The starfield
+needs no image file.
 
 ## The included starfield — a fixed built-in example (recommended)
 
-kettle has a built-in **procedural starfield**: a slow **forward-flight** field
-where stars emerge from the dark near the center, **fade in dramatically as they
-get closer**, and bloom as they drift outward (the "warp at low speed" look).
-It's rendered live by a tiny GPU shader, so unlike a GIF it's **true-color** (soft
-star glows don't band), loops perfectly, stays crisp at **every resolution and
-aspect ratio** (4:3 → 21:9 → square), and uses **~zero memory** (no decoded
-frames). It's the recommended background because it does what a terminal
-background *should*: recede behind your text instead of fighting it.
-
-It's a **fixed example** — its look (speed, star count, glow, fade-in) is baked
-into the shader and isn't config-tunable, so there's just one setting to turn it
-on (no file needed):
+The built-in starfield draws a slow forward-flight effect with a GPU shader,
+without decoded image frames. Its speed, density and glow are fixed; the
+general background controls below still apply. Enable it with:
 
 ```ini
 background-type = starfield
@@ -41,11 +29,9 @@ background-animation = always
 chrome-background = theme
 ```
 
-> A pure-black starfield pairs well with `chrome-background = theme` (a distinct
-> bar) or `auto` (a seamless black bar). It animates at a low ~10 fps cap, so
-> idle CPU stays near a static background's. Want a *different* animated look?
-> Use a file-based background (below) — the starfield itself is intentionally
-> one curated example, not a tweakable engine.
+The starfield requests up to 10 animation redraws per second.
+`chrome-background` controls the bar color as described below. Use an image
+file for a different animation.
 
 ## Using your own image (file-based)
 
@@ -126,13 +112,11 @@ chrome-background = auto
 | `background-darkness` | `0.0` fully see-through (backdrop at full strength) … `1.0` fully covered (backdrop hidden); default `0.5` |
 | `background-animation` | `always` (default), `when-focused` (battery-friendly), `off` (freeze on frame 1) — applies to the starfield and animated images alike |
 
-**Performance.** Frames decode once at load (bounded to 128 MiB / 128 frames; a
-larger file degrades gracefully to a shorter loop, never an OOM). Playback just
-swaps an already-uploaded GPU texture. With `when-focused`, kettle stops
-scheduling animation redraws when you tab away, so an animated wallpaper adds
-**zero idle cost** when unfocused and a single texture swap per frame when
-focused. Prefer a gentle, slow loop (a drifting starfield, not a fast action
-clip) for the least distraction and the lowest wake rate.
+**Performance.** Decoded animations are capped at 128 MiB and 128 frames;
+longer animations retain only the frames that fit. Frames decode once per
+load, and the renderer caches their textures. `when-focused` stops
+animation-driven redraws while unfocused; other repaints can still advance
+the displayed frame. Slower loops need fewer animation wakeups.
 
 ## Where to get good, clearly-licensed wallpapers
 
@@ -140,31 +124,27 @@ Start with the [included starfield](#the-included-starfield--a-fixed-built-in-ex
 If you want something else, keep the [principles](#what-makes-a-good-terminal-background)
 in mind (dark, slow, abstract) and use sources whose license allows use:
 
-### Pixel-art space / particle loops (the popular choice)
+### Pixel art and generated images
 
-The dark, subtle, pixel-art "space" look is what most people run, and it's
-aspect-agnostic. These let you make your own and are free / CC0:
+- [Deep-Fold's generator](https://deep-fold.itch.io/space-background-generator)
+  allows generated images in projects, but prohibits redistributing them alone
+  or in asset packs. Its output is not CC0.
+- [itch.io's CC0 pixel-art filter](https://itch.io/game-assets/free/tag-cc0/tag-pixel-art)
+  and [OpenGameArt](https://opengameart.org/) offer asset searches. Check each
+  item's license; on OpenGameArt, select the CC0 license filter.
 
-- **Deep-Fold — Pixel Space Background Generator:** <https://deep-fold.itch.io/space-background-generator>
-  — generate a seamless, looping pixel starfield/nebula; tile-able, export to GIF.
-- **ansimuz — space backgrounds (CC0):** seamless looped space art, highly rated.
-- **itch.io CC0 packs:** <https://itch.io/game-assets/free/tag-cc0/tag-pixel-art>
-  → search "space", "starfield", "rain", "night". Confirm each pack is **CC0**.
+### NASA and ESA/Hubble imagery
 
-### OpenGameArt — CC0 (public-domain-equivalent)
+- [NASA SVS](https://svs.gsfc.nasa.gov/) and the
+  [NASA image library](https://images.nasa.gov/): follow
+  [NASA's usage guidelines](https://www.nasa.gov/nasa-brand-center/images-and-media/).
+  Some hosted material has third-party rights; check its credit and terms.
+- [ESA/Hubble images](https://esahubble.org/images/): follow the
+  [attribution and reuse terms](https://esahubble.org/copyright/), generally
+  CC BY 4.0. Preserve the full credit and check for exceptions.
 
-- <https://opengameart.org/> → Art search → License: **CC0** → e.g. "space",
-  "starfield", "particles", "parallax". No attribution required.
-
-### NASA / Hubble (public domain — dramatic, but dim it)
-
-NASA imagery is public domain (see NASA's media-usage guidelines) — nebulae, the
-Sun, galaxies. It's **bright and busy**, so it fights text by default: pair it
-with `background-blur = true` + a high `background-darkness`, and
-`chrome-background = auto`, or it'll wash out your terminal.
-
-- **NASA SVS:** <https://svs.gsfc.nasa.gov/> · **Library:** <https://images.nasa.gov/>
-  · **Hubble:** <https://esahubble.org/images/> (confirm each item's terms).
+Bright imagery can obscure terminal text. Use `background-blur` and a higher
+`background-darkness` to dim it.
 
 ### Make your own loop
 
@@ -187,9 +167,9 @@ with `background-blur = true` + a high `background-darkness`, and
   to see decode warnings — not found / unsupported / too large). For the
   starfield, just `background-type = starfield` (no file). And `background-type`
   defaults to `solid`, so a background only appears once you pick one.
-- **Animation freezes when I switch windows?** Only if it's *hidden* (minimized
-  or fully covered) — that's intentional (zero idle for an invisible window). An
-  unfocused-but-visible window keeps animating under the `always` default; set
-  `background-animation = when-focused` if you'd rather it pause on blur.
+- **Animation stops when I switch windows?** `when-focused` stops animation
+  redraws on focus loss. The `always` default keeps visible, unfocused windows
+  animating. Hidden/minimized windows stop those redraws when their state is
+  available; Wayland does not report full occlusion.
 - **Tabs still look busy?** Try `chrome-background = auto` (or `black`/`white`)
   and a calmer loop.

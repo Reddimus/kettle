@@ -1,44 +1,12 @@
-//! Background-image decode helper (Terminator parity). Reads a
-//! user-supplied file path, decodes via the `image` crate, returns RGBA
-//! bytes + dimensions ready for wgpu texture upload.
-//!
-//! Supported formats (per the enabled Cargo.toml image-crate features):
-//!   - PNG (default, also used for kitty/iTerm2 inline images)
-//!   - JPEG (most common for photo wallpapers)
-//!   - WebP (modern web format)
-//!   - BMP, GIF (legacy support)
-//!
-//! AVIF / HEIF / TIFF are NOT in the feature set — they pull
-//! significant transitive deps (rav1e is multi-MB) for marginal
-//! user value on a terminal-bg use case.
-//!
-//! Errors:
-//!   - File not found / not readable → log::warn, return None.
-//!   - Format unsupported → log::warn, return None.
-//!   - Decode failed → log::warn, return None.
-//!
-//! See docs/ARCHITECTURE.md, Background image, for integration.
+//! Bounded still and GIF/APNG/WebP background decoding for GPU upload.
+//! Still formats follow enabled `image` features; see docs/BACKGROUNDS.md.
 
-/// Decompression-bomb defense for the user-configured
-/// `background-image` path. The bg-image source is a config-file
-/// path (not attacker-controlled at the PTY layer), so the threat
-/// model is weaker than the kitty graphics decompression-bomb
-/// defense — but a malicious download masquerading as a 4K
-/// wallpaper could still OOM kettle on launch via the same
-/// PNG/JPEG/GIF/WebP/BMP decompression-bomb shape. Reuse the
-/// same per-axis + total-alloc envelope as `kettle_vt::image`.
+/// Bound dimensions and decoded RGBA storage before materializing a wallpaper.
 const MAX_BG_IMAGE_DIM: u32 = 8192;
 const MAX_BG_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Animated background bounds. A multi-frame background (animated
-/// GIF / APNG / animated WebP) decodes EVERY frame's RGBA up front, so the
-/// envelope is the SUM across frames, not one frame: a 1080p × 200-frame GIF
-/// would be ~1.6 GB. Cap the total decoded bytes AND the frame count; on
-/// exceedance the decoder truncates to the frames that fit (≥ 1) with a
-/// `log::warn`, degrading gracefully to a shorter loop / first-frame-static
-/// rather than OOMing on launch. A 0 ms inter-frame gap (common in
-/// "play as fast as possible" GIFs) is clamped up so the loop has a real
-/// period and a bounded wake rate.
+/// Total decoded animation storage and frame count. Keep the prefix that fits;
+/// clamp frame gaps so malformed delays cannot drive continuous redraws.
 const MAX_BG_ANIM_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_BG_FRAMES: usize = 128;
 const MIN_BG_FRAME_GAP_MS: u32 = 20;
@@ -111,18 +79,8 @@ pub fn bg_next_frame_ms(gaps: &[u32], elapsed_ms: u128) -> Option<u64> {
     Some(16)
 }
 
-/// CPU-side separable box blur. Three passes approximate a Gaussian, the same
-/// technique Photoshop / GIMP / CSS use for a fast "Gaussian blur". Applied to
-/// the decoded RGBA buffer at load time so later renders just upload the
-/// blurred texture; no per-frame shader needed. Returns `false` if the scratch
-/// buffer can't be allocated.
-///
-/// `radius` clamped to a sane range (1..=16). A 1080p image at
-/// radius 8 blurs in ~30-50ms on a modern CPU — acceptable for a
-/// one-time startup cost (background_image config rarely
-/// changes mid-session).
-///
-/// CPU blur runs once at decode time; rendering needs no per-frame blur shader.
+/// Blur premultiplied linear RGBA with three separable box passes.
+/// Radius is capped at 16; allocation failure leaves the image unchanged.
 fn box_blur(img: &mut BgImage, radius: u32) -> bool {
     if radius == 0 || img.width == 0 || img.height == 0 {
         return true;
@@ -280,11 +238,8 @@ fn home_dir() -> Option<String> {
     None
 }
 
-/// Resolve a configured `background-image` path: trims, expands a leading `~/`
-/// via [`home_dir`], and confirms the file exists. Shared by the single-frame
-/// and animated decoders so `~/` handling + the not-found warning live in one
-/// place. Returns `None` (silently for an empty path; with a `log::warn`
-/// otherwise) on any failure.
+/// Expand leading `~/` through [`home_dir`] and require an existing path.
+/// Empty input returns `None` silently; other failures log a warning.
 fn resolve_bg_path(path: &str) -> Option<std::path::PathBuf> {
     if path.trim().is_empty() {
         return None;
@@ -312,13 +267,7 @@ fn resolve_bg_path(path: &str) -> Option<std::path::PathBuf> {
 pub fn decode_bg_image(path: &str) -> Option<BgImage> {
     let pb = resolve_bg_path(path)?;
     let p = pb.as_path();
-    // Bound the decoder against PNG/JPEG/GIF/WebP/BMP
-    // decompression bombs. `image::open` is a convenience wrapper
-    // that decodes the whole DynamicImage; an attacker-supplied
-    // file with header dimensions of 2^31 × 2^31 would OOM during
-    // decode without these limits. Same envelope as the PTY-layer
-    // decompression-bomb fix in kettle-vt; surfaces a `log::warn` on
-    // exceedance and returns None (the bg-image just doesn't load).
+    // Apply pixel and allocation limits before decoding user-provided data.
     let reader = match image::ImageReader::open(p) {
         Ok(r) => r,
         Err(e) => {
