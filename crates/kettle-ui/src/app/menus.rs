@@ -2,6 +2,41 @@
 
 use super::*;
 
+impl ContextMenuState {
+    fn enter_submenu(&mut self, index: usize) -> bool {
+        let nested = match self.items.get(index) {
+            Some(ContextMenuItem::Submenu { items, .. }) if !items.is_empty() => items.clone(),
+            _ => return false,
+        };
+        self.drill_stack.push(ContextMenuLevel {
+            items: std::mem::replace(&mut self.items, nested),
+            highlight: index,
+            scroll_offset: self.scroll_offset,
+        });
+        self.highlight = self
+            .items
+            .iter()
+            .position(item_is_dispatchable)
+            .unwrap_or(0);
+        self.scroll_offset = 0;
+        self.typeahead_buf.clear();
+        self.typeahead_until = None;
+        true
+    }
+
+    fn leave_submenu(&mut self) -> bool {
+        let Some(parent) = self.drill_stack.pop() else {
+            return false;
+        };
+        self.items = parent.items;
+        self.highlight = parent.highlight;
+        self.scroll_offset = parent.scroll_offset;
+        self.typeahead_buf.clear();
+        self.typeahead_until = None;
+        true
+    }
+}
+
 impl App {
     /// Build the right-click context-menu item list. Each `Item`'s
     /// `enabled` flag is computed from current state: Copy needs a
@@ -660,7 +695,6 @@ impl App {
             highlight,
             drill_stack: Vec::new(),
             scroll_offset: 0,
-            scroll_stack: Vec::new(),
             typeahead_buf: String::new(),
             typeahead_until: None,
         });
@@ -989,27 +1023,7 @@ impl App {
             // Keep the menu open: swap the visible level for the submenu.
             ContextMenuClick::DrillIntoSubmenu(idx) => {
                 if let Some(menu) = ws.context_menu.as_mut() {
-                    let nested_items = match menu.items.get(idx) {
-                        Some(ContextMenuItem::Submenu { items, .. }) => items.clone(),
-                        _ => Vec::new(),
-                    };
-                    if !nested_items.is_empty() {
-                        let parent = std::mem::replace(&mut menu.items, nested_items);
-                        menu.drill_stack.push(parent);
-                        // Each level keeps its own scroll view.
-                        menu.scroll_stack.push(menu.scroll_offset);
-                        menu.scroll_offset = 0;
-                        // Drilling resets any in-progress typeahead so a
-                        // half-typed parent prefix doesn't bleed into the
-                        // child level.
-                        menu.typeahead_buf.clear();
-                        menu.typeahead_until = None;
-                        menu.highlight = menu
-                            .items
-                            .iter()
-                            .position(item_is_dispatchable)
-                            .unwrap_or(0);
-                    }
+                    menu.enter_submenu(idx);
                 }
                 let (width, height) = ws
                     .renderer
@@ -1343,20 +1357,11 @@ impl App {
     /// Esc / `h` semantics: pop a drilled-in submenu back to its parent, or
     /// close the menu when at the top level.
     pub(super) fn context_menu_back(&mut self, ws: &mut WindowState) {
-        if let Some(menu) = ws.context_menu.as_mut()
-            && let Some(parent) = menu.drill_stack.pop()
+        if ws
+            .context_menu
+            .as_mut()
+            .is_some_and(ContextMenuState::leave_submenu)
         {
-            menu.items = parent;
-            // Restore the parent level's
-            // scroll_offset so popping out of a deep theme
-            // list doesn't snap the parent's scroll position
-            // to 0.
-            menu.scroll_offset = menu.scroll_stack.pop().unwrap_or(0);
-            menu.highlight = menu
-                .items
-                .iter()
-                .position(item_is_dispatchable)
-                .unwrap_or(0);
             let (width, height) = ws
                 .renderer
                 .as_ref()
@@ -1582,6 +1587,104 @@ impl App {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(count: usize) -> Vec<ContextMenuItem> {
+        (0..count)
+            .map(|i| ContextMenuItem::DynamicItem {
+                label: format!("Row {i}"),
+                action: Action::Paste,
+                enabled: true,
+            })
+            .collect()
+    }
+
+    fn menu(items: Vec<ContextMenuItem>) -> ContextMenuState {
+        ContextMenuState {
+            anchor: (0.0, 0.0),
+            anchor_scale: 1.0,
+            items,
+            highlight: 0,
+            drill_stack: Vec::new(),
+            scroll_offset: 0,
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        }
+    }
+
+    #[test]
+    fn submenu_back_restores_each_scrolled_parent() {
+        let mut child = rows(20);
+        child[17] = ContextMenuItem::Submenu {
+            label: "Nested".into(),
+            items: vec![
+                ContextMenuItem::Separator,
+                ContextMenuItem::Item {
+                    label: "Disabled",
+                    action: Action::Paste,
+                    enabled: false,
+                },
+                ContextMenuItem::Item {
+                    label: "Enabled",
+                    action: Action::Paste,
+                    enabled: true,
+                },
+            ],
+        };
+        let mut root = rows(30);
+        root[28] = ContextMenuItem::Submenu {
+            label: "Preferences".into(),
+            items: child,
+        };
+        let mut menu = menu(root);
+        menu.scroll_offset = 20;
+        assert!(menu.enter_submenu(28));
+        assert_eq!((menu.highlight, menu.scroll_offset), (0, 0));
+        menu.scroll_offset = 12;
+        assert!(menu.enter_submenu(17));
+        assert_eq!((menu.highlight, menu.scroll_offset), (2, 0));
+        menu.typeahead_buf = "child".into();
+        menu.typeahead_until = Some(std::time::Instant::now());
+
+        assert!(menu.leave_submenu());
+        assert_eq!((menu.highlight, menu.scroll_offset), (17, 12));
+        assert!(menu.typeahead_buf.is_empty() && menu.typeahead_until.is_none());
+        assert_eq!(
+            context_menu_scroll_for_highlight(&menu.items, 12, 17, 60.0, 10.0, 2.0),
+            12,
+        );
+        assert!(menu.leave_submenu());
+        assert_eq!((menu.highlight, menu.scroll_offset), (28, 20));
+        assert_eq!(
+            context_menu_scroll_for_highlight(&menu.items, 20, 28, 90.0, 10.0, 2.0),
+            20,
+        );
+        assert!(!menu.leave_submenu());
+    }
+
+    #[test]
+    fn invalid_submenus_leave_the_current_level_unchanged() {
+        let mut items = rows(2);
+        items[1] = ContextMenuItem::Submenu {
+            label: "Empty".into(),
+            items: Vec::new(),
+        };
+        let mut menu = menu(items);
+        menu.highlight = 1;
+        menu.scroll_offset = 1;
+        menu.typeahead_buf = "parent".into();
+        for index in [0, 1, usize::MAX] {
+            assert!(!menu.enter_submenu(index));
+            assert_eq!(menu.items.len(), 2);
+            assert_eq!((menu.highlight, menu.scroll_offset), (1, 1));
+            assert_eq!(menu.typeahead_buf, "parent");
+            assert!(menu.drill_stack.is_empty());
         }
     }
 }

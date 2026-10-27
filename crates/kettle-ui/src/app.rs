@@ -7947,40 +7947,23 @@ pub(crate) struct ContextMenuState {
     /// keeps the same logical relationship to the pointer.
     anchor_scale: f64,
     items: Vec<ContextMenuItem>,
-    /// Index of the currently highlighted item — always points at an
-    /// enabled `Item`, never a `Separator` or disabled row. Updated by
-    /// keyboard nav (`↑↓`) and mouse hover.
+    /// Selected dispatchable row; never a separator or disabled row.
     highlight: usize,
-    /// Drill-in stack. When the user clicks a `Submenu` row, the
-    /// parent's items are pushed here and replaced by the submenu's
-    /// items. Esc / "Back" pops back to the parent.
-    ///
-    /// The stack supports arbitrary depth; current built-in menus are shallow.
-    drill_stack: Vec<Vec<ContextMenuItem>>,
-    /// Scroll offset for long submenus (Theme has ~512 entries).
-    /// `panel_h` is clamped to fit the surface, the visible window
-    /// is `[scroll_offset, scroll_offset + max_visible_rows)`, and
-    /// wheel / `↑↓` past the last visible row advances `scroll_offset`.
-    /// Drill-in resets it to 0; drill-pop restores the parent's value
-    /// from `scroll_stack`.
+    /// Parent levels, including the selected submenu and scroll position.
+    drill_stack: Vec<ContextMenuLevel>,
+    /// First visible item in a height-clamped menu.
     scroll_offset: usize,
-    /// Parallel stack to `drill_stack`: the scroll_offset to restore
-    /// when popping back to each level. Same length as `drill_stack`
-    /// at all times.
-    scroll_stack: Vec<usize>,
-    /// Typeahead buffer (Terminator menu UX). As the
-    /// user types A-Z chars, we accumulate them here and best-match
-    /// against item labels (case-insensitive prefix). A single char
-    /// also resolves to a mnemonic (first matchable char of any
-    /// row), so common items like Copy = 'C' / Theme = 'T' are
-    /// one-keystroke; multi-char "th" → Theme by prefix.
-    ///
-    /// Cleared after 750ms of inactivity (`typeahead_until`) so a
-    /// pause restarts the buffer instead of accumulating forever.
+    /// Pending keyboard prefix, cleared after 750ms of inactivity.
     typeahead_buf: String,
     /// Deadline after which `typeahead_buf` is cleared
     /// on the next key. `None` when the buffer is empty.
     typeahead_until: Option<std::time::Instant>,
+}
+
+struct ContextMenuLevel {
+    items: Vec<ContextMenuItem>,
+    highlight: usize,
+    scroll_offset: usize,
 }
 
 /// Pure: which segment index the tab-bar cursor falls in,
