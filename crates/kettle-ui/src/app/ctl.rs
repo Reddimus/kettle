@@ -1042,7 +1042,8 @@ impl App {
                         | ContextMenuItem::WindowChoice { label, .. } => label.as_str(),
                         ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
                         ContextMenuItem::UrlItem { label, .. } => *label,
-                        ContextMenuItem::Media { label, .. } => *label,
+                        ContextMenuItem::Media { label, .. }
+                        | ContextMenuItem::Preview { label, .. } => *label,
                         ContextMenuItem::Info { label } => label.as_str(),
                         ContextMenuItem::Separator => "",
                     };
