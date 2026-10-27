@@ -68,13 +68,6 @@ The signed Windows MSI and its code-signing certificate are off the roadmap
 because Windows distribution ended with 3.3.0. Since 4.0.0, Windows is only a
 compile and regression CI leg; releases ship no Windows archive or installer.
 
-## Upstream blockers
-
-* The font stack still carries `fontdb 0.23` through `cosmic-text 0.19`.
-  `fontdb 0.24` removes the older parser dependency, but the workspace cannot
-  adopt it until the text stack publishes a compatible release. Track this in
-  issue #36 rather than adding a local fork without a separate design review.
-
 ## Quality bar
 
 Every behavior change needs a focused regression test. Platform code must also
