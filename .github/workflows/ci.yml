@@ -29,9 +29,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the oldest supported Fish minor
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fish
+          scripts/install-ci-linux-deps.sh fish
           fish --version | grep -E '^fish, version 3\.7\.'
       - name: Run native shell integration fixtures
         run: |
@@ -94,17 +94,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: CI package setup fixtures
+        if: runner.os != 'Windows'
+        run: python3 scripts/test-ci-linux-deps.py
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
           components: clippy, rustfmt
       - name: Linux deps
         if: runner.os == 'Linux'
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
+          scripts/install-ci-linux-deps.sh pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb fish xclip x11-utils libxtst6 dbus-daemon ffmpeg
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb xauth fonts-dejavu-core fish xclip x11-utils libxtst6 dbus-daemon ffmpeg
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Validate this host's recipe graph before expensive Rust builds. Run on
       # all matrix hosts: a common recipe cannot depend on a Unix-only recipe.
@@ -957,11 +960,11 @@ jobs:
         with:
           toolchain: "1.95"
       - name: Linux deps
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
+          scripts/install-ci-linux-deps.sh pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb dbus-daemon
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb xauth fonts-dejavu-core dbus-daemon
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: msrv-1.95
@@ -990,11 +993,11 @@ jobs:
         with:
           toolchain: nightly
       - name: Linux deps
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
+          scripts/install-ci-linux-deps.sh pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb dbus-daemon
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb xauth fonts-dejavu-core dbus-daemon
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: nightly
@@ -1025,9 +1028,8 @@ jobs:
           toolchain: stable
           targets: aarch64-unknown-linux-gnu
       - name: aarch64 GNU cross-linker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+        timeout-minutes: 5
+        run: scripts/install-ci-linux-deps.sh gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: aarch64-linux
