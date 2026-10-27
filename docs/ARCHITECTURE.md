@@ -98,8 +98,7 @@ rendered as that, with a typed reply that says which. A PDF page is drawn by
 hayro (`pdf.rs`), whose parser is the patched local copy, on white and placed
 as an SVG is; the worker renders one only when it confined itself, since hayro
 parses the document in-process and is younger than the rest. A gallery is the Mermaid fences
-of one CommonMark document (pulldown-cmark, the version merman-render
-already locks), at most 32 of at most 64 KiB each in at most 1 MiB; its
+of one CommonMark document (pulldown-cmark, shared with merman-render), at most 32 of at most 64 KiB each in at most 1 MiB; its
 reply carries every page, the document as read and its digest beside the
 one page rendered, so later pages render from those bytes and one gallery
 is one version of the file. Video stills are laid out here too
@@ -3042,6 +3041,10 @@ no context reads, clock queries, formatting or writes.
   hit-testing streams separator flags without a temporary collection, and the
   wheel clamp finds its final fitting suffix in one reverse pass; both are
   O(menu items).
+- **System launchers** run off the UI thread for URL clicks, Help and config
+  editing, with at most four active launches. Local file-link checks have a
+  separate four-worker limit. Admission and launcher failures retain each
+  action's logging and notification policy.
 - **Lua VM** is parked on the App struct (single-threaded
   `LuaEngine`) — `mlua`'s `send` feature makes the handle `Send + Sync`
   but kettle never clones it across threads. Event hooks
