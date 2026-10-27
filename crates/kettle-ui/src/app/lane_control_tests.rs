@@ -97,6 +97,348 @@ fn video(seconds: u64) -> kettle_media::VideoInfo {
 }
 
 #[test]
+fn preview_menu_actions_keep_the_item_generation_and_view_mode() {
+    use super::PreviewMenuTarget;
+    use kettle_render::MediaLaneMode;
+
+    let mut image = item(7, kettle_media::MediaKind::Svg, b"<svg/>");
+    let mut panel = crate::window_state::PreviewPanel::new(image.id);
+    let target = PreviewMenuTarget {
+        pane: 3,
+        item: image.id,
+        generation: image.generation,
+        mode: MediaLaneMode::Rendered,
+    };
+    assert!(target.matches(&image, &panel));
+    image.generation += 1;
+    assert!(
+        !target.matches(&image, &panel),
+        "replacement must not retarget a menu"
+    );
+    image.generation -= 1;
+    panel.mode = MediaLaneMode::Source;
+    assert!(
+        !target.matches(&image, &panel),
+        "a different view must not change what Copy means"
+    );
+    panel.mode = MediaLaneMode::Rendered;
+    panel.item += 1;
+    assert!(
+        !target.matches(&image, &panel),
+        "another preview cannot receive the action"
+    );
+}
+
+#[test]
+fn preview_menu_copy_names_describe_the_clipboard_content() {
+    use super::{ContextMenuClick, ContextMenuItem, PreviewMenuAction, PreviewMenuTarget};
+    use kettle_i18n::{Language, Translator};
+    use kettle_render::{MediaLaneMode as M, MediaLanePlay as P};
+
+    for (kind, expected) in [
+        ("image", "Copy image"),
+        ("document", "Copy page as image"),
+        ("video", "Copy frame"),
+        ("source", "Copy source"),
+    ] {
+        let mut lane = super::tests::test_lane_panel();
+        lane.rect = (0.0, 0.0, 1200.0, 800.0);
+        lane.pin_label = Some("Pin".into());
+        lane.document = kind == "document";
+        if kind == "document" {
+            lane.page = Some((1, 2));
+        }
+        if kind == "video" {
+            lane.play = Some(P::Play);
+            lane.scrubber = Some(kettle_render::MediaLaneScrubber {
+                seekable: false,
+                position_ms: 0,
+                duration_ms: 1000,
+                label: "0:00 / 0:01".into(),
+            });
+        }
+        if kind == "source" {
+            lane.mode = M::Source;
+            lane.source = Some(kettle_render::MediaLaneSource {
+                rows: vec!["<svg/>".into()],
+                first_row: 0,
+                total_rows: 1,
+            });
+        }
+        let geometry = kettle_render::media_lane_geometry(&lane, (8.0, 16.0), (8.0, 16.0)).unwrap();
+        let target = PreviewMenuTarget {
+            pane: 7,
+            item: 9,
+            generation: 4,
+            mode: lane.mode,
+        };
+        let rows = super::menus::preview_menu_items(
+            target,
+            &lane,
+            geometry.full,
+            None,
+            Translator::new(Language::En),
+        );
+        let copies: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                ContextMenuItem::Preview {
+                    label,
+                    action: PreviewMenuAction::Copy(mode),
+                    ..
+                } => Some((*label, *mode)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(copies, [(expected, lane.mode)], "{kind}");
+        for (index, row) in rows.iter().enumerate() {
+            if matches!(row, ContextMenuItem::Separator) {
+                continue;
+            }
+            assert!(super::item_is_dispatchable(row));
+            assert!(
+                matches!(super::item_to_click(row, index), Some(ContextMenuClick::Preview { target: bound, .. }) if bound == target)
+            );
+        }
+    }
+}
+
+#[test]
+fn preview_menu_keeps_supported_actions_when_the_toolbar_overflows() {
+    use super::{ContextMenuItem, PreviewMenuTarget};
+    use kettle_i18n::{Language, Translator};
+    use kettle_render::{MediaLaneMode as M, MediaLanePlay as P, MediaLaneSound as S};
+
+    for kind in ["image", "document", "video"] {
+        let mut lane = super::tests::test_lane_panel();
+        lane.rect = (0.0, 0.0, 1200.0, 800.0);
+        lane.reload = true;
+        lane.open_outside = true;
+        lane.page = Some((2, 3));
+        if kind == "image" {
+            lane.source = Some(kettle_render::MediaLaneSource {
+                rows: vec!["<svg/>".into()],
+                first_row: 0,
+                total_rows: 1,
+            });
+        } else if kind == "document" {
+            lane.document = true;
+        } else {
+            lane.page = None;
+            lane.pin_label = Some("Pin".into());
+            lane.play = Some(P::Pause);
+            lane.sound = Some(S::Heard);
+        }
+        let target = PreviewMenuTarget {
+            pane: 7,
+            item: 9,
+            generation: 4,
+            mode: M::Rendered,
+        };
+        let rows = |lane: &kettle_render::MediaLanePanel,
+                    geometry: &kettle_render::MediaLaneGeometry| {
+            super::menus::preview_menu_items(
+                target,
+                lane,
+                geometry.full,
+                None,
+                Translator::new(Language::En),
+            )
+            .into_iter()
+            .filter_map(|row| match row {
+                ContextMenuItem::Preview { label, action, .. } => Some((label, action)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+        };
+        let wide = kettle_render::media_lane_geometry(&lane, (10.0, 16.0), (10.0, 16.0)).unwrap();
+        let expected = rows(&lane, &wide);
+        lane.rect.2 = 160.0;
+        let narrow = kettle_render::media_lane_geometry(&lane, (10.0, 16.0), (10.0, 16.0)).unwrap();
+        assert!(narrow.full, "{kind} still has visible content");
+        assert!(narrow.copy.is_none(), "{kind} toolbar has overflowed");
+        assert_eq!(rows(&lane, &narrow), expected, "{kind}");
+    }
+}
+
+#[test]
+fn preview_menu_uses_available_controls_and_does_not_offer_empty_copy() {
+    use super::{ContextMenuItem, PreviewMenuAction as A, PreviewMenuTarget};
+    use kettle_i18n::{Language, Translator};
+    use kettle_render::{MediaLaneHit as H, MediaLaneMode as M, MediaLaneSource};
+
+    let mut lane = super::tests::test_lane_panel();
+    lane.rect = (0.0, 0.0, 1200.0, 800.0);
+    lane.pin_label = Some("Pin".into());
+    lane.source = Some(MediaLaneSource {
+        rows: vec!["<svg/>".into()],
+        first_row: 0,
+        total_rows: 1,
+    });
+    let target = PreviewMenuTarget {
+        pane: 7,
+        item: 9,
+        generation: 4,
+        mode: M::Rendered,
+    };
+    let actions = |lane: &kettle_render::MediaLanePanel| {
+        let geometry = kettle_render::media_lane_geometry(lane, (8.0, 16.0), (8.0, 16.0)).unwrap();
+        super::menus::preview_menu_items(
+            target,
+            lane,
+            geometry.full,
+            None,
+            Translator::new(Language::En),
+        )
+        .into_iter()
+        .filter_map(|row| match row {
+            ContextMenuItem::Preview { action, .. } => Some(action),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+    };
+    let available = actions(&lane);
+    assert!(available.contains(&A::Copy(M::Rendered)));
+    assert!(
+        available.contains(&A::Copy(M::Source)),
+        "source can be copied without switching views"
+    );
+    assert!(available.contains(&A::Control(H::ZoomIn)));
+    assert!(available.contains(&A::Control(H::Pin)));
+    assert!(
+        !available.contains(&A::Control(H::Play)),
+        "images do not offer video controls"
+    );
+    lane.image = None;
+    lane.source = None;
+    lane.copy = false;
+    let unavailable = actions(&lane);
+    assert!(
+        !unavailable
+            .iter()
+            .any(|action| matches!(action, A::Copy(_)))
+    );
+    assert!(!unavailable.contains(&A::Control(H::ZoomIn)));
+    assert!(unavailable.contains(&A::Control(H::Close)));
+}
+
+#[test]
+fn preview_menu_pages_stop_at_document_boundaries() {
+    use super::{ContextMenuItem, PreviewMenuAction as A, PreviewMenuTarget};
+    use kettle_i18n::{Language, Translator};
+    use kettle_render::{MediaLaneHit as H, MediaLaneMode as M};
+    let mut lane = super::tests::test_lane_panel();
+    lane.rect = (0.0, 0.0, 1200.0, 800.0);
+    lane.document = true;
+    let target = PreviewMenuTarget {
+        pane: 7,
+        item: 9,
+        generation: 4,
+        mode: M::Rendered,
+    };
+    for (index, previous, next) in [(1, false, true), (2, true, false)] {
+        lane.page = Some((index, 2));
+        let geometry = kettle_render::media_lane_geometry(&lane, (8.0, 16.0), (8.0, 16.0)).unwrap();
+        let actions: Vec<_> = super::menus::preview_menu_items(
+            target,
+            &lane,
+            geometry.full,
+            None,
+            Translator::new(Language::En),
+        )
+        .into_iter()
+        .filter_map(|row| match row {
+            ContextMenuItem::Preview { action, .. } => Some(action),
+            _ => None,
+        })
+        .collect();
+        assert_eq!(actions.contains(&A::Control(H::PreviousPage)), previous);
+        assert_eq!(actions.contains(&A::Control(H::NextPage)), next);
+    }
+}
+
+#[test]
+fn preview_menu_playback_rows_capture_the_named_command() {
+    use super::{ContextMenuItem, PreviewMenuAction as A, PreviewMenuTarget};
+    use kettle_i18n::{Language, Translator};
+    use kettle_render::{MediaLaneMode as M, MediaLanePlay as P, MediaLaneSound as S};
+    let mut lane = super::tests::test_lane_panel();
+    lane.rect = (0.0, 0.0, 1200.0, 800.0);
+    lane.pin_label = Some("Pin".into());
+    lane.play = Some(P::Pause);
+    lane.sound = Some(S::Heard);
+    lane.scrubber = Some(kettle_render::MediaLaneScrubber {
+        seekable: true,
+        position_ms: 100,
+        duration_ms: 1000,
+        label: "0:00 / 0:01".into(),
+    });
+    let geometry = kettle_render::media_lane_geometry(&lane, (8.0, 16.0), (8.0, 16.0)).unwrap();
+    let target = PreviewMenuTarget {
+        pane: 7,
+        item: 9,
+        generation: 4,
+        mode: M::Rendered,
+    };
+    let actions: Vec<_> = super::menus::preview_menu_items(
+        target,
+        &lane,
+        geometry.full,
+        None,
+        Translator::new(Language::En),
+    )
+    .into_iter()
+    .filter_map(|row| match row {
+        ContextMenuItem::Preview { action, .. } => Some(action),
+        _ => None,
+    })
+    .collect();
+    assert!(actions.contains(&A::Play(P::Pause)));
+    assert!(actions.contains(&A::Sound(S::Heard)));
+}
+
+#[test]
+fn preview_menu_expansion_rows_set_the_named_state() {
+    use super::{ContextMenuItem, PreviewMenuAction as A, PreviewMenuTarget};
+    use kettle_i18n::{Language, Translator};
+    use kettle_render::{MediaLaneHit as H, MediaLaneMode as M};
+    let mut lane = super::tests::test_lane_panel();
+    lane.rect = (0.0, 0.0, 1200.0, 800.0);
+    let target = PreviewMenuTarget {
+        pane: 7,
+        item: 9,
+        generation: 4,
+        mode: M::Rendered,
+    };
+    for collapsed in [false, true] {
+        lane.collapsed = collapsed;
+        let geometry = kettle_render::media_lane_geometry(&lane, (8.0, 16.0), (8.0, 16.0)).unwrap();
+        let rows = super::menus::preview_menu_items(
+            target,
+            &lane,
+            geometry.full,
+            None,
+            Translator::new(Language::En),
+        );
+        let label = if collapsed {
+            "Expand preview"
+        } else {
+            "Collapse preview"
+        };
+        assert!(rows.iter().any(|row| matches!(row,
+            ContextMenuItem::Preview { label: shown, action: A::Expanded(value), .. }
+                if *shown == label && *value == collapsed)));
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            ContextMenuItem::Preview {
+                action: A::Control(H::Toggle),
+                ..
+            }
+        )));
+    }
+}
+
+#[test]
 fn copying_a_paused_video_uses_the_displayed_frame() {
     use kettle_media::session::{SessionFrame, SessionStatus};
 
@@ -1771,7 +2113,10 @@ fn lane_content_actions_are_wired() {
             .and_then(|rest| rest.split("\n    fn ").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
-    let copy = body("copy_preview");
+    let wrapper = body("copy_preview");
+    assert!(wrapper.contains("lane_mode(item, panel)"));
+    assert!(wrapper.contains("self.copy_preview_in_mode(ws, pane, mode);"));
+    let copy = body("copy_preview_in_mode");
     assert!(copy.contains("kettle_render::MediaLaneMode::Source => item"));
     assert!(copy.contains(".map(|text| crate::media::CopyContent::Text(Arc::clone(text)))"));
     assert!(copy.contains(".map(crate::media::CopyContent::Image)"));
@@ -1942,7 +2287,9 @@ fn a_lane_without_a_source_shows_and_copies_rendered() {
             .and_then(|rest| rest.split("\n    fn ").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
-    assert!(body("copy_preview").contains("let content = match lane_mode(item, panel) {"));
+    assert!(body("copy_preview").contains("lane_mode(item, panel)"));
+    assert!(body("copy_preview").contains("self.copy_preview_in_mode(ws, pane, mode);"));
+    assert!(body("copy_preview_in_mode").contains("let content = match mode {"));
     let scroll = body("scroll_preview_lane");
     assert!(scroll.contains("lane_mode(item, panel) == kettle_render::MediaLaneMode::Source"));
     assert!(scroll.contains("source_scroll_by(steps, ws.mods.shift_key());"));

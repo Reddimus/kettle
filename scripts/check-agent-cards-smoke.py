@@ -8,6 +8,7 @@ import os
 import platform
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -76,6 +77,187 @@ def npm_fixture(root, agent, node):
     return binary
 
 
+def check_preview_menu(app, native, destination, kind, asset):
+    """Use native input and the private X11 clipboard after opening a real card."""
+    geometry = lambda: app.json_ctl("ui_geometry")
+    viewer = lambda: geometry().get("preview_overlay")
+    window = wait_for(lambda: native.windows(app.pid))[-1]
+    terminal = app.json_ctl("read_screen")["text"]
+    checked = []
+
+    def click(rect, button=1):
+        native.move(window, int(rect["x"] + rect["width"] / 2),
+                    int(rect["y"] + rect["height"] / 2))
+        native.button(button, True)
+        native.button(button, False)
+
+    def open_menu():
+        panel = viewer() or geometry()["preview_lanes"][0]
+        click(panel["rect"] if panel["state"] == "strip" else
+              (panel.get("image") or panel["content"]), button=3)
+        menu = wait_for(lambda: geometry().get("context_menu"))
+        assert viewer() or geometry()["preview_lanes"], "menu closed its preview"
+        return {row["label"] for row in menu["rows"] if row["dispatchable"]}
+
+    def choose(label):
+        row = live.visible_context_row(live.reveal_context_row(app, label), label)
+        click(row["rect"])
+        wait_for(lambda: not geometry().get("context_menu"))
+
+    def copy(label, name, text=None):
+        owner = live.set_text_clipboard("KETTLE_PREVIEW_MENU_SENTINEL")
+        try:
+            open_menu()
+            choose(label)
+
+            def read():
+                result = subprocess.run(
+                    ["xclip", "-selection", "clipboard", "-out", "-target",
+                     "UTF8_STRING" if text is not None else "image/png"],
+                    capture_output=True, timeout=3, check=False,
+                )
+                if result.returncode:
+                    return None
+                if text is not None:
+                    return result.stdout if result.stdout == text.encode() else None
+                return result.stdout if result.stdout.startswith(b"\x89PNG\r\n\x1a\n") else None
+
+            data = wait_for(read)
+            if text is None:
+                width, height = struct.unpack(">II", data[16:24])
+                assert width > 0 and height > 0
+                (destination / name).write_bytes(data)
+                if kind == "png":
+                    assert (width, height) == (160, 100)
+                    _, _, rows = live.read_rgba_png(destination / name)
+                    expected = [b"".join(bytes(((x * 4) % 256, (y * 5) % 256, 160, 255))
+                                         for x in range(width)) for y in range(height)]
+                    assert rows == expected, "image copy changed the fixture's pixels"
+            assert viewer() or geometry()["preview_lanes"], "copy closed its preview"
+            checked.append(label)
+            return data
+        finally:
+            if owner is not None:
+                if owner.poll() is None:
+                    owner.terminate()
+                owner.wait(timeout=5)
+
+    labels = open_menu()
+    (destination / "preview-menu.json").write_text(json.dumps(geometry(), indent=2) + "\n")
+    app.screenshot(destination / "preview-menu.png")
+    expected = "Copy frame" if kind == "video" else "Copy page as image" if kind == "pdf" else "Copy image"
+    if kind == "file":
+        assert not any(label.startswith("Copy ") for label in labels), labels
+    else:
+        assert expected in labels, labels
+    native.keys("Escape")
+    wait_for(lambda: not geometry().get("context_menu"))
+    assert viewer(), "Escape closed the preview instead of its menu"
+    native.keys("Shift_L", "F10")
+    wait_for(lambda: geometry().get("context_menu"))
+    native.keys("Escape")
+    wait_for(lambda: not geometry().get("context_menu"))
+    assert viewer()
+    checked.append("right click; Shift+F10; Escape preserves preview")
+
+    if kind != "file":
+        first = copy(expected, "copied.png")
+    if kind in ("svg", "mermaid"):
+        copy("Copy source", "source.txt", text=asset.read_text())
+        assert viewer()["mode"] == "rendered", "Copy source changed the viewing mode"
+        open_menu()
+        choose("Show source")
+        wait_for(lambda: viewer()["mode"] == "source")
+        assert "Copy image" not in open_menu()
+        native.keys("Escape")
+        wait_for(lambda: not geometry().get("context_menu"))
+        copy("Copy source", "source.txt", text=asset.read_text())
+        open_menu()
+        choose("Show rendered")
+        wait_for(lambda: viewer()["mode"] == "rendered")
+    if kind == "pdf":
+        assert "Previous page" not in open_menu()
+        choose("Next page")
+        def last_page_menu():
+            labels = open_menu()
+            if "Previous page" in labels and "Next page" not in labels:
+                return True
+            native.keys("Escape")
+            wait_for(lambda: not geometry().get("context_menu"))
+            return False
+
+        wait_for(last_page_menu)
+        assert "Next page" not in {row["label"] for row in geometry()["context_menu"]["rows"]}
+        native.keys("Escape")
+        wait_for(lambda: not geometry().get("context_menu"))
+        assert first != copy(expected, "copied-page-2.png"), "page copy retained the first page"
+        checked.append("document page bounds and distinct page pixels")
+    if kind == "video":
+        open_menu()
+        choose("Play video")
+        wait_for(lambda: viewer().get("playback", {}).get("state") == "playing")
+        time.sleep(0.4)
+        open_menu()
+        choose("Pause video")
+        wait_for(lambda: viewer().get("playback", {}).get("state") == "paused")
+        paused = copy(expected, "copied-paused-frame.png")
+        assert paused == copy(expected, "copied-paused-frame-again.png")
+        checked.append("menu playback controls and stable paused frame")
+    if kind == "png":
+        open_menu()
+        choose("Pin beside terminal")
+        wait_for(lambda: not viewer() and geometry()["preview_lanes"])
+        surface = geometry()["surface"]
+        app.json_ctl("resize_window", {"width": 240, "height": 140})
+        wait_for(lambda: geometry()["preview_lanes"][0]["state"] == "strip")
+        open_menu()
+        (destination / "strip-menu.json").write_text(json.dumps(geometry(), indent=2) + "\n")
+        choose("Expand preview")
+        app.json_ctl("resize_window", surface)
+        try:
+            wait_for(lambda: geometry()["preview_lanes"][0]["state"] == "expanded")
+        finally:
+            (destination / "expansion-after-resize.json").write_text(json.dumps(geometry(), indent=2) + "\n")
+        assert "Copy image" in open_menu()
+        choose("Close preview")
+        wait_for(lambda: not geometry()["preview_lanes"])
+        checked.append("pinned lane menu, expansion after constrained resize, and close")
+    if kind == "svg":
+        open_menu()
+        choose("Pin beside terminal")
+        wait_for(lambda: not viewer() and geometry()["preview_lanes"])
+        surface = geometry()["surface"]
+        app.json_ctl("resize_window", {"width": 400, "height": surface["height"]})
+        wait_for(lambda: geometry()["surface"]["width"] == 400 and
+                 geometry()["preview_lanes"][0]["state"] == "expanded")
+        lane = geometry()["preview_lanes"][0]
+        assert lane["image"] and "copy" not in lane["controls"], lane
+        wanted = {"Copy image", "Copy source", "Show source", "Zoom in", "Zoom out", "Fit preview"}
+        wanted.update(label for label in labels if label.startswith("Open in "))
+        assert wanted <= open_menu()
+        (destination / "narrow-menu.json").write_text(json.dumps(geometry(), indent=2) + "\n")
+        app.screenshot(destination / "narrow-menu.png")
+        native.keys("Escape")
+        wait_for(lambda: not geometry().get("context_menu"))
+        copy("Copy image", "narrow-copied.png")
+        copy("Copy source", "narrow-source.txt", text=asset.read_text())
+        assert geometry()["preview_lanes"][0]["mode"] == "rendered"
+        open_menu()
+        choose("Zoom in")
+        wait_for(lambda: geometry()["preview_lanes"][0]["zoom"] > 1)
+        open_menu()
+        choose("Fit preview")
+        wait_for(lambda: geometry()["preview_lanes"][0]["zoom"] == 1)
+        app.json_ctl("resize_window", surface)
+        wait_for(lambda: geometry()["surface"] == surface)
+        open_menu()
+        choose("Close preview")
+        wait_for(lambda: not geometry()["preview_lanes"])
+        checked.append("narrow preview keeps copy, source, zoom, fit and external-viewer options")
+    assert app.json_ctl("read_screen")["text"] == terminal, "preview menu typed into the terminal"
+    return checked
+
+
 def check_case(app, binary, root, out, name, target, scoped, path, asset, native, kind="svg", version=None):
     case = root / name
     case.mkdir(mode=0o700)
@@ -111,7 +293,8 @@ def check_case(app, binary, root, out, name, target, scoped, path, asset, native
         assert delivery == ("card" if scoped else "shelf"), model
         receipt = model["result"]["structuredContent"]
         assert receipt["model_has_seen"] is False and receipt["verified"] is True
-        assert receipt["kind"] == {"png": "raster", "jpg": "raster", "webp": "raster"}.get(kind, kind)
+        assert receipt["kind"] == {"png": "raster", "jpg": "raster", "webp": "raster", "gif": "raster"}.get(kind, kind)
+        menu_checks = []
         if scoped:
             wait_for(lambda: app.json_ctl("ui_geometry")["inline_cards"])
             wait_for(lambda: all(card["settled"] for card in app.json_ctl("ui_geometry")["inline_cards"]))
@@ -135,7 +318,10 @@ def check_case(app, binary, root, out, name, target, scoped, path, asset, native
             native.button(1, False)
             wait_for(lambda: app.json_ctl("ui_geometry")["preview_overlay"])
             app.screenshot(destination / "opened.png")
-            native.keys("Escape")
+            if name.startswith("native-codex-"):
+                menu_checks = check_preview_menu(app, native, destination, kind, asset)
+            if app.json_ctl("ui_geometry")["preview_overlay"]:
+                native.keys("Escape")
             wait_for(lambda: app.json_ctl("ui_geometry")["preview_overlay"] is None)
         else:
             assert not app.json_ctl("ui_geometry")["inline_cards"]
@@ -144,7 +330,8 @@ def check_case(app, binary, root, out, name, target, scoped, path, asset, native
         (case / "quit").write_text("quit\n")
         wait_for(lambda: all(not Path(f"/proc/{pid}").exists() for pid in pids))
         wait_for(lambda: not app.json_ctl("ui_geometry")["inline_cards"])
-        return {"case": name, "delivery": delivery, "pids": pids, "processes_closed": True}
+        return {"case": name, "delivery": delivery, "pids": pids,
+                "processes_closed": True, "preview_menu": menu_checks}
     except BaseException:
         (out / "failure-screen.json").write_text(json.dumps(app.json_ctl("read_screen"), indent=2) + "\n")
         raise
@@ -172,6 +359,7 @@ def check(kettle, worker, node, out):
                 "restore-session = false\nupdate-policy = off\nrecord = off\n"
                 "shell = /bin/sh\nlogin-shell = false\nshell-integration = false\n"
                 "agent-server = full\nagent-display = true\nagent-display-claude-code = true\n"
+                "preview-lane-side = right\n"
                 "cursor-blink = false\nwindow-width = 140\nwindow-height = 45\nstatus-bar = off\n"
             )
             environment = {"SHELL": "/bin/sh", "ENV": None, "BASH_ENV": None,

@@ -1,9 +1,6 @@
-//! A preview lane holding the keyboard (`focus_preview`). While it does,
-//! every key is the lane's: a few move, zoom, fit, page, copy what it shows
-//! or play or pause a video (left and right then step it), Esc gives the
-//! keyboard back to the terminal, and every other key
-//! and chord, Enter, digits and the application's shortcuts included, does
-//! nothing, so none reaches the program in the pane by accident.
+//! Keyboard handling for focused previews. Navigation, playback and viewer
+//! controls stay in the preview; Esc returns focus to the terminal. Other
+//! keys, including modified application shortcuts, are swallowed.
 
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
@@ -56,6 +53,7 @@ pub(crate) enum PreviewKey {
     Mute,
     Theater,
     Fullscreen,
+    Menu,
     /// Nothing: the key is the lane's all the same.
     Swallow,
 }
@@ -72,6 +70,7 @@ impl PreviewKey {
                 | Self::Mute
                 | Self::Theater
                 | Self::Fullscreen
+                | Self::Menu
                 | Self::Page(PageStep::First | PageStep::Last)
         )
     }
@@ -86,9 +85,7 @@ pub(crate) enum PageStep {
     Last,
 }
 
-/// What `key` with `mods` held does while a lane holds the keyboard. Shift
-/// counts only where it makes `+`; with Ctrl, Alt or the Command key held,
-/// every key is swallowed.
+/// Map preview keys; Ctrl, Alt and Command chords are swallowed.
 pub(crate) fn preview_key(key: &Key, mods: ModifiersState) -> PreviewKey {
     if mods.control_key() || mods.alt_key() || mods.super_key() {
         return PreviewKey::Swallow;
@@ -96,6 +93,8 @@ pub(crate) fn preview_key(key: &Key, mods: ModifiersState) -> PreviewKey {
     let shift = mods.shift_key();
     match key {
         Key::Named(NamedKey::Escape) => PreviewKey::Exit,
+        Key::Named(NamedKey::ContextMenu) if !shift => PreviewKey::Menu,
+        Key::Named(NamedKey::F10) if shift => PreviewKey::Menu,
         Key::Named(NamedKey::Space) if !shift => PreviewKey::Play,
         Key::Named(arrow) if !shift => match arrow {
             NamedKey::ArrowLeft => PreviewKey::Move(-1, 0),
@@ -126,6 +125,27 @@ pub(crate) fn preview_key(key: &Key, mods: ModifiersState) -> PreviewKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focused_previews_offer_standard_context_menu_keys_once() {
+        assert_eq!(
+            preview_key(&Key::Named(NamedKey::ContextMenu), ModifiersState::empty()),
+            PreviewKey::Menu
+        );
+        assert_eq!(
+            preview_key(&Key::Named(NamedKey::F10), ModifiersState::SHIFT),
+            PreviewKey::Menu
+        );
+        assert_eq!(
+            preview_key(&Key::Named(NamedKey::F10), ModifiersState::empty()),
+            PreviewKey::Swallow
+        );
+        assert_eq!(
+            preview_key(&Key::Named(NamedKey::ContextMenu), ModifiersState::CONTROL),
+            PreviewKey::Swallow
+        );
+        assert!(PreviewKey::Menu.once());
+    }
 
     #[test]
     fn video_shortcuts_toggle_once_and_never_accept_modified_chords() {

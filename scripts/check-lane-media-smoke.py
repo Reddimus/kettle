@@ -122,6 +122,10 @@ def card_fixtures(directory):
         files[suffix] = directory / f"gradient.{suffix}"
         subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-n", "-i",
                         str(files["png"]), "-threads", "1", str(files[suffix])], check=True, timeout=20)
+    files["gif"] = directory / "animated.gif"
+    subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-n", "-f", "lavfi", "-i",
+                    "testsrc2=s=160x100:r=2:d=1", "-loop", "0", "-threads", "1",
+                    str(files["gif"])], check=True, timeout=20)
     files["svg"] = directory / "chart.svg"
     files["svg"].write_text(
         '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="240">'
