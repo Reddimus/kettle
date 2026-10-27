@@ -142,7 +142,13 @@ impl Fake {
         let directory = kettle_test_support::private_tempdir("kettle-ffmpeg-fixture-");
         let log = |name: &str| format!("printf '%s\\n' \"$@\" '--' >> \"${{0%/*}}/{name}.log\"");
         let ffprobe = format!(
-            "{}\ncase \"$*\" in\n*packet=*) printf '%s\\n' {} ;;\n*) printf '%s\\n' {} ;;\nesac\n",
+            r#"{}
+case "$*" in
+    *packet=pts_time,dts_time:*) printf '%s\n' 'packets.packet.0.pts_time="0.000000"' ;;
+    *packet=*) printf '%s\n' {} ;;
+    *) printf '%s\n' {} ;;
+esac
+"#,
             log("ffprobe"),
             quoted(packets),
             quoted(description),
@@ -913,6 +919,46 @@ fn a_session_decodes_from_its_start_at_its_rate() {
 }
 
 #[test]
+fn a_session_keeps_video_when_first_audio_timestamps_are_unusable() {
+    let mut description = DESCRIPTION.to_vec();
+    description.push("streams.stream.1.codec_type=\"audio\"");
+    for answer in [
+        "exit 1",
+        "printf '%s\\n' 'packets.packet.0.pts_time=\"0.000000\"'; printf '%1025s' ''",
+        "printf '%s\\n' 'packets.packet.0.pts_time=\"N/A\"'",
+        "printf '%s\\n' 'packets.packet.0.pts_time=\"2.000000\"'",
+    ] {
+        let fake = Fake::new(&description, PACKETS, Answer { frames: 4, ..GOOD });
+        let executable = fake.directory.path().join("ffprobe");
+        let script = std::fs::read_to_string(&executable).unwrap();
+        let branch = script
+            .lines()
+            .find(|line| line.contains("*packet=pts_time,dts_time:*)"))
+            .unwrap();
+        let replacement = format!("    *packet=pts_time,dts_time:*) {answer} ;;");
+        write_script(
+            &executable,
+            script.replacen(branch, &replacement, 1).as_bytes(),
+        );
+        let clip = Clip::mp4();
+        let mut playback = play(&fake.decoder(), &clip, (20, 20), 300, 10_000).unwrap();
+        assert_eq!(
+            playback.opened.audio,
+            kettle_media::AudioStatus::Unsupported
+        );
+        assert!(playback.audio.is_none());
+        let frames = frames_of(&mut playback).unwrap();
+        assert_eq!(
+            frames.iter().map(|(pts, _)| *pts).collect::<Vec<_>>(),
+            [300, 400, 500, 600]
+        );
+        let calls = fake.calls("ffmpeg");
+        assert_eq!(calls.len(), 1, "{answer}");
+        assert!(calls[0].iter().any(|arg| arg == "-an"));
+    }
+}
+
+#[test]
 fn a_session_retries_video_when_audio_conversion_is_unavailable() {
     let mut description = DESCRIPTION.to_vec();
     description.push("streams.stream.1.codec_type=\"audio\"");
@@ -1158,6 +1204,119 @@ fn real_ffmpeg_paces_video_from_pcm_without_stalling() {
     result.unwrap();
     audio_result.unwrap();
     assert_eq!(times, (0..4000).step_by(100).collect::<Vec<_>>());
+}
+
+fn delayed_audio_clip() -> Clip {
+    let directory = kettle_test_support::private_tempdir("kettle-audio-delay-");
+    let path = directory.path().join("delay.mkv");
+    std::fs::copy(fixture("delayed-audio.mkv"), &path).unwrap();
+    Clip::open(directory, path)
+}
+
+#[test]
+fn real_ffmpeg_primes_audio_before_a_delayed_track() {
+    let Some(decoder) = installed() else { return };
+    let clip = delayed_audio_clip();
+    for start_ms in [0, 1001, 9501] {
+        let mut playback = play(&decoder, &clip, (64, 48), start_ms, 10_000).unwrap();
+        let mut audio = playback.audio.take().expect("decoded PCM");
+        let cancel = audio.cancellation().unwrap();
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let reading = std::thread::spawn(move || {
+            let mut samples = vec![0.0; kettle_media::pcm::FRAMES * 2];
+            let first = audio.next_block(&mut samples);
+            let _ = sent.send((first, samples));
+        });
+        let first = received.recv_timeout(Duration::from_secs(2));
+        cancel();
+        drop(playback);
+        reading.join().unwrap();
+        let (block, samples) =
+            first.expect("first PCM stalled behind video before the audio starts");
+        let block = block.unwrap().expect("leading silence");
+        assert_eq!(block.at_frame, start_ms * 48);
+        assert_eq!(block.frames, kettle_media::pcm::FRAMES);
+        assert!(samples.iter().all(|sample| *sample == 0.0));
+    }
+}
+
+#[test]
+fn real_ffmpeg_delayed_audio_keeps_its_timestamp_and_samples() {
+    let Some(decoder) = installed() else { return };
+    let clip = delayed_audio_clip();
+    for start_ms in [0, 1001, 9501, 10501] {
+        let mut playback = play(&decoder, &clip, (64, 48), start_ms, 10_000).unwrap();
+        let mut audio = playback.audio.take().expect("decoded PCM");
+        let cancel = audio.cancellation().unwrap();
+        let video = std::thread::spawn(move || frames_of(&mut playback));
+        let mut samples = vec![0.0; kettle_media::pcm::FRAMES * 2];
+        let mut end = start_ms * 48;
+        let mut first_signal = None;
+        let mut valid = true;
+        let (mut energy, mut real, mut imaginary, mut measured) = (0.0, 0.0, 0.0, 0usize);
+        let mut ended = false;
+        for _ in 0..1000 {
+            match audio.next_block(&mut samples) {
+                Ok(Some(block)) => {
+                    if block.frames != kettle_media::pcm::FRAMES
+                        || block.at_frame < end
+                        || (first_signal.is_some() && block.at_frame != end)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    valid &= samples.iter().all(|sample| sample.is_finite());
+                    if first_signal.is_none() {
+                        first_signal = samples
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .position(|frame| frame.iter().any(|sample| sample.abs() > 0.0001))
+                            .map(|offset| block.at_frame + offset as u64);
+                    }
+                    for (offset, frame) in samples.as_chunks::<2>().0.iter().enumerate() {
+                        let at = block.at_frame + offset as u64;
+                        if (480_000.max(start_ms * 48)..576_000).contains(&at) {
+                            let value = f64::from(frame[0]);
+                            let phase = at as f64 * 440.0 * std::f64::consts::TAU / 48_000.0;
+                            energy += value * value;
+                            real += value * phase.cos();
+                            imaginary += value * phase.sin();
+                            measured += 1;
+                        }
+                    }
+                    end = block.at_frame + block.frames as u64;
+                }
+                Ok(None) => {
+                    ended = true;
+                    break;
+                }
+                Err(_) => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        cancel();
+        drop(audio);
+        let frames = video.join().unwrap().unwrap();
+        assert!(valid && ended, "bad or unfinished PCM at seek {start_ms}");
+        let expected_signal = if start_ms < 10_000 {
+            480_001
+        } else {
+            start_ms * 48
+        };
+        assert_eq!(first_signal, Some(expected_signal), "seek {start_ms}");
+        assert_eq!(measured, 576_000 - 480_000.max(start_ms * 48) as usize);
+        let tone = 2.0 * (real * real + imaginary * imaginary) / (measured as f64 * energy);
+        assert!(tone > 0.99, "delayed PCM broke tone continuity: {tone}");
+        assert!(
+            (576_000..=576_960).contains(&end),
+            "PCM end {end} at seek {start_ms}"
+        );
+        assert!((start_ms..=start_ms + 100).contains(&frames.first().unwrap().0));
+        assert!((11_900..12_000).contains(&frames.last().unwrap().0));
+    }
 }
 
 /// Audio may precede the first picture. A paused session must still open

@@ -45,6 +45,7 @@ def main():
     env.update(KETTLE_TEST_PCM_WORKER=str(args.worker.resolve()),
                KETTLE_TEST_PCM_CLIP=str(fixture / 'ticks.mp4'),
                KETTLE_TEST_PCM_LONG_CLIP=str(fixture / 'long-audio.mp4'),
+               KETTLE_TEST_PCM_DELAYED_CLIP=str(fixture / 'delayed-audio.mkv'),
                KETTLE_TEST_VIDEO_FIXTURES=str(fixture))
     runtime = Path('/run/user') / str(os.geteuid())
     socket = runtime / 'pulse/native'
@@ -134,8 +135,8 @@ def main():
             # The audio-path decoder tests. HEIF and AVIF stills need ffmpeg 7.1,
             # newer than this runner's, and are no part of the audio path.
             ('decoder', executable(args.decoder_tests_json, 'ffmpeg'),
-             ['--skip', 'real_ffmpeg_draws_heif_and_avif_stills'], 22),
-            ('playback', native, ['--ignored', '--skip', stalled_case], 4),
+             ['--skip', 'real_ffmpeg_draws_heif_and_avif_stills'], 25),
+            ('playback', native, ['--ignored', '--skip', stalled_case], 5),
             ('broker', executable(args.worker_tests_json, 'process_boundary'),
              ['--ignored', '--exact', 'linux_pcm_only_broker_plays_pauses_and_closes'], 1),
             ('output', executable(args.output_tests_json, 'kettle_media_native'),

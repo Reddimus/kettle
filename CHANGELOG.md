@@ -8,6 +8,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Start Linux video promptly when its audio track begins later.
 - End audio at its last decoded sample after a seek.
 - Fix Linux accessibility cache signals when panes or tabs change.
 - Keep Venn set labels dark on the light checkerboard canvas.

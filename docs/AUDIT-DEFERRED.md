@@ -91,20 +91,6 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   before UI work and rejects stale output/resize/query results. Preserve the
   core text/cell/haystack budgets and projection cap.
 
-### Media and performance
-
-- **Video with delayed audio:** when a file's audio starts later than its picture
-  (for example an audio track offset by 10 s), playback paces video by the audio
-  clock, so the picture waits for audio that has not begun. The paths are
-  `crates/kettle-media-worker/src/play.rs` and
-  `crates/kettle-media-native/src/ffmpeg.rs`. A draft that pads silence in the
-  FFmpeg audio graph (`aresample=async=1:first_pts=...`) broke
-  `real_ffmpeg_keeps_audio_before_video_without_opening_deadlock` and
-  `real_ffmpeg_clips_codec_padding_to_the_opened_duration` in
-  `crates/kettle-media-native/tests/ffmpeg.rs`. Closing it needs either a player
-  that paces by wall clock until audio begins, or an audio graph that pads only
-  leading silence. Rare in practice.
-
 ## Testing
 
 - **App testability and remaining module split.**

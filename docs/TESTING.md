@@ -1075,7 +1075,8 @@ root Cargo files, or the workflow.
 - It builds the worker independently in the `media-worker` profile.
 - It builds matching worker, decoder, and audio-output test executables and
   passes Cargo's JSON artifact records to `scripts/check-linux-audio.py`.
-- The checker requires native playback and preserves its results as artifacts.
+- The checker requires native playback, including video before a delayed audio
+  track, and preserves its results as artifacts.
 
 This native service path is stronger evidence than parser-only audio fixtures.
 It still does not replace listening on the release user's hardware.
