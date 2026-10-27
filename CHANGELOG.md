@@ -8,6 +8,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Fix Linux accessibility cache signals when panes or tabs change.
 - Keep Venn set labels dark on the light checkerboard canvas.
 - Use a light Mermaid palette over the checkerboard canvas.
 - Keep slow system URL, Help and config launchers off the UI thread.
