@@ -1091,6 +1091,10 @@ impl LinuxProcessTree {
                     Some(parsed.argv)
                 }
                 ProcFileRead::Unavailable => None,
+                ProcFileRead::Truncated => {
+                    self.partial_roots.insert(root);
+                    None
+                }
                 ProcFileRead::Incomplete => {
                     complete = false;
                     None
@@ -1204,7 +1208,7 @@ fn read_proc_task_children(
     let bytes = match read_proc_file_charged(&path, total_bytes) {
         ProcFileRead::Complete(bytes) => bytes,
         ProcFileRead::Unavailable => return (false, true),
-        ProcFileRead::Incomplete => return (false, false),
+        ProcFileRead::Truncated | ProcFileRead::Incomplete => return (false, false),
     };
     let mut complete = true;
     for child in parse_proc_children(&bytes) {
@@ -1226,8 +1230,9 @@ enum ProcFileRead {
     /// consumed. Process exit/permission races are normal and do not make the
     /// rest of the snapshot internally partial.
     Unavailable,
-    /// The read reached a byte ceiling or failed after opening. Publishing
-    /// this scan could erase state based on truncated evidence.
+    /// A single file reached its cap before the aggregate budget was spent.
+    Truncated,
+    /// The aggregate budget was spent or a read failed. The scan cannot publish.
     Incomplete,
 }
 
@@ -1251,11 +1256,16 @@ fn read_proc_file_charged(path: &std::path::Path, total_bytes: &mut u64) -> Proc
     let mut reader = file.take(limit);
     let result = reader.read_to_end(&mut bytes);
     *total_bytes = total_bytes.saturating_add(bytes.len() as u64);
-    if result.is_err() || bytes.len() as u64 == limit {
-        // Reaching the limit does not prove EOF without reading another byte.
-        // Reject the unproven/truncated file and charge every byte already
-        // consumed to the aggregate budget.
+    if result.is_err() {
         ProcFileRead::Incomplete
+    } else if bytes.len() as u64 == limit {
+        // EOF is unproven. Keep per-file truncation separate from a spent
+        // shared budget, while charging every byte in either case.
+        if remaining > MAX_PROC_FILE_BYTES {
+            ProcFileRead::Truncated
+        } else {
+            ProcFileRead::Incomplete
+        }
     } else {
         ProcFileRead::Complete(bytes)
     }
@@ -1532,15 +1542,40 @@ fn shell_flag_carries_a_command(arg: &str) -> bool {
 /// Erring toward "runs and exits" is the safe direction. The split then starts
 /// the configured shell, which is somewhere to work. The opposite error is a
 /// dead pane.
-fn posix_shell_runs_and_exits(rest: &[String]) -> bool {
+fn posix_shell_runs_and_exits(rest: &[String], bash: bool) -> bool {
     let mut args = rest.iter();
+    let mut bash_long_options = bash;
+    let mut reads_stdin = false;
     while let Some(arg) = args.next() {
+        // Bash accepts one or two hyphens for these names, before short flags.
+        if bash_long_options {
+            match arg.strip_prefix("--").or_else(|| arg.strip_prefix('-')) {
+                Some("rcfile" | "init-file") => {
+                    if args.next().is_none() {
+                        return true;
+                    }
+                    continue;
+                }
+                Some("help" | "version") => return true,
+                Some(
+                    "debug" | "debugger" | "dump-po-strings" | "dump-strings" | "login"
+                    | "noediting" | "noprofile" | "norc" | "posix" | "pretty-print" | "restricted"
+                    | "verbose",
+                ) => continue,
+                _ => bash_long_options = false,
+            }
+        }
         // After the terminator every remaining word is an operand, and the
         // first operand is the script.
         if arg == "--" {
-            return args.next().is_some();
+            return !reads_stdin && args.next().is_some();
         }
-        if shell_flag_carries_a_command(arg) {
+        if shell_flag_carries_a_command(arg)
+            || (bash
+                && arg
+                    .strip_prefix('+')
+                    .is_some_and(|flags| flags.contains('c')))
+        {
             return true;
         }
         // A bare `-` or `+` means "read from stdin", not a script to run.
@@ -1550,9 +1585,9 @@ fn posix_shell_runs_and_exits(rest: &[String]) -> bool {
         if arg.starts_with('-') || arg.starts_with('+') {
             // `-s` reads commands from stdin, which in a pane is the person
             // typing. Its operands become positional parameters, so `bash -s
-            // worker` never names a script and stays interactive.
+            // worker` never names a script. Keep scanning for a later `-c`.
             if !arg.starts_with("--") && arg[1..].contains('s') {
-                return false;
+                reads_stdin = true;
             }
             // `--opt=value` carries its own value; `--opt value` eats the next
             // word, as do the single-letter options that name a shell option.
@@ -1564,7 +1599,7 @@ fn posix_shell_runs_and_exits(rest: &[String]) -> bool {
             }
             continue;
         }
-        return true;
+        return !reads_stdin;
     }
     false
 }
@@ -1577,7 +1612,7 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
         // `-lc`), or `--command`/`--commands`. `-i`/`-l`/`-il` stay interactive.
         // The classic POSIX family, where `sh [options] command_file` is
         // standardized, so a bare operand is a script.
-        "bash" | "zsh" | "sh" | "dash" | "ksh" => posix_shell_runs_and_exits(rest),
+        "bash" | "zsh" | "sh" | "dash" | "ksh" => posix_shell_runs_and_exits(rest, base == "bash"),
         // Everything else keeps the flags-only rule. Their option grammars
         // carry value-taking flags this code has no table for (`fish -C`,
         // `nu -I`, `elvish -log`, `xonsh --rc`, and tcsh's `-i` and `-s`, which
@@ -3269,7 +3304,63 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_proc_scanner_marks_single_oversized_metadata_files_incomplete() {
+    fn linux_proc_file_limit_does_not_hide_aggregate_exhaustion() {
+        let root = kettle_test_support::private_tempdir("kettle-proc-read-boundary-");
+        let path = root.path().join("cmdline");
+        std::fs::write(&path, vec![b'x'; MAX_PROC_FILE_BYTES as usize + 1]).unwrap();
+        let mut bytes = 0;
+        assert!(matches!(
+            read_proc_file_charged(&path, &mut bytes),
+            ProcFileRead::Truncated,
+        ));
+        assert_eq!(bytes, MAX_PROC_FILE_BYTES);
+        bytes = MAX_PROC_TREE_TOTAL_BYTES - MAX_PROC_FILE_BYTES;
+        assert!(matches!(
+            read_proc_file_charged(&path, &mut bytes),
+            ProcFileRead::Incomplete,
+        ));
+        assert_eq!(bytes, MAX_PROC_TREE_TOTAL_BYTES);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_oversized_argv_holds_back_only_its_own_root() {
+        for child in [false, true] {
+            let root = kettle_test_support::private_tempdir("kettle-proc-argv-isolation-");
+            let make_process = |pid: u32, argv: &[u8], children: &[u8]| {
+                let dir = root.path().join(pid.to_string());
+                std::fs::create_dir_all(dir.join("task").join(pid.to_string())).unwrap();
+                std::fs::write(dir.join("cmdline"), argv).unwrap();
+                std::fs::write(
+                    dir.join("task").join(pid.to_string()).join("children"),
+                    children,
+                )
+                .unwrap();
+            };
+            let oversized = vec![b'x'; MAX_PROC_FILE_BYTES as usize + 1];
+            if child {
+                make_process(10, b"bash\0", b"11");
+                make_process(11, &oversized, b"");
+            } else {
+                make_process(10, &oversized, b"");
+            }
+            make_process(20, b"ssh\0healthy.example\0", b"");
+
+            let mut tree = LinuxProcessTree::default();
+            assert!(tree.refresh_from(root.path(), &[10, 20]));
+            assert!(tree.partial_roots.contains(&10));
+            assert!(!tree.partial_roots.contains(&20));
+            assert_eq!(
+                detect_in_tree(20, &mut tree),
+                Some(ssh_ctx("healthy.example", None)),
+            );
+            assert!(tree.bytes_read < MAX_PROC_TREE_TOTAL_BYTES);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_oversized_child_lists_still_prevent_publishing() {
         for oversized_children in [false, true] {
             let root = std::env::temp_dir().join(format!(
                 "kettle-proc-single-oversize-{}-{}-{}",
@@ -3303,15 +3394,8 @@ mod tests {
             .unwrap();
 
             let mut tree = LinuxProcessTree::default();
-            assert!(
-                !tree.refresh_from(&root, &[10]),
-                "oversized {} must prevent publishing a partial scan",
-                if oversized_children {
-                    "children"
-                } else {
-                    "cmdline"
-                }
-            );
+            assert_eq!(tree.refresh_from(&root, &[10]), !oversized_children);
+            assert_eq!(tree.partial_roots.contains(&10), !oversized_children);
 
             std::fs::remove_dir_all(root).unwrap();
         }
@@ -5601,6 +5685,46 @@ mod tests {
                 !is_noninteractive_shell(&argv(a)),
                 "{a:?} should be interactive"
             );
+        }
+    }
+
+    #[test]
+    fn bash_long_options_are_not_short_flag_clusters() {
+        let argv = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for args in [
+            &["bash", "-norc", "-i"][..],
+            &["bash", "-rcfile", "/etc/bashrc", "-i"],
+            &["bash", "-init-file", "/etc/bashrc", "-i"],
+            &["bash", "-posix", "-i"],
+            &["bash", "-restricted", "-i"],
+        ] {
+            assert!(shell_launch_is_interactive(&argv(args)), "{args:?}");
+            let mut tree = MockProcessTree::new();
+            tree.add(1, None, &["zsh"]);
+            tree.add(2, Some(1), args);
+            assert_eq!(
+                find_foreground_shell(1, &mut tree),
+                Some(ShellLaunch {
+                    argv: argv(args),
+                    cwd: None,
+                }),
+            );
+        }
+        for args in [
+            &["bash", "-norc", "-c", "exit"][..],
+            &["bash", "-norc", "-s", "-c", "exit"],
+            &["bash", "-norc", "+c", "exit"],
+            &["bash", "-posix", "/tmp/hook.sh"],
+            &["bash", "-rcfile", "/etc/bashrc", "/tmp/hook.sh"],
+            &["bash", "-init-file", "/etc/bashrc", "-lc", "exit"],
+            &["bash", "--version"],
+            &["bash", "-help"],
+            &["bash", "-rcfile"],
+            &["bash", "--init-file"],
+            &["bash", "-norc", "--", "/tmp/hook.sh"],
+            &["zsh", "-rcfile", "/tmp/hook.sh"],
+        ] {
+            assert!(!shell_launch_is_interactive(&argv(args)), "{args:?}");
         }
     }
 

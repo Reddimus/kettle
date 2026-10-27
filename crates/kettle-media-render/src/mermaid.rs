@@ -6,11 +6,13 @@ use std::time::Duration;
 use kettle_media::{Canvas, FailureCode, Job, MAX_MERMAID_BYTES, Rendered};
 use merman::svg::{
     HostTheme, HostThemePreset, Presentation, RenderResourcePolicy, RootBackgroundPostprocessor,
-    SvgEnvironment, SvgPipeline, TextMeasurementSource, ThemeRole,
+    ScopedCssPostprocessor, SvgEnvironment, SvgPipeline, TextMeasurementSource, ThemeRole,
 };
 use merman::{
-    Engine, OperationControl, RenderError, RenderOutput, RenderRequest, Renderer, SvgRequest,
+    Engine, MermaidConfig, OperationControl, RenderError, RenderOutput, RenderRequest, Renderer,
+    SvgRequest,
 };
+use merman_core::theme_color::ThemeColor;
 
 use crate::{source, svg};
 
@@ -86,11 +88,64 @@ fn theme(job: &Job, family: &str) -> Result<HostTheme, FailureCode> {
         .map_err(|_| FailureCode::RenderParse)
 }
 
+// These families use raw series colors or light-only fills instead of surface roles.
+fn diagram_defaults(job: &Job, theme: &HostTheme) -> Result<MermaidConfig, FailureCode> {
+    let background = if job.canvas == Canvas::White {
+        [255; 4]
+    } else {
+        job.theme.background
+    };
+    let palette = theme
+        .series_palette()
+        .get(..5)
+        .ok_or(FailureCode::RenderParse)?;
+    let fills = palette
+        .iter()
+        .map(|color| {
+            let rgb = ThemeColor::parse(color)
+                .map_err(|_| FailureCode::RenderParse)?
+                .rgba_channels();
+            Ok(mixed(
+                background,
+                [
+                    rgb.red.round() as u8,
+                    rgb.green.round() as u8,
+                    rgb.blue.round() as u8,
+                    255,
+                ],
+                18,
+            ))
+        })
+        .collect::<Result<Vec<_>, FailureCode>>()?;
+    let [command, read_model, event, processor, confusion] = fills.as_slice() else {
+        return Err(FailureCode::RenderParse);
+    };
+    Ok(MermaidConfig::from_value(serde_json::json!({
+        "themeVariables": {
+            "emProcessorFill": processor,
+            "emReadModelFill": read_model,
+            "emCommandFill": command,
+            "emEventFill": event,
+            "cynefin": {
+                "complexBg": read_model,
+                "complicatedBg": processor,
+                "chaoticBg": command,
+                "clearBg": event,
+                "confusionBg": confusion
+            }
+        }
+    })))
+}
+
 /// merman's resvg-safe pipeline, with the diagram's background as its canvas:
 /// the pane's own, white, or none, so a checkerboard shows through. merman
 /// otherwise paints every diagram on white, whatever its theme.
 fn pipeline(job: &Job) -> SvgPipeline {
     let mut pipeline = SvgPipeline::resvg_safe();
+    // Event-model headings set CSS color; SVG text also needs a fill.
+    pipeline.push_postprocessor(ScopedCssPostprocessor::new(
+        ".em-swimlane text { fill: currentColor; }",
+    ));
     pipeline.push_postprocessor(RootBackgroundPostprocessor::new(match job.canvas {
         Canvas::Theme => hex(job.theme.background),
         Canvas::White => "#ffffff".to_owned(),
@@ -143,10 +198,10 @@ pub(crate) fn render_loaded(
     let fonts = Arc::new(svg::fonts::for_mermaid_job(&job.fallback_fonts)?);
     let host = svg::text_host::NativeTextHost::new(fonts.clone(), control.clone());
     host.finish()?;
-    let presentation = Presentation::new()
-        .with_theme(theme(job, &fonts.family)?)
-        .resolve();
-    let engine = presentation.materialize_engine(Engine::new());
+    let host_theme = theme(job, &fonts.family)?;
+    let defaults = diagram_defaults(job, &host_theme)?;
+    let presentation = Presentation::new().with_theme(host_theme).resolve();
+    let engine = presentation.materialize_engine(Engine::new().with_site_config(defaults));
     let request = SvgRequest {
         environment: SvgEnvironment::deterministic()
             .with_resource_policy(RenderResourcePolicy::constrained())
@@ -234,6 +289,152 @@ mod tests {
             theme(&job, "Fira Sans").unwrap().role(ThemeRole::Canvas),
             Some("transparent")
         );
+    }
+
+    fn pixel(image: &Rendered, x: f64, y: f64) -> [u8; 3] {
+        let x = (x * f64::from(image.width)) as usize;
+        let y = (y * f64::from(image.height)) as usize;
+        let at = (y * image.width as usize + x) * 4;
+        image.rgba[at..at + 3].try_into().unwrap()
+    }
+
+    fn luminance(rgb: [u8; 3]) -> f64 {
+        let linear = rgb.map(|channel| {
+            let channel = f64::from(channel) / 255.0;
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        });
+        0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    }
+
+    fn foreground(job: &Job) -> [u8; 3] {
+        let resolved = theme(job, "Fira Sans").unwrap();
+        let text = resolved.role(ThemeRole::Text).unwrap();
+        std::array::from_fn(|i| u8::from_str_radix(&text[1 + 2 * i..3 + 2 * i], 16).unwrap())
+    }
+
+    fn event_heading_pixels(image: &Rendered, foreground: [u8; 3]) -> usize {
+        // Only the Events heading occupies this part of the swimlane.
+        let mut text_pixels = 0;
+        for y in image.height / 4..image.height / 3 {
+            for x in image.width / 9..image.width / 4 {
+                let at = ((y * image.width + x) * 4) as usize;
+                if image.rgba[at..at + 3]
+                    .iter()
+                    .zip(foreground)
+                    .all(|(&actual, expected)| actual.abs_diff(expected) < 20)
+                {
+                    text_pixels += 1;
+                }
+            }
+        }
+        text_pixels
+    }
+
+    #[test]
+    fn event_headings_use_the_theme_text_color() {
+        for canvas in [Canvas::Theme, Canvas::White, Canvas::Checker] {
+            let mut job = job(include_str!("../tests/fixtures/mermaid/eventmodeling.mmd"));
+            job.target.width = 960;
+            job.target.height = 600;
+            job.canvas = canvas;
+            let image = render(&job).unwrap();
+            assert!(
+                event_heading_pixels(&image, foreground(&job)) > 10,
+                "{canvas:?}: heading has no theme-colored text",
+            );
+        }
+    }
+
+    #[test]
+    fn diagram_card_fills_contrast_with_default_text() {
+        for (source, sample) in [
+            (
+                include_str!("../tests/fixtures/mermaid/eventmodeling.mmd"),
+                (0.62, 0.35),
+            ),
+            (
+                include_str!("../tests/fixtures/mermaid/cynefin.mmd"),
+                (0.225, 0.335),
+            ),
+        ] {
+            for canvas in [Canvas::Theme, Canvas::White, Canvas::Checker] {
+                let mut job = job(source);
+                job.target.width = 960;
+                job.target.height = 600;
+                job.canvas = canvas;
+                let image = render(&job).unwrap();
+                // Sample card padding, clear of glyphs and the border.
+                let background = pixel(&image, sample.0, sample.1);
+                let text = luminance(foreground(&job));
+                let fill = luminance(background);
+                let contrast = (text.max(fill) + 0.05) / (text.min(fill) + 0.05);
+                assert!(
+                    contrast >= 4.5,
+                    "{canvas:?}: card {background:?}, contrast {contrast}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn white_diagram_cards_do_not_inherit_the_pane_palette() {
+        for source in [
+            include_str!("../tests/fixtures/mermaid/eventmodeling.mmd"),
+            include_str!("../tests/fixtures/mermaid/cynefin.mmd"),
+        ] {
+            let mut job = job(source);
+            job.canvas = Canvas::White;
+            let before = render(&job).unwrap();
+            job.theme.background = [3, 7, 11, 255];
+            job.theme.foreground = [19, 29, 43, 255];
+            job.theme.palette = [[255, 0, 0, 255]; 16];
+            job.theme.accent = [0, 255, 0, 255];
+            job.theme.is_dark = false;
+            let after = render(&job).unwrap();
+            assert!(
+                before.rgba == after.rgba,
+                "white canvas inherited pane colors"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_diagram_colors_override_host_defaults() {
+        for (source, colors, sample) in [
+            (
+                include_str!("../tests/fixtures/mermaid/eventmodeling.mmd"),
+                "emEventFill: '#d02020'",
+                (0.62, 0.35),
+            ),
+            (
+                include_str!("../tests/fixtures/mermaid/cynefin.mmd"),
+                "cynefin: {clearBg: '#d02020'}",
+                (0.692, 0.775),
+            ),
+        ] {
+            let text = format!(
+                "---\nconfig:\n  themeVariables:\n    textColor: '#22cc88'\n    {colors}\n---\n{source}"
+            );
+            for canvas in [Canvas::Theme, Canvas::White, Canvas::Checker] {
+                let mut job = job(&text);
+                job.target.width = 960;
+                job.target.height = 600;
+                job.canvas = canvas;
+                let image = render(&job).unwrap();
+                let color = pixel(&image, sample.0, sample.1);
+                assert!(
+                    color[0] > 180 && color[1] < 60 && color[2] < 60,
+                    "{color:?}"
+                );
+                if source.starts_with("eventmodeling") {
+                    assert!(event_heading_pixels(&image, [34, 204, 136]) > 10);
+                }
+            }
+        }
     }
 
     #[test]

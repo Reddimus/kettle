@@ -15104,6 +15104,19 @@ fn window_title_formats_and_falls_back() {
         ),
         "[2] ~/Repos/SPI-1/platform (~/Repos/SPI-1/platform)"
     );
+    for title in ["", "kettle"] {
+        assert_eq!(
+            window_title_with_home(t, title, "/", None, 2),
+            "[2] kettle (/)"
+        );
+        assert_eq!(
+            window_title_with_home(t, title, "", None, 2),
+            "[2] kettle ()"
+        );
+        assert_eq!(window_title_with_home("{tab}", title, "/", None, 2), "2");
+        assert_eq!(window_title_with_home("", title, "/", None, 2), "");
+        assert_eq!(window_title_with_home(dflt, title, "/", None, 2), "kettle");
+    }
 }
 
 #[test]

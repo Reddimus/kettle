@@ -5852,22 +5852,21 @@ fn window_title_with_home(
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty());
     let cwd_display = crate::mux::abbreviate_home(cwd, home);
-    // Until the shell sets a real title, use the cwd basename, matching the
-    // tab-title fallback so the OS window title and the in-app tab agree
-    // pre-OSC 2. Only the pane title is checked against the "kettle"
-    // placeholder; a cwd basename of "kettle" (`~/Repos/kettle`) is a real
-    // directory and still fills the template.
+    // Prefer the cwd basename until the shell names the pane. A directory
+    // named "kettle" is real; only the pane title is a placeholder.
     if pane_placeholder {
-        return match cwd_basename {
-            Some(name) => {
-                let tab = tab.to_string();
-                kettle_config::template::fill(
-                    template,
-                    &[("title", name), ("cwd", &cwd_display), ("tab", &tab)],
-                )
-            }
-            None => "kettle".to_string(),
-        };
+        if cwd_basename.is_none() && template == kettle_config::DEFAULT_WINDOW_TITLE_FORMAT {
+            return "kettle".to_string();
+        }
+        let tab = tab.to_string();
+        return kettle_config::template::fill(
+            template,
+            &[
+                ("title", cwd_basename.unwrap_or("kettle")),
+                ("cwd", &cwd_display),
+                ("tab", &tab),
+            ],
+        );
     }
     if !cwd.is_empty()
         && let Some(label) = crate::mux::cwd_label_for_shell_title(t_raw, cwd, home)

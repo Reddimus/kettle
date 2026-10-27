@@ -46,6 +46,7 @@ simplecss = "=0.2.2"
 # Mermaid: parsing, layout and SVG, without its own text measurement (Kettle
 # measures with the job's fonts) or any network or file access.
 merman = { version = "=0.9.2", default-features = false, features = ["svg", "layout-cytoscape", "all-diagrams"] }
+serde_json.workspace = true
 # Exact transitive family constraints keep parsing, layout and painting coherent.
 merman-core = { version = "=0.9.2", default-features = false }
 merman-render = { version = "=0.9.2", default-features = false }
@@ -68,7 +69,7 @@ hayro-syntax = { version = "=0.8.0", default-features = false }
 
 [package.metadata.cargo-machete]
 # These dependencies constrain the renderer family rather than expose APIs.
-ignored = ["merman-core", "merman-render", "dugong", "dugong-graphlib", "manatee", "roughr-merman", "hayro-interpret", "hayro-syntax"]
+ignored = ["merman-render", "dugong", "dugong-graphlib", "manatee", "roughr-merman", "hayro-interpret", "hayro-syntax"]
 
 [features]
 # The entry point the fuzz targets (fuzz/) call. Never in a shipped build.
