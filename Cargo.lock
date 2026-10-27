@@ -2487,6 +2487,7 @@ dependencies = [
  "resvg",
  "roughr-merman",
  "roxmltree 0.21.1",
+ "serde_json",
  "simplecss",
  "skrifa 0.46.2",
  "tempfile",

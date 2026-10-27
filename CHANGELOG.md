@@ -8,6 +8,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Fix dark-theme contrast in event-model headings and event-model/Cynefin cards.
 - Apply custom window title templates at filesystem roots and when cwd is unknown.
 - Keep Linux process scans updating other panes when one argv exceeds its cap.
 - Preserve Bash single-dash long options when detecting shells for splits.

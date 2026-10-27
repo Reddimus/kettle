@@ -162,7 +162,9 @@ painting use the same faces; a measurement merman made any other way refuses
 the diagram. Its colors follow the job's canvas: the pane's own palette
 on the pane's background, a light palette on white, or the pane's palette
 on no background at all for a checkerboard, which merman's root background,
-otherwise always white, is set to (`RootBackgroundPostprocessor`). The SVG
+otherwise always white, is set to (`RootBackgroundPostprocessor`). Event-model
+and Cynefin cards use background-tinted palette colors; explicit diagram colors
+take precedence. Event-model headings also map text color to SVG fill. The SVG
 it produces takes the outside-SVG path in a generated
 mode: its style sheets are lowered by `svg::generated_css`, with simplecss as
 usvg reads them; a declaration the checker cannot read, an element whose

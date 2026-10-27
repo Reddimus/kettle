@@ -1243,6 +1243,7 @@ dependencies = [
  "resvg",
  "roughr-merman",
  "roxmltree",
+ "serde_json",
  "simplecss",
  "skrifa 0.46.2",
  "unicode-linebreak",
