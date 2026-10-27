@@ -1,4 +1,4 @@
-//! RGB color type plus hex / X11-name parsing (Ghostty-compatible).
+//! RGB colors with hex, X11 `rgb:` and named-color parsing.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb {
@@ -79,16 +79,8 @@ fn parse_x11_rgb_component(h: &str) -> Option<u8> {
     Some(scaled as u8)
 }
 
-/// The standard named colors, as CSS Color Level 4 defines them — which is the
-/// X11 `rgb.txt` list every terminal and theme format draws from.
-///
-/// `--accent` rejects a name this table lacks, so the table covers names a
-/// person would actually type, such as `teal` (the `--help` example),
-/// `orange`, `purple`, `pink`, or `navy`.
-///
-/// The nine original entries keep their original values. `green` and
-/// `gray`/`grey` differ between CSS and X11 `rgb.txt`, and configs have been
-/// written against what kettle already resolved them to.
+/// Named colors for config and `--accent`, preserving Kettle's original values
+/// for `green` and `gray`/`grey` where CSS and X11 differ.
 fn x11_name(name: &str) -> Option<Rgb> {
     Some(match name {
         // The original nine, values unchanged.

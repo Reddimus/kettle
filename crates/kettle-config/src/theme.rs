@@ -29,12 +29,8 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        // The hard, self-contained fallback theme (Catppuccin Mocha palette),
-        // returned only when a configured theme name matches no bundled theme.
-        // NOTE: the SHIPPED default (a fresh config) is TokyoNight Night
-        // (`Config::default`); this struct stays the safe fallback so it
-        // carries no bundle dependency. Matched verbatim to `assets/themes/
-        // Catppuccin Mocha`.
+        // Self-contained Catppuccin Mocha fallback, also used for missing fields.
+        // A fresh Config selects the bundled TokyoNight Night instead.
         Theme {
             palette: [
                 Rgb::new(0x45, 0x47, 0x5a),
@@ -373,9 +369,7 @@ mod tests {
     use super::Theme;
     use crate::color::Rgb;
 
-    /// The theme's UI accent. Catppuccin Mocha = signature mauve
-    /// (matches the icon); a theme that declares no `accent` line gets its ANSI
-    /// blue `palette[4]`; an explicit `accent = #hex` line is honored.
+    /// Mocha uses mauve; other themes default to ANSI blue unless overridden.
     #[test]
     fn theme_accent_is_mocha_mauve_else_palette4() {
         // Default (Mocha) → mauve.
