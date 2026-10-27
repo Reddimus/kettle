@@ -66,8 +66,10 @@ class DbusScopeTests(unittest.TestCase):
             command = [
                 sys.executable,
                 "-c",
-                "import sys; from pathlib import Path; "
-                "sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())",
+                (
+                    "import sys; from pathlib import Path; "
+                    "sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())"
+                ),
                 str(path),
             ]
             with (

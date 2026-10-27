@@ -1,58 +1,20 @@
-//! Shared text-entry rules for the modal overlays that own a plain `String`
-//! buffer: the title editors, the command palette, the SSH launcher, the layout
-//! picker, and the Settings path prompt.
-//!
-//! The search bar is a partial caller. It owns a real
-//! [`crate::search_input::SearchEditor`] with a cursor, a selection, a bounded
-//! insert and its own clipboard chords, so it needs none of the append-only
-//! helpers. Its catch-all arm still shares [`accept_text`], so a chord it does
-//! not claim explicitly never types its letter into the query.
-//!
-//! For the other five fields these helpers supply the *correctness* guarantees
-//! search already had — modifier filtering, grapheme-correct deletion, a byte
-//! cap, and a working paste — without pretending they are full editors.
-//!
-//! The module tests reproduce the bug each rule prevents.
+//! Bounded, append-only text entry for title, palette, SSH, layout and Settings
+//! path fields. The search bar uses its own [`crate::search_input::SearchEditor`]
+//! and shares only [`accept_text`] to filter unhandled shortcut chords.
 
 use winit::keyboard::ModifiersState;
 
-/// Byte ceiling for a modal text buffer.
-///
-/// Matches `kettle_core::MAX_SEARCH_QUERY_BYTES` on purpose: both are
-/// single-line fields backed by a `String` that the renderer measures every
-/// frame, and having one bound for "how long may a modal field get" is easier to
-/// reason about than two. Before this cap the fields were unbounded — a live
-/// probe pushed 3000 characters into a tab title and the tab bar dutifully tried
-/// to lay all of them out.
+/// Byte ceiling shared with search; both fields are measured on every frame.
 pub(crate) const MAX_MODAL_INPUT_BYTES: usize = kettle_core::MAX_SEARCH_QUERY_BYTES;
 
-/// The text a modal field should accept from a key event, or `None` when the
-/// keystroke is not text entry.
-///
-/// `winit`'s [`KeyEvent::text`] is **not** filtered by Command/Super: on macOS a
-/// `⌘V` arrives as `Some("v")`. A modal that appends `text` blindly types a
-/// literal character instead of running the shortcut. `⌘V` in "Edit tab title"
-/// would name the tab `v`, and in the command palette it would rewrite the query
-/// to `v`, which re-ranks the list so the *next* Enter runs whichever command
-/// that query surfaces.
-///
-/// The confirm dialog's `Key::Character` arm keeps a stricter check inline. It
-/// rejects any ctrl, alt, or super before reading `y`/`n`/`h`/`l`.
-///
-/// Alt is deliberately **not** rejected. On macOS, Option is a legitimate text
-/// producer — `⌥e` composes `´` — and `macos-option-as-alt` has already decided
-/// upstream whether Option means "compose" or "meta". Rejecting it here would
-/// break dead keys for everyone who types accented characters.
+/// Accept key-event text, excluding shortcuts and controls. Winit can supply
+/// text for Command/Super chords, such as `⌘V` producing `"v"`.
+/// Preserve Option composition (after `macos-option-as-alt` handling) and
+/// Windows AltGr text reported with Ctrl+Alt.
 ///
 /// [`KeyEvent::text`]: winit::event::KeyEvent::text
 pub(crate) fn accept_text(text: Option<&str>, mods: ModifiersState) -> Option<&str> {
-    // Control alone is a shortcut modifier and never text. Control *with* Alt
-    // is not: Windows reports AltGr as Ctrl+Alt, so rejecting the combination
-    // outright swallows every character a non-US layout composes with it —
-    // `@` on German, `ł` on Polish, `€` on many. Those layouts are exactly the
-    // ones that cannot type the character any other way. Gating on `text`
-    // being present keeps genuine Ctrl+Alt chords out, because they do not
-    // produce any.
+    // Ctrl+Alt can be AltGr; accept it only when the event supplies text.
     if mods.super_key() || (mods.control_key() && !mods.alt_key()) {
         return None;
     }
@@ -60,15 +22,9 @@ pub(crate) fn accept_text(text: Option<&str>, mods: ModifiersState) -> Option<&s
     (!text.is_empty() && !text.chars().any(char::is_control)).then_some(text)
 }
 
-/// Text a modal field should accept from an **IME commit**, which is not a
-/// keystroke and carries no modifier meaning.
-///
-/// [`accept_text`]'s modifier rule is right for `KeyEvent::text` and wrong
-/// here: a composition commits when the input method decides, and whatever
-/// modifier happens to be latched at that moment did not produce the text.
-/// Committing a CJK composition with `⌘Space` (switch input source) would
-/// otherwise discard the whole phrase, because `ws.mods` still carries SUPER
-/// from the preceding `ModifiersChanged`.
+/// Accept an IME commit independently of latched modifiers: a composition can
+/// commit while switching input sources with `⌘Space`. [`push_text`] filters
+/// any controls mixed with printable text.
 pub(crate) fn accept_committed_text(text: &str) -> Option<&str> {
     (!text.is_empty() && !text.chars().all(char::is_control)).then_some(text)
 }
@@ -76,9 +32,7 @@ pub(crate) fn accept_committed_text(text: &str) -> Option<&str> {
 /// Append `text` to a modal buffer, dropping control characters and stopping at
 /// [`MAX_MODAL_INPUT_BYTES`]. Returns whether anything was added.
 ///
-/// Truncation is silent by design: unlike the search bar there is no status line
-/// to carry a `TooLong` badge, and refusing the whole insert would make a long
-/// paste look like a dead keystroke.
+/// Truncation is silent because these fields have no overflow status line.
 pub(crate) fn push_text(buf: &mut String, text: &str) -> bool {
     let mut changed = false;
     for ch in text.chars() {
@@ -94,19 +48,8 @@ pub(crate) fn push_text(buf: &mut String, text: &str) -> bool {
     changed
 }
 
-/// Remove the last **grapheme cluster** from a modal buffer. Returns whether
-/// anything was removed.
-///
-/// `String::pop` removes one `char`, which is not what a person means by
-/// "delete the thing I just typed". On `👩‍🚀` (woman + ZWJ + rocket) it removes
-/// only the rocket and leaves a dangling zero-width joiner, because `U+200D` is
-/// a format character rather than a control character and so survives every
-/// filter.
-/// Combining accents fail the same way — one Backspace after `é` typed as
-/// `e` + `U+0301` leaves a bare `e` and looks like nothing happened.
-///
-/// [`crate::search_input::SearchEditor::backspace`] is grapheme-correct; this
-/// shares its boundary helper so the two cannot drift.
+/// Remove the last grapheme cluster, keeping combining marks and emoji intact.
+/// Share search's boundary helper; return whether anything was removed.
 pub(crate) fn backspace(buf: &mut String) -> bool {
     let boundary = crate::search_input::previous_grapheme_boundary(buf, buf.len());
     if boundary == buf.len() {
