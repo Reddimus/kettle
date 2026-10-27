@@ -3673,7 +3673,6 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
         highlight: 0,
         drill_stack: Vec::new(),
         scroll_offset: 0,
-        scroll_stack: Vec::new(),
         typeahead_buf: String::new(),
         typeahead_until: None,
     });
@@ -8745,7 +8744,6 @@ fn non_text_modals_block_control_plane_typing_into_search() {
         highlight: 0,
         drill_stack: Vec::new(),
         scroll_offset: 0,
-        scroll_stack: Vec::new(),
         typeahead_buf: String::new(),
         typeahead_until: None,
     });

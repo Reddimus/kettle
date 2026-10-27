@@ -3280,11 +3280,12 @@ before their window drops; fullscreen startup leaves AppKit's first restore alon
 ## Terminator-parity subsystems
 
 The per-pane right-click context menu supports
-hover-to-highlight, disabled-row hiding, scrollable submenus, mnemonics +
-typeahead, and atomic config write-back via `persist_config_toggle`; its
+hover-to-highlight, disabled-row hiding, scrollable submenus, mnemonics,
+and atomic config write-back via `persist_config_toggle`; its
 **Preferences ▸** submenu wires 13 runtime toggles. `--check-config` echoes
 opt-in keys, and an opt-in pre-commit hook (`.githooks/pre-commit`) catches
 clippy / fmt / test / shellcheck / rustdoc regressions at commit time.
+A submenu restores its parent's selected row and scroll position when it closes.
 
 Other additions:
 
