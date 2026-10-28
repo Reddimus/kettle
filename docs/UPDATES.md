@@ -13,8 +13,10 @@ There is intentionally no `-u` shorthand: short flags are easy to trigger by
 mistake and are difficult to reserve permanently. Updates never restart running
 windows: they keep running their version until they close. Linux commits the
 replacement immediately, and the next launch starts the new version in its own
-process. On macOS a Dock click returns to the running app, so the new version
-starts once Kettle quits.
+process. On macOS, reopening Kettle from the Dock also opens the installed
+build. Repeated reopens focus that build's existing window; old terminals keep
+running until you close them. If the running version predates this behavior,
+quit Kettle once to enable it.
 
 > **Historical Windows bootstrap for v2.35:** releases before v2.35 did not include the
 > out-of-process helper/run-lock protocol and could not reliably replace a

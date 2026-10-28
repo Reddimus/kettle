@@ -13,6 +13,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Reopen the installed macOS build from the Dock without closing old terminals
+  or adding a window on each repeated reopen.
 - Start Linux video promptly when its audio track begins later; keep video
   usable if audio probing stalls.
 - End audio at its last decoded sample after a seek.

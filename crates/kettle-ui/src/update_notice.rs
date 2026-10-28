@@ -134,15 +134,9 @@ pub(crate) fn fact_rows(facts: &UpdateFacts, tr: &Translator) -> Vec<String> {
     rows
 }
 
-/// How this process switches to an installed version. A launch opens in a
-/// process of the new version, except a macOS Dock click, which returns to
-/// the running app.
+/// New launches use the installed version while old terminals keep running.
 fn restart_hint(installed: &str, tr: &Translator) -> String {
-    if cfg!(target_os = "macos") {
-        tr.update_restart_quit_macos(installed)
-    } else {
-        tr.update_restart_new_launches(installed)
-    }
+    tr.update_restart_new_launches(installed)
 }
 
 /// The release page for `tag`; `None` unless it is a version tag.
@@ -251,13 +245,9 @@ mod tests {
     }
 
     #[test]
-    fn restart_hint_per_platform() {
+    fn restart_hint_preserves_running_windows() {
         let tr = Translator::new(kettle_i18n::Language::En);
         let hint = restart_hint("v5.1.0", &tr);
-        if cfg!(target_os = "macos") {
-            assert_eq!(hint, "Quit Kettle to switch to v5.1.0.");
-        } else {
-            assert_eq!(hint, "New launches use v5.1.0.");
-        }
+        assert_eq!(hint, "New launches use v5.1.0.");
     }
 }

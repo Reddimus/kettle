@@ -64,7 +64,9 @@ mod imp {
     use std::cell::RefCell;
 
     use objc2::rc::Retained;
-    use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, NSObject, NSObjectProtocol, Sel};
+    use objc2::runtime::{
+        AnyClass, AnyObject, Bool, ClassBuilder, NSObject, NSObjectProtocol, Sel,
+    };
     use objc2::{ClassType, DeclaredClass, declare_class, msg_send_id, mutability, sel};
     use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
     use objc2_foundation::{MainThreadMarker, NSString, ns_string};
@@ -73,9 +75,8 @@ mod imp {
     use super::{DockCommand, dock_menu_model};
     use crate::app::UserEvent;
 
-    /// Runtime subclass of winit's `WinitApplicationDelegate`, carrying the one
-    /// method winit does not implement. A subclass rather than a replacement
-    /// delegate: winit's private `ApplicationDelegate::get` panics on any other
+    /// Runtime subclass of winit's `WinitApplicationDelegate`. Winit's private
+    /// `ApplicationDelegate::get` panics on any other
     /// delegate object, and it is reached from the swizzled `sendEvent:` and
     /// both run-loop observers, so a proxy delegate dies within milliseconds.
     /// `isKindOfClass:` accepts a subclass, so this stays invisible to winit.
@@ -177,6 +178,21 @@ mod imp {
         })
     }
 
+    extern "C" fn reopen(
+        _this: *const AnyObject,
+        _cmd: Sel,
+        _sender: *mut AnyObject,
+        _visible: Bool,
+    ) -> Bool {
+        STATE.with(|state| {
+            if let Some(state) = state.borrow().as_ref() {
+                let _ = state.proxy.send_event(UserEvent::DockReopen);
+            }
+        });
+        // The event loop handles both focus and installed-build activation.
+        Bool::NO
+    }
+
     fn build_menu(
         mtm: MainThreadMarker,
         target: &DockTarget,
@@ -234,9 +250,12 @@ mod imp {
         if delegate_class
             .instance_method(sel!(applicationDockMenu:))
             .is_some()
+            || delegate_class
+                .instance_method(sel!(applicationShouldHandleReopen:hasVisibleWindows:))
+                .is_some()
         {
             log::info!(
-                "dock menu: {} already implements applicationDockMenu:; leaving it alone",
+                "dock integration: {} already implements a supplied delegate method; leaving it alone",
                 delegate_class.name()
             );
             return;
@@ -285,6 +304,11 @@ mod imp {
                                 Sel,
                                 *mut AnyObject,
                             ) -> *mut AnyObject,
+                    );
+                    builder.add_method(
+                        sel!(applicationShouldHandleReopen:hasVisibleWindows:),
+                        reopen
+                            as extern "C" fn(*const AnyObject, Sel, *mut AnyObject, Bool) -> Bool,
                     );
                 }
                 builder.register()

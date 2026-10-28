@@ -71,6 +71,15 @@ impl InstallSnapshot {
         }
     }
 
+    /// The app bundle captured before an update could replace it.
+    #[cfg(target_os = "macos")]
+    pub fn bundle_path(&self) -> Option<&Path> {
+        match &self.0 {
+            Kind::Bundle { bundle } => Some(bundle),
+            _ => None,
+        }
+    }
+
     /// Whether startup already checked that the installer owns this install.
     /// A later "not managed" error from such an install is then a failure,
     /// not a reason to point the user at the release page.
