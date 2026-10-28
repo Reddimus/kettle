@@ -2124,11 +2124,11 @@ impl App {
 
     /// Collapse `pane`'s lane to its strip, or expand it.
     pub(super) fn toggle_preview(&mut self, ws: &mut WindowState, pane: u64) {
-        let Some(lane) = ws.mux.lane(pane) else {
+        let Some(lane) = self.preview_panel_of(ws, pane) else {
             return;
         };
-        let expanded = !lane.expanded;
-        self.set_preview_expanded(ws, pane, expanded);
+        // A small pane can show a strip while its saved request stays expanded.
+        self.set_preview_expanded(ws, pane, lane.collapsed);
     }
 
     pub(super) fn set_preview_expanded(&mut self, ws: &mut WindowState, pane: u64, expanded: bool) {

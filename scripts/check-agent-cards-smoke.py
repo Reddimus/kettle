@@ -207,21 +207,30 @@ def check_preview_menu(app, native, destination, kind, asset):
         open_menu()
         choose("Pin beside terminal")
         wait_for(lambda: not viewer() and geometry()["preview_lanes"])
-        surface = geometry()["surface"]
-        app.json_ctl("resize_window", {"width": 240, "height": 140})
+        open_menu()
+        choose("Collapse preview")
         wait_for(lambda: geometry()["preview_lanes"][0]["state"] == "strip")
         open_menu()
-        (destination / "strip-menu.json").write_text(json.dumps(geometry(), indent=2) + "\n")
         choose("Expand preview")
-        app.json_ctl("resize_window", surface)
-        try:
-            wait_for(lambda: geometry()["preview_lanes"][0]["state"] == "expanded")
-        finally:
-            (destination / "expansion-after-resize.json").write_text(json.dumps(geometry(), indent=2) + "\n")
+        wait_for(lambda: geometry()["preview_lanes"][0]["state"] == "expanded")
+        surface = geometry()["surface"]
+        for control in ("menu", "button"):
+            app.json_ctl("resize_window", {"width": 240, "height": 140})
+            wait_for(lambda: geometry()["preview_lanes"][0]["state"] == "strip")
+            if control == "menu":
+                open_menu()
+                choose("Expand preview")
+            else:
+                click(geometry()["preview_lanes"][0]["controls"]["toggle"])
+            app.json_ctl("resize_window", surface)
+            try:
+                wait_for(lambda: geometry()["preview_lanes"][0]["state"] == "expanded")
+            finally:
+                (destination / f"expansion-after-resize-{control}.json").write_text(json.dumps(geometry(), indent=2) + "\n")
         assert "Copy image" in open_menu()
         choose("Close preview")
         wait_for(lambda: not geometry()["preview_lanes"])
-        checked.append("pinned lane menu, expansion after constrained resize, and close")
+        checked.append("pinned lane collapse/expand; menu and button expansion after constrained resize; close")
     if kind == "svg":
         open_menu()
         choose("Pin beside terminal")
