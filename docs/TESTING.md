@@ -165,6 +165,8 @@ A passing Cargo summary with a skip is reduced coverage.
 Real-decoder tests in `kettle-media-native` and `kettle-media-worker` pass
 without running when no trusted ffmpeg is installed. On Linux, the HEIF and
 AVIF still tests also need ffmpeg 7.1 or later.
+Native decoder deadline fixtures use isolated children with held input pipes
+and a 30-second fail-safe; the tested deadline remains 300 ms.
 
 Linux GPU tests need a Vulkan loader and a hardware or software adapter.
 `libvulkan1` and `mesa-vulkan-drivers` provide the CI software path.
