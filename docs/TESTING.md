@@ -649,7 +649,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Tab title | `just tab-title-smoke` | Cwd-derived title recovers from shell truncation | Linux/macOS |
 | Split titlebar | `just split-titlebar-smoke` | Cwd titles at both pane edges and focused/receiving/inactive colors | Linux/macOS |
 | Text presentation | `just text-presentation-smoke` | Text-style bullet uses a monochrome face | Linux/macOS |
-| Update toast | `just update-toast-smoke` | Seven-second expiry, terminal preservation, Details/About, dismissal and once-per-state restart receipts | Linux/macOS |
+| Update toast | `just update-toast-smoke` | Presented-frame gating, seven-second expiry, terminal preservation, Details/About, dismissal and once-per-state restart receipts | Linux/macOS |
 | Split exit resize | `just split-exit-resize-smoke` | Exiting split restores survivor grid and tty winsize | Linux/macOS |
 | Steady uploads | `just steady-uploads-smoke` | Unchanged frames and cursor blink avoid GPU uploads; paced output uses mapped writes where available | Linux/macOS |
 | Cursor blink layer | `just cursor-blink-layer-smoke` | Native layer handoff, idle behavior, and exits; `--pixels` needs Screen Recording | macOS |
