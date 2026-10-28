@@ -14296,6 +14296,29 @@ fn painted_and_docking_tab_bands_share_one_function() {
 }
 
 #[test]
+fn mapped_mouse_closure_releases_the_closed_windows_toast() {
+    let src = production_source();
+    let mouse = src.split_once("fn ctl_send_mouse(").unwrap().1;
+    let close = mouse.split_once("drop(target);").unwrap().0;
+    let close = close
+        .rsplit_once("if take_window_close_request(")
+        .unwrap()
+        .1;
+    assert!(close.contains("self.close_update_toast_window(target_seq);"));
+}
+
+#[test]
+fn manual_redocking_releases_the_closed_windows_toast() {
+    let src = production_source();
+    let close = src.split_once("drop(torn);").expect("manual donor close").0;
+    let close = close
+        .rsplit_once("if torn.mux.tabs.is_empty() {")
+        .unwrap()
+        .1;
+    assert!(close.contains("self.close_update_toast_window(torn.seq);"));
+}
+
+#[test]
 fn rescue_tick_finishes_released_tab_drags_before_following() {
     let src = production_source();
     let tick = src

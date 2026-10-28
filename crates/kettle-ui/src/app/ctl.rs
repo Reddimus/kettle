@@ -1933,6 +1933,7 @@ impl App {
         // only that window's request here; the caller remains checked out and
         // must not inherit the target's close.
         if take_window_close_request(&mut self.pending_window_closes, target_seq) {
+            self.close_update_toast_window(target_seq);
             if self
                 .torn_drag
                 .as_ref()

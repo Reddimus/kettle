@@ -18847,9 +18847,16 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
         "shell = /bin/sh\nlogin-shell = false\nshell-integration = false\nask-before-closing = never\n"
     )
     env = {"XDG_CONFIG_HOME": str(xdg), "XDG_STATE_HOME": str(fixture / "state")}
+    native_redock = (platform.system() == "Linux" and os.environ.get("DISPLAY")
+                     and not os.environ.get("WAYLAND_DISPLAY")
+                     and shutil.which("xdotool") and shutil.which("xwininfo"))
+    if native_redock:
+        env["KETTLE_TEAR_MANUAL_FOLLOW"] = "1"
+    redock = {"skipped": "requires Linux X11, xdotool and xwininfo"}
 
     def publish(tag: str, failed: bool = False) -> None:
-        with (record.parent / "update-toasts.lock").open("a") as lock:
+        with (record.parent / "update-check.lock").open("a") as lock:
+            os.fchmod(lock.fileno(), 0o600)
             fcntl.flock(lock, fcntl.LOCK_EX)
             data = json.loads(record.read_text()) if record.exists() else {}
             data.update(last_check=int(time.time()), latest_tag=tag, last_outcome="available")
@@ -18969,6 +18976,8 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
         toast = until(live, lambda g: g.get("update_toast"), "closed toast owner stranded later notices")
         assert live.json_ctl("ui_geometry")["update_toast_delivery"]["active"]["window"] != owner
         click(live, toast["dismiss"])
+        if native_redock:
+            redock = exercise_update_toast_manual_redock(live, publish, until)
         with cfg.open("a") as stream:
             stream.write("font-size = 40\n")
         live.json_ctl("perform_action", {"action": "reload_config"})
@@ -18986,10 +18995,116 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
             time.sleep(0.05)
     assert live.proc.poll() is not None, "restarted app was not reaped"
     data = json.loads(delivery.read_text())
-    assert data["toast"]["seen"] == {"available": "v99.0.4", "failed": "v99.0.5-aaa-bbbbbbbbbb-cccccccccc"}
-    (out / "analysis.json").write_text(json.dumps({"passed": True, "expiry_seconds": elapsed, "owned_pids": owners, "apps_reaped": True,
+    assert data["toast"]["seen"] == {"available": "v99.0.9" if native_redock else "v99.0.4",
+                                    "failed": "v99.0.5-aaa-bbbbbbbbbb-cccccccccc"}
+    (out / "analysis.json").write_text(json.dumps({"passed": True, "expiry_seconds": elapsed, "owned_pids": owners, "apps_reaped": True, "manual_redock": redock,
         "scope": "Private cache fixture and real GUI/control-path actions; no live update feed, physical screen reader, or installer."}, indent=2) + "\n")
     return out
+
+
+def exercise_update_toast_manual_redock(live: LiveKettle, publish, until):
+    """Closed drag donors and background mouse targets must release their toasts."""
+    def xdo(*args):
+        return subprocess.check_output(
+            ["xdotool", *map(str, args)], text=True, timeout=5
+        ).strip()
+
+    def origin(window):
+        output = subprocess.check_output(
+            ["xwininfo", "-id", window], text=True, timeout=5
+        )
+        coordinates = {}
+        for line in output.splitlines():
+            for key, label in [("x", "Absolute upper-left X:"), ("y", "Absolute upper-left Y:")]:
+                if line.strip().startswith(label):
+                    coordinates[key] = int(line.split(":")[1])
+        return coordinates["x"], coordinates["y"]
+
+    live.json_ctl("perform_action", {"action": "new_tab"})
+    windows = xdo("search", "--onlyvisible", "--pid", live.pid).splitlines()
+    assert len(windows) == 1, "manual toast fixture needs one source window"
+    window = windows[0]
+    source = live.json_ctl("get_state")["focused_window"]
+    xdo("windowmove", "--sync", window, 60, 60)
+    bar = live.json_ctl("ui_geometry")["tab_bar"]
+    segment = bar["segments"][1]["rect"]
+    center = int(segment["x"] + segment["width"] / 2)
+    height = int(bar["height"])
+    wx, wy = origin(window)
+    x, y = wx + center, wy + height // 2
+    held = False
+    try:
+        xdo("mousemove", "--sync", x, y)
+        xdo("mousedown", 1)
+        held = True
+        time.sleep(0.15)
+        xdo("mousemove", "--sync", x + 7, y)
+        time.sleep(0.1)
+        xdo("mousemove", "--sync", x + 10, y + height * 3)
+        until(live, lambda _: live.json_ctl("get_state")["windows"] == 2,
+              "manual gesture did not tear a window")
+        live.json_ctl("perform_action", {"action": "focus_window"})
+        publish("v99.0.6")
+        live.json_ctl("perform_action", {"action": "reload_config"})
+        until(live, lambda g: g.get("update_toast")
+              and (g["update_toast_delivery"].get("active") or {}).get("presented"),
+              "torn window did not present its notice")
+        owner = live.json_ctl("ui_geometry")["update_toast_delivery"]["active"]["window"]
+        assert owner != source
+        wx, wy = origin(window)
+        x, y = wx + center, wy + height // 2
+        xdo("mousemove", "--sync", x + 150, y + 180)
+        time.sleep(0.2)
+        xdo("mousemove", "--sync", x, y)
+        time.sleep(0.8)
+        xdo("mouseup", 1)
+        held = False
+        until(live, lambda _: live.json_ctl("get_state")["windows"] == 1,
+              "manual gesture did not merge the donor")
+        live.json_ctl("perform_action", {"action": "focus_window"})
+        publish("v99.0.7")
+        live.json_ctl("perform_action", {"action": "reload_config"})
+        until(live, lambda g: g.get("update_toast")
+              and (active := g["update_toast_delivery"].get("active") or {}).get("presented")
+              and active.get("notice", {}).get("tag") == "v99.0.7",
+              "manual donor stranded later notices")
+        active = live.json_ctl("ui_geometry")["update_toast_delivery"]["active"]
+        assert active["window"] == source
+        live.json_ctl("perform_action", {"action": "dismiss_update"})
+        manual_owner = owner
+        live.json_ctl("perform_action", {"action": "new_window"})
+        until(live, lambda _: live.json_ctl("get_state")["focused_window"] != source,
+              "new control-close target did not focus")
+        publish("v99.0.8")
+        live.json_ctl("perform_action", {"action": "reload_config"})
+        until(live, lambda g: g.get("update_toast")
+              and (g["update_toast_delivery"].get("active") or {}).get("presented"),
+              "control-close target did not present its notice")
+        target = live.json_ctl("ui_geometry")
+        owner = target["update_toast_delivery"]["active"]["window"]
+        assert owner != source
+        segment = target["tab_bar"]["segments"][0]["rect"]
+        xdo("windowactivate", "--sync", window)
+        until(live, lambda _: live.json_ctl("get_state")["focused_window"] == source,
+              "source did not focus before background close")
+        live.json_ctl("send_mouse", {"window": owner, "event": "click", "button": "middle",
+                      "x": segment["x"] + segment["width"] / 2,
+                      "y": segment["y"] + segment["height"] / 2})
+        until(live, lambda _: live.json_ctl("get_state")["windows"] == 1,
+              "background control mouse did not close its target")
+        publish("v99.0.9")
+        live.json_ctl("perform_action", {"action": "reload_config"})
+        until(live, lambda g: g.get("update_toast")
+              and (active := g["update_toast_delivery"].get("active") or {}).get("presented")
+              and active.get("notice", {}).get("tag") == "v99.0.9",
+              "background control close stranded later notices")
+        assert live.json_ctl("ui_geometry")["update_toast_delivery"]["active"]["window"] == source
+        live.json_ctl("perform_action", {"action": "dismiss_update"})
+        return {"passed": True, "closed_owner": manual_owner, "new_owner": source,
+                "mapped_close": {"passed": True, "closed_owner": owner, "new_owner": source}}
+    finally:
+        if held:
+            xdo("mouseup", 1)
 
 
 def run_text_presentation(kettle: str, root: Path) -> Path:
