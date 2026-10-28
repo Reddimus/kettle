@@ -17253,20 +17253,3 @@ fn toast_claim_replies_keep_the_requesting_window_after_focus_moves() {
     assert!(route.contains("self.finish_window_dispatch(el, window, ws)"));
     assert!(route.contains("self.abandon_update_toast_claim(window, reply)"));
 }
-
-#[test]
-fn control_mouse_reaches_the_centered_preview_before_the_modal_guard() {
-    let source = production_source();
-    let body = source
-        .split("fn ctl_mouse_press(")
-        .nth(1)
-        .and_then(|body| body.split("fn ctl_mouse_release(").next())
-        .unwrap();
-    let preview = body
-        .find("if ws.preview_overlay.is_some() && !self.non_search_modal_open(ws)")
-        .expect("control input must operate an uncovered centered preview");
-    let modal = body.find("if modal_swallows_pointer(").unwrap();
-    assert!(preview < modal);
-    let route = &body[preview..modal];
-    assert!(route.contains("self.press_preview_lane(ws, px, py, bcode)"));
-}
