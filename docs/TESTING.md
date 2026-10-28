@@ -740,6 +740,8 @@ The native Codex fixture also checks preview context menus, keyboard dismissal,
 image/frame/page and source copying, playback, pinned previews, and menus in narrow previews.
 The viewer helper checks distinct PDF pages, Home/End and first/last page
 boundaries, and Markdown gallery paging in addition to focus, pan, and pin.
+Control-API clicks must open the centered preview's menu and dismiss the viewer
+without changing the terminal.
 Xvfb fixture success does not establish official-client or GNOME Wayland
 acceptance. The viewer helper uses native X11 input.
 

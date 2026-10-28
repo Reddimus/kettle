@@ -13,6 +13,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Route control-API mouse clicks to the centered media viewer and its menus.
 - Deliver update-toast replies to the requesting window after focus changes.
 - Keep default journey and treemap labels readable over colored fills.
 - Reopen the installed macOS build from the Dock without closing old terminals
