@@ -39,7 +39,7 @@ Three independent hard problems:
 1. **Server runtime.** A long-lived process that owns PTYs, services
    clients over a socket, handles auth, survives client disconnects,
    and shuts down cleanly on signal. Not a kettle thing today —
-   today's kettle assumes a one-process-per-window model.
+   today's PTYs belong to the GUI process.
 
 2. **Wire protocol.** Bidirectional, framed binary protocol that
    carries: pane creation, PTY input, PTY output (high-bandwidth),
@@ -128,18 +128,16 @@ Client → server:
 - `4` **NewTab / NewWindow / Split**: user-action requests.
 - `5` **Bye**: client detaching cleanly.
 
-Same line-prefixed framing as kettle-ctl's NDJSON remote-control
-protocol, just binary + bidirectional. Use `bincode` or hand-rolled
-serde for the payloads.
+This binary length-prefix sketch differs from `kettle-ctl`'s NDJSON framing.
+Reuse the control plane where it fits; choose and version a separate payload
+encoding for high-rate pane output.
 
-### Why not gRPC / protobuf
+### Encoding decision
 
-- Adds 5+ MB to the binary.
-- Generated code is hard to read.
-- We control both ends; a hand-rolled protocol is 200 lines + 20 tests.
-- Versioning via the 1-byte version field is sufficient for forward-
-  compat (add new message types; client negotiates feature flags in
-  Hello).
+The encoding is undecided. Compare throughput, dependency cost, compatibility
+and debugging needs before choosing it. The frame above is a proposal, not a
+measured size or performance result. A version field still needs explicit
+negotiation and rules for unknown messages.
 
 ## Phased roadmap
 
@@ -185,12 +183,11 @@ doesn't exist) but the lifecycles stay separated.
 
 ### Why not just use tmux as the mux
 
-A `kettle + tmux` combo gives most of this for free: tmux owns the
-PTYs + the mux state; kettle's tmux-cc integration lets
-kettle render tmux's state. Many users won't need a separate kettle
-mux server.
+tmux already owns persistent PTYs and mux state. A future
+[control-mode integration](TMUX-CC-DESIGN.md) could expose them in Kettle's UI;
+that integration is also unimplemented. It could meet many users' needs.
 
-The reason kettle ships its own anyway:
+A separate Kettle daemon could offer:
 
 - Native scrollback + image protocol passthrough on reattach.
   tmux does not pass the Kitty graphics protocol through. SIXEL is available
@@ -202,9 +199,8 @@ The reason kettle ships its own anyway:
   See [terminal client compatibility](TERMINAL-CLIENT-COMPATIBILITY.md#tmux-and-full-screen-clients).
 - Native config sharing: a `--profile dev` config applies to both the
   server's panes + the client's chrome without a tmux-config detour.
-- Native key-binding semantics: keystrokes go to the server with
-  their full xterm-modifier-table encoding, not the lossy
-  tmux `send-keys` form.
+- Native key-binding semantics without an additional multiplexer's input
+  configuration or translation layer.
 
 These each matter for users invested in kettle's specific features.
 
@@ -217,18 +213,18 @@ These each matter for users invested in kettle's specific features.
   registry's reserved `kind` field (`"gui"` today, `"muxd"` later) that a
   future `kettle-muxd` daemon would re-host. Its NDJSON request / response /
   event protocol is the natural client / control layer for the daemon; the
-  binary length-prefixed `PaneOutput` frame sketched below would remain a
+  binary length-prefixed `PaneOutput` frame sketched above would remain a
   muxd-internal high-bandwidth stream where the NDJSON line protocol is the
   wrong fit. This partially satisfies the "hand-roll the wire protocol"
-  phase in the roadmap table below — the request / response / event shape
+  phase in the roadmap table above — the request / response / event shape
   exists; the high-rate binary framing does not.
 - The standalone `kettle-muxd` daemon — **not yet**. The implementation is
   real multi-week work and shipping a non-functional `--serve` flag would
   mislead users.
 
-The tmux-cc parser is the closest existing parser piece (it already does the
-"parse a control protocol from a byte stream" shape this design needs) and can
-serve as a template for the high-bandwidth `PaneOutput` framing.
+The old tmux-cc parser was removed in v2.26.0. It is historical reference, not
+an existing module to reuse. Current `kettle-ctl` codecs illustrate bounded
+framing and partial reads; the proposed binary stream needs its own contract.
 
 ## See also
 
