@@ -13,6 +13,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep default journey and treemap labels readable over colored fills.
 - Reopen the installed macOS build from the Dock without closing old terminals
   or adding a window on each repeated reopen.
 - Start Linux video promptly when its audio track begins later; keep video

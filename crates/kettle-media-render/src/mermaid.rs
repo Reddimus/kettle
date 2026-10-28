@@ -9,12 +9,14 @@ use merman::svg::{
     ScopedCssPostprocessor, SvgEnvironment, SvgPipeline, TextMeasurementSource, ThemeRole,
 };
 use merman::{
-    Engine, MermaidConfig, OperationControl, RenderError, RenderOutput, RenderRequest, Renderer,
+    Engine, MermaidConfig, OperationControl, RenderError, RenderOutput, RenderTarget, Renderer,
     SvgRequest,
 };
 use merman_core::theme_color::ThemeColor;
 
 use crate::{source, svg};
+
+mod contrast;
 
 fn hex(color: [u8; 4]) -> String {
     format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2])
@@ -202,21 +204,33 @@ pub(crate) fn render_loaded(
     host.finish()?;
     let host_theme = theme(job, &fonts.family)?;
     let defaults = diagram_defaults(job, &host_theme)?;
+    let foreground = host_theme
+        .role(ThemeRole::Text)
+        .ok_or(FailureCode::RenderParse)?
+        .to_owned();
     let presentation = Presentation::new().with_theme(host_theme).resolve();
     let engine = presentation.materialize_engine(Engine::new().with_site_config(defaults));
+    let semantic = crate::guarded(FailureCode::RenderParse, || {
+        Renderer::new()
+            .with_engine(engine)
+            .prepare_semantic(text, control.clone())
+            .map_err(failure)
+    })?
+    .ok_or(FailureCode::UnsupportedMedia)?;
+    let mut pipeline = pipeline(job);
+    if let Some(labels) = contrast::DefaultLabels::for_diagram(&semantic, &foreground, control)? {
+        pipeline.push_postprocessor(labels);
+    }
     let request = SvgRequest {
         environment: SvgEnvironment::deterministic()
             .with_resource_policy(RenderResourcePolicy::constrained())
             .with_text_measurement_policy(host.policy()?),
-        pipeline: Some(pipeline(job)),
+        pipeline: Some(pipeline),
         presentation: presentation.render_policy(),
         ..SvgRequest::default()
     };
     let result = crate::guarded(FailureCode::RenderParse, || {
-        Renderer::new()
-            .with_engine(engine)
-            .render(RenderRequest::svg(text, control, request))
-            .map_err(failure)
+        semantic.render(RenderTarget::Svg(request)).map_err(failure)
     });
     // Native error has precedence over the cancellation used to unwind the
     // host fallback route. Merman's own resource errors keep their type.
@@ -272,6 +286,59 @@ mod tests {
             canvas: Canvas::Theme,
             fallback_fonts: Vec::new(),
         }
+    }
+
+    fn label_ink(image: &Rendered, background: [u8; 3], area: (f64, f64, f64, f64)) -> [u8; 3] {
+        let (left, top, right, bottom) = area;
+        let mut samples = Vec::new();
+        for y in (top * f64::from(image.height)) as u32..(bottom * f64::from(image.height)) as u32 {
+            for x in (left * f64::from(image.width)) as u32..(right * f64::from(image.width)) as u32
+            {
+                let at = ((y * image.width + x) * 4) as usize;
+                samples.push(image.rgba[at..at + 3].try_into().unwrap());
+            }
+        }
+        samples
+            .into_iter()
+            .max_by_key(|rgb: &[u8; 3]| {
+                rgb.iter()
+                    .zip(background)
+                    .map(|(&a, b)| i32::from(a.abs_diff(b)).pow(2))
+                    .sum::<i32>()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn journey_task_labels_contrast_with_their_actual_fill() {
+        let mut job = job("journey\n section Work\n  Build MMMMM: 5: Me\n");
+        job.target.width = 1200;
+        job.target.height = 800;
+        let image = render(&job).unwrap();
+        let background = pixel(&image, 0.32, 0.31);
+        let ink = label_ink(&image, background, (0.35, 0.30, 0.58, 0.35));
+        let (text, fill) = (luminance(ink), luminance(background));
+        let ratio = (text.max(fill) + 0.05) / (text.min(fill) + 0.05);
+        assert!(
+            ratio >= 4.5,
+            "journey label {ink:?} on {background:?}: {ratio}"
+        );
+    }
+
+    #[test]
+    fn treemap_labels_contrast_over_the_composited_fill() {
+        let mut job = job(include_str!("../tests/fixtures/mermaid/treemap.mmd"));
+        job.target.width = 1200;
+        job.target.height = 800;
+        let image = render(&job).unwrap();
+        let background = pixel(&image, 0.05, 0.50);
+        let ink = label_ink(&image, background, (0.12, 0.48, 0.27, 0.57));
+        let (text, fill) = (luminance(ink), luminance(background));
+        let ratio = (text.max(fill) + 0.05) / (text.min(fill) + 0.05);
+        assert!(
+            ratio >= 4.5,
+            "treemap label {ink:?} on {background:?}: {ratio}"
+        );
     }
 
     #[test]
@@ -493,6 +560,8 @@ mod tests {
         for source in [
             include_str!("../tests/fixtures/mermaid/eventmodeling.mmd"),
             include_str!("../tests/fixtures/mermaid/cynefin.mmd"),
+            include_str!("../tests/fixtures/mermaid/journey.mmd"),
+            include_str!("../tests/fixtures/mermaid/treemap.mmd"),
         ] {
             for canvas in [Canvas::White, Canvas::Checker] {
                 let mut job = job(source);

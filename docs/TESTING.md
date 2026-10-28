@@ -383,6 +383,10 @@ In sequence messages, escape a literal semicolon as `#59;`.
 Inside quoted node labels, use `&quot;` for an embedded quote.
 Keep labels short enough to read in the rendered document.
 This documentation gate is separate from the media renderer's Mermaid tests.
+The renderer checks journey/treemap label contrast against actual pixels,
+authored-style output preservation, unchanged geometry and fonts, and fixed
+canvases independent of the pane palette. Native card checks remain separate
+from these portable rendering regressions.
 
 ## Fuzzing
 
