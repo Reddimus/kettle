@@ -1360,3 +1360,10 @@ The media-native runner also tests refused child termination: it must not report
 cleanup until the recorded child is reaped. Optional audio fallback requires
 that confirmation; otherwise playback opening fails and the parent stops the
 worker group.
+
+For macOS Dock reopen, run two compiled CLI versions in one private bundle.
+Replace its installed executable while the old terminal stays open, then
+reopen from the actual Dock. Verify the new version and PID, repeat without
+adding windows, and run a command in the old PTY. A metadata-only version
+fixture does not prove this behavior. Portable activation tests cover the
+focus-or-open request, recording identity and default-launch compatibility.

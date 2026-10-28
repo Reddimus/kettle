@@ -1657,7 +1657,7 @@ its outcome instead of racing it. The wait is shorter than one frame deadline,
 because the requester's read deadline started earlier and an answer after that
 deadline would be written to nobody. A busy,
 incompatible, timed-out, or failed request falls back to a separate process so
-a launcher click is never discarded. Any explicit argument bypasses activation;
+a launcher click is never discarded. User-supplied arguments bypass activation;
 `--new-process` provides a discoverable isolation escape hatch for an otherwise
 default launch. Dev-record builds also compare a bounded path fingerprint and
 raw-input policy before joining, preventing recording-policy drift without
@@ -1669,6 +1669,13 @@ primary while the old one keeps its windows. A new primary removes the
 activation files of builds whose lock is free, and while another build's
 primary is alive it leaves shared per-user state to it: the restorable session,
 pending remote commands, and older agent files.
+
+On macOS, the delegate's reopen event reads the captured bundle's current
+version off the UI thread. NSWorkspace creates a new instance of the newer
+on-disk bundle without substituting a running app. Its internal
+`--reopen` request uses the same election, identity and idempotency rules, but
+focuses an existing window before opening one. A single in-flight lookup or
+launch coalesces repeated Dock events. Old windows and PTYs remain alive.
 
 - **Take-out/put-back dispatch** — the `ApplicationHandler` entry points
   remove the addressed window from the map, run the inner handlers with

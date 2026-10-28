@@ -316,6 +316,10 @@ struct Cli {
     #[arg(long)]
     new_process: bool,
 
+    /// Internal native reopen handoff.
+    #[arg(long, hide = true)]
+    reopen: bool,
+
     /// Launch into a named layout. Saves and restores from
     /// `<config-dir>/layouts/<NAME>.json` so a user
     /// can maintain distinct workspaces ("dev", "ops", "docs")
@@ -793,10 +797,17 @@ fn init_logging() {
         .init();
 }
 
-fn is_bare_gui_argv(args: impl IntoIterator) -> bool {
+fn is_bare_gui_argv<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
     let mut args = args.into_iter();
     let _program = args.next();
-    args.next().is_none()
+    match args.next() {
+        None => true,
+        Some(arg) => arg.as_ref() == std::ffi::OsStr::new("--reopen") && args.next().is_none(),
+    }
 }
 
 fn is_media_preview_worker_argv<I, S>(args: I) -> bool
@@ -1912,7 +1923,11 @@ fn main() -> anyhow::Result<()> {
         let cwd = std::env::current_dir()
             .ok()
             .and_then(|path| path.to_str().map(str::to_string));
-        let request = kettle_ctl::activation::ActivationRequest::new(cwd, activation_identity);
+        let request = if cli.reopen {
+            kettle_ctl::activation::ActivationRequest::for_reopen(cwd, activation_identity)
+        } else {
+            kettle_ctl::activation::ActivationRequest::new(cwd, activation_identity)
+        };
         // Each build elects its own primary, so a launch after an update
         // opens in the newly installed version (#575).
         let build = kettle_ctl::activation::BuildKey::new(env!("KETTLE_SOURCE_HASH"))
@@ -2573,8 +2588,14 @@ mod activation_cli_tests {
     use clap::Parser as _;
 
     #[test]
-    fn only_an_argument_free_launch_is_bare() {
+    fn only_default_and_native_reopen_launches_join_a_primary() {
         assert!(is_bare_gui_argv(["kettle"]));
+        assert!(is_bare_gui_argv(["kettle", "--reopen"]));
+        assert!(!is_bare_gui_argv(["kettle", "--reopen", "--new-process"]));
+        assert!(!is_bare_gui_argv(["kettle", "--reopen", "-d", "/tmp"]));
+        let cli = Cli::try_parse_from(["kettle", "--reopen"]).unwrap();
+        assert!(cli.reopen);
+        assert!(!cli.new_process);
         assert!(!is_bare_gui_argv(["kettle", "--agent-display", "on"]));
         assert!(!is_bare_gui_argv(["kettle", "--new-process"]));
         assert!(!is_bare_gui_argv(["kettle", "-d", "/tmp"]));
@@ -4010,6 +4031,7 @@ mod tests {
         let allow_missing: &[&str] = &[
             "tab-handoff",
             "tab-handoff-fd",
+            "reopen",
             "exec",
             "claude-card-hook",
             "codex-card-hook",

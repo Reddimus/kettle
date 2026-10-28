@@ -1,9 +1,9 @@
 //! Private single-instance activation for bare GUI launches.
 //!
 //! This is intentionally separate from the opt-in agent control plane. Every
-//! bare GUI launch may use this endpoint, but the wire can request exactly one
-//! action: open a fresh window in the primary process. Explicit CLI launches
-//! bypass it in the binary.
+//! bare GUI launch may use this endpoint to open a fresh window or focus
+//! the primary's existing window.
+//! Explicit CLI launches bypass it in the binary.
 
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
@@ -67,7 +67,7 @@ pub struct LaunchIdentity {
     pub record_raw_input: bool,
 }
 
-/// The only request accepted by the activation endpoint.
+/// A bounded window request accepted by the activation endpoint.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivationRequest {
     v: u32,
@@ -99,6 +99,18 @@ impl ActivationRequest {
         self.cwd.as_deref()
     }
 
+    /// A native reopen focuses an existing window instead of adding one.
+    pub fn for_reopen(cwd: Option<String>, identity: LaunchIdentity) -> Self {
+        Self {
+            action: "focus_or_open".into(),
+            ..Self::new(cwd, identity)
+        }
+    }
+
+    pub fn focuses_existing(&self) -> bool {
+        self.action == "focus_or_open"
+    }
+
     pub fn requires_recording(&self) -> bool {
         self.identity.recording_key.is_some()
     }
@@ -109,7 +121,7 @@ impl ActivationRequest {
 
     pub(crate) fn is_valid(&self) -> bool {
         self.v == PROTOCOL_VERSION
-            && self.action == "open_window"
+            && matches!(self.action.as_str(), "open_window" | "focus_or_open")
             && self.cwd.as_ref().is_none_or(|cwd| {
                 !cwd.is_empty()
                     && cwd.len() <= MAX_CWD_BYTES
@@ -1119,6 +1131,34 @@ mod tests {
         assert!(matches!(second, ActivationOutcome::Activated));
         drop(server);
         drop(dir);
+    }
+
+    #[test]
+    fn native_reopen_round_trip_preserves_focus_action_and_identity() {
+        let (_dir, paths) = test_paths("reopen");
+        let identity = LaunchIdentity {
+            recording_key: Some("dir:aaaa".into()),
+            record_raw_input: true,
+        };
+        let request = ActivationRequest::for_reopen(None, identity);
+        assert!(request.is_valid());
+        assert!(request.focuses_existing());
+        let ActivationOutcome::Primary(primary) =
+            activate_or_elect_at(request.clone(), &paths).unwrap()
+        else {
+            panic!("first reopen elects a primary");
+        };
+        let server = spawn_test_server(primary, &paths.endpoint, |received| {
+            assert!(received.focuses_existing());
+            assert!(received.requires_recording());
+            true
+        })
+        .unwrap();
+        assert!(matches!(
+            activate_or_elect_at(request, &paths).unwrap(),
+            ActivationOutcome::Activated
+        ));
+        drop(server);
     }
 
     /// What the guard can and cannot clean, asserted rather than assumed.

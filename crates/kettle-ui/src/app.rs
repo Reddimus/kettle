@@ -2806,6 +2806,12 @@ pub enum UserEvent {
     /// exactly as `AccessibilityAction` is.
     #[cfg(target_os = "macos")]
     DockCommand(crate::macos_dock::DockCommand),
+    #[cfg(target_os = "macos")]
+    DockReopen,
+    #[cfg(target_os = "macos")]
+    DockReopenReady(std::path::PathBuf),
+    #[cfg(target_os = "macos")]
+    DockReopenFinished(bool),
 }
 
 /// Decode kettle's embedded 256px PNG (the dark or light variant) into the
@@ -10380,6 +10386,24 @@ impl App {
         }
     }
 
+    fn focus_or_open_window(&mut self, event_loop: &ActiveEventLoop, cwd: Option<String>) -> bool {
+        let target = self
+            .windows
+            .get(&self.focused_seq)
+            .or_else(|| self.windows.values().max_by_key(|window| window.seq));
+        if let Some(ws) = target
+            && let Some(window) = &ws.window
+        {
+            self.focused_seq = ws.seq;
+            window.set_visible(true);
+            window.set_minimized(false);
+            window.focus_window();
+            return true;
+        }
+        self.open_window(event_loop, WindowOpen::Fresh { cwd }, None, None)
+            .is_ok()
+    }
+
     fn drain_activation_requests(&mut self, event_loop: &ActiveEventLoop) {
         // Keep requests queued while window 1 is still creating the shared GPU
         // context. `resumed` calls this again immediately after initialization.
@@ -10406,12 +10430,17 @@ impl App {
                 continue;
             }
             let cwd = request.request.cwd().map(str::to_string);
-            let opened = self
-                .open_window(event_loop, WindowOpen::Fresh { cwd }, None, None)
-                .is_ok();
+            let opened = if request.request.focuses_existing() {
+                self.focus_or_open_window(event_loop, cwd)
+            } else {
+                self.open_window(event_loop, WindowOpen::Fresh { cwd }, None, None)
+                    .is_ok()
+            };
             if opened {
-                log::info!("bare-launch activation opened a new window");
-                if let Some(recorder) = self.recorder.as_mut() {
+                log::info!("bare-launch activation activated a window");
+                if !request.request.focuses_existing()
+                    && let Some(recorder) = self.recorder.as_mut()
+                {
                     recorder.record_marker("kettle:activation_window");
                 }
             }
@@ -18418,6 +18447,29 @@ impl ApplicationHandler<UserEvent> for App {
             #[cfg(target_os = "linux")]
             UserEvent::Wayland => self.poll_wayland(el),
             UserEvent::Activation => self.drain_activation_requests(el),
+            #[cfg(target_os = "macos")]
+            UserEvent::DockReopen => {
+                self.focus_or_open_window(el, None);
+                crate::macos_reopen::request(
+                    self.startup.update_install.clone(),
+                    self.startup
+                        .version
+                        .as_deref()
+                        .unwrap_or(env!("CARGO_PKG_VERSION")),
+                    self.proxy.clone(),
+                );
+            }
+            #[cfg(target_os = "macos")]
+            UserEvent::DockReopenReady(bundle) => {
+                crate::macos_reopen::launch(&bundle, self.proxy.clone());
+            }
+            #[cfg(target_os = "macos")]
+            UserEvent::DockReopenFinished(opened) => {
+                crate::macos_reopen::finish();
+                if !opened {
+                    self.focus_or_open_window(el, None);
+                }
+            }
             UserEvent::PastedImageEncoded => self.drain_queued_pastes(el),
             // A watcher event starts a short non-blocking settle window. The
             // pending latch stays closed until about_to_wait clears it just
@@ -19747,6 +19799,10 @@ impl App {
     fn user_event_inner(&mut self, ws: &mut WindowState, _el: &ActiveEventLoop, ev: UserEvent) {
         ws.reuse_pane_snapshots_once = false;
         match ev {
+            #[cfg(target_os = "macos")]
+            UserEvent::DockReopen
+            | UserEvent::DockReopenReady(_)
+            | UserEvent::DockReopenFinished(_) => {}
             #[cfg(target_os = "linux")]
             UserEvent::Wayland => {}
             // Consumed by the outer window-less dispatch before a WindowState
