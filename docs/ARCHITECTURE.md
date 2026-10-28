@@ -114,6 +114,13 @@ in a confined worker by `VideoDecoder::still_image`, a method whose default
 answers `CodecUnavailable`, then checked and fitted as a raster, its layout
 keeping the still's own size.
 
+Default journey and treemap labels gain a contrasting text outline through
+merman's public SVG postprocessor. One semantic preparation and the original
+deadline cover style inspection, layout and paint. Authored themes, paint or
+classes opt out; font-only settings retain the outline. Shapes, typography and
+layout stay unchanged. XML edits are collected in document order and written
+once, in O(S + N) time and O(S + N) space for SVG bytes S and nodes N.
+
 `kettle-media-native` supplies the decoders, as `Decoders`: on macOS
 AVFoundation first for MP4 and QuickTime, behind the `avfoundation`
 feature only the worker turns on (the GUI links the crate for its ACL check
