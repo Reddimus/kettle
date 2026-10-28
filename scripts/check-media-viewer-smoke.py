@@ -42,6 +42,33 @@ def grid(screen):
     return screen["cols"], screen["rows"], screen["text"], screen["cursor"]
 
 
+def check_control_mouse(app):
+    geometry = lambda: app.json_ctl("ui_geometry")
+    overlay = geometry()["preview_overlay"]
+    terminal = grid(app.json_ctl("read_screen"))
+    image = overlay["image"]
+    app.json_ctl("send_mouse", {
+        "event": "click", "button": "right",
+        "x": image["x"] + image["width"] / 2,
+        "y": image["y"] + image["height"] / 2,
+    })
+    menu = wait_for(lambda: geometry().get("context_menu"))
+    assert "Copy image" in {row["label"] for row in menu["rows"] if row["dispatchable"]}
+    outside = {
+        "event": "click", "button": "left",
+        "x": overlay["rect"]["x"] - 1,
+        "y": overlay["rect"]["y"] + overlay["rect"]["height"] / 2,
+    }
+    app.json_ctl("send_mouse", outside)
+    wait_for(lambda: not geometry().get("context_menu"))
+    assert geometry()["preview_overlay"], "dismissing the menu closed its viewer"
+    app.json_ctl("send_mouse", outside)
+    wait_for(lambda: geometry()["preview_overlay"] is None)
+    assert grid(app.json_ctl("read_screen")) == terminal, "control clicks changed the terminal"
+    app.json_ctl("perform_action", {"action": "open_media_shelf"})
+    wait_for(lambda: geometry()["preview_overlay"])
+
+
 def check_pages(app, native, binary, assets, out):
     def show(path):
         command = shlex.join([binary, "show", str(path)])
@@ -299,6 +326,9 @@ def check(kettle, worker, out, case):
                     assert abs(rect[axis] - pane[axis] - pane[size] * 0.05) < 0.01
                 assert grid(screen()) == grid(before), "opening resized or changed the terminal"
                 result["checks"].append("split-relative 90 percent frame; terminal grid unchanged")
+                if case == "all":
+                    check_control_mouse(app)
+                    result["checks"].append("control mouse opens the preview menu and dismisses the viewer without terminal input")
                 if case in ("all", "focus"):
                     native.focus(0)
                     wait_for(lambda: not geometry()["window_focused"])

@@ -350,6 +350,7 @@ pub(crate) fn triple(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     /// A shell script trusted as a tool, in a private directory.
     pub(crate) fn script(directory: &std::path::Path, name: &str, body: &str) -> Tool {
@@ -364,6 +365,31 @@ mod tests {
 
     fn later() -> Instant {
         Instant::now() + Duration::from_secs(10)
+    }
+
+    fn held_input() -> (File, impl FnOnce() -> std::io::PipeWriter) {
+        let (input, writer) = std::io::pipe().unwrap();
+        let (release, waiting) = mpsc::channel();
+        let guard = std::thread::spawn(move || {
+            waiting
+                .recv_timeout(Duration::from_secs(30))
+                .ok()
+                .map(|()| writer)
+        });
+        (File::from(std::os::fd::OwnedFd::from(input)), move || {
+            let _ = release.send(());
+            guard
+                .join()
+                .unwrap()
+                .expect("input fixture exceeded its hard limit")
+        })
+    }
+
+    fn assert_input_closed(mut writer: std::io::PipeWriter) {
+        assert_eq!(
+            writer.write(b"probe").unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
     }
 
     /// Output comes back to the cap, its input is the file given (or
@@ -423,51 +449,64 @@ mod tests {
         );
     }
 
+    /// A refused kill cannot count as confirmed child cleanup.
+    #[test]
+    fn refused_termination_is_not_confirmed_cleanup() {
+        kettle_test_support::run_alone_in_child(
+            "run::tests::refused_termination_is_not_confirmed_cleanup",
+            || {
+                let directory = kettle_test_support::private_tempdir("kettle-native-run-");
+                let silent = script(directory.path(), "silent", "read ignored");
+                let (input, keep_open) = held_input();
+                let (mut running, stdout) =
+                    start(&silent, &[] as &[&str], Some(input), None, &[]).unwrap();
+                drop(stdout);
+                assert!(
+                    !running.reap_with(|_| Err(std::io::Error::from_raw_os_error(libc::EPERM)))
+                );
+                assert!(running.child().try_wait().unwrap().is_none());
+                assert!(running.reap_with(Child::kill));
+                assert!(running.0.is_none());
+                assert!(running.reap_with(|_| panic!("a reaped child must not be signalled")));
+                assert_input_closed(keep_open());
+            },
+        );
+    }
+
     /// A tool that never finishes, writing or not, is killed at the
     /// deadline and nothing of it is left running.
     #[test]
-    fn refused_termination_is_not_confirmed_cleanup() {
-        let directory = kettle_test_support::private_tempdir("kettle-native-run-");
-        let silent = script(directory.path(), "silent", "exec /bin/sleep 30");
-        let (mut running, stdout) = start(&silent, &[] as &[&str], None, None, &[]).unwrap();
-        drop(stdout);
-        assert!(!running.reap_with(|_| Err(std::io::Error::from_raw_os_error(libc::EPERM))));
-        assert!(running.child().try_wait().unwrap().is_none());
-        assert!(running.reap_with(Child::kill));
-        assert!(running.0.is_none());
-        assert!(running.reap_with(|_| panic!("a reaped child must not be signalled")));
-    }
-
-    #[test]
     fn a_run_ends_at_its_deadline() {
-        let directory = kettle_test_support::private_tempdir("kettle-native-run-");
-        // `exec` replaces the shell without forking, which containment allows.
-        let silent = script(directory.path(), "silent", "exec /bin/sleep 30");
-        let started = Instant::now();
-        let deadline = started + Duration::from_millis(300);
-        assert_eq!(
-            run(&silent, &[] as &[&str], None, 64, deadline).unwrap_err(),
-            RunError::Deadline
-        );
-        assert!(started.elapsed() < Duration::from_secs(5));
-        let writer = script(
-            directory.path(),
-            "writer",
-            "printf done; exec 1>&-; exec /bin/sleep 30",
-        );
-        let started = Instant::now();
-        assert_eq!(
-            run(
-                &writer,
-                &[] as &[&str],
-                None,
-                64,
-                started + Duration::from_millis(300)
-            )
-            .unwrap_err(),
-            RunError::Deadline,
-            "output closed but still running"
-        );
-        assert!(started.elapsed() < Duration::from_secs(5));
+        kettle_test_support::run_alone_in_child("run::tests::a_run_ends_at_its_deadline", || {
+            let directory = kettle_test_support::private_tempdir("kettle-native-run-");
+            // The builtin read stays blocked while the parent holds its input open.
+            let silent = script(directory.path(), "silent", "read ignored");
+            let (input, keep_open) = held_input();
+            let started = Instant::now();
+            let deadline = started + Duration::from_millis(300);
+            assert_eq!(
+                run(&silent, &[] as &[&str], Some(input), 64, deadline).unwrap_err(),
+                RunError::Deadline
+            );
+            assert!(Instant::now() >= deadline);
+            assert_input_closed(keep_open());
+            assert!(started.elapsed() < Duration::from_secs(5));
+            let writer = script(
+                directory.path(),
+                "writer",
+                "printf done; exec 1>&-; read ignored",
+            );
+            let (input, keep_open) = held_input();
+            let started = Instant::now();
+            let deadline = started + Duration::from_millis(300);
+            assert_eq!(
+                run(&writer, &[] as &[&str], Some(input), 64, deadline).unwrap_err(),
+                RunError::Deadline,
+                "output closed but still running"
+            );
+            assert!(Instant::now() >= deadline);
+            assert_input_closed(keep_open());
+            assert!(started.elapsed() < Duration::from_secs(5));
+        });
     }
 }

@@ -2181,6 +2181,9 @@ impl App {
         {
             return true;
         }
+        if ws.preview_overlay.is_some() && !self.non_search_modal_open(ws) {
+            return self.press_preview_lane(ws, px, py, bcode);
+        }
         if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some()) {
             return true;
         }
