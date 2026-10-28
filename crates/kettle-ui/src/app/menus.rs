@@ -1053,35 +1053,6 @@ impl App {
         self.show_context_menu(ws, items, sw * 0.5 - 140.0, sh * 0.4);
     }
 
-    /// Open the update chip's menu at `(px, py)`: a disabled row for each
-    /// fact, then the release page and Dismiss. There is no one-click
-    /// dismiss.
-    pub(super) fn open_update_menu(&mut self, ws: &mut WindowState, (px, py): (f32, f32)) {
-        let Some(notice) = self.update_notice() else {
-            return;
-        };
-        self.close_all_modals(ws);
-        let tr = self.ui_text;
-        let mut items: Vec<ContextMenuItem> =
-            crate::update_notice::fact_rows(&self.update_facts, &tr)
-                .into_iter()
-                .map(|label| ContextMenuItem::Info { label })
-                .collect();
-        items.push(ContextMenuItem::Separator);
-        items.push(ContextMenuItem::DynamicItem {
-            label: tr.update_menu_whats_new(&notice.tag),
-            action: Action::OpenUpdate,
-            enabled: crate::update_notice::release_url(&notice.tag).is_some(),
-        });
-        items.push(ContextMenuItem::Item {
-            label: tr.text(kettle_i18n::Text::UpdateMenuDismiss),
-            action: Action::DismissUpdate,
-            enabled: true,
-        });
-        self.show_context_menu(ws, items, px, py);
-        ws.context_menu_a11y_label = Some(tr.text(kettle_i18n::Text::MenuA11yUpdate).to_string());
-    }
-
     /// Open the new-tab `▾` dropdown at
     /// `(px, py)` — detected shells (process-cached in kettle-core, prewarmed
     /// at startup) plus the Settings / Command palette / About bottom rows.

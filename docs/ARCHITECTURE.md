@@ -271,7 +271,7 @@ protocol text never pass through it. Settings, the command palette, the theme,
 layout and SSH pickers, the right-click menu with its Preferences submenu, the new-tab
 dropdown, the About panel, the close, paste and key-rebind confirmations, the
 title editors, the search bar, the completion card, the paste receipts, the
-update chip, the screen-reader names, Kettle's desktop notifications, the
+update toast, the screen-reader names, Kettle's desktop notifications, the
 macOS Dock menu and the macOS menu bar's application menu are on it. The
 application menu is Kettle's own (`macos_menu`): winit builds an English one
 as the app finishes launching, before the first `resumed`, and Kettle's
@@ -403,7 +403,7 @@ the per-pane output drain. Its subsystems are `impl App` blocks in
 | `paste` | text, file and screenshot pastes, the paste queue, the receipt |
 | `search`, `menus`, `modals` | the search bar; context menus; Settings, the palette and other dialogs |
 | `windowing` | opening and closing windows, tear-off, docking, tab transfer |
-| `pointer`, `chrome` | mouse reporting, wheel and selection; the tab bar, its update chip, and the status bar |
+| `pointer`, `chrome` | mouse reporting, wheel and selection; the tab bar and status bar; update delivery and toast overlays |
 | `accessibility` | the accessibility tree and its actions |
 | `config_reload`, `sessions`, `gpu_recovery` | reloads and themes; session save and restore; GPU loss |
 
@@ -3812,3 +3812,15 @@ and [fullscreen and player keyboard controls](https://support.google.com/youtube
 Kettle uses K, Space, T, F and Esc within the focused viewer. It opens paused,
 keeps controls visible, and preserves terminal input ownership. It does not
 implement YouTube's streaming, recommendation or advertising behavior.
+
+Update toasts keep delivery separate from update policy and facts. A bounded
+per-state receipt and expiring claim use `update-toasts.json` and their own lock,
+so a download cannot block delivery. I/O runs off the event loop; only a
+presented foreground frame acknowledges delivery. One lazy worker retries failed
+receipts, coalescing them into at most three version watermarks. Late receipts
+never erase a newer claim or downgrade a watermark. An interruption or write
+failure before persistence can replay a notice. Closing a window releases its
+unpresented claim and clears overlay ownership. Shared paint/input geometry adapts to large
+fonts without changing PTY layout. About retains the untimed information.
+Local fact reads coalesce refresh requests into one read at a time, skipping an
+older result when a refresh arrived while it was in flight.

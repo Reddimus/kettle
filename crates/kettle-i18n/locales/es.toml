@@ -693,6 +693,9 @@ media_viewer_video_hint = "Clic / K: reproducir o pausar · T: cine · F: pantal
 media_viewer_theater = "Alternar modo cine (T)"
 media_viewer_fullscreen = "Alternar pantalla completa (F)"
 
+update_toast_details = "Detalles"
+update_toast_installed = "Kettle {tag} está instalado"
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"

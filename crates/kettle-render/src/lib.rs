@@ -1012,6 +1012,7 @@ pub struct Overlay {
     /// transient size chip should paint (the app owns the timing; the
     /// renderer just draws a centered `cols×rows` chip above everything).
     pub resize_overlay: Option<(u16, u16)>,
+    pub update_toast: Option<UpdateToastOverlay>,
     /// Terminator parity (drag a terminal elsewhere in its tab): `Some(rect)`
     /// while a live pane drag has a drop target latched. The rect is the half
     /// of the target pane the dropped terminal would take, washed in accent
@@ -1019,6 +1020,147 @@ pub struct Overlay {
     /// [`TabBar::insert_marker`], so the renderer never has to know how splits
     /// are laid out.
     pub pane_drop_hint: Option<Rect4>,
+}
+
+/// Window-local update notification. Its geometry is shared with input and accessibility.
+#[derive(Clone, Debug)]
+pub struct UpdateToastOverlay {
+    pub geometry: UpdateToastGeometry,
+    pub message: String,
+    pub details: String,
+    pub close: String,
+    pub opacity: f32,
+    pub focused: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UpdateToastGeometry {
+    pub rect: Rect4,
+    pub message: Rect4,
+    pub details: Rect4,
+    pub close: Rect4,
+}
+
+pub fn update_toast_geometry(
+    surface: (f32, f32),
+    top: f32,
+    scale: f32,
+    cell: (f32, f32),
+    details_cells: usize,
+    message: &str,
+) -> Option<UpdateToastGeometry> {
+    if ![surface.0, surface.1, top, scale, cell.0, cell.1]
+        .iter()
+        .all(|v| v.is_finite())
+        || scale <= 0.0
+        || cell.0 <= 0.0
+        || cell.1 <= 0.0
+    {
+        return None;
+    }
+    let width = (surface.0 - 32.0 * scale).min(480.0 * scale);
+    let y = top + 12.0 * scale;
+    if width < 320.0 * scale || y < 0.0 || message.len() > 1024 {
+        return None;
+    }
+    let x = (surface.0 - width) * 0.5;
+    let close_w = (32.0 * scale).max(cell.0 + 16.0 * scale);
+    let details_w = details_cells as f32 * cell.0 + 16.0 * scale;
+    let message_w = width - close_w - details_w - 28.0 * scale;
+    let rows = |available: f32| {
+        let columns = ((available / cell.0).floor() as usize).saturating_sub(1);
+        toast_text_rows(message, columns)
+    };
+    let inline = rows(message_w).is_some_and(|rows| rows <= 2);
+    let text_width = if inline {
+        message_w
+    } else {
+        width - 24.0 * scale
+    };
+    let text_rows = rows(text_width)?.max(2);
+    if text_rows > 6 || details_w + close_w + 24.0 * scale > width {
+        return None;
+    }
+    let controls_h = (32.0 * scale).max(cell.1 + 16.0 * scale);
+    let height = text_rows as f32 * cell.1 + 24.0 * scale + if inline { 0.0 } else { controls_h };
+    if y + height > surface.1 - 16.0 * scale {
+        return None;
+    }
+    let controls_y = if inline { y } else { y + height - controls_h };
+    let controls_h = if inline { height } else { controls_h };
+    Some(UpdateToastGeometry {
+        rect: (x, y, width, height),
+        message: (
+            x + 12.0 * scale,
+            y + 12.0 * scale,
+            text_width,
+            cell.1 * text_rows as f32,
+        ),
+        details: (
+            x + width - close_w - details_w,
+            controls_y,
+            details_w,
+            controls_h,
+        ),
+        close: (x + width - close_w, controls_y, close_w, controls_h),
+    })
+}
+
+fn toast_text_rows(text: &str, columns: usize) -> Option<usize> {
+    toast_wrapped_text(text, columns).map(|(_, rows)| rows)
+}
+
+fn toast_wrapped_text(text: &str, columns: usize) -> Option<(String, usize)> {
+    if columns == 0 {
+        return None;
+    }
+    let mut rows = 0;
+    let mut displayed = String::with_capacity(text.len());
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            displayed.push('\n');
+        }
+        rows += 1;
+        let mut used = 0;
+        for word in line.split_whitespace() {
+            let width = unicode_width::UnicodeWidthStr::width(word);
+            if used > 0 && used + 1 + width > columns {
+                rows += 1;
+                used = 0;
+                displayed.push('\n');
+            }
+            if used > 0 {
+                used += 1;
+                displayed.push(' ');
+            }
+            if width > columns {
+                rows += (width - 1) / columns;
+                used = (width - 1) % columns + 1;
+            } else {
+                used += width;
+            }
+            displayed.push_str(word);
+        }
+    }
+    Some((displayed, rows))
+}
+
+fn toast_buffer_text(
+    text: &str,
+    width: f32,
+    cell_width: f32,
+    message: bool,
+) -> (std::borrow::Cow<'_, str>, Wrap) {
+    if message {
+        let columns = ((width / cell_width).floor() as usize).saturating_sub(1);
+        let displayed = toast_wrapped_text(text, columns)
+            .map(|(text, _)| text)
+            .unwrap_or_default();
+        // Share preferred word breaks with geometry; long version tokens use glyph wrapping.
+        (std::borrow::Cow::Owned(displayed), Wrap::Glyph)
+    } else {
+        (std::borrow::Cow::Borrowed(text), Wrap::None)
+    }
 }
 
 #[inline]
@@ -2089,29 +2231,6 @@ pub struct TabBar {
     pub scroll_left: Rect4,
     /// The forward scroll button, `›` or `⌄` (see `scroll_left`).
     pub scroll_right: Rect4,
-    /// The update chip at the bar's trailing end, if an update notice is
-    /// active and the bar has room for it.
-    pub update_chip: Option<UpdateChip>,
-}
-
-/// An update notice in the tab bar. The UI fits the label and places the
-/// chip; it never changes the size of anything else.
-#[derive(Clone, Debug, PartialEq)]
-pub struct UpdateChip {
-    /// The painted chip, inset inside its slot.
-    pub rect: Rect4,
-    /// The text shown, already fitted to `rect`.
-    pub label: String,
-    pub tone: UpdateChipTone,
-    pub hovered: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UpdateChipTone {
-    /// A release is available, or installed and waiting for a restart.
-    Notice,
-    /// Installing a release failed.
-    Failed,
 }
 
 impl TabBar {
@@ -2133,7 +2252,6 @@ impl TabBar {
             band: (0.0, 0.0, 0.0, 0.0),
             scroll_left: (0.0, 0.0, 0.0, 0.0),
             scroll_right: (0.0, 0.0, 0.0, 0.0),
-            update_chip: None,
         }
     }
 }
@@ -2636,8 +2754,6 @@ pub struct Renderer {
     tab_close_text: String,
     tabbar_text: String,
     new_tab_arrow_text: String,
-    /// Last label shaped into `update_chip_buffer`.
-    update_chip_text: String,
     /// Last text shaped into the overflow scroll-arrow buffers; it changes
     /// only when the bar moves between a side and the top or bottom.
     scroll_left_text: String,
@@ -2647,6 +2763,8 @@ pub struct Renderer {
     /// equality gate (re-shaped only when the grid size changes).
     resize_overlay_buffer: TextBuffer,
     resize_overlay_text: String,
+    update_toast_buffers: [TextBuffer; 3],
+    update_toast_text: [String; 3],
     /// Input-method preedit buffer and equality gate.
     ime_buffer: TextBuffer,
     ime_text: String,
@@ -2739,7 +2857,6 @@ pub struct Renderer {
     media_receipt_dismiss_buffer: TextBuffer,
     media_receipt_badge_buffer: TextBuffer,
     tabbar_buffer: TextBuffer,
-    update_chip_buffer: TextBuffer,
     /// The `▾` new-tab dropdown-arrow glyph, in its own buffer
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
     /// stays put in `new_tab`. Unused when the dropdown is disabled.
@@ -4476,7 +4593,6 @@ impl Renderer {
         // Physical-pixel metrics — logical font size × DPI scale.
         let metrics = metrics_for(font_size, scale);
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
-        let update_chip_buffer = TextBuffer::new(&mut font_system, metrics);
         let new_tab_arrow_buffer = TextBuffer::new(&mut font_system, metrics);
         let scroll_left_buffer = TextBuffer::new(&mut font_system, metrics);
         let scroll_right_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -4492,6 +4608,8 @@ impl Renderer {
             .collect();
         let status_bar_buffer = TextBuffer::new(&mut font_system, metrics);
         let resize_overlay_buffer = TextBuffer::new(&mut font_system, metrics);
+        let update_toast_buffers =
+            std::array::from_fn(|_| TextBuffer::new(&mut font_system, metrics));
         let mut completion_header_buffer = TextBuffer::new(&mut font_system, metrics);
         completion_header_buffer.set_wrap(Wrap::None);
         let mut completion_count_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -4625,12 +4743,13 @@ impl Renderer {
             tab_close_text: String::new(),
             tabbar_text: String::new(),
             new_tab_arrow_text: String::new(),
-            update_chip_text: String::new(),
             scroll_left_text: String::new(),
             scroll_right_text: String::new(),
             status_bar_text: String::new(),
             resize_overlay_buffer,
             resize_overlay_text: String::new(),
+            update_toast_buffers,
+            update_toast_text: std::array::from_fn(|_| String::new()),
             ime_buffer,
             ime_text: String::new(),
             pane_titlebar_buffers: Vec::new(),
@@ -4662,7 +4781,6 @@ impl Renderer {
             media_receipt_dismiss_buffer,
             media_receipt_badge_buffer,
             tabbar_buffer,
-            update_chip_buffer,
             new_tab_arrow_buffer,
             scroll_left_buffer,
             scroll_right_buffer,
@@ -5381,9 +5499,9 @@ impl Renderer {
                 self.tab_close_text.clear();
                 self.tabbar_text.clear();
                 self.new_tab_arrow_text.clear();
-                self.update_chip_text.clear();
                 self.status_bar_text.clear();
                 self.resize_overlay_text.clear();
+                self.update_toast_text.iter_mut().for_each(String::clear);
                 // The overlay text caches are touched only while their overlay
                 // is open, so a font-family reload that lands while one is
                 // closed, or that keeps the same labels, would leave glyphs
@@ -5911,9 +6029,6 @@ impl Renderer {
                 nx + nw - 2.0
             };
             quads.push(rect(cap_x, ny, 2.0, nh, accent, 1.0));
-            if let Some(chip) = &tabbar.update_chip {
-                push_update_chip(&mut quads, chip, theme);
-            }
             // Drag-in-progress ghost. While the user holds a
             // left button down on the tab bar, paint a
             // translucent overlay copy of the active segment centered
@@ -7043,23 +7158,6 @@ impl Renderer {
                 self.new_tab_arrow_buffer
                     .shape_until_scroll(&mut self.font_system, false);
             }
-            // The update chip's label, shaped only when it changes.
-            if let Some(chip) = &tabbar.update_chip {
-                self.update_chip_buffer.set_metrics(metrics);
-                self.update_chip_buffer
-                    .set_size(Some(chip.rect.2), Some(tabbar.height));
-                if self.update_chip_text != chip.label {
-                    self.update_chip_buffer.set_text(
-                        &chip.label,
-                        &Attrs::new().family(Family::Name(&family)),
-                        Shaping::Advanced,
-                        None,
-                    );
-                    self.update_chip_text.clone_from(&chip.label);
-                }
-                self.update_chip_buffer
-                    .shape_until_scroll(&mut self.font_system, false);
-            }
             // Overflow scroll-arrow glyphs, `‹` / `›` across a top or bottom
             // bar and `⌃` / `⌄` down a side one, each shaped in its own buffer
             // and sized to its button rect. Present only while the bar
@@ -7146,6 +7244,32 @@ impl Renderer {
             }
             self.resize_overlay_buffer
                 .shape_until_scroll(&mut self.font_system, false);
+        }
+
+        if let Some(toast) = &overlay.update_toast {
+            let texts = [&toast.message, &toast.details, &toast.close];
+            let rects = [
+                toast.geometry.message,
+                toast.geometry.details,
+                toast.geometry.close,
+            ];
+            for (i, (text, rect)) in texts.into_iter().zip(rects).enumerate() {
+                let buffer = &mut self.update_toast_buffers[i];
+                buffer.set_metrics(metrics);
+                buffer.set_size(Some(rect.2), Some(rect.3));
+                let (displayed, wrap) = toast_buffer_text(text, rect.2, cw, i == 0);
+                buffer.set_wrap(wrap);
+                if self.update_toast_text[i] != displayed {
+                    buffer.set_text(
+                        &displayed,
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.update_toast_text[i] = displayed.into_owned();
+                }
+                buffer.shape_until_scroll(&mut self.font_system, false);
+            }
         }
 
         // Context-menu row labels (one buffer per row, separators skipped)
@@ -7589,6 +7713,67 @@ impl Renderer {
         // render pass.
         // Pre-size for the menu / settings-overlay rows it collects.
         let mut menu_areas: Vec<TextArea> = Vec::with_capacity(48);
+        if let Some(toast) = &overlay.update_toast {
+            let (x, y, w, h) = toast.geometry.rect;
+            let alpha = toast.opacity.clamp(0.0, 1.0);
+            let background = theme.palette[0];
+            let foreground = color::with_min_contrast(theme.foreground, background, 4.5);
+            menu_q.push(rect(x, y, w, h, background, alpha));
+            let accent = color::with_min_contrast(self.ui_accent(cfg, theme), background, 3.0);
+            menu_q.push(rect(x, y, w, 1.0, accent, alpha));
+            if let Some(index) = toast.focused.filter(|i| *i == 1 || *i == 2) {
+                let (bx, by, bw, bh) = if index == 1 {
+                    toast.geometry.details
+                } else {
+                    toast.geometry.close
+                };
+                for (x, y, w, h) in [
+                    (bx, by, bw, 2.0),
+                    (bx, by + bh - 2.0, bw, 2.0),
+                    (bx, by, 2.0, bh),
+                    (bx + bw - 2.0, by, 2.0, bh),
+                ] {
+                    menu_q.push(rect(x, y, w, h, accent, alpha));
+                }
+            }
+
+            for (i, area) in [
+                toast.geometry.message,
+                toast.geometry.details,
+                toast.geometry.close,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (ax, ay, aw, ah) = area;
+                menu_areas.push(TextArea {
+                    buffer: &self.update_toast_buffers[i],
+                    left: ax,
+                    top: if i == 0 {
+                        ay + (ah
+                            - self.update_toast_buffers[i].layout_runs().count().max(1) as f32 * ch)
+                            .max(0.0)
+                            * 0.5
+                    } else {
+                        ay + (ah - ch).max(0.0) * 0.5
+                    },
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: ax.ceil() as i32,
+                        top: ay.ceil() as i32,
+                        right: (ax + aw).floor() as i32,
+                        bottom: (ay + ah).floor() as i32,
+                    },
+                    default_color: GColor::rgba(
+                        foreground.r,
+                        foreground.g,
+                        foreground.b,
+                        (alpha * 255.0).round() as u8,
+                    ),
+                    custom_glyphs: &[],
+                });
+            }
+        }
         // Ghostty parity: the transient resize chip, centered and drawn in the
         // menu pass (last) so it reads over any pane content.
         if let Some((rcols, rrows)) = overlay.resize_overlay {
@@ -8339,24 +8524,6 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
-            if let Some(chip) = &tabbar.update_chip {
-                let label_w = self
-                    .update_chip_buffer
-                    .layout_runs()
-                    .next()
-                    .map_or(0.0, |run| run.line_w);
-                let (left, top) = centered_text_origin(chip.rect, (label_w, ch));
-                let text = theme.foreground;
-                areas.push(TextArea {
-                    buffer: &self.update_chip_buffer,
-                    left,
-                    top,
-                    scale: 1.0,
-                    bounds: text_bounds_for_rect(chip.rect),
-                    default_color: GColor::rgb(text.r, text.g, text.b),
-                    custom_glyphs: &[],
-                });
-            }
             // Overflow scroll-arrow glyphs: `‹` / `›` at the ends of a top or
             // bottom strip, `⌃` / `⌄` centered in their rows on a side one.
             let vertical = cfg.tab_bar_pos.is_vertical();
@@ -8892,8 +9059,8 @@ impl Renderer {
             self.new_tab_arrow_text.hash(&mut h);
             self.scroll_left_text.hash(&mut h);
             self.scroll_right_text.hash(&mut h);
-            self.update_chip_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
+            self.update_toast_text.hash(&mut h);
             self.ime_text.hash(&mut h);
             prepared_text_areas_damage_key(&areas).hash(&mut h);
             // Completion buffers are retained while the card is static. Hash
@@ -14619,7 +14786,7 @@ pub enum DebugScene {
     BellFlash,
 }
 
-/// The fill and edge of a bar that asks for input, and of the update chip.
+/// The fill and edge of a bar that asks for input.
 /// The fill is a neutral the theme's own foreground reads on at WCAG AA
 /// (4.5:1); the edge is the bar's `accent`, kept at the 3:1 minimum for
 /// non-text UI against that fill. Each bar keeps its own accent, so the
@@ -14644,33 +14811,6 @@ fn push_input_bar(
     quads.push(rect(x, y, w, h, fill, 1.0));
     quads.push(rect(x, y, w, 2.0, edge, 1.0));
     quads.push(rect(x, y, 4.0, h, edge, 1.0));
-}
-
-/// The update chip's opaque fill and its edge: the input-bar colors, with
-/// the theme's red for a failure.
-fn update_chip_colors(theme: &kettle_config::Theme, tone: UpdateChipTone) -> (Rgb, Rgb) {
-    let accent = match tone {
-        UpdateChipTone::Notice => theme.palette[2],
-        UpdateChipTone::Failed => theme.palette[1],
-    };
-    input_bar_colors(theme, accent)
-}
-
-/// Queue the update chip: an opaque fill with a one-pixel edge, two when
-/// hovered.
-fn push_update_chip(
-    quads: &mut Vec<QuadInstance>,
-    chip: &UpdateChip,
-    theme: &kettle_config::Theme,
-) {
-    let (fill, edge) = update_chip_colors(theme, chip.tone);
-    let (x, y, w, h) = chip.rect;
-    let line = if chip.hovered { 2.0 } else { 1.0 };
-    quads.push(rect(x, y, w, h, fill, 1.0));
-    quads.push(rect(x, y, w, line, edge, 1.0));
-    quads.push(rect(x, y + h - line, w, line, edge, 1.0));
-    quads.push(rect(x, y, line, h, edge, 1.0));
-    quads.push(rect(x + w - line, y, line, h, edge, 1.0));
 }
 
 /// Back-compat wrapper for external `capture_png` callers. Always renders
@@ -15817,3 +15957,6 @@ mod glyph_cell_lock_tests;
 
 #[cfg(test)]
 mod paragraph_separator_shaping_tests;
+
+#[cfg(test)]
+mod update_toast_tests;

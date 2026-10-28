@@ -3,7 +3,7 @@
 //! `update-check.json` is one record per user, and each process also knows
 //! the version it runs and the one installed beside it. The facts come from
 //! both (see [`crate::update_check::read_facts`]); this module turns them into
-//! at most one chip in the tab bar, the rows of its menu and of About, and
+//! an update candidate, the persistent rows of About, and
 //! the palette entries. Nothing here changes the size of anything.
 
 use kettle_i18n::Translator;
@@ -45,14 +45,17 @@ pub enum ReleaseState {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum NoticeKind {
     Available,
     RestartPending,
     Failed,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Notice {
     pub kind: NoticeKind,
     /// The release the notice is about.
@@ -98,31 +101,7 @@ pub(crate) fn active_notice(facts: &UpdateFacts, restart_dismissed: bool) -> Opt
     })
 }
 
-/// The chip's label, in full or as its short form for a crowded bar.
-pub(crate) fn chip_label(notice: &Notice, short: bool, tr: &Translator) -> String {
-    let tag = notice.tag.as_str();
-    match (notice.kind, short) {
-        (NoticeKind::Available, false) => tr.update_chip_available(tag),
-        (NoticeKind::RestartPending, false) => tr.update_chip_restart(tag),
-        (NoticeKind::Failed, false) => tr.text(kettle_i18n::Text::UpdateChipFailed).to_string(),
-        (NoticeKind::Available, true) => format!("⬆ {tag}"),
-        (NoticeKind::RestartPending, true) => format!("↻ {tag}"),
-        (NoticeKind::Failed, true) => format!("! {tag}"),
-    }
-}
-
-/// What a screen reader says for the chip. Stable for a given notice, so it
-/// is announced once when the notice appears.
-pub(crate) fn a11y_label(notice: &Notice, tr: &Translator) -> String {
-    let tag = notice.tag.as_str();
-    match notice.kind {
-        NoticeKind::Available => tr.update_a11y_available(tag),
-        NoticeKind::RestartPending => tr.update_a11y_restart(tag),
-        NoticeKind::Failed => tr.update_a11y_failed(tag),
-    }
-}
-
-/// One sentence per fact that holds, for the chip's menu and for About.
+/// One sentence per fact that holds, for About.
 pub(crate) fn fact_rows(facts: &UpdateFacts, tr: &Translator) -> Vec<String> {
     let mut rows = Vec::new();
     if facts.off {
@@ -280,22 +259,5 @@ mod tests {
         } else {
             assert_eq!(hint, "New launches use v5.1.0.");
         }
-    }
-
-    #[test]
-    fn chip_labels_have_a_short_form_with_the_tag() {
-        let tr = Translator::new(kettle_i18n::Language::En);
-        let available = Notice {
-            kind: NoticeKind::Available,
-            tag: "v5.2.0".into(),
-        };
-        assert_eq!(chip_label(&available, false, &tr), "Update v5.2.0");
-        assert_eq!(chip_label(&available, true, &tr), "⬆ v5.2.0");
-        let failed = Notice {
-            kind: NoticeKind::Failed,
-            tag: "v5.2.0".into(),
-        };
-        assert_eq!(chip_label(&failed, false, &tr), "Update failed");
-        assert_eq!(chip_label(&failed, true, &tr), "! v5.2.0");
     }
 }

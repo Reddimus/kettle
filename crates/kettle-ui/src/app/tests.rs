@@ -14296,6 +14296,29 @@ fn painted_and_docking_tab_bands_share_one_function() {
 }
 
 #[test]
+fn mapped_mouse_closure_releases_the_closed_windows_toast() {
+    let src = production_source();
+    let mouse = src.split_once("fn ctl_send_mouse(").unwrap().1;
+    let close = mouse.split_once("drop(target);").unwrap().0;
+    let close = close
+        .rsplit_once("if take_window_close_request(")
+        .unwrap()
+        .1;
+    assert!(close.contains("self.close_update_toast_window(target_seq);"));
+}
+
+#[test]
+fn manual_redocking_releases_the_closed_windows_toast() {
+    let src = production_source();
+    let close = src.split_once("drop(torn);").expect("manual donor close").0;
+    let close = close
+        .rsplit_once("if torn.mux.tabs.is_empty() {")
+        .unwrap()
+        .1;
+    assert!(close.contains("self.close_update_toast_window(torn.seq);"));
+}
+
+#[test]
 fn rescue_tick_finishes_released_tab_drags_before_following() {
     let src = production_source();
     let tick = src
@@ -16067,9 +16090,7 @@ fn content_rect_for_carves_out_tab_and_status_bands() {
     );
 }
 
-/// #576: no update state may resize a pane. The chip lives in the tab bar's
-/// own band, the bar's height ignores it, and nothing that applies or
-/// dismisses a notice queues a resize.
+/// #576: update notices never reserve or resize terminal content.
 #[test]
 fn no_update_state_changes_content_rect() {
     let src = production_source();
@@ -16462,9 +16483,9 @@ fn the_side_tab_bar_places_rows_through_side_tab_rows() {
     assert!(body.contains("let lead = self.vertical_title_edit_h(ws);"));
     assert!(body.contains("let row_y = |row: usize| lead + row as f32 * height;"));
     assert!(body.contains("let strip_rows = ((sh - lead) / height).floor()"));
-    // `+` and the update chip are left out of a strip with no row for them.
+    // A strip with no room keeps its plus button out of view.
     assert!(body.contains("let plus_y = if layout.plus < rows {"));
-    assert!(body.contains(".filter(|_| strip_rows >= 2)"));
+    assert!(body.contains("let rows = strip_rows;"));
     // A narrowed horizontal tab has no close button reaching past it.
     let horizontal = src
         .split("fn tab_bar(&self, ws: &WindowState) -> TabBar {")
@@ -17094,94 +17115,11 @@ fn pick_light_dark_target_round_trips() {
     assert_eq!(pick_light_dark_target("anything", "", ""), None);
 }
 
-/// #576: the chip shows its full label while every tab keeps its minimum
-/// width, the short one while one tab still does, and nothing otherwise.
-#[test]
-fn update_chip_fit_full_short_none() {
-    use super::update_chip_fit;
-    let (full, short) = ("Update v5.2.0", "⬆ v5.2.0");
-    // 13 + 2 cells of 10 px, plus a 3 px inset on each side.
-    let full_slot = 156.0;
-    let short_slot = 106.0;
-    assert_eq!(
-        update_chip_fit(1000.0, 48.0, 4, 120.0, 10.0, full, short),
-        Some((full_slot, false))
-    );
-    assert_eq!(
-        update_chip_fit(1000.0, 48.0, 12, 120.0, 10.0, full, short),
-        Some((short_slot, true))
-    );
-    assert_eq!(
-        update_chip_fit(250.0, 48.0, 1, 120.0, 10.0, full, short),
-        None
-    );
-}
-
-#[test]
-fn update_chip_hit_and_menu_anchor_follow_the_bar() {
-    use super::{update_chip_hit_rect, update_chip_menu_anchor};
-    use kettle_config::TabBarPos;
-    let chip = (700.0, 3.0, 150.0, 18.0);
-    assert_eq!(update_chip_hit_rect(chip), (697.0, 0.0, 156.0, 24.0));
-    assert_eq!(update_chip_menu_anchor(chip, TabBarPos::Top), (700.0, 21.0));
-    assert_eq!(
-        update_chip_menu_anchor(chip, TabBarPos::Bottom),
-        (700.0, 3.0)
-    );
-    assert_eq!(update_chip_menu_anchor(chip, TabBarPos::Left), (850.0, 3.0));
-}
-
-/// A press on the chip must reach it before the tab bar's button gate, in
-/// the window and in `kettle ctl send_mouse`, or a right click would open
-/// the terminal's menu and a left click could start a tab drag.
-#[test]
-fn both_press_paths_route_the_chip_before_the_button_gate() {
-    let src = production_source();
-    let gate = "if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {";
-    let mut checked = 0;
-    for (at, _) in src.match_indices(gate) {
-        let before = &src[..at];
-        let start = before
-            .rfind("let bar = self.tab_bar(ws);")
-            .expect("the bar is built first");
-        assert!(
-            before[start..].contains("self.press_update_chip(ws, &bar, px, py, bcode)"),
-            "the chip is routed before this gate"
-        );
-        checked += 1;
-    }
-    assert_eq!(checked, 2, "the window and ctl press paths");
-}
-
-/// The chip is a button under the window root with a Click action; it never
-/// takes the screen reader's focus from the terminal.
-#[test]
-fn chip_node_never_takes_focus_and_click_opens_menu() {
-    let src = production_source();
-    let node = src
-        .split("// The update chip: a button under the window root")
-        .nth(1)
-        .and_then(|rest| {
-            rest.split("nodes.push((ACCESSIBILITY_UPDATE_CHIP_ID, node));")
-                .next()
-        })
-        .expect("the chip's accessibility node");
-    assert!(node.contains("node.add_action(AccessibilityAction::Click);"));
-    assert!(!node.contains("focus =") && !node.contains("set_focus"));
-    let action = src
-        .split("if request.target_node == ACCESSIBILITY_UPDATE_CHIP_ID {")
-        .nth(1)
-        .and_then(|rest| rest.split("return;").next())
-        .expect("the chip's action");
-    assert!(action.contains("self.open_update_menu(ws, anchor);"));
-}
-
 #[test]
 fn ctl_reports_update_notice_not_modal() {
     let src = production_source();
     assert!(!src.contains("\"update_available\""));
     assert!(src.contains("fields.insert(\"update_notice\".into(), update_notice.into());"));
-    assert!(src.contains("tab_bar.insert(\"update_chip\".into(), update_chip.into());"));
 }
 
 /// While an update notice is active the palette lists its release notes and
@@ -17261,4 +17199,38 @@ fn remote_reconnect_opens_local_shell_without_typing_into_source() {
     assert_eq!(mux.panes[&source].input_generation(), generation);
     assert_eq!(mux.panes[&target].input_generation(), 1);
     mux.kill_children();
+}
+
+#[test]
+fn update_toast_announces_politely_and_exposes_explicit_controls() {
+    let geometry = kettle_render::update_toast_geometry(
+        (800.0, 600.0),
+        30.0,
+        1.0,
+        (8.0, 16.0),
+        8,
+        "v6.0.0 is available.",
+    )
+    .unwrap();
+    let toast = kettle_render::UpdateToastOverlay {
+        geometry,
+        message: "v6.0.0 is available".into(),
+        details: "Detalles".into(),
+        close: "x".into(),
+        opacity: 1.0,
+        focused: None,
+    };
+    let nodes = super::accessibility::update_toast_nodes(&toast, "Descartar");
+    assert_eq!(nodes.len(), 3);
+    assert_eq!(nodes[0].1.role(), accesskit::Role::Status);
+    assert_eq!(nodes[0].1.live(), Some(accesskit::Live::Polite));
+    assert!(!nodes[0].1.supports_action(accesskit::Action::Focus));
+    for (_, button) in &nodes[1..] {
+        assert_eq!(button.role(), accesskit::Role::Button);
+        assert!(button.supports_action(accesskit::Action::Click));
+        assert!(button.supports_action(accesskit::Action::Focus));
+        assert!(button.bounds().is_some());
+    }
+    assert_eq!(nodes[1].1.label(), Some("Detalles"));
+    assert_eq!(nodes[2].1.label(), Some("Descartar"));
 }

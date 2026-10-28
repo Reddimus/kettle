@@ -1287,12 +1287,11 @@ impl App {
                 })
             })
             .collect();
-        let update_chip = bar.update_chip.as_ref().map(|chip| {
-            serde_json::json!({
-                "rect": rect_json(chip.rect),
-                "label": chip.label,
-            })
-        });
+        let update_toast = self.update_toast_projection(target).map(|toast| serde_json::json!({
+            "rect": rect_json(toast.geometry.rect), "label": toast.message,
+            "message": rect_json(toast.geometry.message),
+            "details": rect_json(toast.geometry.details), "dismiss": rect_json(toast.geometry.close),
+        }));
         let update_notice = self.update_notice().map(|notice| {
             serde_json::json!({
                 "state": match notice.kind {
@@ -1437,11 +1436,24 @@ impl App {
         geometry["confirmation"] = serde_json::json!(confirmation);
         if let serde_json::Value::Object(fields) = &mut geometry {
             if let Some(serde_json::Value::Object(tab_bar)) = fields.get_mut("tab_bar") {
-                tab_bar.insert("update_chip".into(), update_chip.into());
+                tab_bar.insert("update_chip".into(), serde_json::Value::Null);
             }
             // The update notice in its own field, so live smokes can check its
-            // state without reading the chip's words.
+            // state independently of toast visibility.
             fields.insert("update_notice".into(), update_notice.into());
+            fields.insert("update_toast".into(), update_toast.into());
+            fields.insert("update_toast_delivery".into(), serde_json::json!({
+                "eligible": self.toast_visible(target),
+                "shown": target.window_shown,
+                "occluded": target.window_occluded,
+                "minimized": target.window.as_ref().and_then(|w| w.is_minimized()),
+                "claiming": self.update_toast_claiming,
+                "handled": self.update_toast_handled,
+                "unavailable": self.update_toast_unavailable,
+                "retry_in_ms": self.update_toast_retry.map(|at| at.saturating_duration_since(std::time::Instant::now()).as_millis()),
+                "receipt_pending": self.update_toast_receipts.as_ref().map_or(0, crate::update_toast::ReceiptWriter::pending_count),
+                "active": self.update_toast.as_ref().map(|t| serde_json::json!({"notice": t.claim.notice,"window":t.window,"presented":t.presented,"remaining_ms":t.remaining().as_millis()})),
+            }));
             fields.insert(
                 "fullscreen".into(),
                 serde_json::Value::Bool(
@@ -1921,6 +1933,7 @@ impl App {
         // only that window's request here; the caller remains checked out and
         // must not inherit the target's close.
         if take_window_close_request(&mut self.pending_window_closes, target_seq) {
+            self.close_update_toast_window(target_seq);
             if self
                 .torn_drag
                 .as_ref()
@@ -2171,13 +2184,13 @@ impl App {
         if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some()) {
             return true;
         }
+        if self.press_update_toast(ws, px, py, bcode) {
+            return true;
+        }
         if self.press_preview_lane(ws, px, py, bcode) {
             return true;
         }
         if self.press_card(ws, px, py, bcode) {
-            return true;
-        }
-        if self.press_update_chip(ws, &bar, px, py, bcode) {
             return true;
         }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {

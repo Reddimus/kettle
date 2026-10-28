@@ -138,12 +138,12 @@ at most once per day (tunable), and when a newer signed release is found it
 installs it. Linux applies it immediately; running windows keep the old version
 until they exit, and the next launch uses the new one. The first launch only
 creates the throttle state and performs no network request; the first automatic
-install shows a one-time notification explaining how to opt out.
+install shows a brief notification when Kettle is active.
 
 ```ini
 # default: install in the background, use on the next launch
 update-policy = auto
-# only show the update chip in the tab bar
+# announce updates without installing them
 update-policy = notify
 # no automatic network request
 update-policy = off
@@ -153,15 +153,17 @@ update-policy = off
 update-check-interval-hours = 24
 ```
 
-When there is something to say, a chip at the end of the tab bar says it:
-**Update v5.2.0** for a release you can install, **Restart for v5.2.0** when a
-newer version is installed than this window runs, and **Update failed** after
-automatic installs of a release failed on three checks. Either click opens a
-menu with what is true, the release notes, and Dismiss. Dismissing a release or
-a failure hides it in every window until a newer one arrives; dismissing a
-restart notice lasts until that window's process exits. Each release sends at
-most one desktop notification, and none asks for your attention. With the tab
-bar hidden there is no chip: About and the command palette say the same.
+Update notices appear briefly at the top center of the active window. Each
+release's available, installed and failed state is announced once across windows
+and restarts. Notices wait while Kettle is in the background; they do not also
+send a desktop notification. The seven-second timer pauses on hover or when an
+accessibility user focuses a toast button. Reduced motion disables fading.
+
+**Details** opens About; the close button dismisses the toast. About and the
+command palette retain update status and release notes after it disappears.
+Notices never take keyboard focus or change the terminal grid.
+The palette's **Dismiss update notice** action dismisses that state persistently;
+the toast's close button only hides the popup.
 
 A window left open for many days is re-checked on an hourly in-session timer
 (still bounded by the configured interval), so a long-running process still

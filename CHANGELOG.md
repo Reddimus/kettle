@@ -6,6 +6,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- Announce updates once per release and state in brief top-center toasts.
+  Background windows wait; About retains the status after the toast disappears.
+
 ### Fixed
 
 - Start Linux video promptly when its audio track begins later; keep video

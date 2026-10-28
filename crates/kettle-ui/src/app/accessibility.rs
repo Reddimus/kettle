@@ -581,25 +581,13 @@ impl App {
             children.push(ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID);
             nodes.push((ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID, dismiss));
         }
-        // The update chip: a button under the window root, never the focus,
-        // so a screen reader stays on the terminal. Its name is stable for a
-        // given notice, so the polite announcement comes once when it appears.
-        if let Some(notice) = self.update_notice()
-            && let Some(chip) = self.tab_bar(ws).update_chip
-        {
-            let mut node = Node::new(Role::Button);
-            node.set_label(crate::update_notice::a11y_label(&notice, &self.ui_text));
-            node.set_live(accesskit::Live::Polite);
-            node.add_action(AccessibilityAction::Click);
-            let (x, y, width, height) = chip.rect;
-            node.set_bounds(accesskit::Rect::new(
-                f64::from(x),
-                f64::from(y),
-                f64::from(x + width),
-                f64::from(y + height),
-            ));
-            children.push(ACCESSIBILITY_UPDATE_CHIP_ID);
-            nodes.push((ACCESSIBILITY_UPDATE_CHIP_ID, node));
+        if let Some(toast) = &overlay.update_toast {
+            let projected = update_toast_nodes(
+                toast,
+                self.ui_text.text(kettle_i18n::Text::UpdateMenuDismiss),
+            );
+            children.extend(projected.iter().map(|(id, _)| *id));
+            nodes.extend(projected);
         }
         let surface = ws
             .window
@@ -643,28 +631,32 @@ impl App {
             ));
         }
         nodes.push((ACCESSIBILITY_ROOT_ID, root));
-        let focus = modal_focus.unwrap_or_else(|| {
-            if ws.search.open {
-                accessibility_search_control_id(ws.search.focused_control)
-            } else if let Some(open) = ws.preview_overlay {
-                open.control
-                    .and_then(|control| accessibility_lane_id(open.pane, control))
-                    .filter(|id| {
-                        nodes
-                            .iter()
-                            .any(|(at, node)| at == id && !node.is_disabled())
-                    })
-                    .or_else(|| accessibility_lane_id(open.pane, 0))
-                    .unwrap_or(ACCESSIBILITY_ROOT_ID)
-            } else {
-                ws.card_focus
-                    .map(accessibility_card_id)
-                    .into_iter()
-                    .chain(focused.map(accessibility_pane_id))
-                    .find(|id| nodes.iter().any(|(candidate, _)| candidate == id))
-                    .unwrap_or(ACCESSIBILITY_ROOT_ID)
-            }
-        });
+        let focus = modal_focus
+            .or(self
+                .update_toast_focus
+                .filter(|_| overlay.update_toast.is_some()))
+            .unwrap_or_else(|| {
+                if ws.search.open {
+                    accessibility_search_control_id(ws.search.focused_control)
+                } else if let Some(open) = ws.preview_overlay {
+                    open.control
+                        .and_then(|control| accessibility_lane_id(open.pane, control))
+                        .filter(|id| {
+                            nodes
+                                .iter()
+                                .any(|(at, node)| at == id && !node.is_disabled())
+                        })
+                        .or_else(|| accessibility_lane_id(open.pane, 0))
+                        .unwrap_or(ACCESSIBILITY_ROOT_ID)
+                } else {
+                    ws.card_focus
+                        .map(accessibility_card_id)
+                        .into_iter()
+                        .chain(focused.map(accessibility_pane_id))
+                        .find(|id| nodes.iter().any(|(candidate, _)| candidate == id))
+                        .unwrap_or(ACCESSIBILITY_ROOT_ID)
+                }
+            });
         TreeUpdate {
             nodes,
             tree: None,
@@ -773,12 +765,18 @@ impl App {
             hint.label.hash(&mut hasher);
             hint.dim.hash(&mut hasher);
         }
-        self.update_notice().hash(&mut hasher);
-        if let Some(chip) = self.tab_bar(ws).update_chip {
-            for component in [chip.rect.0, chip.rect.1, chip.rect.2, chip.rect.3] {
-                component.to_bits().hash(&mut hasher);
+        if let Some(toast) = &overlay.update_toast {
+            toast.message.hash(&mut hasher);
+            for value in [
+                toast.geometry.rect.0,
+                toast.geometry.rect.1,
+                toast.geometry.rect.2,
+                toast.geometry.rect.3,
+            ] {
+                value.to_bits().hash(&mut hasher);
             }
         }
+        self.update_toast_focus.hash(&mut hasher);
         let projected_completion = overlay.completion.as_ref();
         projected_completion.is_some().hash(&mut hasher);
         if let Some(completion) = projected_completion {
@@ -990,15 +988,27 @@ impl App {
             }
             return;
         }
-        if request.target_node == ACCESSIBILITY_UPDATE_CHIP_ID {
-            if request.action == AccessibilityAction::Click
-                && let Some(chip) = self.tab_bar(ws).update_chip
-            {
-                let anchor = update_chip_menu_anchor(chip.rect, self.cfg.tab_bar_pos);
-                self.open_update_menu(ws, anchor);
+        if matches!(
+            request.target_node,
+            ACCESSIBILITY_UPDATE_DETAILS_ID | ACCESSIBILITY_UPDATE_DISMISS_ID
+        ) {
+            if self.update_toast_projection(ws).is_some() {
+                if request.action == AccessibilityAction::Focus {
+                    self.update_toast_focus = Some(request.target_node);
+                    ws.accessibility_pending = true;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                } else if request.action == AccessibilityAction::Click {
+                    self.dismiss_update_toast(ws);
+                    if request.target_node == ACCESSIBILITY_UPDATE_DETAILS_ID {
+                        self.open_about_panel(ws);
+                    }
+                }
             }
             return;
         }
+        self.update_toast_focus = None;
         if request.target_node == ACCESSIBILITY_MEDIA_RECEIPT_ID {
             if request.action == AccessibilityAction::Click {
                 let openable = self
@@ -1147,4 +1157,40 @@ impl App {
             window.request_redraw();
         }
     }
+}
+
+pub(super) fn update_toast_nodes(
+    toast: &kettle_render::UpdateToastOverlay,
+    dismiss: &str,
+) -> Vec<(NodeId, Node)> {
+    let mut nodes = Vec::with_capacity(3);
+    let mut status = Node::new(Role::Status);
+    status.set_label(toast.message.clone());
+    status.set_live(accesskit::Live::Polite);
+    nodes.push((ACCESSIBILITY_UPDATE_STATUS_ID, status));
+    for (id, label, rect) in [
+        (
+            ACCESSIBILITY_UPDATE_DETAILS_ID,
+            toast.details.clone(),
+            toast.geometry.details,
+        ),
+        (
+            ACCESSIBILITY_UPDATE_DISMISS_ID,
+            dismiss.to_string(),
+            toast.geometry.close,
+        ),
+    ] {
+        let mut node = Node::new(Role::Button);
+        node.set_label(label);
+        node.add_action(AccessibilityAction::Click);
+        node.add_action(AccessibilityAction::Focus);
+        node.set_bounds(accesskit::Rect::new(
+            rect.0 as f64,
+            rect.1 as f64,
+            (rect.0 + rect.2) as f64,
+            (rect.1 + rect.3) as f64,
+        ));
+        nodes.push((id, node));
+    }
+    nodes
 }

@@ -1280,6 +1280,7 @@ impl App {
                 // session reflects the post-merge window set (the close-path
                 // pairing every other close keeps).
                 self.save_session(ws);
+                self.close_update_toast_window(torn.seq);
                 drop(torn);
             } else {
                 self.windows.insert(td.seq, torn);
