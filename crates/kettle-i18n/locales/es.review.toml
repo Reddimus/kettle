@@ -17,7 +17,10 @@
 # in rendered Spanish UI; native keyboard and pointer selection passed.
 # The drop-error notification was checked in the GNOME notification list,
 # expanded and readable, after a rejected 33-file batch left input unchanged.
+
 [status]
+update_toast_details = "accepted"
+update_toast_installed = "accepted"
 media_viewer_video_hint = "draft"
 media_viewer_theater = "draft"
 media_viewer_fullscreen = "draft"

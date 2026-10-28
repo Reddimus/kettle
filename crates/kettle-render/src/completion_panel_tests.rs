@@ -635,17 +635,17 @@ fn media_receipt_budgets_real_text_lines_and_the_scrollbar_gutter() {
     }
 }
 
-/// The chip's label is cached and shaped only when it changes, so it
+/// Toast labels are cached and shaped only when they change, so they
 /// must count toward the retained chrome's damage key.
 #[test]
-fn chip_text_is_in_the_chrome_hash() {
+fn toast_text_is_in_the_chrome_hash() {
     let source = production_source();
     let hash = source
         .split("let chrome_hash = {")
         .nth(1)
         .and_then(|rest| rest.split("let chrome_changed =").next())
         .expect("retained chrome hash body");
-    assert!(hash.contains("self.update_chip_text.hash(&mut h);"));
+    assert!(hash.contains("self.update_toast_text.hash(&mut h);"));
 }
 
 /// A side bar's overflow arrows point along it, and since one buffer

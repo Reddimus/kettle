@@ -645,7 +645,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Tab title | `just tab-title-smoke` | Cwd-derived title recovers from shell truncation | Linux/macOS |
 | Split titlebar | `just split-titlebar-smoke` | Cwd titles at both pane edges and focused/receiving/inactive colors | Linux/macOS |
 | Text presentation | `just text-presentation-smoke` | Text-style bullet uses a monochrome face | Linux/macOS |
-| Update chip | `just update-chip-smoke` | Tab-bar notice preserves pane size; right-click menu and persisted dismissal | Linux/macOS |
+| Update toast | `just update-toast-smoke` | Seven-second expiry, terminal preservation, Details/About, dismissal and once-per-state restart receipts | Linux/macOS |
 | Split exit resize | `just split-exit-resize-smoke` | Exiting split restores survivor grid and tty winsize | Linux/macOS |
 | Steady uploads | `just steady-uploads-smoke` | Unchanged frames and cursor blink avoid GPU uploads; paced output uses mapped writes where available | Linux/macOS |
 | Cursor blink layer | `just cursor-blink-layer-smoke` | Native layer handoff, idle behavior, and exits; `--pixels` needs Screen Recording | macOS |
@@ -1340,3 +1340,10 @@ close a viewer in a window that was already fullscreen: it must leave that
 window fullscreen. Check the accessible names and toggle states for both size
 controls, including Spanish. Preserve the original pane focus and verify that
 player keys do not reach its terminal.
+
+Update-toast tests use injected clocks for foreground expiry and hover pauses,
+and private cache fixtures for concurrent claims, restart persistence, abandoned
+claims, contention recovery and failed writes. An unreadable record must remain
+byte-identical. Native checks must retain terminal grid, cursor and
+pending input across presentation, dismissal and Details, including background,
+narrow-window, Spanish and reduced-motion cases.

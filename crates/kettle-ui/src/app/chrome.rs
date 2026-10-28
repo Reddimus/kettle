@@ -1,4 +1,4 @@
-//! The tab bar, its update chip, and the status bar: sizes, hit tests and drawing.
+//! Tab/status chrome and local update facts.
 
 use super::*;
 
@@ -22,7 +22,11 @@ impl App {
     /// Combined chrome-band hit-test. True when the cursor is over the tab
     /// bar or the status bar, which belong in the "OS arrow cursor" group.
     pub(super) fn cursor_in_chrome_band(&self, ws: &WindowState) -> bool {
-        self.cursor_in_tab_bar(ws) || self.cursor_in_status_bar(ws)
+        self.cursor_in_tab_bar(ws)
+            || self.cursor_in_status_bar(ws)
+            || self.update_toast_projection(ws).is_some_and(|toast| {
+                rect_contains(toast.geometry.rect, ws.cursor.x as f32, ws.cursor.y as f32)
+            })
     }
 
     pub(super) fn cursor_in_tab_bar(&self, ws: &WindowState) -> bool {
@@ -135,7 +139,6 @@ impl App {
                 band,
                 scroll_left: (0.0, 0.0, 0.0, 0.0),
                 scroll_right: (0.0, 0.0, 0.0, 0.0),
-                update_chip: None,
             };
         }
         let labels = ws.mux.tab_labels(&self.ui_text);
@@ -155,39 +158,12 @@ impl App {
             0.0
         };
         let button_w = plus_w + arrow_w;
-        // The update chip sits between the tabs and the buttons, in a slot
-        // the tabs give up; the bar's height and everything else stay put.
-        let cell_w = Self::cell_size(ws).map_or(9.0, |(cw, _)| cw);
-        let chip = self.update_notice().and_then(|notice| {
-            let full = crate::update_notice::chip_label(&notice, false, &self.ui_text);
-            let short = crate::update_notice::chip_label(&notice, true, &self.ui_text);
-            let (slot, short) = update_chip_fit(
-                sw,
-                button_w,
-                n,
-                self.cfg.tab_min_width,
-                cell_w,
-                &full,
-                &short,
-            )?;
-            Some((notice, slot, short))
-        });
-        let chip_slot = chip.as_ref().map_or(0.0, |(_, slot, _)| *slot);
         // Every consumer of segment geometry reads it from this bar, so the
         // drag-to-reorder handler and the click hit-test agree on where
         // segments end.
-        let strip = (tab_segment_strip_width(sw, plus_w, arrow_w) - chip_slot).max(plus_w);
+        let strip = tab_segment_strip_width(sw, plus_w, arrow_w).max(plus_w);
         let (arrow_rect, plus_rect) =
             split_new_tab_button((sw - button_w, y, button_w, height), arrow_w);
-        let update_chip = chip.map(|(notice, slot, short)| {
-            let rect = (
-                sw - button_w - slot + UPDATE_CHIP_INSET,
-                y + UPDATE_CHIP_INSET,
-                slot - 2.0 * UPDATE_CHIP_INSET,
-                height - 2.0 * UPDATE_CHIP_INSET,
-            );
-            self.update_chip(ws, &notice, rect, short)
-        });
         // Tabs divide the strip evenly and fill the bar; once they would
         // shrink below `tab_min_width` the bar overflows and — when `scroll_tabbar`
         // — scrolls with `‹ ›` arrows, showing only whole tabs (active kept in
@@ -197,7 +173,7 @@ impl App {
             n,
             active,
             strip,
-            button_w + chip_slot,
+            button_w,
             height,
             self.cfg.tab_min_width,
             self.cfg.scroll_tabbar,
@@ -303,7 +279,6 @@ impl App {
             band,
             scroll_left: to_btn(layout.arrow_left),
             scroll_right: to_btn(layout.arrow_right),
-            update_chip,
         }
     }
 
@@ -341,37 +316,7 @@ impl App {
         // across both the strip and the panes; the strip starts below it.
         let lead = self.vertical_title_edit_h(ws);
         let strip_rows = ((sh - lead) / height).floor().max(0.0) as usize;
-        // The update chip takes the strip's last row; the tabs, the scroll
-        // arrows and `+` share the rows above it. A strip with no row to
-        // spare for it shows none.
-        let update_chip = self
-            .update_notice()
-            .filter(|_| strip_rows >= 2)
-            .and_then(|notice| {
-                let cell_w = Self::cell_size(ws).map_or(9.0, |(cw, _)| cw);
-                let inner = strip_w - 2.0 * UPDATE_CHIP_INSET;
-                let fits = |label: &str| update_chip_width(label, cell_w) <= inner;
-                let full = crate::update_notice::chip_label(&notice, false, &self.ui_text);
-                let short = if fits(&full) {
-                    false
-                } else if fits(&crate::update_notice::chip_label(
-                    &notice,
-                    true,
-                    &self.ui_text,
-                )) {
-                    true
-                } else {
-                    return None;
-                };
-                let rect = (
-                    strip_x + UPDATE_CHIP_INSET,
-                    sh - height + UPDATE_CHIP_INSET,
-                    inner,
-                    height - 2.0 * UPDATE_CHIP_INSET,
-                );
-                Some(self.update_chip(ws, &notice, rect, short))
-            });
-        let rows = strip_rows - usize::from(update_chip.is_some());
+        let rows = strip_rows;
         let layout = side_tab_rows(labels.len(), active, rows);
         let row_y = |row: usize| lead + row as f32 * height;
         // Rows scrolled out of view are parked off-screen, kept in the segment
@@ -487,7 +432,6 @@ impl App {
             // and next tab, which scrolls the strip.
             scroll_left: arrow(0),
             scroll_right: arrow(layout.plus.saturating_sub(1)),
-            update_chip,
         }
     }
 
@@ -544,29 +488,7 @@ impl App {
         crate::update_notice::active_notice(&self.update_facts, self.update_restart_dismissed)
     }
 
-    /// The render-side chip for `notice` at `rect`.
-    fn update_chip(
-        &self,
-        ws: &WindowState,
-        notice: &crate::update_notice::Notice,
-        rect: kettle_render::Rect4,
-        short: bool,
-    ) -> kettle_render::UpdateChip {
-        kettle_render::UpdateChip {
-            rect,
-            label: crate::update_notice::chip_label(notice, short, &self.ui_text),
-            tone: if notice.kind == crate::update_notice::NoticeKind::Failed {
-                kettle_render::UpdateChipTone::Failed
-            } else {
-                kettle_render::UpdateChipTone::Notice
-            },
-            hovered: ws.hovered_update_chip,
-        }
-    }
-
-    /// Read the update facts again, off the UI thread: the shared record,
-    /// the installed version and the journal, never the network. Focus
-    /// changes ask at most every ten seconds; `force` skips that.
+    /// Read local update facts off the event loop, throttled on focus changes.
     pub(super) fn request_update_facts(&mut self, force: bool) {
         let now = std::time::Instant::now();
         if !force
@@ -589,15 +511,19 @@ impl App {
             });
     }
 
-    /// Show new update facts. Nothing is resized: the chip lives in the tab
-    /// bar's own band.
+    /// Refresh update facts without changing terminal geometry.
     pub(super) fn apply_update_facts(
         &mut self,
         ws: &mut WindowState,
         facts: crate::update_notice::UpdateFacts,
     ) {
+        self.update_toast_unavailable = None;
         if self.update_facts != facts {
+            let previous = self.update_notice();
             self.update_facts = facts;
+            if previous != self.update_notice() {
+                self.update_toast_retry = None;
+            }
             self.redraw_for_update_notice(ws);
         }
     }
@@ -628,6 +554,9 @@ impl App {
     /// per tag; Restart pending for this process until it exits. False when
     /// no notice is active.
     pub(super) fn dismiss_update_notice(&mut self, ws: &mut WindowState) -> bool {
+        if self.dismiss_update_toast(ws) {
+            return true;
+        }
         use crate::update_notice::NoticeKind;
         let Some(notice) = self.update_notice() else {
             return false;
@@ -644,29 +573,6 @@ impl App {
             NoticeKind::RestartPending => self.update_restart_dismissed = true,
         }
         self.redraw_for_update_notice(ws);
-        true
-    }
-
-    /// A left or right click on the update chip opens its menu; a middle
-    /// click is swallowed so it neither closes a tab nor pastes. Checked
-    /// before every other tab-bar target.
-    pub(super) fn press_update_chip(
-        &mut self,
-        ws: &mut WindowState,
-        bar: &TabBar,
-        px: f32,
-        py: f32,
-        bcode: u8,
-    ) -> bool {
-        let Some(chip) = &bar.update_chip else {
-            return false;
-        };
-        if !rect_contains(update_chip_hit_rect(chip.rect), px, py) {
-            return false;
-        }
-        if matches!(bcode, 0 | 2) {
-            self.open_update_menu(ws, update_chip_menu_anchor(chip.rect, self.cfg.tab_bar_pos));
-        }
         true
     }
 }

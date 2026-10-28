@@ -692,6 +692,9 @@ media_viewer_video_hint = "Click / K: play or pause · T: theater · F: fullscre
 media_viewer_theater = "Toggle theater mode (T)"
 media_viewer_fullscreen = "Toggle fullscreen (F)"
 
+update_toast_details = "Details"
+update_toast_installed = "Kettle {tag} is installed"
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"

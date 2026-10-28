@@ -3,37 +3,6 @@ use super::{
     fit_tab_segment_title, fit_tab_title, middle_ellipsis, overlay_label_cols, production_source,
 };
 
-/// Every bar that asks for input keeps the theme foreground readable on
-/// its fill, and its accent edge visible against it, in every bundled
-/// theme and for every accent slot a bar uses.
-/// The update chip's text reads at 4.5:1 and its edge at 3:1 against
-/// its opaque fill, in every bundled theme and for both tones.
-#[test]
-fn update_chip_is_readable_in_every_bundled_theme() {
-    let mut checked = 0;
-    for name in kettle_config::Theme::list() {
-        let theme = kettle_config::Theme::by_name(name);
-        for tone in [super::UpdateChipTone::Notice, super::UpdateChipTone::Failed] {
-            let (fill, edge) = super::update_chip_colors(&theme, tone);
-            let text = color::contrast_ratio(theme.foreground, fill);
-            assert!(
-                text + 1e-6 >= 4.5,
-                "{name:?} {tone:?}: chip text is {text:.2}:1"
-            );
-            let edge_ratio = color::contrast_ratio(edge, fill);
-            assert!(
-                edge_ratio + 1e-6 >= 3.0,
-                "{name:?} {tone:?}: chip edge is {edge_ratio:.2}:1"
-            );
-            checked += 1;
-        }
-    }
-    assert!(
-        checked >= 2 * 500,
-        "only {checked} theme and tone pairs checked"
-    );
-}
-
 #[test]
 fn input_bars_are_readable_in_every_bundled_theme() {
     let mut checked = 0;
@@ -87,7 +56,6 @@ fn the_renderer_actually_consumes_the_contrast_and_bell_helpers() {
             "ssh picker",
             "push_input_bar(&mut quads, search_rect, theme, theme.palette[4]);",
         ),
-        ("update chip", "push_update_chip(&mut quads, chip, theme);"),
         (
             "title editor",
             "push_input_bar(&mut quads, edit.rect, theme, theme.palette[3]);",

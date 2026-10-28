@@ -126,6 +126,8 @@ fn try_acquire_file_lock(path: &std::path::Path) -> std::io::Result<CheckLockAtt
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct UpdateCache {
     #[serde(default)]
+    toast: crate::update_toast::Ledger,
+    #[serde(default)]
     last_check: u64,
     /// The latest release the feed reported, even when it is not newer.
     #[serde(default)]
@@ -139,13 +141,9 @@ struct UpdateCache {
     /// The tag whose "failed" notice was dismissed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dismissed_failed: Option<String>,
-    /// Set once the first automatic (`update-policy = auto`) install has been
-    /// announced, so the one-time "Kettle now keeps itself up to date; disable
-    /// with `update-policy = off`" heads-up fires exactly once per install.
+    /// Compatibility markers for older processes sharing this cache.
     #[serde(default)]
     auto_update_announced: bool,
-    /// The newest tag a desktop notification was sent for, per kind, so each
-    /// kind is sent at most once per tag by all processes together.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     notified_available: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1057,5 +1055,147 @@ mod tests {
             super::try_acquire_file_lock(&path).unwrap(),
             CheckLockAttempt::Acquired(Some(_))
         ));
+    }
+}
+
+/// The caller runs delivery transactions off the event loop.
+pub(crate) fn claim_toast(notice: crate::update_notice::Notice) -> crate::update_toast::ClaimReply {
+    use crate::update_toast::ClaimReply;
+    let Some(path) = cache_path() else {
+        return ClaimReply::Unavailable;
+    };
+    toast_transaction(&path, |ledger| {
+        let now = now_secs();
+        if let Some(claim) = ledger.claim(
+            notice,
+            now,
+            std::process::id(),
+            kettle_ctl::presence::process_start_token(std::process::id()),
+        ) {
+            ClaimReply::Acquired(claim)
+        } else if let Some(until) = ledger.busy_until(now) {
+            ClaimReply::Busy(until)
+        } else {
+            ClaimReply::Seen
+        }
+    })
+    .unwrap_or_else(|error| {
+        log::warn!("update toast receipt unavailable: {error}");
+        ClaimReply::Unavailable
+    })
+}
+
+pub(crate) fn finish_toast(claim: &crate::update_toast::Claim, seen: bool) -> bool {
+    cache_path().and_then(|path| toast_transaction(&path, |ledger| ledger.finish(claim, seen)).ok())
+        == Some(true)
+}
+
+fn toast_transaction<T>(
+    path: &std::path::Path,
+    change: impl FnOnce(&mut crate::update_toast::Ledger) -> T,
+) -> std::io::Result<T> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("missing update record directory"))?;
+    kettle_state::create_private_dirs(parent)?;
+    let _lock = kettle_state::ExclusiveFileLock::acquire_timeout(
+        &parent.join("update-check.lock"),
+        std::time::Duration::from_secs(2),
+    )?;
+    let mut cache = match load_cache_at(path) {
+        Some(cache) => cache,
+        None if path.try_exists()? => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unreadable update record",
+            ));
+        }
+        None => UpdateCache::default(),
+    };
+    let result = change(&mut cache.toast);
+    if !save_cache_at(path, &cache) {
+        return Err(std::io::Error::other("update receipt was not persisted"));
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod toast_tests {
+    use super::*;
+    use crate::update_notice::{Notice, NoticeKind};
+
+    fn notice() -> Notice {
+        Notice {
+            kind: NoticeKind::Available,
+            tag: "v6.0.0".into(),
+        }
+    }
+
+    #[test]
+    fn concurrent_delivery_claims_preserve_existing_and_future_cache_fields() {
+        let directory = kettle_test_support::private_tempdir("kettle-toast-cache-");
+        let path = directory.path().join("update-check.json");
+        std::fs::write(
+            &path,
+            br#"{"last_check":17,"dismissed_version":"v5.0.0","future":{"keep":true}}"#,
+        )
+        .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let jobs: Vec<_> = (1..=4)
+            .map(|owner| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    toast_transaction(&path, |ledger| {
+                        ledger.claim(notice(), 100, owner, Some(owner as u64))
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+        let claims: Vec<_> = jobs
+            .into_iter()
+            .filter_map(|job| job.join().unwrap())
+            .collect();
+        assert_eq!(claims.len(), 1);
+        toast_transaction(&path, |ledger| ledger.finish(&claims[0], true)).unwrap();
+        assert!(
+            toast_transaction(&path, |ledger| ledger.claim(notice(), 200, 5, Some(5)))
+                .unwrap()
+                .is_none()
+        );
+        let data: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(data["last_check"], 17);
+        assert_eq!(data["dismissed_version"], "v5.0.0");
+        assert_eq!(data["future"]["keep"], true);
+    }
+
+    #[test]
+    fn delivery_preserves_an_unreadable_update_record() {
+        let directory = kettle_test_support::private_tempdir("kettle-toast-corrupt-");
+        let path = directory.path().join("update-check.json");
+        let original = b"{incomplete record";
+        std::fs::write(&path, original).unwrap();
+        assert!(toast_transaction(&path, |ledger| ledger.claim(notice(), 100, 1, None)).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn delivery_does_not_report_success_when_its_record_cannot_be_written() {
+        let directory = kettle_test_support::private_tempdir("kettle-toast-cache-");
+        let file = directory.path().join("file");
+        std::fs::write(&file, b"preserve").unwrap();
+        assert!(
+            toast_transaction(&file.join("record.json"), |ledger| ledger.claim(
+                notice(),
+                100,
+                1,
+                None
+            ))
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"preserve");
     }
 }

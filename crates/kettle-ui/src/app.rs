@@ -55,8 +55,10 @@ const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MA
 const ACCESSIBILITY_COMPLETION_ID_MASK: u64 = 1 << 60;
 const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_COMPLETION_ID_MASK);
 const ACCESSIBILITY_MEDIA_RECEIPT_ID: NodeId = NodeId(1 << 59);
-/// The tab bar's update chip.
-const ACCESSIBILITY_UPDATE_CHIP_ID: NodeId = NodeId((1 << 59) + 2);
+/// The transient update status.
+const ACCESSIBILITY_UPDATE_STATUS_ID: NodeId = NodeId((1 << 59) + 2);
+const ACCESSIBILITY_UPDATE_DETAILS_ID: NodeId = NodeId((1 << 59) + 3);
+const ACCESSIBILITY_UPDATE_DISMISS_ID: NodeId = NodeId((1 << 59) + 4);
 const ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
 const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
 /// Inline cards on screen, each by its placement's instance number, which
@@ -2241,6 +2243,7 @@ mod preview;
 mod search;
 mod sessions;
 mod system_opener;
+mod update_toast;
 mod windowing;
 
 #[cfg(test)]
@@ -2763,19 +2766,20 @@ pub enum UserEvent {
     /// state. Coalesced by the session until the lane looks.
     LanePlayback,
     /// The background update check announced a newer release, by tag (e.g.
-    /// `v5.2.0`). The tab bar's update chip shows it.
+    /// `v5.2.0`). Update facts drive foreground delivery.
     UpdateAvailable {
         tag: String,
-        /// First notice of this tag from any process: send the desktop
-        /// notification.
+        /// Legacy per-tag delivery marker.
         notify: bool,
     },
     /// Fresh update facts, read off the UI thread.
     UpdateFacts(Box<crate::update_notice::UpdateFacts>),
+    UpdateToastClaimed {
+        window: u64,
+        reply: crate::update_toast::ClaimReply,
+    },
     /// An automatic update completed. Existing windows keep running the
     /// current image; the next kettle launch uses the installed release.
-    /// `first_time` is set on the first automatic install so the UI can show a
-    /// one-time "auto-update is on; disable with `update-policy = off`" note.
     UpdateInstalled {
         tag: String,
         staged: bool,
@@ -4034,17 +4038,10 @@ fn split_new_tab_button(
 enum NewTabHoverTarget {
     Menu,
     Plus,
-    UpdateChip,
 }
 
 fn new_tab_hover_target(bar: &TabBar, x: f32, y: f32) -> Option<NewTabHoverTarget> {
-    if bar
-        .update_chip
-        .as_ref()
-        .is_some_and(|chip| rect_contains(update_chip_hit_rect(chip.rect), x, y))
-    {
-        Some(NewTabHoverTarget::UpdateChip)
-    } else if bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, x, y) {
+    if bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, x, y) {
         Some(NewTabHoverTarget::Menu)
     } else if rect_contains(bar.new_tab, x, y) {
         Some(NewTabHoverTarget::Plus)
@@ -8156,59 +8153,8 @@ fn tab_segment_strip_width(surface_w: f32, plus_w: f32, arrow_w: f32) -> f32 {
     (surface_w - plus_w - arrow_w).max(plus_w)
 }
 
-/// The space between the update chip and the edges of its slot.
-const UPDATE_CHIP_INSET: f32 = 3.0;
-
 /// The shortest a focus change waits before reading the update facts again.
 const UPDATE_FACTS_THROTTLE: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// The chip's width for `label`: its text plus a cell of padding each side.
-fn update_chip_width(label: &str, cell_w: f32) -> f32 {
-    (unicode_width::UnicodeWidthStr::width(label) as f32 + 2.0) * cell_w
-}
-
-/// The update chip's slot on a horizontal bar `surface_w` wide with `tabs`
-/// tabs and `button_w` of trailing buttons: the full label while every tab
-/// keeps at least `min_tab_w`, else the short one while one tab still does,
-/// else none. Returns `(slot width, short)`.
-fn update_chip_fit(
-    surface_w: f32,
-    button_w: f32,
-    tabs: usize,
-    min_tab_w: f32,
-    cell_w: f32,
-    full: &str,
-    short: &str,
-) -> Option<(f32, bool)> {
-    let slot = |label: &str| update_chip_width(label, cell_w) + 2.0 * UPDATE_CHIP_INSET;
-    let full_slot = slot(full);
-    if (surface_w - button_w - full_slot) / tabs.max(1) as f32 >= min_tab_w {
-        return Some((full_slot, false));
-    }
-    let short_slot = slot(short);
-    (surface_w - button_w - short_slot >= min_tab_w).then_some((short_slot, true))
-}
-
-/// The chip's click target: its whole slot, inset included.
-fn update_chip_hit_rect((x, y, w, h): kettle_render::Rect4) -> kettle_render::Rect4 {
-    (
-        x - UPDATE_CHIP_INSET,
-        y - UPDATE_CHIP_INSET,
-        w + 2.0 * UPDATE_CHIP_INSET,
-        h + 2.0 * UPDATE_CHIP_INSET,
-    )
-}
-
-/// Where the chip's menu opens: under a top bar, over a bottom bar, and
-/// beside a side strip, toward the window.
-fn update_chip_menu_anchor((x, y, w, h): kettle_render::Rect4, position: TabBarPos) -> (f32, f32) {
-    match position {
-        TabBarPos::Top => (x, y + h),
-        TabBarPos::Bottom => (x, y),
-        TabBarPos::Left => (x + w, y),
-        TabBarPos::Right => (x, y),
-    }
-}
 
 /// The ✕ hit zone for one tab segment, or an EMPTY rect when the button is
 /// configured off.
@@ -9975,6 +9921,12 @@ pub struct App {
     update_facts: crate::update_notice::UpdateFacts,
     /// This process dismissed its restart notice, until it exits.
     update_restart_dismissed: bool,
+    update_toast: Option<crate::update_toast::Toast>,
+    update_toast_claiming: Option<(crate::update_notice::Notice, u64)>,
+    update_toast_handled: Option<crate::update_notice::Notice>,
+    update_toast_unavailable: Option<crate::update_notice::Notice>,
+    update_toast_retry: Option<std::time::Instant>,
+    update_toast_focus: Option<NodeId>,
     /// When the update facts were last asked for, to throttle focus refreshes.
     update_facts_requested: Option<std::time::Instant>,
     /// The installed version last logged as waiting for a restart.
@@ -10987,6 +10939,12 @@ impl App {
             lua_startup_fired: false,
             update_facts: crate::update_notice::UpdateFacts::default(),
             update_restart_dismissed: false,
+            update_toast: None,
+            update_toast_claiming: None,
+            update_toast_handled: None,
+            update_toast_unavailable: None,
+            update_toast_retry: None,
+            update_toast_focus: None,
             update_facts_requested: None,
             logged_restart_pending: None,
             other_builds,
@@ -11268,7 +11226,6 @@ impl App {
             ws.hovered_close_idx,
             ws.hovered_new_tab,
             ws.hovered_new_tab_menu,
-            ws.hovered_update_chip,
         );
         ws.hovered_close_idx =
             hovered_close_button(&bar.segments, ws.cursor.x as f32, ws.cursor.y as f32);
@@ -11276,13 +11233,11 @@ impl App {
         let new_tab_hover = new_tab_hover_target(&bar, cursor_x, cursor_y);
         ws.hovered_new_tab = new_tab_hover == Some(NewTabHoverTarget::Plus);
         ws.hovered_new_tab_menu = new_tab_hover == Some(NewTabHoverTarget::Menu);
-        ws.hovered_update_chip = new_tab_hover == Some(NewTabHoverTarget::UpdateChip);
         if prior_hover
             != (
                 ws.hovered_close_idx,
                 ws.hovered_new_tab,
                 ws.hovered_new_tab_menu,
-                ws.hovered_update_chip,
             )
             && let Some(window) = &ws.window
         {
@@ -11290,8 +11245,7 @@ impl App {
         }
         let close_hover = tab_close_hover_icon(ws.hovered_close_idx.is_some());
         let new_tab_hover_icon =
-            (ws.hovered_new_tab || ws.hovered_new_tab_menu || ws.hovered_update_chip)
-                .then_some(CursorIcon::Pointer);
+            (ws.hovered_new_tab || ws.hovered_new_tab_menu).then_some(CursorIcon::Pointer);
         let confirm_hover = if self.confirm_button_hovered(ws) {
             Some(CursorIcon::Pointer)
         } else {
@@ -11324,7 +11278,20 @@ impl App {
         let drag_icon = tab_drag_cursor_icon(&ws.detach_drag);
         // A split divider under the cursor shows the resize cursor
         // (after chrome/close-button, before the link-pointer / I-beam default).
+        let toast_hover = self.update_toast_projection(ws).and_then(|toast| {
+            let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+            rect_contains(toast.geometry.rect, x, y).then(|| {
+                if rect_contains(toast.geometry.details, x, y)
+                    || rect_contains(toast.geometry.close, x, y)
+                {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Default
+                }
+            })
+        });
         let want = drag_icon
+            .or(toast_hover)
             .or(close_hover)
             .or(new_tab_hover_icon)
             .or(confirm_hover)
@@ -13473,6 +13440,7 @@ impl App {
                 scrollbar_active,
                 cursor_visible,
                 resize_overlay,
+                update_toast: self.update_toast_projection(ws),
                 context_menu,
                 confirm_dialog: confirm_dialog_early,
                 settings: settings_overlay,
@@ -13594,6 +13562,7 @@ impl App {
             scrollbar_active,
             cursor_visible,
             resize_overlay,
+            update_toast: None,
             context_menu,
             confirm_dialog,
             settings: settings_overlay,
@@ -14095,6 +14064,9 @@ impl App {
             // pointer may rest on one that moved or arrived.
             ws.accessibility_pending = true;
             ws.card_hover_stale = true;
+        }
+        if presented && overlay.update_toast.is_some() {
+            self.update_toast_presented(ws.seq);
         }
         // The first card a user ever sees says a click opens it, once its
         // image is on screen with nothing over it: a card that loads in
@@ -15815,7 +15787,7 @@ impl App {
                     ws.mux.touch_active_tab_seen();
                 }
             }
-            // The update chip's two menu rows, for bindings and the palette.
+            // Persistent update actions for bindings and the palette.
             // Both are a debug-logged no-op while no notice is active, so a
             // bound key is harmless the rest of the time.
             Action::OpenUpdate => {
@@ -19892,19 +19864,13 @@ impl App {
             UserEvent::RemoteCommand => self.drain_remote_commands(ws),
             UserEvent::Ctl => self.drain_ctl(ws, _el),
             UserEvent::UpdateAvailable { tag, notify } => {
-                // The first time any process announces this tag, one desktop
-                // notification; the chip shows it everywhere. An update is
-                // never urgent enough to request the user's attention.
-                if notify && !crate::update_check::is_dismissed(&tag) {
-                    fire_notify(
-                        self.ui_text
-                            .text(kettle_i18n::Text::NotifyTitleUpdateAvailable),
-                        &self.ui_text.notify_body_update_available(&tag),
-                    );
-                }
+                let _ = (tag, notify);
                 self.request_update_facts(true);
             }
             UserEvent::UpdateFacts(facts) => self.apply_update_facts(ws, *facts),
+            UserEvent::UpdateToastClaimed { window, reply } => {
+                self.receive_update_toast(ws, window, reply)
+            }
             UserEvent::UpdateInstalled {
                 tag,
                 staged,
@@ -19912,37 +19878,14 @@ impl App {
                 notify,
             } => {
                 self.request_update_facts(true);
-                if !notify {
-                    return;
-                }
-                let tr = &self.ui_text;
-                let title = tr.text(if staged {
-                    kettle_i18n::Text::NotifyTitleUpdateStaged
-                } else {
-                    kettle_i18n::Text::NotifyTitleUpdateInstalled
-                });
-                // On the first automatic install, tell the user auto-update is
-                // on and how to opt out (oh-my-zsh style, one time only).
-                let body = match (staged, first_time) {
-                    (true, true) => tr.notify_body_update_staged_first(&tag),
-                    (true, false) => tr.notify_body_update_staged(&tag),
-                    (false, true) => tr.notify_body_update_installed_first(&tag),
-                    (false, false) => tr.notify_body_update_installed(&tag),
-                };
-                fire_notify(title, &body);
+                let _ = (tag, staged, first_time, notify);
             }
             UserEvent::UpdateFailed { tag, notify } => {
                 self.request_update_facts(true);
-                if notify {
-                    fire_notify(
-                        self.ui_text
-                            .text(kettle_i18n::Text::NotifyTitleUpdateFailed),
-                        &self.ui_text.notify_body_update_failed(&tag),
-                    );
-                }
+                let _ = (tag, notify);
             }
             UserEvent::UpdateRestartPending { installed } => {
-                // No notice yet: the update chip will show it. Log each
+                // Update facts project a foreground toast. Log each
                 // version once rather than on every hourly check.
                 if self.logged_restart_pending.as_deref() != Some(installed.as_str()) {
                     log::info!(
@@ -20224,7 +20167,6 @@ impl App {
                 ws.hovered_close_idx = None;
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
-                ws.hovered_update_chip = false;
                 ws.search.hovered_control = None;
                 // No card is under a pointer that left.
                 ws.native_pointer = None;
@@ -20699,6 +20641,9 @@ impl App {
                 let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
                 // A preview lane owns every press over it, so the terminal
                 // beside it never gets one.
+                if self.press_update_toast(ws, px, py, bcode) {
+                    return;
+                }
                 if self.press_preview_lane(ws, px, py, bcode) {
                     return;
                 }
@@ -20710,11 +20655,6 @@ impl App {
                 // Tab-bar interactions (left = switch / close-✕ / new-+;
                 // middle = close that tab).
                 let bar = self.tab_bar(ws);
-                // The update chip first: a press there must neither start a
-                // tab drag nor open the terminal's context menu.
-                if self.press_update_chip(ws, &bar, px, py, bcode) {
-                    return;
-                }
                 let in_bar = |r: kettle_render::Rect4, px: f32, py: f32| {
                     px >= r.0 && px < r.0 + r.2 && py >= r.1 && py < r.1 + r.3
                 };
@@ -21332,6 +21272,7 @@ impl App {
                 ws.window_focused = f;
                 ws.os_focus_known = true;
                 if f {
+                    self.update_toast_unavailable = None;
                     ws.frame_recovery.expedite(std::time::Instant::now());
                     // Another process may have installed or dismissed an
                     // update while this one was in the background.
@@ -21541,7 +21482,13 @@ impl App {
                 if event.state == ElementState::Pressed && ws.card_focus.take().is_some() {
                     ws.accessibility_pending = true;
                 }
-                let ui_owns_key = !matches!(ws.detach_drag, crate::detach::DragState::Idle)
+                let toast_owns_key = update_toast::owns_key(
+                    self.update_toast_focus.is_some() && self.update_toast_projection(ws).is_some(),
+                    &event.logical_key,
+                    ws.mods,
+                );
+                let ui_owns_key = toast_owns_key
+                    || !matches!(ws.detach_drag, crate::detach::DragState::Idle)
                     || ws.context_menu.is_some()
                     || ws.vi_mode.is_some()
                     || ws.hint_state.is_some()
@@ -21588,6 +21535,53 @@ impl App {
                 if event.state == ElementState::Released {
                     self.write_terminal_key_event(ws, &event, false);
                     return;
+                }
+                if !toast_owns_key && self.update_toast_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                }
+                if toast_owns_key {
+                    update_toast::guard_activation(
+                        &event.logical_key,
+                        event.physical_key,
+                        &mut ws.closing_keys,
+                    );
+                    match event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.dismiss_update_toast(ws);
+                            return;
+                        }
+                        Key::Named(NamedKey::Tab) => {
+                            self.update_toast_focus = Some(
+                                if self.update_toast_focus == Some(ACCESSIBILITY_UPDATE_DETAILS_ID)
+                                {
+                                    ACCESSIBILITY_UPDATE_DISMISS_ID
+                                } else {
+                                    ACCESSIBILITY_UPDATE_DETAILS_ID
+                                },
+                            );
+                            ws.accessibility_pending = true;
+                            if let Some(window) = &ws.window {
+                                window.request_redraw();
+                            }
+                            return;
+                        }
+                        Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                            let details =
+                                self.update_toast_focus == Some(ACCESSIBILITY_UPDATE_DETAILS_ID);
+                            self.dismiss_update_toast(ws);
+                            if details {
+                                self.open_about_panel(ws);
+                            }
+                            return;
+                        }
+                        _ => {
+                            self.update_toast_focus = None;
+                            ws.accessibility_pending = true;
+                        }
+                    }
                 }
                 if ws.ime_preedit.is_some() {
                     return;
@@ -22260,6 +22254,7 @@ impl App {
         let bell_active = !render_hidden && !ws.bell_flashes.is_empty();
         // The resize chip needs repaints until it expires (then one more to
         // erase it); clear the state once it has.
+        let update_toast_wait = self.tick_update_toast(ws, now);
         let resize_chip_live = ws
             .resize_overlay
             .map(|(_, _, t)| t.elapsed() < RESIZE_OVERLAY_DURATION)
@@ -22585,6 +22580,9 @@ impl App {
         }
         if let Some(next) = completion_hide_wait {
             let next = next.max(std::time::Duration::from_millis(1));
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = update_toast_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = media_receipt_wait {

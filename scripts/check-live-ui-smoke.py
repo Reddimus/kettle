@@ -18818,42 +18818,47 @@ def run_line_edit_chords(kettle: str, root: Path) -> Path:
     return out
 
 
-def run_update_chip(kettle: str, root: Path) -> Path:
-    """An update notice is a chip in the tab bar and never resizes a pane (#576).
+def run_update_toast(kettle: str, root: Path) -> Path:
+    """Exercise transient delivery using a private, locked update-cache fixture."""
+    out = root / f"update-toast-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, mode=0o700, exist_ok=False)
+    with tempfile.TemporaryDirectory(prefix="kettle-update-toast-") as fixture:
+        try:
+            return _run_update_toast_fixture(kettle, out, Path(fixture))
+        finally:
+            record = Path(fixture) / "xdg/kettle/update-check.json"
+            if record.is_file():
+                shutil.copyfile(record, out / "fixture-record.json")
 
-    The update record is written into a private `XDG_CONFIG_HOME`, so the
-    notice comes from what the check would have recorded, without the
-    network. A right click opens the chip's menu, and its Dismiss row hides
-    the notice and records the dismissal for every process; the pane keeps
-    its size throughout.
-    """
-    out = root / f"update-chip-{time.strftime('%Y%m%d-%H%M%S')}"
-    out.mkdir(parents=True, exist_ok=True)
-    xdg = out / "xdg"
-    (xdg / "kettle").mkdir(parents=True, exist_ok=True)
-    os.chmod(xdg, 0o700)
-    os.chmod(xdg / "kettle", 0o700)
+
+def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
+    import fcntl
+
+    xdg = fixture / "xdg"
+    (xdg / "kettle").mkdir(parents=True, mode=0o700)
     record = xdg / "kettle" / "update-check.json"
     cfg = out / "config"
     cfg.write_text(
-        "\n".join(
-            [
-                "agent-server = full",
-                "tab-bar = always",
-                "restore-session = false",
-                "update-policy = notify",
-                "update-check-interval-hours = 24",
-                "window-width = 100",
-                "window-height = 24",
-            ]
-        )
-        + "\n"
+        "agent-server = full\ntab-bar = always\nrestore-session = false\n"
+        "update-policy = notify\nupdate-check-interval-hours = 24\n"
+        "window-width = 100\nwindow-height = 24\nreduce-motion = on\n"
+        "shell = /bin/sh\nlogin-shell = false\nshell-integration = false\n"
     )
-    env = {"XDG_CONFIG_HOME": str(xdg)}
+    env = {"XDG_CONFIG_HOME": str(xdg), "XDG_STATE_HOME": str(fixture / "state")}
 
-    def grid(live: "LiveKettle") -> List[Tuple[object, object]]:
-        panes = live.json_ctl("list_panes").get("panes", [])
-        return [(pane.get("cols"), pane.get("rows")) for pane in panes]
+    def publish(tag: str, failed: bool = False) -> None:
+        with (record.parent / "update-check.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = json.loads(record.read_text()) if record.exists() else {}
+            data.update(last_check=int(time.time()), latest_tag=tag, last_outcome="available")
+            if failed:
+                data.update(failure_tag=tag, failure_count=3)
+            fd, name = tempfile.mkstemp(dir=record.parent)
+            with os.fdopen(fd, "w") as stream:
+                json.dump(data, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, record)
 
     def until(live: "LiveKettle", check, what: str, timeout: float = 15.0):
         deadline = time.monotonic() + timeout
@@ -18862,62 +18867,82 @@ def run_update_chip(kettle: str, root: Path) -> Path:
             value = check(geometry)
             if value:
                 return value
-            time.sleep(0.1)
-        raise SystemExit(f"update-chip smoke: {what}")
+            time.sleep(0.05)
+        raise SystemExit(f"update-toast smoke: {what}; last geometry={geometry}")
 
-    with LiveKettle(kettle, cfg, out / "baseline.log", extra_env=env) as live:
-        until(live, lambda g: g.get("tab_bar", {}).get("height"), "no tab bar")
-        baseline = grid(live)
-        if until(live, lambda g: "update_notice" in g, "no update_notice field") and (
-            live.json_ctl("ui_geometry").get("update_notice") is not None
-        ):
-            raise SystemExit("update-chip smoke: a notice without any record")
+    def terminal(live: "LiveKettle"):
+        screen = live.json_ctl("read_screen")
+        return {key: screen[key] for key in ("text", "cols", "rows", "cursor")}
 
-    record.write_text(
-        json.dumps(
-            {"last_check": int(time.time()), "latest_tag": "v99.0.0", "last_outcome": "available"}
-        )
-    )
-    os.chmod(record, 0o600)
-    with LiveKettle(kettle, cfg, out / "kettle.log", extra_env=env) as live:
-        notice = until(live, lambda g: g.get("update_notice"), "the notice never appeared")
-        if (notice.get("state"), notice.get("tag")) != ("available", "v99.0.0"):
-            raise SystemExit(f"update-chip smoke: unexpected notice {notice!r}")
-        chip = live.json_ctl("ui_geometry")["tab_bar"]["update_chip"]
-        if not str(chip.get("label", "")).endswith("v99.0.0"):
-            raise SystemExit(f"update-chip smoke: unexpected chip {chip!r}")
-        if grid(live) != baseline:
-            raise SystemExit(f"update-chip smoke: the notice resized a pane {grid(live)!r}")
-        rect = chip["rect"]
-        x = rect["x"] + rect["width"] / 2
-        y = rect["y"] + rect["height"] / 2
-        live.ctl("send_mouse", params={"event": "press", "x": x, "y": y, "button": "right"})
-        live.ctl("send_mouse", params={"event": "release", "x": x, "y": y, "button": "right"})
-        rows = until(
-            live,
-            lambda g: (g.get("context_menu") or {}).get("rows"),
-            "the chip's menu never opened",
-        )
-        dismiss = next((row for row in rows if row.get("label") == "Dismiss"), None)
-        if dismiss is None:
-            raise SystemExit(f"update-chip smoke: no Dismiss row in {rows!r}")
-        rect = dismiss["rect"]
-        x = rect["x"] + 5
-        y = rect["y"] + rect["height"] / 2
-        live.ctl("send_mouse", params={"event": "press", "x": x, "y": y, "button": "left"})
-        live.ctl("send_mouse", params={"event": "release", "x": x, "y": y, "button": "left"})
-        until(
-            live,
-            lambda g: "update_notice" in g and g["update_notice"] is None,
-            "Dismiss left the notice up",
-        )
-        if grid(live) != baseline:
-            raise SystemExit(f"update-chip smoke: dismissing resized a pane {grid(live)!r}")
-    deadline = time.monotonic() + 5.0
-    while json.loads(record.read_text()).get("dismissed_version") != "v99.0.0":
-        if time.monotonic() > deadline:
-            raise SystemExit("update-chip smoke: the dismissal was not recorded")
-        time.sleep(0.1)
+    def click(live: "LiveKettle", rect):
+        live.ctl("send_mouse", params={"event": "click", "x": rect["x"] + rect["width"] / 2,
+                                     "y": rect["y"] + rect["height"] / 2, "button": "left"})
+
+    # Suppress real network checks even for the initial baseline launch.
+    publish("v0.0.0")
+    owners = []
+    with LiveKettle(kettle, cfg, out / "first.log", extra_env=env) as live:
+        owners.append(live.pid)
+        live.json_ctl("perform_action", {"action": "focus_window"})
+        until(live, lambda g: g.get("window_focused"), "window never focused")
+        live.ctl("send_text", params={"text": "pending input stays here"})
+        until(live, lambda _: "pending input stays here" in terminal(live)["text"], "input absent")
+        before = terminal(live)
+        publish("v99.0.0")
+        live.json_ctl("perform_action", {"action": "reload_config"})
+        toast = until(live, lambda g: g.get("update_toast"), "toast never appeared")
+        assert live.json_ctl("ui_geometry")["tab_bar"]["update_chip"] is None
+        assert terminal(live) == before, "toast changed terminal geometry or pending input"
+        live.screenshot(out / "toast.png")
+        start = time.monotonic()
+        until(live, lambda g: not g.get("update_toast"), "toast did not expire", 10)
+        elapsed = time.monotonic() - start
+        assert 5.5 < elapsed < 8.5, f"unexpected expiry {elapsed:.2f}s"
+        assert terminal(live) == before, "expiry changed terminal geometry or pending input"
+        assert live.json_ctl("ui_geometry")["update_notice"]["tag"] == "v99.0.0"
+        publish("v99.0.1")
+        live.json_ctl("perform_action", {"action": "reload_config"})
+        toast = until(live, lambda g: g.get("update_toast"), "new release was suppressed")
+        click(live, toast["details"])
+        until(live, lambda g: g.get("context_menu"), "Details did not open About")
+        live.ctl("send_mouse", params={"event": "click", "x": 1, "y": 1, "button": "left"})
+        until(live, lambda g: not g.get("context_menu"), "About did not close on outside click")
+        publish("v99.0.1", failed=True)
+        live.json_ctl("perform_action", {"action": "reload_config"})
+        toast = until(live, lambda g: g.get("update_toast"), "new state was suppressed")
+        click(live, toast["dismiss"])
+        until(live, lambda g: not g.get("update_toast"), "Dismiss left toast visible")
+        assert terminal(live) == before, "toast controls changed pending input"
+        deadline = time.monotonic() + 5
+        while json.loads(record.read_text())["toast"]["seen"].get("failed") != "v99.0.1":
+            assert time.monotonic() < deadline, "delivery receipt was not persisted"
+            time.sleep(0.05)
+        (out / "first.geometry.json").write_text(json.dumps(live.json_ctl("ui_geometry"), indent=2) + "\n")
+    assert live.proc.poll() is not None, "first app was not reaped"
+    with LiveKettle(kettle, cfg, out / "restart.log", extra_env=env) as live:
+        owners.append(live.pid)
+        live.json_ctl("perform_action", {"action": "focus_window"})
+        until(live, lambda g: g.get("update_toast_delivery", {}).get("handled"), "persisted receipt not read")
+        assert live.json_ctl("ui_geometry").get("update_toast") is None, "restart replayed seen state"
+        publish("v99.0.2")
+        with (record.parent / "update-check.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            live.json_ctl("perform_action", {"action": "reload_config"})
+            until(live, lambda g: g.get("update_toast_delivery", {}).get("unavailable"),
+                  "cache contention did not defer delivery", 5)
+            assert live.json_ctl("ui_geometry").get("update_toast") is None
+        live.json_ctl("perform_action", {"action": "reload_config"})
+        toast = until(live, lambda g: g.get("update_toast"), "delivery did not recover after cache contention")
+        click(live, toast["dismiss"])
+        deadline = time.monotonic() + 5
+        while json.loads(record.read_text())["toast"]["seen"].get("available") != "v99.0.2":
+            assert time.monotonic() < deadline, "recovered delivery was not persisted"
+            time.sleep(0.05)
+    assert live.proc.poll() is not None, "restarted app was not reaped"
+    data = json.loads(record.read_text())
+    assert data["toast"]["seen"] == {"available": "v99.0.2", "failed": "v99.0.1"}
+    (out / "analysis.json").write_text(json.dumps({"passed": True, "expiry_seconds": elapsed, "owned_pids": owners, "apps_reaped": True,
+        "scope": "Private cache fixture and real GUI/control-path actions; no live update feed, physical screen reader, or installer."}, indent=2) + "\n")
     return out
 
 
@@ -20754,6 +20779,7 @@ def main() -> int:
             "raw-paste",
             "steady-uploads",
             "text-presentation",
+            "update-toast",
             "update-chip",
             "zoom-keybind",
             "line-edit-chords",
@@ -20895,9 +20921,12 @@ def main() -> int:
         else:
             out = run_text_presentation(args.kettle, root)
             print(f"text-presentation smoke: OK artifacts={out}")
-    if args.case in ("update-chip", "all"):
-        out = run_update_chip(args.kettle, root)
-        print(f"update-chip smoke: OK artifacts={out}")
+    if args.case in ("update-toast", "update-chip", "all"):
+        if platform.system() == "Windows":
+            print("update-toast smoke: skipped (Unix cache-lock fixture)")
+        else:
+            out = run_update_toast(args.kettle, root)
+            print(f"update-toast smoke: OK artifacts={out}")
     if args.case in ("split-exit-resize", "all"):
         out = run_split_exit_resize(args.kettle, root)
         print(f"split-exit-resize smoke: OK artifacts={out}")

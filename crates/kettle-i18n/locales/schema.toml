@@ -2160,3 +2160,10 @@ context = "crates/kettle-ui/src/app/menus.rs: Fits the image or document page to
 
 [messages.media_preview_menu_theater]
 context = "crates/kettle-ui/src/app/menus.rs: Toggles theater mode for the focused video preview."
+
+[messages.update_toast_details]
+context = "Update toast button opening the persistent About update details."
+
+[messages.update_toast_installed]
+context = "Short update toast: a version is installed; old windows keep running."
+args = [{ name = "tag", type = "str" }]
