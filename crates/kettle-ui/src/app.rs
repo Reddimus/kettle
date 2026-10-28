@@ -18610,6 +18610,14 @@ impl ApplicationHandler<UserEvent> for App {
                 );
                 self.finish_window_dispatch(el, window_seq, ws);
             }
+            UserEvent::UpdateToastClaimed { window, reply } => {
+                let Some(mut ws) = self.windows.remove(&window) else {
+                    self.abandon_update_toast_claim(window, reply);
+                    return;
+                };
+                self.receive_update_toast(&mut ws, window, reply);
+                self.finish_window_dispatch(el, window, ws);
+            }
             UserEvent::RemoteCommand => {
                 // Re-arm before reading: a writer racing the drain can queue a
                 // new notification, while commands already present are batched.
@@ -19812,7 +19820,8 @@ impl App {
             | UserEvent::NativeFullscreenExited { .. }
             | UserEvent::RemoteScanReady
             | UserEvent::MediaRendered
-            | UserEvent::LanePlayback => {}
+            | UserEvent::LanePlayback
+            | UserEvent::UpdateToastClaimed { .. } => {}
             UserEvent::AccessibilityAction { request, .. } => {
                 self.handle_accessibility_action(ws, request, _el);
             }
@@ -19937,9 +19946,6 @@ impl App {
                 } else {
                     self.request_update_facts(true);
                 }
-            }
-            UserEvent::UpdateToastClaimed { window, reply } => {
-                self.receive_update_toast(ws, window, reply)
             }
             UserEvent::UpdateInstalled {
                 tag,

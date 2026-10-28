@@ -17234,3 +17234,22 @@ fn update_toast_announces_politely_and_exposes_explicit_controls() {
     assert_eq!(nodes[1].1.label(), Some("Detalles"));
     assert_eq!(nodes[2].1.label(), Some("Descartar"));
 }
+
+#[test]
+fn toast_claim_replies_keep_the_requesting_window_after_focus_moves() {
+    let source = production_source();
+    let dispatch = source
+        .split("fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {")
+        .nth(1)
+        .and_then(|body| body.split("fn window_event(").next())
+        .unwrap();
+    let route = dispatch
+        .split("UserEvent::UpdateToastClaimed { window, reply } => {")
+        .nth(1)
+        .and_then(|body| body.split("\n            UserEvent::").next())
+        .expect("toast replies need their own window route, not focused-window fallback");
+    assert!(route.contains("self.windows.remove(&window)"));
+    assert!(route.contains("self.receive_update_toast(&mut ws, window, reply)"));
+    assert!(route.contains("self.finish_window_dispatch(el, window, ws)"));
+    assert!(route.contains("self.abandon_update_toast_claim(window, reply)"));
+}

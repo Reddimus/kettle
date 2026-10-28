@@ -8693,6 +8693,15 @@ def wayland_clipboard_providers_are_reusable_selftest() -> None:
 def live_helper_selftest() -> None:
     import importlib.util
 
+    projected = {"window": 4, "update_toast": {"message": "fixture"},
+                 "update_toast_delivery": {"active": {"window": 4, "presented": False}}}
+    assert presented_update_toast(projected) is None
+    projected["update_toast_delivery"]["active"]["presented"] = True
+    assert presented_update_toast(projected) == {"message": "fixture"}
+    projected["update_toast_delivery"]["active"]["window"] = 5
+    assert presented_update_toast(projected) is None
+    assert presented_update_toast({"window": 4, "update_toast": {"message": "fixture"}}) is None
+
     event_stream_readiness_selftest()
 
     image_paste_spec = importlib.util.spec_from_file_location(
@@ -18818,6 +18827,14 @@ def run_line_edit_chords(kettle: str, root: Path) -> Path:
     return out
 
 
+def presented_update_toast(geometry):
+    """A projected overlay is not visible until its owner presents a frame."""
+    active = geometry.get("update_toast_delivery", {}).get("active") or {}
+    if active.get("presented") and active.get("window") == geometry.get("window"):
+        return geometry.get("update_toast")
+    return None
+
+
 def run_update_toast(kettle: str, root: Path) -> Path:
     """Exercise transient delivery using a private, locked update-cache fixture."""
     out = root / f"update-toast-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -18899,7 +18916,7 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
         before = terminal(live)
         publish("v99.0.0")
         live.json_ctl("perform_action", {"action": "reload_config"})
-        toast = until(live, lambda g: g.get("update_toast"), "toast never appeared")
+        toast = until(live, presented_update_toast, "toast never appeared")
         assert live.json_ctl("ui_geometry")["tab_bar"]["update_chip"] is None
         assert terminal(live) == before, "toast changed terminal geometry or pending input"
         live.screenshot(out / "toast.png")
@@ -18911,14 +18928,14 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
         assert live.json_ctl("ui_geometry")["update_notice"]["tag"] == "v99.0.0"
         publish("v99.0.1")
         live.json_ctl("perform_action", {"action": "reload_config"})
-        toast = until(live, lambda g: g.get("update_toast"), "new release was suppressed")
+        toast = until(live, presented_update_toast, "new release was suppressed")
         click(live, toast["details"])
         until(live, lambda g: g.get("context_menu"), "Details did not open About")
         live.ctl("send_mouse", params={"event": "click", "x": 1, "y": 1, "button": "left"})
         until(live, lambda g: not g.get("context_menu"), "About did not close on outside click")
         publish("v99.0.1", failed=True)
         live.json_ctl("perform_action", {"action": "reload_config"})
-        toast = until(live, lambda g: g.get("update_toast"), "new state was suppressed")
+        toast = until(live, presented_update_toast, "new state was suppressed")
         click(live, toast["dismiss"])
         until(live, lambda g: not g.get("update_toast"), "Dismiss left toast visible")
         assert terminal(live) == before, "toast controls changed pending input"
@@ -18942,7 +18959,7 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
             until(live, lambda g: g.get("update_toast_delivery", {}).get("retry_in_ms") is not None,
                   "delivery lock did not produce a retry", 5)
             assert live.json_ctl("ui_geometry").get("update_toast") is None
-        toast = until(live, lambda g: g.get("update_toast"), "delivery did not retry after contention")
+        toast = until(live, presented_update_toast, "delivery did not retry after contention")
         live.json_ctl("perform_action", {"action": "dismiss_update"})
         until(live, lambda g: not g.get("update_notice"), "persistent dismissal depends on toast timing")
         deadline = time.monotonic() + 5
@@ -18961,8 +18978,7 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
             os.fchmod(lock.fileno(), 0o600)
             fcntl.flock(lock, fcntl.LOCK_EX)
             live.json_ctl("perform_action", {"action": "reload_config"})
-            until(live, lambda g: g.get("update_toast"), "download lock blocked the toast")
-            until(live, lambda g: (g.get("update_toast_delivery", {}).get("active") or {}).get("presented"), "toast did not present")
+            until(live, presented_update_toast, "download lock blocked the toast")
             deadline = time.monotonic() + 5
             while json.loads(delivery.read_text())["toast"]["seen"].get("available") != "v99.0.3":
                 assert time.monotonic() < deadline, "download lock blocked a presented receipt"
@@ -18973,7 +18989,7 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
         live.json_ctl("perform_action", {"action": "focus_window"})
         publish("v99.0.4")
         live.json_ctl("perform_action", {"action": "reload_config"})
-        toast = until(live, lambda g: g.get("update_toast"), "closed toast owner stranded later notices")
+        toast = until(live, presented_update_toast, "closed toast owner stranded later notices")
         assert live.json_ctl("ui_geometry")["update_toast_delivery"]["active"]["window"] != owner
         click(live, toast["dismiss"])
         if native_redock:
@@ -18985,7 +19001,7 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
         until(live, lambda g: g["cell"]["font_size"] == 40, "large font did not apply")
         publish("v99.0.5-aaa-bbbbbbbbbb-cccccccccc", failed=True)
         live.json_ctl("perform_action", {"action": "reload_config"})
-        toast = until(live, lambda g: g.get("update_toast"), "large-font warning did not fit")
+        toast = until(live, presented_update_toast, "large-font warning did not fit")
         assert toast["message"]["y"] + toast["message"]["height"] <= toast["details"]["y"], "large warning did not stack controls"
         live.screenshot(out / "large-font.png")
         click(live, toast["dismiss"])

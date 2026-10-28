@@ -37,6 +37,15 @@ fn finish(claim: Claim, seen: bool) {
         });
 }
 
+fn forget_claim_request(pending: &mut Option<(crate::update_notice::Notice, u64)>, window: u64) {
+    if pending
+        .as_ref()
+        .is_some_and(|(_, requested)| *requested == window)
+    {
+        *pending = None;
+    }
+}
+
 impl App {
     fn update_toast_message(&self, notice: &crate::update_notice::Notice) -> String {
         match notice.kind {
@@ -119,6 +128,13 @@ impl App {
             },
             opacity: toast.opacity(self.motion_allowed()),
         })
+    }
+
+    pub(super) fn abandon_update_toast_claim(&mut self, window: u64, reply: ClaimReply) {
+        forget_claim_request(&mut self.update_toast_claiming, window);
+        if let ClaimReply::Acquired(claim) = reply {
+            finish(claim, false);
+        }
     }
 
     pub(super) fn receive_update_toast(
@@ -345,6 +361,19 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_closed_window_forgets_only_its_own_pending_claim() {
+        let notice = crate::update_notice::Notice {
+            kind: crate::update_notice::NoticeKind::Available,
+            tag: "v99.0.1".into(),
+        };
+        let mut pending = Some((notice.clone(), 8));
+        forget_claim_request(&mut pending, 3);
+        assert_eq!(pending, Some((notice, 8)));
+        forget_claim_request(&mut pending, 8);
+        assert!(pending.is_none());
+    }
 
     #[test]
     fn ordinary_terminal_keys_and_modified_shortcuts_do_not_belong_to_toast() {
