@@ -1,6 +1,6 @@
 //! The entry point for fuzzing the text the external decoder writes, which
 //! the worker parses: ffprobe's description of a video and its packet list,
-//! and ffmpeg's codec list. The fuzz target (feature `fuzzing`) and the
+//! first-audio packet timestamps, and ffmpeg's codec list. The `fuzzing` target and
 //! in-process sweep below call the same function.
 
 /// Parse `data`, split at NUL bytes, as a description, a packet list and a
@@ -68,8 +68,10 @@ mod tests {
               streams.stream.0.width=1\nstreams.stream.0.height=1\n\
               streams.stream.0.avg_frame_rate=1/2\n",
         );
-        save_seeds("ffprobe", &[&whole, &parsed, &edge]);
-        for case in cases(&[&whole, &parsed, &edge], 9000, 0x5eed_0005) {
+        let audio =
+            b"packets.packet.0.pts_time=\"10.000000\"\npackets.packet.0.dts_time=\"9.980000\"\n";
+        save_seeds("ffprobe", &[&whole, &parsed, &edge, audio]);
+        for case in cases(&[&whole, &parsed, &edge, audio], 9000, 0x5eed_0005) {
             ffprobe(&case);
         }
     }

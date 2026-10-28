@@ -58,6 +58,17 @@ ffmpeg -hide_banner -loglevel error -f lavfi -i \
   -map_metadata -1 -fflags +bitexact -flags:v +bitexact large-index.webm
 ```
 
+`delayed-audio.mkv` has 12 seconds of 64x48 video at 10 fps and two seconds
+of 440 Hz PCM starting at 10 s. Its stream metadata reports an audio start of
+zero; its first audio packet reports 10 s. Made with Homebrew FFmpeg 9.0.2:
+
+```sh
+ffmpeg -nostdin -hide_banner -loglevel error -threads 2 \
+  -f lavfi -i testsrc2=size=64x48:rate=10:duration=12 \
+  -itsoffset 10 -f lavfi -i sine=frequency=440:sample_rate=48000:duration=2 \
+  -map 0:v -map 1:a -c:v ffv1 -threads:v 2 -c:a pcm_s16le delayed-audio.mkv
+```
+
 | File | Bytes | SHA-256 |
 | --- | --- | --- |
 | index.mp4 | 4117 | `4ac5bc7783ee1e305f32272fbab83fbdc46c2a96bb72a992cf326f914c0d9b42` |
@@ -69,3 +80,4 @@ ffmpeg -hide_banner -loglevel error -f lavfi -i \
 | long-audio.mp4 | 5462 | `6f5b60a7e3ba603cd9052093893df960f3c8c77bc93a1ea700fe6720096d0e09` |
 | ticks.mp4 | 9583 | `b53795cb3fcc1266f4a5bed15867e633aad1b5707ff69701b746af857e7d6f36` |
 | large-index.webm | 113107 | `77e6aae46ae5764afd1f38e1698d67a8c4d4d26b7a49c34edbf4623cf7c7d910` |
+| delayed-audio.mkv | 319450 | `74326c9ce0ec39873a5afd6c05414b5a2808b35b27dbb22c1eab573e261176d7` |

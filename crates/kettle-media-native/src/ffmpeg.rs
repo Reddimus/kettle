@@ -82,6 +82,8 @@ const PLAY_CPU_SECONDS: u64 = 30;
 const PLAY_CPU_PER_SECOND: u64 = 4;
 /// How long the explanation of a session that gave no frame may take.
 const EXPLAIN_WITHIN: Duration = Duration::from_secs(2);
+/// An optional audio scan must leave time for video-only playback.
+const AUDIO_PROBE_WITHIN: Duration = Duration::from_secs(1);
 
 /// ffmpeg and ffprobe, trusted, from one directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -204,6 +206,25 @@ fn micros(value: &str) -> Option<i64> {
     }
     let value = whole.parse::<i64>().ok()? * 1_000_000 + fraction.parse::<i64>().ok()?;
     Some(if negative { -value } else { value })
+}
+
+fn audio_start_frame(text: &str, origin_us: i64) -> Option<u64> {
+    let at = text
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            if matches!(
+                key,
+                "packets.packet.0.pts_time" | "packets.packet.0.dts_time"
+            ) {
+                micros(value.trim_matches('"'))
+            } else {
+                None
+            }
+        })
+        .min()?
+        .checked_sub(origin_us)?;
+    kettle_media::audio::frames_at(at.max(0), 1_000_000)
 }
 
 /// Matroska's DURATION tag is the track's final timestamp, not its span.
@@ -774,6 +795,46 @@ impl Ffmpeg {
         parse_probe(&text)
     }
 
+    /// Stream start_time can be zero even when its first audio packet is late.
+    fn first_audio_frame(
+        &self,
+        input: &VideoInput<'_>,
+        origin_us: i64,
+        deadline: Instant,
+    ) -> Result<u64, FailureCode> {
+        let args = [
+            "-v",
+            "error",
+            "-hide_banner",
+            "-protocol_whitelist",
+            "file",
+            "-f",
+            demuxer(input.container),
+            "-select_streams",
+            "a:0",
+            "-read_intervals",
+            "%+#1",
+            "-show_entries",
+            "packet=pts_time,dts_time:packet_side_data=",
+            "-of",
+            "flat",
+            INPUT,
+        ];
+        let now = Instant::now();
+        let within = (deadline.saturating_duration_since(now) / 2).min(AUDIO_PROBE_WITHIN);
+        let ran = match Self::run_on(&self.ffprobe, input, &args, 1024, now + within) {
+            Err(FailureCode::RenderTimeout) if Instant::now() < deadline => {
+                return Err(FailureCode::RenderParse);
+            }
+            result => result?,
+        };
+        if !ran.success || ran.overran {
+            return Err(FailureCode::RenderParse);
+        }
+        let text = std::str::from_utf8(&ran.stdout).map_err(|_| FailureCode::RenderParse)?;
+        audio_start_frame(text, origin_us).ok_or(FailureCode::RenderParse)
+    }
+
     fn packets(
         &self,
         input: &VideoInput<'_>,
@@ -871,6 +932,7 @@ fn failure(error: RunError) -> FailureCode {
     match error {
         RunError::Unavailable => FailureCode::BackendUnavailable,
         RunError::Deadline => FailureCode::RenderTimeout,
+        RunError::Unreaped => FailureCode::RenderResource,
     }
 }
 
@@ -1010,21 +1072,31 @@ impl VideoPlayer for Ffmpeg {
             .start_us
             .is_some_and(|video| video > probe.start_us.saturating_add((start_ms * 1000) as i64));
         if request.audio != kettle_media::AudioRequest::Off && info.has_audio {
-            let pipes = crate::run::triple(
-                &self.ffmpeg,
-                |pipes| sounding_args(args.clone(), pipes, initial_gap, start_ms, info.duration_ms),
-                reopen(input.file, input.identity)?,
-                cpu,
-            )
-            .map_err(failure)?;
-            match playback::split(
-                pipes,
-                width as usize * height as usize * 4,
-                start_ms,
-                info.duration_ms,
-                initial_gap,
-                deadline,
-            ) {
+            let sounding = (|| {
+                let first_audio = self.first_audio_frame(&input, probe.start_us, deadline)?;
+                if first_audio > info.duration_ms * 48 {
+                    return Err(FailureCode::RenderParse);
+                }
+                let pipes = crate::run::triple(
+                    &self.ffmpeg,
+                    |pipes| {
+                        sounding_args(args.clone(), pipes, initial_gap, start_ms, info.duration_ms)
+                    },
+                    reopen(input.file, input.identity)?,
+                    cpu,
+                )
+                .map_err(failure)?;
+                playback::split(
+                    pipes,
+                    width as usize * height as usize * 4,
+                    start_ms,
+                    info.duration_ms,
+                    first_audio,
+                    initial_gap,
+                    deadline,
+                )
+            })();
+            match sounding {
                 Ok((frames, audio)) => {
                     return Ok(Playback {
                         video_end_ms: Some(video_end_ms),
@@ -1478,7 +1550,8 @@ impl VideoDecoder for Ffmpeg {
 
 /// What the fuzz target and the sweep below check of the text ffprobe and
 /// ffmpeg write, split at NUL bytes into a description, a packet list and a
-/// codec list: nothing panics; a description that parses shows a picture
+/// codec list: nothing panics; first-audio timestamps stay within the duration
+/// bound; a description that parses shows a picture
 /// within bounds or fails, turns it by a quarter turn and has a frame
 /// length of at most a thousand seconds; a packet list that parses is sorted and distinct, its keyframes
 /// among its frames, and every frame it finds for a time is one of them.
@@ -1493,6 +1566,18 @@ pub(crate) fn check_text(data: &[u8]) {
         parts.next().flatten(),
     );
     let probe = description.and_then(|text| parse_probe(text).ok());
+    if let Some(text) = description {
+        for origin in [
+            i64::MIN,
+            0,
+            i64::MAX,
+            probe.as_ref().map_or(0, |p| p.start_us),
+        ] {
+            if let Some(frame) = audio_start_frame(text, origin) {
+                assert!(frame <= kettle_media::MAX_VIDEO_DURATION_MS * 48);
+            }
+        }
+    }
     if let Some(probe) = &probe {
         if let Ok((width, height)) = probe.shown() {
             let side = 1..=MAX_VIDEO_SIDE;
@@ -1544,6 +1629,45 @@ pub(crate) fn check_text(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreaped_probe_cannot_become_silent_fallback() {
+        assert_eq!(failure(RunError::Unreaped), FailureCode::RenderResource);
+        assert_ne!(failure(RunError::Unreaped), FailureCode::RenderParse);
+    }
+
+    #[test]
+    fn first_audio_packet_timestamps_share_the_format_origin() {
+        for (text, origin, expected) in [
+            ("packets.packet.0.pts_time=\"10.000000\"", 0, Some(480_000)),
+            (
+                "packets.packet.0.pts_time=\"13.000000\"",
+                3_000_000,
+                Some(480_000),
+            ),
+            (
+                "packets.packet.0.pts_time=\"0.000000\"\npackets.packet.0.dts_time=\"-0.020000\"",
+                0,
+                Some(0),
+            ),
+            (
+                "packets.packet.0.pts_time=\"13.000000\"\npackets.packet.0.dts_time=\"12.980000\"",
+                3_000_000,
+                Some(479_040),
+            ),
+            (
+                "packets.packet.0.pts_time=\"N/A\"\npackets.packet.0.dts_time=\"0.500000\"",
+                0,
+                Some(24_000),
+            ),
+            ("packets.packet.1.pts_time=\"10.000000\"", 0, None),
+            ("packets.packet.0.pts_time=\"999999999999.000000\"", 0, None),
+            ("packets.packet.0.pts_time=\"10.000000\"", i64::MIN, None),
+            ("", 0, None),
+        ] {
+            assert_eq!(audio_start_frame(text, origin), expected, "{text:?}");
+        }
+    }
 
     /// A still is read from its first stream, or from the grid of tiles it
     /// is made of; a turn of a quarter swaps the size it is shown at; and an
