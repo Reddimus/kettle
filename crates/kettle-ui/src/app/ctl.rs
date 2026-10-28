@@ -1289,6 +1289,7 @@ impl App {
             .collect();
         let update_toast = self.update_toast_projection(target).map(|toast| serde_json::json!({
             "rect": rect_json(toast.geometry.rect), "label": toast.message,
+            "message": rect_json(toast.geometry.message),
             "details": rect_json(toast.geometry.details), "dismiss": rect_json(toast.geometry.close),
         }));
         let update_notice = self.update_notice().map(|notice| {
@@ -1449,6 +1450,8 @@ impl App {
                 "claiming": self.update_toast_claiming,
                 "handled": self.update_toast_handled,
                 "unavailable": self.update_toast_unavailable,
+                "retry_in_ms": self.update_toast_retry.map(|at| at.saturating_duration_since(std::time::Instant::now()).as_millis()),
+                "receipt_pending": self.update_toast_receipts.as_ref().map_or(0, crate::update_toast::ReceiptWriter::pending_count),
                 "active": self.update_toast.as_ref().map(|t| serde_json::json!({"notice": t.claim.notice,"window":t.window,"presented":t.presented,"remaining_ms":t.remaining().as_millis()})),
             }));
             fields.insert(

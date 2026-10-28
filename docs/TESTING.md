@@ -1350,6 +1350,10 @@ claims, contention recovery and failed writes. An unreadable record must remain
 byte-identical. Native checks must retain terminal grid, cursor and
 pending input across presentation, dismissal and Details, including background,
 narrow-window, Spanish and reduced-motion cases.
+Also verify download-lock isolation, failed-receipt retry, automatic recovery
+after delivery-lock contention, window-owner closure, persistent palette
+dismissal and the complete warning at large font sizes, including hyphenated
+version tokens against the actual text shaper.
 
 The media-native runner also tests refused child termination: it must not report
 cleanup until the recorded child is reaped. Optional audio fallback requires

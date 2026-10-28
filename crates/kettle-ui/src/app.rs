@@ -9922,6 +9922,7 @@ pub struct App {
     /// This process dismissed its restart notice, until it exits.
     update_restart_dismissed: bool,
     update_toast: Option<crate::update_toast::Toast>,
+    update_toast_receipts: Option<crate::update_toast::ReceiptWriter>,
     update_toast_claiming: Option<(crate::update_notice::Notice, u64)>,
     update_toast_handled: Option<crate::update_notice::Notice>,
     update_toast_unavailable: Option<crate::update_notice::Notice>,
@@ -9929,6 +9930,7 @@ pub struct App {
     update_toast_focus: Option<NodeId>,
     /// When the update facts were last asked for, to throttle focus refreshes.
     update_facts_requested: Option<std::time::Instant>,
+    update_facts_refresh: crate::update_check::FactsRefresh,
     /// The installed version last logged as waiting for a restart.
     logged_restart_pending: Option<String>,
     /// Primaries of other builds still running, found at election.
@@ -10276,12 +10278,16 @@ impl App {
     /// `event_loop_exit_sites_are_allowlisted`).
     fn finish_window_dispatch(&mut self, event_loop: &ActiveEventLoop, seq: u64, ws: WindowState) {
         if self.quit_requested {
+            if let Some(owner) = self.update_toast.as_ref().map(|toast| toast.window) {
+                self.close_update_toast_window(owner);
+            }
             drop(ws);
             self.windows.clear();
             event_loop.exit();
             return;
         }
         if take_window_close_request(&mut self.pending_window_closes, seq) {
+            self.close_update_toast_window(seq);
             // A dying window that is the torn window or the manual-follow
             // capture holder takes its drag with it. Abandon eagerly (clears
             // the latched preview on the still-mapped target and restores
@@ -10940,12 +10946,14 @@ impl App {
             update_facts: crate::update_notice::UpdateFacts::default(),
             update_restart_dismissed: false,
             update_toast: None,
+            update_toast_receipts: None,
             update_toast_claiming: None,
             update_toast_handled: None,
             update_toast_unavailable: None,
             update_toast_retry: None,
             update_toast_focus: None,
             update_facts_requested: None,
+            update_facts_refresh: Default::default(),
             logged_restart_pending: None,
             other_builds,
             executable: std::env::current_exe().and_then(std::fs::canonicalize).ok(),
@@ -19867,7 +19875,13 @@ impl App {
                 let _ = (tag, notify);
                 self.request_update_facts(true);
             }
-            UserEvent::UpdateFacts(facts) => self.apply_update_facts(ws, *facts),
+            UserEvent::UpdateFacts(facts) => {
+                if self.update_facts_refresh.complete() {
+                    self.apply_update_facts(ws, *facts);
+                } else {
+                    self.request_update_facts(true);
+                }
+            }
             UserEvent::UpdateToastClaimed { window, reply } => {
                 self.receive_update_toast(ws, window, reply)
             }

@@ -162,6 +162,8 @@ accessibility user focuses a toast button. Reduced motion disables fading.
 **Details** opens About; the close button dismisses the toast. About and the
 command palette retain update status and release notes after it disappears.
 Notices never take keyboard focus or change the terminal grid.
+The palette's **Dismiss update notice** action dismisses that state persistently;
+the toast's close button only hides the popup.
 
 A window left open for many days is re-checked on an hourly in-session timer
 (still bounded by the configured interval), so a long-running process still

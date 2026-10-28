@@ -38,6 +38,20 @@ fn finish(claim: Claim, seen: bool) {
 }
 
 impl App {
+    fn update_toast_message(&self, notice: &crate::update_notice::Notice) -> String {
+        match notice.kind {
+            crate::update_notice::NoticeKind::Available => {
+                self.ui_text.update_fact_available(&notice.tag)
+            }
+            crate::update_notice::NoticeKind::RestartPending => {
+                self.ui_text.update_toast_installed(&notice.tag)
+            }
+            crate::update_notice::NoticeKind::Failed => {
+                self.ui_text.update_fact_failed(&notice.tag)
+            }
+        }
+    }
+
     fn update_toast_geometry(
         &self,
         ws: &WindowState,
@@ -45,12 +59,19 @@ impl App {
         let surface = ws.renderer.as_ref()?.surface_size();
         let scale = ws.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
         let details = self.ui_text.text(kettle_i18n::Text::UpdateToastDetails);
+        let notice = self
+            .update_toast
+            .as_ref()
+            .filter(|toast| toast.window == ws.seq)
+            .map(|toast| toast.claim.notice.clone())
+            .or_else(|| self.update_notice())?;
         kettle_render::update_toast_geometry(
             (surface.0 as f32, surface.1 as f32),
             self.area(ws).1,
             scale,
             Self::cell_size(ws)?,
             details.width(),
+            &self.update_toast_message(&notice),
         )
     }
 
@@ -85,17 +106,7 @@ impl App {
         }
         Some(kettle_render::UpdateToastOverlay {
             geometry: self.update_toast_geometry(ws)?,
-            message: match toast.claim.notice.kind {
-                crate::update_notice::NoticeKind::Available => {
-                    self.ui_text.update_fact_available(&toast.claim.notice.tag)
-                }
-                crate::update_notice::NoticeKind::RestartPending => {
-                    self.ui_text.update_toast_installed(&toast.claim.notice.tag)
-                }
-                crate::update_notice::NoticeKind::Failed => {
-                    self.ui_text.update_fact_failed(&toast.claim.notice.tag)
-                }
-            },
+            message: self.update_toast_message(&toast.claim.notice),
             details: self
                 .ui_text
                 .text(kettle_i18n::Text::UpdateToastDetails)
@@ -161,7 +172,9 @@ impl App {
             if !toast.acknowledged {
                 toast.acknowledged = true;
                 self.update_toast_handled = Some(toast.claim.notice.clone());
-                finish(toast.claim.clone(), true);
+                if let Some(writer) = &self.update_toast_receipts {
+                    writer.note(toast.claim.clone());
+                }
             }
         }
     }
@@ -170,8 +183,14 @@ impl App {
         let Some(toast) = self.update_toast.take() else {
             return false;
         };
-        if !toast.acknowledged {
-            finish(toast.claim.clone(), true);
+        if toast.presented
+            && !toast.acknowledged
+            && let Some(writer) = &self.update_toast_receipts
+        {
+            writer.note(toast.claim.clone());
+        }
+        if !toast.presented {
+            finish(toast.claim.clone(), false);
         }
         self.update_toast_handled = Some(toast.claim.notice);
         self.update_toast_focus = None;
@@ -240,7 +259,21 @@ impl App {
         let notice = notice.filter(|n| {
             self.update_toast_handled.as_ref() != Some(n)
                 && self.update_toast_unavailable.as_ref() != Some(n)
+                && !self
+                    .update_toast_receipts
+                    .as_ref()
+                    .is_some_and(|writer| writer.suppresses(n))
         })?;
+        if self.update_toast_receipts.is_none() {
+            match crate::update_toast::ReceiptWriter::start() {
+                Ok(writer) => self.update_toast_receipts = Some(writer),
+                Err(error) => {
+                    log::warn!("update toast receipts unavailable: {error}");
+                    self.update_toast_unavailable = Some(notice);
+                    return None;
+                }
+            }
+        }
         if let Some(at) = self.update_toast_retry.take().filter(|at| *at > now) {
             self.update_toast_retry = Some(at);
             return Some(at.saturating_duration_since(now));
@@ -262,6 +295,20 @@ impl App {
             log::warn!("update toast delivery thread could not start");
         }
         None
+    }
+
+    pub(super) fn close_update_toast_window(&mut self, window: u64) {
+        if self
+            .update_toast
+            .as_ref()
+            .is_some_and(|toast| toast.window == window)
+        {
+            let toast = self.update_toast.take().expect("matching toast");
+            if !toast.acknowledged {
+                finish(toast.claim, false);
+            }
+            self.update_toast_focus = None;
+        }
     }
 
     pub(super) fn press_update_toast(

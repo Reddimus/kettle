@@ -1047,6 +1047,7 @@ pub fn update_toast_geometry(
     scale: f32,
     cell: (f32, f32),
     details_cells: usize,
+    message: &str,
 ) -> Option<UpdateToastGeometry> {
     if ![surface.0, surface.1, top, scale, cell.0, cell.1]
         .iter()
@@ -1058,25 +1059,108 @@ pub fn update_toast_geometry(
         return None;
     }
     let width = (surface.0 - 32.0 * scale).min(480.0 * scale);
-    let height = 2.0 * cell.1 + 24.0 * scale;
     let y = top + 12.0 * scale;
-    if width < 320.0 * scale || y < 0.0 || y + height > surface.1 - 16.0 * scale {
+    if width < 320.0 * scale || y < 0.0 || message.len() > 1024 {
         return None;
     }
     let x = (surface.0 - width) * 0.5;
-    let close_w = 32.0 * scale;
-    let details_w = (details_cells as f32 * cell.0 + 16.0 * scale).min(width * 0.35);
+    let close_w = (32.0 * scale).max(cell.0 + 16.0 * scale);
+    let details_w = details_cells as f32 * cell.0 + 16.0 * scale;
+    let message_w = width - close_w - details_w - 28.0 * scale;
+    let rows = |available: f32| {
+        let columns = ((available / cell.0).floor() as usize).saturating_sub(1);
+        toast_text_rows(message, columns)
+    };
+    let inline = rows(message_w).is_some_and(|rows| rows <= 2);
+    let text_width = if inline {
+        message_w
+    } else {
+        width - 24.0 * scale
+    };
+    let text_rows = rows(text_width)?.max(2);
+    if text_rows > 6 || details_w + close_w + 24.0 * scale > width {
+        return None;
+    }
+    let controls_h = (32.0 * scale).max(cell.1 + 16.0 * scale);
+    let height = text_rows as f32 * cell.1 + 24.0 * scale + if inline { 0.0 } else { controls_h };
+    if y + height > surface.1 - 16.0 * scale {
+        return None;
+    }
+    let controls_y = if inline { y } else { y + height - controls_h };
+    let controls_h = if inline { height } else { controls_h };
     Some(UpdateToastGeometry {
         rect: (x, y, width, height),
         message: (
             x + 12.0 * scale,
             y + 12.0 * scale,
-            width - close_w - details_w - 28.0 * scale,
-            cell.1 * 2.0,
+            text_width,
+            cell.1 * text_rows as f32,
         ),
-        details: (x + width - close_w - details_w, y, details_w, height),
-        close: (x + width - close_w, y, close_w, height),
+        details: (
+            x + width - close_w - details_w,
+            controls_y,
+            details_w,
+            controls_h,
+        ),
+        close: (x + width - close_w, controls_y, close_w, controls_h),
     })
+}
+
+fn toast_text_rows(text: &str, columns: usize) -> Option<usize> {
+    toast_wrapped_text(text, columns).map(|(_, rows)| rows)
+}
+
+fn toast_wrapped_text(text: &str, columns: usize) -> Option<(String, usize)> {
+    if columns == 0 {
+        return None;
+    }
+    let mut rows = 0;
+    let mut displayed = String::with_capacity(text.len());
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            displayed.push('\n');
+        }
+        rows += 1;
+        let mut used = 0;
+        for word in line.split_whitespace() {
+            let width = unicode_width::UnicodeWidthStr::width(word);
+            if used > 0 && used + 1 + width > columns {
+                rows += 1;
+                used = 0;
+                displayed.push('\n');
+            }
+            if used > 0 {
+                used += 1;
+                displayed.push(' ');
+            }
+            if width > columns {
+                rows += (width - 1) / columns;
+                used = (width - 1) % columns + 1;
+            } else {
+                used += width;
+            }
+            displayed.push_str(word);
+        }
+    }
+    Some((displayed, rows))
+}
+
+fn toast_buffer_text(
+    text: &str,
+    width: f32,
+    cell_width: f32,
+    message: bool,
+) -> (std::borrow::Cow<'_, str>, Wrap) {
+    if message {
+        let columns = ((width / cell_width).floor() as usize).saturating_sub(1);
+        let displayed = toast_wrapped_text(text, columns)
+            .map(|(text, _)| text)
+            .unwrap_or_default();
+        // Share preferred word breaks with geometry; long version tokens use glyph wrapping.
+        (std::borrow::Cow::Owned(displayed), Wrap::Glyph)
+    } else {
+        (std::borrow::Cow::Borrowed(text), Wrap::None)
+    }
 }
 
 #[inline]
@@ -7173,19 +7257,16 @@ impl Renderer {
                 let buffer = &mut self.update_toast_buffers[i];
                 buffer.set_metrics(metrics);
                 buffer.set_size(Some(rect.2), Some(rect.3));
-                buffer.set_wrap(if i == 0 {
-                    Wrap::WordOrGlyph
-                } else {
-                    Wrap::None
-                });
-                if self.update_toast_text[i] != *text {
+                let (displayed, wrap) = toast_buffer_text(text, rect.2, cw, i == 0);
+                buffer.set_wrap(wrap);
+                if self.update_toast_text[i] != displayed {
                     buffer.set_text(
-                        text,
+                        &displayed,
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
                         None,
                     );
-                    self.update_toast_text[i] = text.clone();
+                    self.update_toast_text[i] = displayed.into_owned();
                 }
                 buffer.shape_until_scroll(&mut self.font_system, false);
             }
@@ -7669,7 +7750,10 @@ impl Renderer {
                     buffer: &self.update_toast_buffers[i],
                     left: ax,
                     top: if i == 0 {
-                        ay
+                        ay + (ah
+                            - self.update_toast_buffers[i].layout_runs().count().max(1) as f32 * ch)
+                            .max(0.0)
+                            * 0.5
                     } else {
                         ay + (ah - ch).max(0.0) * 0.5
                     },

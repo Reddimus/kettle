@@ -18826,7 +18826,7 @@ def run_update_toast(kettle: str, root: Path) -> Path:
         try:
             return _run_update_toast_fixture(kettle, out, Path(fixture))
         finally:
-            record = Path(fixture) / "xdg/kettle/update-check.json"
+            record = Path(fixture) / "xdg/kettle/update-toasts.json"
             if record.is_file():
                 shutil.copyfile(record, out / "fixture-record.json")
 
@@ -18835,19 +18835,21 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
     import fcntl
 
     xdg = fixture / "xdg"
-    (xdg / "kettle").mkdir(parents=True, mode=0o700)
+    xdg.mkdir(mode=0o700)
+    (xdg / "kettle").mkdir(mode=0o700)
     record = xdg / "kettle" / "update-check.json"
+    delivery = record.with_name("update-toasts.json")
     cfg = out / "config"
     cfg.write_text(
         "agent-server = full\ntab-bar = always\nrestore-session = false\n"
         "update-policy = notify\nupdate-check-interval-hours = 24\n"
         "window-width = 100\nwindow-height = 24\nreduce-motion = on\n"
-        "shell = /bin/sh\nlogin-shell = false\nshell-integration = false\n"
+        "shell = /bin/sh\nlogin-shell = false\nshell-integration = false\nask-before-closing = never\n"
     )
     env = {"XDG_CONFIG_HOME": str(xdg), "XDG_STATE_HOME": str(fixture / "state")}
 
     def publish(tag: str, failed: bool = False) -> None:
-        with (record.parent / "update-check.lock").open("a") as lock:
+        with (record.parent / "update-toasts.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             data = json.loads(record.read_text()) if record.exists() else {}
             data.update(last_check=int(time.time()), latest_tag=tag, last_outcome="available")
@@ -18913,8 +18915,9 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
         click(live, toast["dismiss"])
         until(live, lambda g: not g.get("update_toast"), "Dismiss left toast visible")
         assert terminal(live) == before, "toast controls changed pending input"
+        assert live.json_ctl("ui_geometry")["update_notice"]["state"] == "failed", "close button persisted a dismissal"
         deadline = time.monotonic() + 5
-        while json.loads(record.read_text())["toast"]["seen"].get("failed") != "v99.0.1":
+        while json.loads(delivery.read_text())["toast"]["seen"].get("failed") != "v99.0.1":
             assert time.monotonic() < deadline, "delivery receipt was not persisted"
             time.sleep(0.05)
         (out / "first.geometry.json").write_text(json.dumps(live.json_ctl("ui_geometry"), indent=2) + "\n")
@@ -18925,22 +18928,65 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
         until(live, lambda g: g.get("update_toast_delivery", {}).get("handled"), "persisted receipt not read")
         assert live.json_ctl("ui_geometry").get("update_toast") is None, "restart replayed seen state"
         publish("v99.0.2")
-        with (record.parent / "update-check.lock").open("a") as lock:
+        with (record.parent / "update-toasts.lock").open("a") as lock:
+            os.fchmod(lock.fileno(), 0o600)
             fcntl.flock(lock, fcntl.LOCK_EX)
             live.json_ctl("perform_action", {"action": "reload_config"})
-            until(live, lambda g: g.get("update_toast_delivery", {}).get("unavailable"),
-                  "cache contention did not defer delivery", 5)
+            until(live, lambda g: g.get("update_toast_delivery", {}).get("retry_in_ms") is not None,
+                  "delivery lock did not produce a retry", 5)
             assert live.json_ctl("ui_geometry").get("update_toast") is None
-        live.json_ctl("perform_action", {"action": "reload_config"})
-        toast = until(live, lambda g: g.get("update_toast"), "delivery did not recover after cache contention")
-        click(live, toast["dismiss"])
+        toast = until(live, lambda g: g.get("update_toast"), "delivery did not retry after contention")
+        live.json_ctl("perform_action", {"action": "dismiss_update"})
+        until(live, lambda g: not g.get("update_notice"), "persistent dismissal depends on toast timing")
         deadline = time.monotonic() + 5
-        while json.loads(record.read_text())["toast"]["seen"].get("available") != "v99.0.2":
+        while json.loads(record.read_text()).get("dismissed_version") != "v99.0.2":
+            assert time.monotonic() < deadline, "persistent dismissal was not saved"
+            time.sleep(0.05)
+        deadline = time.monotonic() + 5
+        while json.loads(delivery.read_text())["toast"]["seen"].get("available") != "v99.0.2":
             assert time.monotonic() < deadline, "recovered delivery was not persisted"
             time.sleep(0.05)
+        live.json_ctl("perform_action", {"action": "new_window"})
+        until(live, lambda _: live.json_ctl("get_state")["windows"] == 2, "second window did not open")
+        live.json_ctl("perform_action", {"action": "focus_window"})
+        publish("v99.0.3")
+        with (record.parent / "update-check.lock").open("a") as lock:
+            os.fchmod(lock.fileno(), 0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            live.json_ctl("perform_action", {"action": "reload_config"})
+            until(live, lambda g: g.get("update_toast"), "download lock blocked the toast")
+            until(live, lambda g: (g.get("update_toast_delivery", {}).get("active") or {}).get("presented"), "toast did not present")
+            deadline = time.monotonic() + 5
+            while json.loads(delivery.read_text())["toast"]["seen"].get("available") != "v99.0.3":
+                assert time.monotonic() < deadline, "download lock blocked a presented receipt"
+                time.sleep(0.05)
+        owner = live.json_ctl("ui_geometry")["update_toast_delivery"]["active"]["window"]
+        live.json_ctl("perform_action", {"action": "close_window"})
+        until(live, lambda _: live.json_ctl("get_state")["windows"] == 1, "toast owner did not close")
+        live.json_ctl("perform_action", {"action": "focus_window"})
+        publish("v99.0.4")
+        live.json_ctl("perform_action", {"action": "reload_config"})
+        toast = until(live, lambda g: g.get("update_toast"), "closed toast owner stranded later notices")
+        assert live.json_ctl("ui_geometry")["update_toast_delivery"]["active"]["window"] != owner
+        click(live, toast["dismiss"])
+        with cfg.open("a") as stream:
+            stream.write("font-size = 40\n")
+        live.json_ctl("perform_action", {"action": "reload_config"})
+        live.json_ctl("resize_window", {"width": 1000, "height": 700})
+        until(live, lambda g: g["cell"]["font_size"] == 40, "large font did not apply")
+        publish("v99.0.5-aaa-bbbbbbbbbb-cccccccccc", failed=True)
+        live.json_ctl("perform_action", {"action": "reload_config"})
+        toast = until(live, lambda g: g.get("update_toast"), "large-font warning did not fit")
+        assert toast["message"]["y"] + toast["message"]["height"] <= toast["details"]["y"], "large warning did not stack controls"
+        live.screenshot(out / "large-font.png")
+        click(live, toast["dismiss"])
+        deadline = time.monotonic() + 5
+        while json.loads(delivery.read_text())["toast"]["seen"].get("failed") != "v99.0.5-aaa-bbbbbbbbbb-cccccccccc":
+            assert time.monotonic() < deadline, "large-font receipt did not persist"
+            time.sleep(0.05)
     assert live.proc.poll() is not None, "restarted app was not reaped"
-    data = json.loads(record.read_text())
-    assert data["toast"]["seen"] == {"available": "v99.0.2", "failed": "v99.0.1"}
+    data = json.loads(delivery.read_text())
+    assert data["toast"]["seen"] == {"available": "v99.0.4", "failed": "v99.0.5-aaa-bbbbbbbbbb-cccccccccc"}
     (out / "analysis.json").write_text(json.dumps({"passed": True, "expiry_seconds": elapsed, "owned_pids": owners, "apps_reaped": True,
         "scope": "Private cache fixture and real GUI/control-path actions; no live update feed, physical screen reader, or installer."}, indent=2) + "\n")
     return out

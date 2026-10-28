@@ -100,6 +100,30 @@ enum CheckLockAttempt {
     Busy,
 }
 
+#[derive(Default)]
+pub(crate) struct FactsRefresh {
+    reading: bool,
+    pending: bool,
+}
+
+impl FactsRefresh {
+    pub fn begin(&mut self) -> bool {
+        if self.reading {
+            self.pending = true;
+            false
+        } else {
+            self.reading = true;
+            true
+        }
+    }
+
+    /// A requested refresh supersedes the result currently arriving.
+    pub fn complete(&mut self) -> bool {
+        self.reading = false;
+        !std::mem::take(&mut self.pending)
+    }
+}
+
 fn try_acquire_check_lock() -> std::io::Result<CheckLockAttempt> {
     let Some(cache) = cache_path() else {
         return Ok(CheckLockAttempt::Acquired(None));
@@ -125,8 +149,6 @@ fn try_acquire_file_lock(path: &std::path::Path) -> std::io::Result<CheckLockAtt
 /// which can cost one duplicate notification.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct UpdateCache {
-    #[serde(default)]
-    toast: crate::update_toast::Ledger,
     #[serde(default)]
     last_check: u64,
     /// The latest release the feed reported, even when it is not newer.
@@ -308,6 +330,10 @@ fn load_cache_at(path: &std::path::Path) -> Option<UpdateCache> {
 }
 
 fn read_cache(reader: impl Read, size: u64) -> Option<UpdateCache> {
+    read_record(reader, size)
+}
+
+fn read_record<T: serde::de::DeserializeOwned>(reader: impl Read, size: u64) -> Option<T> {
     if size > MAX_CACHE_BYTES as u64 {
         return None;
     }
@@ -1061,7 +1087,7 @@ mod tests {
 /// The caller runs delivery transactions off the event loop.
 pub(crate) fn claim_toast(notice: crate::update_notice::Notice) -> crate::update_toast::ClaimReply {
     use crate::update_toast::ClaimReply;
-    let Some(path) = cache_path() else {
+    let Some(path) = toast_path() else {
         return ClaimReply::Unavailable;
     };
     toast_transaction(&path, |ledger| {
@@ -1081,13 +1107,29 @@ pub(crate) fn claim_toast(notice: crate::update_notice::Notice) -> crate::update
     })
     .unwrap_or_else(|error| {
         log::warn!("update toast receipt unavailable: {error}");
-        ClaimReply::Unavailable
+        if error.kind() == std::io::ErrorKind::TimedOut {
+            ClaimReply::Busy(now_secs().saturating_add(2))
+        } else {
+            ClaimReply::Unavailable
+        }
     })
 }
 
 pub(crate) fn finish_toast(claim: &crate::update_toast::Claim, seen: bool) -> bool {
-    cache_path().and_then(|path| toast_transaction(&path, |ledger| ledger.finish(claim, seen)).ok())
+    toast_path().and_then(|path| toast_transaction(&path, |ledger| ledger.finish(claim, seen)).ok())
         == Some(true)
+}
+
+fn toast_path() -> Option<std::path::PathBuf> {
+    cache_path().map(|path| path.with_file_name("update-toasts.json"))
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct ToastRecord {
+    #[serde(default)]
+    toast: crate::update_toast::Ledger,
+    #[serde(flatten)]
+    extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 fn toast_transaction<T>(
@@ -1099,23 +1141,28 @@ fn toast_transaction<T>(
         .ok_or_else(|| std::io::Error::other("missing update record directory"))?;
     kettle_state::create_private_dirs(parent)?;
     let _lock = kettle_state::ExclusiveFileLock::acquire_timeout(
-        &parent.join("update-check.lock"),
+        &parent.join("update-toasts.lock"),
         std::time::Duration::from_secs(2),
     )?;
-    let mut cache = match load_cache_at(path) {
-        Some(cache) => cache,
-        None if path.try_exists()? => {
-            return Err(std::io::Error::new(
+    let mut cache = match kettle_state::open_trusted_file_read(path) {
+        Ok(file) => read_record::<ToastRecord>(&file, file.metadata()?.len()).ok_or_else(|| {
+            std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "unreadable update record",
-            ));
-        }
-        None => UpdateCache::default(),
+                "unreadable delivery record",
+            )
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ToastRecord::default(),
+        Err(error) => return Err(error),
     };
     let result = change(&mut cache.toast);
-    if !save_cache_at(path, &cache) {
-        return Err(std::io::Error::other("update receipt was not persisted"));
+    let bytes = serde_json::to_vec(&cache)?;
+    if bytes.len() > MAX_CACHE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "delivery record exceeds its limit",
+        ));
     }
+    kettle_update::write_atomic_file(path, &bytes).map_err(std::io::Error::other)?;
     Ok(result)
 }
 
@@ -1129,6 +1176,50 @@ mod toast_tests {
             kind: NoticeKind::Available,
             tag: "v6.0.0".into(),
         }
+    }
+
+    #[test]
+    fn overlapping_fact_refreshes_skip_the_old_result_and_coalesce_reads() {
+        let mut refresh = FactsRefresh::default();
+        assert!(refresh.begin());
+        for _ in 0..100 {
+            assert!(!refresh.begin());
+        }
+        assert!(
+            !refresh.complete(),
+            "the old result must not replace newly requested facts"
+        );
+        assert!(refresh.begin());
+        assert!(refresh.complete(), "the fresh result can be applied");
+        assert!(refresh.begin());
+    }
+
+    #[test]
+    fn update_download_locks_do_not_block_delivery_receipts() {
+        let directory = kettle_test_support::private_tempdir("kettle-toast-download-");
+        let _download = kettle_state::ExclusiveFileLock::acquire_timeout(
+            &directory.path().join("update-check.lock"),
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        let path = directory.path().join("update-toasts.json");
+        let claim = toast_transaction(&path, |ledger| ledger.claim(notice(), 100, 1, None))
+            .unwrap()
+            .unwrap();
+        assert!(toast_transaction(&path, |ledger| ledger.finish(&claim, true)).unwrap());
+    }
+
+    #[test]
+    fn delivery_does_not_publish_a_record_it_cannot_read_back() {
+        let directory = kettle_test_support::private_tempdir("kettle-toast-limit-");
+        let path = directory.path().join("update-toasts.json");
+        let original =
+            serde_json::to_vec(&serde_json::json!({"future": "x".repeat(MAX_CACHE_BYTES - 64)}))
+                .unwrap();
+        assert!(original.len() < MAX_CACHE_BYTES);
+        std::fs::write(&path, &original).unwrap();
+        assert!(toast_transaction(&path, |ledger| ledger.claim(notice(), 100, 1, None)).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), original);
     }
 
     #[test]

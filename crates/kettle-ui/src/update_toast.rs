@@ -77,15 +77,120 @@ impl Ledger {
     }
 
     pub fn finish(&mut self, claim: &Claim, seen: bool) -> bool {
-        if self.claim.as_ref() != Some(claim) {
-            return false;
-        }
-        self.claim = None;
         if seen {
-            self.seen
-                .insert(claim.notice.kind, claim.notice.tag.clone());
+            let replace = self
+                .seen
+                .get(&claim.notice.kind)
+                .is_none_or(|previous| version(&claim.notice.tag) > version(previous));
+            if replace {
+                self.seen
+                    .insert(claim.notice.kind, claim.notice.tag.clone());
+            }
         }
-        true
+        let owns = self.claim.as_ref() == Some(claim);
+        if owns {
+            self.claim = None;
+        }
+        seen || owns
+    }
+}
+
+fn version(tag: &str) -> Option<kettle_update::Version> {
+    kettle_update::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
+}
+
+/// At most one pending high watermark for each of the three notice states.
+pub(crate) struct ReceiptWriter {
+    pending: std::sync::Arc<std::sync::Mutex<BTreeMap<NoticeKind, Claim>>>,
+    wake: crossbeam_channel::Sender<()>,
+}
+
+impl ReceiptWriter {
+    pub fn start() -> std::io::Result<Self> {
+        Self::with_retry(Duration::from_secs(5), |claim| {
+            crate::update_check::finish_toast(claim, true)
+        })
+    }
+
+    fn with_retry(
+        delay: Duration,
+        persist: impl Fn(&Claim) -> bool + Send + 'static,
+    ) -> std::io::Result<Self> {
+        let pending =
+            std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::<NoticeKind, Claim>::new()));
+        let work = pending.clone();
+        let (wake, receiver) = crossbeam_channel::bounded(1);
+        std::thread::Builder::new()
+            .name("kettle-toast-receipts".into())
+            .spawn(move || {
+                let mut retry = false;
+                loop {
+                    let next = if retry {
+                        receiver.recv_timeout(delay)
+                    } else {
+                        receiver
+                            .recv()
+                            .map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected)
+                    };
+                    let stopping =
+                        matches!(next, Err(crossbeam_channel::RecvTimeoutError::Disconnected));
+                    let claims: Vec<_> = work
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .values()
+                        .cloned()
+                        .collect();
+                    for claim in claims {
+                        if persist(&claim) {
+                            let mut pending = work
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if pending.get(&claim.notice.kind) == Some(&claim) {
+                                pending.remove(&claim.notice.kind);
+                            }
+                        }
+                    }
+                    if stopping {
+                        break;
+                    }
+                    retry = !work
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_empty();
+                }
+            })?;
+        Ok(Self { pending, wake })
+    }
+
+    pub fn note(&self, claim: Claim) {
+        {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if pending
+                .get(&claim.notice.kind)
+                .is_none_or(|previous| version(&claim.notice.tag) >= version(&previous.notice.tag))
+            {
+                pending.insert(claim.notice.kind, claim);
+            }
+        }
+        let _ = self.wake.try_send(());
+    }
+
+    pub fn suppresses(&self, notice: &Notice) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&notice.kind)
+            .is_some_and(|claim| version(&claim.notice.tag) >= version(&notice.tag))
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 }
 
@@ -195,7 +300,7 @@ mod tests {
         let n = notice(NoticeKind::Available, "v6.0.0");
         let first = ledger.claim(n.clone(), 1, 10, Some(100)).unwrap();
         let next = ledger.claim(n.clone(), 31, 10, Some(101)).unwrap();
-        assert!(!ledger.finish(&first, true));
+        assert!(!ledger.finish(&first, false));
         assert!(ledger.finish(&next, false));
         assert!(ledger.claim(n, 32, 12, None).is_some());
     }
@@ -215,6 +320,71 @@ mod tests {
     }
 
     #[test]
+    fn late_presented_receipts_preserve_new_claims_and_newer_seen_versions() {
+        let mut ledger = Ledger::default();
+        let old = ledger
+            .claim(notice(NoticeKind::Available, "v6.0.0"), 1, 1, None)
+            .unwrap();
+        let new = ledger
+            .claim(notice(NoticeKind::Available, "v6.0.1"), 31, 2, None)
+            .unwrap();
+        assert!(ledger.finish(&old, true));
+        assert_eq!(ledger.busy_until(32), Some(new.until));
+        assert!(ledger.finish(&new, true));
+        assert!(ledger.finish(&old, true));
+        assert!(
+            ledger
+                .claim(notice(NoticeKind::Available, "v6.0.1"), 100, 3, None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn failed_receipts_are_retried_without_another_presentation() {
+        let (events, receiver) = std::sync::mpsc::channel();
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let writer = ReceiptWriter::with_retry(Duration::from_millis(10), move |claim| {
+            let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            events.send((attempt, claim.notice.clone())).unwrap();
+            attempt > 0
+        })
+        .unwrap();
+        let claim = Ledger::default()
+            .claim(notice(NoticeKind::Failed, "v6.0.0"), 1, 1, None)
+            .unwrap();
+        writer.note(claim.clone());
+        for expected in [0, 1] {
+            let (attempt, received) = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(attempt, expected);
+            assert_eq!(received, claim.notice);
+        }
+    }
+
+    #[test]
+    fn receipt_queue_coalesces_versions_to_three_state_watermarks() {
+        let (wake, _receiver) = crossbeam_channel::bounded(1);
+        let writer = ReceiptWriter {
+            pending: Default::default(),
+            wake,
+        };
+        for version in (0..100).rev() {
+            for kind in [
+                NoticeKind::Available,
+                NoticeKind::Failed,
+                NoticeKind::RestartPending,
+            ] {
+                let claim = Ledger::default()
+                    .claim(notice(kind, &format!("v6.0.{version}")), 1, 1, None)
+                    .unwrap();
+                writer.note(claim);
+            }
+        }
+        let pending = writer.pending.lock().unwrap();
+        assert_eq!(pending.len(), 3);
+        assert!(pending.values().all(|claim| claim.notice.tag == "v6.0.99"));
+    }
+
+    #[test]
     fn a_backwards_wall_clock_does_not_strand_a_delivery_claim() {
         let mut ledger = Ledger::default();
         let first = ledger
@@ -223,7 +393,7 @@ mod tests {
         let second = ledger
             .claim(notice(NoticeKind::Available, "v6.0.0"), 1, 2, None)
             .unwrap();
-        assert!(!ledger.finish(&first, true));
+        assert!(!ledger.finish(&first, false));
         assert!(ledger.finish(&second, true));
     }
 

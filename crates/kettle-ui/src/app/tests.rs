@@ -16067,9 +16067,7 @@ fn content_rect_for_carves_out_tab_and_status_bands() {
     );
 }
 
-/// #576: no update state may resize a pane. The chip lives in the tab bar's
-/// own band, the bar's height ignores it, and nothing that applies or
-/// dismisses a notice queues a resize.
+/// #576: update notices never reserve or resize terminal content.
 #[test]
 fn no_update_state_changes_content_rect() {
     let src = production_source();
@@ -17182,8 +17180,15 @@ fn remote_reconnect_opens_local_shell_without_typing_into_source() {
 
 #[test]
 fn update_toast_announces_politely_and_exposes_explicit_controls() {
-    let geometry =
-        kettle_render::update_toast_geometry((800.0, 600.0), 30.0, 1.0, (8.0, 16.0), 8).unwrap();
+    let geometry = kettle_render::update_toast_geometry(
+        (800.0, 600.0),
+        30.0,
+        1.0,
+        (8.0, 16.0),
+        8,
+        "v6.0.0 is available.",
+    )
+    .unwrap();
     let toast = kettle_render::UpdateToastOverlay {
         geometry,
         message: "v6.0.0 is available".into(),

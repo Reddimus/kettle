@@ -3814,7 +3814,13 @@ keeps controls visible, and preserves terminal input ownership. It does not
 implement YouTube's streaming, recommendation or advertising behavior.
 
 Update toasts keep delivery separate from update policy and facts. A bounded
-per-state receipt and expiring claim share the existing update-cache lock across
-processes. Cache I/O runs off the event loop; only a presented foreground frame
-acknowledges delivery. The overlay shares paint/input geometry and never changes
-PTY layout. About retains the untimed update information.
+per-state receipt and expiring claim use `update-toasts.json` and their own lock,
+so a download cannot block delivery. I/O runs off the event loop; only a
+presented foreground frame acknowledges delivery. One lazy worker retries failed
+receipts, coalescing them into at most three version watermarks. Late receipts
+never erase a newer claim or downgrade a watermark. An interruption or write
+failure before persistence can replay a notice. Closing a window releases its
+unpresented claim and clears overlay ownership. Shared paint/input geometry adapts to large
+fonts without changing PTY layout. About retains the untimed information.
+Local fact reads coalesce refresh requests into one read at a time, skipping an
+older result when a refresh arrived while it was in flight.

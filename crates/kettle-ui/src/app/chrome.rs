@@ -499,16 +499,24 @@ impl App {
             return;
         }
         self.update_facts_requested = Some(now);
+        if !self.update_facts_refresh.begin() {
+            return;
+        }
         let proxy = self.proxy.clone();
         let install = self.startup.update_install.clone();
         let policy = self.cfg.update_policy;
-        let _ = std::thread::Builder::new()
+        if std::thread::Builder::new()
             .name("kettle-update-facts".into())
             .spawn(move || {
                 let facts =
                     crate::update_check::read_facts(&install, policy, env!("CARGO_PKG_VERSION"));
                 let _ = proxy.send_event(UserEvent::UpdateFacts(Box::new(facts)));
-            });
+            })
+            .is_err()
+        {
+            self.update_facts_refresh.complete();
+            log::warn!("could not start update facts read");
+        }
     }
 
     /// Refresh update facts without changing terminal geometry.
@@ -554,9 +562,7 @@ impl App {
     /// per tag; Restart pending for this process until it exits. False when
     /// no notice is active.
     pub(super) fn dismiss_update_notice(&mut self, ws: &mut WindowState) -> bool {
-        if self.dismiss_update_toast(ws) {
-            return true;
-        }
+        self.dismiss_update_toast(ws);
         use crate::update_notice::NoticeKind;
         let Some(notice) = self.update_notice() else {
             return false;
