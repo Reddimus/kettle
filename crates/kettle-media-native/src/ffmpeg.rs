@@ -932,6 +932,7 @@ fn failure(error: RunError) -> FailureCode {
     match error {
         RunError::Unavailable => FailureCode::BackendUnavailable,
         RunError::Deadline => FailureCode::RenderTimeout,
+        RunError::Unreaped => FailureCode::RenderResource,
     }
 }
 
@@ -1628,6 +1629,12 @@ pub(crate) fn check_text(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreaped_probe_cannot_become_silent_fallback() {
+        assert_eq!(failure(RunError::Unreaped), FailureCode::RenderResource);
+        assert_ne!(failure(RunError::Unreaped), FailureCode::RenderParse);
+    }
 
     #[test]
     fn first_audio_packet_timestamps_share_the_format_origin() {

@@ -27,6 +27,8 @@ pub(crate) enum RunError {
     Unavailable,
     /// The deadline passed first.
     Deadline,
+    /// A child could not be stopped and reaped; its worker must exit.
+    Unreaped,
 }
 
 /// What a run wrote and how it ended.
@@ -67,8 +69,14 @@ impl Running {
                     pause = (pause * 2).min(Duration::from_millis(5));
                 }
                 // Dropping it kills and reaps it.
-                Ok(None) => return Err(RunError::Deadline),
-                Err(_) => return Ok(false),
+                Ok(None) => {
+                    self.finish()?;
+                    return Err(RunError::Deadline);
+                }
+                Err(_) => {
+                    self.finish()?;
+                    return Ok(false);
+                }
             }
         }
     }
@@ -112,21 +120,34 @@ impl Running {
     }
 }
 
+impl Running {
+    fn reap_with(&mut self, kill: impl FnOnce(&mut Child) -> std::io::Result<()>) -> bool {
+        let Some(child) = self.0.as_mut() else {
+            return true;
+        };
+        // Reap before signalling: an exited child needs no signal.
+        let reaped = matches!(child.try_wait(), Ok(Some(_)))
+            || (kill(child).is_ok() && child.wait().is_ok());
+        if reaped {
+            self.0 = None;
+        }
+        reaped
+    }
+
+    fn finish(mut self) -> Result<(), RunError> {
+        if self.reap_with(Child::kill) {
+            Ok(())
+        } else {
+            Err(RunError::Unreaped)
+        }
+    }
+}
+
 impl Drop for Running {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            // A sandbox may refuse the kill (Linux before Landlock can scope
-            // signals): the job has failed anyway, and the decoder, which
-            // cannot leave the worker's process group, goes when Kettle kills
-            // that group after the worker exits. Waiting for it here would
-            // only hold the worker up; one that has already exited is still
-            // reaped.
-            if child.kill().is_ok() {
-                let _ = child.wait();
-            } else {
-                let _ = child.try_wait();
-            }
-        }
+        // If signals are refused, the parent stops the worker's whole group.
+        // Never block this worker waiting for a child it cannot stop.
+        self.reap_with(Child::kill);
     }
 }
 
@@ -259,12 +280,14 @@ pub(crate) fn run<A: AsRef<OsStr>>(
     let Ok(read) = read else {
         // Killed and reaped; the reader is left to end with the pipe rather
         // than waited for, in case anything else still holds it open.
-        drop(running);
+        let stopped = running.finish();
         drop(reader);
+        stopped?;
         return Err(RunError::Deadline);
     };
     let _ = reader.join();
     let Ok(mut stdout) = read else {
+        running.finish()?;
         return Ok(Ran {
             stdout: Vec::new(),
             overran: false,
@@ -272,6 +295,7 @@ pub(crate) fn run<A: AsRef<OsStr>>(
         });
     };
     if stdout.len() > cap {
+        running.finish()?;
         stdout.truncate(cap);
         return Ok(Ran {
             stdout,
@@ -401,6 +425,19 @@ mod tests {
 
     /// A tool that never finishes, writing or not, is killed at the
     /// deadline and nothing of it is left running.
+    #[test]
+    fn refused_termination_is_not_confirmed_cleanup() {
+        let directory = kettle_test_support::private_tempdir("kettle-native-run-");
+        let silent = script(directory.path(), "silent", "exec /bin/sleep 30");
+        let (mut running, stdout) = start(&silent, &[] as &[&str], None, None, &[]).unwrap();
+        drop(stdout);
+        assert!(!running.reap_with(|_| Err(std::io::Error::from_raw_os_error(libc::EPERM))));
+        assert!(running.child().try_wait().unwrap().is_none());
+        assert!(running.reap_with(Child::kill));
+        assert!(running.0.is_none());
+        assert!(running.reap_with(|_| panic!("a reaped child must not be signalled")));
+    }
+
     #[test]
     fn a_run_ends_at_its_deadline() {
         let directory = kettle_test_support::private_tempdir("kettle-native-run-");

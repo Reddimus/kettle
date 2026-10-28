@@ -1343,3 +1343,8 @@ close a viewer in a window that was already fullscreen: it must leave that
 window fullscreen. Check the accessible names and toggle states for both size
 controls, including Spanish. Preserve the original pane focus and verify that
 player keys do not reach its terminal.
+
+The media-native runner also tests refused child termination: it must not report
+cleanup until the recorded child is reaped. Optional audio fallback requires
+that confirmation; otherwise playback opening fails and the parent stops the
+worker group.
