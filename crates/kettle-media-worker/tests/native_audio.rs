@@ -637,6 +637,74 @@ fn video_survives_sound_failure(missing_broker: bool) {
 
 #[test]
 #[ignore = "requires native PulseAudio service, trusted FFmpeg, and a production worker"]
+fn linux_client_plays_video_before_a_delayed_audio_track() {
+    let path = PathBuf::from(
+        std::env::var_os("KETTLE_TEST_PCM_WORKER").expect("explicit production worker"),
+    );
+    let clip = PathBuf::from(
+        std::env::var_os("KETTLE_TEST_PCM_DELAYED_CLIP")
+            .expect("explicit delayed-audio.mkv fixture"),
+    );
+    let logs = Logs::new("kettle-native-delayed-audio-");
+    let children = Arc::new(Mutex::new(Vec::new()));
+    let client = WorkerClient::new(
+        BuildId::from_embedded(env!("CARGO_PKG_VERSION"), env!("KETTLE_SOURCE_HASH")).unwrap(),
+        Box::new(Platform {
+            unavailable_broker: false,
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            path,
+            children: Arc::clone(&children),
+            logs: logs.path().to_path_buf(),
+            traces: Arc::clone(&logs.traces),
+        }),
+    );
+    for start_ms in [0, 1001, 9501] {
+        let request = PlayOpen {
+            source: Source::user_pull(
+                NativePath::from_path(&clip).unwrap(),
+                GuiActionWitness::from_explicit_gui_action(),
+            ),
+            max_width: 64,
+            max_height: 48,
+            start_ms,
+            max_fps_milli: 30_000,
+            audio: AudioRequest::Muted,
+        };
+        let session = client.play(&request, Box::new(|| {})).unwrap();
+        wait(&session, |status| {
+            matches!(
+                status,
+                SessionStatus::Open {
+                    state: PlayState::Paused,
+                    ..
+                }
+            )
+        });
+        assert_eq!(session.audio(), Some(AudioStatus::Ready));
+        let started = Instant::now();
+        session.play();
+        let pts = next(&session, start_ms + 100);
+        assert!(pts < start_ms + 1000 && started.elapsed() < Duration::from_secs(3));
+        assert_eq!(session.audio(), Some(AudioStatus::Ready));
+        drop(session);
+        let until = Instant::now() + Duration::from_secs(3);
+        while children
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|pid| Path::new(&format!("/proc/{pid}")).exists())
+        {
+            assert!(
+                Instant::now() < until,
+                "delayed-audio workers outlived their session"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires native PulseAudio service, trusted FFmpeg, and a production worker"]
 fn linux_client_keeps_the_last_picture_while_longer_audio_finishes() {
     let path = PathBuf::from(
         std::env::var_os("KETTLE_TEST_PCM_WORKER").expect("explicit production worker"),

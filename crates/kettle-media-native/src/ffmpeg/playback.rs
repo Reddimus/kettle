@@ -1,13 +1,14 @@
 //! One contained tee process, bounded queues and a shared cancellation path.
 
 use std::io::{BufReader, Read};
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
-use kettle_media::FailureCode;
 use kettle_media::audio::{AudioBlock, AudioSource, CHANNELS};
 use kettle_media::video::{FrameSource, PlayGate};
+use kettle_media::{FailureCode, pcm};
 
 use super::packets::{Metadata, Packet};
 use crate::run::{Exit, Running, Triple};
@@ -46,6 +47,7 @@ pub(super) struct Video {
 pub(super) struct Audio {
     shared: Arc<Shared>,
     packets: mpsc::Receiver<Bytes>,
+    leading_silence: Range<u64>,
     carry: Option<Bytes>,
     consumed: usize,
 }
@@ -55,6 +57,7 @@ pub(super) fn split(
     size: usize,
     start_ms: u64,
     duration_ms: u64,
+    audio_start_frame: u64,
     initial_gap: bool,
     deadline: Instant,
 ) -> Result<(Video, Audio), FailureCode> {
@@ -154,6 +157,11 @@ pub(super) fn split(
                 mpsc::RecvTimeoutError::Disconnected => FailureCode::RenderParse,
             }
         })?;
+    let start_frame = start_ms * 48;
+    let gap = audio_start_frame.saturating_sub(start_frame);
+    // Prime with whole PCM packets; the feeder fills the remaining gap
+    // from the real packet timestamp without discarding audio samples.
+    let silence_frames = gap / pcm::FRAMES as u64 * pcm::FRAMES as u64;
     Ok((
         Video {
             shared: Arc::clone(&shared),
@@ -164,6 +172,7 @@ pub(super) fn split(
         Audio {
             shared,
             packets: audio_rx,
+            leading_silence: start_frame..start_frame + silence_frames,
             carry: None,
             consumed: 0,
         },
@@ -291,6 +300,21 @@ impl AudioSource for Audio {
     fn next_block(&mut self, samples: &mut [f32]) -> Result<Option<AudioBlock>, FailureCode> {
         if samples.len() < CHANNELS {
             return Err(FailureCode::BadParams);
+        }
+        if !self.leading_silence.is_empty() {
+            if self.shared.cancelled.load(Ordering::Acquire)
+                || self.shared.audio_cancelled.load(Ordering::Acquire)
+            {
+                return Err(FailureCode::RenderParse);
+            }
+            let frames = usize::try_from(self.leading_silence.end - self.leading_silence.start)
+                .unwrap_or(usize::MAX)
+                .min(pcm::FRAMES)
+                .min(samples.len() / CHANNELS);
+            samples[..frames * CHANNELS].fill(0.0);
+            let at_frame = self.leading_silence.start;
+            self.leading_silence.start += frames as u64;
+            return Ok(Some(AudioBlock { frames, at_frame }));
         }
         if self.carry.is_none() {
             self.carry = receive(&self.shared, &self.packets, true)?;
