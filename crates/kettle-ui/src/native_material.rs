@@ -461,7 +461,10 @@ fn observe_macos_accessibility_display(
     };
     let dirty_for_observer = dirty.clone();
     let weak_window = Arc::downgrade(window);
+    // SAFETY: The MainThreadMarker above proves this AppKit singleton is accessed on the main
+    // thread.
     let workspace = unsafe { NSWorkspace::sharedWorkspace() };
+    // SAFETY: workspace is retained and its notification center is queried on the main thread.
     let center = unsafe { workspace.notificationCenter() };
     let block = RcBlock::new(move |_notification: NonNull<NSNotification>| {
         dirty_for_observer.store(true, std::sync::atomic::Ordering::Release);
@@ -486,6 +489,7 @@ fn observe_macos_accessibility_display(
 #[cfg(target_os = "macos")]
 fn macos_reduce_transparency(_main_thread: &objc2_foundation::MainThreadMarker) -> bool {
     use objc2_app_kit::NSWorkspace;
+    // SAFETY: The supplied MainThreadMarker proves these AppKit queries run on the main thread.
     unsafe { NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency() }
 }
 
@@ -505,10 +509,13 @@ fn sync_macos_window_background(
     let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
         return;
     };
+    // SAFETY: The borrowed winit window keeps its AppKit NSView alive; the caller holds a
+    // MainThreadMarker.
     let view: &NSView = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
     let Some(ns_window) = view.window() else {
         return;
     };
+    // SAFETY: The color components are in 0..=1 and this call runs on the AppKit main thread.
     let background = unsafe {
         NSColor::colorWithSRGBRed_green_blue_alpha(
             f64::from(color.r) / 255.0,
@@ -546,6 +553,8 @@ fn sync_windows_backdrop(
         DWMSBT_NONE
     };
     let hwnd = windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut core::ffi::c_void);
+    // SAFETY: hwnd comes from the borrowed window; value has the exact type and size for this
+    // attribute.
     let backdrop = unsafe {
         DwmSetWindowAttribute(
             hwnd,
@@ -561,6 +570,8 @@ fn sync_windows_backdrop(
         (DWMWA_CAPTION_COLOR, colorref(caption.0), "caption"),
         (DWMWA_TEXT_COLOR, colorref(caption.1), "caption text"),
     ] {
+        // SAFETY: hwnd belongs to the borrowed window; color is a live COLORREF of the
+        // requested size.
         if let Err(error) = unsafe {
             DwmSetWindowAttribute(
                 hwnd,

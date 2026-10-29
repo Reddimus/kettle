@@ -365,6 +365,7 @@ fn writable(directory: &Path) -> bool {
     let Ok(path) = std::ffi::CString::new(directory.as_os_str().as_bytes()) else {
         return false;
     };
+    // SAFETY: path is a NUL-terminated CString retained for access; W_OK is a valid mode.
     unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
 }
 
@@ -465,6 +466,7 @@ impl Staging {
         let name = c_name(path.file_name().unwrap_or_default())?;
         let parent_fd = open_directory(parent)?;
         let mut transaction = Transaction::create(records, format!("{STAGED_PREFIX}{id}"))?;
+        // SAFETY: parent_fd stays open and name is NUL-terminated for mkdirat.
         if unsafe { libc::mkdirat(parent_fd.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
             let error = std::io::Error::last_os_error();
             let _ = transaction.remove();
@@ -496,6 +498,8 @@ impl Staging {
         // anything, which makes "is someone using this?" a property of the
         // directory rather than of a lock file whose location depends on the
         // environment two processes happened to inherit.
+        // SAFETY: directory owns this live fd; flock borrows it and the lock
+        // is retained by the File stored in Staging.
         if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(UpdateError::Io(std::io::Error::last_os_error()));
         }
@@ -564,6 +568,7 @@ fn require_empty_staging(directory: &File, path: &Path) -> Result<(), UpdateErro
 /// substituted by another user between `mkdirat` and `openat`.
 fn staging_is_ours(directory: &File) -> Result<bool, UpdateError> {
     let stat = directory.metadata()?;
+    // SAFETY: geteuid has no preconditions.
     Ok(stat.is_dir() && stat.uid() == unsafe { libc::geteuid() } && stat.mode() & 0o777 == 0o700)
 }
 
@@ -588,6 +593,8 @@ fn open_directory(path: &Path) -> Result<File, UpdateError> {
 /// cannot be moved by renaming any ancestor.
 fn open_directory_at(directory: &File, name: &std::ffi::CStr) -> Result<File, UpdateError> {
     use std::os::fd::FromRawFd as _;
+    // SAFETY: directory stays open and name is a NUL-terminated CStr
+    // retained throughout openat.
     let fd = unsafe {
         libc::openat(
             directory.as_raw_fd(),
@@ -598,11 +605,13 @@ fn open_directory_at(directory: &File, name: &std::ffi::CStr) -> Result<File, Up
     if fd < 0 {
         return Err(UpdateError::Io(std::io::Error::last_os_error()));
     }
+    // SAFETY: Successful openat returned a new fd, whose sole ownership moves to File.
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 /// Create a subdirectory if it is not already there, and open it.
 fn ensure_directory_at(directory: &File, name: &std::ffi::CStr) -> Result<File, UpdateError> {
+    // SAFETY: directory stays open and name is NUL-terminated for mkdirat.
     if unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o755) } == 0 {
         // Flush the new entry into its parent now. Syncing only the leaf
         // directories at the end would let a power loss after the exchange
@@ -616,6 +625,7 @@ fn ensure_directory_at(directory: &File, name: &std::ffi::CStr) -> Result<File, 
         }
     }
     let child = open_directory_at(directory, name)?;
+    // SAFETY: child owns this live fd throughout fchmod.
     if unsafe { libc::fchmod(child.as_raw_fd(), 0o755) } != 0 {
         return Err(UpdateError::Io(std::io::Error::last_os_error()));
     }
@@ -634,6 +644,8 @@ fn create_file_at(
     mode: libc::mode_t,
 ) -> Result<File, UpdateError> {
     use std::os::fd::FromRawFd as _;
+    // SAFETY: directory stays open and name is NUL-terminated; the O_CREAT
+    // call supplies the promoted mode argument and returns a new fd on success.
     let fd = unsafe {
         libc::openat(
             directory.as_raw_fd(),
@@ -645,9 +657,11 @@ fn create_file_at(
     if fd < 0 {
         return Err(UpdateError::Io(std::io::Error::last_os_error()));
     }
+    // SAFETY: Successful openat returned a new fd, whose sole ownership moves to File.
     let file = unsafe { File::from_raw_fd(fd) };
     // `openat` masks the mode with the umask, which would leave the bundle's
     // files at whatever the invoking shell happened to set. Say it exactly.
+    // SAFETY: file owns this live fd throughout fchmod.
     if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
         return Err(UpdateError::Io(std::io::Error::last_os_error()));
     }
@@ -880,8 +894,8 @@ fn sweep_interrupted_updates(parent: &Path, records: &Path) {
             // because two processes can disagree about where lock files live if
             // they inherited different environments, and cannot disagree about
             // this. The lock stays held while the tree is removed.
-            // SAFETY: `candidate` is an open descriptor owned for this iteration.
             let free =
+                // SAFETY: `candidate` is an open descriptor owned for this iteration.
                 unsafe { libc::flock(candidate.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
             if !free {
                 pending = true;
@@ -969,6 +983,8 @@ fn require_parent_identity(parent: &Path, held: &File) -> Result<(), UpdateError
 
 fn lock_live_bundle(parent: &File, name: &std::ffi::OsStr) -> Result<File, UpdateError> {
     let directory = open_directory_at(parent, &c_name(name)?)?;
+    // SAFETY: directory owns this live fd and retains the flock lock until
+    // the returned File is dropped.
     if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let error = std::io::Error::last_os_error();
         return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
@@ -1416,6 +1432,8 @@ mod tests {
         }
 
         let mask = std::env::var(UMASK_CHILD).unwrap();
+        // SAFETY: umask accepts this parsed mode; this test runs in a dedicated
+        // child so the process-wide mask change does not affect other tests.
         unsafe { libc::umask(libc::mode_t::from_str_radix(&mask, 8).unwrap()) };
         let temp = kettle_test_support::private_tempdir("kettle-macos-modes-");
         let staging = create_staging(temp.path(), "2").unwrap();
@@ -1840,7 +1858,11 @@ mod tests {
     impl Drop for StateHome {
         fn drop(&mut self) {
             match self.0.take() {
+                // SAFETY: This relies on excluding all other process environment access,
+                // including libc readers; the module test mutex alone does not prove that.
                 Some(value) => unsafe { std::env::set_var("XDG_STATE_HOME", value) },
+                // SAFETY: This relies on excluding all other process environment access,
+                // including libc readers; the module test mutex alone does not prove that.
                 None => unsafe { std::env::remove_var("XDG_STATE_HOME") },
             }
         }
@@ -1850,6 +1872,8 @@ mod tests {
     /// already holds [`serialized`].
     fn with_state_home<T>(state: &Path, body: impl FnOnce() -> T) -> T {
         let _restore = StateHome(std::env::var_os("XDG_STATE_HOME"));
+        // SAFETY: This relies on excluding all other process environment access,
+        // including libc readers; the module test mutex alone does not prove that.
         unsafe { std::env::set_var("XDG_STATE_HOME", state) };
         body()
     }
@@ -2000,6 +2024,8 @@ mod tests {
             let directory = open_directory(&install.prefix).unwrap();
             if !replaced_while_downloading {
                 assert_eq!(
+                    // SAFETY: directory owns this live fd for the call and retains the
+                    // lock while the update runs.
                     unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
                     0
                 );

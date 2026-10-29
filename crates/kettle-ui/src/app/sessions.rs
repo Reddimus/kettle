@@ -337,6 +337,8 @@ mod tests {
         let (sender, receiver) = UnixStream::pair().unwrap();
         let small: libc::c_int = 4096;
         assert_eq!(
+            // SAFETY: sender owns the live socket and small is readable c_int storage matching
+            // SO_SNDBUF and its size.
             unsafe {
                 libc::setsockopt(
                     sender.as_raw_fd(),

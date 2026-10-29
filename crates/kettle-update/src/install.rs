@@ -987,6 +987,7 @@ fn open_trusted_linux_install_prefix(prefix: &Path) -> Result<File, UpdateError>
             "Linux install prefix must be an absolute non-root path".into(),
         ));
     }
+    // SAFETY: geteuid has no preconditions.
     let effective_uid = unsafe { libc::geteuid() };
     let components = prefix.components().collect::<Vec<_>>();
     let mut directory = open_anchored_directory(Path::new("/")).map_err(|error| {
@@ -3296,6 +3297,7 @@ fn install_unix_provenance(
         // this record is not owned by the prefix owner either. `install-unix.py`
         // also records `os.geteuid()`, and a record written by one has to be
         // readable by the other.
+        // SAFETY: geteuid has no preconditions.
         owner_uid: unsafe { libc::geteuid() },
         files: files.into_values().collect(),
         directories: directories
@@ -4655,6 +4657,8 @@ fn windows_file_information(
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
 
+    // SAFETY: BY_HANDLE_FILE_INFORMATION contains only integer fields and
+    // FILETIME pairs, all of which admit an all-zero representation.
     let mut information = unsafe { std::mem::zeroed() };
     // SAFETY: `file` owns a valid handle and `information` is writable for the
     // exact structure required by GetFileInformationByHandle.
@@ -6992,6 +6996,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         // Root ignores the mode bits, so the setup cannot be arranged there.
+        // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } == 0 {
             eprintln!("skipped: running as root, where a 0500 directory is still writable");
             return;
@@ -8008,6 +8013,7 @@ mod tests {
                 fs::remove_file(&destination).unwrap();
             }
             let name = std::ffi::CString::new(destination.as_os_str().as_bytes()).unwrap();
+            // SAFETY: name is a NUL-terminated CString retained throughout mkfifo.
             assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
 
             let (send, receive) = std::sync::mpsc::channel();
@@ -9079,6 +9085,7 @@ mod tests {
         // thing.
         assert_eq!(
             after.owner_uid,
+            // SAFETY: geteuid has no preconditions.
             unsafe { libc::geteuid() },
             "provenance must record the uid that published the files"
         );
@@ -10266,6 +10273,7 @@ mod tests {
     fn installed_version_comes_from_the_executable_fixed_version_resource() {
         use windows_sys::Win32::Storage::FileSystem::{VS_FFI_SIGNATURE, VS_FIXEDFILEINFO};
 
+        // SAFETY: VS_FIXEDFILEINFO contains only u32 fields, so all-zero bits are valid.
         let mut fixed = unsafe { std::mem::zeroed::<VS_FIXEDFILEINFO>() };
         fixed.dwSignature = VS_FFI_SIGNATURE as u32;
         fixed.dwProductVersionMS = (2 << 16) | 45;

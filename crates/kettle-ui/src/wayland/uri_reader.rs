@@ -126,8 +126,9 @@ mod tests {
     #[test]
     fn a_complete_pipe_delivers_paths_and_a_stalled_source_is_cancellable() {
         let (mut job, mut writer) = Job::new(Arc::new(|| {})).unwrap();
-        // SAFETY: writer owns the live descriptor being queried.
         assert_eq!(
+            // SAFETY: writer owns the live descriptor being queried; F_GETFL takes no extra
+            // argument.
             unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK,
             0
         );

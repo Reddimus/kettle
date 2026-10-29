@@ -233,6 +233,7 @@ mod tests {
                 .as_encoded_bytes(),
         )
         .unwrap();
+        // SAFETY: fifo is a NUL-terminated CString retained throughout mkfifo.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         assert!(inbox.next().is_none());
     }

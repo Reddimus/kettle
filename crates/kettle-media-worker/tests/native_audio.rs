@@ -35,8 +35,10 @@ impl WorkerProcess for Group {
         if self.reaped {
             return Ok(None);
         }
-        // SAFETY: zeroed siginfo_t is writable and waitid leaves the child unreaped.
+        // SAFETY: siginfo_t contains only integer/raw-pointer fields; zero bits are valid.
         let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        // SAFETY: info is writable siginfo_t storage; this is our unreaped child and WNOWAIT
+        // preserves its status.
         let result = unsafe {
             libc::waitid(
                 libc::P_PID,
@@ -48,6 +50,8 @@ impl WorkerProcess for Group {
         if result != 0 {
             return Err(std::io::Error::last_os_error());
         }
+        // SAFETY: successful waitid filled the child-status layout or left the zeroed no-event
+        // value.
         if unsafe { info.si_pid() } == 0 {
             return Ok(None);
         }

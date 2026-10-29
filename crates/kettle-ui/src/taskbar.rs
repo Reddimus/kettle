@@ -84,10 +84,9 @@ mod imp {
         fn list(&mut self) -> Option<&ITaskbarList3> {
             if !self.tried {
                 self.tried = true;
-                // SAFETY: CoCreateInstance on the STA the winit loop set up.
-                // On failure (COM not init / no shell) we keep `None` and
-                // simply skip taskbar updates — never panics.
                 let created: Option<ITaskbarList3> =
+                    // SAFETY: winit initialized COM on this STA; TaskbarList supports
+                    // ITaskbarList3 and no aggregation is requested.
                     unsafe { CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER).ok() };
                 if let Some(l) = &created {
                     // SAFETY: HrInit must be called once before use.

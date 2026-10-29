@@ -364,13 +364,13 @@ impl Drop for DirectoryStream {
 }
 
 fn set_errno(value: libc::c_int) {
-    // SAFETY: the errno location is valid for the calling thread.
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    // SAFETY: the errno location is valid for the calling thread.
     unsafe {
         *libc::__error() = value;
     }
-    // SAFETY: the errno location is valid for the calling thread.
     #[cfg(any(target_os = "linux", target_os = "android"))]
+    // SAFETY: the errno location is valid for the calling thread.
     unsafe {
         *libc::__errno_location() = value;
     }

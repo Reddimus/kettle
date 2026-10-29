@@ -242,6 +242,7 @@ mod tab_handoff_tests {
         // SAFETY: into_raw_fd gave up the only other owner.
         let handoff = unsafe { TabHandoff::adopt(inherited) }.unwrap();
         assert_ne!(handoff.socket.as_raw_fd(), inherited);
+        // SAFETY: handoff owns the live socket descriptor; F_GETFD takes no additional argument.
         let flags = unsafe { libc::fcntl(handoff.socket.as_raw_fd(), libc::F_GETFD) };
         assert_ne!(flags & libc::FD_CLOEXEC, 0);
         peer.write_all(b"x").unwrap();

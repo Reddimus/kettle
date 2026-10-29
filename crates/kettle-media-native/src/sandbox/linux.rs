@@ -203,10 +203,8 @@ impl Ruleset {
             .filter(|fd| *fd >= 0)
             .ok_or(SandboxError::Failed)?;
         // SAFETY: the call returned a new descriptor this ruleset owns.
-        Ok(Self {
-            fd: unsafe { OwnedFd::from_raw_fd(fd) },
-            handled,
-        })
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        Ok(Self { fd, handled })
     }
 
     /// Grant `rights` beneath the open descriptor `fd`: a file's own, or a

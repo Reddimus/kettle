@@ -16151,6 +16151,8 @@ fn trigger_command_reaps_exited_child() {
         std::thread::sleep(Duration::from_millis(10));
     };
     let reaped = loop {
+        // SAFETY: Signal zero probes the child PID without delivering a signal or accessing
+        // pointers.
         if unsafe { libc::kill(pid, 0) } == -1
             && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
         {
@@ -16162,6 +16164,8 @@ fn trigger_command_reaps_exited_child() {
         std::thread::sleep(Duration::from_millis(10));
     };
     if !reaped {
+        // SAFETY: pid names the test child; a null status pointer is allowed and WNOHANG avoids
+        // blocking.
         unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
     }
     assert!(reaped, "the completed trigger child was left unreaped");

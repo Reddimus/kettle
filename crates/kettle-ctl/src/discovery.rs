@@ -110,6 +110,7 @@ impl RegistryEntry {
 #[cfg(unix)]
 fn private_temp_state_dir() -> PathBuf {
     std::env::temp_dir()
+        // SAFETY: geteuid has no preconditions.
         .join(format!("kettle-{}", unsafe { libc::geteuid() }))
         .join("state")
 }
@@ -175,8 +176,10 @@ fn os_registry_bases() -> Vec<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt as _;
+        // SAFETY: geteuid has no preconditions.
         let run_user = PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() }));
         if std::fs::symlink_metadata(&run_user).is_ok_and(|metadata| {
+            // SAFETY: geteuid has no preconditions.
             metadata.file_type().is_dir() && metadata.uid() == unsafe { libc::geteuid() }
         }) {
             bases.push(run_user);
@@ -228,9 +231,9 @@ fn known_local_app_data() -> Option<PathBuf> {
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath};
     let mut path: windows_sys::core::PWSTR = std::ptr::null_mut();
-    // SAFETY: valid GUID reference and out-parameter; the returned buffer is
-    // freed below on every path.
     let hr =
+        // SAFETY: valid GUID reference and out-parameter; the returned buffer is
+        // freed below on every path.
         unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, std::ptr::null_mut(), &mut path) };
     if hr < 0 || path.is_null() {
         if !path.is_null() {
@@ -524,6 +527,7 @@ fn endpoint_is_derived(dir: &std::path::Path, pid: u32, endpoint: &str) -> bool 
         }
         let expected = fallback_ctl_endpoint(dir, pid, &private_temp_socket_dir());
         let endpoint = std::path::Path::new(endpoint);
+        // SAFETY: geteuid has no preconditions.
         let private_parent = format!("kettle-{}", unsafe { libc::geteuid() });
         endpoint.is_absolute()
             && endpoint.file_name() == expected.file_name()
@@ -575,6 +579,7 @@ fn read_registry_entry(path: &std::path::Path) -> Option<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
+        // SAFETY: geteuid has no preconditions.
         if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
             return None;
         }
@@ -1416,6 +1421,7 @@ mod tests {
         let root =
             crate::test_scratch_root().join(format!("kettle-ctl-fallback-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
+        // SAFETY: geteuid has no preconditions.
         let uid = unsafe { libc::geteuid() };
         let other = root.join(format!("kettle-{uid}"));
         std::fs::create_dir_all(&other).unwrap();
@@ -1599,6 +1605,7 @@ mod tests {
         );
         assert!(
             endpoint.starts_with(
+                // SAFETY: geteuid has no preconditions.
                 std::path::Path::new("/tmp").join(format!("kettle-{}", unsafe { libc::geteuid() }))
             ),
             "an overlong TMPDIR must fall back to the fixed short Unix temp root"

@@ -85,6 +85,7 @@ fn limit_of(resource: Resource) -> io::Result<libc::rlimit> {
         rlim_cur: 0,
         rlim_max: 0,
     };
+    // SAFETY: limit is writable rlimit storage; callers supply a platform resource constant.
     if unsafe { libc::getrlimit(resource, &mut limit) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -96,6 +97,7 @@ fn set(resource: Resource, soft: libc::rlim_t, hard: libc::rlim_t) -> io::Result
         rlim_cur: soft,
         rlim_max: hard,
     };
+    // SAFETY: limit is initialized rlimit storage kept alive for the synchronous call.
     if unsafe { libc::setrlimit(resource, &limit) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -194,8 +196,8 @@ fn close_above_stderr() -> io::Result<()> {
 fn open_descriptors() -> io::Result<Vec<c_int>> {
     let pid = c_int::try_from(std::process::id()).map_err(io::Error::other)?;
     let entry = std::mem::size_of::<libc::proc_fdinfo>();
-    // SAFETY: with a null buffer the call only reports the size it needs.
     let needed =
+        // SAFETY: with a null buffer the call only reports the size it needs.
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
     let needed = usize::try_from(needed)
         .ok()

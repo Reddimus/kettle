@@ -327,6 +327,8 @@ fn platform_file_identity(
 
     let mut info = FILE_ID_INFO::default();
     let mut basic = FILE_BASIC_INFO::default();
+    // SAFETY: file owns the live handle; each output buffer and byte count match its
+    // information class.
     unsafe {
         GetFileInformationByHandleEx(
             HANDLE(file.as_raw_handle()),
@@ -1242,12 +1244,16 @@ fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
     struct ComGuard;
     impl Drop for ComGuard {
         fn drop(&mut self) {
+            // SAFETY: This guard is created only after successful CoInitializeEx and drops on
+            // the same thread.
             unsafe { CoUninitialize() };
         }
     }
     struct BitmapGuard(HBITMAP);
     impl Drop for BitmapGuard {
         fn drop(&mut self) {
+            // SAFETY: GetImage transferred this HBITMAP to BitmapGuard; it is no longer used
+            // when deleted.
             unsafe {
                 let _ = DeleteObject(HGDIOBJ(self.0.0));
             }
@@ -1257,6 +1263,8 @@ fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
     // Thumbnail providers are Shell extension handlers. Microsoft
     // `Thumbnail Provider Guidelines` requires an apartment-threaded COM
     // model, so the isolated worker uses an STA.
+    // SAFETY: This worker initializes its own thread as an STA; ComGuard balances each
+    // successful call.
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
         .ok()
         .ok()?;
@@ -1267,6 +1275,8 @@ fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
     let item: IShellItemImageFactory =
+        // SAFETY: wide is NUL-terminated and remains alive for the call; COM is initialized on
+        // this thread.
         match unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>) } {
             Ok(item) => item,
             Err(error) => {
@@ -1274,6 +1284,7 @@ fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
                 return None;
             }
         };
+    // SAFETY: item is a live COM interface on this STA; the requested dimensions are positive.
     let bitmap = match unsafe {
         item.GetImage(
             SIZE {
@@ -1290,6 +1301,8 @@ fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
         }
     };
     let mut bitmap_shape = BITMAP::default();
+    // SAFETY: bitmap owns a live HBITMAP and bitmap_shape is writable BITMAP storage of the
+    // given size.
     if unsafe {
         GetObjectW(
             HGDIOBJ(bitmap.0.0),
@@ -1318,7 +1331,10 @@ fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
         ..Default::default()
     };
     let mut bgra = vec![0u8; width as usize * height as usize * 4];
+    // SAFETY: A null window requests the screen DC, which is released on this thread below.
     let dc = unsafe { GetDC(None) };
+    // SAFETY: bitmap is owned and unselected; bgra holds width * height 32-bit pixels matching
+    // info.
     let rows = unsafe {
         GetDIBits(
             dc,
@@ -1330,6 +1346,7 @@ fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
             DIB_RGB_COLORS,
         )
     };
+    // SAFETY: dc is the screen DC acquired above, and this is its last use on the acquiring thread.
     unsafe {
         ReleaseDC(None, dc);
     }
@@ -2149,8 +2166,9 @@ mod tests {
                 )
             };
             assert_eq!(queried, 0);
-            // SAFETY: pthread_sigmask initialized `current` on success.
             assert_eq!(
+                // SAFETY: pthread_sigmask initialized current on success; SIGPIPE is a valid
+                // signal.
                 unsafe { libc::sigismember(&current.assume_init(), libc::SIGPIPE) },
                 1
             );

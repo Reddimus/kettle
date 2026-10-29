@@ -149,8 +149,8 @@ fn attempt(dir: &Path, held: &File) {
             }
         }),
     );
-    // SAFETY: setsid has no preconditions; the probe ends soon after.
     report("setsid", {
+        // SAFETY: setsid has no preconditions; the probe ends soon after.
         if unsafe { libc::setsid() } == -1 {
             Err(std::io::Error::last_os_error())
         } else {
@@ -161,12 +161,13 @@ fn attempt(dir: &Path, held: &File) {
         "spawn",
         Command::new("/bin/sh").arg("-c").arg("true").status(),
     );
-    // SAFETY: a private segment, removed at once if it was made.
     report("sysv_shm", {
+        // SAFETY: shmget takes no pointers; this makes a private segment.
         let id = unsafe { libc::shmget(libc::IPC_PRIVATE, 4096, libc::IPC_CREAT | 0o600) };
         if id == -1 {
             Err(std::io::Error::last_os_error())
         } else {
+            // SAFETY: id is the segment just made; IPC_RMID takes no buffer.
             unsafe { libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut()) };
             Ok(())
         }
@@ -188,8 +189,8 @@ fn attempt(dir: &Path, held: &File) {
         }
     });
     // Signal 0 only asks whether a signal could be sent.
-    // SAFETY: kill with signal 0 sends nothing.
     report("signal_parent", {
+        // SAFETY: kill with signal 0 sends nothing.
         if unsafe { libc::kill(libc::getppid(), 0) } == -1 {
             Err(std::io::Error::last_os_error())
         } else {
@@ -394,8 +395,8 @@ fn past_its_deadline(dir: &Path, held: &File) {
         programs,
         ..Policy::default()
     };
-    // SAFETY: setpgid takes no pointers.
     assert_eq!(
+        // SAFETY: setpgid takes no pointers.
         unsafe { libc::setpgid(0, 0) },
         0,
         "the probe leads no group"

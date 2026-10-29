@@ -344,6 +344,8 @@ fn native_stdin_pair() -> (super::PtyStdin, std::fs::File) {
     use std::sync::{Arc, Mutex};
     let (mut master, mut slave) = (-1, -1);
     assert_eq!(
+        // SAFETY: master and slave are writable descriptor outputs; null name, termios and
+        // winsize request defaults.
         unsafe {
             libc::openpty(
                 &mut master,
@@ -355,14 +357,20 @@ fn native_stdin_pair() -> (super::PtyStdin, std::fs::File) {
         },
         0
     );
+    // SAFETY: Successful openpty returned a new master descriptor with no other Rust owner.
     let master = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(master) });
+    // SAFETY: Successful openpty returned a distinct new slave descriptor with no other Rust owner.
     let slave = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(slave) });
+    // SAFETY: termios consists of integer fields and arrays, for which zero bits are valid.
     let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
+    // SAFETY: slave owns the live terminal descriptor and attrs is writable termios storage.
     assert_eq!(unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut attrs) }, 0);
     attrs.c_lflag |= libc::ICANON;
     attrs.c_lflag &= !libc::ECHO;
     attrs.c_cc[libc::VEOF] = 4;
     assert_eq!(
+        // SAFETY: slave owns the live descriptor and attrs remains initialized from tcgetattr
+        // with valid flag/byte edits.
         unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &attrs) },
         0
     );
@@ -392,6 +400,7 @@ fn read_native_record(slave: &mut std::fs::File) -> Vec<u8> {
         revents: 0,
     };
     assert!(
+        // SAFETY: poll_fd is writable storage for one pollfd; slave keeps the descriptor live.
         unsafe { libc::poll(&mut poll_fd, 1, 1000) } > 0,
         "canonical read did not become ready"
     );
@@ -479,12 +488,16 @@ fn eof_admission_rejects_mapped_or_shadowed_control_bytes() {
 fn mapped_carriage_return_veof_is_not_injected() {
     use std::os::fd::AsRawFd as _;
     let (mut stdin, slave) = native_stdin_pair();
+    // SAFETY: termios consists of integer fields and arrays, for which zero bits are valid.
     let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
+    // SAFETY: slave owns the live terminal descriptor and attrs is writable termios storage.
     assert_eq!(unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut attrs) }, 0);
     attrs.c_cc[libc::VEOF] = b'\r';
     attrs.c_iflag |= libc::ICRNL;
     attrs.c_iflag &= !libc::IGNCR;
     assert_eq!(
+        // SAFETY: slave owns the live descriptor and attrs remains initialized from tcgetattr
+        // with valid flag/byte edits.
         unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &attrs) },
         0
     );
@@ -498,6 +511,7 @@ fn mapped_carriage_return_veof_is_not_injected() {
         revents: 0,
     };
     assert_eq!(
+        // SAFETY: poll_fd is writable storage for one pollfd; slave keeps the descriptor live.
         unsafe { libc::poll(&mut poll_fd, 1, 0) },
         0,
         "unsupported EOF must not deliver a newline"

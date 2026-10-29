@@ -140,14 +140,17 @@ impl NativeCaptionDrag {
                 if let Some(event) = NSApplication::sharedApplication(mtm).currentEvent() {
                     // AppKit can consume Escape inside its move loop before
                     // winit delivers the restored-position Moved event.
+                    // SAFETY: event is retained on the main thread; keyCode is read only for a
+                    // KeyDown event.
                     if unsafe { event.r#type() == NSEventType::KeyDown && event.keyCode() == 53 } {
                         cancelled.set(true);
                     }
                 }
             });
-            // SAFETY: no operation queue means main-thread delivery here. The
-            // observers are scoped to this window and removed before it drops.
+            // SAFETY: The default notification center is queried on the AppKit main thread.
             let center = unsafe { NSNotificationCenter::defaultCenter() };
+            // SAFETY: This window posts on the main thread; the center copies start and its
+            // token is removed on drop.
             state.observers.push(unsafe {
                 center.addObserverForName_object_queue_usingBlock(
                     Some(NSWindowWillMoveNotification),
@@ -156,6 +159,8 @@ impl NativeCaptionDrag {
                     &start,
                 )
             });
+            // SAFETY: This window posts on the main thread; the center copies moved and its
+            // token is removed on drop.
             state.observers.push(unsafe {
                 center.addObserverForName_object_queue_usingBlock(
                     Some(NSWindowDidMoveNotification),
@@ -247,6 +252,8 @@ mod tests {
         use objc2_foundation::{NSPoint, NSString};
         let text = NSString::from_str("r");
         // These event objects are never posted to AppKit or the Window Server.
+        // SAFETY: KeyDown matches this constructor; text is live and the synthetic event is
+        // never posted.
         let key = unsafe {
             NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
                 NSEventType::KeyDown,
@@ -262,6 +269,7 @@ mod tests {
             )
         }
         .expect("key event fixture");
+        // SAFETY: ApplicationDefined matches this constructor; the synthetic event is never posted.
         let application = unsafe {
             NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
                 NSEventType::ApplicationDefined,

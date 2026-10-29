@@ -1092,6 +1092,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         // Root ignores the mode bits, so the setup cannot be arranged there.
+        // SAFETY: geteuid takes no pointers and only queries the process identity.
         if unsafe { libc::geteuid() } == 0 {
             eprintln!("skipped: as root a read-only directory still permits rename");
             return;

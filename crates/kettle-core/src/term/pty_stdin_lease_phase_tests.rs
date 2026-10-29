@@ -52,12 +52,16 @@ fn failed_restoration_latches_the_lease_closed() {
 fn unix_lease_sets_exclusive_nonblocking_status_and_restores_it() {
     let mut descriptors = [-1; 2];
     assert_eq!(
+        // SAFETY: descriptors has writable space for the two descriptors returned by pipe.
         unsafe { libc::pipe(descriptors.as_mut_ptr()) },
         0,
         "pipe fixture creation failed: {}",
         std::io::Error::last_os_error()
     );
+    // SAFETY: Successful pipe returned this new read descriptor, which has no other Rust owner.
     let _read_end = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+    // SAFETY: Successful pipe returned this distinct write descriptor, which has no other Rust
+    // owner.
     let write_end = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
     let phase = Arc::new(Mutex::new(PtyStdinLeasePhase::Available));
     let original =

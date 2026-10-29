@@ -81,6 +81,7 @@ impl Transaction {
         let file = kettle_state::open_trusted_file_read(&path)?;
         let metadata = file.metadata()?;
         // Trusted reads also accept root-owned files; provenance must be ours alone.
+        // SAFETY: geteuid has no preconditions.
         if metadata.uid() != unsafe { libc::geteuid() }
             || metadata.mode() & 0o7777 != 0o600
             || metadata.len() > MAX_RECORD_BYTES
@@ -125,6 +126,7 @@ impl Transaction {
     }
 
     pub(crate) fn matches(&self, name: &str, metadata: &Metadata) -> bool {
+        // SAFETY: geteuid has no preconditions.
         if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
             return false;
         }

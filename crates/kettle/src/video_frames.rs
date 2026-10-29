@@ -379,6 +379,7 @@ fn shared_directory(directory: &std::fs::File) -> Result<bool, OutputRefusal> {
     let found = directory
         .metadata()
         .map_err(|_| OutputRefusal::Unwritable)?;
+    // SAFETY: geteuid has no preconditions.
     if shared_mode(found.uid(), found.mode(), unsafe { libc::geteuid() }) {
         return Ok(true);
     }
@@ -541,8 +542,10 @@ fn write_out_attested(
         .custom_flags(access | libc::O_DIRECTORY | libc::O_CLOEXEC)
         .open(directory)
         .map_err(|_| OutputRefusal::Unwritable)?;
-    // SAFETY: the held parent, NUL-terminated leaf and stat output are valid.
+    // SAFETY: stat contains only integer fields, which admit all-zero bits.
     let mut found: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: parent stays open and name is NUL-terminated; found is an
+    // exclusive writable stat output buffer throughout fstatat.
     if unsafe {
         libc::fstatat(
             parent.as_raw_fd(),
@@ -922,6 +925,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         // Root bypasses the permission check this regression exercises.
+        // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } == 0 {
             eprintln!("skipping write/search-only directory check as root");
             return;

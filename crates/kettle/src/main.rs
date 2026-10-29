@@ -437,9 +437,12 @@ fn attach_parent_console_if_needed() {
         // means a real (non-error) UNKNOWN. Without the SetLastError(0) the
         // check could read a stale code from an earlier Win32 call.
         unsafe { SetLastError(0) };
+        // SAFETY: h is the borrowed standard handle supplied by the caller;
+        // GetFileType queries it and reports invalid handles as errors.
         match unsafe { GetFileType(h) } {
             FILE_TYPE_DISK | FILE_TYPE_PIPE | FILE_TYPE_CHAR => true,
             // UNKNOWN counts as usable only when it isn't actually an error.
+            // SAFETY: GetLastError reads only this thread's error state following GetFileType.
             FILE_TYPE_UNKNOWN => (unsafe { GetLastError() }) == 0,
             _ => false,
         }
@@ -2575,8 +2578,11 @@ mod tests {
         }
         let root = kettle_test_support::private_tempdir("kettle-config-write-failure-");
         let path = root.path().join("config");
+        // SAFETY: rlimit contains only integer fields, all of which admit zero bits.
         let mut original: libc::rlimit = unsafe { std::mem::zeroed() };
         assert_eq!(
+            // SAFETY: original is an exclusive writable rlimit output buffer;
+            // RLIMIT_FSIZE is a valid getrlimit selector.
             unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut original) },
             0
         );
@@ -2584,10 +2590,18 @@ mod tests {
             rlim_cur: 128,
             rlim_max: original.rlim_max,
         };
+        // SAFETY: SIG_IGN is a valid signal disposition; this isolated child
+        // changes only its own SIGXFSZ handling.
         let signal = unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+        // SAFETY: limited is a live initialized rlimit whose hard limit is
+        // unchanged from getrlimit; failures are checked in this isolated fixture.
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limited) }, 0);
         let failed = write_default_config(&path, kettle_config::ConfigTrust::VerifyDirectory);
+        // SAFETY: original is the initialized rlimit returned by getrlimit
+        // and remains readable throughout the restoring call.
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &original) }, 0);
+        // SAFETY: signal is the prior SIGXFSZ disposition returned by signal;
+        // this isolated child restores it without installing a Rust handler.
         unsafe {
             libc::signal(libc::SIGXFSZ, signal);
         }

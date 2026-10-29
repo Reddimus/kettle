@@ -149,8 +149,8 @@ pub fn pid_alive(pid: u32) -> bool {
         if pid <= 0 {
             return false;
         }
-        // kill(pid, 0): no signal sent, just the permission/existence check.
         // ESRCH = gone; EPERM = alive but not ours (still alive).
+        // SAFETY: pid is positive and signal 0 performs only an existence/permission probe.
         let r = unsafe { libc::kill(pid, 0) };
         r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
@@ -160,6 +160,8 @@ pub fn pid_alive(pid: u32) -> bool {
         use windows_sys::Win32::System::Threading::{
             GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
+        // SAFETY: OpenProcess takes a numeric pid and returns an owned query
+        // handle on success; code is writable and that handle is closed exactly once.
         unsafe {
             let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if h.is_null() {
@@ -420,6 +422,7 @@ fn examine_entry(path: &Path) -> EntryRead {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
+        // SAFETY: geteuid has no preconditions.
         if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
             return EntryRead::Garbage;
         }
@@ -487,6 +490,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         assert!(
+            // SAFETY: geteuid has no preconditions.
             unsafe { libc::geteuid() } != 0,
             "run the suite as an ordinary user: root ignores the mode bits this test relies on"
         );

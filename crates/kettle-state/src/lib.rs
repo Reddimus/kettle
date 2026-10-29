@@ -460,6 +460,7 @@ fn process_is_definitely_dead(pid: u32) -> bool {
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
         // Access-denied and transient query failures are not proof of death.
+        // SAFETY: GetLastError reads only the calling thread's error state.
         return unsafe { GetLastError() } == ERROR_INVALID_PARAMETER;
     }
     let mut exit_code = 0_u32;
@@ -727,6 +728,8 @@ pub fn swap_directory_entries(
     };
     let (from, to) = (name(from_name)?, name(to_name)?);
 
+    // SAFETY: Both directory Files stay open and both CStrings remain NUL-terminated
+    // for the synchronous renameatx_np call; RENAME_SWAP takes no ownership.
     let swapped = unsafe {
         renameatx_np(
             from_dir.as_raw_fd(),

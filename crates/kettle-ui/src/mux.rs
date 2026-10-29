@@ -117,6 +117,8 @@ fn path_with_kettle(path: &str, directory: &std::path::Path) -> Option<String> {
     let runnable = |kettle: &std::path::Path| {
         std::fs::metadata(kettle).is_ok_and(|metadata| metadata.is_file())
             && std::ffi::CString::new(kettle.as_os_str().as_bytes())
+                // SAFETY: name is a live CString for this synchronous access check; X_OK is a
+                // valid mode.
                 .is_ok_and(|name| unsafe { libc::access(name.as_ptr(), libc::X_OK) } == 0)
     };
     let directory = crate::codex_shell::kettle_path(directory).ok()?;
@@ -10295,6 +10297,7 @@ mod node_tests {
         );
         // Run by others but not by its owner, this user: none for the pane.
         std::fs::set_permissions(&kettle, std::fs::Permissions::from_mode(0o011)).unwrap();
+        // SAFETY: geteuid takes no pointers and only queries the effective process identity.
         if unsafe { libc::geteuid() } != 0 {
             assert!(
                 super::path_with_kettle(&path, &app).is_some(),

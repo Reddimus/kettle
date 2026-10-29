@@ -1916,6 +1916,8 @@ impl LinuxPidHandle {
     fn open(identity: LinuxProcessIdentity) -> std::io::Result<Option<Self>> {
         use std::os::fd::FromRawFd as _;
 
+        // SAFETY: pidfd_open takes a numeric pid and zero flags, with no pointer
+        // arguments; success returns a new owned descriptor.
         let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, identity.pid, 0) };
         if raw < 0 {
             let error = std::io::Error::last_os_error();
@@ -2064,8 +2066,10 @@ fn linux_adopted_children(
         return Err(std::io::Error::last_os_error());
     }
     scan.next_batch(root, own_session, deadline, 16_384, |pid| {
-        // SAFETY: waitid receives initialized storage; WNOWAIT retains the child.
+        // SAFETY: siginfo_t is plain C data, for which all zero bytes are valid.
         let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: waitid writes into `status`, initialized storage owned here;
+        // WNOWAIT leaves the child to be reaped later.
         if unsafe {
             libc::waitid(
                 libc::P_PID,
@@ -2468,6 +2472,8 @@ fn linux_signal_process_group(group: u32, signal: libc::c_int) -> bool {
     let Ok(group) = libc::pid_t::try_from(group) else {
         return false;
     };
+    // SAFETY: kill takes numeric arguments only; the group fits pid_t and
+    // callers supply a POSIX signal for the tracked PTY session.
     let result = unsafe { libc::kill(-group, signal) };
     if result == 0 {
         true
@@ -3781,6 +3787,8 @@ fn spawn_stdin_pump_task_with(
 pub fn stdin_is_pipe() -> bool {
     #[cfg(unix)]
     {
+        // SAFETY: stat contains only zero-valid integers; fstat writes into
+        // exclusive local storage, and an invalid stdin fd returns an error.
         unsafe {
             let mut st: libc::stat = std::mem::zeroed();
             if libc::fstat(0, &mut st) != 0 {
@@ -3798,11 +3806,15 @@ pub fn stdin_is_pipe() -> bool {
 
         const FILE_TYPE_DISK: u32 = 0x0001;
         const FILE_TYPE_PIPE: u32 = 0x0003;
+        // SAFETY: GetStdHandle accepts this standard-handle selector and returns
+        // a borrowed handle; this function does not close it.
         let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
             return false;
         }
         matches!(
+            // SAFETY: handle is the non-null, non-sentinel borrowed stdin handle;
+            // GetFileType only queries it and reports invalid handles as errors.
             unsafe { GetFileType(handle) },
             FILE_TYPE_DISK | FILE_TYPE_PIPE
         )
@@ -3841,6 +3853,9 @@ fn windows_console_size() -> Option<(u16, u16)> {
     use windows_sys::Win32::System::Console::{
         CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE,
     };
+    // SAFETY: GetStdHandle returns a borrowed handle; info contains only
+    // zero-valid integer fields and is writable for GetConsoleScreenBufferInfo.
+    // An invalid or non-console handle makes the query fail.
     unsafe {
         let h = GetStdHandle(STD_OUTPUT_HANDLE);
         if h.is_null() {
@@ -5951,8 +5966,8 @@ mod tests {
     fn teardown_accepts_unreaped_adopted_children() {
         const FIXTURE: &str = "exec::tests::teardown_accepts_unreaped_adopted_children";
         if invoked_as_fixture(FIXTURE) {
-            // SAFETY: only this isolated fixture adopts its orphaned descendants.
             assert_eq!(
+                // SAFETY: only this isolated fixture adopts its orphaned descendants.
                 unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
                 0
             );
@@ -6014,6 +6029,8 @@ mod tests {
             || linux_process_has_exited(pid),
             || {
                 // Avoid leaking the fixture if the assertion fails.
+                // SAFETY: kill takes numeric arguments only; pid was published by the
+                // test fixture and SIGKILL is a valid signal for its cleanup.
                 unsafe {
                     libc::kill(pid as libc::pid_t, libc::SIGKILL);
                 }
@@ -6075,6 +6092,8 @@ wait
             || linux_process_has_exited(pid),
             || {
                 // Avoid leaking the fixture if the assertion fails.
+                // SAFETY: kill takes numeric arguments only; pid was published by the
+                // test fixture and SIGKILL is a valid signal for its cleanup.
                 unsafe {
                     libc::kill(pid as libc::pid_t, libc::SIGKILL);
                 }
@@ -6163,6 +6182,8 @@ wait
         let exited = exited_before_cleanup(
             || linux_process_has_exited(pid),
             || {
+                // SAFETY: kill takes numeric arguments only; pid was published by the
+                // test fixture and SIGKILL is a valid signal for its cleanup.
                 unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
             },
         );
@@ -6467,6 +6488,8 @@ wait
         // so it deterministically retains the inherited slave; the parent test
         // owns its explicit cleanup because this is also the documented
         // containment escape that needs an OS-owned supervisor/cgroup.
+        // SAFETY: The pre_exec closure calls only setsid and last_os_error,
+        // which use no allocation or locks in the post-fork child.
         unsafe {
             command.pre_exec(|| {
                 if libc::setsid() < 0 {
@@ -6519,11 +6542,14 @@ wait
                     .ok()
             })
             .unwrap_or_else(|| panic!("fixture did not announce its descendant: {output:?}"));
+        // SAFETY: kill with signal 0 only probes the numeric pid published by the fixture.
         if unsafe { libc::kill(pid, 0) } == 0 {
             // The fixture intentionally called setsid, which is the documented
             // escape from Kettle's Unix PTY-session ownership boundary. The
             // result is about reaching the EOF timeout; clean this
             // deliberately unowned process up explicitly.
+            // SAFETY: kill takes numeric arguments only; pid was published by
+            // this fixture and SIGKILL is a valid cleanup signal.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
         assert_eq!(code, EXIT_INTERNAL);
@@ -6575,10 +6601,12 @@ wait
         }
         println!("FORK_PID {}", std::process::id());
         let _ = std::io::stdout().flush();
+        // SAFETY: getppid has no preconditions.
         let parent = unsafe { libc::getppid() };
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut children = Vec::new();
         while Instant::now() < deadline
+            // SAFETY: getppid has no preconditions.
             && unsafe { libc::getppid() } == parent
             && children.len() < 256
         {
@@ -6658,6 +6686,8 @@ wait
             .filter(|pid| !linux_process_has_exited(*pid))
             .collect::<Vec<_>>();
         for pid in &survivors {
+            // SAFETY: kill takes numeric arguments only; these pids were published
+            // by the test fixtures and SIGKILL is a valid cleanup signal.
             unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
         }
         assert!(
@@ -6782,7 +6812,10 @@ wait
         if process.is_null() {
             return; // The process object was already fully reaped.
         }
+        // SAFETY: OpenProcess returned this live synchronization handle,
+        // which remains open for the duration of the wait.
         let exited = unsafe { WaitForSingleObject(process, 1000) } == WAIT_OBJECT_0;
+        // SAFETY: OpenProcess transferred this handle to us; this is its only close.
         unsafe { CloseHandle(process) };
         assert!(exited, "Windows descendant {pid} survived Job termination");
     }

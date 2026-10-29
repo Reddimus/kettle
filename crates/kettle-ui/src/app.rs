@@ -19650,6 +19650,7 @@ fn cursor_screen_pos() -> Option<(f64, f64)> {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut p = POINT::default();
+    // SAFETY: p is writable POINT storage for the synchronous cursor query.
     unsafe { GetCursorPos(&mut p) }
         .ok()
         .map(|()| (f64::from(p.x), f64::from(p.y)))
@@ -19744,6 +19745,8 @@ fn set_window_alpha(hwnd: isize, alpha: u8) {
         GWL_EXSTYLE, GetWindowLongPtrW, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongPtrW,
     };
     let h = HWND(hwnd as *mut core::ffi::c_void);
+    // SAFETY: h comes from a live winit window on its UI thread; only integer style and alpha
+    // values are passed.
     unsafe {
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
         if alpha == 255 {
@@ -19776,15 +19779,14 @@ fn set_window_background_brush(hwnd: isize, rgb: kettle_config::Rgb) -> bool {
     // COLORREF is 0x00BBGGRR, not RGB order.
     let colorref = COLORREF(u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16));
     let h = HWND(hwnd as *mut core::ffi::c_void);
+    // SAFETY: h is a live winit HWND on the UI thread. Its class starts with no
+    // brush; only this function installs owned brushes, and replacement/deletion
+    // is serialized with window painting on that thread.
     unsafe {
         let brush = CreateSolidBrush(colorref);
         if brush.is_invalid() {
             return false;
         }
-        // Replaces the class brush and hands back the previous one. The class is
-        // shared and outlives the window, and every kettle window wants the same
-        // colour. winit registers it with no brush, so a nonzero previous brush
-        // came from an earlier kettle window and is destroyed below.
         let previous = SetClassLongPtrW(h, GCLP_HBRBACKGROUND, brush.0 as isize);
         if previous != 0 {
             let _ = DeleteObject(HGDIOBJ(previous as *mut core::ffi::c_void));
@@ -19825,6 +19827,8 @@ fn process_working_set_mb() -> f64 {
         cb: size,
         ..Default::default()
     };
+    // SAFETY: counters is writable for size bytes and cb matches; GetCurrentProcess returns a
+    // borrowed pseudo-handle.
     unsafe {
         if GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size).is_ok() {
             return counters.WorkingSetSize as f64 / (1024.0 * 1024.0);
@@ -19898,11 +19902,14 @@ fn primary_button_physically_held() -> bool {
             GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON,
         };
         use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+        // SAFETY: SM_SWAPBUTTON is a valid metric index and this query takes no pointers.
         let vk = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 {
             VK_RBUTTON
         } else {
             VK_LBUTTON
         };
+        // SAFETY: vk is one of the valid left/right mouse virtual-key codes; no pointers are
+        // passed.
         (unsafe { GetAsyncKeyState(i32::from(vk.0)) } as u16) & 0x8000 != 0
     }
     #[cfg(target_os = "macos")]
@@ -19950,13 +19957,19 @@ fn zorder_pick(
         GW_HWNDNEXT, GetWindow, GetWindowRect, IsWindowVisible,
     };
     let (px, py) = (cursor.0 as i32, cursor.1 as i32);
+    // SAFETY: torn_hwnd comes from the winit window; GetWindow borrows it and returns an
+    // OS-managed handle.
     let mut hwnd = unsafe { GetWindow(HWND(torn_hwnd as *mut core::ffi::c_void), GW_HWNDNEXT) };
     // Bounded walk: the desktop can hold hundreds of top-level windows but
     // a runaway loop must be impossible.
     for _ in 0..1024 {
         let Ok(h) = hwnd else { break };
+        // SAFETY: h is an OS-managed window handle; this query takes no pointers and tolerates
+        // a vanished window.
         if unsafe { IsWindowVisible(h) }.as_bool() {
             let mut cloaked: u32 = 0;
+            // SAFETY: cloaked is writable u32 storage matching DWMWA_CLOAKED and the supplied
+            // byte count.
             let _ = unsafe {
                 DwmGetWindowAttribute(
                     h,
@@ -19967,6 +19980,8 @@ fn zorder_pick(
             };
             let mut r = RECT::default();
             if cloaked == 0
+                // SAFETY: r is writable RECT storage for the synchronous query; a vanished
+                // window returns an error.
                 && unsafe { GetWindowRect(h, &mut r) }.is_ok()
                 && px >= r.left
                 && px < r.right
@@ -19980,6 +19995,8 @@ fn zorder_pick(
                     .map(|&(_, s, i)| (s, i));
             }
         }
+        // SAFETY: h is borrowed from the OS window list; GetWindow returns another borrowed
+        // handle or an error.
         hwnd = unsafe { GetWindow(h, GW_HWNDNEXT) };
     }
     None

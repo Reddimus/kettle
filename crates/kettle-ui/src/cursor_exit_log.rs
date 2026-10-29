@@ -326,6 +326,7 @@ fn read_context(path: &std::path::Path) -> Option<Context> {
     if !private_context(
         metadata.is_file(),
         metadata.uid(),
+        // SAFETY: geteuid takes no pointers and only reads the effective process identity.
         unsafe { libc::geteuid() },
         metadata.mode(),
         metadata.nlink(),
@@ -352,6 +353,8 @@ pub(crate) fn raw_now_ns() -> Option<u64> {
         tv_nsec: 0,
     };
     // CLOCK_UPTIME_RAW excludes sleep, matching HC's keyblock and clock checks.
+    // SAFETY: time is writable timespec storage for this call; CLOCK_UPTIME_RAW is a macOS
+    // clock ID.
     if unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &mut time) } != 0 {
         return None;
     }
@@ -376,8 +379,9 @@ fn native_window_number(window: &winit::window::Window) -> Option<u64> {
     let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
         return None;
     };
-    // Called only on winit's main thread; winit owns this view and its window.
+    // SAFETY: Called only on winit's main thread; the borrowed window keeps its NSView alive.
     let view = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
+    // SAFETY: The view and its window are live AppKit objects accessed on the main thread.
     let number = unsafe { view.window()?.windowNumber() };
     u64::try_from(number).ok()
 }
@@ -395,6 +399,7 @@ pub(crate) fn emit_line(line: &str) {
     let stderr = std::io::stderr();
     let _lock = stderr.lock();
     loop {
+        // SAFETY: line remains readable for line.len() bytes throughout the synchronous write.
         let written = unsafe { libc::write(libc::STDERR_FILENO, line.as_ptr().cast(), line.len()) };
         if written >= 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
         {

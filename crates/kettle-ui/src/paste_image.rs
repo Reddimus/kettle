@@ -1649,6 +1649,7 @@ fn require_owned_session_file(file: &File) -> io::Result<std::fs::Metadata> {
 
     let metadata = file.metadata()?;
     if metadata.file_type().is_file()
+        // SAFETY: geteuid takes no pointers and only queries the effective process identity.
         && metadata.uid() == unsafe { libc::geteuid() }
         && metadata.nlink() == 1
     {
@@ -1677,9 +1678,9 @@ fn session_entry_matches(
 
     let opened = file.metadata()?;
     let name = session_c_name(name)?;
-    // SAFETY: the held directory descriptor, NUL-terminated name, and output
-    // buffer are valid. AT_SYMLINK_NOFOLLOW compares the directory entry itself.
+    // SAFETY: stat contains integer fields and arrays, for which zero bits are valid.
     let mut current = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: The directory fd and NUL-terminated name stay live; current is writable stat storage.
     if unsafe {
         libc::fstatat(
             directory.file.as_raw_fd(),
@@ -1804,6 +1805,8 @@ fn session_directory_entry_names(
     let current = std::ffi::CString::new(".").expect("static path has no NUL");
     // Open "." relative to the retained capability to get a readable
     // descriptor with an independent directory offset on every Unix.
+    // SAFETY: directory owns the live fd and current is a NUL-terminated path; no creation mode
+    // is needed.
     let descriptor = unsafe {
         libc::openat(
             directory.file.as_raw_fd(),
@@ -1895,6 +1898,8 @@ fn discard_private_file(file: File, path: &Path) {
     // The private creator requested DELETE on this exact handle. Marking that
     // kernel object is both race-free and compatible with its intentionally
     // restrictive share mode.
+    // SAFETY: file has DELETE access; disposition and its size match FileDispositionInfo for
+    // the call.
     let result = unsafe {
         SetFileInformationByHandle(
             HANDLE(file.as_raw_handle()),
@@ -2116,8 +2121,9 @@ impl Drop for Pending<'_> {
 #[cfg(unix)]
 fn require_free(directory: &SessionDirectory, size: u64, keep: u64) -> io::Result<()> {
     use std::os::fd::AsRawFd as _;
-    // SAFETY: the descriptor is open and the buffer is the call's own type.
+    // SAFETY: statvfs contains integer fields and arrays, for which zero bits are valid.
     let mut stats = unsafe { std::mem::zeroed::<libc::statvfs>() };
+    // SAFETY: directory owns the live fd and stats is exclusively writable statvfs storage.
     if unsafe { libc::fstatvfs(directory.file.as_raw_fd(), &mut stats) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -2297,6 +2303,7 @@ fn session_directory_matches_path(directory: &SessionDirectory) -> io::Result<bo
 
     let current = std::fs::symlink_metadata(&directory.path)?;
     Ok(current.file_type().is_dir()
+        // SAFETY: geteuid takes no pointers and only queries the effective process identity.
         && current.uid() == unsafe { libc::geteuid() }
         && current.mode() & 0o777 == 0o700
         && current.dev() == directory.device
@@ -2351,6 +2358,7 @@ fn open_session_directory(path: &Path) -> io::Result<SessionDirectory> {
         .open(path)?;
     let metadata = file.metadata()?;
     if !metadata.file_type().is_dir()
+        // SAFETY: geteuid takes no pointers and only queries the effective process identity.
         || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.mode() & 0o777 != 0o700
     {
@@ -2428,6 +2436,7 @@ fn remove_session_directory(directory: SessionDirectory) -> io::Result<()> {
 
     let current = std::fs::symlink_metadata(&directory.path)?;
     if !current.file_type().is_dir()
+        // SAFETY: geteuid takes no pointers and only queries the effective process identity.
         || current.uid() != unsafe { libc::geteuid() }
         || current.mode() & 0o777 != 0o700
         || current.dev() != directory.device

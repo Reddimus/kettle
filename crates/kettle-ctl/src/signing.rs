@@ -653,9 +653,9 @@ mod imp {
     fn parse(requirement: Requirement) -> Result<Owned, SignatureError> {
         let text = cf_string(requirement.text()).ok_or(SignatureError::Os)?;
         let mut parsed: CFTypeRef = std::ptr::null();
-        // SAFETY: `text` is a live string of a requirement Kettle's own tests
-        // parse; `parsed` receives an owned requirement on success.
         let status =
+            // SAFETY: `text` is a live string of a requirement Kettle's own tests
+            // parse; `parsed` receives an owned requirement on success.
             unsafe { SecRequirementCreateWithString(text.0, SEC_CS_DEFAULT_FLAGS, &mut parsed) };
         copied(status, parsed)
     }

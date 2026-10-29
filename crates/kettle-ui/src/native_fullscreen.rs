@@ -195,10 +195,13 @@ impl NativeFullscreen {
                     generation,
                 });
             });
-            // SAFETY: AppKit delivers these window-scoped observers on the
-            // main thread. Their retained tokens are removed before the window.
+            // SAFETY: The default notification center is queried on the AppKit main thread.
             let center = unsafe { NSNotificationCenter::defaultCenter() };
+            // SAFETY: These AppKit notification names are immutable, process-lifetime framework
+            // globals.
             for name in unsafe { [NSWindowDidMoveNotification, NSWindowDidResizeNotification] } {
+                // SAFETY: This window posts on the main thread; the center copies changed and
+                // the token is removed on drop.
                 state.observers.push(unsafe {
                     center.addObserverForName_object_queue_usingBlock(
                         Some(name),
@@ -208,6 +211,8 @@ impl NativeFullscreen {
                     )
                 });
             }
+            // SAFETY: This window posts on the main thread; the center copies entering and the
+            // token is removed on drop.
             state.observers.push(unsafe {
                 center.addObserverForName_object_queue_usingBlock(
                     Some(NSWindowWillEnterFullScreenNotification),
@@ -216,6 +221,8 @@ impl NativeFullscreen {
                     &entering,
                 )
             });
+            // SAFETY: This window posts on the main thread; the center copies exited and the
+            // token is removed on drop.
             state.observers.push(unsafe {
                 center.addObserverForName_object_queue_usingBlock(
                     Some(NSWindowDidExitFullScreenNotification),
@@ -224,6 +231,8 @@ impl NativeFullscreen {
                     &exited,
                 )
             });
+            // SAFETY: This window posts on the main thread; the center copies leaving and the
+            // token is removed on drop.
             state.observers.push(unsafe {
                 center.addObserverForName_object_queue_usingBlock(
                     Some(NSWindowWillExitFullScreenNotification),

@@ -375,11 +375,15 @@ enum WordEraseMode {
 
 #[cfg(unix)]
 fn live_canonical_eof_rules(fd: RawFd) -> Result<(CanonicalEofRules, u8, u8)> {
+    // SAFETY: termios contains only integer fields and arrays, for which all-zero bits are valid.
     let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
+    // SAFETY: attrs is exclusively writable termios storage for the call; fd is borrowed from
+    // the PTY.
     if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
         return Err(std::io::Error::last_os_error())
             .context("cannot read live PTY termios for stdin forwarding");
     }
+    // SAFETY: _PC_VDISABLE is a valid fpathconf query and takes no pointer arguments.
     let disabled = unsafe { libc::fpathconf(fd, libc::_PC_VDISABLE) };
     if !(0..=u8::MAX as libc::c_long).contains(&disabled) {
         anyhow::bail!("cannot determine the PTY's disabled control-character value");
@@ -669,11 +673,11 @@ fn unix_child_exit_code_unreaped(pid: u32) -> io::Result<Option<u32>> {
     let pid = libc::pid_t::try_from(pid)
         .map_err(|_| io::Error::other("PTY child process id is out of range"))?;
 
-    // SAFETY: `info` is initialized for the kernel, `pid` identifies this
-    // process's direct child, and WNOWAIT explicitly leaves its wait status
-    // available to portable-pty's later `try_wait`.
+    // SAFETY: siginfo_t contains only integer/raw-pointer fields; zero bits are valid.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     loop {
+        // SAFETY: info is writable siginfo_t storage; pid selects the direct child and WNOWAIT
+        // preserves its status.
         let result = unsafe {
             libc::waitid(
                 libc::P_PID,
@@ -685,9 +689,13 @@ fn unix_child_exit_code_unreaped(pid: u32) -> io::Result<Option<u32>> {
         if result == 0 {
             // POSIX reports a successful WNOHANG probe with si_pid == 0 while
             // the selected child is still running.
+            // SAFETY: Successful waitid initialized the child-status layout, or left the
+            // zero-initialized no-event value.
             if unsafe { info.si_pid() } == 0 {
                 return Ok(None);
             }
+            // SAFETY: waitid returned a nonzero child PID, so the child-status union fields are
+            // initialized.
             let status = unsafe { info.si_status() };
             let code = match info.si_code {
                 libc::CLD_EXITED => status as u32,
@@ -741,6 +749,8 @@ impl UnixPtyWatcher {
     fn new(pid: u32, _master_fd: RawFd) -> Self {
         #[cfg(target_os = "linux")]
         let pidfd = {
+            // SAFETY: SYS_pidfd_open takes the integer PID and zero flags, with no pointer
+            // arguments.
             let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
             if raw < 0 {
                 log::debug!(
@@ -778,6 +788,8 @@ impl UnixPtyWatcher {
 
     #[cfg(target_os = "macos")]
     fn macos_kqueue(pid: u32, master_fd: RawFd) -> io::Result<OwnedFd> {
+        // SAFETY: kqueue takes no arguments and transfers ownership of any returned descriptor
+        // to the caller.
         let raw = unsafe { libc::kqueue() };
         if raw < 0 {
             return Err(io::Error::last_os_error());
@@ -802,6 +814,8 @@ impl UnixPtyWatcher {
                 udata: std::ptr::null_mut(),
             },
         ];
+        // SAFETY: queue is owned; changes contains two initialized records and no event output
+        // buffer is requested.
         let registered = unsafe {
             libc::kevent(
                 queue.as_raw_fd(),
@@ -839,6 +853,8 @@ impl UnixPtyWatcher {
             ];
             loop {
                 let timeout = deadline.map(poll_timeout_ms_until).unwrap_or(-1);
+                // SAFETY: fds is exclusively writable for exactly fds.len() pollfd entries
+                // throughout the call.
                 let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) };
                 if result == 0 {
                     return Ok(None);
@@ -869,9 +885,13 @@ impl UnixPtyWatcher {
 
         #[cfg(target_os = "macos")]
         if let Some(queue) = &self.kqueue {
+            // SAFETY: kevent contains integer and raw-pointer fields; zero is a valid initial
+            // value for each.
             let mut events: [libc::kevent; 2] = unsafe { std::mem::zeroed() };
             loop {
                 let timeout = deadline.map(kqueue_timeout_until);
+                // SAFETY: queue is owned; events has room for two records and timeout, if
+                // present, lives through the call.
                 let count = unsafe {
                     libc::kevent(
                         queue.as_raw_fd(),
@@ -944,6 +964,7 @@ impl UnixPtyWatcher {
                 .map_or(self.fallback_timeout_ms, |remaining| {
                     remaining.min(self.fallback_timeout_ms)
                 });
+            // SAFETY: poll_fd is a live, exclusively writable pollfd and the count is one.
             let result = unsafe { libc::poll(&mut poll_fd, 1, timeout) };
             if result < 0 {
                 let error = io::Error::last_os_error();
@@ -1003,6 +1024,7 @@ fn wait_for_master_until(master_fd: RawFd, deadline: std::time::Instant) -> io::
             events: libc::POLLIN,
             revents: 0,
         };
+        // SAFETY: fd is a live, exclusively writable pollfd and the count is one.
         let result = unsafe { libc::poll(&mut fd, 1, poll_timeout_ms_until(deadline)) };
         if result == 0 || std::time::Instant::now() >= deadline {
             return Ok(false);
@@ -1051,8 +1073,12 @@ fn spawn_windows_child_exit_observer(
     let source = child
         .as_raw_handle()
         .ok_or_else(|| io::Error::other("ConPTY child has no process handle"))?;
+    // SAFETY: GetCurrentProcess takes no pointers and returns a borrowed pseudo-handle, which
+    // is not closed.
     let process = unsafe { GetCurrentProcess() };
     let mut duplicate: HANDLE = std::ptr::null_mut();
+    // SAFETY: child keeps source live; both process handles denote this process and duplicate
+    // is writable HANDLE storage.
     let duplicated = unsafe {
         DuplicateHandle(
             process,
@@ -1072,6 +1098,8 @@ fn spawn_windows_child_exit_observer(
     std::thread::Builder::new()
         .name("kettle-child-observer".into())
         .spawn(move || {
+            // SAFETY: handle owns the duplicated process handle throughout the wait; INFINITE
+            // is a valid timeout.
             let result = unsafe { WaitForSingleObject(handle.as_raw_handle() as HANDLE, INFINITE) };
             match result {
                 WAIT_OBJECT_0 => {
@@ -3571,6 +3599,8 @@ mod foreground_job_tests {
                 .ok()
                 .and_then(|foreground| {
                     let child_pid = terminal.child_pid()? as libc::pid_t;
+                    // SAFETY: getpgid only queries the integer child PID; a child that has
+                    // exited may return an error.
                     let child_group = unsafe { libc::getpgid(child_pid) };
                     (child_group >= 0).then_some(foreground != child_group as u32)
                 });
@@ -5767,6 +5797,8 @@ impl Terminal {
                                                 // exec writer arbiter has the
                                                 // shared master description in
                                                 // nonblocking mode.
+                                                // SAFETY: poll_fd is a live, exclusively
+                                                // writable pollfd and the count is one.
                                                 let _ = unsafe { libc::poll(&mut poll_fd, 1, 250) };
                                             }
                                             #[cfg(not(unix))]
@@ -6811,7 +6843,11 @@ impl Terminal {
             .context("PTY master is unavailable")?
             .as_raw_fd()
             .context("PTY master has no Unix file descriptor")?;
+        // SAFETY: termios contains only integer fields and arrays, for which all-zero bits are
+        // valid.
         let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
+        // SAFETY: The borrowed master keeps fd live and attrs is writable termios storage for
+        // this call.
         if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
             return Err(std::io::Error::last_os_error())
                 .context("cannot read live PTY termios for key encoding");
@@ -6840,6 +6876,8 @@ impl Terminal {
             .context("PTY master is unavailable")?
             .as_raw_fd()
             .context("PTY master has no Unix file descriptor")?;
+        // SAFETY: The borrowed master keeps fd live; tcgetpgrp only queries its terminal
+        // process group.
         let foreground = unsafe { libc::tcgetpgrp(fd) };
         if foreground < 0 {
             return Err(std::io::Error::last_os_error())
@@ -8667,6 +8705,8 @@ fn fcntl_retry(
     argument: libc::c_int,
 ) -> std::io::Result<libc::c_int> {
     loop {
+        // SAFETY: All callers use F_GETFL, F_SETFL or F_DUPFD_CLOEXEC on borrowed descriptors;
+        // these commands accept the integer argument supplied here, never a pointer.
         let result = unsafe { libc::fcntl(fd, command, argument) };
         if result >= 0 {
             return Ok(result);
@@ -8702,6 +8742,8 @@ impl UnixPtyStdinLease {
         let acquired = (|| {
             let duplicated = fcntl_retry(master_fd, libc::F_DUPFD_CLOEXEC, 0)
                 .context("cannot duplicate PTY descriptor for stdin termios")?;
+            // SAFETY: F_DUPFD_CLOEXEC returned a new owned descriptor, transferred exactly once
+            // into OwnedFd.
             let termios_fd = unsafe { OwnedFd::from_raw_fd(duplicated) };
             let original_status_flags = fcntl_retry(termios_fd.as_raw_fd(), libc::F_GETFL, 0)
                 .context("cannot read PTY status flags for stdin arbitration")?;
