@@ -973,6 +973,10 @@ mod tests {
                 "--test-threads=1",
             ])
             .env(CHILD, &destination)
+            // Under coverage instrumentation the child would also write its
+            // profile at exit, which the same limit truncates, and a truncated
+            // profile stops the report from merging.
+            .env("LLVM_PROFILE_FILE", "/dev/null")
             .status()
             .unwrap();
         assert!(
