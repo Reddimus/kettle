@@ -95,7 +95,8 @@ kettle.add_url_handler(
 --   - "tab_add"          → tab index appended; payload = new index
 --   - "tab_close"        → tab being closed; payload = closing index
 --   - "bell"             → bell rang in a pane; payload = pane id
---   - "pane_close"        → pane about to close; payload = pane id
+--   - "pane_close"        → a pane ended (closed, with its tab or window,
+--                          or its shell exited); payload = pane id
 --   - "output"           → pane produced output; payload = (pane id,
 --                          bytes since last emission). Throttled at
 --                          the dispatch site so a busy build doesn't
