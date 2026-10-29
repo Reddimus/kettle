@@ -346,7 +346,7 @@ pub use kettle_vt::AnsiStripper;
 #[cfg(test)]
 const MAX_CONTROL_SEQUENCE_BYTES: usize = kettle_vt::control::MAX_CONTROL_SEQUENCE_BYTES;
 
-/// A private handle to this process's standard output for the child stream.
+/// A private handle to this process's standard output for exec and MCP.
 ///
 /// `Outputter` flushes after every command, so the process-global
 /// `std::io::stdout()` contributes nothing but a shared lock and a second copy
@@ -354,7 +354,7 @@ const MAX_CONTROL_SEQUENCE_BYTES: usize = kettle_vt::control::MAX_CONTROL_SEQUEN
 /// Unix: bytes a failed write leaves in that global buffer are retried by the
 /// runtime's exit-time flush, on the main thread, where SIGPIPE is back at
 /// SIG_DFL — so a broken pipe kills the process by signal and discards the
-/// lifecycle's chosen exit code. A duplicated descriptor keeps exec's output
+/// lifecycle's chosen exit code. A duplicated descriptor keeps protocol output
 /// out of that buffer entirely.
 ///
 /// Windows keeps the standard handle deliberately: it has no SIGPIPE, and
@@ -362,15 +362,24 @@ const MAX_CONTROL_SEQUENCE_BYTES: usize = kettle_vt::control::MAX_CONTROL_SEQUEN
 /// would emit UTF-8 bytes for the console's active code page to misread
 /// whenever stdout is a console rather than a pipe.
 #[cfg(unix)]
-fn exec_stdout_sink() -> std::io::Result<std::fs::File> {
+pub(crate) fn stdout_sink() -> std::io::Result<std::fs::File> {
     use std::os::fd::AsFd as _;
-    Ok(std::fs::File::from(
-        std::io::stdout().as_fd().try_clone_to_owned()?,
-    ))
+    let sink = std::fs::File::from(std::io::stdout().as_fd().try_clone_to_owned()?);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd as _;
+        // Darwin delivers pipe SIGPIPE process-wide, even if the writer
+        // blocks it. Suppress it on this descriptor so EPIPE reaches cleanup.
+        // SAFETY: sink owns a live descriptor; F_SETNOSIGPIPE takes an integer.
+        if unsafe { libc::fcntl(sink.as_raw_fd(), libc::F_SETNOSIGPIPE, 1) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(sink)
 }
 
 #[cfg(not(unix))]
-fn exec_stdout_sink() -> std::io::Result<std::io::Stdout> {
+pub(crate) fn stdout_sink() -> std::io::Result<std::io::Stdout> {
     Ok(std::io::stdout())
 }
 
@@ -421,7 +430,7 @@ pub fn run_exec(opts: ExecOpts, capture_tail: bool) -> i32 {
             }
         };
     }
-    let sink = match exec_stdout_sink() {
+    let sink = match stdout_sink() {
         Ok(sink) => sink,
         Err(error) => {
             let _ = writeln!(
@@ -1165,18 +1174,6 @@ fn run_exec_engine_with_recording_poll(
             match state {
                 ExecCompletion::Recording { code, deadline } => {
                     if recording_finished(&mut recorder, deadline) {
-                        // Finish containment before publishing the exit event,
-                        // while the direct child's identity is still reserved.
-                        #[cfg(target_os = "linux")]
-                        let code = if ADOPTION.get().is_some() && !process_tree.terminate(&term) {
-                            let _ = writeln!(
-                                std::io::stderr(),
-                                "kettle exec: normal-exit process-tree teardown was not verified"
-                            );
-                            EXIT_INTERNAL
-                        } else {
-                            code
-                        };
                         output_or_stop!(output.finish(
                             code,
                             started.elapsed(),
@@ -1429,21 +1426,6 @@ fn run_exec_engine_with_recording_poll(
             Ok(Some(code)) => {
                 child_gone_at = Some(Instant::now());
                 child_exit_code = Some(code);
-                // Escaped orphans can retain a PTY writer. Stop them before
-                // waiting for EOF, and sweep again after session teardown.
-                #[cfg(target_os = "linux")]
-                if !linux_kill_adopted(process_tree.root, Instant::now() + LINUX_ADOPTED_KILL_TIME)
-                {
-                    let _ = process_tree.terminate(&term);
-                    let _ = term.child_exit_code();
-                    finish_recording(&mut recorder, RECORD_FINISH_TIMEOUT);
-                    let _ = output.finish(
-                        EXIT_INTERNAL,
-                        started.elapsed(),
-                        OutputFinish::AbandonPending,
-                    );
-                    return EXIT_INTERNAL;
-                }
             }
             Ok(None) => {}
             Err(error) => {
@@ -1742,6 +1724,7 @@ fn usable_directory(cwd: &Path) -> Result<PathBuf, String> {
 /// containment is established inside the PTY backend before the suspended
 /// primary thread resumes, so the portable child kill reaches its Job Object.
 struct ExecProcessTree {
+    teardown: std::sync::OnceLock<bool>,
     root: Option<u32>,
     #[cfg(target_os = "linux")]
     session: Option<LinuxSession>,
@@ -1808,6 +1791,7 @@ impl ExecProcessTree {
         #[cfg(target_os = "linux")]
         let session = root.map(LinuxSession::attach);
         Self {
+            teardown: std::sync::OnceLock::new(),
             root,
             #[cfg(target_os = "linux")]
             session,
@@ -1818,6 +1802,12 @@ impl ExecProcessTree {
     /// proven complete. A timeout/cancellation status is meaningful only when
     /// the command cannot keep running after Kettle returns.
     fn terminate(&self, term: &Terminal) -> bool {
+        // Terminal::kill may reap the direct child. After that its numeric PID
+        // is no longer ours, so even failed teardown must never signal it again.
+        *self.teardown.get_or_init(|| self.terminate_once(term))
+    }
+
+    fn terminate_once(&self, term: &Terminal) -> bool {
         let Some(root) = self.root.or_else(|| term.child_pid()) else {
             let direct = report_failed_termination(term.kill());
             #[cfg(unix)]
@@ -3009,8 +2999,8 @@ struct WorkerOutput {
 }
 
 /// `main` restores the conventional Unix SIGPIPE disposition for ordinary CLI
-/// writes. The exec stdout worker is different: it must observe `EPIPE`, report
-/// exit 74, and reap the PTY child instead of letting the signal kill Kettle.
+/// writes. Exec and MCP writers must instead observe `EPIPE` so the lifecycle
+/// can stop owned commands before exiting with a numeric failure status.
 #[cfg(unix)]
 pub(crate) fn block_sigpipe_for_current_thread() -> std::io::Result<()> {
     // SAFETY: sigemptyset/sigaddset initialize and mutate only this local set;
@@ -3036,7 +3026,7 @@ pub(crate) fn block_sigpipe_for_current_thread() -> std::io::Result<()> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn consume_pending_sigpipe(error: &std::io::Error) {
+pub(crate) fn consume_pending_sigpipe(error: &std::io::Error) {
     if error.kind() != std::io::ErrorKind::BrokenPipe {
         return;
     }
@@ -3071,7 +3061,7 @@ fn consume_pending_sigpipe(error: &std::io::Error) {
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
-fn consume_pending_sigpipe(error: &std::io::Error) {
+pub(crate) fn consume_pending_sigpipe(error: &std::io::Error) {
     if error.kind() != std::io::ErrorKind::BrokenPipe {
         return;
     }
@@ -3104,7 +3094,7 @@ fn consume_pending_sigpipe(error: &std::io::Error) {
 }
 
 #[cfg(not(unix))]
-fn consume_pending_sigpipe(_error: &std::io::Error) {}
+pub(crate) fn consume_pending_sigpipe(_error: &std::io::Error) {}
 
 /// Retire one command from the stdout worker.
 ///
@@ -4923,6 +4913,147 @@ mod tests {
         assert!(
             waited < Duration::from_secs(1),
             "waited {waited:?} for a command that never reached the writer"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_tree_teardown_is_idempotent_after_direct_child_reap() {
+        let (tx, _events) = crossbeam_channel::unbounded();
+        let term = Terminal::new(
+            &["sh".into(), "-c".into(), "exec sleep 300".into()],
+            None,
+            100,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            Arc::new(|| {}),
+        )
+        .expect("regression requires a real PTY");
+        let tree = ExecProcessTree::attach(&term);
+        assert!(tree.terminate(&term), "first teardown must be verified");
+        assert!(wait_for_exit_code(&term).is_some());
+        assert!(
+            tree.terminate(&term),
+            "completed teardown must return its cached result"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normal_completion_reserves_pid_until_output_acknowledgement() {
+        kettle_test_support::run_alone_in_child(
+            "exec::tests::normal_completion_reserves_pid_until_output_acknowledgement",
+            || {
+                #[cfg(target_os = "linux")]
+                adopt_orphaned_descendants();
+                for stop in ["ack", "cancel", "timeout", "failure"] {
+                    struct CompletionOutput<'a> {
+                        pid_file: &'a Path,
+                        stop: &'a str,
+                        cancelled: &'a AtomicBool,
+                        completed: bool,
+                    }
+                    impl ExecOutput for CompletionOutput<'_> {
+                        fn ready(&mut self) -> OutputResult<bool> {
+                            Ok(true)
+                        }
+                        fn start(&mut self, _: u16, _: u16) -> OutputResult<()> {
+                            Ok(())
+                        }
+                        fn output(&mut self, _: Vec<u8>) -> OutputResult<()> {
+                            Ok(())
+                        }
+                        fn title(&mut self, _: String) -> OutputResult<()> {
+                            Ok(())
+                        }
+                        fn finish(
+                            &mut self,
+                            _: i32,
+                            _: Duration,
+                            mode: OutputFinish,
+                        ) -> OutputResult<()> {
+                            if matches!(mode, OutputFinish::Complete) {
+                                self.completed = true;
+                                let pid: u32 = std::fs::read_to_string(self.pid_file)
+                                    .unwrap()
+                                    .trim()
+                                    .parse()
+                                    .unwrap();
+                                // SAFETY: this is our own exited PTY child. WNOWAIT
+                                // verifies its PID reservation without releasing it.
+                                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                                // SAFETY: info is writable, pid is our own child,
+                                // and WNOWAIT leaves its status reserved.
+                                let observed = unsafe {
+                                    libc::waitid(
+                                        libc::P_PID,
+                                        pid as _,
+                                        &raw mut info,
+                                        libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                                    )
+                                };
+                                assert_eq!(
+                                    observed,
+                                    0,
+                                    "normal completion reaped before output acknowledgement: {}",
+                                    std::io::Error::last_os_error()
+                                );
+                                // SAFETY: successful waitid initialized the child-status layout.
+                                assert_eq!(unsafe { info.si_pid() }, pid as i32);
+                                if self.stop == "cancel" {
+                                    self.cancelled.store(true, Ordering::Release);
+                                }
+                            }
+                            Ok(())
+                        }
+                        fn completion_ready(&mut self) -> OutputResult<bool> {
+                            if self.stop == "failure" {
+                                Err(OutputDeliveryError::unexpected("late output failure"))
+                            } else {
+                                Ok(self.stop == "ack")
+                            }
+                        }
+                    }
+                    let directory = tempfile::tempdir().unwrap();
+                    let pid = directory.path().join("pid");
+                    let cancelled = AtomicBool::new(false);
+                    let mut opts = opts_for(
+                        vec![
+                            "sh".into(),
+                            "-c".into(),
+                            "echo $$ > \"$1\"; exit 7".into(),
+                            "fixture".into(),
+                            pid.to_string_lossy().into_owned(),
+                        ],
+                        None,
+                    );
+                    opts.timeout = Some(Duration::from_secs(2));
+                    let mut output = CompletionOutput {
+                        pid_file: &pid,
+                        stop,
+                        cancelled: &cancelled,
+                        completed: false,
+                    };
+                    let code = run_exec_engine(opts, &|| None, &mut output, Some(&cancelled), true);
+                    assert!(
+                        output.completed,
+                        "fixture must reach ordinary output completion"
+                    );
+                    let expected = match stop {
+                        "ack" => 7,
+                        "cancel" => EXIT_CANCELLED,
+                        "timeout" => EXIT_TIMEOUT,
+                        _ => EXIT_OUTPUT_DELIVERY,
+                    };
+                    assert_eq!(code, expected, "{stop} after child exit");
+                }
+            },
         );
     }
 
@@ -7446,7 +7577,7 @@ wait
     fn exec_stdout_sink_is_a_private_descriptor() {
         use std::os::fd::AsRawFd as _;
 
-        let sink = exec_stdout_sink().expect("duplicate stdout");
+        let sink = stdout_sink().expect("duplicate stdout");
         assert_ne!(
             sink.as_raw_fd(),
             1,

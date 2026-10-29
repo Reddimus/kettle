@@ -194,16 +194,21 @@ cargo test -p kettle --test mcp_supervisor
 cargo test -p kettle --test exec exec_sigterm_and_sigint_follow_bounded_cancellation
 ```
 
-`mcp_supervisor_stops_setsid_on_exit_timeout_and_cancel` launches `sleep 300`
+`mcp_supervisor_preserves_setsid_on_exit_and_stops_on_timeout_and_cancel` launches `sleep 300`
 under `setsid`, uses the PID the fixture prints (pinned with a pidfd), and checks
-normal exit, timeout and cancellation separately. Cancellation still emits no
-MCP reply. `cancelling_one_mcp_supervisor_preserves_the_other_tree_and_output`
+daemon survival on normal exit, and containment on timeout and cancellation
+separately. The fixture redirects daemon stdio away from the PTY. Cancellation
+still emits no MCP reply. `cancelling_one_mcp_supervisor_preserves_the_other_tree_and_output`
 keeps two commands alive together, cancels one, verifies the other's exact PID
-is alive, then checks its complete output and cleanup. The SIGTERM regression
-checks that real `kettle exec` exits 130 and leaves no escaped sleep process;
+is alive, then checks its complete output and normal-exit daemon survival.
+`exec_normal_exit_preserves_escaped_daemon` also checks the real CLI. The
+SIGTERM regression checks that real `kettle exec` exits 130 and leaves no escaped sleep process;
 the stdout-failure regression checks server shutdown cancels supervised tools.
+`server_death_stops_supervisor_and_escaped_command` kills the MCP server with
+SIGTERM and SIGKILL and requires both its supervisor and the escaped command
+to stop without waiting for the 600-second timeout.
 These are native Linux tests, not soft skips on failure. On the former
-in-process implementation the escaped sleep survives all three stop modes;
+in-process implementation the escaped sleep survives timeout and cancellation;
 the former CLI signal disposition also exits by SIGTERM instead of returning
 130. Those pre-change Linux failures require Linux execution to demonstrate.
 
@@ -219,6 +224,17 @@ source: SIGTERM produced no numeric exit code instead of 130.
 `exec::supervisor::tests::supervisor_*` also run on Unix: both pipes
 under pressure, ignored SIGTERM escalation, outer timeout, inherited writers,
 argument boundaries, and refusal to spawn with autoreaping SIGCHLD.
+`supervisor_reaps_a_child_that_exits_after_kill_grace` injects delayed
+termination after the bounded wait and uses WNOWAIT to require the background
+owner to reap the eventual exit. `process_tree_teardown_is_idempotent_after_direct_child_reap`
+requires repeated teardown to retain its original verified result.
+`real_mcp_stdout_failure_returns_failure_status` closes a real stdout pipe and
+requires numeric exit 1 rather than SIGPIPE on every Unix host.
+`normal_completion_reserves_pid_until_output_acknowledgement` runs in an
+isolated Unix process (with adoption enabled on Linux) and verifies the child is
+still waitable at final output submission, then exercises acknowledgement,
+cancellation, timeout and output failure. The Linux parent-death startup-race
+unit test requires SIGTERM pending when registration discovers a lost parent.
 Linux runtime containment cannot be certified by these portable tests. If the Linux target standard library is installed, try
 `cargo check --locked --offline -p kettle --target x86_64-unknown-linux-gnu`;
 a missing cross C compiler can still block dependency build scripts. Record

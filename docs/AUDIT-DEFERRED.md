@@ -24,10 +24,11 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   `kettle exec` and the in-process MCP `kettle_run` path can leave descendants
   that deliberately leave the PTY process group. Deferred until a macOS
   supervisor tracks descendants across session changes. Close with native
-  normal-exit, timeout, cancellation and concurrent-command isolation tests.
+  timeout, cancellation and concurrent-command isolation tests. Normal exit
+  intentionally preserves detached daemons on all Unix platforms.
   Linux MCP now gives each command its own supervising `kettle exec` child;
-  its subreaper adopts escaped descendants and bounds teardown on normal exit,
-  timeout and cancellation (`crates/kettle/src/exec{,_supervisor}.rs`). Native
+  its subreaper adopts escaped descendants and bounds teardown on timeout,
+  cancellation and termination signals (`crates/kettle/src/exec{,_supervisor}.rs`). Native
   Linux regression coverage lives in `crates/kettle/tests/mcp_supervisor.rs`;
   those tests must run on Linux, not be inferred from macOS results.
 

@@ -104,13 +104,14 @@ cancellation kills and reaps it too. Where the kernel refuses a subreaper or
 has no per-thread child lists, such a timeout or cancellation reports 125,
 since an escaped descendant could still be running. That ownership is the kernel's, not an
 inference from ancestry or an open PTY descriptor, so it cannot reach an
-unrelated same-user process. Linux also sweeps adopted descendants on normal
-exit and verifies final session teardown before returning. Linux MCP runs each
+unrelated same-user process. Normal completion preserves descendants that
+deliberately left the PTY session, including detached daemons. Linux MCP runs each
 command in its own supervising `kettle exec` child, located through
 `current_exe()`; cancellation sends SIGTERM, with a five-second teardown grace
 before SIGKILL and internal failure (125). The child enforces the command's
 timeout; an outer timeout plus ten seconds bounds a wedged supervisor. Both
-supervisor pipes are drained concurrently into bounded buffers. macOS has no
+supervisor pipes are drained concurrently into bounded buffers. Server death
+also requests supervisor cancellation, including during startup. macOS has no
 subreaper and keeps the in-process MCP path, so its `setsid()` descendants can
 still outlive a run. Windows retains its in-process Job Object containment.
 When Kettle cannot verify the scope it owned was terminated, teardown reports

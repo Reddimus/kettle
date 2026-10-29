@@ -475,8 +475,8 @@ on a completed
 .B 125
 on an internal error or unverified teardown. On Unix, SIGTERM and SIGINT request
 bounded command-tree teardown and return 130 when verified (125 otherwise).
-On Linux, normal completion also stops and reaps adopted descendants that left
-the PTY session. Options:
+Normal completion preserves descendants that deliberately left the PTY
+session. Options:
 .B \-\-cols
 .IR N " / " \fB\-\-rows\fP " " N
 (terminal size; default: probe the console, else 80x24),

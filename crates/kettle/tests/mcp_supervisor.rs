@@ -6,13 +6,13 @@ use std::io::{BufRead, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Duration;
-#[cfg(target_os = "linux")]
 use std::time::Instant;
 
 struct Peer {
     child: Child,
     input: ChildStdin,
     replies: Receiver<Value>,
+    reader: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Peer {
@@ -27,7 +27,7 @@ impl Peer {
         let input = child.stdin.take().unwrap();
         let output = child.stdout.take().unwrap();
         let (tx, replies) = sync_channel(8);
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
             for line in std::io::BufReader::new(output).lines() {
                 let Ok(line) = line else { break };
                 let value = serde_json::from_str(&line).unwrap();
@@ -40,6 +40,7 @@ impl Peer {
             child,
             input,
             replies,
+            reader: Some(reader),
         };
         peer.send(
             json!({"jsonrpc":"2.0", "id":0, "method":"initialize", "params":{
@@ -157,6 +158,36 @@ fn mcp_capture_matches_internal_in_process_capture() {
     }
 }
 
+#[test]
+fn real_mcp_stdout_failure_returns_failure_status() {
+    let mut peer = Peer::new();
+    // Stop the reader, then let its next response close the actual pipe.
+    let (unused, replacement) = sync_channel(1);
+    drop(unused);
+    drop(std::mem::replace(&mut peer.replies, replacement));
+    peer.send(json!({"jsonrpc":"2.0", "id":1, "method":"ping"}));
+    let reader = peer.reader.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !reader.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "stdout reader did not close its pipe"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    reader.join().unwrap();
+    peer.send(json!({"jsonrpc":"2.0", "id":2, "method":"ping"}));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = peer.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "broken stdout did not stop MCP");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(1));
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
@@ -241,9 +272,10 @@ mod linux {
 
     fn script(pid: &Path, release: &Path) -> String {
         format!(
-            "setsid sh -c 'sleep 300 & p=$!; echo ESCAPED $p; echo $p > \"$1\"; wait' sh '{}' & \
-            while [ ! -s '{}' ]; do sleep 0.01; done; \
+            "setsid sh -c 'sleep 300 & p=$!; echo $p > \"$1\"; wait' sh '{}' </dev/null >/dev/null 2>&1 & \
+            while [ ! -s '{}' ]; do sleep 0.01; done; echo ESCAPED $(cat '{}'); \
             while [ ! -f '{}' ]; do sleep 0.01; done; printf finished",
+            pid.display(),
             pid.display(),
             pid.display(),
             release.display()
@@ -251,7 +283,7 @@ mod linux {
     }
 
     #[test]
-    fn mcp_supervisor_stops_setsid_on_exit_timeout_and_cancel() {
+    fn mcp_supervisor_preserves_setsid_on_exit_and_stops_on_timeout_and_cancel() {
         for mode in ["exit", "timeout", "cancel"] {
             let directory = tempfile::tempdir().unwrap();
             let pid = directory.path().join("pid");
@@ -289,9 +321,10 @@ mod linux {
                     "{reply}"
                 );
             }
-            assert!(
-                !descendant.alive(),
-                "{mode}: sleep PID {} survived",
+            assert_eq!(
+                descendant.alive(),
+                mode == "exit",
+                "{mode}: unexpected lifetime for sleep PID {}",
                 descendant.pid
             );
         }
@@ -332,7 +365,44 @@ mod linux {
             text.contains("finished") && text.contains(&format!("ESCAPED {}", descendants[1].pid)),
             "{text}"
         );
-        assert!(!descendants[1].alive());
+        assert!(
+            descendants[1].alive(),
+            "normal exit must preserve escaped daemons"
+        );
+    }
+
+    #[test]
+    fn server_death_stops_supervisor_and_escaped_command() {
+        for signal in [libc::SIGTERM, libc::SIGKILL] {
+            let directory = tempfile::tempdir().unwrap();
+            let pid = directory.path().join("pid");
+            let release = directory.path().join("release");
+            let mut peer = Peer::new();
+            peer.run(
+                1,
+                json!({"command":["sh", "-c", script(&pid, &release)], "timeout_s":600}),
+            );
+            let descendant = Descendant::read(&pid);
+            let children = std::fs::read_dir(format!("/proc/{}/task", peer.child.id()))
+                .unwrap()
+                .flat_map(|entry| {
+                    std::fs::read_to_string(entry.unwrap().path().join("children"))
+                        .unwrap()
+                        .split_whitespace()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(children.len(), 1, "one supervisor per command");
+            let supervisor_pid = directory.path().join("supervisor-pid");
+            std::fs::write(&supervisor_pid, &children[0]).unwrap();
+            let supervisor = Descendant::read(&supervisor_pid);
+            // SAFETY: the server Child is owned and unreaped by this test.
+            assert_eq!(unsafe { libc::kill(peer.child.id() as i32, signal) }, 0);
+            peer.child.wait().unwrap();
+            descendant.wait_stopped();
+            supervisor.wait_stopped();
+        }
     }
 
     #[test]
@@ -389,6 +459,47 @@ mod linux {
             !descendant.alive(),
             "server exit leaked sleep PID {}",
             descendant.pid
+        );
+    }
+
+    #[test]
+    fn exec_normal_exit_preserves_escaped_daemon() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid = directory.path().join("pid");
+        let release = directory.path().join("release");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
+            .args([
+                "exec",
+                "--timeout",
+                "20",
+                "--",
+                "sh",
+                "-c",
+                &script(&pid, &release),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let descendant = Descendant::read(&pid);
+        std::fs::write(&release, "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("normal completion hung");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.code(), Some(0));
+        assert!(
+            descendant.alive(),
+            "normal CLI completion killed escaped daemon"
         );
     }
 

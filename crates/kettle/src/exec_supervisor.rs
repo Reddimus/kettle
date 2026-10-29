@@ -61,12 +61,39 @@ fn command(executable: &std::path::Path, opts: &ExecOpts) -> Command {
     // Block cancellation before exec. A request can be cancelled as soon as
     // spawn returns, before the new program has installed its handlers. The
     // internal CLI unblocks only after those handlers and adoption are ready.
-    // SAFETY: pre_exec calls only async-signal-safe sigset/sigprocmask functions,
-    // allocates nothing, and uses initialized stack storage.
+    #[cfg(target_os = "linux")]
+    // SAFETY: getpid has no arguments or memory requirements.
+    let parent = unsafe { libc::getpid() };
+    // SAFETY: the hook uses only signal-mask, prctl and PID/signal syscalls;
+    // it allocates nothing and uses initialized stack storage.
     unsafe {
-        command.pre_exec(|| cancellation_mask(libc::SIG_BLOCK));
+        command.pre_exec(move || {
+            cancellation_mask(libc::SIG_BLOCK)?;
+            #[cfg(target_os = "linux")]
+            parent_death_signal(parent)?;
+            Ok(())
+        });
     }
     command
+}
+
+#[cfg(target_os = "linux")]
+fn parent_death_signal(parent: libc::pid_t) -> std::io::Result<()> {
+    // SAFETY: PR_SET_PDEATHSIG takes a valid signal number and no pointers.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Registration is not retroactive. If the server died after fork but
+    // before prctl, queue the same blocked signal ourselves. The internal CLI
+    // unblocks it only after handlers and descendant adoption are ready.
+    // SAFETY: getppid has no arguments or memory requirements.
+    if unsafe { libc::getppid() } != parent {
+        // SAFETY: kill targets ourselves with a valid signal number.
+        if unsafe { libc::kill(libc::getpid(), libc::SIGTERM) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn cancellation_mask(how: libc::c_int) -> std::io::Result<()> {
@@ -91,10 +118,78 @@ pub(super) fn cancellation_mask(how: libc::c_int) -> std::io::Result<()> {
 
 /// Kill on every error path, but never perform an unbounded wait (including
 /// when the supervisor is stuck in uninterruptible kernel sleep).
-struct Supervisor(Child);
+struct Supervisor {
+    child: Option<Child>,
+    reaper: crossbeam_channel::Sender<Child>,
+}
+
+fn supervisor_reaper() -> std::io::Result<crossbeam_channel::Sender<Child>> {
+    static REAPER: std::sync::OnceLock<Result<crossbeam_channel::Sender<Child>, String>> =
+        std::sync::OnceLock::new();
+    REAPER
+        .get_or_init(|| {
+            let (sender, receiver) = crossbeam_channel::unbounded::<Child>();
+            std::thread::Builder::new()
+                .name("kettle-supervisor-reaper".into())
+                .spawn(move || {
+                    let mut pending = Vec::<Child>::new();
+                    loop {
+                        if pending.is_empty() {
+                            match receiver.recv() {
+                                Ok(child) => pending.push(child),
+                                Err(_) => return,
+                            }
+                        }
+                        // Bound admission so even a busy sender cannot postpone
+                        // polling the children whose exits we already own.
+                        pending.extend(receiver.try_iter().take(64));
+                        pending.retain_mut(|child| match child.try_wait() {
+                            Ok(Some(_)) => false,
+                            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => false,
+                            _ => true,
+                        });
+                        std::thread::sleep(POLL_INTERVAL);
+                    }
+                })
+                .map(|_| sender)
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .cloned()
+        .map_err(|error| std::io::Error::other(error.clone()))
+}
+
+fn retire_child(
+    mut child: Child,
+    reaper: &crossbeam_channel::Sender<Child>,
+    grace: Duration,
+    kill: impl FnOnce(&mut Child),
+) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    kill(&mut child);
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    // The reaper is started before the child, and its loop has no shutdown
+    // path while this sender exists. Ownership must survive the bounded wait.
+    reaper.send(child).expect("supervisor reaper stays alive");
+}
+
 impl Supervisor {
+    fn child(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("supervisor owns child until drop")
+    }
+
     fn kill_for(&mut self, reason: &str) -> std::io::Error {
-        let action = match self.0.kill() {
+        let action = match self.child().kill() {
             Ok(()) => "sent SIGKILL".to_string(),
             Err(error) => format!("SIGKILL failed: {error}"),
         };
@@ -106,15 +201,10 @@ impl Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
-        if !matches!(self.0.try_wait(), Ok(Some(_))) {
-            let _ = self.0.kill();
-            let deadline = Instant::now() + KILL_GRACE;
-            while Instant::now() < deadline {
-                if matches!(self.0.try_wait(), Ok(Some(_))) {
-                    return;
-                }
-                std::thread::sleep(POLL_INTERVAL);
-            }
+        if let Some(child) = self.child.take() {
+            retire_child(child, &self.reaper, KILL_GRACE, |child| {
+                let _ = child.kill();
+            });
         }
     }
 }
@@ -167,15 +257,19 @@ fn supervise(
                 "SIGCHLD auto-reaps children; cannot safely own a supervisor PID",
             ));
         }
-        let mut child = Supervisor(
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?,
-        );
-        let mut stdout = child.0.stdout.take().expect("piped stdout");
-        let mut stderr = child.0.stderr.take().expect("piped stderr");
+        let reaper = supervisor_reaper()?;
+        let mut child = Supervisor {
+            reaper,
+            child: Some(
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()?,
+            ),
+        };
+        let mut stdout = child.child().stdout.take().expect("piped stdout");
+        let mut stderr = child.child().stderr.take().expect("piped stderr");
         nonblocking(&stdout)?;
         nonblocking(&stderr)?;
         let mut stdout_eof = false;
@@ -196,7 +290,7 @@ fn supervise(
                 // An unreaped Child reserves its PID, so this signal cannot
                 // target an unrelated process after PID reuse.
                 // SAFETY: this is the positive PID of our unreaped child.
-                if unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM) } != 0 {
+                if unsafe { libc::kill(child.child().id() as libc::pid_t, libc::SIGTERM) } != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 cancelling = Some(now);
@@ -220,7 +314,7 @@ fn supervise(
                 backlog |= more;
             }
             if exited.is_none()
-                && let Some(status) = child.0.try_wait()?
+                && let Some(status) = child.child().try_wait()?
             {
                 exited = Some((status, Instant::now()));
             }
@@ -262,6 +356,91 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", script]);
         command
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervisor_parent_death_during_startup_queues_cancellation() {
+        use std::os::unix::process::CommandExt as _;
+        let mut command = shell("exit 0");
+        // SAFETY: the forked child uses only initialized stack values and
+        // signal/prctl syscalls. It consumes pending TERM before exec.
+        unsafe {
+            command.pre_exec(|| {
+                cancellation_mask(libc::SIG_BLOCK)?;
+                // A stale parent PID models death between fork and prctl.
+                parent_death_signal(libc::getpid())?;
+                let mut pending: libc::sigset_t = std::mem::zeroed();
+                let mut signal: libc::c_int = 0;
+                if libc::sigpending(&raw mut pending) != 0
+                    || libc::sigismember(&raw const pending, libc::SIGTERM) != 1
+                    || libc::prctl(libc::PR_GET_PDEATHSIG, &raw mut signal, 0, 0, 0) != 0
+                    || signal != libc::SIGTERM
+                {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                }
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&raw mut set);
+                libc::sigaddset(&raw mut set, libc::SIGTERM);
+                let result = libc::sigwait(&raw const set, &raw mut signal);
+                if result != 0 || signal != libc::SIGTERM {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                }
+                Ok(())
+            });
+        }
+        assert!(
+            command
+                .status()
+                .expect("parent death must queue TERM before exec")
+                .success()
+        );
+    }
+
+    #[test]
+    fn supervisor_reaps_a_child_that_exits_after_kill_grace() {
+        let directory = tempfile::tempdir().unwrap();
+        let release = directory.path().join("release");
+        let mut command = shell("while [ ! -f \"$1\" ]; do sleep 0.01; done");
+        command.arg("fixture").arg(&release);
+        let child = command.spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+        let started = Instant::now();
+        // Deliberately delay termination beyond the bounded owner wait. This
+        // models SIGKILL waiting on uninterruptible I/O without requiring it.
+        retire_child(child, &supervisor_reaper().unwrap(), Duration::ZERO, |_| {});
+        assert!(started.elapsed() < Duration::from_secs(1));
+        std::fs::write(&release, "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            // SAFETY: waitid observes only this fixture child and WNOWAIT
+            // leaves reaping to the production owner, even after it exits.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: info is writable and pid selects this unreaped child.
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as _,
+                    &raw mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == -1 {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ECHILD)
+                );
+                break;
+            }
+            if Instant::now() >= deadline {
+                // SAFETY: the unreaped fixture PID remains reserved to us.
+                unsafe {
+                    libc::waitpid(pid, std::ptr::null_mut(), 0);
+                }
+                panic!("delayed supervisor exit was never reaped");
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
     }
 
     #[test]
