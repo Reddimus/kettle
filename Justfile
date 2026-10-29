@@ -192,6 +192,7 @@ coverage:
 # results land in target/mutants. A surviving mutant marks behavior no test
 # pins: a lead to check, not a failure. Requires cargo-mutants.
 mutants SHARD="0/1":
+    mkdir -p target/mutants
     cargo mutants --no-shuffle --shard {{SHARD}} --timeout-multiplier 3 --output target/mutants -p kettle-vt -p kettle-media -p kettle-config -p kettle-update -p kettle-state
 
 # AddressSanitizer over Unix FFI lifecycle tests: the control transport,
