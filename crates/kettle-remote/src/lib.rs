@@ -2943,14 +2943,23 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
 }
 
 fn connection_path_is_absolute(path: &str) -> bool {
+    connection_path_is_absolute_on(path, cfg!(windows))
+}
+
+/// Whether `path` names the same file wherever the reconnect shell starts.
+/// On Windows a leading `/` or single `\` is relative to the current drive, so only
+/// a drive letter with a separator, or a UNC path, qualifies there.
+fn connection_path_is_absolute_on(path: &str, windows: bool) -> bool {
+    if !windows {
+        return path.starts_with('/');
+    }
     let bytes = path.as_bytes();
-    path.starts_with('/')
-        || (cfg!(windows)
-            && (path.starts_with(r"\\")
-                || (bytes.len() >= 3
-                    && bytes[0].is_ascii_alphabetic()
-                    && bytes[1] == b':'
-                    && matches!(bytes[2], b'/' | b'\\'))))
+    path.starts_with(r"\\")
+        || path.starts_with("//")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
 }
 
 /// Append ` FLAG 'VALUE'` to a command line being built, or return `None` when
@@ -2993,6 +3002,33 @@ pub fn format_remote_title(ctx: &RemoteContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_paths_are_absolute_only_where_every_shell_agrees() {
+        assert!(connection_path_is_absolute_on(
+            "/home/me/.ssh/config",
+            false
+        ));
+        assert!(!connection_path_is_absolute_on("ssh.conf", false));
+        assert!(connection_path_is_absolute_on(
+            "C:\\Users\\me\\.ssh\\config",
+            true
+        ));
+        assert!(connection_path_is_absolute_on(
+            "C:/Users/me/.ssh/config",
+            true
+        ));
+        assert!(connection_path_is_absolute_on(
+            "\\\\server\\share\\key",
+            true
+        ));
+        assert!(
+            !connection_path_is_absolute_on("/ssh.conf", true),
+            "a leading slash is relative to the current drive on Windows"
+        );
+        assert!(!connection_path_is_absolute_on("\\ssh.conf", true));
+        assert!(!connection_path_is_absolute_on("C:relative-key", true));
+    }
 
     /// The `Ssh` context a plain `ssh [user@]host` argv must produce: host,
     /// login user, and NO connection options. Comparing against this asserts
