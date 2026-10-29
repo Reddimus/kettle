@@ -32,7 +32,7 @@ issues privately as described in [SECURITY.md](SECURITY.md).
    ```
 
    Release and supply-chain changes also need `just gauntlet-strict`. See
-   [Testing](docs/TESTING.md#strict-and-full-gates) for required tools and full
+   [Testing](docs/TESTING.md#what-strict-and-full-mean) for required tools and full
    native gates. Record skipped checks and their reasons. CI includes an
    MSRV (Rust 1.95) check; a portable or offscreen pass does not establish native
    platform or live-UI behavior.
@@ -125,7 +125,7 @@ file packaging/linux/kettle-*.png
 
 Commit source and generated assets together. PNGs must be 8-bit/color RGBA;
 GNOME Shell rejects 16-bit icons. See [macOS packaging](packaging/macos/README.md)
-for the Xcode asset pipeline and [Testing](docs/TESTING.md#macos-appearance-and-icon-gates)
+for the Xcode asset pipeline and [Testing](docs/TESTING.md#supply-chain-fixture-gates)
 for icon validation.
 
 ## Releasing

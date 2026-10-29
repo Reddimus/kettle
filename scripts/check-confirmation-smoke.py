@@ -197,7 +197,7 @@ def check(binary, out):
                 opened = open_dialog()
                 original = opened["surface"]
                 app.json_ctl("resize_window", {"width": 400, "height": 160})
-                short = wait_for(lambda: (lambda g: g if g["surface"]["height"] == 160 and g["confirmation"]["max_scroll"] > 0 else None)(geometry()))
+                wait_for(lambda: (lambda g: g if g["surface"]["height"] == 160 and g["confirmation"]["max_scroll"] > 0 else None)(geometry()))
                 native.keys("Home")
                 wait_for(lambda: geometry()["confirmation"]["scroll_offset"] == 0)
                 native.keys("End")

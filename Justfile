@@ -139,13 +139,70 @@ audit: lru-scope dbus-scope
     cargo audit --deny warnings --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --ignore RUSTSEC-2026-0253 --ignore RUSTSEC-2026-0370 --ignore RUSTSEC-2026-0371 --ignore RUSTSEC-2026-0372
     cargo audit --deny warnings --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --file vendor/Cargo.lock
 
-# `cargo machete` — finds unused workspace dependencies. CI runs
-# this via `.github/workflows/machete.yml` on every PR that touches a
-# Cargo.toml or Cargo.lock. Local pre-flight before adding a `Cargo.toml`
-# dep, since a forgotten leftover trips CI later. Requires
-# `cargo install cargo-machete`.
-machete:
-    cargo machete
+# `cargo shear` — finds declared dependencies (normal, dev and build) that no
+# code uses, and Rust files no module includes. CI runs it in
+# `.github/workflows/shear.yml`. Known false positives are listed under each
+# crate's `[package.metadata.cargo-shear]`. Requires `cargo install cargo-shear`.
+shear:
+    cargo shear --locked --deny-warnings
+
+# Workflow analysis: template injection, persisted credentials, cache
+# poisoning, excessive permissions. Offline, so it never queries GitHub.
+# Configured by `.github/zizmor.yml`. Requires zizmor.
+zizmor:
+    zizmor --offline .github/workflows
+
+# Local Markdown links, images and heading fragments, without network access.
+# The tracked-file audit checks inline link targets but not their fragments.
+# Requires lychee.
+links:
+    lychee --offline --no-progress --include-fragments --exclude-path vendor --exclude-path target '**/*.md'
+
+# ShellCheck for standalone shell scripts and the pre-commit hook; actionlint
+# already covers workflow run blocks. zsh and fish files are out of its scope.
+shell-lint:
+    git ls-files -z '*.sh' '*.bash' ':!vendor' | xargs -0 shellcheck --severity=warning .githooks/pre-commit
+
+# Python correctness subset from `ruff.toml`. Formatting is not enforced.
+# Requires ruff.
+python-lint:
+    ruff check scripts
+
+# Spelling in code and docs, with the reasoned allowlist in `_typos.toml`.
+# Requires typos.
+typos:
+    typos
+
+# The repository-wide static checks `.github/workflows/static-checks.yml` runs.
+static-checks: zizmor links shell-lint python-lint typos
+
+# Line coverage for the crates whose limits and refusal paths matter most, as
+# HTML (target/coverage/html) and LCOV (target/coverage/lcov.info). Advisory:
+# GPU and decoder tests that skip without their host count as uncovered, so
+# read it for uncovered branches, not for a percentage. Requires
+# cargo-llvm-cov and the llvm-tools-preview component.
+coverage:
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --locked --no-report -p kettle-vt -p kettle-core -p kettle-media -p kettle-state -p kettle-config -p kettle-update -p kettle-ctl -p kettle-remote
+    cargo llvm-cov report --html --output-dir target/coverage
+    cargo llvm-cov report --lcov --output-path target/coverage/lcov.info
+
+# Mutation testing for the parser, protocol, config, update and state crates.
+# SHARD picks one slice (k/n) so a scheduled job covers the set in turns;
+# results land in target/mutants. A surviving mutant marks behavior no test
+# pins: a lead to check, not a failure. Requires cargo-mutants.
+mutants SHARD="0/1":
+    mkdir -p target/mutants
+    cargo mutants --no-shuffle --shard {{SHARD}} --timeout-multiplier 3 --output target/mutants -p kettle-vt -p kettle-media -p kettle-config -p kettle-update -p kettle-state
+
+# AddressSanitizer over Unix FFI lifecycle tests: the control transport,
+# private state files, and PTY watcher teardown. Uses the fuzz workflow's
+# pinned nightly and rebuilds the standard library instrumented. Linux x86_64
+# only; needs the nightly's rust-src component.
+[linux]
+sanitizer-test:
+    RUSTFLAGS="-Zsanitizer=address" cargo +nightly-2026-09-24 test -Zbuild-std --target x86_64-unknown-linux-gnu --locked --target-dir target/asan -p kettle-ctl -p kettle-state --lib
+    RUSTFLAGS="-Zsanitizer=address" cargo +nightly-2026-09-24 test -Zbuild-std --target x86_64-unknown-linux-gnu --locked --target-dir target/asan -p kettle-core --lib unix_pty_watcher
 
 # Run every retained unit target, doctest, and warnings-denied clippy target
 # owned by the patched parser crates. These crates are deliberately outside the
@@ -407,19 +464,19 @@ gauntlet: live-ui-helper-selftest native-titlebar-self-test wayland-first-frame-
     @echo "GAUNTLET PASSED — core Rust gate green. Run 'just gauntlet-full' for required current-OS native gates."
 
 # Strict gate: gauntlet + direct patched-crate validation + supply-chain
-# hygiene (the cargo-deny, cargo-audit, and cargo-machete checks CI runs as
-# separate workflows on Cargo.lock changes, and the RUSTSEC scope guards),
-# plus the documentation gates. `mermaid-check` fails open without Node or
-# Chrome, so it is safe in a tier people run locally; CI sets
+# hygiene (the cargo-deny, cargo-audit, and cargo-shear checks CI runs as
+# separate workflows, and the RUSTSEC scope guards), the repository-wide
+# static checks, plus the documentation gates. `mermaid-check` fails open
+# without Node or Chrome, so it is safe in a tier people run locally; CI sets
 # KETTLE_MERMAID_REQUIRED=1 so it cannot quietly stop running there. Run
 # `just gauntlet-strict` before a release cut so all CI gates pass locally
-# first. Requires cargo-audit, cargo-deny, and cargo-machete (one-time). CI
-# supplements the current-OS vendor check with Linux + Windows native vendor
-# legs.
+# first. Requires cargo-audit, cargo-deny, cargo-shear, zizmor, lychee,
+# shellcheck, ruff, and typos (one-time). CI supplements the current-OS
+# vendor check with Linux + Windows native vendor legs.
 [unix]
-gauntlet-strict: gauntlet vendor-check deny audit lru-scope machete tracked-audit fuzz-guard mermaid-check release-script-test
+gauntlet-strict: gauntlet vendor-check deny audit lru-scope shear static-checks tracked-audit fuzz-guard mermaid-check release-script-test
     @echo ""
-    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, release preparation, the lru scope, deny (with the ttf-parser ban), machete, tracked-file audit, fuzzing guards, and mermaid rendering are green."
+    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, release preparation, the lru scope, deny (with the ttf-parser ban), shear, static checks, tracked-file audit, fuzzing guards, and mermaid rendering are green."
 
 # The FULL CI-equivalent gate: gauntlet-strict plus every packaging,
 # installer, update-manifest, and GPU-render check ci.yml runs that

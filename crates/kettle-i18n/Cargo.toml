@@ -32,3 +32,8 @@ toml.workspace = true
 [dev-dependencies]
 serde.workspace = true
 toml.workspace = true
+
+# Both uses of serde are in `build_support.rs`, which `build.rs` and the
+# catalogue tests include by path, so cargo-shear's scan cannot see them.
+[package.metadata.cargo-shear]
+ignored = ["serde"]

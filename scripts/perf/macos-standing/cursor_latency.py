@@ -1,6 +1,5 @@
 """Cursor-only method, deadline and optional C2 exit wire. No app operations."""
 import json
-import math
 import re
 import struct
 

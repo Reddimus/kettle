@@ -1,0 +1,9 @@
+# Ruff configuration for the Python scripts; `just python-lint` runs it.
+# audit-tracked-files.py imports tomllib, so 3.11 is the floor.
+target-version = "py311"
+extend-exclude = ["vendor"]
+
+[lint]
+# Correctness only: syntax errors, undefined names, invalid comparisons, and
+# unused imports and variables. Formatting and style are not enforced.
+select = ["E9", "F63", "F7", "F82", "F401", "F811", "F821", "F841"]

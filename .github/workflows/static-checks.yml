@@ -1,0 +1,53 @@
+# Repository-wide static checks: workflow analysis, local links, standalone
+# shell scripts, Python correctness, and spelling.
+#
+# Each step runs the matching `just` recipe (or the same arguments through the
+# tool's pinned action), so `just static-checks` reproduces this job locally.
+# None of them compiles anything; the job finishes in about a minute on Linux,
+# which is enough because every check here is platform-independent.
+name: static checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install just, zizmor, typos and shellcheck
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: just,zizmor@1.31.1,typos@1.51.1,shellcheck@0.11.0
+      # Kept as separate steps so each tool reports its own result.
+      - name: Workflow analysis (zizmor)
+        run: just zizmor
+      - name: Standalone shell scripts (shellcheck)
+        run: just shell-lint
+      - name: Spelling (typos)
+        run: just typos
+      - name: Python correctness (ruff)
+        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
+        with:
+          version: 0.16.10
+          args: check
+          src: scripts
+      - name: Local links and fragments (lychee)
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          lycheeVersion: v0.24.2
+          args: --offline --no-progress --include-fragments --exclude-path vendor --exclude-path target './**/*.md'
+          jobSummary: false

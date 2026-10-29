@@ -59,9 +59,9 @@ categories = ["command-line-utilities"]
 #                                     source restrictions (crates.io
 #                                     only, no `git = …`), banned
 #                                     crates, wildcard `*` denied.
-#   - `cargo machete` (machete.yml) — every dep listed here + in
+#   - `cargo shear`   (shear.yml)   — every dep listed here + in
 #                                     per-crate manifests is actually
-#                                     imported in source.
+#                                     used in source.
 #   - MSRV verify     (ci.yml)      — workspace builds + tests on
 #                                     exactly the declared
 #                                     rust-version.
@@ -69,7 +69,7 @@ categories = ["command-line-utilities"]
 # Before adding a dep: check it's not transitively available via an
 # existing one (often the case for `pollster`, `bytemuck`, etc.) and
 # that its license is in deny.toml's allow-list. After adding: run
-# `cargo machete` locally to confirm it actually gets imported.
+# `cargo shear` locally to confirm it is actually used.
 [workspace.dependencies]
 # Declare every internal kettle-* crate as a workspace dep so
 # version + path stay in lockstep across every consumer manifest.
@@ -122,6 +122,12 @@ mlua = { version = "0.12", features = ["lua54", "vendored", "send", "error-send"
 # on macOS, Toast on Windows. Pure-Rust + small. Falls back to log::warn
 # when a notification cannot be shown.
 notify-rust = "4"
+
+[workspace.lints.rust]
+# Every unsafe operation inside an `unsafe fn` needs its own `unsafe` block,
+# so each one is visible and gets its own SAFETY justification. Edition 2024
+# warns by default; deny makes it policy rather than a CI flag.
+unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 # Deny three patterns that must never reach main. `clippy -- -D warnings`

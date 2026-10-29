@@ -7208,10 +7208,14 @@ mod tests {
         // SAFETY: this branch only runs in the isolated child process above,
         // before it starts any application threads. Create the trusted parent
         // first so this deliberately unusual umask affects only the file.
-        unsafe { libc::umask(0o400) };
+        let previous = unsafe { libc::umask(0o400) };
         let path = dir.path().join("private");
         let file = create_private_file_new(&path).unwrap();
         use std::os::unix::fs::PermissionsExt as _;
         assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        // Restore it before exit: anything the process writes on the way out,
+        // such as a coverage profile, would otherwise be unreadable to its owner.
+        // SAFETY: as above, this isolated child runs no other threads.
+        unsafe { libc::umask(previous) };
     }
 }

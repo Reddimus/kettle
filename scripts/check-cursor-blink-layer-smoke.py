@@ -231,7 +231,7 @@ def run_contract(helpers, kettle: str, out: Path, args) -> Dict[str, object]:
         analysis["samples"] = samples
         stamps.update(measure_start=first["t"], measure_end=samples[-1]["t"], sample_period_s=0.5)
         idle = idle_metrics(samples)
-        span, peak = idle["span_s"], idle["peak_mib"]
+        peak = idle["peak_mib"]
         wakeups, cpu = idle["wakeups_per_s"], idle["cpu_percent"]
         analysis["idle"] = idle
         if peak > args.max_footprint_mib:

@@ -482,7 +482,7 @@ def collect(runner, name, workload, options, keep, setup=None):
     body = (f'exec "{runner.probes["printing"]}" "{barrier}" "{log}"'
             if workload == 'output-memory' else 'exec /bin/sleep 30')
     process, observer = None, None
-    result, raw, records = {}, [], []
+    result, raw = {}, []
     try:
         runner.observation_context = context
         process = runner.launch(name, body, 45)

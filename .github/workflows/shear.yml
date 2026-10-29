@@ -1,0 +1,61 @@
+# cargo-shear — catch unused dependencies and orphaned Rust files.
+# Pairs with the audit + deny workflows: every dependency change passes
+# through three supply-chain checks:
+#
+#   audit.yml  — RustSec security advisories
+#   deny.yml   — licenses, sources, banned crates
+#   shear.yml  — actually-used (this one)
+#
+# Each one catches a class the others miss. cargo-shear finds normal, dev and
+# build dependencies declared in a manifest but never used, and `.rs` files no
+# module includes. It replaced cargo-machete after missing an unused
+# kettle-render dev-dependency; known false positives are listed under each
+# crate's `[package.metadata.cargo-shear]`.
+name: cargo-shear
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "**/*.rs"
+      - ".github/workflows/shear.yml"
+  # Source paths are included: deleting a dependency's last use is a source
+  # change, and the check needs no build, so it stays cheap.
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "**/*.rs"
+      - ".github/workflows/shear.yml"
+  schedule:
+    - cron: "0 6 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shear:
+    name: unused deps
+    runs-on: ubuntu-latest
+    # Budget cap. cargo-shear reads manifests and sources without compiling;
+    # it finishes in well under a minute.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Install cargo-shear
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-shear@1.14.0
+      - name: cargo shear
+        run: cargo shear --locked --deny-warnings

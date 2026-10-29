@@ -1,0 +1,74 @@
+# typos configuration; `just typos` runs it and docs/TESTING.md explains it.
+[files]
+extend-exclude = [
+    "vendor/",
+    "assets/",
+    "docs/licenses/",
+    "docs/changelog/",
+    "crates/kettle-i18n/locales/es.toml",
+    "crates/kettle-i18n/locales/es.review.toml",
+    "**/fixtures/",
+    "*.fixture",
+    "*.cast",
+    "*.svg",
+    "*.mmd",
+    "Cargo.lock",
+]
+
+# Accepted as written. Grouped by reason; add a word only with its reason.
+[default.extend-words]
+# Protocol, platform and API names.
+PN = "PN"          # DEC parameter notation, `CSI Pn ...`
+Pn = "Pn"
+DECID = "DECID"    # DEC identify-terminal sequence
+decid = "decid"
+BA = "BA"          # Windows SDDL alias for Administrators
+numer = "numer"    # mach_timebase_info and image delay fields
+Flate = "Flate"    # PDF filter name
+UE = "UE"
+controllen = "controllen"  # msghdr.msg_controllen
+exten = "exten"    # termios IEXTEN
+replayd = "replayd"        # macOS screen-recording daemon
+Tilda = "Tilda"    # a drop-down terminal emulator
+enew = "enew"      # Vim's :enew
+shs = "shs"        # a URL scheme in link-detection tests
+noe = "noe"        # PowerShell -noe(xit) abbreviation
+clonable = "clonable"
+unparseable = "unparseable"
+Unparseable = "Unparseable"
+seeked = "seeked"  # the media `seeked` event
+mis = "mis"        # mis-parse, mis-grid
+nd = "nd"          # ordinal suffix
+# Deliberate fragments and misspelled inputs in tests.
+iy = "iy"
+Iy = "Iy"
+caf = "caf"
+gam = "gam"
+alph = "alph"
+ALPH = "ALPH"
+ine = "ine"
+fo = "fo"
+ba = "ba"
+abd = "abd"
+sohw = "sohw"
+ths = "ths"
+leafs = "leafs"
+ifself = "ifself"
+projets = "projets"
+contorl = "contorl"
+alwyas = "alwyas"
+botom = "botom"
+evrywhere = "evrywhere"
+flase = "flase"
+szie = "szie"
+themeing = "themeing"
+yse = "yse"
+Cpy = "Cpy"
+# Spanish examples in translator notes and desktop-entry keywords.
+comando = "comando"
+comandos = "comandos"
+divisiones = "divisiones"
+historial = "historial"
+tema = "tema"
+terminales = "terminales"
+varios = "varios"
