@@ -168,6 +168,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   when the broadcast scope changes.
 - Hide sibling preview lanes behind the theater and fullscreen viewers.
 - Bound a tab handoff to one deadline however it is fragmented.
+- Tell Lua plugins `pane_close` for every pane that ends: with its tab, its
+  window, or after its shell exits.
+- Keep a torn-off tab's font zoom in its new window.
 
 ## [5.6.0] — 2026-10-28
 
