@@ -302,3 +302,29 @@ fn the_selection_is_the_highlighted_row() {
         Some(opened_on)
     );
 }
+
+#[test]
+fn builtin_theme_picker_localizes_labels_and_keeps_selection_identifiers() {
+    for (name, label) in [
+        ("Builtin Dark", "Oscuro integrado"),
+        ("Builtin Light", "Claro integrado"),
+    ] {
+        let list = theme_picker_list(name, 0, name, &ES);
+        assert_eq!(list.rows[0].label, label);
+        assert!(list.rows[0].hint.starts_with("✓ "));
+        assert_eq!(theme_picker_selection(&state(name, 0, name)), Some(name));
+    }
+}
+
+#[test]
+fn picker_scroll_strips_leave_the_selected_row_fully_visible() {
+    let list = theme_picker_list("", 20, "Builtin Dark", &EN);
+    let menu = super::picker_context_menu(list, (320.0, 160.0), (8.0, 16.0)).unwrap();
+    let (_, content_h) = kettle_render::menu::scroll_content(
+        menu.rows.len() as f32 * 28.0,
+        menu.panel_h_clamped,
+        28.0,
+    );
+    let visible = (content_h / 28.0).floor() as usize;
+    assert!((menu.scroll_offset..menu.scroll_offset + visible).contains(&menu.highlight));
+}

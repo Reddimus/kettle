@@ -2167,3 +2167,9 @@ context = "Update toast button opening the persistent About update details."
 [messages.update_toast_installed]
 context = "Short update toast: a version is installed; old windows keep running."
 args = [{ name = "tag", type = "str" }]
+
+[messages.theme_builtin_dark]
+context = "Display name for the bundled Builtin Dark theme; keep the configuration identifier unchanged."
+
+[messages.theme_builtin_light]
+context = "Display name for the bundled Builtin Light theme; keep the configuration identifier unchanged."

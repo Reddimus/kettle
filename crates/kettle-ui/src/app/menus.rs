@@ -1094,6 +1094,7 @@ impl App {
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
+        let (_, panel_h) = context_menu_content_geometry(&menu.items, panel_h, row_h, sep_h);
         menu.highlight = next;
         menu.scroll_offset = context_menu_scroll_for_highlight(
             &menu.items,
@@ -1122,7 +1123,8 @@ impl App {
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
-        let new_off = (menu.scroll_offset as isize + delta).max(0) as usize;
+        let (_, panel_h) = context_menu_content_geometry(&menu.items, panel_h, row_h, sep_h);
+        let new_off = menu.scroll_offset.saturating_add_signed(delta);
         // Clamp: never scroll past the point where the last visible
         // row is the final item.
         let max_off = context_menu_max_scroll_offset(&menu.items, panel_h, row_h, sep_h);
@@ -1160,7 +1162,8 @@ impl App {
         let kinds = menu.items[start..]
             .iter()
             .map(|it| matches!(it, ContextMenuItem::Separator));
-        find_menu_row_y(py, ay, panel_h, row_h, sep_h, kinds).map(|i| i + start)
+        let (inset, content_h) = context_menu_content_geometry(&menu.items, panel_h, row_h, sep_h);
+        find_menu_row_y(py, ay + inset, content_h, row_h, sep_h, kinds).map(|i| i + start)
     }
 
     /// Set `menu.highlight` to whichever row the cursor is
@@ -1169,6 +1172,10 @@ impl App {
     /// only when the highlight actually changed so we don't churn the
     /// GPU on every sub-pixel motion event.
     pub(super) fn update_menu_highlight_from_cursor(&mut self, ws: &mut WindowState) {
+        if let Some(delta) = self.context_menu_scroll_edge(ws) {
+            self.scroll_context_menu(ws, delta);
+            return;
+        }
         let Some(idx) = self.menu_row_at_cursor(ws) else {
             return;
         };
@@ -1316,6 +1323,35 @@ impl App {
         }
     }
 
+    pub(super) fn context_menu_scroll_edge(&self, ws: &WindowState) -> Option<isize> {
+        let menu = ws.context_menu.as_ref()?;
+        let ((x, y), (w, h)) = self.context_menu_geometry(ws)?;
+        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if px < x || px >= x + w || py < y || py >= y + h {
+            return None;
+        }
+        let (_, ch) = self.menu_cell(ws);
+        let row_h = ch + kettle_render::menu::ROW_PAD;
+        let (inset, content_h) =
+            context_menu_content_geometry(&menu.items, h, row_h, kettle_render::menu::SEP_H);
+        if inset <= 0.0 {
+            return None;
+        }
+        if py < y + inset {
+            Some(if menu.scroll_offset > 0 { -1 } else { 0 })
+        } else if py >= y + inset + content_h {
+            let max = context_menu_max_scroll_offset(
+                &menu.items,
+                content_h,
+                row_h,
+                kettle_render::menu::SEP_H,
+            );
+            Some(if menu.scroll_offset < max { 1 } else { 0 })
+        } else {
+            None
+        }
+    }
+
     pub(super) fn context_menu_click_action(
         &self,
         ws: &WindowState,
@@ -1418,13 +1454,14 @@ impl App {
         let row_h = cell_h + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
         if let Some(menu) = ws.context_menu.as_mut() {
+            let (_, content_h) = context_menu_content_geometry(&menu.items, panel.1, row_h, sep_h);
             menu.anchor = anchor;
             menu.anchor_scale = current_scale;
             menu.scroll_offset = context_menu_scroll_for_highlight(
                 &menu.items,
                 menu.scroll_offset,
                 menu.highlight,
-                panel.1,
+                content_h,
                 row_h,
                 sep_h,
             );
@@ -1661,6 +1698,8 @@ impl App {
                 let row_h = ch + kettle_render::menu::ROW_PAD;
                 let sep_h = kettle_render::menu::SEP_H;
                 let next = ws.context_menu.as_ref().map(|m| {
+                    let (_, panel_h) =
+                        context_menu_content_geometry(&m.items, panel_h, row_h, sep_h);
                     let visible =
                         count_rows_fitting(&m.items, m.scroll_offset, panel_h, row_h, sep_h);
                     half_page_menu_target(&m.items, m.highlight, (visible / 2).max(1), dir)
@@ -1771,12 +1810,13 @@ impl App {
                 // Typeahead path: accumulate into the buffer, find
                 // the first row whose label has this prefix, advance
                 // highlight without dispatching.
-                if let Some(menu) = ws.context_menu.as_mut() {
+                let next = ws.context_menu.as_mut().and_then(|menu| {
                     menu.typeahead_buf.push(lower);
                     menu.typeahead_until = Some(now + std::time::Duration::from_millis(750));
-                    if let Some(idx) = typeahead_match(&menu.items, &menu.typeahead_buf) {
-                        menu.highlight = idx;
-                    }
+                    typeahead_match(&menu.items, &menu.typeahead_buf)
+                });
+                if let Some(idx) = next {
+                    self.set_context_menu_highlight(ws, idx);
                 }
             }
         }
@@ -1877,6 +1917,18 @@ mod tests {
             assert_eq!((menu.highlight, menu.scroll_offset), (1, 1));
             assert_eq!(menu.typeahead_buf, "parent");
             assert!(menu.drill_stack.is_empty());
+        }
+    }
+    #[test]
+    fn scroll_strip_viewport_keeps_keyboard_selection_visible() {
+        let items = rows(30);
+        let (inset, content_h) = context_menu_content_geometry(&items, 200.0, 28.0, 8.0);
+        assert_eq!((inset, content_h), (18.0, 164.0));
+        for selected in 0..items.len() {
+            let offset =
+                context_menu_scroll_for_highlight(&items, 0, selected, content_h, 28.0, 8.0);
+            let visible = count_rows_fitting(&items, offset, content_h, 28.0, 8.0);
+            assert!((offset..offset + visible).contains(&selected));
         }
     }
 }

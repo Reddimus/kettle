@@ -472,7 +472,7 @@ impl App {
         let title_capped = cap_title_for_status_bar(&title, 60);
         let text = format!(
             "{hh:02}:{mm:02}:{ss:02}  ·  {}  ·  {title_capped}",
-            self.cfg.theme_name
+            self.ui_text.theme_name(&self.cfg.theme_name)
         );
         kettle_render::StatusBar { height: h, y, text }
     }

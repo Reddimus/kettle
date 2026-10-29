@@ -695,6 +695,9 @@ media_viewer_fullscreen = "Toggle fullscreen (F)"
 update_toast_details = "Details"
 update_toast_installed = "Kettle {tag} is installed"
 
+theme_builtin_dark = "Builtin Dark"
+theme_builtin_light = "Builtin Light"
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"

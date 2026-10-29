@@ -99,3 +99,7 @@ cargo test -p kettle-i18n --features dev-pseudo
 `tests/build_gates.rs` runs the generator against broken catalogues. The
 `compile_fail` doctests in `src/lib.rs` prove that unknown keys and wrong
 arguments do not compile.
+
+Spanish chrome uses "Editar grupo de paneles:" and the compact Settings tab
+"Atajos". Builtin Dark and Builtin Light display as "Oscuro integrado" and
+"Claro integrado" in Spanish; their configuration identifiers stay in English.

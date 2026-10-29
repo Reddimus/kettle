@@ -8396,6 +8396,19 @@ fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
     })
 }
 
+fn context_menu_content_geometry(
+    items: &[ContextMenuItem],
+    panel_h: f32,
+    row_h: f32,
+    sep_h: f32,
+) -> (f32, f32) {
+    let natural_h = items
+        .iter()
+        .map(|item| context_menu_item_height(item, row_h, sep_h))
+        .sum();
+    kettle_render::menu::scroll_content(natural_h, panel_h, row_h)
+}
+
 /// How many context-menu rows starting at
 /// `start` fit within `panel_h` pixels. Separators take `sep_h`,
 /// every other row takes `row_h`. Used by `step_context_menu_highlight`
@@ -8826,7 +8839,7 @@ fn theme_picker_list(
                 ""
             };
             ContextMenuRow {
-                label: name.to_string(),
+                label: tr.theme_name(name).to_string(),
                 separator: false,
                 enabled: true,
                 hint: format!("{tick}{appearance}"),
@@ -9032,7 +9045,12 @@ fn picker_context_menu(
     for row in &mut list.rows {
         fit_context_menu_row(row, max_columns);
     }
-    let scroll_offset = picker_scroll_offset(list.rows.len(), list.selected, panel.1, row_height);
+    let (_, content_h) = kettle_render::menu::scroll_content(
+        row_height * list.rows.len() as f32,
+        panel.1,
+        row_height,
+    );
+    let scroll_offset = picker_scroll_offset(list.rows.len(), list.selected, content_h, row_height);
     let requested_anchor = (
         (surface_w - panel.0) * 0.5,
         (list_surface.1 - panel.1 - 4.0).max(4.0),
@@ -20876,6 +20894,12 @@ impl App {
                 // outside the panel — closes the menu. Middle-click outside
                 // dismisses too; only right-click falls through so it can
                 // reopen/relocate the menu.
+                if bcode == 0
+                    && let Some(delta) = self.context_menu_scroll_edge(ws)
+                {
+                    self.scroll_context_menu(ws, delta);
+                    return;
+                }
                 if ws.context_menu.is_some()
                     && let Some(click) = self.context_menu_click_action(ws, bcode)
                 {

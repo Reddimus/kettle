@@ -74,6 +74,17 @@ impl Translator {
         }
     }
 
+    /// Display a theme name without changing its configuration identifier.
+    pub fn theme_name<'a>(&self, name: &'a str) -> &'a str {
+        if name.eq_ignore_ascii_case("Builtin Dark") {
+            self.text(Text::ThemeBuiltinDark)
+        } else if name.eq_ignore_ascii_case("Builtin Light") {
+            self.text(Text::ThemeBuiltinLight)
+        } else {
+            name
+        }
+    }
+
     pub const fn language(&self) -> Language {
         self.language
     }

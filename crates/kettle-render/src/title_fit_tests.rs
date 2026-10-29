@@ -43,31 +43,32 @@ fn the_title_editor_reads_in_dracula() {
 #[test]
 fn the_renderer_actually_consumes_the_contrast_and_bell_helpers() {
     let src = production_source();
+    let compact: String = src.split_whitespace().collect();
     for (bar, wiring) in [
         (
             "palette and theme picker",
-            "push_input_bar(&mut quads, search_rect, theme, theme.palette[5]);",
+            "push_input_bar(&mutquads,search_rect,theme,theme.palette[5],&mutself.chrome_colors,);",
         ),
         (
             "layout picker",
-            "push_input_bar(&mut quads, search_rect, theme, theme.palette[6]);",
+            "push_input_bar(&mutquads,search_rect,theme,theme.palette[6],&mutself.chrome_colors,);",
         ),
         (
             "ssh picker",
-            "push_input_bar(&mut quads, search_rect, theme, theme.palette[4]);",
+            "push_input_bar(&mutquads,search_rect,theme,theme.palette[4],&mutself.chrome_colors,);",
         ),
         (
             "title editor",
-            "push_input_bar(&mut quads, edit.rect, theme, theme.palette[3]);",
+            "push_input_bar(&mutquads,edit.rect,theme,theme.palette[3],&mutself.chrome_colors,);",
         ),
     ] {
         assert!(
-            src.contains(wiring),
+            compact.contains(wiring),
             "the {bar} must paint through push_input_bar"
         );
     }
     assert_eq!(
-        src.matches("push_input_bar(&mut quads, search_rect, theme, theme.palette[5]);")
+        compact.matches("push_input_bar(&mutquads,search_rect,theme,theme.palette[5],&mutself.chrome_colors,);")
             .count(),
         2,
         "the command palette and the theme picker both paint the shared bar"

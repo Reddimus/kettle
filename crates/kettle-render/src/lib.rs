@@ -1,7 +1,7 @@
 //! GPU renderer for pane grids, chrome, text, images, and overlays.
 //!
 //! Draw order is part of the contract: backgrounds and chrome, inline images,
-//! pane text, post-text dimming/scrollbars, then menu chrome and text. Changing
+//! pane text, scrollbars, then menu chrome and text. Changing
 //! it can break transparency, clipping, or overlay readability. See
 //! `docs/ARCHITECTURE.md` for the full pipeline.
 //!
@@ -35,6 +35,7 @@ pub use inline_cards::{
     CardHarness, CardPlacement, CardPoster, CardRefusal, CardSpec, InlineCards, MAX_CARD_COLUMNS,
     MAX_PANE_CARDS, cli_card_text,
 };
+mod chrome;
 mod color;
 mod confirm;
 pub use confirm::ConfirmDialogLayout;
@@ -273,6 +274,18 @@ pub mod menu {
     /// Separator row height. Smaller than a regular row so the menu
     /// reads as grouped without wasting vertical space.
     pub const SEP_H: f32 = 8.0;
+    /// Height of each pointer target at the cut edges of a scrolling menu.
+    pub const SCROLL_H: f32 = 18.0;
+
+    /// Content inset and height shared by paint, pointer targets and navigation.
+    pub fn scroll_content(natural_h: f32, panel_h: f32, row_h: f32) -> (f32, f32) {
+        let inset = if natural_h > panel_h {
+            SCROLL_H.min(((panel_h - row_h) * 0.5).max(0.0))
+        } else {
+            0.0
+        };
+        (inset, (panel_h - 2.0 * inset).max(0.0))
+    }
     /// Horizontal padding inside the panel: `max_columns * cw + H_PAD`.
     /// Gives the longest label breathing room and lets short labels
     /// (Copy) still feel like a real menu surface.
@@ -1551,7 +1564,16 @@ struct CompletionPalette {
     scroll_thumb: Rgb,
 }
 
+#[cfg(test)]
 fn completion_palette(theme: &kettle_config::Theme, accent: Rgb) -> CompletionPalette {
+    chrome::Colors::default().completion(theme, accent)
+}
+
+fn completion_palette_with_colors(
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    colors: &mut chrome::Colors,
+) -> CompletionPalette {
     let panel_bg = solid_blend(theme.foreground, theme.background, 9);
     let selection_bg = completion_selection_surface(theme.selection_background, panel_bg, accent);
     // A blended surface is no longer the pair the theme designed its selection
@@ -1566,24 +1588,19 @@ fn completion_palette(theme: &kettle_config::Theme, accent: Rgb) -> CompletionPa
         border: solid_blend(theme.foreground, theme.background, 30),
         divider: solid_blend(theme.foreground, panel_bg, 16),
         selection_bg,
-        rail: color::with_min_contrast(accent, selection_bg, 2.0),
-        header: color::with_min_contrast(color::dim(theme.foreground, panel_bg), panel_bg, 4.5),
-        label: color::with_min_contrast(theme.foreground, panel_bg, 4.5),
-        description: color::with_min_contrast(
-            color::dim(theme.foreground, panel_bg),
-            panel_bg,
-            4.0,
-        ),
-        emphasis: color::with_min_contrast(accent, panel_bg, 4.5),
-        selected_label: color::with_min_contrast(selected_fg, selection_bg, 4.5),
-        selected_description: color::with_min_contrast(
-            color::dim(selected_fg, selection_bg),
-            selection_bg,
-            4.0,
-        ),
-        selected_emphasis: color::with_min_contrast(accent, selection_bg, 4.5),
+        rail: colors.icon(accent, selection_bg),
+        header: colors.muted(theme.foreground, panel_bg),
+        label: colors.text(theme.foreground, panel_bg),
+        description: colors.muted(theme.foreground, panel_bg),
+        emphasis: colors.text(accent, panel_bg),
+        selected_label: colors.text(selected_fg, selection_bg),
+        selected_description: colors.muted(selected_fg, selection_bg),
+        selected_emphasis: colors.text(accent, selection_bg),
         scroll_track: solid_blend(theme.foreground, panel_bg, 12),
-        scroll_thumb: solid_blend(theme.foreground, panel_bg, 45),
+        scroll_thumb: colors.icon(
+            solid_blend(theme.foreground, panel_bg, 45),
+            solid_blend(theme.foreground, panel_bg, 12),
+        ),
     }
 }
 
@@ -2701,6 +2718,7 @@ pub struct Renderer {
     /// palette across thousands of cells, while the lift itself performs a
     /// bisection with many nonlinear color conversions.
     minimum_contrast_cache: MinimumContrastCache,
+    chrome_colors: chrome::Colors,
     /// Per-pane, per-row content keys for the line-level shaping cache.
     /// `build_pane` hashes each grid row's style runs (text, fg, bold, italic).
     /// A row whose key matches last frame is skipped entirely, so its
@@ -4744,6 +4762,7 @@ impl Renderer {
             cursor_layer: None,
             span_breaks_scratch: Vec::new(),
             minimum_contrast_cache: MinimumContrastCache::default(),
+            chrome_colors: chrome::Colors::default(),
             pane_line_keys: Vec::new(),
             pane_style_keys: Vec::new(),
             line_text_scratch: String::new(),
@@ -6358,6 +6377,11 @@ impl Renderer {
                 i,
                 pv,
                 cfg,
+                if !pv.focused && panes.len() > 1 {
+                    inactive_pane_amount(cfg)
+                } else {
+                    0.0
+                },
                 &family,
                 overlay.window_focused,
                 if pane_has_search {
@@ -6518,27 +6542,12 @@ impl Renderer {
                 }
             }
 
-            // Post-text overlay: dim unfocused panes; per-pane scrollbar.
-            //
-            // Terminator parity, terminatorlib/config.py:84-85
-            // `inactive_color_offset` + `inactive_bg_color_offset`: when EITHER
-            // offset is < 1.0, layer a dim over the unfocused pane.
-            //
-            // The FG offset, the BG offset, and the split opacity all
-            // contribute, so Terminator's own default pair
-            // (`inactive_color_offset = 0.8`, `inactive_bg_color_offset = 1.0`)
-            // still dims the pane. Terminator scales the foreground palette per
-            // glyph (terminal.py:809-823) rather than compositing, but an
-            // overlay reproduces the visible intent ("unfocused panes recede")
-            // without re-running the shaper for every unfocused pane. Taking
-            // the max rather than summing keeps a config that sets both from
-            // dimming twice as hard as either alone.
-            let inactive_fg_dim = (1.0 - cfg.inactive_color_offset).clamp(0.0, 0.95);
-            let inactive_bg_dim = (1.0 - cfg.inactive_bg_color_offset).clamp(0.0, 0.95);
-            let split_opacity_dim = (1.0 - cfg.unfocused_split_opacity).clamp(0.0, 0.95);
-            let composed_dim = inactive_fg_dim.max(inactive_bg_dim).max(split_opacity_dim);
-            if !pv.focused && panes.len() > 1 && composed_dim > 0.0 {
-                over.push(rect(rx, ry, rw, rh, theme.background, composed_dim));
+            if !pv.focused && panes.len() > 1 {
+                let amount = inactive_pane_amount(cfg);
+                if amount > 0.0 {
+                    let (x, y, w, h) = pv.terminal;
+                    quads.push(rect(x, y, w, h, theme.background, amount));
+                }
             }
             if cfg.scrollbar != ScrollbarMode::Never {
                 // The scrollbar runs the height of the terminal it scrolls,
@@ -6796,13 +6805,6 @@ impl Renderer {
             // line as tall as the row, placed at the row's top, is centered.
             let segment_metrics = Metrics::new(metrics.font_size, row_h.max(metrics.font_size));
             let linear = self.config.format.is_srgb();
-            let on_accent = search_focused_label(
-                theme.cursor_text,
-                color::over(theme.background, theme.palette[8], 0.98, linear),
-                accent,
-                tint_of(search.focused),
-                linear,
-            );
             let mut editor_left = geometry.editor.0 + cw;
             let mut editor_clusters = Vec::new();
             for (index, segment) in search_bar_segments(search, geometry, cw)
@@ -6828,9 +6830,40 @@ impl Renderer {
                     editor_clusters =
                         segment_clusters(&self.search_segment_buffers[index], &segment);
                 }
-                let color = (segment.control == Some(search.focused)
-                    && search.focused != SearchControl::Editor)
-                    .then_some(on_accent);
+                let bar =
+                    self.chrome_colors
+                        .surface(theme.background, theme.palette[8], 0.98, linear);
+                let background = match segment.control {
+                    Some(SearchControl::Editor) => {
+                        self.chrome_colors
+                            .surface(bar, theme.background, 0.72, linear)
+                    }
+                    Some(control) => {
+                        let (fill, alpha) = if search.focused == control {
+                            (accent, SEARCH_FOCUSED_FILL_ALPHA)
+                        } else {
+                            (theme.background, 0.28)
+                        };
+                        let fill = self
+                            .chrome_colors
+                            .surface(bar, fill, f64::from(alpha), linear);
+                        tint_of(control).map_or(fill, |(tint, alpha)| {
+                            self.chrome_colors
+                                .surface(fill, tint, f64::from(alpha), linear)
+                        })
+                    }
+                    None => bar,
+                };
+                let color = Some(self.chrome_colors.text(
+                    if segment.control == Some(search.focused)
+                        && search.focused != SearchControl::Editor
+                    {
+                        theme.cursor_text
+                    } else {
+                        theme.foreground
+                    },
+                    background,
+                ));
                 let (x, y, w, h) = segment.rect;
                 if w > 0.0 && h > 0.0 && !self.search_segment_texts[index].is_empty() {
                     search_segment_places.push((
@@ -6924,7 +6957,13 @@ impl Renderer {
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
-            push_input_bar(&mut quads, search_rect, theme, theme.palette[5]);
+            push_input_bar(
+                &mut quads,
+                search_rect,
+                theme,
+                theme.palette[5],
+                &mut self.chrome_colors,
+            );
             let label = format!("  ⌘ {q}_   {}", overlay.palette_hint);
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
@@ -6952,7 +6991,13 @@ impl Renderer {
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
-            push_input_bar(&mut quads, search_rect, theme, theme.palette[5]);
+            push_input_bar(
+                &mut quads,
+                search_rect,
+                theme,
+                theme.palette[5],
+                &mut self.chrome_colors,
+            );
             let label = format!(
                 "{}{q}_   {}",
                 theme_picker_prefix(&overlay.tr),
@@ -6984,7 +7029,13 @@ impl Renderer {
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
-            push_input_bar(&mut quads, search_rect, theme, theme.palette[6]);
+            push_input_bar(
+                &mut quads,
+                search_rect,
+                theme,
+                theme.palette[6],
+                &mut self.chrome_colors,
+            );
             let label = format!(
                 "  ▤ {} {q}_   {}",
                 overlay.tr.text(Text::PickerLayoutPrompt),
@@ -7013,7 +7064,13 @@ impl Renderer {
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
-            push_input_bar(&mut quads, search_rect, theme, theme.palette[4]);
+            push_input_bar(
+                &mut quads,
+                search_rect,
+                theme,
+                theme.palette[4],
+                &mut self.chrome_colors,
+            );
             let label = format!("  ssh ❯ {q}_   {}", overlay.ssh_hint);
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
@@ -7042,7 +7099,13 @@ impl Renderer {
             // bars; the fill is the shared readable neutral.
             have_search = true;
             search_rect = edit.rect;
-            push_input_bar(&mut quads, edit.rect, theme, theme.palette[3]);
+            push_input_bar(
+                &mut quads,
+                edit.rect,
+                theme,
+                theme.palette[3],
+                &mut self.chrome_colors,
+            );
             let label = format!(
                 "{}{}_   {}",
                 title_edit_prefix(&edit.label),
@@ -7427,7 +7490,8 @@ impl Renderer {
         if let Some(completion) = &overlay.completion
             && let Some(geometry) = completion_panel_geometry(completion, (cw, ch))
         {
-            let palette = completion_palette(theme, self.ui_accent(cfg, theme));
+            let accent = self.ui_accent(cfg, theme);
+            let palette = self.chrome_colors.completion(theme, accent);
             let count = geometry.rows;
             while self.completion_buffers.len() < count {
                 let mut buffer = TextBuffer::new(&mut self.font_system, metrics);
@@ -7740,9 +7804,10 @@ impl Renderer {
             let (x, y, w, h) = toast.geometry.rect;
             let alpha = toast.opacity.clamp(0.0, 1.0);
             let background = theme.palette[0];
-            let foreground = color::with_min_contrast(theme.foreground, background, 4.5);
+            let foreground = self.chrome_colors.text(theme.foreground, background);
             menu_q.push(rect(x, y, w, h, background, alpha));
-            let accent = color::with_min_contrast(self.ui_accent(cfg, theme), background, 3.0);
+            let accent = self.ui_accent(cfg, theme);
+            let accent = self.chrome_colors.icon(accent, background);
             menu_q.push(rect(x, y, w, 1.0, accent, alpha));
             if let Some(index) = toast.focused.filter(|i| *i == 1 || *i == 2) {
                 let (bx, by, bw, bh) = if index == 1 {
@@ -7843,7 +7908,8 @@ impl Renderer {
                 self.metrics.line_height,
             )
         {
-            let palette = completion_palette(theme, self.ui_accent(cfg, theme));
+            let accent = self.ui_accent(cfg, theme);
+            let palette = self.chrome_colors.completion(theme, accent);
             let (x, y, width, height) = geometry.rect;
             for (offset, alpha) in [(1.0_f32, 0.28_f32), (2.0, 0.16), (3.0, 0.08)] {
                 menu_q.push(rect(
@@ -7860,7 +7926,7 @@ impl Renderer {
             // bleed into that crop.
             menu_q.push(rect(x, y, width, height, palette.panel_bg, 1.0));
             let rail_color = if receipt.remote {
-                color::with_min_contrast(theme.palette[3], palette.panel_bg, 4.5)
+                self.chrome_colors.text(theme.palette[3], palette.panel_bg)
             } else {
                 palette.emphasis
             };
@@ -8005,7 +8071,8 @@ impl Renderer {
             cfg.handle_size as f32
         };
         for lane in &overlay.media_lanes {
-            let palette = completion_palette(theme, self.ui_accent(cfg, theme));
+            let accent = self.ui_accent(cfg, theme);
+            let palette = self.chrome_colors.completion(theme, accent);
             let (x, y, width, height) = lane.rect;
             let inner = if lane.pin_label.is_some() {
                 lane.rect
@@ -8218,7 +8285,8 @@ impl Renderer {
             && let Some(geometry) = completion_panel_geometry(completion, (cw, ch))
         {
             let (x, y, width, height) = geometry.rect;
-            let palette = completion_palette(theme, self.ui_accent(cfg, theme));
+            let accent = self.ui_accent(cfg, theme);
+            let palette = self.chrome_colors.completion(theme, accent);
             let border = COMPLETION_BORDER;
             // Three restrained steps of pure black. Enough depth to lift the
             // detached card off similar-colored terminal content without a
@@ -8409,6 +8477,14 @@ impl Renderer {
                 } else {
                     cfg.title_inactive_fg_color.unwrap_or(theme.foreground)
                 };
+                let background = pick_titlebar_bg(
+                    cfg,
+                    theme,
+                    self.ui_accent(cfg, theme),
+                    pv.focused,
+                    tabbar.broadcast,
+                );
+                let fg = self.chrome_colors.text(fg, background);
                 // Text-area position mirrors the
                 // titlebar bar's y-position so the title text follows
                 // the bar to the bottom when title_at_bottom is
@@ -8446,6 +8522,12 @@ impl Renderer {
             let tb = (tabbar.y + tabbar.height) as i32;
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (tx, ty_px, tw, th) = s.title_rect;
+                let tab_background = if s.active {
+                    default_bg
+                } else {
+                    chrome_strip_bg
+                };
+                let title_fg = self.chrome_colors.text(fg, tab_background);
                 let label_cols = display_width(&self.tab_texts[bi]) as f32;
                 let label_w = label_cols * cw.max(1.0);
                 let centered_left = tx + ((tw - label_w) * 0.5).max(0.0);
@@ -8460,7 +8542,7 @@ impl Renderer {
                         right: (tx + tw) as i32,
                         bottom: (ty_px + th) as i32,
                     },
-                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    default_color: gc(title_fg),
                     custom_glyphs: &[],
                 });
                 // `✕` close glyph — separate text area so we can color
@@ -8484,6 +8566,15 @@ impl Renderer {
                     // Rest: dim chrome — readable but secondary.
                     theme.palette[8]
                 };
+                let close_background = self.chrome_colors.close_background(
+                    theme.foreground,
+                    default_bg,
+                    chrome_strip_bg,
+                    theme.palette[1],
+                    (s.active, hovered),
+                    self.config.format.is_srgb(),
+                );
+                let close_fg = self.chrome_colors.icon(close_fg, close_background);
                 let (close_left, close_top) = centered_text_origin((cx, cy, ccw, cch), (cw, ch));
                 areas.push(TextArea {
                     buffer: &self.tab_close_buffer,
@@ -8496,11 +8587,30 @@ impl Renderer {
                 });
             }
             let (nx, ny, nw, nh) = tabbar.new_tab;
-            let plus_fg = if tabbar.hovered_new_tab {
+            let toolbar_accent = if tabbar.broadcast {
+                theme.palette[3]
+            } else {
                 self.ui_accent(cfg, theme)
+            };
+            let plus_fg = if tabbar.hovered_new_tab {
+                toolbar_accent
             } else {
                 fg
             };
+            let toolbar_background = |colors: &mut chrome::Colors, hovered| {
+                if hovered {
+                    colors.surface(
+                        chrome_strip_bg,
+                        toolbar_accent,
+                        0.14,
+                        self.config.format.is_srgb(),
+                    )
+                } else {
+                    chrome_strip_bg
+                }
+            };
+            let background = toolbar_background(&mut self.chrome_colors, tabbar.hovered_new_tab);
+            let plus_fg = self.chrome_colors.icon(plus_fg, background);
             let plus_w = self
                 .tabbar_buffer
                 .layout_runs()
@@ -8528,10 +8638,13 @@ impl Renderer {
             if tabbar.new_tab_menu.2 > 0.0 {
                 let (ax, ay, aw, ah) = tabbar.new_tab_menu;
                 let arrow_fg = if tabbar.hovered_new_tab_menu {
-                    self.ui_accent(cfg, theme)
+                    toolbar_accent
                 } else {
                     fg
                 };
+                let background =
+                    toolbar_background(&mut self.chrome_colors, tabbar.hovered_new_tab_menu);
+                let arrow_fg = self.chrome_colors.icon(arrow_fg, background);
                 let arrow_w = self
                     .new_tab_arrow_buffer
                     .layout_runs()
@@ -8578,7 +8691,7 @@ impl Renderer {
                     top,
                     scale: 1.0,
                     bounds,
-                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    default_color: gc(self.chrome_colors.icon(fg, chrome_strip_bg)),
                     custom_glyphs: &[],
                 });
             }
@@ -8635,7 +8748,7 @@ impl Renderer {
                     right: self.config.width as i32,
                     bottom: (status.y + status.height) as i32,
                 },
-                default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                default_color: gc(self.chrome_colors.text(fg, chrome_strip_bg)),
                 custom_glyphs: &[],
             });
         }
@@ -8686,7 +8799,16 @@ impl Renderer {
         // `self.menu_text_renderer.render` call after the menu quads), so the
         // opaque panel bg stays under the menu text.
         if let Some(menu) = &overlay.context_menu {
-            let chrome = menu_chrome_quads(menu, theme, self.ui_accent(cfg, theme), cw, ch);
+            let accent = self.ui_accent(cfg, theme);
+            let chrome = menu_chrome_quads(
+                menu,
+                theme,
+                accent,
+                cw,
+                ch,
+                &mut self.chrome_colors,
+                self.config.format.is_srgb(),
+            );
             menu_q.extend(chrome);
             // Row labels — collected into `menu_areas` so the second
             // TextRenderer can prepare them as their own batch.
@@ -8708,23 +8830,32 @@ impl Renderer {
             } else {
                 natural_h
             };
+            let (inset, content_h) = menu::scroll_content(natural_h, panel_h_eff, row_h);
             let start = menu.scroll_offset.min(menu.rows.len());
-            let mut row_y = ay;
+            let mut row_y = ay + inset;
             for (i, row) in menu.rows.iter().enumerate().skip(start) {
                 let h = if row.separator { sep_h } else { row_h };
-                if row_y + h > ay + panel_h_eff {
+                if row_y + h > ay + inset + content_h {
                     break;
                 }
                 if row.separator {
                     row_y += sep_h;
                     continue;
                 }
-                // Disabled rows blend toward the panel background (see
-                // `dim_blend`).
-                let fg = if row.enabled {
-                    theme.foreground
+                let background = if i == menu.highlight && row.enabled {
+                    self.chrome_colors.surface(
+                        theme.background,
+                        self.ui_accent(cfg, theme),
+                        0.18,
+                        self.config.format.is_srgb(),
+                    )
                 } else {
-                    dim_blend(theme.foreground, theme.background)
+                    theme.background
+                };
+                let fg = if row.enabled {
+                    self.chrome_colors.text(theme.foreground, background)
+                } else {
+                    self.chrome_colors.muted(theme.foreground, background)
                 };
                 let bounds = TextBounds {
                     left: ax as i32,
@@ -8743,7 +8874,7 @@ impl Renderer {
                 });
                 // Dropdown-parity: the right-aligned dimmed hint.
                 if !row.hint.is_empty() {
-                    let hint_fg = dim_blend(theme.foreground, theme.background);
+                    let hint_fg = self.chrome_colors.muted(theme.foreground, background);
                     let hint_w =
                         unicode_width::UnicodeWidthStr::width(row.hint.as_str()) as f32 * cw;
                     menu_areas.push(TextArea {
@@ -8789,7 +8920,7 @@ impl Renderer {
             let backdrop_a = set.backdrop_alpha();
             menu_q.push(rect(0.0, 0.0, sw, sh, theme.background, backdrop_a));
             // Panel background (near-opaque) + accent border.
-            menu_q.push(rect(px, py, panel_w, panel_h, theme.background, 0.99));
+            menu_q.push(rect(px, py, panel_w, panel_h, theme.background, 1.0));
             menu_q.push(rect(px, py, panel_w, 2.0, acc, 1.0));
             menu_q.push(rect(px, py + panel_h - 2.0, panel_w, 2.0, acc, 1.0));
             menu_q.push(rect(px, py, 2.0, panel_h, acc, 1.0));
@@ -8819,22 +8950,31 @@ impl Renderer {
             let hi_y = py + 12.0 + (hi_line - layout.first_line) as f32 * row_h;
             menu_q.push(rect(px + 6.0, hi_y, panel_w - 12.0, row_h, acc, 0.22));
             let sfg = theme.foreground;
-            // A disabled field row (inapplicable to the current state) renders
-            // dimmed, blended halfway toward the panel background.
-            let dim = color::dim(sfg, theme.background);
+            // Disabled fields and footer hints keep a quieter, readable color.
             for (visible_index, i) in settings_painted_lines(&layout) {
                 if i >= self.settings_buffers.len() {
                     break;
                 }
-                let row_color = if i >= SETTINGS_FIELD_START
-                    && set
-                        .rows
-                        .get(i - SETTINGS_FIELD_START)
-                        .is_some_and(|r| r.disabled)
-                {
-                    dim
+                let background = if i == hi_line {
+                    self.chrome_colors.surface(
+                        theme.background,
+                        acc,
+                        0.22,
+                        self.config.format.is_srgb(),
+                    )
                 } else {
-                    sfg
+                    theme.background
+                };
+                let muted = i >= SETTINGS_FIELD_START + set.rows.len()
+                    || (i >= SETTINGS_FIELD_START
+                        && set
+                            .rows
+                            .get(i - SETTINGS_FIELD_START)
+                            .is_some_and(|r| r.disabled));
+                let row_color = if muted {
+                    self.chrome_colors.muted(sfg, background)
+                } else {
+                    self.chrome_colors.text(sfg, background)
                 };
                 menu_areas.push(TextArea {
                     buffer: &self.settings_buffers[i],
@@ -10101,6 +10241,7 @@ impl Renderer {
         idx: usize,
         pv: &PaneView<'_>,
         cfg: &Config,
+        inactive: f32,
         family: &str,
         window_focused: bool,
         search_highlights: &[HighlightRect],
@@ -10120,6 +10261,7 @@ impl Renderer {
             idx,
             pv,
             cfg,
+            inactive,
             family,
             window_focused,
             search_highlights,
@@ -10143,6 +10285,7 @@ impl Renderer {
         idx: usize,
         pv: &PaneView<'_>,
         cfg: &Config,
+        inactive: f32,
         family: &str,
         window_focused: bool,
         search_highlights: &[HighlightRect],
@@ -10390,6 +10533,24 @@ impl Renderer {
                 theme,
                 &mut self.minimum_contrast_cache,
             );
+            if inactive > 0.0 {
+                let background = match highlight {
+                    CellHighlight::Search(true) => {
+                        cfg.search_background.unwrap_or(theme.palette[3])
+                    }
+                    CellHighlight::Search(false) | CellHighlight::Selection => {
+                        theme.selection_background
+                    }
+                    CellHighlight::None => bg,
+                };
+                fg = self.chrome_colors.inactive(
+                    fg,
+                    background,
+                    theme.background,
+                    inactive,
+                    self.config.format.is_srgb(),
+                );
+            }
             // Recolor the glyph sitting under a focused solid block cursor.
             // The second arm catches a cursor parked on the spacer half of a
             // wide glyph: the glyph lives one cell LEFT (the WIDE_CHAR lead),
@@ -12975,6 +13136,7 @@ const SEARCH_FOCUSED_FILL_ALPHA: f32 = 0.92;
 /// to contrast with. The theme's cursor text is held to AA against the fill
 /// as painted: the accent over the bar, then any hover or press `tint`,
 /// composited the way the surface blends (`linear` for an sRGB surface).
+#[cfg(test)]
 fn search_focused_label(
     cursor_text: Rgb,
     bar: Rgb,
@@ -13941,6 +14103,8 @@ fn menu_chrome_quads(
     accent: Rgb,
     cw: f32,
     ch: f32,
+    colors: &mut chrome::Colors,
+    linear: bool,
 ) -> Vec<QuadInstance> {
     let mut out: Vec<QuadInstance> = Vec::new();
     let panel_w = context_menu_panel_width(menu, cw);
@@ -13970,8 +14134,9 @@ fn menu_chrome_quads(
     {
         return out;
     }
+    let (inset, content_h) = menu::scroll_content(natural_h, panel_h, row_h);
     let (clipped_top, clipped_bottom) =
-        context_menu_clip_indicators(&menu.rows, menu.scroll_offset, panel_h, row_h, sep_h);
+        context_menu_clip_indicators(&menu.rows, menu.scroll_offset, content_h, row_h, sep_h);
 
     // Soft drop shadow — offset 4 px down-right at low opacity for
     // depth (GTK / iTerm2 convention).
@@ -14009,11 +14174,11 @@ fn menu_chrome_quads(
 
     // Per-row highlight + separators. Skip scrolled-off
     // rows; stop drawing when we'd go past panel_h.
-    let mut row_y = ay;
+    let mut row_y = ay + inset;
     let start = menu.scroll_offset.min(menu.rows.len());
     for (i, row) in menu.rows.iter().enumerate().skip(start) {
         let h = if row.separator { sep_h } else { row_h };
-        if row_y + h > ay + panel_h {
+        if row_y + h > ay + inset + content_h {
             break;
         }
         if row.separator {
@@ -14041,27 +14206,35 @@ fn menu_chrome_quads(
             // 2-px accent strip on the left of the highlighted row —
             // same pattern as the active-tab accent strip and
             // the focused-pane border.
-            out.push(rect(ax + 1.0, row_y, 2.0, row_h, accent, 1.0));
+            let selected_bg = colors.surface(theme.background, accent, 0.18, linear);
+            let rail = colors.icon(accent, selected_bg);
+            out.push(rect(ax + 1.0, row_y, 2.0, row_h, rail, 1.0));
         }
         row_y += row_h;
     }
-    // Terminator menu UX: top/bottom overflow cues when the natural list is
-    // clipped. Drawn as small accent-colored bars rather than glyphs so they
-    // do not need a separate text-buffer path.
-    if clipped_top {
-        // Centered 12-px wide accent bar near the top edge.
-        let bar_w = 12.0;
-        let bar_h = 3.0;
-        let bx = ax + (panel_w - bar_w) * 0.5;
-        let by = ay + 2.0;
-        out.push(rect(bx, by, bar_w, bar_h, accent, 0.85));
-    }
-    if clipped_bottom {
-        let bar_w = 12.0;
-        let bar_h = 3.0;
-        let bx = ax + (panel_w - bar_w) * 0.5;
-        let by = ay + panel_h - 2.0 - bar_h;
-        out.push(rect(bx, by, bar_w, bar_h, accent, 0.85));
+    let arrow = colors.icon(accent, theme.background);
+    for (visible, top, down) in [
+        (clipped_top, ay, false),
+        (clipped_bottom, ay + panel_h - inset, true),
+    ] {
+        if !visible || inset <= 0.0 {
+            continue;
+        }
+        let center = ax + panel_w * 0.5;
+        let size = (inset * 0.7).min(panel_w * 0.25);
+        for step in 0..3 {
+            let width = size * (step + 1) as f32 / 3.0;
+            let dy = step as f32 * 2.0;
+            let y = top + (inset - 6.0) * 0.5 + if down { 4.0 - dy } else { dy };
+            out.push(rect(
+                center - width * 0.5,
+                y,
+                width,
+                2.0_f32.min(inset),
+                arrow,
+                1.0,
+            ));
+        }
     }
     out
 }
@@ -14203,6 +14376,13 @@ fn pane_backdrop_rect(terminal: (f32, f32, f32, f32), bw: f32) -> Option<(f32, f
     let bwid = (rw - 2.0 * bw).max(0.0);
     let bhgt = (rh - 2.0 * bw).max(0.0);
     (bwid > 0.0 && bhgt > 0.0).then_some((rx + bw, ry + bw, bwid, bhgt))
+}
+
+fn inactive_pane_amount(cfg: &Config) -> f32 {
+    (1.0 - cfg.inactive_color_offset)
+        .clamp(0.0, 0.95)
+        .max((1.0 - cfg.inactive_bg_color_offset).clamp(0.0, 0.95))
+        .max((1.0 - cfg.unfocused_split_opacity).clamp(0.0, 0.95))
 }
 
 /// Apply dim after palette brightening and RGB resolution. The caller applies
@@ -14895,9 +15075,11 @@ pub enum DebugScene {
 /// (4.5:1); the edge is the bar's `accent`, kept at the 3:1 minimum for
 /// non-text UI against that fill. Each bar keeps its own accent, so the
 /// palette, the pickers and the title editor still look different.
+#[cfg(test)]
 fn input_bar_colors(theme: &kettle_config::Theme, accent: Rgb) -> (Rgb, Rgb) {
-    let fill = color::with_min_contrast(theme.palette[8], theme.foreground, 4.5);
-    let edge = color::with_min_contrast(accent, fill, 3.0);
+    let mut colors = chrome::Colors::default();
+    let fill = colors.text(theme.palette[8], theme.foreground);
+    let edge = colors.icon(accent, fill);
     (fill, edge)
 }
 
@@ -14910,8 +15092,10 @@ fn push_input_bar(
     (x, y, w, h): (f32, f32, f32, f32),
     theme: &kettle_config::Theme,
     accent: Rgb,
+    colors: &mut chrome::Colors,
 ) {
-    let (fill, edge) = input_bar_colors(theme, accent);
+    let fill = colors.text(theme.palette[8], theme.foreground);
+    let edge = colors.icon(accent, fill);
     quads.push(rect(x, y, w, h, fill, 1.0));
     quads.push(rect(x, y, w, 2.0, edge, 1.0));
     quads.push(rect(x, y, 4.0, h, edge, 1.0));
@@ -15522,6 +15706,8 @@ pub fn capture_png_with_annotation(
                 cfg.resolved_accent(theme),
                 cw,
                 ch,
+                &mut chrome::Colors::default(),
+                format.is_srgb(),
             ));
 
             // Text areas — one TextBuffer per non-separator row.
@@ -15556,14 +15742,21 @@ pub fn capture_png_with_annotation(
                     row_y += sep_h;
                     continue;
                 }
-                let fg = if row.enabled {
-                    theme.foreground
-                } else {
-                    Rgb::new(
-                        ((theme.foreground.r as u16 + theme.background.r as u16 * 5) / 6) as u8,
-                        ((theme.foreground.g as u16 + theme.background.g as u16 * 5) / 6) as u8,
-                        ((theme.foreground.b as u16 + theme.background.b as u16 * 5) / 6) as u8,
+                let background = if i == menu.highlight && row.enabled {
+                    color::over(
+                        theme.background,
+                        cfg.resolved_accent(theme),
+                        0.18,
+                        format.is_srgb(),
                     )
+                } else {
+                    theme.background
+                };
+                let mut colors = chrome::Colors::default();
+                let fg = if row.enabled {
+                    colors.text(theme.foreground, background)
+                } else {
+                    colors.muted(theme.foreground, background)
                 };
                 menu_areas.push(TextArea {
                     buffer: &menu_text_buffers[i],

@@ -1027,9 +1027,11 @@ impl App {
             let (_, ch) = self.menu_cell(target);
             let row_h = ch + kettle_render::menu::ROW_PAD;
             let sep_h = kettle_render::menu::SEP_H;
-            let mut row_y = ay;
+            let (inset, content_h) =
+                context_menu_content_geometry(&menu.items, panel_h, row_h, sep_h);
+            let mut row_y = ay + inset;
             let start = menu.scroll_offset.min(menu.items.len());
-            let visible = count_rows_fitting(&menu.items, start, panel_h, row_h, sep_h);
+            let visible = count_rows_fitting(&menu.items, start, content_h, row_h, sep_h);
             let rows: Vec<serde_json::Value> = menu
                 .items
                 .iter()
@@ -2168,6 +2170,12 @@ impl App {
         }
         let bar = self.tab_bar(ws);
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if bcode == 0
+            && let Some(delta) = self.context_menu_scroll_edge(ws)
+        {
+            self.scroll_context_menu(ws, delta);
+            return true;
+        }
         if ws.context_menu.is_some()
             && let Some(click) = self.context_menu_click_action(ws, bcode)
         {

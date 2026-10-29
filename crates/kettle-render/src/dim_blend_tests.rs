@@ -22,3 +22,17 @@ fn dimmed_text_stays_readable_on_a_dark_theme() {
         "still dimmer than normal text"
     );
 }
+
+#[test]
+fn inactive_pane_text_keeps_a_text_contrast_floor() {
+    let theme = kettle_config::Theme::by_name("Builtin Light");
+    let dimmed = crate::chrome::Colors::default().inactive(
+        theme.foreground,
+        theme.background,
+        theme.background,
+        0.55,
+        true,
+    );
+    let ratio = contrast_ratio(dimmed, theme.background);
+    assert!(ratio >= 4.5, "inactive pane: {ratio:.3}:1 < 4.5");
+}

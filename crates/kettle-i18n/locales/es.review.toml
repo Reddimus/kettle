@@ -19,6 +19,8 @@
 # expanded and readable, after a rejected 33-file batch left input unchanged.
 
 [status]
+theme_builtin_dark = "draft"
+theme_builtin_light = "draft"
 update_toast_details = "accepted"
 update_toast_installed = "accepted"
 media_viewer_video_hint = "draft"

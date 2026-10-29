@@ -578,6 +578,9 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
 /// fallback such as `"Off"`, `""`, or `"—"` rather than panicking.
 pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
     use Text as T;
+    if field.key == "theme" {
+        return tr.theme_name(&cfg.theme_name).to_string();
+    }
     match &field.kind {
         FieldKind::Toggle => {
             let state = if read_bool(cfg, field.key) {
@@ -1949,5 +1952,24 @@ mod tests {
 
         cfg.background_opacity = 1.0;
         assert_eq!(next_value(&cfg, &f, -1), "0.99");
+    }
+    #[test]
+    fn builtin_theme_settings_display_keeps_configuration_identifiers() {
+        let field = categories(&[])
+            .into_iter()
+            .flat_map(|category| category.fields)
+            .find(|field| field.key == "theme")
+            .unwrap();
+        for (identifier, label) in [
+            ("Builtin Dark", "Oscuro integrado"),
+            ("Builtin Light", "Claro integrado"),
+        ] {
+            let cfg = Config {
+                theme_name: identifier.to_string(),
+                ..Config::default()
+            };
+            assert_eq!(read(&cfg, &field, &ES), label);
+            assert_eq!(read_choice(&cfg, "theme"), identifier);
+        }
     }
 }

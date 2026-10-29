@@ -23,3 +23,41 @@ fn contextual_notes_do_not_move_the_panel() {
         cols
     );
 }
+
+#[test]
+fn settings_tabs_fit_measured_english_and_spanish_labels() {
+    use kettle_i18n::{Language, Text, Translator};
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let set = SettingsOverlay {
+            categories: [
+                Text::SettingsCategoryAppearance,
+                Text::SettingsCategoryGraphics,
+                Text::SettingsCategoryBackground,
+                Text::SettingsCategoryBehavior,
+                Text::SettingsCategoryTabs,
+                Text::SettingsCategorySearch,
+                Text::SettingsCategoryAgents,
+                Text::SettingsCategoryKeybinds,
+            ]
+            .map(|key| tr.text(key).to_string())
+            .to_vec(),
+            label_cols: 20,
+            value_cols: 30,
+            active_category: 7,
+            background_page: false,
+            rows: vec![],
+            focused_row: 0,
+            title: String::new(),
+            hints: String::new(),
+            footer_note: None,
+        };
+        let line = set.categories.join("  ");
+        let fitted = super::settings_fit_display_line(&set, 1, &line, 848.0, 9.6);
+        assert!(
+            !fitted.contains('…'),
+            "{language:?} tabs truncated: {fitted}"
+        );
+        assert!(fitted.ends_with(tr.text(Text::SettingsCategoryKeybinds)));
+    }
+}
