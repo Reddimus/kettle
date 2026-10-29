@@ -96,11 +96,15 @@ incomplete lossless PTY delivery into success. MCP cancellation takes precedence
 
 Kettle owns the PTY-created process group on macOS and the PTY-created session
 on Linux. A Unix descendant that deliberately calls `setsid()` leaves that
-boundary; Kettle will not infer ownership from ancestry or an open PTY
-descriptor and risk killing an unrelated same-user process. Fully containing
-that case requires an OS-owned supervisor/cgroup. When Kettle cannot verify the
-scope it did own was terminated, timeout/cancellation reports 125 rather than a
-misleading 124/130.
+boundary. On Linux, the `kettle exec` command line is a child subreaper: such a
+descendant is reparented to Kettle when its own parent exits, so a timeout or
+cancellation kills and reaps it too. That ownership is the kernel's, not an
+inference from ancestry or an open PTY descriptor, so it cannot reach an
+unrelated same-user process. macOS has no equivalent, and the MCP `kettle_run`
+tool runs concurrent commands in one server process, where an adopted process
+cannot be attributed to one command; in both, a `setsid()` descendant can
+outlive the run. When Kettle cannot verify the scope it did own was terminated,
+timeout/cancellation reports 125 rather than a misleading 124/130.
 
 A real stdout write or flush failure is different from deadline abandonment.
 Kettle reports it on stderr, stops and reaps the owned process scope, and

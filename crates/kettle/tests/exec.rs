@@ -577,6 +577,57 @@ fn exec_timeout_returns_124() {
     );
 }
 
+/// A descendant that leaves the PTY session with `setsid` is out of reach of
+/// the session teardown. `kettle exec` adopts it as a child subreaper, so the
+/// timeout still stops it.
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_timeout_stops_a_descendant_that_left_the_session() {
+    struct KillOnDrop(Option<libc::pid_t>);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            if let Some(pid) = self.0 {
+                // SAFETY: kill takes plain values. The test only reaches here
+                // with the PID its own fixture printed moments ago.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+    }
+
+    let argv = [
+        "sh",
+        "-c",
+        "setsid sh -c 'echo ESCAPED_PID $$; exec sleep 60' </dev/null & sleep 60",
+    ];
+    let (code, out, err) = run_exec(&["--timeout", "2", "--strip-ansi"], &argv, None);
+    if no_pty(code, &err) {
+        eprintln!("skipping exec_timeout_stops_a_descendant_that_left_the_session: no PTY");
+        return;
+    }
+    let pid = out
+        .split("ESCAPED_PID ")
+        .nth(1)
+        .and_then(|tail| {
+            tail.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<libc::pid_t>()
+                .ok()
+        })
+        .unwrap_or_else(|| {
+            panic!("fixture did not report its PID; stdout {out:?}, stderr {err:?}")
+        });
+    let _cleanup = KillOnDrop(Some(pid));
+    assert_eq!(code, 124, "a contained timeout exits 124; stderr: {err}");
+    let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.chars().next()));
+    assert!(
+        matches!(state, None | Some(Some('Z' | 'X'))),
+        "the descendant that left the session is still running (state {state:?})"
+    );
+}
+
 const STDOUT_FLOOD_MARKER_ENV: &str = "KETTLE_EXEC_STDOUT_FLOOD_MARKER";
 const STDOUT_FLOOD_EXEC_TIMEOUT: &str = "8.0";
 const STDOUT_FLOOD_READY_BUDGET: Duration = Duration::from_secs(4);

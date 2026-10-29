@@ -25,6 +25,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   ownership check, so a tree renamed into their place in the shared
   Applications folder is never deleted.
 - Repair three documentation links to testing sections that had moved.
+- On Linux, stop descendants that left the session with `setsid()` when
+  `kettle exec` times out or is cancelled, instead of leaving them running.
 
 ## [5.6.0] — 2026-10-28
 

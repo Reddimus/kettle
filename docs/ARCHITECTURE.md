@@ -2125,7 +2125,11 @@ fields from different moments. A stdout command already accepted by the writer
 remains non-idle until its OS-facing write returns. The final source-progress
 sample is therefore taken behind an authoritative disconnect, when no new pump
 read can race it. Linux process teardown uses the session created for the PTY
-as its ownership boundary. Session membership survives reparenting and cannot be
+as its ownership boundary, and the `kettle exec` command line is also a child
+subreaper: a descendant that left the session with `setsid()` is reparented to
+it when its parent exits, and teardown kills and reaps every such adopted child
+outside Kettle's own session until none remains, while a running command's
+exited adoptees are reaped every 250 ms. Session membership survives reparenting and cannot be
 joined by an unrelated process. Before any numeric group signal or session scan,
 teardown stops the original leader through its pidfd and revalidates its PID plus
 start time; that unreaped anchor prevents the kernel from recycling the

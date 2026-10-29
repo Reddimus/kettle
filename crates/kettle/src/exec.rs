@@ -586,6 +586,8 @@ fn exec_stdout_sink() -> std::io::Result<std::io::Stdout> {
 
 /// Run `kettle exec` end to end; returns the process exit code to propagate.
 pub fn run_exec(opts: ExecOpts) -> i32 {
+    #[cfg(target_os = "linux")]
+    adopt_orphaned_descendants();
     let sink = match exec_stdout_sink() {
         Ok(sink) => sink,
         Err(error) => {
@@ -1152,6 +1154,8 @@ fn run_exec_engine_with_recording_poll(
     #[cfg(windows)]
     let mut pty_close_started_at: Option<Instant> = None;
     let mut last_lifecycle_trace = started;
+    #[cfg(target_os = "linux")]
+    let mut last_adopted_reap = started;
     // The newest title the child set, held until output is ready to take it.
     let mut pending_title: Option<String> = None;
 
@@ -1246,6 +1250,12 @@ fn run_exec_engine_with_recording_poll(
             }
             std::thread::sleep(IDLE_TURN);
             continue;
+        }
+
+        #[cfg(target_os = "linux")]
+        if last_adopted_reap.elapsed() >= ADOPTED_REAP_INTERVAL {
+            last_adopted_reap = Instant::now();
+            linux_reap_exited_adopted(process_tree.root);
         }
 
         let trace_lifecycle = elapsed >= Duration::from_secs(4)
@@ -1861,7 +1871,6 @@ impl ExecProcessTree {
 
         #[cfg(target_os = "linux")]
         {
-            let _ = root;
             if let Some(session) = &self.session {
                 complete &= session.terminate();
             } else {
@@ -1872,6 +1881,9 @@ impl ExecProcessTree {
                 );
                 complete = false;
             }
+            // A descendant that left the session with setsid() is out of the
+            // session scan's reach, but it is this process's adopted child.
+            complete &= linux_kill_adopted(Some(root), Instant::now() + LINUX_ADOPTED_KILL_TIME);
         }
 
         #[cfg(all(unix, not(target_os = "linux")))]
@@ -1938,6 +1950,13 @@ fn report_failed_termination(outcome: std::io::Result<()>) -> bool {
 
 #[cfg(target_os = "linux")]
 const LINUX_PROC_SCAN_TIME: Duration = Duration::from_millis(500);
+/// How long timeout teardown waits for adopted descendants to exit after
+/// SIGKILL before reporting that containment failed.
+#[cfg(target_os = "linux")]
+const LINUX_ADOPTED_KILL_TIME: Duration = Duration::from_secs(1);
+/// How often a running command's exited adopted descendants are reaped.
+#[cfg(target_os = "linux")]
+const ADOPTED_REAP_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(target_os = "linux")]
 const LINUX_PROC_SCAN_PROCESSES: usize = 16_384;
 /// The time one session scan may take. Tests that check the order of
@@ -2120,6 +2139,144 @@ impl LinuxPidHandle {
             return Ok(true);
         }
         Ok(matches!(stat.state, b'T' | b't' | b'Z' | b'X'))
+    }
+
+    fn exited_or_gone(&self) -> std::io::Result<bool> {
+        let Some(stat) = LinuxProcessStat::read(self.identity.pid)? else {
+            return Ok(true);
+        };
+        if stat.identity != self.identity {
+            return Ok(true);
+        }
+        Ok(matches!(stat.state, b'Z' | b'X' | b'x'))
+    }
+}
+
+/// Set once this process is the reaper of its orphaned descendants.
+#[cfg(target_os = "linux")]
+static ADOPTS_ORPHANS: AtomicBool = AtomicBool::new(false);
+
+/// Make this `kettle exec` process the reaper of its orphaned descendants.
+///
+/// A descendant that leaves the PTY session with `setsid()` escapes the
+/// session teardown. As a child subreaper, this process receives such a
+/// descendant when its own parent exits, so a timeout or cancellation can
+/// still stop it. Only the command-line path does this: it runs one command
+/// per process, so everything adopted here belongs to that command. The MCP
+/// server runs concurrent commands in one process, where an adopted orphan
+/// cannot be attributed to any one of them.
+#[cfg(target_os = "linux")]
+fn adopt_orphaned_descendants() {
+    // SAFETY: PR_SET_CHILD_SUBREAPER takes an integer flag and no pointers.
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0 {
+        ADOPTS_ORPHANS.store(true, Ordering::Release);
+    }
+}
+
+/// Children of this process that came from the command's tree.
+///
+/// Every thread's procfs list is read, since a child belongs to the thread
+/// that forked it. The PTY child `root` is excluded; its status belongs to the
+/// PTY backend. So is any child still in this process's own session: helpers
+/// this process starts itself stay there, while the command runs in the PTY's
+/// session and an escaped descendant in one it created.
+#[cfg(target_os = "linux")]
+fn linux_adopted_children(root: Option<u32>) -> std::io::Result<Vec<libc::pid_t>> {
+    // SAFETY: getsid(0) queries the calling process and takes no pointers.
+    let own_session = unsafe { libc::getsid(0) };
+    let mut children = Vec::new();
+    for task in std::fs::read_dir("/proc/self/task")? {
+        let list = match std::fs::read_to_string(task?.path().join("children")) {
+            Ok(list) => list,
+            // A thread that exited after the directory was listed.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for pid in list.split_ascii_whitespace() {
+            let pid: libc::pid_t = pid.parse().map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed child list")
+            })?;
+            if u32::try_from(pid).ok() == root {
+                continue;
+            }
+            // SAFETY: getsid takes a PID and no pointers. An unreaped child,
+            // zombie or not, keeps its PID and session until reaped here.
+            let session = unsafe { libc::getsid(pid) };
+            if session != -1 && session != own_session {
+                children.push(pid);
+            }
+        }
+    }
+    children.sort_unstable();
+    children.dedup();
+    Ok(children)
+}
+
+/// Reap adopted descendants that already exited, so a long command that
+/// detaches short-lived helpers does not leave zombies here until it ends.
+#[cfg(target_os = "linux")]
+fn linux_reap_exited_adopted(root: Option<u32>) {
+    if !ADOPTS_ORPHANS.load(Ordering::Acquire) {
+        return;
+    }
+    let Ok(children) = linux_adopted_children(root) else {
+        return;
+    };
+    for pid in children {
+        // SAFETY: `pid` is this process's child and only this process reaps
+        // it; a null status pointer is allowed.
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+    }
+}
+
+/// Kill and reap every descendant adopted during the run, including ones the
+/// kills hand down. Returns whether none remains by `deadline`.
+///
+/// An unreaped child's PID cannot be reused, so signalling a listed child
+/// reaches only that process. Each child killed passes its own children to
+/// this process as it exits, so rounds continue until a listing is empty.
+#[cfg(target_os = "linux")]
+fn linux_kill_adopted(root: Option<u32>, deadline: Instant) -> bool {
+    if !ADOPTS_ORPHANS.load(Ordering::Acquire) {
+        return true;
+    }
+    let mut pending: Vec<libc::pid_t> = Vec::new();
+    loop {
+        let children = match linux_adopted_children(root) {
+            Ok(children) => children,
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: cannot list adopted descendants: {error}"
+                );
+                return false;
+            }
+        };
+        if children.is_empty() {
+            return true;
+        }
+        for &pid in &children {
+            if !pending.contains(&pid) {
+                // SAFETY: see above; `pid` is an unreaped child of this process.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                pending.push(pid);
+            }
+        }
+        // SIGKILL cannot be blocked, but a child in uninterruptible sleep
+        // exits late, so poll rather than block on any one of them.
+        pending.retain(|&pid| {
+            // SAFETY: as above; WNOHANG returns at once.
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) == 0 }
+        });
+        if Instant::now() >= deadline {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: {} adopted descendant(s) did not exit after SIGKILL",
+                children.len()
+            );
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -2344,6 +2501,30 @@ impl LinuxSession {
         }
         if !linux_signal_process_group(self.process_group, libc::SIGKILL) {
             incomplete = true;
+        }
+        // A killed member hands its children to this process only as it exits,
+        // and the adopted-descendant sweep that follows must see them. Wait
+        // for every kill to land; an unreaped zombie counts as exited.
+        let exit_deadline = Instant::now() + LINUX_ADOPTED_KILL_TIME;
+        loop {
+            let mut all_exited = true;
+            for handle in handles.values() {
+                if !handle.exited_or_gone().unwrap_or(false) {
+                    all_exited = false;
+                }
+            }
+            if all_exited {
+                break;
+            }
+            if Instant::now() >= exit_deadline {
+                incomplete = true;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: a Linux session member did not exit after SIGKILL"
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
         stable && !incomplete
     }
