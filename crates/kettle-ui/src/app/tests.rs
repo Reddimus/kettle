@@ -7989,7 +7989,12 @@ fn animated_bg_redraw_is_edge_triggered() {
     );
     // The wake interval is the GIF's frame boundary, not a fixed 30 fps.
     assert!(
-        src.contains("} else if let Some(bg_ms) = bg_anim_interval {"),
+        src.contains("let mut wait = animation_wait("),
+        "the scheduler must merge the background frame interval"
+    );
+    assert_eq!(
+        super::animation_wait(false, Some(173), None),
+        Some(std::time::Duration::from_millis(173)),
         "the wait must use the bg frame interval, not the fixed 33ms tick"
     );
 }
@@ -8525,6 +8530,7 @@ fn implicit_zoom_exits_restore_the_saved_font() {
             "Action::SplitDown | Action::SplitUp | Action::SplitAuto => {",
             "Action::ClosePane",
         ),
+        ("Action::DuplicatePane => {", "Action::NextTheme"),
     ] {
         let arm = src.split_once(start).unwrap().1.split_once(end).unwrap().0;
         assert!(arm.contains("} else {\n                    self.restore_scaled_zoom_font(ws);"));
@@ -9691,6 +9697,7 @@ fn a_key_that_closes_or_replaces_a_modal_stops_repeating() {
         owner: crate::window_state::ImePreeditOwner::Other,
         generation: ws.ime_focus_generation,
         ended: None,
+        empty_after_focus: false,
     });
     let generation = ws.ime_focus_generation;
 
@@ -13768,76 +13775,100 @@ fn cursor_in_status_bar_band_geometry() {
         0.0,
         22.0,
         600.0,
-        StatusBarMode::Off
+        StatusBarMode::Off,
+        0.0,
+        0.0
     ));
     assert!(!cursor_in_status_bar_band(
         300.0,
         22.0,
         600.0,
-        StatusBarMode::Off
+        StatusBarMode::Off,
+        0.0,
+        0.0
     ));
     // Top: [0, 22).
     assert!(cursor_in_status_bar_band(
         0.0,
         22.0,
         600.0,
-        StatusBarMode::Top
+        StatusBarMode::Top,
+        0.0,
+        0.0
     ));
     assert!(cursor_in_status_bar_band(
         21.0,
         22.0,
         600.0,
-        StatusBarMode::Top
+        StatusBarMode::Top,
+        0.0,
+        0.0
     ));
     assert!(!cursor_in_status_bar_band(
         22.0,
         22.0,
         600.0,
-        StatusBarMode::Top
+        StatusBarMode::Top,
+        0.0,
+        0.0
     ));
     assert!(!cursor_in_status_bar_band(
         300.0,
         22.0,
         600.0,
-        StatusBarMode::Top
+        StatusBarMode::Top,
+        0.0,
+        0.0
     ));
     // Bottom: [578, 600].
     assert!(cursor_in_status_bar_band(
         578.0,
         22.0,
         600.0,
-        StatusBarMode::Bottom
+        StatusBarMode::Bottom,
+        0.0,
+        0.0
     ));
     assert!(cursor_in_status_bar_band(
         600.0,
         22.0,
         600.0,
-        StatusBarMode::Bottom
+        StatusBarMode::Bottom,
+        0.0,
+        0.0
     ));
     assert!(!cursor_in_status_bar_band(
         577.0,
         22.0,
         600.0,
-        StatusBarMode::Bottom
+        StatusBarMode::Bottom,
+        0.0,
+        0.0
     ));
     assert!(!cursor_in_status_bar_band(
         0.0,
         22.0,
         600.0,
-        StatusBarMode::Bottom
+        StatusBarMode::Bottom,
+        0.0,
+        0.0
     ));
     // bar_h == 0 → out of band regardless of mode.
     assert!(!cursor_in_status_bar_band(
         0.0,
         0.0,
         600.0,
-        StatusBarMode::Top
+        StatusBarMode::Top,
+        0.0,
+        0.0
     ));
     assert!(!cursor_in_status_bar_band(
         0.0,
         0.0,
         600.0,
-        StatusBarMode::Bottom
+        StatusBarMode::Bottom,
+        0.0,
+        0.0
     ));
 }
 
@@ -16191,15 +16222,23 @@ fn session_screenshot_path_under_cache_kettle_shots() {
     use super::session_screenshot_path;
     let cache = std::path::Path::new("/home/u/.cache");
     let p = session_screenshot_path(1_716_422_400, 1234, Some(cache));
-    assert_eq!(
-        p,
-        std::path::PathBuf::from("/home/u/.cache/kettle/shots/kettle-1716422400-1234.png")
+    assert_eq!(p.parent(), Some(cache.join("kettle/shots").as_path()));
+    let name = p.file_stem().unwrap().to_str().unwrap();
+    assert!(
+        name.strip_prefix("kettle-1716422400-1234-")
+            .unwrap()
+            .parse::<u64>()
+            .is_ok()
     );
     // Relative fallback when no cache dir resolves.
     let p = session_screenshot_path(1_716_422_400, 1234, None);
-    assert_eq!(
-        p,
-        std::path::PathBuf::from("kettle-shots/kettle-1716422400-1234.png")
+    assert_eq!(p.parent(), Some(std::path::Path::new("kettle-shots")));
+    let name = p.file_stem().unwrap().to_str().unwrap();
+    assert!(
+        name.strip_prefix("kettle-1716422400-1234-")
+            .unwrap()
+            .parse::<u64>()
+            .is_ok()
     );
     // .png extension is fixed (vs the `session_log_path` .log shape).
     assert_eq!(p.extension().and_then(|s| s.to_str()), Some("png"));
@@ -16966,7 +17005,7 @@ fn custom_url_handler_failure_falls_back_to_system_open() {
         .nth(1)
         .and_then(|s| s.split("fn paste_clipboard").next())
         .expect("open_url helper present");
-    assert!(open_url.contains("spawn_custom_url_handler(&cmd, uri)"));
+    assert!(open_url.contains("system_opener::open_custom(&cmd, uri);\n            return;"));
     let checked = src
         .split("fn open_checked_file(")
         .nth(1)
@@ -16982,26 +17021,31 @@ fn custom_url_handler_failure_falls_back_to_system_open() {
     let child = helper.find("Command::new(&cmd)").unwrap();
     let wait = helper.find("child.wait()").unwrap();
     assert!(worker < child && child < wait);
-    assert!(
-        open_url.contains("Ok(_) => return,"),
-        "a successful custom-url-handler spawn should own the URL"
-    );
-    assert!(
-        open_url.contains("falling through to system")
-            && open_url.contains("system_opener::open(uri,"),
-        "a failed custom-url-handler spawn must fall back to system open"
-    );
-    let failed_spawn_tail = open_url
-        .split("Err(e) => log::warn!")
+    let opener = include_str!("system_opener.rs");
+    let custom = opener
+        .split("fn open_custom(")
         .nth(1)
-        .expect("custom handler error arm present");
+        .unwrap()
+        .split("\nfn ")
+        .next()
+        .unwrap();
+    assert!(custom.contains("spawn_with("));
     assert!(
-        !failed_spawn_tail
-            .split("system_opener::open(uri,")
+        custom.contains("Ok(()) => Ok(()),"),
+        "a successful handler owns the URL"
+    );
+    let fallback = custom.split("Err(error) => {").nth(1).unwrap();
+    assert!(
+        fallback.contains("falling through to system")
+            && fallback.contains("open::that_detached(target)"),
+        "a failed custom handler must fall back on its worker"
+    );
+    assert!(
+        !fallback
+            .split("open::that_detached(target)")
             .next()
-            .unwrap_or("")
-            .contains("return;"),
-        "custom-url-handler failure must not return before system open"
+            .unwrap()
+            .contains("return;")
     );
 }
 
@@ -17319,4 +17363,418 @@ fn toast_claim_replies_keep_the_requesting_window_after_focus_moves() {
     assert!(route.contains("self.receive_update_toast(&mut ws, window, reply)"));
     assert!(route.contains("self.finish_window_dispatch(el, window, ws)"));
     assert!(route.contains("self.abandon_update_toast_claim(window, reply)"));
+}
+
+#[test]
+fn repeated_default_screenshots_have_distinct_destinations() {
+    let first = super::session_screenshot_path(123, 42, None);
+    let second = super::session_screenshot_path(123, 42, None);
+    assert_ne!(
+        first, second,
+        "captures sharing a timestamp need distinct paths"
+    );
+}
+
+#[test]
+fn screenshot_completion_retains_pending_and_reports_failure_once() {
+    let mut ws = WindowState::new(1, Mux::new());
+    let (tx, rx) = std::sync::mpsc::channel();
+    ws.screenshot_completion = Some(rx);
+    assert!(super::poll_screenshot_completion(&mut ws).is_none());
+    assert!(ws.screenshot_completion.is_some());
+    tx.send(Err("destination exists".into())).unwrap();
+    assert_eq!(
+        super::poll_screenshot_completion(&mut ws),
+        Some(Err("destination exists".into()))
+    );
+    assert!(super::poll_screenshot_completion(&mut ws).is_none());
+}
+
+#[test]
+fn custom_url_launch_uses_the_bounded_opener_worker() {
+    let src = production_source();
+    let open_url = src
+        .split("fn open_url(&mut self, ws: &WindowState, uri: &str, source: LinkSource) {")
+        .nth(1)
+        .unwrap()
+        .split("\n    fn ")
+        .next()
+        .unwrap();
+    assert!(
+        open_url.contains("system_opener::open_custom(&cmd, uri)"),
+        "custom URL process creation must run on the bounded opener worker"
+    );
+}
+
+#[test]
+fn unix_first_shell_title_can_equal_argv0() {
+    assert!(
+        !super::suppress_startup_title("sh", &["sh".into()], false),
+        "a Unix shell's OSC title equal to argv0 is legitimate"
+    );
+    assert!(super::suppress_startup_title(
+        "pwsh",
+        &["pwsh".into()],
+        true
+    ));
+}
+
+#[test]
+fn status_bar_cursor_tracks_tab_and_search_offsets() {
+    use kettle_config::StatusBarMode::{Bottom, Top};
+    assert!(
+        super::cursor_in_status_bar_band(30.0, 22.0, 600.0, Top, 24.0, 0.0),
+        "the top status strip begins below the tab bar"
+    );
+    assert!(!super::cursor_in_status_bar_band(
+        10.0, 22.0, 600.0, Top, 24.0, 0.0
+    ));
+    assert!(super::cursor_in_status_bar_band(
+        550.0, 22.0, 600.0, Bottom, 24.0, 30.0
+    ));
+    assert!(!super::cursor_in_status_bar_band(
+        590.0, 22.0, 600.0, Bottom, 24.0, 30.0
+    ));
+    assert_eq!(super::status_bar_y(600.0, 22.0, Top, 24.0, 30.0), 24.0);
+    assert_eq!(super::status_bar_y(600.0, 22.0, Bottom, 24.0, 30.0), 548.0);
+}
+
+#[test]
+fn restarts_run_focus_change_cleanup() {
+    let src = production_source();
+    let body = src
+        .split("fn process_pending_pane_restarts(")
+        .nth(1)
+        .unwrap()
+        .split("\n    fn ")
+        .next()
+        .unwrap();
+    assert!(
+        body.contains("self.note_focus_change(ws, pre);"),
+        "a replacement tab must clean up the old focus owner"
+    );
+    assert!(
+        body.find("let pre = self.focus_key(ws);").unwrap()
+            < body.find("ws.mux.new_tab_with_").unwrap()
+    );
+}
+
+#[test]
+fn restarts_use_launch_directory_routing() {
+    let src = production_source();
+    let body = src
+        .split("fn process_pending_pane_restarts(")
+        .nth(1)
+        .unwrap()
+        .split("\n    fn ")
+        .next()
+        .unwrap();
+    assert!(
+        body.contains("new_tab_with_launch_geometry("),
+        "restarts must route reported WSL directories through the launcher"
+    );
+}
+
+#[test]
+fn foreign_broadcast_scrolls_request_a_redraw() {
+    let src = production_source();
+    for (method, foreign, accepted) in [
+        (
+            "fn broadcast_input(",
+            "broadcast_write_foreign_delivery(",
+            "delivery.accepted",
+        ),
+        (
+            "fn write_terminal_key_event(",
+            "broadcast_encoded_foreign(",
+            "foreign.accepted",
+        ),
+    ] {
+        let body = src
+            .split(method)
+            .nth(1)
+            .unwrap()
+            .split("\n    fn ")
+            .next()
+            .unwrap();
+        let tail = body.split(foreign).nth(1).unwrap();
+        assert!(
+            tail.contains("other.window")
+                && tail.contains("request_redraw()")
+                && tail.contains(accepted),
+            "accepted foreign input that scrolls must repaint its window: {method}"
+        );
+    }
+}
+
+#[test]
+fn ime_composition_cannot_follow_focus_to_another_pane() {
+    for late_preedit in [false, true] {
+        let (mux, first, second) = title_test_split_mux();
+        let mut ws = WindowState::new(1, mux);
+        assert!(ws.mux.focus_pane(first));
+        super::update_ime_preedit(&mut ws, "compose".into(), None);
+        assert!(ws.mux.focus_pane(second));
+        if late_preedit {
+            super::update_ime_preedit(&mut ws, "composed".into(), None);
+        }
+        assert!(
+            !super::take_ime_commit(&mut ws),
+            "composition must not commit into a different pane"
+        );
+        super::update_ime_preedit(&mut ws, "new".into(), None);
+        assert!(super::take_ime_commit(&mut ws));
+
+        super::update_ime_preedit(&mut ws, "old".into(), None);
+        assert!(ws.mux.focus_pane(first));
+        super::end_modal_composition(&mut ws);
+        super::update_ime_preedit(&mut ws, String::new(), None);
+        assert!(ws.mux.focus_pane(second));
+        super::end_modal_composition(&mut ws);
+        assert!(
+            !super::take_ime_commit(&mut ws),
+            "returning to the pane must not revive an invalidated composition"
+        );
+    }
+    let source = production_source();
+    let focus = source
+        .split("fn note_focus_change(")
+        .nth(1)
+        .unwrap()
+        .split("\n    fn ")
+        .next()
+        .unwrap();
+    assert!(focus.contains("end_modal_composition(ws);"));
+}
+
+#[test]
+fn cancelled_pane_composition_allows_new_preedit_after_focus_moves() {
+    let (mux, first, second) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    assert!(ws.mux.focus_pane(first));
+    super::update_ime_preedit(&mut ws, "old".into(), None);
+    assert!(ws.mux.focus_pane(second));
+    super::end_modal_composition(&mut ws);
+    super::update_ime_preedit(&mut ws, String::new(), None);
+    super::update_ime_preedit(&mut ws, "new".into(), None);
+    assert!(
+        super::take_ime_commit(&mut ws),
+        "a new composition after cancellation must be accepted"
+    );
+}
+
+#[test]
+fn launch_recorder_precedes_restored_sibling_windows() {
+    let src = production_source();
+    let startup = src
+        .split("fn resumed_inner(")
+        .nth(1)
+        .unwrap()
+        .split("\nimpl ")
+        .next()
+        .unwrap();
+    let recorder = startup.find("self.recorder = Some(rec);").unwrap();
+    let sibling = startup.find(".open_window(").unwrap();
+    assert!(
+        recorder < sibling,
+        "attach recording before a restored sibling can drain output"
+    );
+    let windows = include_str!("windowing.rs");
+    let setup = windows
+        .split("mux.lua_output_subscribed = self.lua_engine.is_some();")
+        .nth(1)
+        .unwrap()
+        .split("let mut ws = WindowState::new")
+        .next()
+        .unwrap();
+    assert!(
+        setup.contains("self.startup.record.is_some()")
+            && setup.contains("self.cfg.record.enabled()")
+    );
+}
+
+#[test]
+fn modal_pointer_ownership_blocks_terminal_motion() {
+    let src = production_source();
+    let movement = src
+        .split("WindowEvent::CursorMoved { position, .. } => {")
+        .nth(1)
+        .unwrap()
+        .split("WindowEvent::")
+        .next()
+        .unwrap();
+    let report = movement
+        .find("self.send_mouse(ws, input::MOUSE_NO_BUTTON, true, true)")
+        .unwrap();
+    let condition = &movement[report.saturating_sub(100)..report];
+    assert!(
+        condition.contains("!self.pointer_modal_open(ws)"),
+        "modal pointer ownership must gate terminal motion reports"
+    );
+}
+
+#[test]
+fn tab_bar_controls_reconcile_focus_owners() {
+    let src = production_source();
+    let controls = src
+        .split("} else if bcode == 0 && in_bar(bar.new_tab, px, py) {")
+        .nth(1)
+        .unwrap()
+        .split("} else if let Some(seg) =")
+        .next()
+        .unwrap();
+    assert_eq!(
+        controls.matches("self.note_focus_change(ws, pre);").count(),
+        3,
+        "plus and both overflow arrows must reconcile focus owners"
+    );
+    assert_eq!(controls.matches("let pre = self.focus_key(ws);").count(), 3);
+}
+
+#[test]
+fn only_one_window_can_own_the_theme_preview() {
+    use kettle_config::Config;
+    let mut windows = std::collections::BTreeMap::new();
+    let mut first = WindowState::new(1, Mux::new());
+    let mut second = WindowState::new(2, Mux::new());
+    let baseline = (
+        "TokyoNight Night".to_string(),
+        kettle_config::Theme::by_name("TokyoNight Night"),
+    );
+    super::begin_theme_picker_session(&mut first, &mut windows, baseline.clone());
+    first.theme_picker_input.as_mut().unwrap().selected += 1;
+    let live = super::theme_preview_change(
+        &mut first,
+        &Config {
+            theme_name: baseline.0.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    windows.insert(1, first);
+    let restored = super::begin_theme_picker_session(&mut second, &mut windows, live);
+    assert!(
+        windows[&1].theme_picker_input.is_none(),
+        "opening another picker must retire the previous preview owner"
+    );
+    assert!(windows[&1].theme_preview.is_none());
+    assert_eq!(
+        restored.as_ref().map(|state| state.0.as_str()),
+        Some(baseline.0.as_str())
+    );
+    second.theme_picker_input.as_mut().unwrap().query = "Dracula".into();
+    second.theme_picker_input.as_mut().unwrap().selected = 0;
+    let preview = super::theme_preview_change(
+        &mut second,
+        &Config {
+            theme_name: baseline.0.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        super::theme_preview_change(
+            windows.get_mut(&1).unwrap(),
+            &Config {
+                theme_name: preview.0.clone(),
+                ..Default::default()
+            }
+        )
+        .is_none()
+    );
+    second.theme_picker_input = None;
+    let restored = super::theme_preview_change(
+        &mut second,
+        &Config {
+            theme_name: preview.0.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(restored.0, baseline.0);
+    assert_eq!(restored.1.background, baseline.1.background);
+}
+
+#[test]
+fn theme_previews_preserve_configured_color_overrides() {
+    use kettle_config::Config;
+    let cfg = Config::parse_text(
+        "background = #010203\nforeground = #040506\ncursor-color = #070809\npalette = 4=#123456\n",
+    );
+    let baseline = cfg.theme.clone();
+    let mut ws = WindowState::new(1, Mux::new());
+    super::begin_theme_picker(&mut ws, (cfg.theme_name.clone(), baseline.clone()));
+    let picker = ws.theme_picker_input.as_mut().unwrap();
+    picker.query = "Dracula".into();
+    picker.selected = 0;
+    let (name, preview) = super::theme_preview_change(&mut ws, &cfg).unwrap();
+    assert_eq!(
+        preview.background,
+        kettle_config::Rgb::parse("#010203").unwrap(),
+        "preview must retain configured background overrides"
+    );
+    assert_eq!(
+        preview.foreground,
+        kettle_config::Rgb::parse("#040506").unwrap()
+    );
+    assert_eq!(
+        preview.cursor,
+        kettle_config::Rgb::parse("#070809").unwrap()
+    );
+    assert_eq!(
+        preview.palette[4],
+        kettle_config::Rgb::parse("#123456").unwrap()
+    );
+    let committed = cfg.theme_by_name(&name);
+    assert_eq!(preview.background, committed.background);
+    assert_eq!(preview.palette, committed.palette);
+    ws.theme_picker_input = None;
+    let restored = super::theme_preview_change(&mut ws, &cfg).unwrap();
+    assert_eq!(restored.1.background, baseline.background);
+    assert_eq!(restored.1.palette, baseline.palette);
+}
+
+#[test]
+fn command_deadlines_are_maintained_before_gpu_recovery() {
+    let src = production_source();
+    let scheduler = src.split("fn about_to_wait_inner(").nth(1).unwrap();
+    let maintenance = scheduler
+        .find("self.check_pending_run_deadlines(ws);")
+        .unwrap();
+    let recovery = scheduler
+        .find("if self.gpu.as_ref().is_some_and(|g| g.is_lost())")
+        .unwrap();
+    assert!(
+        maintenance < recovery,
+        "GPU recovery waits must not bypass command timeout maintenance"
+    );
+    assert!(scheduler[..recovery].contains("chain(pending_run_wait)"));
+    let recovery = scheduler[recovery..]
+        .split("if ws.pty_resize_retry")
+        .next()
+        .unwrap();
+    assert_eq!(
+        recovery.matches("automation_wait.map_or").count(),
+        2,
+        "both recovery backoff returns must retain the command deadline"
+    );
+}
+
+#[test]
+fn background_frames_do_not_delay_cursor_blink() {
+    use std::time::Duration;
+    assert_eq!(
+        super::animation_wait(false, Some(1000), Some(Duration::from_millis(330))),
+        Some(Duration::from_millis(330)),
+        "a later background frame must not delay the cursor edge"
+    );
+    assert_eq!(
+        super::animation_wait(false, Some(100), Some(Duration::from_millis(530))),
+        Some(Duration::from_millis(100))
+    );
+    assert_eq!(
+        super::animation_wait(true, Some(1000), Some(Duration::from_millis(5))),
+        Some(Duration::from_millis(5))
+    );
+    assert_eq!(super::animation_wait(false, None, None), None);
 }

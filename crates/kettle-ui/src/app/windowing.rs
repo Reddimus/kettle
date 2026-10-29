@@ -373,8 +373,11 @@ impl App {
         mux.osc52_copy_allowed = osc52_copy_is_available(self.cfg.osc52, self.clipboard.is_some());
         mux.autoclean_groups = self.cfg.autoclean_groups;
         {
-            mux.lua_output_subscribed |= self.recorder.is_some();
-            mux.record_lossless = self.recorder.is_some();
+            let recording_requested = self.recorder.is_some()
+                || self.startup.record.is_some()
+                || self.cfg.record.enabled();
+            mux.lua_output_subscribed |= recording_requested;
+            mux.record_lossless = recording_requested;
         }
         let mut ws = WindowState::new(seq, mux);
         ws.window_shown = !should_reveal_after_renderer_init(state);

@@ -16,7 +16,19 @@ impl App {
             .as_ref()
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
-        cursor_in_status_bar_band(ws.cursor.y as f32, h, sh as f32, self.cfg.status_bar)
+        let tab_top_h = if matches!(self.cfg.tab_bar_pos, TabBarPos::Top) {
+            self.tab_bar_h(ws)
+        } else {
+            0.0
+        };
+        cursor_in_status_bar_band(
+            ws.cursor.y as f32,
+            h,
+            sh as f32,
+            self.cfg.status_bar,
+            tab_top_h,
+            self.search_bar_h(ws),
+        )
     }
 
     /// Combined chrome-band hit-test. True when the cursor is over the tab
@@ -451,17 +463,18 @@ impl App {
             .as_ref()
             .map(|r| r.surface_size().1 as f32)
             .unwrap_or(600.0);
-        let y = match self.cfg.status_bar {
-            kettle_config::StatusBarMode::Top => {
-                if matches!(self.cfg.tab_bar_pos, TabBarPos::Top) {
-                    self.tab_bar_h(ws)
-                } else {
-                    0.0
-                }
-            }
-            kettle_config::StatusBarMode::Bottom => surface_h - self.search_bar_h(ws) - h,
-            kettle_config::StatusBarMode::Off => 0.0,
+        let tab_top_h = if matches!(self.cfg.tab_bar_pos, TabBarPos::Top) {
+            self.tab_bar_h(ws)
+        } else {
+            0.0
         };
+        let y = status_bar_y(
+            surface_h,
+            h,
+            self.cfg.status_bar,
+            tab_top_h,
+            self.search_bar_h(ws),
+        );
         // Compose text: local HH:MM:SS · theme · focused pane title.
         let (hh, mm, ss) = crate::wall_clock::now_local();
         let title = ws

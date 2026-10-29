@@ -17,7 +17,7 @@ impl App {
     /// Reconcile the live theme with the theme picker after every event (see
     /// `theme_preview_change`).
     pub(super) fn sync_theme_preview(&mut self, ws: &mut WindowState) {
-        if let Some((name, theme)) = theme_preview_change(ws, &self.cfg.theme_name) {
+        if let Some((name, theme)) = theme_preview_change(ws, &self.cfg) {
             self.set_runtime_theme_state(ws, name, theme);
         }
     }

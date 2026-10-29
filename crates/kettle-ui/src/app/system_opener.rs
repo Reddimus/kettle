@@ -20,6 +20,23 @@ pub(super) fn open(target: impl AsRef<OsStr>, report: impl Fn(io::Error) + Send 
     );
 }
 
+pub(super) fn open_custom(cmd: &str, target: &str) {
+    let cmd = cmd.to_owned();
+    let _ = spawn_with(
+        &OPENERS,
+        MAX_OPENERS,
+        target.into(),
+        move |target| match super::spawn_custom_url_handler(&cmd, &target.to_string_lossy()) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                log::warn!("custom-url-handler {cmd:?}: {error}; falling through to system");
+                open::that_detached(target)
+            }
+        },
+        |error| log::warn!("failed to open a terminal-supplied URL: {error}"),
+    );
+}
+
 fn spawn_with(
     counter: &'static AtomicUsize,
     limit: usize,

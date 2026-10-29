@@ -3755,19 +3755,33 @@ fn content_rect_for_with_strip(
 /// Uses `<cache>/kettle/shots/` (mirrors the `session_log_path` scheme below); falls
 /// back to `./kettle-shots/` when no cache dir resolves.
 ///
-/// File name shape: `kettle-<unix-secs>-<pid>.png`. `Action::TakeScreenshot`
+/// File name shape: `kettle-<unix-secs>-<pid>-<sequence>.png`. `Action::TakeScreenshot`
 /// and a ctl `screenshot` request without a `path` capture to it.
 ///
-/// Pure modulo `unix_secs` + `cache_dir` — caller pins both.
+/// The process-wide sequence distinguishes captures sharing a timestamp.
 fn session_screenshot_path(
     unix_secs: u64,
     pid: u32,
     cache_dir: Option<&std::path::Path>,
 ) -> std::path::PathBuf {
+    static NEXT_SHOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT_SHOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = cache_dir
         .map(|p| p.to_path_buf().join("kettle").join("shots"))
         .unwrap_or_else(|| std::path::PathBuf::from("kettle-shots"));
-    dir.join(format!("kettle-{unix_secs}-{pid}.png"))
+    dir.join(format!("kettle-{unix_secs}-{pid}-{sequence}.png"))
+}
+
+fn poll_screenshot_completion(ws: &mut WindowState) -> Option<Result<std::path::PathBuf, String>> {
+    let result = match ws.screenshot_completion.as_ref()?.try_recv() {
+        Ok(result) => result,
+        Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Err("screenshot capture worker disconnected".into())
+        }
+    };
+    ws.screenshot_completion = None;
+    Some(result)
 }
 
 /// Validate a caller-supplied `screenshot` destination. `path` reaches here
@@ -5561,6 +5575,20 @@ fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) ->
     }
 }
 
+fn status_bar_y(
+    surface_h: f32,
+    bar_h: f32,
+    pos: kettle_config::StatusBarMode,
+    tab_top_h: f32,
+    search_h: f32,
+) -> f32 {
+    match pos {
+        kettle_config::StatusBarMode::Top => tab_top_h,
+        kettle_config::StatusBarMode::Bottom => surface_h - search_h - bar_h,
+        kettle_config::StatusBarMode::Off => 0.0,
+    }
+}
+
 /// Sibling of `cursor_in_tab_bar_band` for the status bar, so the
 /// chrome-cursor logic treats both bars uniformly. The status strip is outside
 /// every pane rect and the tab-bar band, so without this check hovering it
@@ -5570,14 +5598,17 @@ fn cursor_in_status_bar_band(
     bar_h: f32,
     surface_h: f32,
     pos: kettle_config::StatusBarMode,
+    tab_top_h: f32,
+    search_h: f32,
 ) -> bool {
     if bar_h <= 0.0 {
         return false;
     }
+    let bar_y = status_bar_y(surface_h, bar_h, pos, tab_top_h, search_h);
     match pos {
         kettle_config::StatusBarMode::Off => false,
-        kettle_config::StatusBarMode::Top => y >= 0.0 && y < bar_h,
-        kettle_config::StatusBarMode::Bottom => y >= (surface_h - bar_h) && y <= surface_h,
+        kettle_config::StatusBarMode::Top => y >= bar_y && y < bar_y + bar_h,
+        kettle_config::StatusBarMode::Bottom => y >= bar_y && y <= bar_y + bar_h,
     }
 }
 
@@ -6037,6 +6068,10 @@ fn pane_title_parts(
 ///
 /// Pure (unit-tested). Never fires on Unix/macOS — those shells don't emit an
 /// absolute-Windows-path title and conhost doesn't exist there.
+fn suppress_startup_title(title: &str, argv: &[String], windows: bool) -> bool {
+    windows && is_conhost_startup_title(title, argv)
+}
+
 fn is_conhost_startup_title(title: &str, argv: &[String]) -> bool {
     let t = title.trim().trim_matches('"');
     if t.is_empty() {
@@ -8830,18 +8865,38 @@ fn begin_theme_picker(ws: &mut WindowState, live: ThemeState) -> Option<ThemeSta
     restore
 }
 
+fn begin_theme_picker_session(
+    ws: &mut WindowState,
+    windows: &mut std::collections::BTreeMap<u64, WindowState>,
+    live: ThemeState,
+) -> Option<ThemeState> {
+    for other in windows.values_mut() {
+        if let Some(baseline) = other.theme_preview.take() {
+            ws.theme_preview = Some(baseline);
+        }
+        if other.theme_picker_input.take().is_some() {
+            end_modal_composition(other);
+            if let Some(window) = &other.window {
+                window.request_redraw();
+            }
+        }
+    }
+    begin_theme_picker(ws, live)
+}
+
 /// The theme the window must switch to after an event, if any, while
 /// `live_name` is the one it wears. An open picker shows its selection, or its
 /// baseline while nothing matches the query; the baseline stays until the
 /// picker closes. A picker that closed without keeping a theme (a kept one
 /// clears the baseline first) puts the baseline back.
-fn theme_preview_change(ws: &mut WindowState, live_name: &str) -> Option<ThemeState> {
+fn theme_preview_change(ws: &mut WindowState, cfg: &Config) -> Option<ThemeState> {
+    let live_name = cfg.theme_name.as_str();
     let Some(state) = ws.theme_picker_input.as_ref() else {
         return ws.theme_preview.take();
     };
     match theme_picker_selection(state) {
         Some(name) if name == live_name => None,
-        Some(name) => Some((name.to_string(), kettle_config::Theme::by_name(name))),
+        Some(name) => Some((name.to_string(), cfg.theme_by_name(name))),
         None => ws
             .theme_preview
             .as_ref()
@@ -11523,6 +11578,12 @@ impl App {
                     .entry(event.physical_key)
                     .or_default()
                     .extend(recipients);
+                if scroll_to_bottom
+                    && foreign.accepted
+                    && let Some(window) = &other.window
+                {
+                    window.request_redraw();
+                }
                 Self::dismiss_media_paste_receipt_after_delivery(other, foreign);
                 if let Some(input_time) = input_time {
                     stamp_accepted_input(&mut other.last_typed, foreign, input_time);
@@ -12150,13 +12211,9 @@ impl App {
             return;
         }
         if self.cfg.use_custom_url_handler && !self.cfg.custom_url_handler.is_empty() {
-            // Custom handler — spawn detached so a long-running
-            // browser launch doesn't freeze kettle.
             let cmd = self.cfg.custom_url_handler.clone();
-            match spawn_custom_url_handler(&cmd, uri) {
-                Ok(_) => return,
-                Err(e) => log::warn!("custom-url-handler {cmd:?}: {e}; falling through to system"),
-            }
+            system_opener::open_custom(&cmd, uri);
+            return;
         }
         system_opener::open(uri, |e| {
             log::warn!("failed to open a terminal-supplied URL: {e}");
@@ -12445,7 +12502,9 @@ impl App {
                     // checked; ANY genuine OSC 2 title (incl. a later one from
                     // the shell's own prompt) is stored and permanently ends
                     // suppression, so a program-set title is never lost.
-                    if pane.title_is_placeholder && is_conhost_startup_title(&t, &pane.argv) {
+                    if pane.title_is_placeholder
+                        && suppress_startup_title(&t, &pane.argv, cfg!(windows))
+                    {
                         // keep the placeholder seed; do not store the exe path
                     } else {
                         apply_shell_title(
@@ -12801,15 +12860,17 @@ impl App {
                 .get(&pane_id)
                 .map(|pane| (pane.argv.clone(), pane.term.current_dir_or_native()));
             if let Some((argv, cwd)) = restart_info {
-                if let Err(error) = ws.mux.new_tab_with_geometry(
+                let pre = self.focus_key(ws);
+                if let Err(error) = ws.mux.new_tab_with_launch_geometry(
                     &self.cfg,
                     geometry,
                     waker.clone(),
-                    &argv,
-                    cwd.as_deref(),
+                    argv,
+                    cwd,
                 ) {
                     log::warn!("exit-action = restart: spawn failed for pane {pane_id}: {error}");
                 } else {
+                    self.note_focus_change(ws, pre);
                     self.fire_tab_add_event(ws);
                 }
             }
@@ -14299,6 +14360,7 @@ impl App {
     /// cursor visible on the new pane right away.
     fn note_focus_change(&mut self, ws: &mut WindowState, pre: (usize, Option<u64>)) {
         if self.focus_key(ws) != pre {
+            end_modal_composition(ws);
             // Focus moved to a pane, so not to a card any more.
             if ws.card_focus.take().is_some() {
                 ws.accessibility_pending = true;
@@ -14713,6 +14775,12 @@ impl App {
                     scroll_to_bottom,
                     receipt_pane,
                 );
+                if scroll_to_bottom
+                    && delivery.accepted
+                    && let Some(window) = &other.window
+                {
+                    window.request_redraw();
+                }
                 Self::dismiss_media_paste_receipt_after_delivery(other, delivery);
                 stamp_accepted_input(&mut other.last_typed, delivery, input_time);
                 result = result.merge(delivery.result);
@@ -15645,6 +15713,7 @@ impl App {
                 ) {
                     log::error!("duplicate_pane failed: {e}");
                 } else {
+                    self.restore_scaled_zoom_font(ws);
                     self.resize_all(ws);
                 }
             }
@@ -15766,11 +15835,12 @@ impl App {
                     let path = session_screenshot_path(secs, std::process::id(), cache.as_deref());
                     let path_str = path.display().to_string();
                     let proxy = self.proxy.clone();
+                    let (completion, receiver) = std::sync::mpsc::channel();
                     let request = kettle_render::ScreenshotRequest {
                         out_path: path,
                         output_policy: kettle_render::ScreenshotOutputPolicy::PrivateState,
                         crop,
-                        completion: None,
+                        completion: Some(completion),
                         cancellation: None,
                         recovery_wake: Some(kettle_render::ScreenshotRecoveryWake::new(
                             move || {
@@ -15778,7 +15848,10 @@ impl App {
                             },
                         )),
                     };
-                    if renderer.set_pending_screenshot(request).is_ok() {
+                    if ws.screenshot_completion.is_none()
+                        && renderer.set_pending_screenshot(request).is_ok()
+                    {
+                        ws.screenshot_completion = Some(receiver);
                         log::info!("take_screenshot: queued -> {path_str}");
                         fire_notify(
                             self.ui_text
@@ -18246,6 +18319,21 @@ fn focus_report_transition(
     }
 }
 
+fn animation_wait(
+    animation_active: bool,
+    background_ms: Option<u64>,
+    blink_wait: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    [
+        animation_active.then(|| std::time::Duration::from_millis(33)),
+        background_ms.map(|ms| std::time::Duration::from_millis(ms.clamp(16, 1000))),
+        blink_wait,
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+}
+
 fn cursor_blink_active(configured: bool, pane_requests_blink: bool, window_focused: bool) -> bool {
     configured && pane_requests_blink && window_focused
 }
@@ -18260,8 +18348,13 @@ fn normalized_ime_preedit(
 fn current_ime_owner(ws: &WindowState) -> crate::window_state::ImePreeditOwner {
     if ws.search.open {
         crate::window_state::ImePreeditOwner::Search
-    } else {
+    } else if modal_holds_cursor_steady(ws) {
         crate::window_state::ImePreeditOwner::Other
+    } else {
+        ws.mux
+            .active_focus()
+            .map(crate::window_state::ImePreeditOwner::Terminal)
+            .unwrap_or(crate::window_state::ImePreeditOwner::Other)
     }
 }
 
@@ -18271,12 +18364,30 @@ fn update_ime_preedit(
     selection: Option<(usize, usize)>,
 ) -> bool {
     use crate::window_state::ImePreeditSession;
+    let owner = current_ime_owner(ws);
+    let generation = ws.ime_focus_generation;
+    if let Some(session) = ws.ime_preedit_owner.as_mut()
+        && matches!(
+            session.owner,
+            crate::window_state::ImePreeditOwner::Terminal(_)
+        )
+        && (session.owner != owner || session.generation != generation)
+    {
+        if text.is_empty() {
+            session.empty_after_focus = true;
+            ws.ime_preedit = None;
+            return true;
+        }
+        if !session.empty_after_focus {
+            ws.ime_preedit = None;
+            return true;
+        }
+        ws.ime_preedit_owner = None;
+    }
     let next = normalized_ime_preedit(text, selection);
     if ws.ime_preedit == next {
         return false;
     }
-    let owner = current_ime_owner(ws);
-    let generation = ws.ime_focus_generation;
     match (next.is_some(), ws.ime_preedit_owner) {
         // A composition begins here, unless one under way here goes on.
         (true, session)
@@ -18290,6 +18401,7 @@ fn update_ime_preedit(
                 owner,
                 generation,
                 ended: None,
+                empty_after_focus: false,
             });
         }
         // Emptied where it began: cancelled, or leading into a Commit for
@@ -18319,9 +18431,12 @@ fn take_ime_commit(ws: &mut WindowState) -> bool {
     let owner = current_ime_owner(ws);
     let generation = ws.ime_focus_generation;
     ws.ime_preedit_owner.take().is_none_or(|session| {
-        // A session that ended before focus moved on again is stale: no
-        // Commit was still due for it, so this one is new input here.
-        session.ended.is_some_and(|ended| ended != generation)
+        // A modal session that ended before focus moved on again is stale.
+        // Terminal sessions keep rejecting their old composition.
+        (!matches!(
+            session.owner,
+            crate::window_state::ImePreeditOwner::Terminal(_)
+        ) && session.ended.is_some_and(|ended| ended != generation))
             || (session.owner == owner && session.generation == generation)
     })
 }
@@ -19632,6 +19747,36 @@ impl App {
         } else {
             None
         };
+        // Restored sibling windows can drain output as soon as they open.
+        if let Some((target, raw)) = dev_record {
+            let (cols, rows) = self.grid_of(ws, self.area(ws));
+            match crate::dev_record::Recorder::start_target_async(
+                &target,
+                cols as u16,
+                rows as u16,
+                raw,
+            ) {
+                Ok(mut rec) => {
+                    log::info!("dev-record: queued asynchronous start for {target:?}");
+                    let proxy = self.proxy.clone();
+                    rec.set_failure_waker(Arc::new(move || {
+                        let _ = proxy.send_event(UserEvent::Wakeup);
+                    }));
+                    self.recording_start_failed = false;
+                    self.recording_error_reported = false;
+                    self.recorder = Some(rec);
+                    self.sync_recording_state(ws, "");
+                }
+                Err(e) => {
+                    log::warn!("dev-record: could not start recorder for {target:?}: {e}");
+                    self.recording_start_failed = true;
+                    let body = self
+                        .ui_text
+                        .notify_body_recording_start_failed(&e.to_string());
+                    self.sync_recording_state(ws, &body);
+                }
+            }
+        }
         let restored = if spawned_early {
             true
         } else if has_launch_override {
@@ -19770,41 +19915,6 @@ impl App {
         // FIFO. Run one bounded slice before the first paint; a stalled child
         // retains the exact head message and about_to_wait drives retries.
         let _ = self.poll_pending_lua_commands(ws, event_loop, std::time::Instant::now());
-        // Start the session recorder now that the grid exists (when requested
-        // via `--record` / `KETTLE_RECORD` or the `record = on` config key;
-        // resolved above). Start it BEFORE the first `redraw()` below, which
-        // runs the first `drain_events()` and tees PTY output into the trace. A
-        // later start drops the session's opening output (e.g. a fast
-        // `-e cmd`'s line).
-        if let Some((target, raw)) = dev_record {
-            let (cols, rows) = self.grid_of(ws, self.area(ws));
-            match crate::dev_record::Recorder::start_target_async(
-                &target,
-                cols as u16,
-                rows as u16,
-                raw,
-            ) {
-                Ok(mut rec) => {
-                    log::info!("dev-record: queued asynchronous start for {target:?}");
-                    let proxy = self.proxy.clone();
-                    rec.set_failure_waker(Arc::new(move || {
-                        let _ = proxy.send_event(UserEvent::Wakeup);
-                    }));
-                    self.recording_start_failed = false;
-                    self.recording_error_reported = false;
-                    self.recorder = Some(rec);
-                    self.sync_recording_state(ws, "");
-                }
-                Err(e) => {
-                    log::warn!("dev-record: could not start recorder for {target:?}: {e}");
-                    self.recording_start_failed = true;
-                    let body = self
-                        .ui_text
-                        .notify_body_recording_start_failed(&e.to_string());
-                    self.sync_recording_state(ws, &body);
-                }
-            }
-        }
         if should_reveal_before_first_surface_frame(
             self.cfg.window_state,
             ws.window_shown,
@@ -20547,7 +20657,9 @@ impl App {
                     // 1003 exists to deliver; `send_mouse` decides per mode
                     // whether this motion is reportable at all, so 1002 still
                     // needs a held button and 1000 still gets nothing.
-                    if self.send_mouse(ws, input::MOUSE_NO_BUTTON, true, true) {
+                    if !self.pointer_modal_open(ws)
+                        && self.send_mouse(ws, input::MOUSE_NO_BUTTON, true, true)
+                    {
                         return;
                     }
                 }
@@ -20789,8 +20901,12 @@ impl App {
                         // Log a `+`-button new-tab spawn failure rather than
                         // swallowing it, and fire TabAdd on success so Lua
                         // `TabAdd` and dev-record see the new tab.
+                        let pre = self.focus_key(ws);
                         match ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
-                            Ok(()) => self.fire_tab_add_event(ws),
+                            Ok(()) => {
+                                self.note_focus_change(ws, pre);
+                                self.fire_tab_add_event(ws);
+                            }
                             Err(e) => log::warn!("could not open a new tab (+ button): {e}"),
                         }
                     } else if bcode == 0
@@ -20799,12 +20915,16 @@ impl App {
                     {
                         // `‹` overflow arrow — step to an earlier tab
                         // (scrolls it into view via tab_strip_layout).
+                        let pre = self.focus_key(ws);
                         ws.mux.prev_tab();
+                        self.note_focus_change(ws, pre);
                     } else if bcode == 0
                         && bar.scroll_right.2 > 0.0
                         && in_bar(bar.scroll_right, px, py)
                     {
+                        let pre = self.focus_key(ws);
                         ws.mux.next_tab();
+                        self.note_focus_change(ws, pre);
                     } else if let Some(seg) = bar.segments.iter().find(|s| in_bar(s.rect, px, py)) {
                         let close = bcode == 1 || in_bar(seg.close, px, py);
                         if close {
@@ -22134,6 +22254,16 @@ impl App {
             ws.pending_video_paste_receipt = None;
         }
         let now = std::time::Instant::now();
+        if let Some(Err(error)) = poll_screenshot_completion(ws) {
+            fire_notify(
+                self.ui_text.text(kettle_i18n::Text::PaletteTakeScreenshot),
+                &error,
+            );
+        }
+        let screenshot_wait = ws
+            .screenshot_completion
+            .as_ref()
+            .map(|_| std::time::Duration::from_millis(50));
         if ws
             .pending_video_paste_receipt
             .as_ref()
@@ -22178,6 +22308,23 @@ impl App {
             (Some(wait), None) | (None, Some(wait)) => Some(wait),
             (None, None) => None,
         };
+        self.check_pending_run_deadlines(ws);
+        let pending_run_wait =
+            self.pending_runs
+                .values()
+                .map(|p| p.deadline)
+                .min()
+                .map(|soonest| {
+                    soonest.saturating_duration_since(now).clamp(
+                        std::time::Duration::from_millis(1),
+                        std::time::Duration::from_millis(500),
+                    )
+                });
+        let automation_wait = automation_wait
+            .into_iter()
+            .chain(screenshot_wait)
+            .chain(pending_run_wait)
+            .min();
         if self.window_close_pending(ws.seq) || self.quit_requested {
             return None;
         }
@@ -22664,19 +22811,15 @@ impl App {
         // Pick the earliest wake we still need: ~30 fps for bell / animation /
         // autoscroll / the resize chip, the cursor-blink half-period deadline,
         // or the pending coalesced output paint's deadline.
-        let mut wait: Option<std::time::Duration> =
-            if bell_active || term_anim || autoscroll_active || resize_chip_active {
-                Some(std::time::Duration::from_millis(33))
-            } else if let Some(bg_ms) = bg_anim_interval {
-                // Animated bg: wake exactly at its next frame boundary (its
-                // own fps), not 30 fps.
-                Some(std::time::Duration::from_millis(bg_ms.clamp(16, 1000)))
-            } else if blink_active {
-                let remaining = blink_interval.saturating_sub(blink_elapsed);
-                Some(remaining.max(std::time::Duration::from_millis(1)))
-            } else {
-                None
-            };
+        let blink_wait = blink_active.then(|| {
+            let remaining = blink_interval.saturating_sub(blink_elapsed);
+            remaining.max(std::time::Duration::from_millis(1))
+        });
+        let mut wait = animation_wait(
+            bell_active || term_anim || autoscroll_active || resize_chip_active,
+            bg_anim_interval,
+            blink_wait,
+        );
         if let Some(next) = frame_recovery_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
@@ -22803,24 +22946,12 @@ impl App {
                 window.request_redraw();
             }
         }
-        // Reply `timed_out` to any pending
-        // run_command whose deadline has passed, and—while runs are pending—
-        // schedule a wake at the soonest deadline so a fully-silent command
-        // (no output to wake us) still times out on time.
-        self.check_pending_run_deadlines(ws);
         // `show` pushes waiting past their deadline are answered, and those
         // whose pane closed are dropped, even when nothing else wakes us.
         self.media_tick(ws);
         self.prune_previews(ws);
         self.open_ready_previews(ws);
         if let Some(soonest) = self.media.next_deadline() {
-            let next = soonest.saturating_duration_since(now).clamp(
-                std::time::Duration::from_millis(1),
-                std::time::Duration::from_millis(500),
-            );
-            wait = Some(wait.map_or(next, |current| current.min(next)));
-        }
-        if let Some(soonest) = self.pending_runs.values().map(|p| p.deadline).min() {
             let next = soonest.saturating_duration_since(now).clamp(
                 std::time::Duration::from_millis(1),
                 std::time::Duration::from_millis(500),

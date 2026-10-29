@@ -108,7 +108,11 @@ fn live(name: &str) -> (String, Theme) {
 /// Apply the preview's next change as the App would, returning the theme
 /// the window then wears.
 fn settle(ws: &mut WindowState, wearing: &str) -> String {
-    theme_preview_change(ws, wearing)
+    let cfg = kettle_config::Config {
+        theme_name: wearing.to_string(),
+        ..Default::default()
+    };
+    theme_preview_change(ws, &cfg)
         .map(|(name, _)| name)
         .unwrap_or_else(|| wearing.to_string())
 }
@@ -156,7 +160,16 @@ fn the_preview_restores_the_theme_the_picker_opened_on() {
     ws.theme_picker_input = None;
     assert_eq!(settle(&mut ws, &previewed), opened);
     assert!(ws.theme_preview.is_none());
-    assert!(theme_preview_change(&mut ws, opened).is_none());
+    assert!(
+        theme_preview_change(
+            &mut ws,
+            &kettle_config::Config {
+                theme_name: opened.to_string(),
+                ..Default::default()
+            }
+        )
+        .is_none()
+    );
 }
 
 /// Enter keeps the previewed theme: nothing puts the opening one back.
@@ -169,7 +182,16 @@ fn a_kept_theme_stays() {
     // `commit_theme` drops the baseline, then the picker closes.
     ws.theme_preview = None;
     ws.theme_picker_input = None;
-    assert!(theme_preview_change(&mut ws, &kept).is_none());
+    assert!(
+        theme_preview_change(
+            &mut ws,
+            &kettle_config::Config {
+                theme_name: kept.to_string(),
+                ..Default::default()
+            }
+        )
+        .is_none()
+    );
 }
 
 /// A composition a closing modal owned ends, so a late Commit cannot type
@@ -180,6 +202,7 @@ fn closing_a_modal_ends_its_composition() {
     ws.ime_preedit = Some(("ka".into(), None));
     ws.ime_preedit_owner = Some(ImePreeditSession {
         ended: None,
+        empty_after_focus: false,
         owner: ImePreeditOwner::Other,
         generation: ws.ime_focus_generation,
     });

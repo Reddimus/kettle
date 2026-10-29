@@ -459,6 +459,7 @@ pub(crate) struct WindowAccent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ImePreeditOwner {
     Search,
+    Terminal(u64),
     Other,
 }
 
@@ -467,9 +468,12 @@ pub(crate) struct ImePreeditSession {
     pub(crate) owner: ImePreeditOwner,
     pub(crate) generation: u64,
     /// The focus generation at which the composition left the screen while
-    /// its Commit could still arrive. Once focus moves on from there, no
-    /// Commit is due and the session guards nothing.
+    /// its Commit could still arrive. Modal sessions stop guarding after the
+    /// next focus move; terminal sessions guard until Commit or cancellation.
     pub(crate) ended: Option<u64>,
+    /// An empty preedit may precede Commit; the next nonempty preedit starts
+    /// a new composition if the old one was cancelled after focus moved.
+    pub(crate) empty_after_focus: bool,
 }
 
 const MEDIA_RECEIPT_EXPANDED: std::time::Duration = std::time::Duration::from_secs(4);
@@ -1263,6 +1267,8 @@ pub(crate) struct WindowState {
     /// so runtime font zoom, cell scaling, per-window accent, and a queued
     /// screenshot completion cannot be reset or lost between retries.
     pub(crate) renderer_recovery: Option<kettle_render::RendererRecoveryState>,
+    pub(crate) screenshot_completion:
+        Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     /// Coalesces a monitor scale transition with its corresponding physical
     /// resize so PTYs observe one final grid, never an intermediate reflow.
     pub(crate) dpi_resize: DpiResizeCoalescer,
@@ -1598,6 +1604,7 @@ impl WindowState {
             frame_recovery: FrameRecoveryState::default(),
             pty_resize_retry: PtyResizeRetryState::default(),
             renderer_recovery: None,
+            screenshot_completion: None,
             dpi_resize: DpiResizeCoalescer::default(),
             dpi_resize_surface_suspended: false,
             accent: None,

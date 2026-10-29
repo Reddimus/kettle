@@ -1719,7 +1719,7 @@ impl App {
         self.close_all_modals(ws);
         ws.settings_nav = settings;
         let live = (self.cfg.theme_name.clone(), self.cfg.theme.clone());
-        if let Some((name, theme)) = begin_theme_picker(ws, live) {
+        if let Some((name, theme)) = begin_theme_picker_session(ws, &mut self.windows, live) {
             self.set_runtime_theme_state(ws, name, theme);
         }
     }
