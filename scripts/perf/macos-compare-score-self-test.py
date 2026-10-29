@@ -182,6 +182,72 @@ class ApplePayloadTests(unittest.TestCase):
                     self.assertEqual(namespace["main"](), 7)
 
 
+class ProcessCleanupTests(unittest.TestCase):
+    def registry(self):
+        source = SCRIPT.read_text()
+        marker = 'cat > "$process_registry" <<\'PY\'\n'
+        start = source.index(marker) + len(marker)
+        namespace = {'__name__': 'registry_test'}
+        exec(compile(source[start:source.index('\nPY\n', start)], str(SCRIPT), 'exec'), namespace)
+        return namespace
+
+    def test_registry_rechecks_identity_before_each_signal_and_unregisters(self):
+        registry = self.registry()
+        with tempfile.TemporaryDirectory() as raw:
+            log = Path(raw) / 'pids'
+            with mock.patch.object(registry['subprocess'], 'run', side_effect=[
+                subprocess.CompletedProcess([], 0, 'original start\n', ''),
+                subprocess.CompletedProcess([], 0, 'original start\n', ''),
+                subprocess.CompletedProcess([], 0, 'reused start\n', ''),
+            ]), mock.patch.object(registry['os'], 'kill') as kill:
+                start = registry['register'](log, 123)
+                self.assertEqual(log.read_text(), '123\toriginal start\n')
+                registry['update'](log, 'signal-all', sig='TERM')
+                registry['update'](log, 'signal-all', sig='KILL')
+                kill.assert_called_once_with(123, registry['signal'].SIGTERM)
+            registry['update'](log, 'unregister', 123, start)
+            self.assertEqual(log.read_text(), '')
+
+    def test_cleanup_does_not_signal_a_reused_pid(self):
+        source = SCRIPT.read_text()
+        start = source.index('cleanup() {')
+        end = source.index('\ntrap cleanup EXIT', start)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            log = root / 'pids'
+            log.write_text('123\tWed Oct 28 10:00:00 2026\n')
+            # Use a shell kill double so the regression cannot signal a real PID.
+            prelude = '''kill() { printf '%s\\n' "$*" >> "$calls"; }
+sleep() { :; }
+'''
+            # The historical implementation logged just the numeric PID.
+            if 'process_registry=' not in source:
+                log.write_text('123\n')
+            else:
+                marker = 'cat > "$process_registry" <<\'PY\'\n'
+                helper_start = source.index(marker) + len(marker)
+                (root / 'registry.py').write_text(source[helper_start:source.index('\nPY\n', helper_start)])
+            (root / 'ps').write_text('#!/bin/sh\necho checked >> "$ps_calls"\n'
+                                    'printf "Thu Oct 29 10:00:00 2026\\n"\n')
+            (root / 'ps').chmod(0o755)
+            (root / 'python3').write_text('#!' + sys.executable + '\nimport os, runpy, sys\n'
+                'def record(*args):\n'
+                '    with open(os.environ["calls"], "a") as log: log.write(str(args))\n'
+                'os.kill = record\nsys.argv = sys.argv[1:]\nrunpy.run_path(sys.argv[0], run_name="__main__")\n')
+            (root / 'python3').chmod(0o755)
+            program = prelude + source[start:end] + '\ncleanup\n'
+            result = subprocess.run(['bash', '-c', program], env=dict(
+                os.environ, tmp_dir=str(root / 'unused'), peer_pid_log=str(log),
+                idle_stop_log=str(root / 'stops'), apple_window_log=str(root / 'windows'),
+                process_registry=str(root / 'registry.py'), calls=str(root / 'calls'),
+                ps_calls=str(root / 'ps-calls'),
+                PATH=str(root) + os.pathsep + os.environ['PATH']),
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((root / 'calls').exists(), 'cleanup signaled a PID with a different start time')
+            self.assertEqual((root / 'ps-calls').read_text().splitlines(), ['checked', 'checked'])
+
+
 class MacosCompareScoreTests(unittest.TestCase):
     def test_kettle_only_metrics_are_ineligible(self) -> None:
         completed = run_score(["kettle"])

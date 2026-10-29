@@ -6,7 +6,7 @@
       configuration, show the fixture on its pane's shelf, open the lane,
       and measure: stream the lane's picture and the system's sound through
       avsync-probe, press the lane's play control natively, give the lane the
-      keyboard through ctl, press Left natively at 10, 16 and 22 s (back five
+      keyboard through ctl, press Left natively at 14, 28 and 42 s (back five
       seconds; a control client may neither start nor step a video), and
       judge the capture. Then close that Kettle. The worker is staged beside
       a copy of Kettle and signed with the machine's one Developer ID
@@ -17,8 +17,8 @@
       the fixture's clicks are heard, and the window must stay uncovered.
 
   macos-avsync.py fixture OUT.mov
-      Write the flash/click fixture with ffmpeg: 40 s of black at 30 fps, a
-      white frame pair and a 20 ms 1 kHz tone at 0.5 s past each second,
+      Write the flash/click fixture with ffmpeg: 70 s of black at 30 fps,
+      white frame pairs and 20 ms 1 kHz tones at seeded distinct intervals,
       H.264 with a key frame each second, and 48 kHz PCM sound, in QuickTime.
 
   macos-avsync.py analyze DIR [--play-ns T] [--seek-ns T1,T2,...]
@@ -59,6 +59,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import shlex
 import shutil
 import subprocess
@@ -73,10 +74,10 @@ TARGET_MS = (-125.0, 45.0)
 PAIR_WINDOW_NS = 450_000_000
 CLICK_REFRACTORY_NS = 300_000_000
 MIN_STEADY_PAIRS = 5
-FIXTURE_SECONDS = 40
+FIXTURE_SECONDS = 70
 LEFT_ARROW = 123  # the virtual key code
-CAPTURE_SECONDS = 30
-SEEKS_AT = (10.0, 16.0, 22.0)
+CAPTURE_SECONDS = 56
+SEEKS_AT = (14.0, 28.0, 42.0)
 REPO = Path(__file__).resolve().parents[2]
 PROBE_SOURCE = Path(__file__).resolve().parent / "macos-avsync" / "avsync-probe.swift"
 WORKER_IDENTIFIER = "org.kettle.terminal.media-worker"
@@ -100,18 +101,28 @@ def uptime_ns() -> int:
 # Fixture
 
 
+def fixture_frames() -> List[int]:
+    intervals = random.Random(216).sample(range(18, 78), 60)
+    frames = [15]
+    for interval in intervals:
+        if frames[-1] + interval >= FIXTURE_SECONDS * 30 - 2:
+            break
+        frames.append(frames[-1] + interval)
+    return frames
+
+
 def fixture_command(ffmpeg: str, out: Path) -> List[str]:
+    frames = fixture_frames()
+    flashes = "+".join(f"between(n\\,{n}\\,{n + 1})" for n in frames)
+    tones = "+".join(f"between(t\\,{n / 30:.9f}\\,{n / 30 + 0.02:.9f})" for n in frames)
     video = (
         f"color=c=black:s=640x360:r=30:d={FIXTURE_SECONDS},format=yuv420p,"
         "drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:"
-        "enable='between(mod(n\\,30)\\,15\\,16)'"
+        f"enable='{flashes}'"
     )
-    # The tone starts at a zero crossing, rising, on the flash's first frame.
-    audio = (
-        "aevalsrc='if(between(mod(t\\,1)\\,0.5\\,0.52)\\,"
-        "0.5*sin(2*PI*1000*(mod(t\\,1)-0.5))\\,0)'"
-        f":s=48000:d={FIXTURE_SECONDS}:c=stereo"
-    )
+    # Every flash starts on a 30 fps frame and shares its onset with a tone.
+    audio = (f"aevalsrc='if({tones}\\,0.5*sin(2*PI*1000*t)\\,0)'"
+             f":s=48000:d={FIXTURE_SECONDS}:c=stereo")
     return [
         ffmpeg, "-v", "error", "-nostdin", "-n",
         "-f", "lavfi", "-i", video,
@@ -215,17 +226,52 @@ def click_onsets(samples: Sequence[float], buffers: Sequence[Tuple[int, int, int
     return onsets, loudest
 
 
+def ordered_pairs(flashes: Sequence[int], clicks: Sequence[int], offset: int,
+                  window: int) -> List[Tuple[int, int]]:
+    # Maximize correspondence first, then minimize residual error. Skips never
+    # consume an event twice, including during recovery from a seek.
+    rows = [[(0, 0, []) for _ in range(len(clicks) + 1)] for _ in range(len(flashes) + 1)]
+    for i, flash in enumerate(flashes, 1):
+        for j, click in enumerate(clicks, 1):
+            choices = [rows[i - 1][j], rows[i][j - 1]]
+            error = abs(click - flash - offset)
+            if error <= window:
+                count, cost, matches = rows[i - 1][j - 1]
+                choices.append((count + 1, cost - error, matches + [(flash, click)]))
+            rows[i][j] = max(choices, key=lambda item: item[:2])
+    return rows[-1][-1][2]
+
+
 def pair(flashes: Sequence[int], clicks: Sequence[int]) -> Tuple[List[Tuple[int, int]], List[int]]:
-    """Each flash with the nearest click within 450 ms, and the flashes with
-    none."""
-    pairs, lone = [], []
+    """Identify one offset from the interval pattern, then match in order.
+
+    At least five anchors within 25 ms must identify a unique correspondence;
+    an alternative missing at most one anchor is ambiguous. At most one event
+    on either leg may be missing. Recovery pairs can vary by up to 450 ms.
+    """
+    candidates = {}
     for flash in flashes:
-        near = min(clicks, key=lambda click: abs(click - flash), default=None)
-        if near is not None and abs(near - flash) <= PAIR_WINDOW_NS:
-            pairs.append((flash, near))
-        else:
-            lone.append(flash)
-    return pairs, lone
+        for click in clicks:
+            offset = click - flash
+            matches = ordered_pairs(flashes, clicks, offset, 25_000_000)
+            identity = tuple(matches)
+            cost = sum(abs(c - f - offset) for f, c in matches)
+            if identity not in candidates or cost < candidates[identity][0]:
+                candidates[identity] = (cost, offset)
+    ranked = sorted(candidates.items(), key=lambda item: (-len(item[0]), item[1][0]))
+    if not ranked or len(ranked[0][0]) < MIN_STEADY_PAIRS:
+        raise ValueError("too few events to identify A/V correspondence")
+    anchors, (_, offset) = ranked[0]
+    for alternative, (_, other_offset) in ranked[1:]:
+        if len(alternative) < len(anchors) - 1:
+            break
+        if abs(other_offset - offset) > 50_000_000:
+            raise ValueError("ambiguous A/V interval correspondence")
+    matches = ordered_pairs(flashes, clicks, offset, PAIR_WINDOW_NS)
+    if len(flashes) - len(matches) > 1 or len(clicks) - len(matches) > 1:
+        raise ValueError("A/V correspondence exceeds one missing event per leg")
+    paired = {flash for flash, _ in matches}
+    return matches, [flash for flash in flashes if flash not in paired]
 
 
 def latency_parts_ns(latency: Dict) -> Tuple[float, float]:
@@ -556,13 +602,14 @@ def run(args: argparse.Namespace) -> int:
 
 def synthetic(offsets_ms: Sequence[float], frame_ns: int = 8_333_333, rate: float = 48_000.0,
               latency: Optional[Dict] = None, mute: bool = False) -> Capture:
-    """Flashes each second from 1.5 s; each click lands offsets_ms[i] after
+    """The fixture's nonperiodic flashes; each click lands offsets_ms[i] after
     its flash (negative: before), before device latency."""
     start = 10_000_000_000
     frames, samples, buffers = [], array.array("f"), []
-    seconds = len(offsets_ms) + 2
     # Each flash on a frame, as a display shows it.
-    flash_times = [start + round((k + 1.5) * 1e9 / frame_ns) * frame_ns for k in range(len(offsets_ms))]
+    flash_times = [start + round((1 + n / 30) * 1e9 / frame_ns) * frame_ns
+                   for n in fixture_frames()[:len(offsets_ms)]]
+    seconds = math.ceil((flash_times[-1] - start) / 1e9 + 2)
     t = start
     while t < start + seconds * 1_000_000_000:
         lit = any(f <= t < f + 66_000_000 for f in flash_times)
@@ -599,6 +646,8 @@ def self_test() -> int:
     check(seg["pairs"] == 12 and seg["recovery_ms"] is not None, f"every flash pairs: {seg}")
     check(abs(seg["steady_high_ms"] - 0.0) <= 0.1 and abs(seg["steady_low_ms"] + 11.0) <= 0.2,
           f"the band is the safety offset and buffer: {seg}")
+    delayed = synthetic([999.0] * 12)
+    check(not judge(delayed, delayed.frames[0][0])["pass"], "one-second audio delay must fail")
     # Sound 200 ms late: E = +199, outside the band; never recovers.
     late = synthetic([-200.0] * 10)
     check(not judge(late, late.frames[0][0])["pass"], "sound 200 ms early fails")
@@ -623,18 +672,18 @@ def self_test() -> int:
     # Recovery after a seek: three bad pairs, then good ones.
     offsets = [-1.0] * 8 + [-300.0] * 3 + [-1.0] * 8
     seek = synthetic(offsets)
-    seek_ns = 10_000_000_000 + int(9.2 * 1e9)
+    seek_ns = flash_onsets(seek.frames)[0][8] - 100_000_000
     result = judge(seek, seek.frames[0][0], [seek_ns])
     after = result["segments"][1]
     check(result["pass"], f"recovers after the seek: {result}")
     check(after["from"] == "seek 1" and len(after["before_recovery"]) == 3, f"three before recovery: {after}")
-    check(abs(after["recovery_ms"] - (12.5 * 1e3 - 9.2 * 1e3)) < 10, f"recovery time from the seek: {after}")
+    check(abs(after["recovery_ms"] - (flash_onsets(seek.frames)[0][11] - seek_ns) / 1e6) < 10, f"recovery time from the seek: {after}")
     # Too few steady pairs after a seek fails.
     short = synthetic([-1.0] * 8 + [-300.0] * 8 + [-1.0] * 2)
     check(not judge(short, short.frames[0][0], [seek_ns])["pass"], "two steady pairs are too few")
     # A dropped click after recovery fails.
     drop = synthetic([-1.0] * 12)
-    lone_flash = drop.frames[0][0] + int(6.5 * 1e9)
+    lone_flash = flash_onsets(drop.frames)[0][5]
     for b, (pts, count, offset) in enumerate(drop.buffers):
         for i in range(count):
             at = pts + round(i * 1e9 / drop.rate)
@@ -661,16 +710,30 @@ def self_test() -> int:
         failures.append("a changed device must be refused")
     except ValueError:
         pass
-    # Pairing: a click 500 ms away is not a flash's.
-    pairs, lone = pair([1_000_000_000], [1_500_000_001])
-    check(not pairs and lone == [1_000_000_000], "a click past 450 ms does not pair")
+    for flashes, clicks, why in (
+        ([1_000_000_000], [1_500_000_001], "sparse"),
+        ([i * 1_000_000_000 for i in range(12)], [i * 1_000_000_000 for i in range(12)], "ambiguous"),
+        (flash_onsets(capture.frames)[0], click_onsets(capture.samples, capture.buffers, capture.rate)[0][2:], "missing"),
+    ):
+        try:
+            pair(flashes, clicks)
+            failures.append(f"{why} correspondence must be refused")
+        except ValueError:
+            pass
     # Audio gaps are measured.
     check(audio_gaps_ns([(0, 480, 0), (10_000_000, 480, 480), (25_000_000, 480, 960)], 48_000.0) == 5_000_000,
           "a 5 ms gap is found")
     # The seek schedule leaves each segment its steady pairs, inside the
     # fixture: Left steps back, so the video never runs out.
     times = [1.5, *SEEKS_AT, CAPTURE_SECONDS]
-    check(all(b - a >= MIN_STEADY_PAIRS + 1 for a, b in zip(times, times[1:])), "seek schedule")
+    media_start = 0.0
+    for a, b in zip(times, times[1:]):
+        media_end = media_start + b - a
+        check(sum(media_start <= frame / 30 < media_end for frame in fixture_frames()) >= MIN_STEADY_PAIRS + 1,
+              f"seek schedule has enough nonperiodic events: {media_start}..{media_end}")
+        media_start = max(0.0, media_end - 5.0)
+    intervals = [b - a for a, b in zip(fixture_frames(), fixture_frames()[1:])]
+    check(len(intervals) == len(set(intervals)), "fixture intervals are distinct")
     check(1.5 + CAPTURE_SECONDS <= FIXTURE_SECONDS, "the capture fits the fixture")
     # A lane before its first play has no playback; its rectangles are
     # read in global points from the client origin.

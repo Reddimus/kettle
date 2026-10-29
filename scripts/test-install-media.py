@@ -471,20 +471,75 @@ sys.exit(module.main())
             timeout=30,
         )
 
-    def uninstall(self):
+    def uninstall(self, kill_at=0):
+        child = """
+import importlib.util, os, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("installer", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+unlink = module._unlink_recorded
+count = 0
+def interrupted(*arguments):
+    global count
+    unlink(*arguments)
+    count += 1
+    if count == int(sys.argv[2]):
+        os._exit(9)
+module._unlink_recorded = interrupted
+arguments = module._parser().parse_args(["uninstall", "--prefix", sys.argv[3]])
+module._uninstall(arguments)
+"""
+        helper = str(ROOT / "scripts/install-unix.py")
+        command = ([sys.executable, "-c", child, helper, str(kill_at), str(self.prefix)]
+                   if kill_at else [sys.executable, helper, "uninstall", "--prefix", str(self.prefix)])
         return subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "scripts/install-unix.py"),
-                "uninstall",
-                "--prefix",
-                str(self.prefix),
-            ],
+            command,
             capture_output=True,
             check=False,
             text=True,
             timeout=30,
         )
+
+    def test_interrupted_uninstall_resumes_and_verifies_remaining_files(self):
+        self.assertEqual(self.helper(("share/kettle/z", b"payload")).returncode, 0)
+        cut = self.uninstall(kill_at=1)
+        self.assertEqual(cut.returncode, 9, cut.stderr)
+        resumed = self.uninstall()
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertFalse((self.prefix / "share/kettle").exists())
+
+    def test_uninstall_journal_preserves_helpers_and_refuses_changed_remainder(self):
+        self.assertEqual(self.helper(("share/kettle/z", b"payload")).returncode, 0)
+        self.assertEqual(self.uninstall(kill_at=1).returncode, 9)
+        journal = self.prefix / "share/kettle/uninstall-pending.json"
+        self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
+        for name in ('install.sh', 'install-unix.py'):
+            self.assertTrue((journal.parent / name).exists())
+        refused = self.helper()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('interrupted uninstall', refused.stderr)
+        binary = self.prefix / "bin/kettle"
+        binary.write_bytes(b"tamper")
+        refused = self.uninstall()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('changed content', refused.stderr)
+        self.assertTrue(journal.exists())
+        self.assertTrue((journal.parent / 'install.sh').exists())
+        binary.write_bytes(b"kettle")
+        self.assertEqual(self.uninstall().returncode, 0)
+
+    def test_uninstall_resumes_after_manifest_removal(self):
+        self.assertEqual(self.helper().returncode, 0)
+        manifest = json.loads((self.prefix / "share/kettle/install-files.json").read_text())
+        # Payloads, then the manifest, with the recovery helpers still present.
+        cut = self.uninstall(kill_at=len(manifest['files']) - 1)
+        self.assertEqual(cut.returncode, 9, cut.stderr)
+        self.assertFalse((self.prefix / "share/kettle/install-files.json").exists())
+        self.assertTrue((self.prefix / "share/kettle/install-unix.py").exists())
+        resumed = self.uninstall()
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertFalse((self.prefix / "share/kettle").exists())
 
     def test_an_interrupted_upgrade_can_be_retried_and_removed(self):
         old = [("share/kettle/a", b"old a"), ("share/kettle/b", b"old b")]
