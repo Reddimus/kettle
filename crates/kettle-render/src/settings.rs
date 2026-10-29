@@ -269,6 +269,31 @@ pub fn settings_panel_geometry(
     }
 }
 
+/// Value slot of the focused row, using the painter's column budgets and scrolling.
+pub fn settings_value_rect(set: &SettingsOverlay, cw: f32, ch: f32, sw: f32, sh: f32) -> Rect4 {
+    let lines = settings_display_lines(set);
+    let layout = settings_panel_layout(set, &lines, cw, ch, sw, sh);
+    let columns = ((layout.panel_w - 32.0).max(cw) / cw).floor().max(1.0) as usize;
+    let available = columns.saturating_sub(4);
+    let reserved = set.value_cols.max(1).min(available / 2);
+    let label = set.label_cols.min(available.saturating_sub(reserved));
+    let prefix = if columns <= 5 {
+        2.min(columns)
+    } else {
+        4 + label
+    };
+    let y = layout.py
+        + 12.0
+        + (SETTINGS_FIELD_START + set.focused_row).saturating_sub(layout.first_line) as f32
+            * layout.row_h;
+    (
+        layout.px + 16.0 + prefix as f32 * cw,
+        y,
+        columns.saturating_sub(prefix) as f32 * cw,
+        layout.row_h,
+    )
+}
+
 /// What a click on the settings overlay landed on. The hit-test recomputes the
 /// geometry from the SAME inputs the draw uses (`settings_display_lines` +
 /// `settings_panel_layout`), so it can't drift from what's painted.

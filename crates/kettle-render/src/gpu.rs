@@ -672,8 +672,6 @@ impl Renderer {
         let scroll_left_buffer = TextBuffer::new(&mut font_system, metrics);
         let scroll_right_buffer = TextBuffer::new(&mut font_system, metrics);
         let tab_close_buffer = TextBuffer::new(&mut font_system, metrics);
-        let mut search_buffer = TextBuffer::new(&mut font_system, metrics);
-        search_buffer.set_wrap(Wrap::None);
         let search_segment_buffers = (0..SEARCH_SEGMENTS)
             .map(|_| {
                 let mut buffer = TextBuffer::new(&mut font_system, metrics);
@@ -869,8 +867,6 @@ impl Renderer {
             scroll_left_buffer,
             scroll_right_buffer,
             tab_close_buffer,
-            search_buffer,
-            search_buffer_text: String::new(),
             search_segment_buffers,
             search_segment_texts: vec![String::new(); SEARCH_SEGMENTS],
             search_editor_stops: Vec::new(),

@@ -13,7 +13,7 @@ const ES: Translator = Translator::new(Language::Es);
 
 fn state(query: &str, selected: usize, opened_on: &str) -> ThemePickerState {
     ThemePickerState {
-        query: query.to_string(),
+        query: query.into(),
         selected,
         opened_on: opened_on.to_string(),
     }
@@ -418,13 +418,13 @@ fn picker_arrows_and_wheel_scroll_all_four_modal_projections() {
     for kind in 0..4 {
         let mut ws = WindowState::new(0, Mux::new());
         match kind {
-            0 => ws.palette_input = Some((String::new(), 0)),
+            0 => ws.palette_input = Some((Default::default(), 0)),
             1 => ws.theme_picker_input = Some(state("", 0, "Builtin Dark")),
             2 => {
                 ws.layout_picker_entries = (0..40).map(|i| format!("layout-{i}")).collect();
-                ws.layout_picker_input = Some((String::new(), 0));
+                ws.layout_picker_input = Some((Default::default(), 0));
             }
-            _ => ws.ssh_input = Some((String::new(), 0)),
+            _ => ws.ssh_input = Some((Default::default(), 0)),
         }
         assert!(ws.context_menu.is_none());
         let menu = project(&ws);

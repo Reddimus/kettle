@@ -1,3 +1,4 @@
+#[cfg(test)]
 pub(crate) fn overlay_label_cols(width: f32, cell_width: f32) -> usize {
     if !width.is_finite() || !cell_width.is_finite() || width <= 0.0 || cell_width <= 0.0 {
         return 0;

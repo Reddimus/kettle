@@ -2113,6 +2113,9 @@ impl App {
         }
         // Like the media receipt below, the search lane's hover follows
         // control input so automation can exercise it.
+        if ws.dragging_modal_editor && self.modal_text_pointer(ws, false) {
+            return;
+        }
         self.update_search_hover(ws);
         if search_pointer_route(ws.search.open, None, ws.search.pointer_captured())
             == SearchPointerRoute::Bar
@@ -2175,6 +2178,12 @@ impl App {
         self.release_held_buttons(ws, |held| held.button == bcode);
         ws.held_buttons.pressed(bcode, None, (0, 0));
         if self.confirm_mouse_press(ws, event_loop, bcode) {
+            return true;
+        }
+        if self.dismiss_modal_outside(ws, bcode) {
+            return true;
+        }
+        if bcode == 0 && self.modal_text_pointer(ws, true) {
             return true;
         }
         let bar = self.tab_bar(ws);
@@ -2359,6 +2368,9 @@ impl App {
             && let Some(drag) = ws.lane_drag.take()
         {
             self.end_lane_drag(ws, drag);
+            return true;
+        }
+        if bcode == 0 && std::mem::take(&mut ws.dragging_modal_editor) {
             return true;
         }
         if bcode == 0

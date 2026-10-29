@@ -20,6 +20,10 @@ mod labels;
 mod overlays;
 mod screenshot;
 mod search;
+#[cfg(test)]
+use labels::overlay_label_cols;
+mod text_field;
+pub use text_field::{TextFieldLayout, TextFieldOverlay, text_field_labels, text_field_rects};
 mod settings;
 mod terminal;
 mod theme;
@@ -83,8 +87,7 @@ use gpu::{
 };
 use gpu::{latch_gpu_fault, live_device_limits, resolve_headless_adapter};
 use labels::{
-    display_width, fit_single_line_label, middle_ellipsis, overlay_label_cols, take_cols_back,
-    take_cols_front,
+    display_width, fit_single_line_label, middle_ellipsis, take_cols_back, take_cols_front,
 };
 pub use labels::{fit_pane_titlebar_title, fit_tab_segment_title};
 #[cfg(test)]
@@ -142,7 +145,7 @@ use settings::{
 };
 pub use settings::{
     SettingsHit, SettingsOverlay, SettingsPanelGeometry, SettingsRow, settings_hit_test,
-    settings_panel_geometry,
+    settings_panel_geometry, settings_value_rect,
 };
 #[cfg(test)]
 use settings::{settings_fit_line, settings_row_line};
@@ -279,6 +282,7 @@ fn production_source() -> String {
         kettle_test_support::production_source(include_str!("batching.rs")),
         kettle_test_support::production_source(include_str!("theme.rs")),
         kettle_test_support::production_source(include_str!("search.rs")),
+        kettle_test_support::production_source(include_str!("text_field.rs")),
         kettle_test_support::production_source(include_str!("completion.rs")),
         kettle_test_support::production_source(include_str!("settings.rs")),
         kettle_test_support::production_source(include_str!("geometry.rs")),
@@ -584,16 +588,6 @@ pub struct Renderer {
     ///
     /// One buffer, N positions via per-tab `TextArea` instances.
     tab_close_buffer: TextBuffer,
-    search_buffer: TextBuffer,
-    /// Last text shaped into `search_buffer`. Shared across the search /
-    /// command-palette / layout-picker / ssh-launcher / edit-title /
-    /// confirm-dialog / update-banner bars. Only one of those `else if`
-    /// branches paints per frame, so a single cache is enough. When a
-    /// different bar takes over, it re-shapes once, the same cost a fresh
-    /// buffer pays on its first frame.
-    search_buffer_text: String,
-    /// One buffer per piece of search-lane text (see `search_bar_segments`),
-    /// each drawn in its own slot, and the text last shaped into it.
     search_segment_buffers: Vec<TextBuffer>,
     search_segment_texts: Vec<String>,
     /// Glyph boundaries of the query painted last frame, as (query byte,
@@ -914,7 +908,6 @@ impl Renderer {
                 self.lane_texts
                     .values_mut()
                     .for_each(media_lane::LaneText::invalidate);
-                self.search_buffer_text.clear();
                 self.search_segment_texts.iter_mut().for_each(String::clear);
             }
         }
@@ -2047,8 +2040,6 @@ impl Renderer {
                 dialog,
             )
         });
-        let mut have_search = false;
-        let mut search_rect = (0.0, sh - (ch + 10.0), sw, ch + 10.0);
         // The search lane draws each control's text in its own area:
         // (segment index, left, top, clip bounds).
         let mut search_segment_places: Vec<(usize, f32, f32, TextBounds, Option<Rgb>)> = Vec::new();
@@ -2056,11 +2047,11 @@ impl Renderer {
         self.search_editor_clusters.clear();
         self.search_editor_rtl = false;
         if overlay.confirm_dialog.is_none()
+            && overlay.text_field.is_none()
             && let Some(search) = overlay.search.as_ref()
         {
             let cw = self.overlay_text_cell_width();
             let geometry = search_bar_geometry(sw, sh, cw, ch, &search.tr);
-            search_rect = geometry.rect;
             let row_h = geometry.reserved_height / geometry.rows.max(1) as f32;
             let accent = cfg.search_background.unwrap_or(theme.palette[3]);
 
@@ -2280,186 +2271,39 @@ impl Renderer {
                     1.0,
                 ));
             }
-        } else if overlay.confirm_dialog.is_none()
-            && let Some(q) = &overlay.palette_query
-        {
-            have_search = true;
-            let bar_h = ch + 10.0;
-            search_rect = (0.0, sh - bar_h, sw, bar_h);
-            push_input_bar(
-                &mut quads,
-                search_rect,
-                theme,
-                theme.palette[5],
-                &mut self.chrome_colors,
-            );
-            let label = format!("  ⌘ {q}_   {}", overlay.palette_hint);
-            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
-            self.search_buffer.set_metrics(metrics);
-            self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // Same equality gate as the other chrome buffers. Only one arm of
-            // this `if`/`else if` chain runs per frame, so a single cache is
-            // enough (see `search_buffer_text`'s doc comment).
-            if self.search_buffer_text != label {
-                self.search_buffer.set_text(
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
-                self.search_buffer_text = label;
-            }
-            self.search_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-        } else if overlay.confirm_dialog.is_none()
-            && let Some(q) = &overlay.theme_picker_query
-        {
-            // Theme picker input. The ranked themes live in the shared
-            // context-menu panel above this lane, and the window behind them
-            // already wears the selected theme.
-            have_search = true;
-            let bar_h = ch + 10.0;
-            search_rect = (0.0, sh - bar_h, sw, bar_h);
-            push_input_bar(
-                &mut quads,
-                search_rect,
-                theme,
-                theme.palette[5],
-                &mut self.chrome_colors,
-            );
-            let label = format!(
-                "{}{q}_   {}",
-                theme_picker_prefix(&overlay.tr),
-                overlay.theme_picker_hint
-            );
-            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
-            self.search_buffer.set_metrics(metrics);
-            self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // Same equality gate as the other chrome buffers. Only one arm of
-            // this `if`/`else if` chain runs per frame, so a single cache is
-            // enough (see `search_buffer_text`'s doc comment).
-            if self.search_buffer_text != label {
-                self.search_buffer.set_text(
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
-                self.search_buffer_text = label;
-            }
-            self.search_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-        } else if overlay.confirm_dialog.is_none()
-            && let Some(q) = &overlay.layout_picker_query
-        {
-            // Terminator parity, layoutlauncher.py:
-            // layout picker input. The ranked layouts live in the shared
-            // context-menu panel above this lane.
-            have_search = true;
-            let bar_h = ch + 10.0;
-            search_rect = (0.0, sh - bar_h, sw, bar_h);
-            push_input_bar(
-                &mut quads,
-                search_rect,
-                theme,
-                theme.palette[6],
-                &mut self.chrome_colors,
-            );
-            let label = format!(
-                "  ▤ {} {q}_   {}",
-                overlay.tr.text(Text::PickerLayoutPrompt),
-                overlay.layout_picker_hint
-            );
-            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
-            self.search_buffer.set_metrics(metrics);
-            self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // Same equality gate as the other chrome buffers. Only one arm of
-            // this `if`/`else if` chain runs per frame, so a single cache is
-            // enough (see `search_buffer_text`'s doc comment).
-            if self.search_buffer_text != label {
-                self.search_buffer.set_text(
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
-                self.search_buffer_text = label;
-            }
-            self.search_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-        } else if overlay.confirm_dialog.is_none()
-            && let Some(q) = &overlay.ssh_query
-        {
-            have_search = true;
-            let bar_h = ch + 10.0;
-            search_rect = (0.0, sh - bar_h, sw, bar_h);
-            push_input_bar(
-                &mut quads,
-                search_rect,
-                theme,
-                theme.palette[4],
-                &mut self.chrome_colors,
-            );
-            let label = format!("  ssh ❯ {q}_   {}", overlay.ssh_hint);
-            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
-            self.search_buffer.set_metrics(metrics);
-            self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // Same equality gate as the other chrome buffers. Only one arm of
-            // this `if`/`else if` chain runs per frame, so a single cache is
-            // enough (see `search_buffer_text`'s doc comment).
-            if self.search_buffer_text != label {
-                self.search_buffer.set_text(
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
-                self.search_buffer_text = label;
-            }
-            self.search_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-        } else if overlay.confirm_dialog.is_none()
-            && let Some(edit) = &overlay.edit_title
-        {
-            // Terminator parity, edit-title overlay UX:
-            // a thin bar in app chrome mirroring the shape of the
-            // palette + ssh-input overlays without covering terminal rows.
-            // Its palette[3] edge tells it from the palette (5) and ssh (4)
-            // bars; the fill is the shared readable neutral.
-            have_search = true;
-            search_rect = edit.rect;
-            push_input_bar(
-                &mut quads,
-                edit.rect,
-                theme,
-                theme.palette[3],
-                &mut self.chrome_colors,
-            );
-            let label = format!(
-                "{}{}_   {}",
-                title_edit_prefix(&edit.label),
-                edit.input,
-                edit.hint
-            );
-            let label = fit_single_line_label(&label, overlay_label_cols(edit.rect.2, cw));
-            self.search_buffer.set_metrics(metrics);
-            self.search_buffer
-                .set_size(Some(edit.rect.2), Some(edit.rect.3));
-            // Same equality gate as the other chrome buffers. Only one arm of
-            // this `if`/`else if` chain runs per frame, so a single cache is
-            // enough (see `search_buffer_text`'s doc comment).
-            if self.search_buffer_text != label {
-                self.search_buffer.set_text(
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
-                self.search_buffer_text = label;
-            }
-            self.search_buffer
-                .shape_until_scroll(&mut self.font_system, false);
         }
+
+        let field_layout = overlay
+            .text_field
+            .as_ref()
+            .filter(|_| overlay.confirm_dialog.is_none())
+            .map(|field| {
+                let cw = self.overlay_text_cell_width();
+                let layout = text_field::prepare_text_field(
+                    &mut self.font_system,
+                    &mut self.search_segment_buffers[1],
+                    field,
+                    cw,
+                    metrics,
+                    &family,
+                );
+                let (prefix, hint) = text_field::text_field_labels(field, cw);
+                for (index, text) in [(0, prefix.as_str()), (2, hint.as_str())] {
+                    text_field::shape_field_label(
+                        &mut self.font_system,
+                        &mut self.search_segment_buffers[index],
+                        text,
+                        field.rect.3,
+                        metrics,
+                        &family,
+                    );
+                }
+                // These buffers are shared with search; invalidate its text cache.
+                for text in &mut self.search_segment_texts {
+                    text.clear();
+                }
+                layout
+            });
 
         // Tab-bar text: one buffer per segment + the `+` button.
         let have_tabs = tabbar.height > 0.0 && !tabbar.segments.is_empty();
@@ -4055,32 +3899,6 @@ impl Renderer {
                 custom_glyphs: &[],
             });
         }
-        if have_search {
-            let text_h = if overlay.confirm_dialog.is_some() {
-                metrics.line_height
-            } else {
-                ch
-            };
-            let area = TextArea {
-                buffer: &self.search_buffer,
-                left: search_rect.0,
-                top: if overlay.confirm_dialog.is_some() {
-                    search_rect.1
-                } else {
-                    search_rect.1 + ((search_rect.3 - text_h) * 0.5).max(0.0)
-                },
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: search_rect.0 as i32,
-                    top: search_rect.1 as i32,
-                    right: (search_rect.0 + search_rect.2) as i32,
-                    bottom: (search_rect.1 + search_rect.3) as i32,
-                },
-                default_color: GColor::rgb(fg.r, fg.g, fg.b),
-                custom_glyphs: &[],
-            };
-            areas.push(area);
-        }
         // Status-bar text area. Left-padded 8 px, baseline
         // nudged 3 px below the strip top so descenders don't clip.
         if status.height > 0.0 && !status.text.is_empty() {
@@ -4342,6 +4160,40 @@ impl Renderer {
             if layout.first_line + layout.visible_lines < content_end {
                 let content_bottom = py + 12.0 + layout.visible_lines as f32 * row_h;
                 menu_q.push(rect(cue_x, content_bottom - 3.0, cue_w, 3.0, acc, 0.85));
+            }
+        }
+
+        if let (Some(field), Some(layout)) = (&overlay.text_field, &field_layout) {
+            if overlay.settings.is_none() {
+                push_input_bar(
+                    &mut menu_q,
+                    field.rect,
+                    theme,
+                    theme.palette[field.accent_palette.min(15)],
+                    &mut self.chrome_colors,
+                );
+            }
+            for &(x, y, w, h) in &layout.selection {
+                menu_q.push(rect(x, y, w, h, theme.selection_background, 1.0));
+            }
+            let (x, y, w, h) = layout.caret;
+            menu_q.push(rect(x, y, w, h, theme.foreground, 1.0));
+            let slots = text_field_rects(field, self.overlay_text_cell_width());
+            for (index, slot) in slots.into_iter().enumerate() {
+                menu_areas.push(TextArea {
+                    buffer: &self.search_segment_buffers[index],
+                    left: if index == 1 { layout.text_left } else { slot.0 },
+                    top: slot.1,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: slot.0 as i32,
+                        top: slot.1 as i32,
+                        right: (slot.0 + slot.2) as i32,
+                        bottom: (slot.1 + slot.3) as i32,
+                    },
+                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    custom_glyphs: &[],
+                });
             }
         }
 

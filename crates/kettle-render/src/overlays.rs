@@ -197,6 +197,7 @@ pub struct MediaPasteReceiptOverlay {
 /// overlay built from a default.
 #[cfg_attr(any(test, feature = "test-defaults"), derive(Default))]
 pub struct Overlay {
+    pub text_field: Option<crate::TextFieldOverlay>,
     /// The UI's language. Text the renderer words itself (the search bar, the
     /// completion count, the layout picker prompt) goes through it.
     pub tr: Translator,

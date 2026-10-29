@@ -132,6 +132,17 @@ for about 19 columns and its detail lines 22, noted in the schema `context`,
 and a longer line is cut with an ellipsis. The compact receipt widens for its
 title, and the remote warning is always kept whole where the card fits.
 
+### Editable fields and input methods
+
+Modal title, command, SSH, layout, theme and Settings path fields share the
+search editor. Their localized prefixes and action hints occupy separate clipped
+slots, so a longer translation cannot be mistaken for editable text. Selection,
+scrolling, pointer hit testing and IME candidate placement use shaped glyph
+positions. IME preedit replaces the selected range or appears at the caret,
+with the remaining text after it. Measured text must be the same text the painter
+draws, including preedit and its suffix; do not estimate the caret by adding a
+translated prefix's character count to the committed string's length.
+
 ## Fallback
 
 Every shipping language holds every key; the build enforces it. If a message

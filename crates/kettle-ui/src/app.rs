@@ -4455,6 +4455,7 @@ fn title_edit_label(scope: TitleEditScope, tr: &kettle_i18n::Translator) -> &'st
 
 /// The column of the title editor's caret: the painted prefix in the UI's
 /// language, the input, then any composition before the focus point.
+#[cfg(test)]
 fn title_edit_caret_cols(
     scope: TitleEditScope,
     input: &str,
@@ -7811,7 +7812,7 @@ pub struct TitleEditState {
     pub target: TitleEditTarget,
     /// Current text the user has typed. Pre-filled with the existing
     /// title so the user can edit in place vs starting blank.
-    pub input: String,
+    pub(crate) input: crate::text_editor::TextEditor,
     /// When `scope == Group`, which panes Apply writes
     /// to. Single = opening pane only (existing behavior); Tab/Window
     /// = bulk-assign via `Action::GroupTab`/`GroupWindow`.
@@ -7870,7 +7871,7 @@ fn begin_title_edit(
     Some(TitleEditState {
         scope,
         target,
-        input,
+        input: input.into(),
         bulk,
     })
 }
@@ -7904,7 +7905,7 @@ fn clear_stale_title_edit(mux: &Mux, editing: &mut Option<TitleEditState>) -> bo
 }
 
 fn apply_mux_title_edit(mux: &mut Mux, state: &TitleEditState) -> bool {
-    let value = &state.input;
+    let value = state.input.text();
     match (state.scope, state.bulk, &state.target) {
         (TitleEditScope::Window, _, _) => false,
         (TitleEditScope::Tab, _, TitleEditTarget::Tab(panes)) => {
@@ -7915,7 +7916,7 @@ fn apply_mux_title_edit(mux: &mut Mux, state: &TitleEditState) -> bool {
             tab.title_override = if value.is_empty() {
                 None
             } else {
-                Some(value.clone())
+                Some(value.to_string())
             };
             true
         }
@@ -7930,7 +7931,7 @@ fn apply_mux_title_edit(mux: &mut Mux, state: &TitleEditState) -> bool {
                 pane.title_is_placeholder = true;
                 pane.title_origin = PaneTitleOrigin::Placeholder;
             } else {
-                pane.title = value.clone();
+                pane.title = value.to_string();
                 pane.title_is_placeholder = false;
                 pane.title_origin = PaneTitleOrigin::Manual;
             }
@@ -7940,7 +7941,7 @@ fn apply_mux_title_edit(mux: &mut Mux, state: &TitleEditState) -> bool {
             let next = if value.is_empty() {
                 None
             } else {
-                Some(value.clone())
+                Some(value.to_string())
             };
             match (bulk, target) {
                 (GroupBulkScope::Single, TitleEditTarget::Pane(id)) => {
@@ -8670,8 +8671,143 @@ pub(crate) fn rank_layouts(q: &str, layouts: &[String]) -> Vec<usize> {
         .collect()
 }
 
-/// Indices into the configured SSH-host list, best fuzzy match first. Ties
-/// preserve config order so an empty query has a stable initial selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModalKind {
+    ContextMenu,
+    Palette,
+    Theme,
+    Layout,
+    Ssh,
+    Title,
+    Hint,
+    SettingsCapture,
+    Settings,
+    Confirmation,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutsidePress {
+    Keep,
+    DismissConsume,
+    DismissForward,
+}
+fn outside_press_policy(kind: ModalKind, inside: bool, button: u8) -> OutsidePress {
+    if inside || kind == ModalKind::Confirmation {
+        OutsidePress::Keep
+    } else if kind == ModalKind::ContextMenu && button == 2 {
+        OutsidePress::DismissForward
+    } else {
+        OutsidePress::DismissConsume
+    }
+}
+
+/// Mutation sink shared by native and control pointer dispatch.
+fn dispatch_modal_press(ws: &mut WindowState, kind: ModalKind, inside: bool, button: u8) -> bool {
+    if kind == ModalKind::Confirmation {
+        return true;
+    }
+    let action = outside_press_policy(kind, inside, button);
+    if action == OutsidePress::Keep {
+        return false;
+    }
+    match kind {
+        ModalKind::ContextMenu => ws.context_menu = None,
+        ModalKind::Palette => ws.palette_input = None,
+        ModalKind::Theme => ws.theme_picker_input = None,
+        ModalKind::Layout => ws.layout_picker_input = None,
+        ModalKind::Ssh => ws.ssh_input = None,
+        ModalKind::Title => {
+            ws.editing_title = None;
+            ws.pending_resize = true;
+        }
+        ModalKind::Hint => ws.hint_state = None,
+        ModalKind::SettingsCapture => {
+            ws.settings_text_edit = None;
+            if let Some(nav) = &mut ws.settings_nav {
+                nav.capturing = false;
+            }
+        }
+        ModalKind::Settings => ws.settings_nav = None,
+        ModalKind::Confirmation => return false,
+    }
+    ws.dragging_modal_editor = false;
+    end_modal_composition(ws);
+    ws.accessibility_pending = true;
+    if let Some(window) = &ws.window {
+        window.request_redraw();
+    }
+    action == OutsidePress::DismissConsume
+}
+
+fn project_modal_editor(
+    editor: &crate::text_editor::TextEditor,
+    preedit: Option<&(String, Option<(usize, usize)>)>,
+) -> (String, usize, Option<(usize, usize)>) {
+    let mut text = editor.text().to_string();
+    let mut cursor = editor.cursor();
+    let mut selection = editor.selection().map(|r| (r.start, r.end));
+    if let Some((preedit, focus)) = preedit {
+        let range = editor.selection().unwrap_or(cursor..cursor);
+        text.replace_range(range.clone(), preedit);
+        cursor = range.start + ime_preedit_focus(preedit, *focus);
+        selection = None;
+    }
+    (text, cursor, selection)
+}
+
+fn modal_editor(ws: &WindowState) -> Option<&crate::text_editor::TextEditor> {
+    if ws.confirm_dialog.is_some() || ws.context_menu.is_some() {
+        return None;
+    }
+    if let Some((editor, _)) = &ws.palette_input {
+        Some(editor)
+    } else if let Some(state) = &ws.theme_picker_input {
+        Some(&state.query)
+    } else if let Some(state) = &ws.settings_text_edit {
+        Some(&state.buf)
+    } else if let Some((editor, _)) = &ws.layout_picker_input {
+        Some(editor)
+    } else if let Some((editor, _)) = &ws.ssh_input {
+        Some(editor)
+    } else {
+        ws.editing_title.as_ref().map(|state| &state.input)
+    }
+}
+
+fn modal_editor_mut(ws: &mut WindowState) -> Option<&mut crate::text_editor::TextEditor> {
+    if ws.confirm_dialog.is_some() || ws.context_menu.is_some() {
+        return None;
+    }
+    if let Some((editor, _)) = &mut ws.palette_input {
+        Some(editor)
+    } else if let Some(state) = &mut ws.theme_picker_input {
+        Some(&mut state.query)
+    } else if let Some(state) = &mut ws.settings_text_edit {
+        Some(&mut state.buf)
+    } else if let Some((editor, _)) = &mut ws.layout_picker_input {
+        Some(editor)
+    } else if let Some((editor, _)) = &mut ws.ssh_input {
+        Some(editor)
+    } else {
+        ws.editing_title.as_mut().map(|state| &mut state.input)
+    }
+}
+
+fn reset_modal_results(ws: &mut WindowState) {
+    if let Some((_, selected)) = ws.palette_input.as_mut() {
+        *selected = 0;
+    }
+    if let Some(state) = ws.theme_picker_input.as_mut() {
+        state.selected = 0;
+    }
+    if let Some((_, selected)) = ws.layout_picker_input.as_mut() {
+        *selected = 0;
+    }
+    if let Some((_, selected)) = ws.ssh_input.as_mut() {
+        *selected = 0;
+    }
+}
+
+/// Indices into configured SSH hosts, best match first, with config order breaking ties.
 fn rank_ssh_hosts(query: &str, hosts: &[(String, String)]) -> Vec<usize> {
     let query = query.trim();
     let mut ranked: Vec<(usize, i32)> = hosts
@@ -8931,7 +9067,7 @@ fn begin_theme_picker(ws: &mut WindowState, live: ThemeState) -> Option<ThemeSta
     let restore = ws.theme_preview.take();
     let opened = restore.clone().unwrap_or(live);
     ws.theme_picker_input = Some(crate::window_state::ThemePickerState {
-        query: String::new(),
+        query: Default::default(),
         selected: theme_picker_start(&opened.0),
         opened_on: opened.0.clone(),
     });
@@ -10737,7 +10873,16 @@ impl App {
     /// close reaches `event_loop.exit()`, so "exit only when the map is
     /// empty" holds by construction (drift-guarded in
     /// `event_loop_exit_sites_are_allowlisted`).
-    fn finish_window_dispatch(&mut self, event_loop: &ActiveEventLoop, seq: u64, ws: WindowState) {
+    fn finish_window_dispatch(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        seq: u64,
+        mut ws: WindowState,
+    ) {
+        if modal_editor(&ws).is_some() {
+            self.sync_modal_editor_scroll(&mut ws);
+            self.update_ime_cursor_area(&mut ws);
+        }
         if self.quit_requested {
             if let Some(owner) = self.update_toast.as_ref().map(|toast| toast.window) {
                 self.close_update_toast_window(owner);
@@ -13566,7 +13711,7 @@ impl App {
         Some((point.line.0.max(0) as usize, point.column.0))
     }
 
-    fn update_ime_cursor_area(&self, ws: &WindowState) {
+    fn update_ime_cursor_area(&self, ws: &mut WindowState) {
         let Some(window) = &ws.window else {
             return;
         };
@@ -13581,25 +13726,17 @@ impl App {
             .map(|(text, selection)| (text.as_str(), ime_preedit_focus(text, *selection)))
             .unwrap_or(("", 0));
         let preedit_before_focus = &preedit[..preedit_focus];
-        let input = ws
-            .palette_input
-            .as_ref()
-            .map(|(query, _)| (4, query.as_str()))
-            .or_else(|| {
-                ws.theme_picker_input.as_ref().map(|state| {
-                    use unicode_width::UnicodeWidthStr as _;
-                    (
-                        kettle_render::theme_picker_prefix(&self.ui_text).width(),
-                        state.query.as_str(),
-                    )
-                })
-            })
-            .or_else(|| {
-                ws.layout_picker_input
-                    .as_ref()
-                    .map(|(query, _)| (12, query.as_str()))
-            })
-            .or_else(|| ws.ssh_input.as_ref().map(|(query, _)| (8, query.as_str())));
+        if let Some(field) = self.modal_text_projection(ws)
+            && let Some(renderer) = ws.renderer.as_mut()
+        {
+            let layout = renderer.measure_text_field(&field);
+            let (x, y, w, h) = layout.caret;
+            window.set_ime_cursor_area(
+                winit::dpi::PhysicalPosition::new(f64::from(x), f64::from(y)),
+                winit::dpi::PhysicalSize::new(f64::from(w.max(1.0)), f64::from(h.max(1.0))),
+            );
+            return;
+        }
         let search_cursor = self.search_geometry(ws).map(|geometry| {
             let cw = self.overlay_text_cell_width(ws);
             let mut projected = ws.search.query().to_string();
@@ -13642,26 +13779,6 @@ impl App {
         });
         let (x, y) = if let Some((x, y)) = search_cursor {
             (x, y)
-        } else if let Some((prefix_cols, input)) = input {
-            use unicode_width::UnicodeWidthStr as _;
-
-            let size = window.inner_size();
-            let cols = prefix_cols + input.width() + preedit_before_focus.width();
-            (
-                (cols as f32 * cw).min(size.width.saturating_sub(1) as f32),
-                (size.height as f32 - ch - 5.0).max(0.0),
-            )
-        } else if let Some(edit) = &ws.editing_title {
-            let rect = self.title_edit_rect(ws);
-            let caret =
-                title_edit_caret_cols(edit.scope, &edit.input, preedit_before_focus, &self.ui_text);
-            (
-                rect.0 + caret as f32 * cw,
-                rect.1 + ((rect.3 - ch) * 0.5).max(0.0),
-            )
-        } else if ws.settings_text_edit.is_some() {
-            let size = window.inner_size();
-            (size.width as f32 * 0.5, size.height as f32 * 0.5)
         } else {
             let Some((row, col)) = self.terminal_cursor_cell(ws) else {
                 return;
@@ -13826,9 +13943,13 @@ impl App {
     fn overlay(&self, ws: &WindowState, reuse_pane_snapshots: bool) -> Overlay {
         let preedit_state = ws.ime_preedit.as_ref().filter(|(text, _)| !text.is_empty());
         let preedit = preedit_state.map(|(text, _)| text.as_str());
-        let with_preedit = |input: &str| match preedit {
-            Some(preedit) => format!("{input}{preedit}"),
-            None => input.to_string(),
+        let with_preedit = |input: &crate::text_editor::TextEditor| {
+            let mut projected = input.text().to_string();
+            if let Some(preedit) = preedit {
+                let range = input.selection().unwrap_or(input.cursor()..input.cursor());
+                projected.replace_range(range, preedit);
+            }
+            projected
         };
         // Hovering any segment of a link wrapped across rows lights them all.
         let hovered_group = self.link_at_cursor(ws).map(|link| link.group);
@@ -14063,6 +14184,7 @@ impl App {
         if !s.open {
             return Overlay {
                 tr: self.ui_text,
+                text_field: self.modal_text_projection(ws),
                 search: None,
                 highlights: Vec::new(),
                 links,
@@ -14177,6 +14299,7 @@ impl App {
             .unwrap_or_else(|| s.editor.horizontal_scroll());
         Overlay {
             tr: self.ui_text,
+            text_field: self.modal_text_projection(ws),
             search: Some(kettle_render::SearchOverlay {
                 tr: self.ui_text,
                 target_pane: s.target_pane,
@@ -14318,7 +14441,7 @@ impl App {
                 self.poll_remote_contexts(ws);
                 self.poll_focus_event(ws);
                 self.poll_title_event(ws);
-                if ws.ime_preedit.is_some() {
+                if ws.ime_preedit.is_some() || modal_editor(ws).is_some() {
                     self.update_ime_cursor_area(ws);
                 }
                 // Reflect the focused pane's OSC 9;4 progress onto the OS
@@ -15012,6 +15135,7 @@ impl App {
         ws.ssh_input = None;
         ws.context_menu = None;
         ws.editing_title = None;
+        ws.dragging_modal_editor = false;
         // Vi mode is backed by per-terminal engine state, so closing the modal
         // must clear both the UI owner and TermMode::VI.
         self.exit_vi_mode(ws);
@@ -15032,7 +15156,7 @@ impl App {
             ws.pending_resize = true;
             match state.scope {
                 TitleEditScope::Window => {
-                    let value = state.input;
+                    let value = state.input.text().to_string();
                     // Empty clears the override and restores the
                     // `window-title-format` behaviour; anything else pins it
                     // as the base for `sync_window_title`.
@@ -16116,11 +16240,11 @@ impl App {
             }
             Action::OpenSsh => {
                 self.close_all_modals(ws);
-                ws.ssh_input = Some((String::new(), 0));
+                ws.ssh_input = Some((Default::default(), 0));
             }
             Action::CommandPalette => {
                 self.close_all_modals(ws);
-                ws.palette_input = Some((String::new(), 0));
+                ws.palette_input = Some((Default::default(), 0));
             }
             // Open the in-app settings overlay (Ctrl+, / right-click
             // → Settings / palette "Open settings").
@@ -16149,7 +16273,7 @@ impl App {
             Action::OpenLayoutPicker => {
                 self.close_all_modals(ws);
                 ws.layout_picker_entries = crate::session::Session::list_layouts();
-                ws.layout_picker_input = Some((String::new(), 0));
+                ws.layout_picker_input = Some((Default::default(), 0));
             }
             Action::OpenThemePicker => self.open_theme_picker(ws),
             Action::OpenMediaShelf => self.open_media_shelf(ws),
@@ -18703,19 +18827,6 @@ fn gpu_kind_text<'a>(tr: &kettle_i18n::Translator, kind: &'a str) -> &'a str {
     }
 }
 
-/// How the in-settings text-edit buffer is shown in the value column. A short
-/// string shows whole; a long one shows an ellipsized tail, so a long path
-/// stays readable (the caret/end is what matters while typing) without
-/// ballooning the panel width.
-fn settings_edit_display(buf: &str) -> String {
-    let count = buf.chars().count();
-    if count <= 40 {
-        return buf.to_string();
-    }
-    let tail: String = buf.chars().skip(count - 39).collect();
-    format!("…{tail}")
-}
-
 /// Startup visibility policy. Windows are created hidden while renderer init
 /// runs, then visible states are revealed once the wgpu surface is configured.
 /// Only `window_state = hidden` remains hidden.
@@ -21037,6 +21148,9 @@ impl App {
                     self.sync_cursor_icon(ws);
                     return;
                 }
+                if ws.dragging_modal_editor && self.modal_text_pointer(ws, false) {
+                    return;
+                }
                 self.update_search_hover(ws);
                 if ws.selecting {
                     note_selection_drag_motion(ws);
@@ -21296,6 +21410,9 @@ impl App {
                     if self.confirm_mouse_press(ws, event_loop, sgr) {
                         return;
                     }
+                    if self.dismiss_modal_outside(ws, sgr) {
+                        return;
+                    }
                     // A lone context menu must swallow the side-button press
                     // too. Dismiss the menu and DON'T forward.
                     // `modal_swallows_pointer` returns false for a lone menu,
@@ -21346,11 +21463,17 @@ impl App {
                 if self.confirm_mouse_press(ws, event_loop, bcode) {
                     return;
                 }
+                if self.dismiss_modal_outside(ws, bcode) {
+                    return;
+                }
                 // Context menu: if the menu is open, a left-click
                 // either fires the row that was hit or — if the click landed
                 // outside the panel — closes the menu. Middle-click outside
                 // dismisses too; only right-click falls through so it can
                 // reopen/relocate the menu.
+                if bcode == 0 && self.modal_text_pointer(ws, true) {
+                    return;
+                }
                 if bcode == 0 && self.picker_pointer(ws, PickerPointer::Press) {
                     return;
                 }
@@ -21804,6 +21927,9 @@ impl App {
                 // press returns before any button is noted as held -- but "today"
                 // is exactly the kind of reasoning that leaves a gesture armed
                 // when one of them grows a new early return.
+                if bcode == 0 && std::mem::take(&mut ws.dragging_modal_editor) {
+                    return;
+                }
                 if self.release_pane_drag(ws, bcode, event_loop) {
                     return;
                 }
@@ -22101,6 +22227,8 @@ impl App {
                     ws.ime_preedit = None;
                     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
                     ws.search.dragging_editor = false;
+                    ws.dragging_modal_editor = false;
+                    ws.context_menu = None;
                     ws.search.pressed_control = None;
                     self.finish_selection_gesture(ws);
                     ws.scrollbar_drag_offset = None;
@@ -23558,3 +23686,7 @@ mod settings_footer_text_tests;
 
 #[cfg(test)]
 mod lane_control_tests;
+
+#[cfg(test)]
+#[path = "app/modal_editor_tests.rs"]
+mod modal_editor_tests;

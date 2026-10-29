@@ -44,35 +44,8 @@ fn the_title_editor_reads_in_dracula() {
 fn the_renderer_actually_consumes_the_contrast_and_bell_helpers() {
     let src = production_source();
     let compact: String = src.split_whitespace().collect();
-    for (bar, wiring) in [
-        (
-            "palette and theme picker",
-            "push_input_bar(&mutquads,search_rect,theme,theme.palette[5],&mutself.chrome_colors,);",
-        ),
-        (
-            "layout picker",
-            "push_input_bar(&mutquads,search_rect,theme,theme.palette[6],&mutself.chrome_colors,);",
-        ),
-        (
-            "ssh picker",
-            "push_input_bar(&mutquads,search_rect,theme,theme.palette[4],&mutself.chrome_colors,);",
-        ),
-        (
-            "title editor",
-            "push_input_bar(&mutquads,edit.rect,theme,theme.palette[3],&mutself.chrome_colors,);",
-        ),
-    ] {
-        assert!(
-            compact.contains(wiring),
-            "the {bar} must paint through push_input_bar"
-        );
-    }
-    assert_eq!(
-        compact.matches("push_input_bar(&mutquads,search_rect,theme,theme.palette[5],&mutself.chrome_colors,);")
-            .count(),
-        2,
-        "the command palette and the theme picker both paint the shared bar"
-    );
+    assert!(compact.contains("push_input_bar(&mutmenu_q,field.rect,theme,theme.palette[field.accent_palette.min(15)],&mutself.chrome_colors,);"),
+        "every modal field must paint the shared readable input bar");
     for slot in 2..=6 {
         assert!(
             !src.contains(&format!("theme.palette[{slot}], 0.96")),

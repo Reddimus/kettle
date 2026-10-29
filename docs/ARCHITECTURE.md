@@ -1539,6 +1539,46 @@ focused, its pre-search viewport back. The right-click menu is the one modal
 allowed to coexist with the bar; keys go to the menu while it is up because
 its arm precedes search in the key handler.
 
+Modal text fields and search share `kettle-ui::text_editor::TextEditor`: one
+bounded UTF-8 string, a caret and an optional selection anchor on extended
+grapheme boundaries, undo/redo, and a horizontal display-column offset. Title
+(window, tab, pane and group), command, SSH, layout, theme and Settings path
+fields use it. Left/Right, Home/End and Shift selection work in every field;
+Option on macOS and Ctrl elsewhere move or delete words. The platform's
+select-all, cut, copy and paste shortcuts use the existing clipboard. A failed
+clipboard write keeps a cut selection. Inputs share search's 4 KiB byte ceiling
+and single-line normalization; over-limit replacements leave the text intact.
+
+`kettle-render::text_field` shapes modal editor projections with search's
+shaping and grapheme-cluster helpers. Selection spans, caret positions,
+horizontal scrolling and pointer stops all come from that shaped buffer.
+Prefix and hint text have separate clipped slots. Settings computes the inline
+value slot from the same column budgets and scrolling layout as its row painter.
+The UI projects IME preedit over the selected range or at the caret, retains
+the suffix, and commits through the same editor. IME candidate placement shapes
+the exact same projection, including preedit, rather than estimating text widths.
+Native and control pointer routes both place the caret and extend drag selections
+from those shaped stops. A pointer press ends composition before mapping into
+committed text.
+
+Transient popups share one outside-press dispatch and consume the dismissing
+click: context menus, the command palette, theme/layout pickers, SSH, title
+editing and quick-select hints. A picker's input lane and results panel together
+count as inside. Any pointer press cancels a keyboard-only hint. Settings closes
+on a press outside its panel; an active path editor or keybinding capture instead
+cancels only that capture on a press outside its focused row. Confirmation dialogs
+keep their question and consume outside presses. The search lane and vi mode keep
+their existing pointer behavior because they are not transient popups.
+
+The context menu retains its platform convention: left/middle presses outside
+it, including in the terminal, dismiss and consume; an outside right press
+dismisses and follows the ordinary right-click route to relocate/reopen the menu.
+Changing OS windows dismisses the menu on focus loss and lets the new window
+handle its own click. Other transient popups do not pass a dismissing click into
+terminal selection, mouse reporting, pane focus or window chrome. Native and
+control presses enter the same dispatcher; dismissal also ends composition and
+editor dragging, and title dismissal schedules the chrome/PTY geometry resize.
+
 Pane-bound bytes never block the App thread. Each pane owns two bounded input
 lanes: user input (keys, mouse, focus, paste, Lua, legacy remote commands, and
 control requests) and higher-priority terminal protocol replies. Both lanes
@@ -2752,6 +2792,7 @@ moving existing items.
 | `overlays` | Tab/status bars, menus, title editing, IME projections, toasts, receipts, confirmation projections and shared overlay state |
 | `completion` | Completion projections, card layout, visible rows, selection and scroll chrome |
 | `search` | Search projections, responsive bar layout, shaped editor clusters and pointer stops |
+| `text_field` | Modal editor projections, clipped text slots and shared shaped paint/pointer/IME geometry |
 | `settings` | Settings projections, display lines, scrolling layout and hit testing |
 | `geometry` | GPU-free rectangle, viewport, placement, selection, cell-position and size-limit helpers, with focused unit tests |
 | `labels` | Display-column measurement, fitting and title/path truncation |

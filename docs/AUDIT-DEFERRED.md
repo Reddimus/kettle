@@ -47,16 +47,6 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
 
 ## UX
 
-- **Full editing in modal text fields.** `crates/kettle-ui/src/modal_input.rs`
-  still appends to strings; title, command, SSH, layout and Settings path fields
-  lack a caret, selection, Home/End and word movement. Deferred because editor
-  state also needs renderer and IME changes. Close by sharing `SearchEditor`
-  behavior with `crates/kettle-render/src/lib.rs` overlays and testing caret,
-  selection, horizontal scrolling and mid-string preedit.
-- **Consistent outside-click dismissal.** `crates/kettle-ui/src/app.rs` closes
-  context menus on outside clicks but swallows clicks for palettes and pickers.
-  Deferred for per-modal hit-testing and a deliberate click-through policy.
-  Close with consistent dismissal, documented click consumption and regressions.
 - **Intermittent macOS page-up failure.** `scroll_page_up` in
   `crates/kettle-ui/src/app.rs` and `scripts/check-live-ui-smoke.py` needs
   investigation: earlier runs stayed at display offset zero after 1,600 lines,

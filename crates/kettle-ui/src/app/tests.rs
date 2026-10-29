@@ -1208,7 +1208,9 @@ fn bulk_group_edits_keep_pinned_tab_and_live_window_semantics() {
             .all(|pane| pane.group_name.as_deref() == Some("window-fleet"))
     );
 
-    window_edit.input.clear();
+    window_edit
+        .input
+        .replace_all("", crate::modal_input::MAX_MODAL_INPUT_BYTES);
     assert!(apply_mux_title_edit(&mut mux, &window_edit));
     assert!(
         mux.panes.values().all(|pane| pane.group_name.is_none()),
@@ -4133,7 +4135,7 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
         assert_eq!(accessibility_context_menu_item_index(id, &ws), None);
     }
     let copy = super::accessibility_modal_id(2, 1);
-    ws.palette_input = Some((String::new(), 0));
+    ws.palette_input = Some((Default::default(), 0));
     assert_eq!(accessibility_context_menu_item_index(copy, &ws), None);
     ws.palette_input = None;
     ws.context_menu = None;
@@ -5597,7 +5599,7 @@ fn empty_preedit_preserves_ownership_until_commit() {
         } else {
             ws.ime_focus_generation += 1;
         }
-        ws.palette_input = Some((String::new(), 0));
+        ws.palette_input = Some((Default::default(), 0));
         super::update_ime_preedit(&mut ws, String::new(), None);
         let kept = |ws: &WindowState| ws.ime_preedit_owner.map(|s| (s.owner, s.generation));
         assert_eq!(kept(&ws), owner.map(|s| (s.owner, s.generation)));
@@ -9532,14 +9534,15 @@ fn every_modal_text_field_routes_through_the_shared_input_rules() {
     // deletion, but its catch-all arm still has to reject Command chords,
     // because every chord it does not claim explicitly (⌘Q, ⌘W, …) used to
     // land in the query as a bare letter.
-    let append_only = [
+    let modal_fields = [
         "fn palette_key(",
         "fn ssh_key(",
         "fn layout_picker_key(",
         "fn settings_text_key(",
         "fn title_edit_key(",
+        "fn theme_picker_key(",
     ];
-    for name in append_only.iter().copied().chain(["fn search_key("]) {
+    for name in modal_fields.iter().copied().chain(["fn search_key("]) {
         let body = src
             .split(name)
             .nth(1)
@@ -9575,9 +9578,13 @@ fn every_modal_text_field_routes_through_the_shared_input_rules() {
                      control-character filter apply"
             );
         }
-        if !append_only.contains(&name) {
+        if !modal_fields.contains(&name) {
             continue;
         }
+        assert!(
+            body.contains("self.modal_editor_key(ws, key)"),
+            "{name} must route editing commands to the shared editor"
+        );
         assert!(
             body.contains("crate::modal_input::push_text("),
             "{name} must append through modal_input::push_text so the \
@@ -10277,7 +10284,7 @@ fn a_key_that_closes_or_replaces_a_modal_stops_repeating() {
 
     let enter = PhysicalKey::Code(KeyCode::Enter);
     let mut ws = WindowState::new(0, Mux::new());
-    ws.palette_input = Some((String::new(), 0));
+    ws.palette_input = Some((Default::default(), 0));
     let owner = top_modal(&ws);
     assert_eq!(owner, Some(KeyModal::Palette));
 
@@ -10301,7 +10308,7 @@ fn a_key_that_closes_or_replaces_a_modal_stops_repeating() {
     // Enter runs "Open layout picker": the palette is replaced, and its
     // composition ends so a late Commit cannot type into the picker.
     ws.palette_input = None;
-    ws.layout_picker_input = Some((String::new(), 0));
+    ws.layout_picker_input = Some((Default::default(), 0));
     remember_closing_key(&mut ws, owner, enter);
     assert!(ws.closing_keys.contains(&enter));
     assert_ne!(ws.ime_focus_generation, generation);
@@ -10367,7 +10374,7 @@ fn every_held_closing_key_stops_repeating() {
     let enter = PhysicalKey::Code(KeyCode::Enter);
     let escape = PhysicalKey::Code(KeyCode::Escape);
     let mut ws = WindowState::new(0, Mux::new());
-    ws.palette_input = Some((String::new(), 0));
+    ws.palette_input = Some((Default::default(), 0));
     let owner = top_modal(&ws);
     ws.palette_input = None;
     ws.settings_nav = Some(crate::settings::SettingsNav {
@@ -12180,7 +12187,7 @@ fn side_button_forward_is_modal_gated_and_releases_pair_with_presses() {
     );
     assert!(
         src.contains(
-            "self.release_held_buttons(ws, |held| held.button == sgr); ws.held_buttons.pressed(sgr, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, sgr) { return; } // A lone context menu"
+            "self.release_held_buttons(ws, |held| held.button == sgr); ws.held_buttons.pressed(sgr, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, sgr) { return; } if self.dismiss_modal_outside(ws, sgr) { return; } // A lone context menu"
         ),
         "a side press first releases one whose release went elsewhere, and is Kettle's until a program gets it"
     );
@@ -12280,8 +12287,8 @@ fn a_held_buttons_reports_stay_with_the_pane_its_press_went_to() {
     for needle in [
         // Each press first releases one whose release went elsewhere, and
         // is Kettle's own gesture until a program receives it.
-        "self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, bcode) { return; } // Context menu:",
-        "if bcode == 0 { ws.card_press = None; } if ws.card_focus.take().is_some() { ws.accessibility_pending = true; } self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, bcode) { return true; } let bar",
+        "self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, bcode) { return; } if self.dismiss_modal_outside(ws, bcode) { return; } // Context menu:",
+        "if bcode == 0 { ws.card_press = None; } if ws.card_focus.take().is_some() { ws.accessibility_pending = true; } self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, bcode) { return true; } if self.dismiss_modal_outside(ws, bcode) { return true; } if bcode == 0 && self.modal_text_pointer(ws, true) { return true; } let bar",
         // Each release ends a gesture of Kettle's own first.
         "ws.held_buttons.end_own(bcode); // End any split-divider drag on left-button up. if bcode == 0 { ws.dragging_split = None; } if self.confirm_mouse_release(ws, bcode) { return; } // A release ends an editor drag inside the search bar;",
         "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); if self.confirm_mouse_release(ws, sgr) { return; } self.send_mouse(ws, sgr, false, false); return; }",

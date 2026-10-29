@@ -137,12 +137,11 @@ pub struct SettingsNav {
 
 /// State for the inline text prompt opened by a [`FieldKind::Text`] row (the
 /// in-settings image-path entry). `key` is the config key to persist on submit;
-/// `buf` is the editable string (append / backspace only; the cursor is always
-/// at the end, plenty for a path). Enter persists + reloads, Esc cancels.
+/// `buf` is the shared grapheme-aware editor. Enter persists + reloads, Esc cancels.
 #[derive(Debug, Clone)]
 pub struct SettingsTextEdit {
     pub key: &'static str,
-    pub buf: String,
+    pub(crate) buf: crate::text_editor::TextEditor,
 }
 
 fn toggle(label: Text, key: &'static str) -> Field {
