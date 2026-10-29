@@ -17,6 +17,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Refuse a symlinked update backup directory during recovery instead of
+  reading and cleaning up whatever it points to.
+- Stop enumerating update and backup trees as soon as they exceed their
+  entry limits, and reject a stray backup file before collecting the tree.
+- Let Windows update cleanup finish when the payload is exactly at its size
+  limit.
+- Keep two macOS updaters started with different state directories from both
+  replacing the app.
+
+### Fixed
+
 - Keep titles, prompt marks, clipboard writes and notifications working in
   every pane while other panes hold all image memory.
 - Stop a large image or control string that is refused for lack of memory from
