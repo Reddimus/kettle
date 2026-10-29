@@ -130,6 +130,44 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Bring the security, agent, recording, protocol and architecture documents
   in line with the code, and buffer partial output lines per pane in the
   example `init.lua`.
+- Give each screenshot its own destination and report a failed capture.
+- Keep a zoomed pane's font when duplicating it.
+- Run custom URL handlers and the system opener off the event loop.
+- Suppress startup titles only on Windows, where ConPTY causes them.
+- Hit-test the status bar where it is drawn.
+- Return focus to a restarted pane, and keep its directory for WSL launches.
+- Redraw after a broadcast that scrolls a pane.
+- Tie IME composition to its pane, end it on focus changes, and accept new
+  input after a cancelled composition.
+- Start recording before restored sibling windows open.
+- Respect menus and other modal pointer owners in mouse motion reports.
+- Keep the new-tab button and tab overflow arrows in step with focus changes.
+- Open a second theme picker from the first one's baseline, and keep
+  configured theme overrides in previews.
+- Run command deadlines before GPU recovery, and wake for the earliest of the
+  animation, background and cursor-blink timers.
+- Give a screen reader that attaches late a current accessibility tree.
+- Keep search on the focused pane after a remote new tab or a tear-off.
+- Keep wide and combining characters in trigger matches.
+- Hide a vertical tab's close button when it cannot fit, and hit-test tabs,
+  tear-off anchors and docking against the tab band as drawn, including the
+  status bar.
+- Keep an update notice dismissed in this window when an older update state
+  arrives later.
+- Keep live config reload working when re-registering its watcher fails.
+- Stop reporting mouse motion to the terminal while a menu or dialog owns the
+  pointer.
+- Resize splits by dragging a divider through the control API.
+- Submit `run_command` with exactly one carriage return whatever line ending
+  it has.
+- Keep a short window's menu at least one full row tall; offer Ungroup when
+  any pane in the tab is grouped; accept Space typed as a character in
+  Settings, toasts and dialogs.
+- Reap layouts opened from the layout picker.
+- Deliver keys typed behind a queued paste to the panes they were typed for
+  when the broadcast scope changes.
+- Hide sibling preview lanes behind the theater and fullscreen viewers.
+- Bound a tab handoff to one deadline however it is fragmented.
 
 ## [5.6.0] — 2026-10-28
 
