@@ -309,6 +309,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Refresh links and search highlights when terminal output lands while a
   frame is being prepared, instead of keeping stale ones until the next
   output.
+- Align the control-message buffers of the legacy tab handoff and bound the
+  Windows access-control entry checks to each entry's size.
 
 ### Security
 
