@@ -39,11 +39,21 @@ matching and replacement behavior against native Lua. For an offline run, use
 
 The renderer's `ime_preedit_` tests cover a single composition glyph with a
 nonblinking block cursor and composition over existing terminal text with
-`cell-width = 0.5`, in both grid and legacy modes. The headless screenshots
+`cell-width = 0.5`, in both grid and legacy modes. A portable shaping test also
+checks that `cell-height = 0.5` retains the full composition line height in its
+opaque background and text clip. The headless screenshots
 require a GPU adapter and report a skip when none is available. Run
 `cargo test -j 2 --locked --offline -p kettle-render -p kettle-ui ime_preedit_ -- --nocapture`
 to see those skips, then run the same command without the filter for both full
 crate suites.
+
+The renderer recovery tests include successful device creation on a backend
+that failed while drawing, checking that another backend is tried first.
+`python3 scripts/test-install-media.py` interrupts uninstall after each recovery
+helper deletion and retries through installed helpers or a fresh package install.
+`python3 scripts/perf/macos-compare-score-self-test.py` forces a process identity
+probe to time out and verifies that the benchmark wrapper reaps its child even
+when it ignores SIGTERM.
 
 ### Main gates
 

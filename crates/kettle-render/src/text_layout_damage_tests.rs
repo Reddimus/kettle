@@ -125,7 +125,7 @@ fn ime_preedit_background_is_opaque_and_clipped_to_its_pane() {
             },
             (10.0, 20.0),
             (8.0, 16.0),
-            0.0,
+            (0.0, 16.0),
         ),
         (10.0, 20.0, 50.0, 30.0),
         Rgb::new(10, 20, 30),
@@ -185,7 +185,7 @@ fn ime_preedit_background_covers_naturally_shaped_text_in_narrow_cells() {
         row: 0,
         col: 0,
     };
-    let bounds = ime_preedit_rect(&preedit, (8.0, 8.0), (5.0, 20.0), shaped_width);
+    let bounds = ime_preedit_rect(&preedit, (8.0, 8.0), (5.0, 20.0), (shaped_width, 20.0));
     let mut quads = Vec::new();
     let clip = push_ime_preedit_quads(
         &mut quads,
@@ -206,9 +206,63 @@ fn ime_preedit_background_covers_naturally_shaped_text_in_narrow_cells() {
     assert_eq!(clip.left, 8);
     assert_eq!(clip.right as f32, bounds.0 + bounds.2);
     assert_eq!(
-        ime_preedit_rect(&preedit, (8.0, 8.0), (20.0, 20.0), shaped_width).2,
+        ime_preedit_rect(&preedit, (8.0, 8.0), (20.0, 20.0), (shaped_width, 20.0)).2,
         80.0
     );
+}
+
+#[test]
+fn ime_preedit_reduced_height_covers_the_shaped_line() {
+    use super::*;
+    let metrics = Metrics::new(16.0, 20.0);
+    let mut fonts = FontSystem::new();
+    for face in kettle_config::font::all() {
+        load_bundled_font(&mut fonts, face);
+    }
+    let mut buffer = TextBuffer::new(&mut fonts, metrics);
+    buffer.set_wrap(Wrap::None);
+    buffer.set_size(None, Some(10.0));
+    buffer.set_text(
+        "gyjp",
+        &Attrs::new().family(Family::Name(kettle_config::font::FAMILY)),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut fonts, false);
+    let run = buffer.layout_runs().next().unwrap();
+    assert_eq!(run.line_height, metrics.line_height);
+    let preedit = ImePreedit {
+        text: "gyjp".into(),
+        row: 2,
+        col: 1,
+    };
+    let bounds = ime_preedit_rect(
+        &preedit,
+        (8.0, 8.0),
+        (8.0, 10.0),
+        (run.line_w, run.line_height),
+    );
+    assert_eq!(
+        bounds.1, 28.0,
+        "composition origin still follows the reduced grid"
+    );
+    let mut quads = Vec::new();
+    let clip = push_ime_preedit_quads(
+        &mut quads,
+        bounds,
+        (0.0, 0.0, 320.0, 120.0),
+        Rgb::new(10, 20, 30),
+        Rgb::new(40, 50, 60),
+    );
+    assert!(
+        quads[0].size[1] >= run.line_height,
+        "background must cover the shaped line"
+    );
+    assert!(
+        clip.bottom as f32 >= bounds.1 + run.line_height,
+        "descenders must remain inside the clip"
+    );
+    assert_eq!(quads[1].pos[1], bounds.1 + run.line_height - 2.0);
 }
 
 #[test]
@@ -219,7 +273,7 @@ fn ime_preedit_text_clip_stays_inside_opaque_pixels_and_pane() {
         row: 0,
         col: 0,
     };
-    let bounds = ime_preedit_rect(&preedit, (12.25, 23.75), (5.0, 20.0), 38.4);
+    let bounds = ime_preedit_rect(&preedit, (12.25, 23.75), (5.0, 20.0), (38.4, 20.0));
     let mut quads = Vec::new();
     let clip = push_ime_preedit_quads(
         &mut quads,

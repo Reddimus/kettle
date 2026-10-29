@@ -56,6 +56,47 @@ fn recovery_tries_same_model_adapters_in_enumeration_order() {
 }
 
 #[test]
+fn recovery_prefers_another_backend_even_when_failed_devices_build() {
+    use super::{
+        AdapterEscalation, GpuAdapterKey, recovery_candidate_indices, try_adapter_candidates,
+    };
+    let failed = GpuAdapterKey {
+        vendor: 1,
+        device: 2,
+        backend: wgpu::Backend::Vulkan,
+    };
+    let alternate = GpuAdapterKey {
+        backend: wgpu::Backend::Gl,
+        ..failed
+    };
+    for keys in [
+        vec![failed, alternate],
+        vec![failed, alternate, failed, alternate],
+    ] {
+        let indices = recovery_candidate_indices(
+            &keys,
+            AdapterEscalation::AlternateBackend,
+            Some(failed),
+            None,
+        );
+        let (chosen, ()) = pollster::block_on(try_adapter_candidates(indices.clone(), |_index| {
+            // Device creation also succeeds on the backend that fails while drawing.
+            std::future::ready(Ok(()))
+        }))
+        .unwrap();
+        assert_eq!(keys[chosen], alternate);
+        let expected: Vec<_> = (0..keys.len())
+            .filter(|&i| keys[i] == alternate)
+            .chain((0..keys.len()).filter(|&i| keys[i] == failed))
+            .collect();
+        assert_eq!(
+            indices, expected,
+            "keep enumeration order within each backend tier"
+        );
+    }
+}
+
+#[test]
 fn recovery_keeps_unique_model_excluded_and_bounds_device_attempts() {
     use super::{
         AdapterEscalation::*, GpuAdapterKey, MAX_RECOVERY_ADAPTER_ATTEMPTS,

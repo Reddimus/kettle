@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from dataclasses import dataclass
@@ -183,6 +184,60 @@ class ApplePayloadTests(unittest.TestCase):
 
 
 class ProcessCleanupTests(unittest.TestCase):
+    def test_registration_timeout_reaps_unregistered_child(self):
+        source = SCRIPT.read_text()
+        def embedded(variable, delimiter):
+            marker = f'cat > "${variable}" <<\'{delimiter}\'\n'
+            start = source.index(marker) + len(marker)
+            return source[start:source.index('\n' + delimiter + '\n', start)]
+
+        for behavior in ('timeout', 'empty'):
+            with self.subTest(behavior=behavior), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                wrapper = root / 'bounded-run'
+                wrapper.write_text(embedded('bounded_run', 'EOF'))
+                registry = root / 'registry.py'
+                registry.write_text(embedded('process_registry', 'PY'))
+                # Let the real registry hit its timeout, or return no identity.
+                ps = root / 'ps'
+                ps.write_text('#!' + sys.executable + '\nimport os, time\nfrom pathlib import Path\n'
+                              'deadline = time.monotonic() + 1\n'
+                              'while not Path(os.environ["FIXTURE_CHILD_PID"]).exists() and time.monotonic() < deadline:\n'
+                              '    time.sleep(0.01)\n' +
+                              ('time.sleep(3)\n' if behavior == 'timeout' else ''))
+                ps.chmod(0o755)
+                child = root / 'child.py'
+                child.write_text('import os, signal, sys\nfrom pathlib import Path\n'
+                                 'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+                                 'Path(sys.argv[1]).write_text(str(os.getpid()))\n'
+                                 'signal.pause()\n')
+                pid_file = root / 'child-pid'
+                process = subprocess.Popen(
+                    ['bash', str(wrapper), '10', str(root / 'pids'), sys.executable, str(child), str(pid_file)],
+                    env=dict(os.environ, PROCESS_REGISTRY=str(registry), MARKER_DIR=raw, FIXTURE_CHILD_PID=str(pid_file),
+                             PATH=str(root) + os.pathsep + os.environ['PATH']),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                child_pid = None
+                try:
+                    deadline = time.monotonic() + 5
+                    while not pid_file.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(pid_file.exists(), 'child did not start')
+                    child_pid = int(pid_file.read_text())
+                    self.assertNotEqual(process.wait(timeout=10), 0)
+                    with self.assertRaises(ProcessLookupError, msg='registration failure left a terminal running'):
+                        os.kill(child_pid, 0)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
+                    if child_pid is not None:
+                        try:
+                            os.kill(child_pid, 9)
+                        except ProcessLookupError:
+                            pass
+
     def registry(self):
         source = SCRIPT.read_text()
         marker = 'cat > "$process_registry" <<\'PY\'\n'

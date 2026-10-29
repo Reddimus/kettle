@@ -471,7 +471,7 @@ sys.exit(module.main())
             timeout=30,
         )
 
-    def uninstall(self, kill_at=0):
+    def uninstall(self, kill_at=0, kill_path=None, installed=False):
         child = """
 import importlib.util, os, sys
 sys.dont_write_bytecode = True
@@ -484,15 +484,16 @@ def interrupted(*arguments):
     global count
     unlink(*arguments)
     count += 1
-    if count == int(sys.argv[2]):
+    if str(count) == sys.argv[2] or arguments[1] == sys.argv[2]:
         os._exit(9)
 module._unlink_recorded = interrupted
 arguments = module._parser().parse_args(["uninstall", "--prefix", sys.argv[3]])
 module._uninstall(arguments)
 """
-        helper = str(ROOT / "scripts/install-unix.py")
-        command = ([sys.executable, "-c", child, helper, str(kill_at), str(self.prefix)]
-                   if kill_at else [sys.executable, helper, "uninstall", "--prefix", str(self.prefix)])
+        helper = str(self.prefix / "share/kettle/install-unix.py" if installed
+                     else ROOT / "scripts/install-unix.py")
+        command = ([sys.executable, "-c", child, helper, str(kill_path or kill_at), str(self.prefix)]
+                   if kill_at or kill_path else [sys.executable, helper, "uninstall", "--prefix", str(self.prefix)])
         return subprocess.run(
             command,
             capture_output=True,
@@ -508,6 +509,36 @@ module._uninstall(arguments)
         resumed = self.uninstall()
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
         self.assertFalse((self.prefix / "share/kettle").exists())
+
+    def test_uninstall_interrupted_after_each_recovery_helper_deletion(self):
+        for name in ('install.sh', 'install-unix.py', 'uninstall-pending.json'):
+            with self.subTest(helper=name):
+                installed = self.run_installer()
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                cut = self.uninstall(kill_path='share/kettle/' + name, installed=True)
+                self.assertEqual(cut.returncode, 9, cut.stderr)
+                self.assertFalse((self.prefix / 'share/kettle' / name).exists())
+                journal = self.prefix / 'share/kettle/uninstall-pending.json'
+                if journal.exists():
+                    helper = self.prefix / 'share/kettle/install-unix.py'
+                    self.assertTrue(helper.is_file(), 'blocking journal has no installed recovery command')
+                    resumed = self.uninstall(installed=True)
+                else:
+                    # Once the recovery command is gone, reinstall must be available.
+                    receipt = self.prefix / 'share/kettle/install-pending.json'
+                    self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+                    reinstalled = self.run_installer()
+                    self.assertEqual(reinstalled.returncode, 0, reinstalled.stderr)
+                    resumed = subprocess.run(
+                        ['bash', str(self.prefix / 'share/kettle/install.sh'), '--uninstall'],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                self.assertEqual(resumed.returncode, 0, resumed.stderr)
+                for relative in ('bin/kettle', 'share/kettle/install.sh',
+                                 'share/kettle/install-unix.py',
+                                 'share/kettle/uninstall-pending.json',
+                                 'share/kettle/install-pending.json'):
+                    self.assertFalse((self.prefix / relative).exists(), relative)
 
     def test_uninstall_journal_preserves_helpers_and_refuses_changed_remainder(self):
         self.assertEqual(self.helper(("share/kettle/z", b"payload")).returncode, 0)
@@ -530,14 +561,16 @@ module._uninstall(arguments)
         self.assertEqual(self.uninstall().returncode, 0)
 
     def test_uninstall_resumes_after_manifest_removal(self):
-        self.assertEqual(self.helper().returncode, 0)
-        manifest = json.loads((self.prefix / "share/kettle/install-files.json").read_text())
-        # Payloads, then the manifest, with the recovery helpers still present.
-        cut = self.uninstall(kill_at=len(manifest['files']) - 1)
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        cut = self.uninstall(kill_path='share/kettle/install-files.json', installed=True)
         self.assertEqual(cut.returncode, 9, cut.stderr)
         self.assertFalse((self.prefix / "share/kettle/install-files.json").exists())
         self.assertTrue((self.prefix / "share/kettle/install-unix.py").exists())
-        resumed = self.uninstall()
+        resumed = subprocess.run(
+            ['bash', str(self.prefix / 'share/kettle/install.sh'), '--uninstall'],
+            capture_output=True, text=True, timeout=30,
+        )
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
         self.assertFalse((self.prefix / "share/kettle").exists())
 

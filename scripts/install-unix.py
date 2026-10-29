@@ -16,7 +16,8 @@ from typing import Any, Dict, Iterator, List, NoReturn, Optional, Sequence, Tupl
 
 
 MANIFEST_RELATIVE = "share/kettle/install-files.json"
-# What an install is about to write, kept until its provenance is committed.
+# What an install is about to write, or uninstall's final recovery helpers.
+# Kept until install provenance is committed or uninstall removes the helpers.
 # A retry trusts a file that differs from its record only when this receipt
 # shows the interrupted install wrote it; equal bytes alone prove nothing.
 PENDING_RELATIVE = "share/kettle/install-pending.json"
@@ -326,8 +327,8 @@ def _read_owned_json(root_fd: int, relative: str, mode: int, label: str) -> Opti
 
 
 def _read_pending(root_fd: int, prefix: str) -> Dict[str, List[Dict[str, Any]]]:
-    """The files an interrupted install was writing, by path; empty when no
-    install was interrupted."""
+    """Files an interrupted install was writing or uninstall was removing last,
+    by path; empty when there is no pending receipt."""
     document = _read_owned_json(root_fd, PENDING_RELATIVE, 0o600, "install receipt")
     if document is None:
         return {}
@@ -1032,7 +1033,7 @@ def _uninstall(arguments: argparse.Namespace) -> None:
                 key=lambda path: (path.count("/"), path), reverse=True,
             ):
                 _unlink_recorded(root_fd, path)
-            for path in (PENDING_RELATIVE, MANIFEST_RELATIVE, *RECOVERY_PATHS):
+            for path in (PENDING_RELATIVE, MANIFEST_RELATIVE):
                 if _destination_exists(root_fd, path):
                     _unlink_recorded(root_fd, path)
             directories = sorted(
@@ -1045,8 +1046,22 @@ def _uninstall(arguments: argparse.Namespace) -> None:
                     _remove_recorded_directory(root_fd, record["path"])
                 except FileNotFoundError:
                     pass
+            # Hand off the last helpers to an install receipt before dropping the
+            # journal. While installation is blocked, both recovery entry points
+            # remain runnable; after this point reinstall can recognize leftovers.
+            recovery = {
+                record["path"]: [record] for record in journal["files"]
+                if record["path"] in RECOVERY_PATHS and record["path"] in remaining
+            }
+            if recovery:
+                _publish_pending(root_fd, prefix, recovery, {})
             _unlink_recorded(root_fd, UNINSTALL_RELATIVE)
-            # The journal kept its ancestors nonempty until its final unlink.
+            for path in RECOVERY_PATHS:
+                if _destination_exists(root_fd, path):
+                    _unlink_recorded(root_fd, path)
+            if recovery:
+                _unlink_recorded(root_fd, PENDING_RELATIVE)
+            # The receipts and helpers kept their ancestors nonempty until now.
             for record in directories:
                 try:
                     _remove_recorded_directory(root_fd, record["path"])

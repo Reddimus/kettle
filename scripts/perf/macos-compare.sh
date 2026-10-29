@@ -309,7 +309,23 @@ rm -f "$completion_marker"
 export COMPLETION_MARKER="$completion_marker"
 "$@" &
 child_pid=$!
-child_start="$(python3 "$PROCESS_REGISTRY" register "$pid_log" "$child_pid")"
+
+registration_failed() {
+  trap - HUP INT TERM
+  # This wrapper owns job 1. Use its jobspec while no creation-time identity
+  # is available, so an already-completed child cannot become a stale PID kill.
+  kill -TERM %1 2>/dev/null || true
+  sleep 0.2
+  kill -KILL %1 2>/dev/null || true
+  wait "$child_pid" 2>/dev/null || true
+  rm -f "$completion_marker"
+  echo "macos-compare.sh: could not register terminal process: $1" >&2
+  exit 1
+}
+trap 'registration_failed "$1"' HUP INT TERM
+if ! child_start="$(python3 "$PROCESS_REGISTRY" register "$pid_log" "$child_pid")" || [ -z "$child_start" ]; then
+  registration_failed "$1"
+fi
 
 terminate_child() {
   if kill -0 "$child_pid" 2>/dev/null; then

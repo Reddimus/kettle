@@ -1707,14 +1707,14 @@ fn ime_preedit_rect(
     preedit: &ImePreedit,
     origin: (f32, f32),
     cell: (f32, f32),
-    shaped_width: f32,
+    shaped_size: (f32, f32),
 ) -> Rect4 {
     let cells = unicode_width::UnicodeWidthStr::width(preedit.text.as_str()).max(1);
     (
         origin.0 + preedit.col as f32 * cell.0,
         origin.1 + preedit.row as f32 * cell.1,
-        (cells as f32 * cell.0).max(shaped_width).ceil(),
-        cell.1,
+        (cells as f32 * cell.0).max(shaped_size.0).ceil(),
+        cell.1.max(shaped_size.1).ceil(),
     )
 }
 
@@ -7902,7 +7902,7 @@ impl Renderer {
                     preedit,
                     pane_grid_origin(pane, (pad_x, pad_y)),
                     (cw, ch),
-                    shaped_width,
+                    (shaped_width, metrics.line_height),
                 );
                 let bounds = push_ime_preedit_quads(
                     &mut ime_q,
@@ -11842,7 +11842,8 @@ fn recovery_candidate_indices(
     let same_model =
         |a: GpuAdapterKey, b: GpuAdapterKey| a.vendor == b.vendor && a.device == b.device;
     let ambiguous = avoid.is_some_and(|failed| ambiguous_adapter_model(keys, failed));
-    keys.iter()
+    let mut indices: Vec<_> = keys
+        .iter()
         .enumerate()
         .filter_map(|(i, &key)| {
             let eligible = match escalation {
@@ -11860,7 +11861,15 @@ fn recovery_candidate_indices(
             };
             eligible.then_some(i)
         })
-        .collect()
+        .collect();
+    if escalation == AdapterEscalation::AlternateBackend
+        && let Some(failed) = avoid
+    {
+        // A backend can create devices successfully and fail only while drawing.
+        // Keep ambiguous boards eligible, but try other backends first.
+        indices.sort_by_key(|&index| keys[index].backend == failed.backend);
+    }
+    indices
 }
 
 async fn try_adapter_candidates<T: Clone, D, F, Fut>(
@@ -12594,8 +12603,8 @@ async fn resolve_adapters(
         let indices = recovery_candidate_indices(&keys, escalation, avoid, preferred);
         let eligible: Vec<_> = indices.into_iter().map(|i| candidates[i].clone()).collect();
         // Model IDs cannot tell two boards apart, or prove that different
-        // backends refer to the same board. Try ambiguous matches in the
-        // driver's enumeration order, with a bounded number of device requests.
+        // backends refer to the same board. Keep enumeration order within each
+        // recovery tier, with a bounded number of device requests.
         if avoid.is_some_and(|failed| ambiguous_adapter_model(&keys, failed)) {
             let eligible: Vec<_> = eligible
                 .into_iter()
