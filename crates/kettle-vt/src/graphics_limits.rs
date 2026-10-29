@@ -38,9 +38,10 @@ impl Default for GraphicsLimits {
             image_bytes: 64 * MIB,
             retained_bytes: 256 * MIB,
             // Maximum-transmission extractor regressions (1-byte, 4 KiB,
-            // uneven 11/15 MiB, and full-sequence chunks) peak at 192,937,966
-            // bytes, just under 184 MiB: 96 MiB segmented payload + 72 MiB
-            // base64 output + 16 MiB sequence. Segments never reallocate;
+            // uneven 11/15 MiB, full-sequence chunks, and synchronized replay)
+            // peak at 192,937,970 bytes, just under 184 MiB: 96 MiB segmented
+            // payload + 72 MiB base64 output + 16 MiB sequence (+4 wire bytes).
+            // Replay consumes the saved allocation. Segments never reallocate;
             // rounding up to 184 MiB + 8 MiB headroom gives 192 MiB.
             transient_cpu_bytes: 192 * MIB,
             process_cpu_bytes: 512 * MIB,

@@ -2405,12 +2405,22 @@ mod tests {
     }
 
     fn maximum_transmission_with_extractor_chunks(pattern: &[usize], name: &str) -> usize {
+        maximum_transmission_with_extractor_replay(pattern, name, false)
+    }
+
+    fn maximum_transmission_with_extractor_replay(
+        pattern: &[usize],
+        name: &str,
+        synchronized: bool,
+    ) -> usize {
         let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
         let (control, payload) = maximum_transmission_fixture(&budget);
         let mut extractor = crate::Extractor::with_budget(budget.clone());
         let mut offset = 0;
         let mut index = 0;
         let mut wire = String::new();
+        let mut deferred = Vec::new();
+        extractor.set_graphics_deferred(synchronized);
         while offset < payload.len() {
             let size = pattern[index.min(pattern.len() - 1)].min(payload.len() - offset);
             let more = offset + size < payload.len();
@@ -2428,16 +2438,27 @@ mod tests {
             wire.push_str(&payload[offset..offset + size]);
             wire.push_str("\x1b\\");
             assert!(wire.len() - 4 <= budget.limits().sequence_bytes);
-            drop(extractor.feed(wire.as_bytes()));
+            for chunk in extractor.feed(wire.as_bytes()) {
+                if let crate::Chunk::DeferredGraphics(graphics) = chunk {
+                    deferred.push(graphics);
+                }
+            }
             offset += size;
             index += 1;
             assert_eq!(
                 budget.in_flight_usage().0,
-                usize::from(more),
+                usize::from(more && !synchronized),
                 "upload discarded after {offset} payload bytes ({name})"
             );
         }
         drop(payload);
+        extractor.set_graphics_deferred(false);
+        assert_eq!(deferred.len(), if synchronized { index } else { 0 });
+        let count = deferred.len();
+        for (index, graphics) in deferred.into_iter().enumerate() {
+            extractor.replay_graphics_with(graphics, |_, _| {});
+            assert_eq!(budget.in_flight_usage().0, usize::from(index + 1 < count));
+        }
         let out = extractor.feed(b"\x1b_Ga=p,i=1;\x1b\\");
         let image = out
             .iter()
@@ -2510,6 +2531,21 @@ mod tests {
                 "maximum-size",
             ),
             192_937_966
+        );
+    }
+
+    #[test]
+    fn maximum_transmission_transient_peak_with_synchronized_replay() {
+        let limits = crate::GraphicsLimits::default();
+        let maximum = limits.sequence_bytes - "Gm=0;".len();
+        let payload_len = limits.transmission_bytes - "a=t,i=1,f=100,o=z,m=1".len();
+        assert_eq!(
+            maximum_transmission_with_extractor_replay(
+                &[payload_len % maximum, maximum],
+                "synchronized maximum-size",
+                true,
+            ),
+            192_937_970
         );
     }
 

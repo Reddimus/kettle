@@ -376,7 +376,12 @@ The maximum-transmission tests feed a 96 MiB Kitty upload that inflates to
 the 64 MiB cap and decodes a 4096x4096 RGBA image. Extractor cases exercise
 1-byte, 4 KiB and maximum-size protocol chunks, plus seven 11 MiB chunks,
 a 15 MiB chunk and the remainder. The final sequence decodes while its lease
-is still live. Each case prints and asserts the transient high-water charge,
+is still live. The synchronized case queues the entire maximum upload before
+replaying it with a full 16 MiB final sequence; it verifies saved-buffer reuse
+with a peak of 192,937,970 bytes, four bytes above the immediate path.
+`deferred_graphics_replay_` tests check protocol parity, terminators, and
+preservation of an unrelated partial PTY sequence and graphics deferral.
+Each maximum-upload case prints and asserts the transient high-water charge,
 verifies idle-terminal admission, and releases all leases. The 1-byte case
 processes about 100 million APC sequences and takes substantially longer.
 `chunked_upload_segments_never_move_and_are_charged` checks stable segment

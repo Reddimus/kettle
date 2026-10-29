@@ -2325,9 +2325,13 @@ unless other process allocations exhaust that account.
 
 The maximum-size Kitty extractor regressions measure 176,160,750 bytes with
 1-byte and 4 KiB protocol chunks, 180,355,038 bytes with seven 11 MiB chunks,
-a 15 MiB chunk and the remainder, and 192,937,966 bytes with a full 16 MiB
-final sequence. The worst peak is just under 184 MiB: 96 MiB accumulated
-transmission + 72 MiB base64 output + 16 MiB active extractor sequence.
+a 15 MiB chunk and the remainder, 192,937,966 bytes with a full 16 MiB
+final sequence, and 192,937,970 bytes when replaying that upload from a
+synchronized-output journal. Replay consumes the saved sequence allocation
+and its lease directly, keeping the live PTY parser separate from protocol
+dispatch. The worst peak is just under 184 MiB: 96 MiB accumulated
+transmission + 72 MiB base64 output + 16 MiB sequence (plus four framing bytes
+in the synchronized case).
 Rounding up to 184 MiB and adding 8 MiB headroom keeps the ceiling at 192 MiB.
 Kitty accumulates payloads in separately allocated segments that never resize.
 Small initial segments grow geometrically up to 1 MiB per new segment, keeping

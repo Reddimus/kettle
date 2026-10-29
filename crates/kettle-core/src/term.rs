@@ -2683,7 +2683,7 @@ fn apply_sync_marker(
 
     extractor.set_graphics_deferred(false);
     let mut replay_failed = false;
-    extractor.feed_with(graphics.as_bytes(), |extractor, chunk| {
+    extractor.replay_graphics_with(graphics, |extractor, chunk| {
         if replay_failed {
             return;
         }
