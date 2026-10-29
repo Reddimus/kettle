@@ -1,5 +1,5 @@
-# Kettle shell integration for PowerShell 5.1 and 7+. Install with:
-#     kettle.exe --shell-integration powershell >> $PROFILE
+# PowerShell 5.1/7+ integration. Install:
+# kettle.exe --shell-integration powershell >> $PROFILE
 
 if (-not $global:__kettle_prompt_installed) {
     $global:__kettle_completion_session = [uint64]0
@@ -456,8 +456,7 @@ if (-not $global:__kettle_prompt_installed) {
 
     __kettle_completion_reset_cycle
 
-    # Emit C from PSReadLine's stock AcceptLine binding. Custom handlers cannot
-    # be recovered as ScriptBlocks, so leave them untouched.
+    # Leave custom Enter handlers intact.
     if (Get-Module -ListAvailable PSReadLine) {
         & {
             $enterHandler = Get-PSReadLineKeyHandler -Bound |
@@ -466,7 +465,9 @@ if (-not $global:__kettle_prompt_installed) {
             if ($null -ne $enterHandler -and $enterHandler.Function -eq 'AcceptLine') {
                 Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
                     __kettle_completion_clear
-                    [Console]::Write([char]27 + ']133;C' + [char]7)
+                    $errors = $null
+                    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$null, [ref]$null, [ref]$errors, [ref]0)
+                    if ($true -notin $errors.IncompleteInput) { [Console]::Write([char]27 + ']133;C' + [char]7) }
                     [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
                 }
             }

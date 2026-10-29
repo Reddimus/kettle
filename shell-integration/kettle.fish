@@ -378,7 +378,7 @@ end
 function __kettle_completion_cycle --argument direction
     set -q __kettle_completion_request; or set -g __kettle_completion_request 0
     __kettle_completion_begin_request; or return
-    set -l current_line (commandline -b)
+    set -l current_line (commandline -b | string collect)
     set -l current_cursor (commandline -C)
     set -l count (count $__kettle_completion_cycle_labels)
     if test $count -gt 1; and test "$current_line" = "$__kettle_completion_cycle_line"; and test "$current_cursor" = "$__kettle_completion_cycle_cursor"
@@ -390,7 +390,7 @@ function __kettle_completion_cycle --argument direction
         set -g __kettle_completion_cycle_index $next
         set -l insertion $__kettle_completion_cycle_insertions[(math $next + 1)]
         commandline -rt -- $insertion
-        set -g __kettle_completion_cycle_line (commandline -b)
+        set -g __kettle_completion_cycle_line (commandline -b | string collect)
         set -g __kettle_completion_cycle_cursor (commandline -C)
         __kettle_completion_emit_cycle update $next
         return
@@ -412,7 +412,7 @@ function __kettle_completion_cycle --argument direction
         # reopening the provider.
         set -g __kettle_completion_cycle_index 0
         __kettle_completion_insert_captured $__kettle_completion_cycle_insertions[1] $__kettle_completion_cycle_labels[1] 1
-        set -g __kettle_completion_cycle_line (commandline -b)
+        set -g __kettle_completion_cycle_line (commandline -b | string collect)
         set -g __kettle_completion_cycle_cursor (commandline -C)
         __kettle_completion_emit_cycle show 0
         return
@@ -421,7 +421,7 @@ function __kettle_completion_cycle --argument direction
     if test $direction -lt 0
         set -g __kettle_completion_cycle_index (math $count - 1)
         commandline -rt -- $__kettle_completion_cycle_insertions[-1]
-        set -g __kettle_completion_cycle_line (commandline -b)
+        set -g __kettle_completion_cycle_line (commandline -b | string collect)
         set -g __kettle_completion_cycle_cursor (commandline -C)
         __kettle_completion_emit_cycle show $__kettle_completion_cycle_index
         return
@@ -429,7 +429,7 @@ function __kettle_completion_cycle --argument direction
 
     # Keep the first ambiguous result wholly detached. Editing a common prefix
     # here recreates the inline suggestion the overlay is meant to replace.
-    set -g __kettle_completion_cycle_line (commandline -b)
+    set -g __kettle_completion_cycle_line (commandline -b | string collect)
     set -g __kettle_completion_cycle_cursor (commandline -C)
     set -g __kettle_completion_cycle_index -1
     __kettle_completion_emit_cycle show ''
