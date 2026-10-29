@@ -70,6 +70,112 @@ const FIELDS: [ModalKind; 6] = [
 ];
 
 #[test]
+fn review_settings_rejects_oversized_initial_paths() {
+    let cap = crate::modal_input::MAX_MODAL_INPUT_BYTES;
+    for path in ["x".repeat(cap + 1), "\u{e9}".repeat(cap / 2 + 1)] {
+        assert!(
+            modals::begin_settings_text_edit("background-image", &path).is_none(),
+            "an oversized saved path must not become an empty committable editor"
+        );
+    }
+    for path in [String::new(), "x".repeat(cap), "\u{e9}".repeat(cap / 2)] {
+        let edit = modals::begin_settings_text_edit("background-image", &path).unwrap();
+        assert_eq!(edit.key, "background-image");
+        assert_eq!(edit.buf.text(), path);
+        assert_eq!(edit.buf.cursor(), path.len());
+    }
+}
+
+#[test]
+fn review_settings_value_slot_uses_natural_font_width() {
+    let set = kettle_render::SettingsOverlay {
+        categories: vec!["Background".into()],
+        label_cols: 12,
+        value_cols: 20,
+        active_category: 0,
+        background_page: true,
+        rows: vec![kettle_render::SettingsRow {
+            label: "Image path".into(),
+            value: String::new(),
+            disabled: false,
+        }],
+        focused_row: 0,
+        title: "Settings".into(),
+        hints: String::new(),
+        footer_note: None,
+    };
+    let text_cw = 10.0;
+    for (scale, prefix_cols) in [(0.5, 14.0), (1.0, 16.0), (2.0, 16.0)] {
+        let cw = text_cw * scale;
+        let panel = kettle_render::settings_panel_geometry(&set, cw, 20.0, 1600.0, 600.0);
+        let value = kettle_render::settings_value_rect(&set, cw, 20.0, 1600.0, 600.0, text_cw);
+        // Narrow panels shorten the label to ten columns. The marker and
+        // gap add four more, all in the font's natural advance.
+        assert_eq!(
+            value.0,
+            panel.rect.0 + 16.0 + prefix_cols * text_cw,
+            "scale {scale}"
+        );
+        assert!(value.2 > 0.0);
+        assert!(value.0 + value.2 <= panel.rect.0 + panel.rect.2 - 16.0);
+        assert_eq!(value.1, panel.focused_rect.1);
+    }
+}
+
+#[test]
+fn review_pointer_cancels_platform_composition_before_moving_caret() {
+    for kind in FIELDS {
+        let mut ws = field(kind);
+        *modal_editor_mut(&mut ws).unwrap() = "ab".into();
+        update_ime_preedit(&mut ws, "phrase".into(), None);
+        let generation = ws.ime_focus_generation;
+        let mut allowed = Vec::new();
+        let mut platform_phrase = Some("phrase");
+        modals::cancel_modal_pointer_composition(&mut ws, |value| {
+            allowed.push(value);
+            if !value {
+                platform_phrase = None;
+            }
+        });
+        assert_eq!(modal_editor(&ws).unwrap().cursor(), 2);
+        assert!(ws.ime_preedit.is_none());
+        assert_ne!(ws.ime_focus_generation, generation);
+        modal_editor_mut(&mut ws)
+            .unwrap()
+            .set_cursor_at(crate::text_editor::QueryPoint::Byte(0), false);
+        // An uncancelled input method can continue its phrase after the click.
+        if let Some(phrase) = platform_phrase {
+            update_ime_preedit(&mut ws, phrase.into(), None);
+            update_ime_preedit(&mut ws, String::new(), None);
+            if take_ime_commit(&mut ws) {
+                crate::modal_input::push_text(modal_editor_mut(&mut ws).unwrap(), phrase);
+            }
+        }
+        assert_eq!(modal_editor(&ws).unwrap().text(), "ab", "{kind:?}");
+        assert_eq!(
+            allowed,
+            [false, true],
+            "{kind:?}: cancel the platform's phrase"
+        );
+        assert!(
+            !take_ime_commit(&mut ws),
+            "a queued old commit must be dropped"
+        );
+
+        // After the platform discards its old phrase, the next composition
+        // belongs to the new caret location and commits there normally.
+        update_ime_preedit(&mut ws, "new".into(), None);
+        update_ime_preedit(&mut ws, String::new(), None);
+        assert!(take_ime_commit(&mut ws));
+        crate::modal_input::push_text(modal_editor_mut(&mut ws).unwrap(), "new");
+        assert_eq!(modal_editor(&ws).unwrap().text(), "newab");
+        let generation = ws.ime_focus_generation;
+        modals::cancel_modal_pointer_composition(&mut ws, |_| panic!("no active phrase"));
+        assert_eq!(ws.ime_focus_generation, generation);
+    }
+}
+
+#[test]
 fn every_modal_field_edits_and_projects_mid_string_composition() {
     for kind in FIELDS {
         let mut ws = field(kind);

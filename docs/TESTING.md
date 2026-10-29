@@ -1714,8 +1714,11 @@ ZWJ sequences and CJK, then wire title, command, SSH, layout, theme and Settings
 path state through the same editor accessors. They cover keyboard commands,
 clipboard failure, selection replacement and mid-string IME projections. Native
 macOS modifier tests apply every Option-as-Alt policy before word commands in
-each modal field. Title initialization tests reject oversized ASCII and UTF-8
-values without clearing existing overrides and accept values at the byte cap. The
+each modal field. Title and Settings path initialization tests reject oversized
+ASCII and UTF-8 values and accept values at the byte cap. Pointer composition
+tests model the platform's unfinished phrase, require IME disable/enable before
+caret movement, reject a queued old commit and accept fresh composition at the
+new caret. These tests inject the platform toggle; they do not run a native IME. The
 shared outside-press mutation sink is exercised for every transient popup,
 Settings capture and confirmation, including the context menu's right-click
 exception. Native and control input both use this sink.
@@ -1725,6 +1728,8 @@ compare caret and selection placement with the shaped pointer stops, including
 long scrolled inputs, grapheme clusters, CJK and RTL. Fitting RTL text must keep
 all shaped clusters visible and retain its full selection width at every caret
 boundary, including Home and stale logical scroll offsets. Localized prefix/hint slot
-tests cover English and Spanish at narrow widths. These unit checks do not
+tests cover English and Spanish at narrow widths. Settings value-slot tests compare
+the editor's start with the fitted label and gap at terminal cell-width scales
+0.5, 1 and 2, including narrow panels and wide labels. These unit checks do not
 replace native IME candidate-window, pointer drag, clipboard and live-GPU checks
 on macOS and Linux; record those separately when run.

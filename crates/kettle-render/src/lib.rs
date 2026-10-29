@@ -2636,11 +2636,12 @@ impl Renderer {
             // in the quad/area pass below.
             let panel_w = (settings_panel_cols(set, lines) * cw + 48.0).min((sw - 40.0).max(120.0));
             let row_h = ch + 6.0;
+            let text_cw = self.overlay_text_cell_width();
             for (i, line) in lines.iter().enumerate() {
                 let buf = &mut self.settings_buffers[i];
                 buf.set_metrics(metrics);
-                let text_w = (panel_w - 32.0).max(cw);
-                let fitted = settings_fit_display_line(set, i, line, panel_w, cw);
+                let text_w = (panel_w - 32.0).max(text_cw);
+                let fitted = settings_fit_display_line(set, i, line, panel_w, text_cw);
                 buf.set_size(Some(text_w), Some(row_h));
                 buf.set_wrap(Wrap::None);
                 // Moving the focused row only changes 2 of N lines (the old/new

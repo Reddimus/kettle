@@ -2,6 +2,33 @@
 
 use super::*;
 
+pub(super) fn begin_settings_text_edit(
+    key: &'static str,
+    cur: &str,
+) -> Option<crate::settings::SettingsTextEdit> {
+    if cur.len() > crate::modal_input::MAX_MODAL_INPUT_BYTES {
+        log::warn!("setting exceeds the modal editor byte limit; leaving the value unchanged");
+        return None;
+    }
+    Some(crate::settings::SettingsTextEdit {
+        key,
+        buf: cur.into(),
+    })
+}
+
+pub(super) fn cancel_modal_pointer_composition(
+    ws: &mut WindowState,
+    mut set_ime_allowed: impl FnMut(bool),
+) {
+    if ws.ime_preedit.is_some() {
+        end_modal_composition(ws);
+        // Moving the caret must also discard the platform's unfinished phrase;
+        // otherwise another Preedit would restart it at the new insertion point.
+        set_ime_allowed(false);
+        set_ime_allowed(true);
+    }
+}
+
 pub(super) fn edit_modal_text(
     ws: &mut WindowState,
     key: &Key,
@@ -147,7 +174,14 @@ impl App {
             kettle_render::theme_picker_prefix(&self.ui_text)
         } else if ws.settings_text_edit.is_some() {
             let set = self.settings_overlay_projection(ws)?;
-            rect = kettle_render::settings_value_rect(&set, cw, ch, sw, sh);
+            rect = kettle_render::settings_value_rect(
+                &set,
+                cw,
+                ch,
+                sw,
+                sh,
+                self.overlay_text_cell_width(ws),
+            );
             String::new()
         } else if ws.layout_picker_input.is_some() {
             format!(
@@ -234,6 +268,9 @@ impl App {
     }
 
     pub(super) fn modal_text_pointer(&self, ws: &mut WindowState, press: bool) -> bool {
+        if !press && !ws.dragging_modal_editor {
+            return false;
+        }
         let Some(mut field) = self.modal_text_projection(ws) else {
             ws.dragging_modal_editor = false;
             return false;
@@ -244,7 +281,12 @@ impl App {
             return false;
         }
         if ws.ime_preedit.is_some() {
-            end_modal_composition(ws);
+            let window = ws.window.clone();
+            cancel_modal_pointer_composition(ws, |allowed| {
+                if let Some(window) = &window {
+                    window.set_ime_allowed(allowed);
+                }
+            });
             let Some(committed) = self.modal_text_projection(ws) else {
                 return false;
             };
@@ -257,9 +299,6 @@ impl App {
         let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
         let (ex, ey, ew, eh) = layout.editor;
         if press && !(x >= ex && x < ex + ew && y >= ey && y < ey + eh) {
-            return false;
-        }
-        if !press && !ws.dragging_modal_editor {
             return false;
         }
         let byte = crate::text_editor::nearest_stop_byte(&layout.stops, x).unwrap_or(0);
@@ -1850,10 +1889,7 @@ impl App {
             "background-image" => self.cfg.background_image.clone(),
             _ => String::new(),
         };
-        ws.settings_text_edit = Some(crate::settings::SettingsTextEdit {
-            key,
-            buf: cur.into(),
-        });
+        ws.settings_text_edit = begin_settings_text_edit(key, &cur);
         if let Some(w) = &ws.window {
             w.request_redraw();
         }

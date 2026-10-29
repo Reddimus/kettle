@@ -270,10 +270,20 @@ pub fn settings_panel_geometry(
 }
 
 /// Value slot of the focused row, using the painter's column budgets and scrolling.
-pub fn settings_value_rect(set: &SettingsOverlay, cw: f32, ch: f32, sw: f32, sh: f32) -> Rect4 {
+/// `cw` sizes the panel; `text_cw` is the unscaled font advance used by its rows.
+pub fn settings_value_rect(
+    set: &SettingsOverlay,
+    cw: f32,
+    ch: f32,
+    sw: f32,
+    sh: f32,
+    text_cw: f32,
+) -> Rect4 {
     let lines = settings_display_lines(set);
     let layout = settings_panel_layout(set, &lines, cw, ch, sw, sh);
-    let columns = ((layout.panel_w - 32.0).max(cw) / cw).floor().max(1.0) as usize;
+    let columns = ((layout.panel_w - 32.0).max(text_cw) / text_cw)
+        .floor()
+        .max(1.0) as usize;
     let available = columns.saturating_sub(4);
     let reserved = set.value_cols.max(1).min(available / 2);
     let label = set.label_cols.min(available.saturating_sub(reserved));
@@ -287,9 +297,9 @@ pub fn settings_value_rect(set: &SettingsOverlay, cw: f32, ch: f32, sw: f32, sh:
         + (SETTINGS_FIELD_START + set.focused_row).saturating_sub(layout.first_line) as f32
             * layout.row_h;
     (
-        layout.px + 16.0 + prefix as f32 * cw,
+        layout.px + 16.0 + prefix as f32 * text_cw,
         y,
-        columns.saturating_sub(prefix) as f32 * cw,
+        columns.saturating_sub(prefix) as f32 * text_cw,
         layout.row_h,
     )
 }
