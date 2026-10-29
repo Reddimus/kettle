@@ -197,6 +197,64 @@ class PackageManifestTests(unittest.TestCase):
         script.write_bytes(b"prompt\n")
         script.chmod(0o644)
 
+    @unittest.skipUnless(os.name == "posix", "shared POSIX output ancestor")
+    def test_shared_parent_cannot_redirect_descendant_writes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw).resolve()
+            shared = temporary / "shared"
+            shared.mkdir(mode=0o777)
+            shared.chmod(0o777)
+            external = temporary / "external"
+            external.mkdir()
+            output = shared / "output"
+            archive = temporary / "input.tar.gz"
+            write_linux_tar(archive, {"nested/file": (b"data", 0o644)})
+            create_directories = MODULE._create_output_directories
+            def replace_root(root, members):
+                root.rename(shared / "displaced")
+                root.symlink_to(external, target_is_directory=True)
+                create_directories(root, members)
+            with mock.patch.object(MODULE, "_create_output_directories", side_effect=replace_root):
+                with self.assertRaises((ValueError, RuntimeError)):
+                    MODULE.extract_archive(archive, output, LINUX_TARGET, VERSION)
+            self.assertEqual(list(external.iterdir()), [], "extraction wrote through replaced root")
+
+    @unittest.skipIf(os.name == "nt", "Linux package modes require POSIX")
+    def test_pack_rejects_compressed_output_over_limit_without_publishing(self):
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            root = temporary / "package"
+            root.mkdir(mode=0o755)
+            self.package(root)
+            MODULE.generate(root, LINUX_TARGET, VERSION)
+            archive = temporary / "archive.tar.gz"
+            with mock.patch.object(MODULE, "MAX_ARCHIVE_BYTES", 1):
+                with self.assertRaisesRegex(ValueError, "archive.*limit"):
+                    MODULE.pack_archive(archive, root, LINUX_TARGET, VERSION)
+            self.assertFalse(archive.exists())
+            self.assertEqual(sorted(p.name for p in temporary.iterdir()), ["package"])
+
+    @unittest.skipIf(os.name == "nt", "Linux package modes require POSIX")
+    def test_pack_extract_relative_path_limit_includes_longname(self):
+        for length in (234, MODULE.MAX_PACKAGE_PATH_BYTES):
+            with self.subTest(length=length), tempfile.TemporaryDirectory() as raw:
+                temporary = Path(raw)
+                root = temporary / "package"
+                root.mkdir(mode=0o755)
+                self.package(root)
+                name = "a" * length
+                (root / name).write_bytes(b"boundary")
+                (root / name).chmod(0o644)
+                MODULE.generate(root, LINUX_TARGET, VERSION)
+                archive = temporary / "archive.tar.gz"
+                MODULE.pack_archive(archive, root, LINUX_TARGET, VERSION)
+                output = temporary / "output"
+                try:
+                    MODULE.extract_archive(archive, output, LINUX_TARGET, VERSION)
+                except ValueError as error:
+                    self.fail(f"valid relative path failed round trip: {error}")
+                self.assertEqual((output / name).read_bytes(), b"boundary")
+
     def test_generation_is_deterministic_and_verifiable(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

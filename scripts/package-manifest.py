@@ -120,18 +120,17 @@ def portable_components(path: str, *, directory: bool = False) -> list[str]:
 
 
 def archive_relative_path(path: str, *, directory: bool, target: str) -> str:
-    parts = portable_components(path, directory=directory)
     if target.endswith("linux-gnu"):
-        if parts[0] != "kettle":
-            raise ValueError(
-                f"Linux archive entry is outside the kettle root: {path!r}"
-            )
-        parts = parts[1:]
-        if not parts:
+        if path in ("kettle", "kettle/"):
             if not directory:
                 raise ValueError("the Linux kettle archive root must be a directory")
             return ""
-    return "/".join(parts)
+        if not path.startswith("kettle/"):
+            raise ValueError(
+                f"Linux archive entry is outside the kettle root: {path!r}"
+            )
+        path = path[len("kettle/"):]
+    return "/".join(portable_components(path, directory=directory))
 
 
 def validate_linux_mode(mode: object, path: str) -> int:
@@ -382,11 +381,21 @@ def pack_archive(archive_path: Path, root: Path, target: str, version: str) -> N
         )
     # Existing updaters count directory headers toward their 128-entry limit.
     # File paths already describe every required parent directory.
-    with tarfile.open(archive_path, "x:gz", format=tarfile.GNU_FORMAT) as archive:
-        archive.add(root, arcname="kettle", recursive=False)
-        for path in files:
-            relative = path.relative_to(root).as_posix()
-            archive.add(path, arcname=f"kettle/{relative}", recursive=False)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{archive_path.name}.", dir=archive_path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            with tarfile.open(fileobj=output, mode="w:gz", format=tarfile.GNU_FORMAT) as archive:
+                archive.add(root, arcname="kettle", recursive=False)
+                for path in files:
+                    relative = path.relative_to(root).as_posix()
+                    archive.add(path, arcname=f"kettle/{relative}", recursive=False)
+            output.flush()
+            if os.fstat(output.fileno()).st_size > MAX_ARCHIVE_BYTES:
+                raise ValueError("compressed archive exceeds the 256 MiB safety limit")
+            os.fsync(output.fileno())
+        os.link(temporary, archive_path)
+    finally:
+        os.unlink(temporary)
 
 
 def _archive_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
@@ -447,10 +456,17 @@ class BoundedTarInfo(tarfile.TarInfo):
         longname = self.type == tarfile.GNUTYPE_LONGNAME
         if longname:
             if (
-                not 1 <= self.size <= MAX_PACKAGE_PATH_BYTES + 1
+                not 1 <= self.size <= MAX_PACKAGE_PATH_BYTES + len("kettle/") + 1
                 or getattr(archive, "_kettle_longname", False)
             ):
                 raise ValueError("GNU name metadata exceeds its safety limit")
+            if self.size > MAX_PACKAGE_PATH_BYTES + 1:
+                # Only the fixed root prefix may exceed the relative-path bound.
+                offset = archive.fileobj.tell()
+                prefix = archive.fileobj.read(len(b"kettle/"))
+                archive.fileobj.seek(offset)
+                if prefix != b"kettle/":
+                    raise ValueError("GNU name metadata exceeds its safety limit")
         elif self.type not in (
             tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.CONTTYPE, tarfile.DIRTYPE
         ):
@@ -770,6 +786,12 @@ def _prepare_output_root(root: Path) -> tuple[Path, tuple[int, int]]:
     ancestors.reverse()
     for ancestor in [*ancestors, output.parent]:
         _require_real_directory(ancestor)
+        if os.name == "posix":
+            metadata = ancestor.stat()
+            trusted_owner = metadata.st_uid in {0, os.geteuid()}
+            replaceable = metadata.st_mode & 0o022 and not metadata.st_mode & stat.S_ISVTX
+            if not trusted_owner or replaceable:
+                raise ValueError(f"output ancestor permits untrusted replacement: {ancestor}")
     os.mkdir(output, 0o700)
     metadata = output.lstat()
     if not stat.S_ISDIR(metadata.st_mode) or _is_link_or_junction(output):

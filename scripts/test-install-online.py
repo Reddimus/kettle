@@ -38,8 +38,8 @@ def deterministic_filler(size: int = 4096) -> bytes:
 class OnlineInstallerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        if os.name != "posix":
-            raise unittest.SkipTest("the online installer is Linux/POSIX-only")
+        if platform.system() != "Linux":
+            raise unittest.SkipTest("the online installer is Linux-only")
         tar_version = subprocess.run(
             ["tar", "--version"],
             check=False,

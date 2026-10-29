@@ -829,6 +829,14 @@ def _install(arguments: argparse.Namespace) -> None:
                 owned_directories = {
                     record["path"]: record["mode"] for record in existing["directories"]
                 }
+            for path, records in pending.items():
+                for record in records:
+                    if _file_matches(root_fd, record):
+                        old_files[path] = record
+                        break
+            merged = {**old_files, **planned}
+            if sum(record["size"] for record in merged.values()) > MAX_FILE_BYTES:
+                _fail("install provenance file set exceeds its bounded size")
             if len(set(owned_directories).union(planned_parents)) > MAX_ENTRIES:
                 _fail("install provenance directory set exceeds its bounded limit")
             if len(set(old_files).union(planned)) > MAX_ENTRIES:

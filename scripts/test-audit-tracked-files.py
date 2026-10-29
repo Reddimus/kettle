@@ -77,6 +77,31 @@ class TrackedFileAuditTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertIn("plain.txt: tracked path is not a regular file", result.stderr)
 
+    def test_parent_directory_replaced_by_external_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            root.mkdir()
+            parent = root / "nested"
+            parent.mkdir()
+            write_lf(parent / "plain.txt", "identical bytes\n")
+            initialize_repository(root)
+            external = root.parent / "external"
+            parent.rename(external)
+            parent.symlink_to(external, target_is_directory=True)
+            report = AUDIT.audit(root)
+            self.assertTrue(report["errors"], "symlinked parent passed audit")
+            self.assertEqual(report["files"], [], "external file was read")
+
+    def test_nul_in_structured_data_is_rejected(self) -> None:
+        for name, data in (("data.json", b'{"key": "bad\x00value"}\n'),
+                           ("data.toml", b'key = "bad\x00value"\n')):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / name).write_bytes(data)
+                initialize_repository(root)
+                errors = AUDIT.audit(root)["errors"]
+                self.assertTrue(any("structured-data parse failed" in e for e in errors), errors)
+
     def test_text_unset_files_keep_their_bytes(self) -> None:
         """A file `.gitattributes` marks `-text` keeps its CRLF, its last
         line without a newline and its trailing white space; any other text
