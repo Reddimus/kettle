@@ -16,6 +16,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Run weekly advisory coverage, mutation-testing and AddressSanitizer jobs.
 - Never let an older release become latest once a newer one is published,
   whatever order their release runs finish in.
+- Make secondary text and icons readable in every bundled theme: shortcut
+  hints, About and update details, empty states, theme labels, tab titles,
+  tab and toolbar buttons, search labels and completion details now meet
+  WCAG AA contrast (4.5:1 for text, 3:1 for icons) against what they are
+  drawn on.
+- Keep dimmed text in inactive panes readable, without making text a
+  program drew faintly any clearer than in the active pane.
+- Show scroll arrows on a menu that is too tall for its window.
+- Spanish: "Editar grupo de paneles:", the shorter "Atajos" Settings tab
+  where the full label cannot fit, and translated names for the built-in
+  themes.
 
 ### Fixed
 
@@ -181,6 +192,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   sticky, saying how to fix it, and remove only a socket you own when binding.
 - Stop advertising a control server whose process has exited but not yet
   been reaped.
+- Never enqueue an audio buffer twice or write one already queued, and keep
+  playback from seeking past the last frame.
+- Refuse GIF frames larger than the image's screen before decoding, keep
+  fractional frame delays, and apply image orientation before fitting.
+- Render SVG text kerning, filters, stylesheets and trailing whitespace as
+  browsers do, within the memory budget.
+- Keep a video's presentation clock honest while frames are pending, and end
+  the audio-tail allowance when the sound ends.
+- Bound the Linux audio relay's queue before admitting blocks.
+- Keep the Linux media sandbox from reading or changing other processes'
+  resource limits or aiming I/O signals at them.
 
 ## [5.6.0] — 2026-10-28
 
