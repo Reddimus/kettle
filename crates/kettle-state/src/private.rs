@@ -499,8 +499,8 @@ pub fn open_trusted_file_read_following_leaf(
 
 /// Request `0700` for every newly created directory in the path. Existing
 /// user-owned Kettle components are repaired from the outer namespace through
-/// the leaf. The final component
-/// is opened with `O_NOFOLLOW`; ancestor links resolve to their real directory.
+/// the leaf. Kettle components are opened without following links; links above
+/// that namespace resolve to their real directory.
 pub fn create_private_dirs(directory: &Path) -> io::Result<()> {
     create_private_dirs_impl(directory)
 }
@@ -573,12 +573,8 @@ fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
     if let Some(root) = owned.parent() {
         private(root)?;
     }
-    private(directory)?;
 
-    // Repair every component from `owned` down. A fresh create is already
-    // correct — the recursive builder above names the mode for each directory
-    // it makes — so this only affects components an earlier run left behind,
-    // which a create against an existing path silently leaves alone.
+    // Verify and narrow each owned component before creating descendants.
     let mut repair: Vec<&Path> = Vec::new();
     let mut cursor = Some(directory);
     while let Some(path) = cursor {
@@ -588,66 +584,9 @@ fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
         }
         cursor = path.parent();
     }
-    // Outermost first. Repairing leaf-to-root opens each deeper path while its
-    // ancestors are still group-writable, which is a window a group peer can
-    // use to swap one — and `O_NOFOLLOW` only protects the final component, so
-    // the redirected open would look legitimate. Narrowing each ancestor before
-    // descending through it closes that ordering.
-    for path in repair.iter().rev() {
-        repair_private_dir_mode(path)?;
-    }
+    repair.reverse();
+    unix::create_and_repair_private_dirs(owned.parent().unwrap_or(Path::new(".")), &repair)?;
     sync_new_entries()
-}
-
-/// Set one existing directory to `0700`, through a file descriptor rather than
-/// a path.
-///
-/// Path-based `set_permissions` follows symlinks and re-resolves the name, so
-/// the inspect-then-chmod pair is two lookups an attacker could interleave.
-/// That is hard to reach here — the directories being repaired sit under
-/// `$XDG_RUNTIME_DIR` or `~/.config`, and the one under a shared `/tmp` is
-/// protected by the sticky bit plus the owner check below — but opening once
-/// with `O_NOFOLLOW | O_DIRECTORY` and calling `fchmod` removes the question
-/// rather than arguing it. A symlink at the path fails the open outright.
-///
-/// A missing directory is not an error: a concurrent teardown between the
-/// create above and this call is the same outcome as never having existed.
-#[cfg(unix)]
-fn repair_private_dir_mode(path: &Path) -> io::Result<()> {
-    use std::os::fd::AsRawFd as _;
-    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
-
-    let directory = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open(path)
-    {
-        Ok(directory) => directory,
-        // ELOOP/ENOTDIR: the name is a symlink, or not a directory at all.
-        // Leave it to the ownership checks at the call site rather than
-        // chmod'ing a target somebody else chose. Matched on raw errno because
-        // `ErrorKind::FilesystemLoop` is unstable.
-        Err(error)
-            if matches!(
-                error.raw_os_error(),
-                Some(libc::ENOENT | libc::ELOOP | libc::ENOTDIR)
-            ) =>
-        {
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-
-    // Both checks now read the object we hold open, not the name.
-    let metadata = directory.metadata()?;
-    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 == 0 {
-        return Ok(());
-    }
-    // SAFETY: `directory` owns a live descriptor for the duration of the call.
-    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -1900,6 +1839,21 @@ pub(crate) mod unix {
                     return Err(error);
                 }
             }
+            if created {
+                // A restrictive umask can remove owner-read on macOS before
+                // open_directory_at can obtain a readable descriptor.
+                if unsafe {
+                    libc::fchmodat(
+                        parent.as_raw_fd(),
+                        name_c.as_ptr(),
+                        0o700,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                } != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+            }
             let child = open_directory_at(parent, name)?;
             let child_metadata = child.metadata()?;
             require_trusted_directory_edge(&parent.metadata()?, &child_metadata, &cursor)?;
@@ -1913,11 +1867,6 @@ pub(crate) mod unix {
                         ),
                     ));
                 }
-                // SAFETY: the parent directory is held and trusted, and the
-                // just-created child name is NUL-terminated.
-                if unsafe { libc::fchmodat(parent.as_raw_fd(), name_c.as_ptr(), 0o700, 0) } != 0 {
-                    return Err(io::Error::last_os_error());
-                }
                 if child.metadata()?.mode() & 0o777 != 0o700 {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
@@ -1927,6 +1876,65 @@ pub(crate) mod unix {
                         ),
                     ));
                 }
+                sync_directory(parent)?;
+            }
+            handles.push(child);
+        }
+        Ok(())
+    }
+
+    pub(super) fn create_and_repair_private_dirs(root: &Path, paths: &[&Path]) -> io::Result<()> {
+        let root = std::fs::canonicalize(root)?;
+        let (mut handles, _) = open_verified_parent_chain(&root)?;
+        for path in paths {
+            let parent = handles
+                .last()
+                .expect("the verified chain contains a directory");
+            let name = path.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "private directory has no name")
+            })?;
+            let name_c = c_name(name, "private directory name")?;
+            require_trusted_leaf_creation(&parent.metadata()?, path)?;
+            // SAFETY: the parent descriptor and NUL-terminated child name are valid.
+            let created = unsafe {
+                libc::mkdirat(parent.as_raw_fd(), name_c.as_ptr(), 0o700 as libc::mode_t)
+            } == 0;
+            if !created {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+            } else {
+                // Restore owner access before a readable open under a restrictive umask.
+                if unsafe {
+                    libc::fchmodat(
+                        parent.as_raw_fd(),
+                        name_c.as_ptr(),
+                        0o700,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                } != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            let child = open_directory_at(parent, name)?;
+            let metadata = child.metadata()?;
+            if metadata.uid() != current_user() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "private directory is not owned by the effective user",
+                ));
+            }
+            require_trusted_directory_edge(&parent.metadata()?, &metadata, path)?;
+            if metadata.mode() & 0o077 != 0 {
+                let readable = open_readable_directory(&child)?;
+                // SAFETY: the readable directory descriptor is held for this call.
+                if unsafe { libc::fchmod(readable.as_raw_fd(), 0o700) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            if created {
                 sync_directory(parent)?;
             }
             handles.push(child);
@@ -2314,6 +2322,9 @@ pub(crate) mod unix {
                 if require_user_owned_regular(&file, &candidate).is_err()
                     || self.require_leaf_policy(metadata.uid()).is_err()
                 {
+                    continue;
+                }
+                if fs4::FileExt::try_lock(&file).is_err() {
                     continue;
                 }
                 if self.unlink_open_file(&file, name).is_ok() {
@@ -7183,6 +7194,94 @@ mod tests {
             result.unwrap();
             assert!(directory.is_dir());
             assert!(synced.contains(&(metadata.dev(), metadata.ino())));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_directory_repair_rejects_a_planted_namespace_symlink() {
+        const CHILD: &str = "KETTLE_PLANTED_NAMESPACE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "private::tests::private_directory_repair_rejects_a_planted_namespace_symlink",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "namespace-symlink child failed: {status}");
+            return;
+        }
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let root = crate::test_tempdir();
+        let target = root.path().join("personal");
+        let state = target.join("state/kettle/ctl");
+        std::fs::create_dir_all(&state).unwrap();
+        for path in [
+            &target,
+            &target.join("state"),
+            &target.join("state/kettle"),
+            &state,
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let namespace = root.path().join("kettle");
+        symlink(&target, &namespace).unwrap();
+        // SAFETY: this test changes the environment only in its isolated child.
+        unsafe { std::env::set_var("XDG_STATE_HOME", root.path()) };
+        let result = create_private_dirs(&namespace.join("state/kettle/ctl"));
+        assert_eq!(
+            target
+                .join("state")
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755,
+            "repair must not descend through a namespace symlink"
+        );
+        assert!(result.is_err());
+        assert!(create_private_dirs(&namespace.join("missing/leaf")).is_err());
+        assert!(!target.join("missing").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_create_restores_missing_parents_under_a_restrictive_umask() {
+        const CHILD: &str = "KETTLE_MISSING_PARENT_UMASK_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "private::tests::private_create_restores_missing_parents_under_a_restrictive_umask", "--nocapture"])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "missing-parent umask child failed: {status}"
+            );
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = crate::test_tempdir();
+        // SAFETY: only the re-executed child changes its process-wide umask.
+        unsafe { libc::umask(0o400) };
+        let path = root.path().join("missing/nested/private");
+        let result = create_private_file_new(&path);
+        assert!(
+            result.is_ok(),
+            "missing parents must restore owner read before opening: {result:?}"
+        );
+        for parent in [
+            root.path().join("missing"),
+            root.path().join("missing/nested"),
+        ] {
+            assert_eq!(
+                parent.metadata().unwrap().permissions().mode() & 0o777,
+                0o700
+            );
         }
     }
 

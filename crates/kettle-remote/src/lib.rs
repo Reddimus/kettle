@@ -2241,10 +2241,10 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
                 ),
                 'o' => options.unreproducible |= ssh_option_selects_endpoint(value),
                 // Tags select Match blocks; stdio forwarding selects another
-                // host. Neither can be dropped from a safe reconnect.
-                'P' | 'W' => options.unreproducible = true,
-                // Everything else (ciphers, forwards, log files, control
-                // sockets) leaves the endpoint where it was.
+                // host. Control sockets can select a master's endpoint.
+                'P' | 'W' | 'S' => options.unreproducible = true,
+                // Everything else (ciphers, forwards, log files) leaves
+                // the endpoint where it was.
                 _ => {}
             }
         }
@@ -2337,6 +2337,7 @@ fn ssh_option_selects_endpoint(option: &str) -> bool {
             | "identityagent"
             | "canonicalizehostname"
             | "canonicaldomains"
+            | "controlpath"
     )
 }
 
@@ -2566,6 +2567,7 @@ fn container_global_option(
         (Runtime::Docker, "context" | "c") => (Slot::Context, true),
         (Runtime::Podman, "connection" | "c") => (Slot::Context, true),
         (Runtime::Docker, "host" | "H") => (Slot::Endpoint, true),
+        (Runtime::Docker, "tls" | "tlsverify") => (Slot::Unreproducible, false),
         (Runtime::Podman, "url") => (Slot::Endpoint, true),
         // The config dir holds Docker's current context, so it selects the
         // daemon just as `--context` does.
@@ -2847,6 +2849,17 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
             if options.unreproducible || has_control_char(host) {
                 return None;
             }
+            if options
+                .identity
+                .as_deref()
+                .is_some_and(|path| !connection_path_is_absolute(path))
+                || options
+                    .config
+                    .as_deref()
+                    .is_some_and(|path| path != "none" && !connection_path_is_absolute(path))
+            {
+                return None;
+            }
             let mut cmd = String::from("ssh");
             // Fixed order (config, identity, jump, port) so the emitted line is
             // deterministic regardless of how the user happened to type it.
@@ -2913,20 +2926,31 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
             let c = shell_single_quote(container);
             match runtime {
                 ContainerRuntime::Docker | ContainerRuntime::Podman => {
-                    cmd.push_str(&format!(" exec -it {c} $SHELL"));
+                    cmd.push_str(&format!(" exec -it {c} /bin/sh"));
                 }
                 ContainerRuntime::Kubectl => {
                     cmd.push_str(&format!(" exec -it {c}"));
                     if let Some(value) = &options.pod_container {
                         push_quoted_option(&mut cmd, "-c", value)?;
                     }
-                    cmd.push_str(" -- $SHELL");
+                    cmd.push_str(" -- /bin/sh");
                 }
                 ContainerRuntime::Lxc => cmd.push_str(&format!(" -n {c}")),
             }
             Some(cmd)
         }
     }
+}
+
+fn connection_path_is_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || (cfg!(windows)
+            && (path.starts_with(r"\\")
+                || (bytes.len() >= 3
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes[1] == b':'
+                    && matches!(bytes[2], b'/' | b'\\'))))
 }
 
 /// Append ` FLAG 'VALUE'` to a command line being built, or return `None` when
@@ -3058,7 +3082,7 @@ mod tests {
         assert_eq!(ctx, container_ctx(ContainerRuntime::Docker, "web"));
         assert_eq!(
             clone_session_command(&ctx),
-            Some("docker exec -it 'web' $SHELL".to_string())
+            Some("docker exec -it 'web' /bin/sh".to_string())
         );
         assert!(parse_proc_argv(b"").argv.is_empty());
         assert_eq!(parse_proc_argv(b"\0").argv, [""]);
@@ -3609,17 +3633,17 @@ mod tests {
         // Docker.
         assert_eq!(
             clone_session_command(&container_ctx(ContainerRuntime::Docker, "ubuntu")),
-            Some("docker exec -it 'ubuntu' $SHELL".to_string())
+            Some("docker exec -it 'ubuntu' /bin/sh".to_string())
         );
         // Podman.
         assert_eq!(
             clone_session_command(&container_ctx(ContainerRuntime::Podman, "fedora")),
-            Some("podman exec -it 'fedora' $SHELL".to_string())
+            Some("podman exec -it 'fedora' /bin/sh".to_string())
         );
         // Kubectl (note the `--` separator).
         assert_eq!(
             clone_session_command(&container_ctx(ContainerRuntime::Kubectl, "my-pod")),
-            Some("kubectl exec -it 'my-pod' -- $SHELL".to_string())
+            Some("kubectl exec -it 'my-pod' -- /bin/sh".to_string())
         );
         // LXC.
         assert_eq!(
@@ -3673,12 +3697,9 @@ mod tests {
 
         let cmd = clone_session_command(&container_ctx(ContainerRuntime::Docker, "$(reboot)"))
             .expect("no control char → Some");
-        // NOTE: the trailing literal `$SHELL` placeholder is intentional (the
-        // user's pane shell resolves it), so the metachar property is asserted on
-        // just the quoted container token, not the whole line.
-        assert_eq!(cmd, "docker exec -it '$(reboot)' $SHELL");
+        assert_eq!(cmd, "docker exec -it '$(reboot)' /bin/sh");
         assert!(
-            !has_unquoted_metachar("docker exec -it '$(reboot)'"),
+            !has_unquoted_metachar(&cmd),
             "container token metachars must stay quoted: {cmd}"
         );
 
@@ -4074,6 +4095,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ssh_control_socket_suppresses_reconnect() {
+        for args in [
+            ["ssh", "-S", "/tmp/master", "box"],
+            ["ssh", "-o", "ControlPath=/tmp/master", "box"],
+            ["ssh", "-o", " controlpath /tmp/master", "box"],
+        ] {
+            let argv = args.map(String::from);
+            let ctx = detect_ssh(&argv).unwrap();
+            assert_eq!(format_remote_title(&ctx), "ssh box");
+            assert_eq!(
+                clone_session_command(&ctx),
+                None,
+                "{args:?} can use a master's endpoint"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_windows_shaped_relative_files_suppress_reconnect_on_unix() {
+        for path in [r"C:\ssh.conf", r"\\server\key"] {
+            let argv = ["ssh", "-i", path, "box"].map(String::from);
+            let ctx = detect_ssh(&argv).unwrap();
+            assert_eq!(
+                clone_session_command(&ctx),
+                None,
+                "{path} is relative on Unix"
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_relative_connection_files_suppress_reconnect() {
+        for flag in ["-F", "-i"] {
+            for path in ["./ssh.conf", "keys/id", "../key", r"C:relative-key"] {
+                let argv = ["ssh", flag, path, "box"].map(String::from);
+                let ctx = detect_ssh(&argv).unwrap();
+                assert_eq!(format_remote_title(&ctx), "ssh box");
+                assert_eq!(
+                    clone_session_command(&ctx),
+                    None,
+                    "{flag} {path} depends on the client's cwd"
+                );
+            }
+        }
+    }
+
     /// The options that decide WHICH host `ssh` reached travel with the host
     /// and come back out. Dropping them would make Reconnect offer plain
     /// `ssh host`, a different service on a different port, reached without
@@ -4339,16 +4408,24 @@ mod tests {
             "box",
         ]))
         .expect("a Windows identity path is still an ssh session");
-        let cmd = clone_session_command(&windows)
-            .expect("an ordinary Windows path keeps the reconnect entry");
-        assert_eq!(
-            cmd,
-            r"ssh -i 'C:\Program Files (x86)\OpenSSH\id_ed25519' 'box'"
-        );
-        assert!(
-            !has_unquoted_metachar(&cmd),
-            "the path's parentheses must stay inside the quotes: {cmd}"
-        );
+        if cfg!(windows) {
+            let cmd = clone_session_command(&windows)
+                .expect("an ordinary Windows path keeps the reconnect entry");
+            assert_eq!(
+                cmd,
+                r"ssh -i 'C:\Program Files (x86)\OpenSSH\id_ed25519' 'box'"
+            );
+            assert!(
+                !has_unquoted_metachar(&cmd),
+                "the path's parentheses must stay inside the quotes: {cmd}"
+            );
+        } else {
+            assert_eq!(
+                clone_session_command(&windows),
+                None,
+                "a drive-shaped filename is relative on Unix"
+            );
+        }
 
         // The same charset drives every path-shaped option, not just `-i`.
         let kubeconfig = detect_container(&argv(&[
@@ -4364,7 +4441,7 @@ mod tests {
         assert_eq!(
             clone_session_command(&kubeconfig),
             Some(
-                r"kubectl --kubeconfig 'C:\Program Files (x86)\kube\config' exec -it 'api-0' -- $SHELL"
+                r"kubectl --kubeconfig 'C:\Program Files (x86)\kube\config' exec -it 'api-0' -- /bin/sh"
                     .to_string()
             )
         );
@@ -4458,7 +4535,7 @@ mod tests {
         );
         assert_eq!(
             clone_session_command(&docker),
-            Some("docker --context 'remote' exec -it 'web' $SHELL".to_string())
+            Some("docker --context 'remote' exec -it 'web' /bin/sh".to_string())
         );
         // The `--flag=value` spelling of the same option.
         assert_eq!(
@@ -4484,7 +4561,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             clone_session_command(&remote_daemon),
-            Some("docker --host 'tcp://build.example:2375' exec -it 'web' $SHELL".to_string())
+            Some("docker --host 'tcp://build.example:2375' exec -it 'web' /bin/sh".to_string())
         );
 
         // Podman names the same concept `--connection`, so that is what comes
@@ -4511,7 +4588,7 @@ mod tests {
         );
         assert_eq!(
             clone_session_command(&podman),
-            Some("podman --connection 'prod' exec -it 'api' $SHELL".to_string())
+            Some("podman --connection 'prod' exec -it 'api' /bin/sh".to_string())
         );
 
         // kubectl: the namespace picks the pod, and `-c` picks which of the
@@ -4534,7 +4611,7 @@ mod tests {
         );
         assert_eq!(
             clone_session_command(&kubectl),
-            Some("kubectl --namespace 'prod' exec -it 'api-0' -c 'sidecar' -- $SHELL".to_string())
+            Some("kubectl --namespace 'prod' exec -it 'api-0' -c 'sidecar' -- /bin/sh".to_string())
         );
 
         // A kubeconfig defines the clusters every other selector resolves in.
@@ -4551,7 +4628,7 @@ mod tests {
         assert_eq!(
             clone_session_command(&kubeconfig),
             Some(
-                "kubectl --kubeconfig '/home/me/.kube/staging' exec -it 'api-0' -- $SHELL"
+                "kubectl --kubeconfig '/home/me/.kube/staging' exec -it 'api-0' -- /bin/sh"
                     .to_string()
             )
         );
@@ -4715,6 +4792,52 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn container_reconnect_uses_a_container_shell() {
+        for runtime in ["docker", "podman", "kubectl"] {
+            let argv = [runtime, "exec", "web", "sh"].map(String::from);
+            let command = clone_session_command(&detect_container(&argv).unwrap()).unwrap();
+            let script = format!(
+                "{runtime}() {{ for arg do last=$arg; done; printf '%s' \"$last\"; }}; {command}"
+            );
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", &script])
+                .env("SHELL", "/host-only/zsh")
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                "/bin/sh",
+                "{runtime} must not use the host shell"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_tls_switches_suppress_reconnect() {
+        for flag in ["--tls", "--tlsverify", "--tls=true", "--tlsverify=true"] {
+            let argv = [
+                "docker",
+                flag,
+                "-H",
+                "tcp://build.example:2376",
+                "exec",
+                "web",
+                "sh",
+            ]
+            .map(String::from);
+            let ctx = detect_container(&argv).unwrap();
+            assert_eq!(format_remote_title(&ctx), "docker: web");
+            assert_eq!(
+                clone_session_command(&ctx),
+                None,
+                "{flag} needs TLS transport"
+            );
+        }
+    }
+
     /// A credential can never be echoed back into a command line, and
     /// `podman --remote` has no value to carry. Both still produce a remote
     /// title; both refuse to produce a Reconnect, because the one that could
@@ -4866,15 +4989,15 @@ mod tests {
         for (reproducible, expected) in [
             (
                 &["podman", "exec", "-it", "web", "sh"][..],
-                "podman exec -it 'web' $SHELL",
+                "podman exec -it 'web' /bin/sh",
             ),
             (
                 &["docker", "exec", "--user", "root", "web", "sh"],
-                "docker exec -it 'web' $SHELL",
+                "docker exec -it 'web' /bin/sh",
             ),
             (
                 &["kubectl", "exec", "-it", "api-0", "--", "sh"],
-                "kubectl exec -it 'api-0' -- $SHELL",
+                "kubectl exec -it 'api-0' -- /bin/sh",
             ),
         ] {
             let ctx = detect_container(&argv(reproducible))
@@ -5015,6 +5138,8 @@ mod tests {
             "certificate-authority",
             "client-certificate",
             "client-key",
+            "tls",
+            "tlsverify",
             "tlscacert",
             "tlscert",
             "tlskey",

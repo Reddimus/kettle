@@ -336,7 +336,27 @@ fn create_staged_file(parent: &Path, destination: &Path) -> io::Result<(File, Pa
             nonce
         ));
         match create_private_file_new(&path) {
-            Ok(file) => return Ok((file, path)),
+            Ok(file) => {
+                #[cfg(unix)]
+                {
+                    if let Err(error) = fs4::FileExt::lock(&file) {
+                        private::discard_created_private_file(file, &path);
+                        return Err(error);
+                    }
+                    // A reaper in another PID namespace may have reached the
+                    // name before the creation handle acquired its lock.
+                    match private::same_file_identity(&file, &path) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                        Err(error) => {
+                            private::discard_created_private_file(file, &path);
+                            return Err(error);
+                        }
+                    }
+                }
+                return Ok((file, path));
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         }
@@ -1146,6 +1166,44 @@ mod tests {
                 .iter()
                 .any(|(completed, _)| completed == &destination)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guarded_reaper_preserves_locked_staging_with_an_unobservable_creator() {
+        let dir = crate::test_tempdir();
+        let destination = dir.path().join("state.json");
+        let dead_pid = exited_child_pid();
+        let candidate = dir.path().join(format!(".state.json.tmp.{dead_pid}.1.0"));
+        let file = create_private_file_new(&candidate).unwrap();
+        fs4::FileExt::lock(&file).unwrap();
+        let guard = private::guard_private_parent(&destination).unwrap();
+        reap_stale_staged_files(&destination, &guard);
+        assert!(
+            candidate.exists(),
+            "a writer lock must override an unobservable creator PID"
+        );
+        drop(file);
+        reap_stale_staged_files(&destination, &guard);
+        assert!(
+            !candidate.exists(),
+            "an abandoned staging file is still reclaimed"
+        );
+
+        let (staged, path) = create_staged_file(dir.path(), &destination).unwrap();
+        let other = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(
+            matches!(
+                fs4::FileExt::try_lock(&other),
+                Err(fs4::TryLockError::WouldBlock)
+            ),
+            "staging writers must hold the lock until publication"
+        );
+        private::discard_created_private_file(staged, &path);
     }
 
     #[test]

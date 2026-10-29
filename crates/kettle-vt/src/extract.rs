@@ -404,6 +404,7 @@ impl PrivateOutputFilter {
                             continue;
                         }
                         let pair = [0x1b, byte];
+                        let pair = &pair[..if byte == 0x1b { 1 } else { 2 }];
                         let recovering = discard_remaining.is_some();
                         let consumed = if let Some(remaining) = discard_remaining.as_mut() {
                             let consumed = pair.len().min(*remaining);
@@ -423,6 +424,9 @@ impl PrivateOutputFilter {
                         self.note_private_tail(&pair[..consumed]);
                         if discard_remaining == Some(0) {
                             self.finish_bounded_recovery();
+                            if byte == 0x1b {
+                                index -= 1;
+                            }
                             if consumed < pair.len() {
                                 // `byte` came from this input while the leading
                                 // ESC was withheld from the previous turn.
@@ -441,7 +445,7 @@ impl PrivateOutputFilter {
                             self.mode = OutputFilterMode::Completion {
                                 message_bytes,
                                 discard_remaining,
-                                escape: false,
+                                escape: byte == 0x1b,
                             };
                         }
                         continue;
@@ -751,6 +755,7 @@ pub struct Extractor {
     /// Once the full private namespace prefix is known, malformed ESC
     /// followers must not make its remaining payload visible.
     private_completion: bool,
+    completion_prefix: Option<usize>,
     /// Private completion messages that outgrew their cap. Their recovery
     /// window is counted from the read that crossed it, so how the bytes
     /// arrived decides where ordinary output resumes.
@@ -821,6 +826,7 @@ impl Extractor {
             recovery_private_started: false,
             raw_tap: false,
             private_completion: false,
+            completion_prefix: Some(0),
             #[cfg(any(test, feature = "fuzzing"))]
             private_overflows: 0,
             seq_tail: [0; 3],
@@ -1070,14 +1076,15 @@ impl Extractor {
                         }
                         if self.private_completion {
                             // A malformed ESC follower does not declassify a
-                            // private completion payload. Count both bytes as
-                            // payload and stay private until a real terminator
-                            // or the bounded recovery window. If recovery lands
+                            // private completion payload. A repeated ESC stays
+                            // pending; other followers count as payload until a
+                            // terminator or bounded recovery. If recovery lands
                             // between them, only the unconsumed suffix becomes
                             // ordinary terminal input.
                             i += 1;
                             let pair = [0x1b, b];
-                            let consumed = self.consume_seq_bytes(&pair);
+                            let pair = &pair[..if b == 0x1b { 1 } else { 2 }];
+                            let consumed = self.consume_seq_bytes(pair);
                             match consumed {
                                 0 => self.dispatch_escape_follower(b, &mut out, &mut handle),
                                 1 if self.mode == Mode::Pass
@@ -1085,7 +1092,10 @@ impl Extractor {
                                 {
                                     i -= 1;
                                 }
-                                1 if b == 0x1b => self.esc_pending = true,
+                                1 if b == 0x1b && self.mode == Mode::Pass => {
+                                    self.esc_pending = true
+                                }
+                                1 if b == 0x1b => self.st_pending = true,
                                 1 => self.pass.push(b),
                                 _ => {}
                             }
@@ -1280,6 +1290,7 @@ impl Extractor {
         self.recovery_private_started = false;
         self.seq_tail_len = 0;
         self.private_completion = false;
+        self.completion_prefix = Some(0);
     }
 
     fn append_seq(&mut self, bytes: &[u8]) -> bool {
@@ -1331,6 +1342,28 @@ impl Extractor {
         if bytes.is_empty() {
             return 0;
         }
+        if self.mode == Mode::Osc
+            && let Some(mut matched) = self.completion_prefix
+        {
+            let observed = if self.discarding_seq {
+                bytes.len().min(self.discard_remaining)
+            } else {
+                bytes.len()
+            };
+            for &byte in &bytes[..observed] {
+                if completion::PREFIX[matched] != byte {
+                    self.completion_prefix = None;
+                    break;
+                }
+                matched += 1;
+                self.completion_prefix = Some(matched);
+                if matched == completion::PREFIX.len() {
+                    self.private_completion = true;
+                    self.completion_prefix = None;
+                    break;
+                }
+            }
+        }
         if !self.discarding_seq {
             let room = self
                 .budget
@@ -1338,25 +1371,14 @@ impl Extractor {
                 .sequence_bytes
                 .saturating_sub(self.seq.len());
             if bytes.len() > room {
-                // A completion message is private from its prefix however
-                // its bytes arrive. Judge the part that still fits, as reads
-                // that stopped there would have, before the string is dropped.
-                if self.mode == Mode::Osc
-                    && joined_starts_with(&self.seq, &bytes[..room], completion::PREFIX)
-                {
-                    self.private_completion = true;
-                }
                 // `append_seq` is intentionally all-or-nothing. Account for
                 // the prefix that still fit so recovery starts at the actual
                 // configured limit, not at the start of this bulk slice.
                 self.bail(room);
             } else if self.append_seq(bytes) {
                 self.note_seq_tail(bytes);
-                if self.mode == Mode::Osc && self.seq.starts_with(completion::PREFIX) {
-                    self.private_completion = true;
-                    if self.seq.len() > completion::MAX_MESSAGE_BYTES {
-                        self.bail_private();
-                    }
+                if self.private_completion && self.seq.len() > completion::MAX_MESSAGE_BYTES {
+                    self.bail_private();
                 }
                 return bytes.len();
             }
@@ -2338,21 +2360,17 @@ fn plain_cwd(path: String) -> Option<String> {
 /// forward slashes). Unix paths are untouched.
 fn normalize_drive_path(path: String) -> String {
     let b = path.as_bytes();
-    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+    if cfg!(windows)
+        && b.len() >= 4
+        && b[0] == b'/'
+        && b[1].is_ascii_alphabetic()
+        && b[2] == b':'
+        && matches!(b[3], b'/' | b'\\')
+    {
         path[1..].to_string()
     } else {
         path
     }
-}
-
-/// Whether `head` followed by `tail` starts with `prefix`.
-fn joined_starts_with(head: &[u8], tail: &[u8], prefix: &[u8]) -> bool {
-    head.len() + tail.len() >= prefix.len()
-        && head
-            .iter()
-            .chain(tail)
-            .zip(prefix)
-            .all(|(byte, want)| byte == want)
 }
 
 /// Parse an OSC 9;4 body (`9;4;<state>[;<pct>]`) into a [`Progress`].
@@ -3503,11 +3521,25 @@ mod tests {
         // encoders ([uri]::EscapeDataString in the pwsh snippet).
         assert_eq!(
             parse_osc7_with_host("file://myhost/C:/Users/k/dir", Some("myhost")),
-            Some("C:/Users/k/dir".to_string())
+            Some(
+                if cfg!(windows) {
+                    "C:/Users/k/dir"
+                } else {
+                    "/C:/Users/k/dir"
+                }
+                .to_string()
+            )
         );
         assert_eq!(
             parse_osc7_with_host("file://myhost/C%3A/Users/k/dir%20x", Some("myhost")),
-            Some("C:/Users/k/dir x".to_string())
+            Some(
+                if cfg!(windows) {
+                    "C:/Users/k/dir x"
+                } else {
+                    "/C:/Users/k/dir x"
+                }
+                .to_string()
+            )
         );
         // A plain unix root path is untouched by drive normalization.
         assert_eq!(
@@ -3806,6 +3838,60 @@ mod tests {
         (Extractor::with_budget(budget), held)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn osc7_preserves_posix_paths_that_resemble_drive_prefixes() {
+        for path in ["/a:work", "/C:/work", "/C:"] {
+            let mut ex = Extractor::isolated();
+            let chunks = ex.feed(format!("\x1b]7;file://localhost{path}\x07").as_bytes());
+            assert!(
+                chunks
+                    .iter()
+                    .any(|chunk| matches!(chunk, Chunk::Cwd(cwd) if cwd == path)),
+                "OSC 7 must preserve the POSIX path {path}: {chunks:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_messages_keep_the_last_repeated_escape_pending() {
+        let input = b"\x1b]777;kettle-completion;x\x1b\x1b\\visible";
+        for size in 1..=input.len() {
+            let mut ex = Extractor::isolated();
+            let mut filter = PrivateOutputFilter::default();
+            let mut screen = Vec::new();
+            let mut recorded = Vec::new();
+            for part in input.chunks(size) {
+                screen.extend(passed(&ex.feed(part)));
+                recorded.extend(filter.feed(part, true));
+            }
+            assert_eq!(
+                screen, b"visible",
+                "extractor missed ST with reads of {size} bytes"
+            );
+            assert_eq!(
+                recorded, b"visible",
+                "output filter missed ST with reads of {size} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_privacy_survives_sequence_reservation_failure() {
+        let mut input = b"\x1b]777;kettle-completion;".to_vec();
+        input.extend(std::iter::repeat_n(b'x', super::UNMETERED_SEQ_BYTES + 1));
+        input.extend_from_slice(b"\x1b[31msecret\x07visible");
+        for split in 0..=2 + crate::completion::PREFIX.len() {
+            let (mut ex, _held) = extractor_with_exhausted_process_account();
+            let mut output = passed(&ex.feed(&input[..split]));
+            output.extend(passed(&ex.feed(&input[split..])));
+            assert_eq!(
+                output, b"visible",
+                "private payload leaked at split {split}"
+            );
+        }
+    }
+
     /// Other panes holding all image memory must not stop this pane's
     /// ordinary control strings from parsing.
     #[test]
@@ -4000,7 +4086,17 @@ mod tests {
             cwd("file:///home/u/a%2eb/..x"),
             Some("/home/u/a.b/..x".to_string())
         );
-        assert_eq!(cwd("file:///C:/Users/me"), Some("C:/Users/me".to_string()));
+        assert_eq!(
+            cwd("file:///C:/Users/me"),
+            Some(
+                if cfg!(windows) {
+                    "C:/Users/me"
+                } else {
+                    "/C:/Users/me"
+                }
+                .to_string()
+            )
+        );
         // A local WSL share stays a usable cwd.
         assert_eq!(
             cwd("file://myhost//wsl.localhost/Ubuntu/home/me"),
