@@ -4,6 +4,7 @@
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -184,20 +185,20 @@ class ApplePayloadTests(unittest.TestCase):
 
 
 class ProcessCleanupTests(unittest.TestCase):
-    def test_registration_timeout_reaps_unregistered_child(self):
+    def embedded(self, variable, delimiter):
         source = SCRIPT.read_text()
-        def embedded(variable, delimiter):
-            marker = f'cat > "${variable}" <<\'{delimiter}\'\n'
-            start = source.index(marker) + len(marker)
-            return source[start:source.index('\n' + delimiter + '\n', start)]
+        marker = f'cat > "${variable}" <<\'{delimiter}\'\n'
+        start = source.index(marker) + len(marker)
+        return source[start:source.index('\n' + delimiter + '\n', start)]
 
+    def test_registration_timeout_reaps_unregistered_child(self):
         for behavior in ('timeout', 'empty'):
             with self.subTest(behavior=behavior), tempfile.TemporaryDirectory() as raw:
                 root = Path(raw)
                 wrapper = root / 'bounded-run'
-                wrapper.write_text(embedded('bounded_run', 'EOF'))
+                wrapper.write_text(self.embedded('bounded_run', 'EOF'))
                 registry = root / 'registry.py'
-                registry.write_text(embedded('process_registry', 'PY'))
+                registry.write_text(self.embedded('process_registry', 'PY'))
                 # Let the real registry hit its timeout, or return no identity.
                 ps = root / 'ps'
                 ps.write_text('#!' + sys.executable + '\nimport os, time\nfrom pathlib import Path\n'
@@ -238,12 +239,89 @@ class ProcessCleanupTests(unittest.TestCase):
                         except ProcessLookupError:
                             pass
 
+    def test_shutdown_reaps_registered_child_when_identity_probe_times_out(self):
+        for shutdown in ('timeout', 'completion', 'signal'):
+            with self.subTest(shutdown=shutdown), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                wrapper = root / 'bounded-run'
+                wrapper.write_text(self.embedded('bounded_run', 'EOF'))
+                registry = root / 'registry.py'
+                registry.write_text(self.embedded('process_registry', 'PY'))
+                # Registration succeeds; every later identity probe times out.
+                ps = root / 'ps'
+                ps.write_text('#!' + sys.executable + '\nimport os, time\nfrom pathlib import Path\n'
+                              'root = Path(os.environ["MARKER_DIR"])\n'
+                              'deadline = time.monotonic() + 2\n'
+                              'while not (root / "child-pid").exists() and time.monotonic() < deadline:\n'
+                              '    time.sleep(0.01)\n'
+                              'with (root / "ps-calls").open("a") as log: log.write("checked\\n")\n'
+                              'if (root / "pids").read_text(): time.sleep(3)\n'
+                              'print("Wed Oct 28 10:00:00 2026")\n')
+                ps.chmod(0o755)
+                # Observe the polling loop before delivering a shutdown signal.
+                sleep = root / 'sleep'
+                sleep.write_text('#!/bin/sh\n: > "$MARKER_DIR/polling"\nexec "$FIXTURE_SLEEP" "$@"\n')
+                sleep.chmod(0o755)
+                child = root / 'child.py'
+                child.write_text('import os, signal, sys\nfrom pathlib import Path\n'
+                                 'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+                                 'Path(sys.argv[1]).write_text(str(os.getpid()))\n'
+                                 'if sys.argv[2] == "completion":\n'
+                                 '    Path(os.environ["COMPLETION_MARKER"]).write_text("7\\n")\n'
+                                 'signal.pause()\n')
+                log = root / 'pids'
+                pid_file = root / 'child-pid'
+                with (root / 'stderr').open('w+') as stderr:
+                    process = subprocess.Popen(
+                        ['bash', str(wrapper), '1', str(log), sys.executable, str(child), str(pid_file), shutdown],
+                        env=dict(os.environ, PROCESS_REGISTRY=str(registry), MARKER_DIR=raw,
+                                 FIXTURE_SLEEP=shutil.which('sleep'),
+                                 PATH=str(root) + os.pathsep + os.environ['PATH']),
+                        stdout=subprocess.DEVNULL, stderr=stderr,
+                    )
+                    child_pid = None
+                    try:
+                        deadline = time.monotonic() + 5
+                        while (not log.exists() or not log.read_text()) and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        self.assertTrue(log.exists() and log.read_text(), 'registration did not succeed')
+                        child_pid = int(pid_file.read_text())
+                        self.assertTrue(log.read_text().startswith(f'{child_pid}\t'))
+                        if shutdown == 'signal':
+                            while not (root / 'polling').exists() and time.monotonic() < deadline:
+                                time.sleep(0.01)
+                            self.assertTrue((root / 'polling').exists(), 'wrapper did not start polling')
+                            process.send_signal(signal.SIGTERM)
+                        try:
+                            status = process.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            self.fail('registered child shutdown exceeded its deadline')
+                        stderr.seek(0)
+                        diagnostic = stderr.read()
+                        self.assertEqual(status, 7 if shutdown == 'completion' else 124, diagnostic)
+                        if shutdown != 'completion':
+                            self.assertIn('command timed out after 1s', diagnostic)
+                        self.assertEqual(log.read_text(), '', 'child identity was not unregistered')
+                        self.assertFalse(list(root.glob('direct-result-*')), 'completion marker leaked')
+                        with self.assertRaises(ProcessLookupError, msg='shutdown left a terminal running'):
+                            os.kill(child_pid, 0)
+                    finally:
+                        if child_pid is None and pid_file.exists():
+                            child_pid = int(pid_file.read_text())
+                        if child_pid is not None:
+                            try:
+                                os.kill(child_pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+
     def registry(self):
-        source = SCRIPT.read_text()
-        marker = 'cat > "$process_registry" <<\'PY\'\n'
-        start = source.index(marker) + len(marker)
         namespace = {'__name__': 'registry_test'}
-        exec(compile(source[start:source.index('\nPY\n', start)], str(SCRIPT), 'exec'), namespace)
+        exec(compile(self.embedded('process_registry', 'PY'), str(SCRIPT), 'exec'), namespace)
         return namespace
 
     def test_registry_rechecks_identity_before_each_signal_and_unregisters(self):

@@ -310,13 +310,17 @@ export COMPLETION_MARKER="$completion_marker"
 "$@" &
 child_pid=$!
 
+signal_child() {
+  # This wrapper owns job 1. Its jobspec stays safe if identity probes fail
+  # or the child exits and its PID is reused before a signal is sent.
+  kill "-$1" %1 2>/dev/null || true
+}
+
 registration_failed() {
   trap - HUP INT TERM
-  # This wrapper owns job 1. Use its jobspec while no creation-time identity
-  # is available, so an already-completed child cannot become a stale PID kill.
-  kill -TERM %1 2>/dev/null || true
+  signal_child TERM
   sleep 0.2
-  kill -KILL %1 2>/dev/null || true
+  signal_child KILL
   wait "$child_pid" 2>/dev/null || true
   rm -f "$completion_marker"
   echo "macos-compare.sh: could not register terminal process: $1" >&2
@@ -327,12 +331,7 @@ if ! child_start="$(python3 "$PROCESS_REGISTRY" register "$pid_log" "$child_pid"
   registration_failed "$1"
 fi
 
-terminate_child() {
-  if kill -0 "$child_pid" 2>/dev/null; then
-    python3 "$PROCESS_REGISTRY" signal "$pid_log" "$child_pid" "$child_start" TERM || true
-  fi
-}
-trap terminate_child HUP INT TERM
+trap 'signal_child TERM' HUP INT TERM
 
 ticks=0
 max_ticks=$((timeout_seconds * 10))
@@ -358,7 +357,7 @@ if [ -s "$completion_marker" ]; then
     close_ticks=$((close_ticks + 1))
   done
   if kill -0 "$child_pid" 2>/dev/null; then
-    python3 "$PROCESS_REGISTRY" signal "$pid_log" "$child_pid" "$child_start" TERM || true
+    signal_child TERM
   fi
   term_ticks=0
   while kill -0 "$child_pid" 2>/dev/null && [ "$term_ticks" -lt 20 ]; do
@@ -366,7 +365,7 @@ if [ -s "$completion_marker" ]; then
     term_ticks=$((term_ticks + 1))
   done
   if kill -0 "$child_pid" 2>/dev/null; then
-    python3 "$PROCESS_REGISTRY" signal "$pid_log" "$child_pid" "$child_start" KILL || true
+    signal_child KILL
   fi
   if wait "$child_pid" 2>/dev/null; then
     :
@@ -391,9 +390,9 @@ if ! kill -0 "$child_pid" 2>/dev/null; then
   exit "$child_status"
 fi
 
-python3 "$PROCESS_REGISTRY" signal "$pid_log" "$child_pid" "$child_start" TERM || true
+signal_child TERM
 sleep 2
-python3 "$PROCESS_REGISTRY" signal "$pid_log" "$child_pid" "$child_start" KILL || true
+signal_child KILL
 wait "$child_pid" 2>/dev/null || true
 python3 "$PROCESS_REGISTRY" unregister "$pid_log" "$child_pid" "$child_start"
 trap - HUP INT TERM

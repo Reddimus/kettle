@@ -51,9 +51,11 @@ The renderer recovery tests include successful device creation on a backend
 that failed while drawing, checking that another backend is tried first.
 `python3 scripts/test-install-media.py` interrupts uninstall after each recovery
 helper deletion and retries through installed helpers or a fresh package install.
-`python3 scripts/perf/macos-compare-score-self-test.py` forces a process identity
-probe to time out and verifies that the benchmark wrapper reaps its child even
-when it ignores SIGTERM.
+`python3 scripts/perf/macos-compare-score-self-test.py` forces process identity
+probes to time out during registration and after successful registration. It
+verifies that the benchmark wrapper reaps a child that ignores SIGTERM on
+timeout, payload completion, and a shutdown signal, preserving exit statuses
+and removing the registry entry and completion marker.
 
 ### Main gates
 
