@@ -28,9 +28,9 @@ turns it into an `ExternalRequest` with an `ExternalAttested` path or inline
 bytes, and Mermaid text or `kind: "mermaid"` selects the Mermaid job kind
 rather than Auto.
 
-## Wire version 8
+## Wire version 9
 
-The header is 11 bytes: `KMED`, u16 LE protocol version 8, a frame kind, then u32 LE payload
+The header is 11 bytes: `KMED`, u16 LE protocol version 9, a frame kind, then u32 LE payload
 length. No padding or compression is permitted. Binary data and UTF-8 strings have u32 LE
 byte lengths. Lists have u32 LE counts. Integers and f64 bit patterns use LE. Boolean and
 optional-value discriminants are exactly 0 or 1. Floats must satisfy the field validators.
@@ -43,7 +43,7 @@ platform refuses the other encoding.
 | 2 Ready | Worker to parent | Same BuildId representation |
 | 3 ExternalRequest | External to parent | Kind, restricted source, theme, canvas, target, fonts |
 | 4 Job | Parent to worker | Kind, worker source, theme, canvas, target, fonts |
-| 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes, layout, optional exact source, optional video result |
+| 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes, layout, optional exact source, optional video result, optional PDF page (page shown and page count, u32 each; present exactly for PDF replies) |
 | 6 Failure | Worker to parent | One fixed error-code byte |
 | 7 DetectedRendered | Worker to parent | One media-kind byte, then exactly the Rendered payload |
 | 8 PlayOpen | Parent to worker | Worker source, max width u32, max height u32, start ms u64, max frame rate u32, sound byte: 0 off, 1 on, 2 muted |
