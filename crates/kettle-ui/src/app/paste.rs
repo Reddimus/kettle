@@ -1336,3 +1336,220 @@ pub(super) fn pop_ready_paste(
         None
     }
 }
+
+/// A paste made while a clipboard image was still being encoded. It waits
+/// its turn so pastes land in the order they were made.
+pub(super) struct QueuedPaste {
+    pub(super) window: u64,
+    pub(super) target: Option<u64>,
+    pub(super) receipt_pane: Option<u64>,
+    pub(super) broadcast: crate::mux::BroadcastScope,
+    /// The panes a broadcast paste reaches, every window's, when it was made.
+    pub(super) recipients: Vec<u64>,
+    pub(super) content: QueuedPasteContent,
+    pub(super) key_presses: Vec<(u64, TerminalKeyRelease)>,
+    pub(super) key_releases: Vec<(u64, PhysicalKey, TerminalKeyRelease)>,
+}
+
+pub(super) enum QueuedPasteContent {
+    /// The PNG of encoder job `id`, once it is kept or has failed, and the
+    /// clipboard's text to paste instead if it failed.
+    Image {
+        id: u64,
+        fallback: String,
+        path: Option<std::io::Result<std::path::PathBuf>>,
+    },
+    Text(String),
+    Input {
+        targets: Vec<(u64, Vec<u8>)>,
+        prepare_input: bool,
+    },
+    Paths {
+        paths: Vec<std::path::PathBuf>,
+        trailing_space: bool,
+        video: Option<crate::video_preview::VideoPasteRequest>,
+    },
+}
+
+impl QueuedPasteContent {
+    /// The bytes it holds while it waits.
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Image { fallback, .. } => fallback.len(),
+            Self::Text(text) => text.len(),
+            Self::Input { targets, .. } => targets
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .fold(0, usize::saturating_add),
+            Self::Paths { paths, .. } => paths
+                .iter()
+                .map(|path| path.as_os_str().len())
+                .fold(0, usize::saturating_add),
+        }
+    }
+
+    /// Whether it is an image still being encoded.
+    fn encoding(&self) -> bool {
+        matches!(self, Self::Image { path: None, .. })
+    }
+}
+
+/// Most pastes that may wait behind encoding images, and their text bytes.
+pub(super) const QUEUED_PASTES_MAX: usize = 64;
+pub(super) const QUEUED_PASTE_BYTES_MAX: usize = 4 * LOCAL_PASTE_MAX;
+
+/// Terminator parity (`terminal.py:real_copy_clipboard` +
+/// `config.py:smart_copy`): what `Action::Copy` writes to the clipboard.
+///
+///   * `selection`: the selected text, or `None` when the pane has none.
+///   * `smart_copy`: `cfg.smart_copy`. With no selection, `true` (default)
+///     keeps the existing clipboard and `false` clobbers it with an empty
+///     string (Terminator's deliberate-UX-choice mode).
+///
+/// Returns the text to write, or `None` to leave the clipboard untouched.
+/// On the `Some("")` clobber path the caller writes the empty string but does
+/// not count it as a real copy, so the `clear_select_on_copy` follow-up is
+/// skipped (no selection existed to clear). Pure; unit-testable without a
+/// clipboard fixture.
+pub(super) fn copy_clipboard_decision(
+    selection: Option<String>,
+    smart_copy: bool,
+) -> Result<Option<String>, std::collections::TryReserveError> {
+    match (selection, smart_copy) {
+        (Some(s), _) => kettle_core::scrub_card_markers(s).map(Some),
+        (None, false) => Ok(Some(String::new())),
+        (None, true) => Ok(None),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PasteSource {
+    Clipboard,
+    Primary,
+}
+
+/// Terminator parity for `putty_paste_style_source_clipboard`: right-click
+/// PuTTY paste defaults to the PRIMARY selection on Linux, matching terminal
+/// mouse-paste convention. Users who expect Windows/PuTTY-style clipboard
+/// paste can opt into the regular clipboard source.
+pub(super) fn putty_paste_source(source_clipboard: bool) -> PasteSource {
+    if source_clipboard {
+        PasteSource::Clipboard
+    } else {
+        PasteSource::Primary
+    }
+}
+
+/// 4 MiB limit on a *local* clipboard paste. The OSC 52 cap above guards
+/// against a hostile remote program pushing an unbounded payload into
+/// the system clipboard; this guards the reverse direction — a user
+/// accidentally pastes a multi-GB file and kettle would otherwise feed
+/// every byte into the PTY in one shot, freezing the terminal until
+/// the program at the other end (cat? vim?) drained the pipe. 4 MiB
+/// fits any realistic code-review / log-snippet paste with room to spare.
+/// Larger payloads are rejected with visible feedback rather than truncated,
+/// since silently shortening a command, patch, or encoded file is unsafe.
+const LOCAL_PASTE_MAX: usize = 4 << 20;
+
+pub(super) fn local_paste_within_limit(text: &str) -> bool {
+    text.len() <= LOCAL_PASTE_MAX
+}
+
+/// The pane a single-pane paste goes to: the focused one. Broadcast names no
+/// pane and keeps its live group semantics.
+fn paste_target(mux: &Mux) -> Option<u64> {
+    if mux.is_broadcast_on() {
+        None
+    } else {
+        mux.active_focus()
+    }
+}
+
+/// Apply a terminal control, such as Reset's RIS or Clear Scrollback's
+/// CSI 3 J, to each target pane's terminal.
+///
+/// Nothing is written to the child, so read-only panes are included. This is
+/// VTE's model, which Terminator's Reset uses: `vte_terminal_reset` changes the
+/// terminal and ignores `input-enabled`.
+pub(super) fn apply_terminal_control(mux: &Mux, targets: &[u64], bytes: &[u8]) {
+    for id in targets {
+        if let Some(pane) = mux.panes.get(id)
+            && !pane.term.apply_local_output(bytes)
+        {
+            log::debug!("pane {id}: terminal control dropped; its reader is busy or stopped");
+        }
+    }
+}
+
+/// Deliver a confirmed non-broadcast text paste to the pane named when the
+/// prompt opened. Mode lookup and delivery use the same stable id.
+fn paste_text_into_target(
+    mux: &mut Mux,
+    target: Option<u64>,
+    text: &str,
+) -> Option<PaneInputResult> {
+    let pane = mux.panes.get_mut(&target?)?;
+    let bracketed = pane
+        .term
+        .term
+        .lock()
+        .ok()
+        .map(|term| term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
+        .unwrap_or(false);
+    let bytes = input::paste_payload(text, bracketed);
+    Some(pane.feed_input(&bytes))
+}
+
+/// Deliver a confirmed non-broadcast path paste to the pane named when the
+/// prompt opened. Shell formatting, mode lookup, and delivery all use it.
+pub(super) fn paste_paths_into_target(
+    mux: &mut Mux,
+    target: Option<u64>,
+    paths: &[std::path::PathBuf],
+    trailing_space: bool,
+) -> Option<PaneInputDelivery> {
+    let pane = mux.panes.get_mut(&target?)?;
+    let mut text = match crate::mux::format_paths_for_paste(&pane.argv, paths) {
+        Ok(text) => text,
+        Err(error) => return Some(PaneInputDelivery::rejected(error)),
+    };
+    if trailing_space {
+        text.push(' ');
+    }
+    let bracketed = pane
+        .term
+        .term
+        .lock()
+        .ok()
+        .map(|term| term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
+        .unwrap_or(false);
+    let bytes = input::paste_payload(&text, bracketed);
+    let result = pane.feed_input(&bytes);
+    Some(PaneInputDelivery {
+        result,
+        accepted: result.is_queued(),
+        receipt_accepted: result.is_queued(),
+        pending_accepted: false,
+    })
+}
+
+/// The window waiting for this pane's video preview generation: the window
+/// that requested it, or the one its tab has moved to since.
+pub(super) fn video_preview_target_window(
+    windows: &std::collections::BTreeMap<u64, WindowState>,
+    hint: u64,
+    pane: u64,
+    generation: u64,
+) -> Option<u64> {
+    if windows
+        .get(&hint)
+        .is_some_and(|window| window.expects_video_preview(pane, generation))
+    {
+        return Some(hint);
+    }
+    windows.iter().find_map(|(&seq, window)| {
+        window
+            .expects_video_preview(pane, generation)
+            .then_some(seq)
+    })
+}

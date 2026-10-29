@@ -486,3 +486,216 @@ impl App {
         log::debug!("config reload applied once across {} windows", seqs.len());
     }
 }
+
+/// Terminator parity (key_next_profile / key_previous_profile):
+/// pick the next profile name after `current`, wrapping at the end.
+/// If `current` isn't in the list (e.g. user launched without `--profile`,
+/// or with an explicit `--config FILE`), the cycle starts at index 0.
+/// Pure — unit-testable without touching disk.
+pub(super) fn pick_next_profile(current: Option<&str>, names: &[String], forward: bool) -> String {
+    let n = names.len();
+    let cur_idx = current
+        .and_then(|c| names.iter().position(|x| x == c))
+        .unwrap_or(0);
+    let next_idx = if forward {
+        (cur_idx + 1) % n
+    } else {
+        (cur_idx + n - 1) % n
+    };
+    names[next_idx].clone()
+}
+
+pub(super) fn pick_light_dark_target(current: &str, light: &str, dark: &str) -> Option<String> {
+    let cur = current.trim().to_ascii_lowercase();
+    let l = light.trim();
+    let d = dark.trim();
+    match (l.is_empty(), d.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(l.to_string()),
+        (true, false) => Some(d.to_string()),
+        (false, false) => {
+            // Current dark switches to light. Light and any third-party theme
+            // switch to dark, so only the dark match needs its own arm.
+            if cur == d.to_ascii_lowercase() {
+                Some(l.to_string())
+            } else {
+                Some(d.to_string())
+            }
+        }
+    }
+}
+
+/// Decide the native window-theme hint (winit
+/// `WindowAttributes::preferred_theme` / `Window::set_theme`) so the OS
+/// titlebar — the Windows DWM caption, the Wayland Adwaita CSD frame —
+/// matches the palette kettle is actually rendering, instead of staying on
+/// the OS-wide setting under a forced dark/light theme.
+///
+///   - `Auto` without a schedule → `None`: the palette follows the OS, so
+///     let the titlebar follow the OS natively too. Forcing a value here
+///     would also stop winit's `ThemeChanged` events on some backends,
+///     which the palette auto-switcher depends on.
+///   - everything else (Explicit / Light / Dark / Auto+schedule) → the
+///     titlebar matches the active theme's background darkness.
+///
+/// Pure — unit-testable without a window.
+pub(super) fn native_theme_hint(
+    mode: kettle_config::ThemeMode,
+    has_schedule: bool,
+    theme_is_dark: bool,
+) -> Option<WindowTheme> {
+    if mode == kettle_config::ThemeMode::Auto && !has_schedule {
+        None
+    } else if theme_is_dark {
+        Some(WindowTheme::Dark)
+    } else {
+        Some(WindowTheme::Light)
+    }
+}
+
+pub(super) const CONFIG_RELOAD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(75);
+
+/// Should a live config reload fire a "malformed values ignored" notification?
+/// Only when the diagnostics are non-empty AND differ from the set surfaced on
+/// the previous reload — kettle's own settings-persistence writes (theme /
+/// preferences toggles) reload the config, and an unchanged malformed set must
+/// not re-notify on every one of them. Pure so the edge-trigger rule is tested.
+pub(super) fn should_notify_malformed(new: &[String], last: &[String]) -> bool {
+    !new.is_empty() && new != last
+}
+
+/// Filesystem watchers observe the containing directory so atomic replacement
+/// works across platforms. Only content/name changes to the exact file are
+/// actionable. Accepting `Access(Open)` creates a read -> reload -> read
+/// feedback loop on Linux inotify; accepting `Modify(Metadata)` creates the
+/// same loop on macOS because opening a private state file re-applies its mode.
+pub(super) fn watcher_event_matches(event: &notify::Event, watched: &std::path::Path) -> bool {
+    use notify::EventKind;
+    use notify::event::ModifyKind;
+
+    if !event.paths.iter().any(|path| path == watched) {
+        return false;
+    }
+    match event.kind {
+        EventKind::Any | EventKind::Create(_) | EventKind::Remove(_) => true,
+        EventKind::Modify(ModifyKind::Metadata(_)) => false,
+        EventKind::Modify(_) => true,
+        EventKind::Access(_) | EventKind::Other => false,
+    }
+}
+
+/// Queue at most one event until the main thread re-arms the latch. Re-open it
+/// when the event loop has already closed so a failed send cannot strand the
+/// watcher in a permanently pending state.
+pub(super) fn queue_watcher_event(
+    pending: &std::sync::atomic::AtomicBool,
+    send: impl FnOnce() -> bool,
+) -> bool {
+    use std::sync::atomic::Ordering;
+
+    if pending
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    if send() {
+        true
+    } else {
+        pending.store(false, Ordering::Release);
+        false
+    }
+}
+
+pub(super) fn config_watch_paths(
+    path: &std::path::Path,
+) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let requested = std::path::absolute(path)?;
+    let mut paths = vec![requested.clone()];
+    match std::fs::canonicalize(&requested) {
+        Ok(target) if target != requested => paths.push(target),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(paths)
+}
+
+pub(super) fn config_watcher(
+    path: &std::path::Path,
+    trust: ConfigTrust,
+    pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    send: impl Fn() -> bool + Send + 'static,
+) -> Result<notify::RecommendedWatcher, String> {
+    use notify::Watcher as _;
+
+    prepare_config_directory(path, trust).map_err(|error| error.to_string())?;
+    let watched = config_watch_paths(path).map_err(|error| error.to_string())?;
+    let mut directories = Vec::new();
+    for path in &watched {
+        if let Some(parent) = path.parent()
+            && !directories.iter().any(|directory| directory == parent)
+        {
+            directories.push(parent.to_path_buf());
+        }
+    }
+    let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        if let Ok(event) = result
+            && watched
+                .iter()
+                .any(|path| watcher_event_matches(&event, path))
+        {
+            queue_watcher_event(&pending, &send);
+        }
+    })
+    .map_err(|error| error.to_string())?;
+    registered_watcher(watcher, |watcher| {
+        for directory in directories {
+            watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
+        }
+        Ok::<_, notify::Error>(())
+    })
+    .map_err(|error| error.to_string())
+}
+
+pub(super) fn registered_watcher<W, E>(
+    mut watcher: W,
+    register: impl FnOnce(&mut W) -> Result<(), E>,
+) -> Result<W, E> {
+    register(&mut watcher)?;
+    Ok(watcher)
+}
+
+pub(super) fn prepare_config_directory(
+    path: &std::path::Path,
+    trust: ConfigTrust,
+) -> std::io::Result<()> {
+    if trust == ConfigTrust::ExplicitPath {
+        return Ok(());
+    }
+    let directory = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("config path has no parent: {}", path.display()),
+        )
+    })?;
+    if let Err(error) = kettle_state::create_private_dirs(directory) {
+        log::debug!(
+            "config directory repair skipped for {}: {error}",
+            directory.display()
+        );
+    }
+    kettle_state::validate_trusted_directory(directory)
+}
+
+pub(super) fn reloaded_font_size(
+    configured_changed: bool,
+    configured: f32,
+    runtime: Option<f32>,
+) -> f32 {
+    if configured_changed {
+        configured
+    } else {
+        runtime.unwrap_or(configured)
+    }
+}

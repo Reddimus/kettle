@@ -1085,7 +1085,7 @@ mod tests {
     /// An update is never urgent enough to ask for the user's attention.
     #[test]
     fn no_update_event_requests_attention() {
-        let source = kettle_test_support::production_source(include_str!("app.rs"));
+        let source = kettle_test_support::production_source(include_str!("app/output.rs"));
         for event in [
             "UserEvent::UpdateAvailable {",
             "UserEvent::UpdateInstalled {",

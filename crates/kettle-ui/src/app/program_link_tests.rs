@@ -216,7 +216,7 @@ fn file_links_are_checked_off_the_ui_thread_before_any_opener() {
     let body = src
         .split("fn open_url(&mut self, ws: &WindowState, uri: &str, source: LinkSource) {")
         .nth(1)
-        .and_then(|rest| rest.split("\n    fn ").next())
+        .and_then(|rest| rest.split("\n    }\n").next())
         .expect("open_url");
     let local = body
         .find("let Some(path) = kettle_core::links::local_file_path(uri) else {")

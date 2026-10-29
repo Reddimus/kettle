@@ -410,3 +410,108 @@ mod tests {
         }
     }
 }
+
+/// How much of the saved session can be stale before the next event-loop turn
+/// writes it out.
+///
+/// Most of what `session.json` holds is announced by a gesture that already
+/// saves — splitting, closing, opening a tab. Some of it is not: a shell `cd`
+/// moves a pane's recorded directory, a divider drag moves a split ratio, a
+/// renamed tab moves its title. Without the sweep, each would reach disk only
+/// if some *later* gesture happened to save, so restoring a workspace could
+/// bring back directories the user left an hour ago.
+///
+/// Saving on every turn instead would serialize the whole tree at PTY-output
+/// rates, and arming a timer for it would keep the process awake and show up as
+/// idle CPU — kettle measures that. So the sweep rides on turns the event loop
+/// was running anyway: it never wakes the process on its own account, and an
+/// idle kettle simply saves the moment anything next happens. The write itself
+/// is skipped when the serialized text matches what is already on disk, so a
+/// sweep over an unchanged workspace costs one serialization and no I/O.
+pub(super) const SESSION_SWEEP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether a session sweep is owed as of `now`. The first turn always sweeps,
+/// so a workspace that changes and then goes quiet is written once rather than
+/// waiting for a second turn that may never come.
+///
+/// A window with no tabs is never swept, whatever the clock says. A sweep is a
+/// background refresh of what is on screen, and an empty window is one that has
+/// not opened yet or is on its way out — writing that snapshot would put
+/// `{"tabs":[],"windows":[]}` over the saved session the user is about to have
+/// restored. The paths that genuinely mean to erase — `close_window`, and the
+/// reap that precedes this — still save explicitly, and this does not touch
+/// them. Same rule as the named-layout guard in `session_write_target`.
+///
+/// Returning `false` here deliberately leaves the caller's timestamp alone, so
+/// a window that is skipped does not consume the interval for the others.
+pub(super) fn session_sweep_due(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    window_has_tabs: bool,
+) -> bool {
+    window_has_tabs && last.is_none_or(|then| now.saturating_duration_since(then) >= SESSION_SWEEP)
+}
+
+/// Where a session snapshot should be written, if anywhere.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum SessionWriteTarget<'a> {
+    NamedLayout(&'a str),
+    DefaultSession,
+    Skip,
+}
+
+/// Decide where a snapshot goes.
+///
+/// The rule worth stating out loud is the first arm: **an empty snapshot never
+/// overwrites a named layout.** `close_window` deliberately empties the mux
+/// before saving, so the SESSION it writes is the empty one ("this window is
+/// finished, do not bring it back"). That intent belongs to session.json. Sent
+/// to a named layout, the empty snapshot would erase the workspace, and the
+/// next `--layout NAME` would open a single default pane. Terminator, whose
+/// layouts this mirrors, only ever writes one from an explicit Add/Refresh;
+/// launching a layout never modifies it.
+///
+/// Extracted so the truth table can be driven directly; the arms below are the
+/// whole of the routing decision.
+pub(super) fn session_write_target(
+    layout: Option<&str>,
+    named_layout_writable: bool,
+    restore_mode: bool,
+    snapshot_is_empty: bool,
+) -> SessionWriteTarget<'_> {
+    match layout {
+        // Never clear a named workspace by quitting.
+        Some(_) if snapshot_is_empty => SessionWriteTarget::Skip,
+        Some(name) if named_layout_writable => SessionWriteTarget::NamedLayout(name),
+        // `--layout NAME` given, but a launch override replaced it: leave the
+        // file alone rather than overwriting it with a window that was never
+        // restored from it.
+        Some(_) => SessionWriteTarget::Skip,
+        // Only write the DEFAULT session.json when this launch is in restore
+        // mode — symmetric with the opt-in load gate. A fresh (non-opted-in)
+        // window must NOT overwrite the saved layout that `--restore` /
+        // `restore-session = true` exists to recover.
+        None if restore_mode => SessionWriteTarget::DefaultSession,
+        None => SessionWriteTarget::Skip,
+    }
+}
+
+/// Is the default last-session (`session.json`) active for THIS launch?
+/// Drives BOTH the startup restore gate (whether to `load()`) and the
+/// `save_session` gate (whether to `save()` the default session). They MUST
+/// agree. If *load* is opt-in but *save* is not, a fresh, non-opted-in window
+/// silently overwrites the saved layout that `--restore` exists to recover.
+/// Routing both through this one predicate keeps them symmetric.
+/// `--layout NAME` is independent (its own file, explicit intent) and never
+/// consults this gate.
+///
+/// While another build's primary still runs, typically the old version after
+/// an update, the session is its: restoring it here would duplicate its open
+/// tabs, and saving would overwrite them (#575). Both wait until it exits.
+pub(super) fn should_restore_session(
+    startup_restore: bool,
+    cfg_restore_session: bool,
+    another_build_running: bool,
+) -> bool {
+    (startup_restore || cfg_restore_session) && !another_build_running
+}

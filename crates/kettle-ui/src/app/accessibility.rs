@@ -1201,3 +1201,624 @@ pub(super) fn update_toast_nodes(
     }
     nodes
 }
+
+pub(super) const ACCESSIBILITY_ROOT_ID: NodeId = NodeId(0);
+const ACCESSIBILITY_PANE_ID_MASK: u64 = 1 << 63;
+const ACCESSIBILITY_TEXT_ID_MASK: u64 = (1 << 63) | (1 << 62);
+const ACCESSIBILITY_SEARCH_ID_MASK: u64 = 1 << 61;
+pub(super) const ACCESSIBILITY_SEARCH_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK);
+const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 16);
+const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 17);
+const ACCESSIBILITY_COMPLETION_ID_MASK: u64 = 1 << 60;
+pub(super) const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId =
+    NodeId(ACCESSIBILITY_COMPLETION_ID_MASK);
+pub(super) const ACCESSIBILITY_MEDIA_RECEIPT_ID: NodeId = NodeId(1 << 59);
+/// The transient update status.
+const ACCESSIBILITY_UPDATE_STATUS_ID: NodeId = NodeId((1 << 59) + 2);
+pub(super) const ACCESSIBILITY_UPDATE_DETAILS_ID: NodeId = NodeId((1 << 59) + 3);
+pub(super) const ACCESSIBILITY_UPDATE_DISMISS_ID: NodeId = NodeId((1 << 59) + 4);
+pub(super) const ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
+pub(super) const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
+/// Inline cards on screen, each by its placement's instance number, which
+/// stays below this bit; never by its nonce.
+pub(super) const ACCESSIBILITY_CARD_ID_MASK: u64 = crate::media::MAX_CARD_INSTANCE;
+pub(super) const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
+pub(super) fn accessibility_completion_geometry_key(
+    completion: &kettle_render::CompletionOverlay,
+    cell: (f32, f32),
+) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+
+    fn hash_rect(rect: kettle_render::Rect4, hasher: &mut impl std::hash::Hasher) {
+        for component in [rect.0, rect.1, rect.2, rect.3] {
+            component.to_bits().hash(hasher);
+        }
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    if let Some(rect) = kettle_render::completion_overlay_rect(completion, cell) {
+        true.hash(&mut hasher);
+        hash_rect(rect, &mut hasher);
+    } else {
+        false.hash(&mut hasher);
+    }
+    for (index, rect) in kettle_render::completion_overlay_row_rects(completion, cell) {
+        index.hash(&mut hasher);
+        hash_rect(rect, &mut hasher);
+    }
+    hasher.finish()
+}
+
+pub(super) fn accessibility_pane_id(pane_id: u64) -> NodeId {
+    NodeId::from(ACCESSIBILITY_PANE_ID_MASK | pane_id)
+}
+
+pub(super) fn accessibility_text_id(pane_id: u64) -> NodeId {
+    NodeId::from(ACCESSIBILITY_TEXT_ID_MASK | pane_id)
+}
+
+pub(super) fn accessibility_completion_row_id(position: usize) -> NodeId {
+    NodeId(ACCESSIBILITY_COMPLETION_ID_MASK | (position as u64 + 1))
+}
+
+fn accessibility_search_control_id(control: kettle_render::SearchControl) -> NodeId {
+    let offset = match control {
+        kettle_render::SearchControl::Editor => 1,
+        kettle_render::SearchControl::Previous => 2,
+        kettle_render::SearchControl::Next => 3,
+        kettle_render::SearchControl::Wrap => 4,
+        kettle_render::SearchControl::Case => 5,
+        kettle_render::SearchControl::Invert => 6,
+        kettle_render::SearchControl::Close => 7,
+    };
+    NodeId(ACCESSIBILITY_SEARCH_ID_MASK | offset)
+}
+
+fn accessibility_search_control_from_id(id: NodeId) -> Option<kettle_render::SearchControl> {
+    match id.0 {
+        value
+            if value == accessibility_search_control_id(kettle_render::SearchControl::Editor).0 =>
+        {
+            Some(kettle_render::SearchControl::Editor)
+        }
+        value
+            if value
+                == accessibility_search_control_id(kettle_render::SearchControl::Previous).0 =>
+        {
+            Some(kettle_render::SearchControl::Previous)
+        }
+        value if value == accessibility_search_control_id(kettle_render::SearchControl::Next).0 => {
+            Some(kettle_render::SearchControl::Next)
+        }
+        value if value == accessibility_search_control_id(kettle_render::SearchControl::Wrap).0 => {
+            Some(kettle_render::SearchControl::Wrap)
+        }
+        value if value == accessibility_search_control_id(kettle_render::SearchControl::Case).0 => {
+            Some(kettle_render::SearchControl::Case)
+        }
+        value
+            if value == accessibility_search_control_id(kettle_render::SearchControl::Invert).0 =>
+        {
+            Some(kettle_render::SearchControl::Invert)
+        }
+        value
+            if value == accessibility_search_control_id(kettle_render::SearchControl::Close).0 =>
+        {
+            Some(kettle_render::SearchControl::Close)
+        }
+        _ => None,
+    }
+}
+
+/// What a screen reader hears for a preview lane: its name, with the item's
+/// place on the shelf, title and detail line, and a description that says
+/// what the lane last did (`announced`), else when the pixels were released
+/// and where keys go.
+pub(super) fn media_lane_accessibility(
+    lane: &kettle_render::MediaLanePanel,
+    tr: &kettle_i18n::Translator,
+    announced: Option<&str>,
+) -> (String, String) {
+    let (index, count) = lane.position;
+    let detail = match lane.page.filter(|&(_, pages)| pages > 1) {
+        Some((page, pages)) => format!(
+            "{} · {} · {}",
+            lane.detail,
+            if lane.document {
+                tr.media_lane_a11y_page(page as u64, pages as u64)
+            } else {
+                tr.media_lane_a11y_diagram(page as u64, pages as u64)
+            },
+            lane.sender.text
+        ),
+        None => format!("{} · {}", lane.detail, lane.sender.text),
+    };
+    let label = if lane.pin_label.is_some() {
+        tr.media_viewer_a11y(index as u64, count as u64, &lane.title, &detail)
+    } else {
+        tr.media_lane_a11y(index as u64, count as u64, &lane.title, &detail)
+    };
+    let description = match announced {
+        Some(announced) => announced.to_owned(),
+        None if lane.image.is_some() || lane.frame.is_some() => lane.hint.clone(),
+        None => format!("{} {}", lane.status, lane.hint),
+    };
+    (label, description)
+}
+
+/// The node of `pane`'s lane (`part` 0) or one of its controls.
+pub(super) fn accessibility_lane_id(pane: u64, part: u64) -> Option<NodeId> {
+    (pane < MAX_LANE_ACCESSIBILITY_PANE && part < LANE_ACCESSIBILITY_PARTS)
+        .then(|| NodeId(ACCESSIBILITY_LANE_ID_MASK | (pane * LANE_ACCESSIBILITY_PARTS) | part))
+}
+
+/// The pane and part a lane node names, if it is a lane's.
+pub(super) fn accessibility_lane_part(id: NodeId) -> Option<(u64, u64)> {
+    let payload = id.0 & (ACCESSIBILITY_LANE_ID_MASK - 1);
+    (id.0 & !(ACCESSIBILITY_LANE_ID_MASK - 1) == ACCESSIBILITY_LANE_ID_MASK).then_some((
+        payload / LANE_ACCESSIBILITY_PARTS,
+        payload % LANE_ACCESSIBILITY_PARTS,
+    ))
+}
+
+pub(super) fn accessibility_lane_controls_key(
+    lane: &kettle_render::MediaLanePanel,
+    geometry: Option<&kettle_render::MediaLaneGeometry>,
+) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (lane.mode == kettle_render::MediaLaneMode::Source).hash(&mut hasher);
+    lane.pin_label.is_some().hash(&mut hasher);
+    geometry.is_some().hash(&mut hasher);
+    let rect_key =
+        |(x, y, width, height): kettle_render::Rect4| [x, y, width, height].map(f32::to_bits);
+    if let Some(geometry) = geometry {
+        for (part, rect, hit) in lane_controls(geometry) {
+            (part, rect.map(rect_key), lane_control_enabled(lane, hit)).hash(&mut hasher);
+        }
+        geometry.scrubber.map(rect_key).hash(&mut hasher);
+        if geometry.scrubber.is_some() {
+            lane.scrubber
+                .as_ref()
+                .map(|bar| (bar.position_ms, bar.duration_ms))
+                .hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+pub(super) fn accessibility_card_id(instance: u64) -> NodeId {
+    NodeId(ACCESSIBILITY_CARD_ID_MASK | instance)
+}
+
+/// The card instance a node names, if it is a card's.
+pub(super) fn accessibility_card_instance(id: NodeId) -> Option<u64> {
+    let instance = id.0 & (ACCESSIBILITY_CARD_ID_MASK - 1);
+    (id.0 & !(ACCESSIBILITY_CARD_ID_MASK - 1) == ACCESSIBILITY_CARD_ID_MASK && instance != 0)
+        .then_some(instance)
+}
+
+/// `text` without placeholder sequences. A label built from outside text,
+/// such as a sender's path, reaches a screen reader or a control client and
+/// must never carry a card's marks.
+pub(super) fn without_card_marks(text: String) -> String {
+    match kettle_core::strip_placeholders(&text) {
+        std::borrow::Cow::Borrowed(_) => text,
+        std::borrow::Cow::Owned(stripped) => stripped,
+    }
+}
+
+/// A card's button for assistive technology: named by its item's title and
+/// the viewer's detail line, never by its nonce, at the part of the card on
+/// screen. Clicking it opens the item in the viewer.
+pub(super) fn card_accessibility_node(
+    rect: [f32; 4],
+    title: &str,
+    detail: &str,
+    tr: &kettle_i18n::Translator,
+) -> Node {
+    let mut node = Node::new(Role::Button);
+    node.set_label(without_card_marks(tr.card_a11y(title, detail)));
+    node.set_description(tr.text(kettle_i18n::Text::CardA11yOpen));
+    node.add_action(AccessibilityAction::Focus);
+    node.add_action(AccessibilityAction::Click);
+    let [x, y, width, height] = rect;
+    node.set_bounds(accesskit::Rect::new(
+        f64::from(x),
+        f64::from(y),
+        f64::from(x + width),
+        f64::from(y + height),
+    ));
+    node
+}
+
+pub(super) fn accessibility_modal_id(kind: u64, index: usize) -> NodeId {
+    NodeId(ACCESSIBILITY_MODAL_ID_MASK | (kind << 16) | index as u64)
+}
+
+pub(super) fn accessibility_confirm_button_index(id: NodeId) -> Option<usize> {
+    let first = accessibility_modal_id(1, 1).0;
+    let raw = id.0.checked_sub(first)?;
+    (raw < (1 << 16) - 1).then_some(raw as usize)
+}
+
+pub(super) fn accessibility_context_menu_item_index(id: NodeId, ws: &WindowState) -> Option<usize> {
+    if ws.confirm_dialog.is_some()
+        || ws.palette_input.is_some()
+        || ws.theme_picker_input.is_some()
+        || ws.layout_picker_input.is_some()
+        || ws.ssh_input.is_some()
+    {
+        return None;
+    }
+    let raw = id.0.checked_sub(accessibility_modal_id(2, 1).0)?;
+    if raw >= (1 << 16) - 1 {
+        return None;
+    }
+    let index = raw as usize;
+    ws.context_menu
+        .as_ref()?
+        .items
+        .get(index)
+        .is_some_and(item_is_dispatchable)
+        .then_some(index)
+}
+
+pub(super) struct ModalAccessibilityProjection {
+    pub(super) roots: Vec<NodeId>,
+    pub(super) nodes: Vec<(NodeId, Node)>,
+    pub(super) focus: Option<NodeId>,
+}
+
+fn push_picker_accessibility(
+    projection: &mut ModalAccessibilityProjection,
+    menu: Option<&ContextMenu>,
+    kind: u64,
+    label: &str,
+    query: &str,
+    full_bounds: accesskit::Rect,
+    tr: &kettle_i18n::Translator,
+) {
+    let container_id = accessibility_modal_id(kind, 0);
+    let input_id = accessibility_modal_id(kind, 1);
+    let list_id = accessibility_modal_id(kind, 2);
+    let mut input = Node::new(Role::TextInput);
+    input.set_label(label);
+    input.set_value(query);
+    projection.nodes.push((input_id, input));
+
+    let mut list_children = Vec::new();
+    let mut selected = None;
+    if let Some(menu) = menu {
+        for (index, row) in menu.rows.iter().enumerate() {
+            if row.separator {
+                continue;
+            }
+            let id = accessibility_modal_id(kind, index + 3);
+            let mut option = Node::new(Role::ListBoxOption);
+            option.set_label(row.label.clone());
+            // The painted hint, such as a shortcut or a theme's appearance.
+            if !row.hint.is_empty() {
+                option.set_description(row.hint.clone());
+            }
+            if !row.enabled {
+                option.set_disabled();
+            }
+            option.set_selected(index == menu.highlight);
+            if index == menu.highlight {
+                selected = Some(id);
+            }
+            list_children.push(id);
+            projection.nodes.push((id, option));
+        }
+    }
+    let mut list = Node::new(Role::ListBox);
+    list.set_label(tr.picker_a11y_results(label));
+    list.set_children(list_children);
+    projection.nodes.push((list_id, list));
+
+    let mut dialog = Node::new(Role::Dialog);
+    dialog.set_label(label);
+    dialog.set_children([input_id, list_id]);
+    dialog.set_bounds(full_bounds);
+    projection.roots.push(container_id);
+    projection.nodes.push((container_id, dialog));
+    if projection.focus.is_none() {
+        projection.focus = selected.or(Some(input_id));
+    }
+}
+
+pub(super) fn modal_accessibility_projection(
+    overlay: &Overlay,
+    surface: (f32, f32),
+    metrics: (f32, f32),
+    scale_factor: f32,
+    tr: &kettle_i18n::Translator,
+) -> ModalAccessibilityProjection {
+    let full_bounds = accesskit::Rect::new(0.0, 0.0, f64::from(surface.0), f64::from(surface.1));
+    let mut projection = ModalAccessibilityProjection {
+        roots: Vec::new(),
+        nodes: Vec::new(),
+        focus: None,
+    };
+
+    if let Some(dialog) = overlay.confirm_dialog.as_ref() {
+        let layout =
+            kettle_render::ConfirmDialogLayout::new(surface, metrics, scale_factor, dialog);
+        let bounds = |(x, y, w, h): (f32, f32, f32, f32)| {
+            accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
+        };
+        let container_id = accessibility_modal_id(1, 0);
+        let mut children = Vec::with_capacity(dialog.buttons.len());
+        for (index, button) in dialog.buttons.iter().enumerate() {
+            let id = accessibility_modal_id(1, index + 1);
+            let mut node = Node::new(Role::Button);
+            node.set_label(button.label.clone());
+            if let Some(rect) = layout.buttons.get(index) {
+                node.set_bounds(bounds(*rect));
+            }
+            node.add_action(AccessibilityAction::Focus);
+            node.add_action(AccessibilityAction::Click);
+            children.push(id);
+            projection.nodes.push((id, node));
+        }
+        let mut node = Node::new(Role::AlertDialog);
+        node.set_label(dialog.heading.clone());
+        node.set_description(dialog.body.clone());
+        node.set_modal();
+        if layout.max_scroll > 0 {
+            node.add_action(AccessibilityAction::ScrollUp);
+            node.add_action(AccessibilityAction::ScrollDown);
+        }
+        node.set_children(children.clone());
+        node.set_bounds(bounds(layout.rect));
+        projection.roots.push(container_id);
+        projection.nodes.push((container_id, node));
+        projection.focus = children
+            .get(dialog.focus_idx.min(children.len().saturating_sub(1)))
+            .copied()
+            .or(Some(container_id));
+        return projection;
+    }
+
+    let picker_open = overlay.palette_query.is_some()
+        || overlay.theme_picker_query.is_some()
+        || overlay.layout_picker_query.is_some()
+        || overlay.ssh_query.is_some();
+    if !picker_open && let Some(menu) = overlay.context_menu.as_ref() {
+        let container_id = accessibility_modal_id(2, 0);
+        let mut children = Vec::new();
+        let mut highlighted = None;
+        for (index, row) in menu.rows.iter().enumerate() {
+            if row.separator {
+                continue;
+            }
+            let id = accessibility_modal_id(2, index + 1);
+            let mut node = Node::new(Role::MenuItem);
+            node.set_label(row.label.clone());
+            if !row.hint.is_empty() {
+                node.set_description(row.hint.clone());
+            }
+            if !row.enabled {
+                node.set_disabled();
+            } else {
+                node.add_action(AccessibilityAction::Focus);
+                node.add_action(AccessibilityAction::Click);
+            }
+            if index == menu.highlight {
+                highlighted = Some(id);
+            }
+            children.push(id);
+            projection.nodes.push((id, node));
+        }
+        let mut node = Node::new(Role::Menu);
+        node.set_label(
+            menu.a11y_label
+                .clone()
+                .unwrap_or_else(|| tr.text(kettle_i18n::Text::MenuA11yTerminal).to_string()),
+        );
+        node.set_children(children);
+        node.set_bounds(full_bounds);
+        projection.roots.push(container_id);
+        projection.nodes.push((container_id, node));
+        if projection.focus.is_none() {
+            projection.focus = highlighted.or(Some(container_id));
+        }
+    }
+
+    if !overlay.hint_labels.is_empty() {
+        let container_id = accessibility_modal_id(3, 0);
+        let mut children = Vec::with_capacity(overlay.hint_labels.len());
+        for (index, hint) in overlay.hint_labels.iter().enumerate() {
+            let id = accessibility_modal_id(3, index + 1);
+            let mut node = Node::new(Role::ListBoxOption);
+            node.set_label(hint.label.clone());
+            if hint.dim {
+                node.set_disabled();
+            }
+            children.push(id);
+            projection.nodes.push((id, node));
+        }
+        let mut node = Node::new(Role::ListBox);
+        node.set_label(tr.text(kettle_i18n::Text::HintA11yList));
+        node.set_children(children);
+        projection.roots.push(container_id);
+        projection.nodes.push((container_id, node));
+        if projection.focus.is_none() {
+            projection.focus = Some(container_id);
+        }
+    }
+
+    if let Some(query) = overlay.palette_query.as_deref() {
+        push_picker_accessibility(
+            &mut projection,
+            overlay.context_menu.as_ref(),
+            4,
+            tr.text(kettle_i18n::Text::PickerA11yPalette),
+            query,
+            full_bounds,
+            tr,
+        );
+    }
+    if let Some(query) = overlay.theme_picker_query.as_deref() {
+        push_picker_accessibility(
+            &mut projection,
+            overlay.context_menu.as_ref(),
+            10,
+            tr.text(kettle_i18n::Text::PickerA11yThemes),
+            query,
+            full_bounds,
+            tr,
+        );
+    }
+
+    if let Some(settings) = overlay.settings.as_ref() {
+        let container_id = accessibility_modal_id(5, 0);
+        let list_id = accessibility_modal_id(5, 1);
+        let mut children = Vec::with_capacity(settings.rows.len());
+        for (index, row) in settings.rows.iter().enumerate() {
+            let id = accessibility_modal_id(5, index + 2);
+            let mut node = Node::new(Role::ListBoxOption);
+            node.set_label(row.label.clone());
+            node.set_value(row.value.clone());
+            if row.disabled {
+                node.set_disabled();
+            }
+            node.set_selected(index == settings.focused_row);
+            children.push(id);
+            projection.nodes.push((id, node));
+        }
+        let mut list = Node::new(Role::ListBox);
+        list.set_label(tr.text(kettle_i18n::Text::SettingsA11yFields));
+        list.set_children(children.clone());
+        projection.nodes.push((list_id, list));
+        let mut dialog = Node::new(Role::Dialog);
+        dialog.set_label(match settings.categories.get(settings.active_category) {
+            Some(category) => tr.settings_a11y_dialog(category),
+            None => tr.text(kettle_i18n::Text::SettingsA11yTitle).to_string(),
+        });
+        dialog.set_children([list_id]);
+        dialog.set_bounds(full_bounds);
+        projection.roots.push(container_id);
+        projection.nodes.push((container_id, dialog));
+        if projection.focus.is_none() {
+            projection.focus = children
+                .get(settings.focused_row.min(children.len().saturating_sub(1)))
+                .copied()
+                .or(Some(container_id));
+        }
+    }
+
+    if let Some(query) = overlay.layout_picker_query.as_deref() {
+        push_picker_accessibility(
+            &mut projection,
+            overlay.context_menu.as_ref(),
+            6,
+            tr.text(kettle_i18n::Text::PickerA11yLayouts),
+            query,
+            full_bounds,
+            tr,
+        );
+    }
+    if let Some(query) = overlay.ssh_query.as_deref() {
+        push_picker_accessibility(
+            &mut projection,
+            overlay.context_menu.as_ref(),
+            7,
+            tr.text(kettle_i18n::Text::PickerA11ySsh),
+            query,
+            full_bounds,
+            tr,
+        );
+    }
+
+    if let Some(edit) = overlay.edit_title.as_ref() {
+        let container_id = accessibility_modal_id(8, 0);
+        let input_id = accessibility_modal_id(8, 1);
+        let mut input = Node::new(Role::TextInput);
+        input.set_label(edit.label.clone());
+        input.set_value(edit.input.clone());
+        projection.nodes.push((input_id, input));
+        let mut dialog = Node::new(Role::Dialog);
+        dialog.set_label(edit.label.clone());
+        dialog.set_children([input_id]);
+        dialog.set_bounds(full_bounds);
+        projection.roots.push(container_id);
+        projection.nodes.push((container_id, dialog));
+        if projection.focus.is_none() {
+            projection.focus = Some(input_id);
+        }
+    }
+
+    projection
+}
+
+#[derive(Clone)]
+struct AccessibilityActivation {
+    initial: TreeUpdate,
+    proxy: EventLoopProxy<UserEvent>,
+    window_seq: u64,
+}
+
+impl ActivationHandler for AccessibilityActivation {
+    fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
+        let _ = self.proxy.send_event(UserEvent::AccessibilityActivated {
+            window_seq: self.window_seq,
+        });
+        Some(self.initial.clone())
+    }
+}
+
+struct AccessibilityActions {
+    proxy: EventLoopProxy<UserEvent>,
+    window_seq: u64,
+}
+
+impl ActionHandler for AccessibilityActions {
+    fn do_action(&mut self, request: ActionRequest) {
+        let _ = self.proxy.send_event(UserEvent::AccessibilityAction {
+            window_seq: self.window_seq,
+            request,
+        });
+    }
+}
+
+struct AccessibilityDeactivation;
+
+impl DeactivationHandler for AccessibilityDeactivation {
+    fn deactivate_accessibility(&mut self) {}
+}
+
+pub(super) fn media_receipt_accessibility_label(
+    kind: &kettle_render::MediaPasteReceiptKind,
+    remote: bool,
+    tr: &kettle_i18n::Translator,
+) -> String {
+    let mut label = match kind {
+        kettle_render::MediaPasteReceiptKind::Image {
+            original_width,
+            original_height,
+        } => tr.receipt_a11y_image(u64::from(*original_width), u64::from(*original_height)),
+        kettle_render::MediaPasteReceiptKind::Video {
+            extension,
+            size,
+            count,
+            ..
+        } if *count > 1 => tr.receipt_a11y_videos(
+            *count as u64,
+            extension,
+            &kettle_render::format_media_size(*size),
+        ),
+        kettle_render::MediaPasteReceiptKind::Video {
+            extension, size, ..
+        } => tr.receipt_a11y_video(extension, &kettle_render::format_media_size(*size)),
+    };
+    if remote {
+        label.push_str(", ");
+        label.push_str(tr.text(kettle_i18n::Text::ReceiptA11yRemote));
+    }
+    label
+}

@@ -398,29 +398,47 @@ use O(1) per guard rather than O(path depth) without weakening path-swap checks.
 ### Where the App's code lives
 
 `kettle-ui`'s `App` (`crates/kettle-ui/src/app.rs`) owns every window and
-runs the event loop: window and user events, `handle_action`, drawing and
-the per-pane output drain. Its subsystems are `impl App` blocks in
-`crates/kettle-ui/src/app/`:
+keeps the process-global state, `UserEvent`, the `ApplicationHandler` dispatch
+skeleton and small shared helpers. Per-window state remains in `window_state.rs`.
+Subsystem methods live in `impl App` blocks under `crates/kettle-ui/src/app/`,
+using `use super::*;` to share the parent scope:
 
 | Module | Holds |
 | --- | --- |
-| `ctl` | the control API's requests and replies |
-| `automation` | Lua hooks, the remote command spool, output triggers |
-| `media`, `preview` | the media shelf's jobs; lanes, the viewer and cards on screen |
-| `paste` | text, file and screenshot pastes, the paste queue, the receipt |
-| `search`, `menus`, `modals` | the search bar; context menus; Settings, the palette and other dialogs |
-| `windowing` | opening and closing windows, tear-off, docking, tab transfer |
-| `pointer`, `chrome` | mouse reporting, wheel and selection; the tab bar and status bar; update delivery and toast overlays |
-| `accessibility` | the accessibility tree and its actions |
-| `config_reload`, `sessions`, `gpu_recovery` | reloads and themes; session save and restore; GPU loss |
+| `startup` | event-loop startup, initial window/renderer setup, startup sizing and fonts |
+| `windowing` | window lifecycle, native window helpers, tear-off, docking and tab transfer |
+| `window_events` | the native window-event match, kept intact with its input dispatch order |
+| `keyboard`, `ime` | key encoding, bindings, program key ownership; composition and IME cursor geometry |
+| `pointer` | mouse reporting, wheel, selection, pane and split-divider dragging, cursor icons |
+| `actions` | action dispatch, pane/tab operations, scaled zoom and broadcast groups |
+| `layout` | content bands, pane/grid geometry, resize and PTY pixel sizes |
+| `focus` | focus transitions, focus reports and completion cleanup |
+| `output` | PTY output and lifecycle drains, wake gates, output generations and per-window user events |
+| `redraw`, `scheduling`, `cursor` | overlay/frame construction; redraw deadlines and pacing; cursor blink and native blink layer |
+| `gpu_recovery` | GPU loss, renderer recovery and initialization watchdogs |
+| `notifications`, `recording` | bell, desktop and input-rejection notices; recording output, status and shutdown |
+| `clipboard`, `paste` | OSC 52 policy and channels; text, file and screenshot pastes, queue and receipts |
+| `title`, `remote`, `links` | title editing and sanitization; remote process context and reconnect; link validation and opening |
+| `ctl`, `ctl_snapshot`, `screenshots` | control requests and replies; bounded snapshot/page helpers; screenshot policy, paths and completion |
+| `automation` | Lua hooks, the remote command spool and output triggers |
+| `media`, `preview`, `preview_model` | shelf jobs and cards; viewer/lane interaction; preview, playback and lane projection helpers |
+| `search`, `completion` | search queries, editor, background scans and pointer routing; completion projection and hit tests |
+| `menus`, `chrome` | context-menu state, geometry and navigation; tab/status chrome and update facts |
+| `modals`, `pickers`, `hints`, `settings_text` | dialog ownership and input; picker projections; hint targets; translated settings notes |
+| `accessibility` | accessibility identifiers, projections, tree and actions |
+| `config_reload`, `sessions` | config watchers, reloads and themes; session save and restore |
+| `system_opener`, `update_toast` | bounded desktop launches; transient update notifications |
 
 Session saves pass their opt-in gate before snapshotting. One worker performs
 serialization, comparison and durable replacement with one replaceable pending
 snapshot; it holds no queue lock during filesystem work. Shutdown drains the
 latest snapshot after any write already in progress and waits for completion.
 
-The other files in `app/` are its tests. Guards that read the App's source
-use `app_source()`, which joins app.rs and these modules.
+The `*_tests.rs` files sit next to their subsystems. `tests.rs` keeps shared
+fixtures and includes the tests split out of its original body, preserving their
+`app::tests` names and shared scope. Existing standalone test modules keep their
+names too. Guards that read the App's source use `app_source()`, which joins
+app.rs and all production modules, or include the specific owning module.
 
 ### Private clipboard images and video receipts
 

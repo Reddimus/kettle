@@ -266,3 +266,88 @@ impl App {
         })
     }
 }
+
+pub(super) fn retain_renderer_recovery_snapshot<T>(retained: &mut Option<T>, live: Option<T>) {
+    if retained.is_none() {
+        *retained = live;
+    }
+}
+
+pub(super) struct GpuRecoveryOutcome {
+    pub(super) adapter: kettle_render::GpuAdapterInfo,
+    pub(super) secondary_window_failures: usize,
+}
+
+type RecoveryBuilds<T> = Vec<(u64, T)>;
+type RecoveryBuildErrors<E> = Vec<(u64, E)>;
+
+pub(super) fn build_recovery_set<T, O, E>(
+    targets: impl IntoIterator<Item = (u64, T)>,
+    mut build: impl FnMut(T) -> std::result::Result<O, E>,
+) -> std::result::Result<RecoveryBuilds<O>, RecoveryBuildErrors<E>> {
+    let mut built = Vec::new();
+    let mut errors = Vec::new();
+    for (seq, target) in targets {
+        match build(target) {
+            Ok(output) => built.push((seq, output)),
+            Err(error) => errors.push((seq, error)),
+        }
+    }
+    if errors.is_empty() {
+        Ok(built)
+    } else {
+        Err(errors)
+    }
+}
+
+/// How long to let the synchronous GPU adapter+device
+/// init run before treating it as a hung graphics driver. Real init is ~1.5s;
+/// this is deliberately generous so a slow-but-working GPU is never killed,
+/// while still bounding the worst case (a wedged driver that never returns)
+/// to a clean diagnostic exit instead of an infinite invisible-window hang.
+pub(super) const GPU_INIT_TIMEOUT_SECS: u64 = 30;
+
+pub(super) const GPU_RECOVERY_SETTLE: std::time::Duration = std::time::Duration::from_millis(700);
+
+pub(super) fn gpu_escalation_label(escalation: kettle_render::AdapterEscalation) -> &'static str {
+    match escalation {
+        kettle_render::AdapterEscalation::Preferred => "preferred",
+        kettle_render::AdapterEscalation::AlternateBackend => "alternate_backend",
+        kettle_render::AdapterEscalation::SurfacePreferred => "surface_preferred",
+        kettle_render::AdapterEscalation::AnyHardware => "any_hardware",
+        kettle_render::AdapterEscalation::ForceSoftware => "force_software",
+    }
+}
+
+pub(super) fn gpu_recovery_backoff(attempt: u32) -> std::time::Duration {
+    let ms = match attempt {
+        0 | 1 => 500,
+        2 => 1000,
+        3 => 2000,
+        _ => 4000,
+    };
+    std::time::Duration::from_millis(ms)
+}
+
+/// Watchdog body for the GPU-init guard. Polls `done` every `step`
+/// until `timeout` elapses. Returns `true` if the timeout was reached without
+/// `done` ever being observed set — i.e. the caller should treat the init as
+/// hung — and `false` if `done` was seen in time (init finished, watchdog
+/// stands down). Pulled out as a pure-ish helper so the timeout logic is
+/// unit-testable without standing up a GPU or calling `process::exit`.
+pub(super) fn gpu_init_timed_out(
+    done: &std::sync::atomic::AtomicBool,
+    timeout: std::time::Duration,
+    step: std::time::Duration,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    let mut waited = std::time::Duration::ZERO;
+    while waited < timeout {
+        if done.load(Ordering::Acquire) {
+            return false;
+        }
+        std::thread::sleep(step);
+        waited += step;
+    }
+    !done.load(Ordering::Acquire)
+}

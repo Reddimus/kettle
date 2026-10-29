@@ -1901,3 +1901,1064 @@ mod tests {
         );
     }
 }
+
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MacosTitlebarPolicy {
+    /// Keep AppKit's geometry and controls on an opaque native surface whose
+    /// light or dark appearance follows Kettle's theme hint.
+    ThemeMatchedNative,
+    /// Borderless windows have no native titlebar to configure.
+    NotApplicable,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn macos_titlebar_policy(borderless: bool) -> MacosTitlebarPolicy {
+    if borderless {
+        MacosTitlebarPolicy::NotApplicable
+    } else {
+        MacosTitlebarPolicy::ThemeMatchedNative
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn apply_macos_window_chrome(
+    attrs: winit::window::WindowAttributes,
+    borderless: bool,
+) -> winit::window::WindowAttributes {
+    use winit::platform::macos::WindowAttributesExtMacOS as _;
+
+    match macos_titlebar_policy(borderless) {
+        // Create the caption opaque from the first frame. The material effect
+        // stays inside the content rect below it.
+        MacosTitlebarPolicy::ThemeMatchedNative => attrs.with_titlebar_transparent(false),
+        MacosTitlebarPolicy::NotApplicable => attrs.with_decorations(false),
+    }
+}
+
+/// Decode kettle's embedded 256px PNG (the dark or light variant) into the
+/// *running* window's icon: the title-bar system-menu glyph (top-left), the
+/// taskbar button, and the Alt-Tab thumbnail. winit leaves this icon unset by
+/// default. `build.rs` embeds the same art as an `.exe` resource, but that
+/// covers only Explorer, the file glyph and pinned shortcuts, not the live
+/// window's `WM_SETICON`. Without this, Windows shows a generic placeholder.
+/// The OS downscales the source for the small title-bar icon and picks the
+/// right size for the taskbar and switcher. Best-effort: a decode failure
+/// leaves the icon unset rather than aborting startup. No-op on Wayland (uses
+/// the `.desktop` app_id); effective on Windows and X11.
+///
+/// macOS returns `None` without decoding. An AppKit window has no icon of its
+/// own (the Dock and the app switcher use the bundle's), and winit's macOS
+/// backend drops whatever it is given, at creation and in `set_window_icon`,
+/// so the decode would only delay the first window.
+pub(super) fn load_window_icon(dark: bool) -> Option<winit::window::Icon> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = dark;
+        None
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        const DARK_ICON_PNG: &[u8] = include_bytes!("../../../../packaging/linux/kettle-256.png");
+        const LIGHT_ICON_PNG: &[u8] =
+            include_bytes!("../../../../packaging/linux/kettle-light-256.png");
+        let icon_png = if dark { DARK_ICON_PNG } else { LIGHT_ICON_PNG };
+        let img = image::load_from_memory(icon_png).ok()?.into_rgba8();
+        let (w, h) = img.dimensions();
+        winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
+    }
+}
+
+/// macOS `sticky = true` — make the window appear on every Space
+/// (Mission Control workspace). winit 0.30 dropped the native method, so we
+/// reach the underlying `NSWindow` through the raw AppKit handle and set its
+/// collection behavior — exactly what `set_visible_on_all_workspaces` did. The
+/// objc2 / objc2-app-kit versions are pinned to winit's own (0.5 / 0.2) so the
+/// ObjC class layout matches. Best-effort: a missing handle just leaves the
+/// window on its current Space.
+#[cfg(target_os = "macos")]
+fn set_visible_on_all_spaces(window: &winit::window::Window) {
+    use objc2_app_kit::{NSView, NSWindowCollectionBehavior};
+    // winit re-exports raw-window-handle, so we don't need it as a direct dep.
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: on macOS winit hands us a live `NSView*`, and `resumed` runs on
+    // the main thread where AppKit requires UI mutations. We only borrow it.
+    let view: &NSView = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
+    if let Some(ns_window) = view.window() {
+        // SAFETY: `setCollectionBehavior:` is an objc2 `unsafe fn` (any ObjC
+        // message send is). The behavior bits are valid and the window is live.
+        unsafe {
+            ns_window.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::Stationary,
+            );
+        }
+    }
+}
+
+/// Turn off AppKit's persistent UI ("Resume") before the application
+/// launches. Kettle restores its own session, and AppKit cannot rebuild a
+/// winit window anyway. Left on, a bundled Kettle kept encoding its window
+/// state for the persistent-UI service while idle: 0.04 % CPU and 0.2 extra
+/// wakeups a second. `ApplePersistence` goes in the registration domain,
+/// which lives only in memory and loses to anything the user sets.
+#[cfg(target_os = "macos")]
+pub(super) fn disable_app_state_restoration() {
+    use objc2::rc::Retained;
+    use objc2_foundation::{NSDictionary, NSNumber, NSString, NSUserDefaults};
+
+    let key = NSString::from_str("ApplePersistence");
+    let off = Retained::into_super(Retained::into_super(Retained::into_super(
+        NSNumber::numberWithBool(false),
+    )));
+    let defaults = NSDictionary::from_vec(&[&*key], vec![off]);
+    // SAFETY: `registerDefaults:` copies a property-list dictionary of
+    // NSString keys, and this runs on the main thread before AppKit starts.
+    unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+}
+
+pub(super) fn rounded_window_corner_policy(
+    is_macos: bool,
+    live_decorated: bool,
+    live_fullscreen: bool,
+) -> bool {
+    is_macos && live_decorated && !live_fullscreen
+}
+
+/// The hint winit gets at window creation, which on macOS is not the hint the
+/// window ends up with.
+///
+/// macOS gets `None` here and picks its appearance up later, from
+/// [`native_theme_sync_is_due`]. winit applies a creation-time hint as an
+/// `NSWindow` appearance override before AppKit has built the titlebar's
+/// container view, and the native material view kettle adds to the frame view
+/// right afterwards then locks in the container-less layout: AppKit centres
+/// the title over the 72pt traffic-light cluster instead of the caption, so
+/// `~ — kettle` is drawn across the red and yellow buttons and clipped at the
+/// window edge (Reddimus/kettle#251).
+///
+/// Every other platform still seeds the caption at creation, where it costs
+/// nothing and avoids a first-frame flash.
+///
+/// Pure — unit-testable without a window.
+pub(super) fn creation_theme_hint(
+    hint: Option<WindowTheme>,
+    is_macos: bool,
+) -> Option<WindowTheme> {
+    if is_macos { None } else { hint }
+}
+
+/// Whether this window may be handed the native theme hint yet.
+///
+/// Only the *first* appearance a macOS window is given has to wait for the
+/// window to be on screen and key, which is when AppKit builds its titlebar
+/// container. That one can leave the window permanently without a caption —
+/// removing the material view again does not bring it back — so a window that
+/// has never been focused keeps the system appearance rather than a broken
+/// caption. See [`creation_theme_hint`].
+///
+/// Every later change is unconditional. The caption exists by then, and this
+/// is the path the runtime light/dark toggle always took. Holding those back
+/// too would strand a background window on a stale appearance until someone
+/// clicked it, since a schedule boundary, Lua, or a config reload can move the
+/// hint while another window has focus.
+///
+/// Pure — unit-testable without a window.
+pub(super) fn native_theme_sync_is_due(
+    window_is_key: bool,
+    already_synced: bool,
+    is_macos: bool,
+) -> bool {
+    !is_macos || window_is_key || already_synced
+}
+
+pub(super) fn take_window_close_request(
+    pending: &mut std::collections::BTreeSet<u64>,
+    seq: u64,
+) -> bool {
+    pending.remove(&seq)
+}
+
+/// Peacock: a STABLE per-window seed for `accent-color = auto`,
+/// hashed from the window's working directory (the launch `-d DIR`, else the
+/// process cwd). Same project → same seed → same accent across launches;
+/// different projects → different accents. Pure given the cwd.
+pub(super) fn accent_seed_from_cwd(cwd: Option<&std::path::Path>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let dir = cwd
+        .map(|p| p.to_path_buf())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    // Canonicalize so every spelling of the same project
+    // (`-d .`, `-d C:\proj`, a relative path, a trailing slash) hashes to the
+    // SAME seed — the documented "same project → same accent" stability.
+    // Falls back to the raw path when it doesn't resolve (nonexistent dir).
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    dir.hash(&mut h);
+    h.finish()
+}
+
+/// Pure: which segment index the tab-bar cursor falls in,
+/// using the same rendered segment rects that hit-testing and painting use.
+/// Used by the drag-to-reorder handler — the user grabs a tab,
+/// drags, and the bar reorders to keep the dragged segment under the cursor.
+/// Clamped to the first/last segment on screen (scrolled-out tabs are never
+/// targets) so a cursor that overshoots either edge still produces a valid
+/// target. Returns 0 for an empty bar.
+pub(super) fn tab_drag_target_index(
+    cursor_x: f32,
+    cursor_y: f32,
+    segments: &[kettle_render::TabSeg],
+) -> usize {
+    let Some(first) = segments.first() else {
+        return 0;
+    };
+    // Which way the strip runs is a property of what was drawn: a vertical bar
+    // stacks its segments down a shared column, a horizontal one lays them
+    // across a shared row. Reading it back off the segments means the drag can
+    // never disagree with the geometry the user is looking at.
+    //
+    // Testing `cursor_x` alone would break vertical bars, where every segment
+    // shares one x span and the first one would always match.
+    let vertical = segments.iter().any(|seg| seg.rect.1 != first.rect.1);
+    // Only tabs on screen are targets: a pointer past the last one shown
+    // (onto a scroll arrow or `+`) stops there rather than at a hidden tab.
+    let mut last_shown = None;
+    for seg in segments.iter().filter(|seg| tab_shown(seg)) {
+        last_shown = Some(seg.idx);
+        let (x, y, w, h) = seg.rect;
+        let (cursor, end) = if vertical {
+            (cursor_y, y + h)
+        } else {
+            (cursor_x, x + w)
+        };
+        if cursor < end {
+            return seg.idx;
+        }
+    }
+    last_shown
+        .or_else(|| segments.last().map(|seg| seg.idx))
+        .unwrap_or(0)
+}
+
+/// Pixel distance a held tab press must move before Kettle promotes the click
+/// into the in-window reorder gesture. This is intentionally larger than the
+/// low-level detachable-tab FSM threshold: a tab click should stay visually
+/// anchored to the selected segment through normal hand jitter, while a real
+/// drag still starts quickly at typical tab-bar heights.
+pub(super) fn tab_reorder_drag_threshold_px(tab_bar_h: f32) -> f32 {
+    (tab_bar_h * 0.5).clamp(8.0, 16.0)
+}
+
+/// Euclidean distance from a point to the nearest
+/// edge of a rect — `0.0` when the point is inside. The tear decision is
+/// "distance from the tab band ≥ threshold", which gives UNIFORM hysteresis
+/// in every direction away from the band (the Chromium model): drag along
+/// the strip = reorder, drag perpendicular past the slop = tear. Because a
+/// `Top` band's upper edge coincides with the window's top edge, "above the
+/// window" falls out of the same math — no separate outside-the-window
+/// clause needed.
+pub(super) fn dist_to_rect(cx: f32, cy: f32, rect: (f32, f32, f32, f32)) -> f32 {
+    let (rx, ry, rw, rh) = rect;
+    let dx = (rx - cx).max(cx - (rx + rw)).max(0.0);
+    let dy = (ry - cy).max(cy - (ry + rh)).max(0.0);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Has the cursor moved far enough from the tab
+/// band to tear the dragged tab off into its own window? Pure so the
+/// per-orientation cases are unit-testable without a window.
+pub(super) fn tear_threshold_crossed(
+    cx: f32,
+    cy: f32,
+    band: (f32, f32, f32, f32),
+    threshold: f32,
+) -> bool {
+    threshold > 0.0 && dist_to_rect(cx, cy, band) >= threshold
+}
+
+/// How far (0.0..=1.0) the cursor has travelled from
+/// the tab band toward the tear threshold. 0.0 at/inside the band, 1.0 at
+/// (or past) the exact distance `tear_threshold_crossed` fires at, so the
+/// ghost's visual lift saturates precisely where the tear happens. A
+/// non-positive threshold can never tear, so it also never lifts. Pure for
+/// the same unit-testability reason as `tear_threshold_crossed`.
+pub(super) fn tear_lift_ratio(cx: f32, cy: f32, band: (f32, f32, f32, f32), threshold: f32) -> f32 {
+    if threshold <= 0.0 {
+        return 0.0;
+    }
+    (dist_to_rect(cx, cy, band) / threshold).clamp(0.0, 1.0)
+}
+
+/// Re-dock insertion index for a torn-off tab dropped at
+/// `cursor` (main-axis coordinate) given the existing segments' main-axis
+/// midpoints, in order. Negative midpoints mark hidden segments.
+/// First visible midpoint past the cursor wins; otherwise insert after the
+/// last visible tab. Distinct from `tab_drag_target_index`
+/// (which picks the segment UNDER the cursor for reorder): docking inserts
+/// BETWEEN segments, so a strip of n tabs has n+1 valid slots.
+pub(super) fn dock_insertion_index(seg_mids: &[f32], cursor: f32) -> usize {
+    let mut insertion = 0;
+    for (idx, &mid) in seg_mids.iter().enumerate() {
+        if mid < 0.0 {
+            continue;
+        }
+        if cursor < mid {
+            return idx;
+        }
+        insertion = idx + 1;
+    }
+    insertion
+}
+
+/// The tab index a torn-off tab dropped at `cursor` (main-axis coordinate)
+/// lands at, among the tabs on screen: before the first whose midpoint is
+/// past the cursor, else right after the last one shown, never after tabs
+/// scrolled out of view. `None` for a bar with no tab on screen.
+pub(super) fn dock_insertion_tab(
+    segments: &[kettle_render::TabSeg],
+    vertical: bool,
+    cursor: f32,
+) -> Option<usize> {
+    let shown: Vec<&kettle_render::TabSeg> = segments.iter().filter(|seg| tab_shown(seg)).collect();
+    let mids: Vec<f32> = shown
+        .iter()
+        .map(|seg| {
+            let (x, y, w, h) = seg.rect;
+            if vertical { y + h * 0.5 } else { x + w * 0.5 }
+        })
+        .collect();
+    let slot = dock_insertion_index(&mids, cursor);
+    match shown.get(slot) {
+        Some(seg) => Some(seg.idx),
+        None => shown.last().map(|seg| seg.idx + 1),
+    }
+}
+
+/// Rescue-tick cadence (one frame at 60Hz) while a torn drag is in flight or
+/// a silent native handoff is being watched.
+const TORN_TICK_MS: u64 = 16;
+
+/// Diagnostics/test override: `KETTLE_TEAR_MANUAL_FOLLOW=1` skips the native
+/// `drag_window()` handoff so a tear always takes the manual-follow/rescue-tick
+/// path. Otherwise demotion is a nondeterministic race (the WM silently
+/// dropping `_NET_WM_MOVERESIZE` for a just-mapped window) that cannot be
+/// triggered on demand, so the live tear-off smoke pins BOTH paths by
+/// launching one instance per mode. Read per tear, not cached: trivially
+/// cheap, and it keeps the override in one place.
+fn tear_native_handoff_disabled() -> bool {
+    std::env::var_os("KETTLE_TEAR_MANUAL_FOLLOW").is_some_and(|v| v == "1")
+}
+
+/// Real pointer travel (px) required, alongside the 400ms grace, before a
+/// silent native handoff is demoted to manual follow. A WM that took the grab
+/// moves the frame with the pointer, so travel-without-`Moved` is proof it
+/// never did; the floor keeps a stationary hover from demoting a
+/// healthy-but-quiet grab.
+const DEMOTION_TRAVEL_PX: f64 = 24.0;
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(PartialEq, Eq)]
+pub(super) struct WaylandDropTarget {
+    pane: Option<u64>,
+    broadcast: crate::mux::BroadcastScope,
+    input_generation: u64,
+    preview: Option<crate::media::PreviewFocus>,
+    pane_input: Option<u64>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl WaylandDropTarget {
+    pub(super) fn capture(ws: &WindowState) -> Self {
+        Self {
+            pane: ws.mux.active_focus(),
+            broadcast: ws.mux.broadcast.clone(),
+            input_generation: ws.ime_focus_generation,
+            preview: ws.preview_focus,
+            pane_input: ws
+                .mux
+                .active_focus()
+                .and_then(|id| ws.mux.panes.get(&id))
+                .map(|pane| pane.input_generation()),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) struct WaylandTabDrag {
+    source: u64,
+    source_index: usize,
+    panes: Vec<u64>,
+    carrier: u64,
+    preview: Option<u64>,
+}
+
+pub(super) struct TornDrag {
+    /// Seq of the torn-off window being dragged.
+    pub(super) seq: u64,
+    /// Seq of the mouse-capture holder: the tear's SOURCE window (it keeps
+    /// streaming CursorMoved while the button is held), or `seq` itself
+    /// for a lone-tab whole-window drag. Manual-follow only listens to the
+    /// carrier — without this gate, stale tracking would hijack EVERY
+    /// window's cursor stream.
+    pub(super) carrier: u64,
+    /// Handoff instant. The X11/macOS pointer-event drop heuristics are
+    /// suppressed for a short window after it (a stray client motion can
+    /// race the WM actually taking the move grab), and the native→manual
+    /// demotion fires off it when the WM never takes the drag at all.
+    pub(super) started: std::time::Instant,
+    /// Cursor offset from the torn window's FRAME top-left in drag coordinates
+    /// (macOS desktop points, physical pixels on Windows/X11),
+    /// chosen at tear time so the pointer holds the tab. `Moved(pos) + grab`
+    /// approximates the live screen cursor during the native move loop
+    /// (winit's `Moved` reports the frame position on Windows — verified in
+    /// the vendored 0.30.13 WM_WINDOWPOSCHANGED handler).
+    pub(super) grab: (f64, f64),
+    /// Latched dock target: (sibling window seq, insertion index). Updated
+    /// by every hit-test; the drop commits whatever is latched.
+    pub(super) dock: Option<(u64, usize)>,
+    /// `drag_window()` succeeded — the OS carries the window. The drop then
+    /// arrives as winit's synthesized post-WM_EXITSIZEMOVE left-release
+    /// (Windows) or as the first client pointer event after the WM's pointer
+    /// grab ends (X11/macOS — the client receives NO pointer events while
+    /// the WM moves the window). `false` = manual-follow: the SOURCE window
+    /// still holds mouse capture, repositions the torn window from its own
+    /// CursorMoved stream, and its left-release is the drop.
+    pub(super) native: bool,
+    /// A native caption gesture is OS-owned and must never be demoted to
+    /// the manual-follow rescue used for failed tab-drag handoffs.
+    pub(super) caption: bool,
+    /// At least one `Moved` arrived since the handoff. Gates the
+    /// pointer-event drop heuristic against the PostMessage race on
+    /// Windows (a stray client mouse-move can slip in between
+    /// `drag_window()`'s posted WM_NCLBUTTONDOWN and the modal loop
+    /// actually starting) and against an X11 tear the user never moved.
+    pub(super) saw_move: bool,
+    /// Last signal (tear or `Moved`) — the stale-tracking failsafe: a
+    /// torn drag with no movement for 120s is abandoned by `about_to_wait`
+    /// (covers an X11 tear whose release we never observe). The rescue
+    /// tick also arbitrates on it (a fresh CursorMoved-driven follow
+    /// suppresses the tick for 30ms).
+    pub(super) last_signal: std::time::Instant,
+    /// The torn window's HWND (Windows; `None` elsewhere) — the dock-hover
+    /// translucency and the z-order walk both key off it, and tracking
+    /// teardown needs it to restore full opacity from any code path.
+    /// Only Windows code reads it; populated unconditionally so the
+    /// struct shape stays identical across platforms.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(super) hwnd: Option<isize>,
+    /// X11: the real cursor position at the last tracking signal, refreshed
+    /// by every `Moved` that pairs with a live-cursor query, or by the rescue
+    /// tick's first look. Demotion evidence: if the pointer has since
+    /// travelled while no further `Moved` arrived, the WM is not actually
+    /// moving the window (an accepted-but-ignored `_NET_WM_MOVERESIZE`, an
+    /// unmapped-window race, or a grab dropped after one incidental placement
+    /// `Moved`) and the tick takes over. Purely time-based demotion would
+    /// fight a WM that DID take the grab over a pointer simply holding still.
+    pub(super) signal_cursor: Option<(f64, f64)>,
+}
+
+/// How a new in-process window starts life.
+pub(super) enum WindowOpen {
+    /// A fresh window with one shell tab (`Action::NewWindow`).
+    Fresh { cwd: Option<String> },
+    /// Adopt a tab detached from another window — the live tab move /
+    /// tear-off. PTYs keep running; nothing respawns.
+    AdoptTab {
+        tab: crate::mux::DetachedTab,
+        source_color: Option<kettle_config::Rgb>,
+        /// The source window's runtime font size, so the torn-off window
+        /// draws its tab and status bars at the size the drag anchor was
+        /// measured with.
+        font_size: Option<f32>,
+        /// Font size to restore when the adopted tab leaves scaled zoom.
+        scaled_zoom_prev_font_size: Option<f32>,
+        /// The moved tab's paste receipt and pending video preview.
+        paste: Box<crate::window_state::MovedPasteState>,
+    },
+    /// Respawn one saved window of a multi-window session (tabs + geometry)
+    /// on `--restore` / `restore-session = true` startup.
+    Restore(crate::session::SWindow),
+}
+
+/// Is this window's backend Wayland? A runtime check, since X11 vs Wayland is
+/// a runtime choice on Linux and `cfg!` can't answer it. Wayland gets the
+/// tear-at-release fallback (no client-side window positioning, and
+/// `xdg_toplevel.move` is compositor-validated against a press serial a
+/// just-created surface never saw).
+pub(super) fn window_is_wayland(w: &winit::window::Window) -> bool {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    matches!(
+        w.window_handle().map(|h| h.as_raw()),
+        Ok(RawWindowHandle::Wayland(_))
+    )
+}
+
+/// Tear-off UX, Windows: the LIVE screen cursor. The tear
+/// positions the torn window from the CursorMoved event's coordinates,
+/// but window creation takes ~50-150ms — by the time `drag_window()`'s
+/// posted WM_NCLBUTTONDOWN starts the modal move loop, a fast-moving
+/// pointer has slid well past the event position, and DefWindowProc
+/// anchors the loop at the CURRENT cursor. Without re-anchoring, the
+/// pointer ends up holding the window mid-body instead of at the grab
+/// point (measured: ~97px of slide under a scripted drag). Re-positioning
+/// from the live cursor immediately before the handoff closes the gap to
+/// sub-millisecond.
+#[cfg(target_os = "windows")]
+pub(super) fn cursor_screen_pos() -> Option<(f64, f64)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut p = POINT::default();
+    // SAFETY: p is writable POINT storage for the synchronous cursor query.
+    unsafe { GetCursorPos(&mut p) }
+        .ok()
+        .map(|()| (f64::from(p.x), f64::from(p.y)))
+}
+
+/// Tear-off UX, X11: one `QueryPointer` round-trip on a lazy
+/// side connection — the LIVE screen cursor (root coords ARE screen
+/// coords) plus the primary button's held state from the same reply's
+/// button mask. Needed because the WM's move-grab anchor drifts from the
+/// tear-time `grab` offset (measured 55-86px under Mutter — enough to miss
+/// the whole dock band), pointer motion stops reaching the client entirely
+/// while the WM holds the move grab, and the Esc-cancel tell needs the
+/// physical button state (see `primary_button_physically_held`). A Wayland
+/// session (no X server for this client) fails the one-time connect and
+/// yields `None` forever — callers keep their approximations. Only ever
+/// exercised while torn-drag tracking is live.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn x11_pointer_state() -> Option<((f64, f64), bool)> {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{ConnectionExt as _, KeyButMask};
+    use x11rb::rust_connection::RustConnection;
+    static X11: std::sync::OnceLock<Option<(RustConnection, u32)>> = std::sync::OnceLock::new();
+    let (conn, root) = X11
+        .get_or_init(|| {
+            x11rb::connect(None).ok().map(|(conn, screen)| {
+                let root = conn.setup().roots[screen].root;
+                (conn, root)
+            })
+        })
+        .as_ref()?;
+    let reply = conn.query_pointer(*root).ok()?.reply().ok()?;
+    // The server applies the pointer-button mapping before reporting the
+    // state mask, so BUTTON1 here is the LOGICAL primary — a left-handed
+    // mapping is already accounted for.
+    let held = reply.mask.contains(KeyButMask::BUTTON1);
+    Some(((f64::from(reply.root_x), f64::from(reply.root_y)), held))
+}
+
+/// Tear-off UX, X11: the LIVE screen cursor, counterpart of the Windows
+/// `GetCursorPos` path above. See `x11_pointer_state`.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) fn cursor_screen_pos() -> Option<(f64, f64)> {
+    x11_pointer_state().map(|(pos, _)| pos)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn cursor_screen_pos() -> Option<(f64, f64)> {
+    crate::native_drag::cursor_position()
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
+pub(super) fn cursor_screen_pos() -> Option<(f64, f64)> {
+    None
+}
+
+// AppKit's global desktop uses points; winit's physical positions multiply
+// the entire desktop origin by each window's scale. Normalize before comparing
+// windows so a Retina donor can dock onto a non-Retina target.
+fn drag_coordinate_scale(window: &Window) -> f64 {
+    if cfg!(target_os = "macos") {
+        window.scale_factor()
+    } else {
+        1.0
+    }
+}
+
+pub(super) fn drag_position(
+    window: &Window,
+    position: winit::dpi::PhysicalPosition<i32>,
+) -> (f64, f64) {
+    let scale = drag_coordinate_scale(window);
+    (f64::from(position.x) / scale, f64::from(position.y) / scale)
+}
+
+fn drag_native_position(position: (f64, f64)) -> winit::dpi::Position {
+    if cfg!(target_os = "macos") {
+        winit::dpi::LogicalPosition::new(position.0, position.1).into()
+    } else {
+        winit::dpi::PhysicalPosition::new(position.0 as i32, position.1 as i32).into()
+    }
+}
+
+/// Re-dock, Windows: per-window alpha for the dock-hover
+/// preview. The torn window rides UNDER the pointer, so at the moment a
+/// dock target latches, the full-size torn window is covering the very
+/// strip the insertion marker draws in — the user would never see it.
+/// Going translucent while a target is latched shows the target strip
+/// (and marker) through the dragged window, Chromium-style. Verified
+/// live against kettle's wgpu flip-model swapchain (renders fine under
+/// WS_EX_LAYERED + LWA_ALPHA). 255 restores and drops the layered bit.
+#[cfg(target_os = "windows")]
+fn set_window_alpha(hwnd: isize, alpha: u8) {
+    use windows::Win32::Foundation::{COLORREF, HWND};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongPtrW,
+    };
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    // SAFETY: h comes from a live winit window on its UI thread; only integer style and alpha
+    // values are passed.
+    unsafe {
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        if alpha == 255 {
+            let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
+            SetWindowLongPtrW(h, GWL_EXSTYLE, ex & !(WS_EX_LAYERED_BIT));
+        } else {
+            SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED_BIT);
+            let _ = SetLayeredWindowAttributes(h, COLORREF(0), alpha, LWA_ALPHA);
+        }
+    }
+}
+
+/// Paint a freshly created window's background in the configured terminal
+/// background colour, and report whether it took.
+///
+/// Sets the window class brush that Win32 erases with on `WM_ERASEBKGND`, so
+/// the pre-paint window would match what the renderer is about to draw. This
+/// is best effort only. A light-background probe showed the pre-paint window
+/// stays black whatever the brush is, so the early reveal does not depend on
+/// it (see `background_is_dark_enough_to_reveal_early`).
+///
+/// Returns false if the brush cannot be created.
+#[cfg(target_os = "windows")]
+pub(super) fn set_window_background_brush(hwnd: isize, rgb: kettle_config::Rgb) -> bool {
+    use windows::Win32::Foundation::{COLORREF, HWND};
+    use windows::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, HBRUSH, HGDIOBJ};
+    use windows::Win32::UI::WindowsAndMessaging::{GCLP_HBRBACKGROUND, SetClassLongPtrW};
+
+    let kettle_config::Rgb { r, g, b } = rgb;
+    // COLORREF is 0x00BBGGRR, not RGB order.
+    let colorref = COLORREF(u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16));
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    // SAFETY: h is a live winit HWND on the UI thread. Its class starts with no
+    // brush; only this function installs owned brushes, and replacement/deletion
+    // is serialized with window painting on that thread.
+    unsafe {
+        let brush = CreateSolidBrush(colorref);
+        if brush.is_invalid() {
+            return false;
+        }
+        let previous = SetClassLongPtrW(h, GCLP_HBRBACKGROUND, brush.0 as isize);
+        if previous != 0 {
+            let _ = DeleteObject(HGDIOBJ(previous as *mut core::ffi::c_void));
+        }
+        let _ = HBRUSH(brush.0);
+        true
+    }
+}
+
+/// Non-Windows platforms have no equivalent cheap guarantee that the first
+/// composited frame is the right colour, so they keep hiding until painted.
+#[cfg(not(target_os = "windows"))]
+pub(super) fn set_window_background_brush(_hwnd: isize, _rgb: kettle_config::Rgb) -> bool {
+    false
+}
+
+/// Current process working set in MiB, for startup phase accounting.
+///
+/// Kettle's resident footprint is large and barely moves with scrollback, font
+/// or features, so it is a FIXED cost. Sampling across the phases that allocate
+/// is the only way to attribute it (docs/PERFORMANCE.md has the numbers).
+///
+/// `0.0` where unavailable; this is diagnostics, never control flow.
+#[cfg(target_os = "windows")]
+pub(super) fn process_working_set_mb() -> f64 {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let Ok(size) = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()) else {
+        // A zero size would be accepted by the signature and rejected -- or
+        // worse, partially honoured -- by the API. Refuse instead of asking for
+        // a struct of no bytes.
+        return 0.0;
+    };
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        // `cb` is an in-parameter: the API uses it to decide how much of the
+        // struct it may write. `Default` leaves it 0, which is not a smaller
+        // request, it is a malformed one.
+        cb: size,
+        ..Default::default()
+    };
+    // SAFETY: counters is writable for size bytes and cb matches; GetCurrentProcess returns a
+    // borrowed pseudo-handle.
+    unsafe {
+        if GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size).is_ok() {
+            return counters.WorkingSetSize as f64 / (1024.0 * 1024.0);
+        }
+    }
+    0.0
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn process_working_set_mb() -> f64 {
+    0.0
+}
+
+/// May the window be shown BEFORE the first painted frame?
+///
+/// Only when the terminal's background is dark enough that the difference from
+/// black is imperceptible, because black is what an unpainted window actually
+/// shows. The class brush set alongside this does NOT decide what appears. With
+/// a light background configured (`#f0e8d8`) the pre-paint window still sampled
+/// `0,0,0`, because winit owns `WM_ERASEBKGND`. Revealing a light-themed window
+/// early would trade a late window for a black flash.
+///
+/// Dark backgrounds have no such trade. `#101010` is 16 levels from black on
+/// each channel, which nobody can see, and revealing early shows the window
+/// during the ~730ms of renderer init instead of after it.
+///
+/// The threshold is deliberately strict. This is not "dark theme" detection; it
+/// is "indistinguishable from black", so anything with visible colour keeps
+/// hiding until painted.
+pub(super) fn background_is_dark_enough_to_reveal_early(bg: kettle_config::Rgb) -> bool {
+    // Windows only. "An unpainted window is black" was observed on DWM and is
+    // NOT a portable fact; on another compositor the pre-paint frame could as
+    // easily be white or transparent.
+    if !cfg!(target_os = "windows") {
+        return false;
+    }
+    const MAX_CHANNEL: u8 = 24;
+    bg.r <= MAX_CHANNEL && bg.g <= MAX_CHANNEL && bg.b <= MAX_CHANNEL
+}
+
+/// `WS_EX_LAYERED` as the isize `GetWindowLongPtrW` works in.
+#[cfg(target_os = "windows")]
+const WS_EX_LAYERED_BIT: isize = 0x0008_0000;
+
+/// Torn-window alpha while a dock target is latched. Translucent enough to
+/// read the target strip + insertion marker through the dragged window,
+/// opaque enough that the window still reads as "the thing you're holding"
+/// (probed live at several values).
+#[cfg(target_os = "windows")]
+const DOCK_HOVER_ALPHA: u8 = 150;
+
+/// Is the primary mouse button PHYSICALLY held right now? Distinguishes an
+/// Esc-CANCELLED move loop (button still down when the WM ends its grab)
+/// from a real drop (button up); the client-visible events look identical
+/// for both. Windows honors a swapped-button mouse (`SM_SWAPBUTTON`:
+/// GetAsyncKeyState reports PHYSICAL buttons, so the primary button of a
+/// left-handed mouse is VK_RBUTTON); X11 reads the button mask from the
+/// same `QueryPointer` the live-cursor path uses (the server pre-applies
+/// the pointer mapping there). macOS uses the combined session button state.
+/// False elsewhere (Wayland never produces a release-while-held; an X11 query failure also
+/// degrades to false, which errs toward committing a real drop rather
+/// than dropping user data on a cancel we cannot prove).
+pub(super) fn primary_button_physically_held() -> bool {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        x11_pointer_state().is_some_and(|(_, held)| held)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+        // SAFETY: SM_SWAPBUTTON is a valid metric index and this query takes no pointers.
+        let vk = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 {
+            VK_RBUTTON
+        } else {
+            VK_LBUTTON
+        };
+        // SAFETY: vk is one of the valid left/right mouse virtual-key codes; no pointers are
+        // passed.
+        (unsafe { GetAsyncKeyState(i32::from(vk.0)) } as u16) & 0x8000 != 0
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::native_drag::primary_held()
+    }
+    #[cfg(not(any(target_os = "windows", unix)))]
+    false
+}
+
+/// HWND of a winit window.
+/// `None` off-Windows (the `Win32` raw-handle variant exists on every
+/// platform, so this compiles everywhere without cfg noise).
+pub(super) fn window_hwnd(w: &winit::window::Window) -> Option<isize> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match w.window_handle().ok().map(|h| h.as_raw()) {
+        Some(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
+/// Resolve overlapping dock candidates, and foreign windows covering a band,
+/// against the REAL z-order. Walks down from the torn window (topmost while
+/// dragged); the first visible, uncloaked window containing the cursor
+/// decides: one of ours → that's the target; a foreign window → it covers the
+/// band, no dock. The cloak check matters: suspended UWP apps park full-screen
+/// DWM-cloaked windows in the z-order that would otherwise always read as
+/// "covered".
+///
+/// Known limitation (accepted): always-on-top foreign windows
+/// sit ABOVE the torn window and are invisible to a downward walk — a
+/// band covered by one still shows the marker (the merge itself is
+/// unaffected). GetWindowRect also includes the invisible Win10/11 resize
+/// borders, which mirrors real input routing (those borders DO capture
+/// clicks), so near-edge "covered" verdicts match what a click would do.
+#[cfg(target_os = "windows")]
+fn zorder_pick(
+    torn_hwnd: isize,
+    cursor: (f64, f64),
+    candidates: &[(isize, u64, usize)],
+) -> Option<(u64, usize)> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GW_HWNDNEXT, GetWindow, GetWindowRect, IsWindowVisible,
+    };
+    let (px, py) = (cursor.0 as i32, cursor.1 as i32);
+    // SAFETY: torn_hwnd comes from the winit window; GetWindow borrows it and returns an
+    // OS-managed handle.
+    let mut hwnd = unsafe { GetWindow(HWND(torn_hwnd as *mut core::ffi::c_void), GW_HWNDNEXT) };
+    // Bounded walk: the desktop can hold hundreds of top-level windows but
+    // a runaway loop must be impossible.
+    for _ in 0..1024 {
+        let Ok(h) = hwnd else { break };
+        // SAFETY: h is an OS-managed window handle; this query takes no pointers and tolerates
+        // a vanished window.
+        if unsafe { IsWindowVisible(h) }.as_bool() {
+            let mut cloaked: u32 = 0;
+            // SAFETY: cloaked is writable u32 storage matching DWMWA_CLOAKED and the supplied
+            // byte count.
+            let _ = unsafe {
+                DwmGetWindowAttribute(
+                    h,
+                    DWMWA_CLOAKED,
+                    (&raw mut cloaked).cast(),
+                    std::mem::size_of::<u32>() as u32,
+                )
+            };
+            let mut r = RECT::default();
+            if cloaked == 0
+                // SAFETY: r is writable RECT storage for the synchronous query; a vanished
+                // window returns an error.
+                && unsafe { GetWindowRect(h, &mut r) }.is_ok()
+                && px >= r.left
+                && px < r.right
+                && py >= r.top
+                && py < r.bottom
+            {
+                let found = h.0 as isize;
+                return candidates
+                    .iter()
+                    .find(|(ch, _, _)| *ch == found)
+                    .map(|&(_, s, i)| (s, i));
+            }
+        }
+        // SAFETY: h is borrowed from the OS window list; GetWindow returns another borrowed
+        // handle or an error.
+        hwnd = unsafe { GetWindow(h, GW_HWNDNEXT) };
+    }
+    None
+}
+
+/// The live monitor rects, for clamping a saved window geometry whose
+/// monitor is gone (see `session::clamp_geometry_to_monitors`).
+pub(super) fn monitor_rects(event_loop: &ActiveEventLoop) -> Vec<(i32, i32, u32, u32)> {
+    event_loop
+        .available_monitors()
+        .map(|m| {
+            let p = m.position();
+            let s = m.size();
+            (p.x, p.y, s.width, s.height)
+        })
+        .collect()
+}
+
+impl App {
+    /// The map key of the WindowState whose OS window is `wid`, if any.
+    /// Returns `WindowState::seq`, which is the map key by invariant.
+    pub(super) fn seq_of_window(&self, wid: WindowId) -> Option<u64> {
+        self.windows
+            .values()
+            .find_map(|w| (w.window.as_ref().map(|x| x.id()) == Some(wid)).then_some(w.seq))
+    }
+
+    pub(super) fn request_window_close(&mut self, seq: u64) {
+        self.pending_window_closes.insert(seq);
+    }
+
+    pub(super) fn window_close_pending(&self, seq: u64) -> bool {
+        self.pending_window_closes.contains(&seq)
+    }
+
+    /// The dispatch wrappers' epilogue. Reinserts the checked-out window
+    /// — or, when the inner handler flagged this window for close
+    /// or a quit, drops it (panes' PTYs die with their Mux) and exits the
+    /// event loop once no windows remain. This is the ONLY place a window
+    /// close reaches `event_loop.exit()`, so "exit only when the map is
+    /// empty" holds by construction (drift-guarded in
+    /// `event_loop_exit_sites_are_allowlisted`).
+    pub(super) fn finish_window_dispatch(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        seq: u64,
+        mut ws: WindowState,
+    ) {
+        if modal_editor(&ws).is_some() {
+            self.sync_modal_editor_scroll(&mut ws);
+            self.update_ime_cursor_area(&mut ws);
+        }
+        if self.quit_requested {
+            if let Some(owner) = self.update_toast.as_ref().map(|toast| toast.window) {
+                self.close_update_toast_window(owner);
+            }
+            drop(ws);
+            self.windows.clear();
+            event_loop.exit();
+            return;
+        }
+        if take_window_close_request(&mut self.pending_window_closes, seq) {
+            self.close_update_toast_window(seq);
+            // A dying window that is the torn window or the manual-follow
+            // capture holder takes its drag with it. Abandon eagerly (clears
+            // the latched preview on the still-mapped target and restores
+            // opacity) instead of leaving stale tracking for the heuristics to
+            // trip over.
+            if self
+                .torn_drag
+                .as_ref()
+                .is_some_and(|t| t.seq == seq || t.carrier == seq)
+            {
+                self.abandon_torn_drag(None);
+            }
+            drop(ws);
+            self.hoover_mapped_groups();
+            if self.windows.is_empty() {
+                event_loop.exit();
+            } else if self.focused_seq == seq
+                && let Some(&next) = self.windows.keys().next_back()
+            {
+                // Focus falls to the most recently opened remaining window;
+                // the OS will confirm with a Focused(true) shortly.
+                self.focused_seq = next;
+            }
+            return;
+        }
+        let mut ws = ws;
+        self.sync_pane_focus_reports(&mut ws);
+        self.windows.insert(seq, ws);
+    }
+
+    pub(super) fn focus_or_open_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        cwd: Option<String>,
+    ) -> bool {
+        let target = self
+            .windows
+            .get(&self.focused_seq)
+            .or_else(|| self.windows.values().max_by_key(|window| window.seq));
+        if let Some(ws) = target
+            && let Some(window) = &ws.window
+        {
+            self.focused_seq = ws.seq;
+            window.set_visible(true);
+            window.set_minimized(false);
+            window.focus_window();
+            return true;
+        }
+        self.open_window(event_loop, WindowOpen::Fresh { cwd }, None, None)
+            .is_ok()
+    }
+
+    pub(super) fn drain_activation_requests(&mut self, event_loop: &ActiveEventLoop) {
+        // Keep requests queued while window 1 is still creating the shared GPU
+        // context. `resumed` calls this again immediately after initialization.
+        if self.gpu.is_none() {
+            return;
+        }
+        let pending = self
+            .activation
+            .as_ref()
+            .map(crate::activation_server::ActivationInbox::drain)
+            .unwrap_or_default();
+        for request in pending {
+            if !request.claim() {
+                continue;
+            }
+            if !activation_recording_available(
+                request.request.requires_recording(),
+                self.recording_status(),
+            ) {
+                log::warn!(
+                    "bare-launch activation rejected because the requested dev recorder is not active"
+                );
+                let _ = request.completion.send(false);
+                continue;
+            }
+            let cwd = request.request.cwd().map(str::to_string);
+            let opened = if request.request.focuses_existing() {
+                self.focus_or_open_window(event_loop, cwd)
+            } else {
+                self.open_window(event_loop, WindowOpen::Fresh { cwd }, None, None)
+                    .is_ok()
+            };
+            if opened {
+                log::info!("bare-launch activation activated a window");
+                if !request.request.focuses_existing()
+                    && let Some(recorder) = self.recorder.as_mut()
+                {
+                    recorder.record_marker("kettle:activation_window");
+                }
+            }
+            let _ = request.completion.send(opened);
+        }
+    }
+
+    /// Lift the drag ghost toward the same threshold that triggers tear-off.
+    /// A window without its own active drag has no lift.
+    pub(super) fn tear_lift_for(&self, ws: &WindowState) -> f32 {
+        if !self.cfg.detachable_tabs {
+            return 0.0;
+        }
+        match ws.detach_drag {
+            crate::detach::DragState::DraggingInside { .. }
+            | crate::detach::DragState::DraggingOutside { .. } => self
+                .dock_band(ws)
+                .map(|band| {
+                    tear_lift_ratio(
+                        ws.cursor.x as f32,
+                        ws.cursor.y as f32,
+                        band,
+                        1.5 * self.tab_bar_h(ws),
+                    )
+                })
+                .unwrap_or(0.0),
+            _ => 0.0,
+        }
+    }
+
+    /// The window numbered `seq`: `ws` or another.
+    pub(super) fn window_by_seq<'a>(
+        &'a mut self,
+        ws: &'a mut WindowState,
+        seq: u64,
+    ) -> Option<&'a mut WindowState> {
+        if ws.seq == seq {
+            Some(ws)
+        } else {
+            self.windows.get_mut(&seq)
+        }
+    }
+}

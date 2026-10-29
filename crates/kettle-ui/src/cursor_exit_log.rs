@@ -958,7 +958,7 @@ mod tests {
             .split_once("fn resumed_inner(")
             .unwrap()
             .1
-            .split_once("fn handle_accessibility_action(")
+            .split_once("\n    }\n")
             .unwrap()
             .0;
         let bind = resumed

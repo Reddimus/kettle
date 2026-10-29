@@ -1021,7 +1021,7 @@ fn a_lanes_wheel_motion_goes_with_its_gesture() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     assert!(
@@ -1864,7 +1864,7 @@ fn viewer_retains_keyboard_ownership_until_it_closes() {
         .split("fn exit_preview_focus(")
         .nth(1)
         .unwrap()
-        .split("\n    fn ")
+        .split("\n    }\n")
         .next()
         .unwrap();
     let flat = release.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1876,7 +1876,7 @@ fn viewer_retains_keyboard_ownership_until_it_closes() {
         .split("fn restore_overlay_origin(")
         .nth(1)
         .unwrap()
-        .split("\n    fn ")
+        .split("\n    }\n")
         .next()
         .unwrap();
     assert!(
@@ -1984,7 +1984,7 @@ fn a_lane_holding_the_keyboard_is_wired_as_a_modal() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     let focus = body("focus_preview");
@@ -2039,7 +2039,7 @@ fn copied_diagrams_are_wired() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     let preview = body("preview_copied_diagram");
@@ -2118,7 +2118,7 @@ fn lane_content_actions_are_wired() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     let wrapper = body("copy_preview");
@@ -2249,7 +2249,7 @@ fn reload_is_a_pull_of_the_items_file_under_its_key() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     let reload = body("reload_preview");
@@ -2292,7 +2292,7 @@ fn a_lane_without_a_source_shows_and_copies_rendered() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     assert!(body("copy_preview").contains("lane_mode(item, panel)"));

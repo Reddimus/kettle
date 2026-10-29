@@ -249,7 +249,7 @@ fn split_auto_picks_an_axis_instead_of_always_splitting_down() {
         .split("fn auto_split_dir(&self, ws: &WindowState) -> Dir {")
         .nth(1)
         .expect("auto_split_dir must exist")
-        .split("\n    fn ")
+        .split("\n    }\n")
         .next()
         .expect("chooser body");
     assert!(

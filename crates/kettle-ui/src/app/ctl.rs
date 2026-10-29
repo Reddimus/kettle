@@ -3286,3 +3286,167 @@ mod screen_page_tests {
         )));
     }
 }
+
+/// A control request that only reads UI state, so it needs no frame. A
+/// frame would also end the Core Animation cursor blink `ui_geometry` is
+/// there to observe.
+/// `get_state`'s `caller`: whether the caller runs in one of this Kettle's
+/// panes. Verified means the pane's own child process is an ancestor of the
+/// connecting process; the nearest such pane wins. A hint from the caller's
+/// environment is reported separately and never makes it verified.
+pub(super) fn ctl_caller_report(
+    caller: &crate::ctl_server::CallerEvidence,
+    roots: &[crate::media::PaneRoot],
+    panes: &[(u64, u64)],
+    kettle_pid: u32,
+) -> serde_json::Value {
+    use kettle_ctl::identity::UnverifiedReason;
+    let hint = caller
+        .hint()
+        .filter(|hint| hint.kettle_pid == kettle_pid)
+        .and_then(|hint| panes.iter().find(|(pane, _)| *pane == hint.pane))
+        .map(|(pane, window)| serde_json::json!({"pane": pane, "window": window}));
+    let (chain, reason) = match caller.chain() {
+        Some(Ok(chain)) => (Some(chain), None),
+        Some(Err(reason)) => (None, Some(reason)),
+        // Not checked: only requests that report their caller are.
+        None => (None, Some(UnverifiedReason::MissingClaim)),
+    };
+    let found = chain.and_then(|chain| crate::media::nearest_pane(chain, roots));
+    let reason = reason.or_else(|| found.is_none().then_some(UnverifiedReason::NoPane));
+    let peer = chain.and_then(|chain| chain.first()).map(|peer| {
+        serde_json::json!({
+            "pid": peer.pid(),
+            "start_token": peer.start().to_string(),
+        })
+    });
+    serde_json::json!({
+        "verified": found.is_some(),
+        "reason": reason.map(UnverifiedReason::as_str),
+        "pane": found.map(|(pane, _)| pane),
+        "window": found.map(|(_, window)| window),
+        "peer": peer,
+        "hint": hint,
+    })
+}
+
+/// The control-server launch flags.
+pub(super) fn ctl_overrides(startup: &crate::Options) -> kettle_ctl::CtlOverrides {
+    kettle_ctl::CtlOverrides {
+        server: startup.agent_server,
+        display: startup.agent_display,
+    }
+}
+
+/// Where the control server's start stands. It may start once the first pane
+/// exists, and tries at most once unless display is newly turned on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CtlStart {
+    NotReady,
+    Ready,
+    Attempted,
+}
+
+pub(super) fn ctl_method_is_pure_read(method: kettle_ctl::protocol::Method) -> bool {
+    matches!(
+        method,
+        kettle_ctl::protocol::Method::UiGeometry
+            | kettle_ctl::protocol::Method::AgentLaunch
+            | kettle_ctl::protocol::Method::CardPickup
+    )
+}
+
+/// An in-flight `run_command` awaiting its OSC-133
+/// completion. The control server wrote `cmd\r` to the pane; the matching
+/// `CommandFinished` generation resolves the request with the exit code,
+/// duration, and the output captured since `start_line`. A deadline guards the
+/// no-shell-integration case (the command runs but no `CommandEnd` ever fires).
+pub(super) struct PendingRun {
+    /// Connection that issued the run (for disconnect cleanup).
+    pub(super) conn_id: u64,
+    /// Request id, echoed in the completion response.
+    pub(super) req_id: u64,
+    /// Absolute line, counted from the first row ever written (evicted history
+    /// included), where the command's output begins, so the reply can slice
+    /// just this command's output out of the grid even after the ring wraps.
+    pub(super) start_line: u64,
+    /// Command-start generation observed before submitting input.
+    pub(super) command_generation: u64,
+    /// When the request gives up waiting for OSC-133 and replies `timed_out`.
+    pub(super) deadline: std::time::Instant,
+    /// Where the completion response is sent (the connection thread is blocked
+    /// reading this until the command finishes or the deadline fires).
+    pub(super) reply: crate::ctl_server::ReplyTx,
+}
+
+pub(super) fn take_pending_run(
+    runs: &mut std::collections::HashMap<u64, PendingRun>,
+    pane: u64,
+    event: &kettle_core::CommandFinished,
+) -> Option<PendingRun> {
+    if event.generation != runs.get(&pane)?.command_generation.wrapping_add(1) {
+        return None;
+    }
+    runs.remove(&pane)
+}
+
+/// The window holding `pane`: `ws` or one of `windows`.
+pub(super) fn window_with_pane<'a>(
+    ws: &'a mut WindowState,
+    windows: &'a mut std::collections::BTreeMap<u64, WindowState>,
+    pane: u64,
+) -> Option<&'a mut WindowState> {
+    if ws.mux.panes.contains_key(&pane) {
+        return Some(ws);
+    }
+    windows
+        .values_mut()
+        .find(|window| window.mux.panes.contains_key(&pane))
+}
+
+pub(super) fn ctl_mouse_button(params: &serde_json::Value) -> std::result::Result<u8, String> {
+    let button = params
+        .get("button")
+        .and_then(|v| v.as_str())
+        .unwrap_or("left")
+        .to_ascii_lowercase();
+    match button.as_str() {
+        "left" => Ok(0),
+        "middle" => Ok(1),
+        "right" => Ok(2),
+        // The report codes the physical buttons send, not xterm's button
+        // numbers: 8 and 9 would encode as a modified left or middle press.
+        "back" => Ok(MOUSE_BACK),
+        "forward" => Ok(MOUSE_FORWARD),
+        other => Err(format!(
+            "unknown button '{other}' (expected left, middle, right, back, or forward)"
+        )),
+    }
+}
+
+pub(super) fn ctl_input_error(result: PaneInputResult) -> Option<(&'static str, &'static str)> {
+    use kettle_ctl::protocol::error_codes as ec;
+    match result {
+        PaneInputResult::Queued => None,
+        PaneInputResult::ReadOnly => Some((
+            ec::READ_ONLY,
+            "pane is read-only (user toggled 'Read only')",
+        )),
+        PaneInputResult::Backpressured => Some((
+            ec::BUSY,
+            "pane input is backpressured; no bytes were sent (retry later)",
+        )),
+        PaneInputResult::Oversize => Some((
+            ec::BAD_PARAMS,
+            "input exceeds the per-message safety limit; no bytes were sent",
+        )),
+        PaneInputResult::PathNotTyped => Some((
+            ec::BAD_PARAMS,
+            "file path cannot be typed exactly; no bytes were sent",
+        )),
+        PaneInputResult::Failed => Some((
+            ec::INTERNAL,
+            "pane input transport failed; the pane is being closed",
+        )),
+    }
+}
