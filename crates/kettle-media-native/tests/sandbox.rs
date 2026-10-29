@@ -196,6 +196,47 @@ fn attempt(dir: &Path, held: &File) {
             Ok(())
         }
     });
+    // Resource limits only for the job itself, and no asynchronous I/O
+    // signals aimed at another process.
+    #[cfg(target_os = "linux")]
+    {
+        let limits = |pid: libc::pid_t| {
+            let mut old = std::mem::MaybeUninit::<libc::rlimit64>::uninit();
+            // SAFETY: a null new limit only reads; `old` is writable.
+            if unsafe {
+                libc::syscall(
+                    libc::SYS_prlimit64,
+                    pid,
+                    libc::RLIMIT_NOFILE,
+                    std::ptr::null::<libc::rlimit64>(),
+                    old.as_mut_ptr(),
+                )
+            } == -1
+            {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        };
+        report("prlimit_self", limits(0));
+        // SAFETY: getppid has no preconditions.
+        report("prlimit_parent", limits(unsafe { libc::getppid() }));
+        let fcntl = |command: libc::c_int, argument: libc::c_int| {
+            // SAFETY: `held_fd` is open for the probe's life; these commands
+            // take an integer argument.
+            if unsafe { libc::fcntl(held_fd, command, argument) } == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        };
+        // SAFETY: getppid has no preconditions.
+        report(
+            "fcntl_setown",
+            fcntl(libc::F_SETOWN, unsafe { libc::getppid() }),
+        );
+        report("fcntl_setsig", fcntl(libc::F_SETSIG, libc::SIGUSR1));
+    }
     let sibling = dir.join("sibling.bin");
     report(
         "thread_sibling",
@@ -447,6 +488,14 @@ fn every_refused_operation_works_without_the_sandbox() {
         "sysv_shm",
         "signal_parent",
         "thread_sibling",
+        #[cfg(target_os = "linux")]
+        "prlimit_self",
+        #[cfg(target_os = "linux")]
+        "prlimit_parent",
+        #[cfg(target_os = "linux")]
+        "fcntl_setown",
+        #[cfg(target_os = "linux")]
+        "fcntl_setsig",
     ] {
         assert_eq!(
             result.get(name).map(String::as_str),
@@ -530,6 +579,13 @@ fn holds_only_its_file(result: &BTreeMap<String, String>) {
     };
     for name in ["confine", "read_held", "reopen_held", "open_held_path"] {
         ok(name);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ok("prlimit_self");
+        for name in ["prlimit_parent", "fcntl_setown", "fcntl_setsig"] {
+            denied(name);
+        }
     }
     #[cfg(target_os = "macos")]
     {

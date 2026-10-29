@@ -575,6 +575,12 @@ fn filter(runs_programs: bool, me: u32, scoped: bool) -> Vec<sock_filter> {
         To::Label("pair"),
         To::Next,
     ));
+    ops.push(jeq(
+        libc::SYS_prlimit64 as u32,
+        To::Label("prlimit"),
+        To::Next,
+    ));
+    ops.push(jeq(libc::SYS_fcntl as u32, To::Label("fcntl"), To::Next));
     // Without Landlock's scoping, a signal stays inside the worker's
     // process group: any other process id, or a thread id, could be
     // Kettle's own. A decoder, which inherits this, cannot send a signal
@@ -669,6 +675,20 @@ fn filter(runs_programs: bool, me: u32, scoped: bool) -> Vec<sock_filter> {
         To::Label("allow"),
         To::Label("eperm"),
     ));
+    // Resource limits: only the caller's own, as getrlimit and setrlimit
+    // ask for them (pid 0). Another process's are not the job's to read
+    // or change.
+    ops.push(Op::Label("prlimit"));
+    ops.push(Op::Load(arg_low(0)));
+    ops.push(jeq(0, To::Label("allow"), To::Label("eperm")));
+    // No asynchronous I/O signals: they would be delivered to whatever
+    // process or thread the owner names, outside the worker's group.
+    ops.push(Op::Label("fcntl"));
+    ops.push(Op::Load(arg_low(1)));
+    for command in [libc::F_SETOWN, libc::F_SETOWN_EX, libc::F_SETSIG] {
+        ops.push(jeq(command as u32, To::Label("eperm"), To::Next));
+    }
+    ops.push(Op::Ret(ALLOW));
     ops.push(Op::Label("allow"));
     ops.push(Op::Ret(ALLOW));
     ops.push(Op::Label("enosys"));
