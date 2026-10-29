@@ -275,6 +275,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Reject audio that arrives a full second late in the A/V sync check.
 - Check a process's start time before `macos-compare` signals it, so a
   reused process ID is never signalled.
+- Answer OSC 52 clipboard reads in order with the writes before them.
+- Show a "Detecting shells…" row in the shell menu instead of waiting for
+  detection, then run a held New Tab With Shell action when it finishes.
+- Deliver focus reports that arrive while terminal input is backed up,
+  once and in order.
+- Release keys held in a terminal when its window loses focus.
+- Let the control API drag panes the same way the pointer does.
+- Remove only staging directories that an update recorded next to the macOS
+  app, never other directories whose names match the pattern.
 
 ## [5.6.0] — 2026-10-28
 
