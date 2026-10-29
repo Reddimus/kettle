@@ -8216,10 +8216,10 @@ impl Renderer {
                 };
                 let content = geometry.content;
                 let source = source.map(|(x, y, width, height)| kettle_core::ImageSourceRect {
-                    x,
-                    y,
-                    width,
-                    height,
+                    x: x as f32,
+                    y: y as f32,
+                    width: width as f32,
+                    height: height as f32,
                 });
                 lane_items.push(imgpipe::ImageItem::placement(
                     [rect.0, rect.1, rect.2, rect.3],

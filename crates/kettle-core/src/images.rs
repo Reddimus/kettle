@@ -11,12 +11,12 @@ pub use kettle_vt::{ImageData, ImageRefusal, PixelBuffer, Placed, PlacementParam
 
 /// Pixel-space sub-rectangle sampled by one image placement. The renderer
 /// validates it against the referenced image before producing UV coordinates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImageSourceRect {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 /// Normalized vertical range retained from a placement's source rectangle.
@@ -319,7 +319,7 @@ pub struct AnimEntry {
     pub imgs: Vec<ImageData>,
     pub gaps: Vec<i32>,
     pub state: AnimationState,
-    /// When the current run started (reset when run state changes).
+    /// When the current run or its selected frame started.
     pub started: Instant,
 }
 

@@ -2108,3 +2108,43 @@ fn history_pruning_cache_distinguishes_equal_origins_in_each_buffer() {
     assert!(images.lock().unwrap().is_empty());
     assert_eq!(pruner.last_key, Some((true, origin)));
 }
+
+#[test]
+fn selected_frame_playback_rebases_the_core_clock() {
+    for synchronized in [false, true] {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b_Ga=T,i=7,f=32,s=1,v=1;AQID/w==\x1b\\");
+        harness.feed(b"\x1b_Ga=f,i=7,f=32,s=1,v=1,z=200;CAkK/w==\x1b\\");
+        harness.feed(b"\x1b_Ga=f,i=7,f=32,s=1,v=1,z=300;BQYH/w==\x1b\\");
+        harness.feed(b"\x1b_Ga=a,i=7,r=1,z=100,c=2,s=3\x1b\\");
+        let old_start = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        harness.anims.lock().unwrap().get_mut(&7).unwrap().started = old_start;
+        if synchronized {
+            harness.feed(b"\x1b[?2026h");
+        }
+        harness.feed(b"\x1b_Ga=a,i=7,c=3\x1b\\");
+        if synchronized {
+            assert_eq!(harness.anims.lock().unwrap()[&7].started, old_start);
+            harness.feed(b"\x1b[?2026l");
+        }
+        let rebased = {
+            let animations = harness.anims.lock().unwrap();
+            let animation = &animations[&7];
+            assert!(
+                animation.started > old_start,
+                "selection changes must reset playback time"
+            );
+            assert_eq!(
+                kettle_vt::kitty::current_frame(&animation.gaps, &animation.state, 0),
+                2
+            );
+            animation.started
+        };
+        harness.feed(b"\x1b_Ga=a,i=7,r=2,z=400\x1b\\");
+        assert_eq!(
+            harness.anims.lock().unwrap()[&7].started,
+            rebased,
+            "gap-only updates preserve the clock"
+        );
+    }
+}

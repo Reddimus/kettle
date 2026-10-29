@@ -186,10 +186,10 @@ mod cache_lifetime_tests {
                     [0.0, 0.0, width, 1.0],
                     image.clone(),
                     Some(kettle_core::ImageSourceRect {
-                        x: 1,
-                        y: 0,
-                        width: 2,
-                        height: 1,
+                        x: 1.0,
+                        y: 0.0,
+                        width: 2.0,
+                        height: 1.0,
                     }),
                     None,
                     [0.0, 0.0, 2.0, 1.0],
@@ -573,11 +573,13 @@ impl ImageItem {
         };
         let width = self.image.width as f32;
         let height = self.image.height as f32;
+        let inset_x = source.width.min(1.0) / 2.0;
+        let inset_y = source.height.min(1.0) / 2.0;
         [
-            (source.x as f32 + 0.5) / width,
-            (source.y as f32 + 0.5) / height,
-            (source.x as f32 + source.width as f32 - 0.5) / width,
-            (source.y as f32 + source.height as f32 - 0.5) / height,
+            (source.x + inset_x) / width,
+            (source.y + inset_y) / height,
+            (source.x + source.width - inset_x) / width,
+            (source.y + source.height - inset_y) / height,
         ]
     }
 
@@ -758,18 +760,27 @@ fn source_uv(
         return None;
     }
     let (uv_origin, uv_size) = if let Some(source) = source_rect {
-        let x1 = source.x.checked_add(source.width)?;
-        let y1 = source.y.checked_add(source.height)?;
-        if source.width == 0 || source.height == 0 || x1 > image.width || y1 > image.height {
+        let x1 = source.x + source.width;
+        let y1 = source.y + source.height;
+        if ![source.x, source.y, source.width, source.height, x1, y1]
+            .iter()
+            .all(|n| n.is_finite())
+            || source.x < 0.0
+            || source.y < 0.0
+            || source.width <= 0.0
+            || source.height <= 0.0
+            || x1 > image.width as f32
+            || y1 > image.height as f32
+        {
             return None;
         }
 
         let image_w = image.width as f32;
         let image_h = image.height as f32;
-        let u0 = source.x as f32 / image_w;
-        let v0 = source.y as f32 / image_h;
-        let u1 = x1 as f32 / image_w;
-        let v1 = y1 as f32 / image_h;
+        let u0 = source.x / image_w;
+        let v0 = source.y / image_h;
+        let u1 = x1 / image_w;
+        let v1 = y1 / image_h;
         ([u0, v0], [u1 - u0, v1 - v0])
     } else {
         ([0.0, 0.0], [1.0, 1.0])
@@ -915,7 +926,7 @@ fn retained_upload_key(screen: [f32; 2], items: &[ImageItem]) -> u64 {
             value.to_bits().hash(&mut hash);
         }
         item.source_rect
-            .map(|r| (r.x, r.y, r.width, r.height))
+            .map(|r| [r.x, r.y, r.width, r.height].map(f32::to_bits))
             .hash(&mut hash);
         item.source_crop
             .map(|c| (c.top.to_bits(), c.bottom.to_bits()))
@@ -1579,6 +1590,66 @@ mod aba_guard_tests {
     }
 
     #[test]
+    fn fractional_source_rectangles_reach_texture_coordinates() {
+        let image = ImageData::new(1, 1, vec![1, 2, 3, 255]).unwrap();
+        for (x, y) in [(0.0, 0.0), (0.5, 0.0), (0.0, 0.5), (0.5, 0.5)] {
+            let source = ImageSourceRect {
+                x,
+                y,
+                width: 0.5,
+                height: 0.5,
+            };
+            assert_eq!(
+                super::source_uv(&image, Some(source), None),
+                Some(([x, y], [0.5, 0.5]))
+            );
+            let item = super::ImageItem::placement(
+                [0.0, 0.0, 8.0, 16.0],
+                image.clone(),
+                Some(source),
+                None,
+                [0.0, 0.0, 8.0, 16.0],
+            );
+            let instance = item.instance().expect("fractional tile");
+            assert_eq!(instance.uv_clamp, [x + 0.25, y + 0.25, x + 0.25, y + 0.25]);
+        }
+        for source in [
+            ImageSourceRect {
+                x: -0.5,
+                y: 0.0,
+                width: 0.5,
+                height: 0.5,
+            },
+            ImageSourceRect {
+                x: 0.75,
+                y: 0.0,
+                width: 0.5,
+                height: 0.5,
+            },
+            ImageSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.5,
+            },
+            ImageSourceRect {
+                x: f32::NAN,
+                y: 0.0,
+                width: 0.5,
+                height: 0.5,
+            },
+            ImageSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: f32::INFINITY,
+                height: 0.5,
+            },
+        ] {
+            assert!(super::source_uv(&image, Some(source), None).is_none());
+        }
+    }
+
+    #[test]
     fn source_rect_uses_pixel_edges_and_rejects_out_of_bounds() {
         let image = ImageData::new(4, 2, vec![0; 4 * 2 * 4]).expect("test image");
         assert_eq!(
@@ -1589,10 +1660,10 @@ mod aba_guard_tests {
             super::source_uv(
                 &image,
                 Some(ImageSourceRect {
-                    x: 2,
-                    y: 0,
-                    width: 2,
-                    height: 2,
+                    x: 2.0,
+                    y: 0.0,
+                    width: 2.0,
+                    height: 2.0,
                 }),
                 None,
             ),
@@ -1613,10 +1684,10 @@ mod aba_guard_tests {
             super::source_uv(
                 &image,
                 Some(ImageSourceRect {
-                    x: 2,
-                    y: 0,
-                    width: 2,
-                    height: 2,
+                    x: 2.0,
+                    y: 0.0,
+                    width: 2.0,
+                    height: 2.0,
                 }),
                 Some(ImageSourceCrop {
                     top: 0.25,
@@ -1640,10 +1711,10 @@ mod aba_guard_tests {
             super::source_uv(
                 &image,
                 Some(ImageSourceRect {
-                    x: 4,
-                    y: 0,
-                    width: 1,
-                    height: 1,
+                    x: 4.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 1.0,
                 }),
                 None,
             ),

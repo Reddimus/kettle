@@ -1382,10 +1382,10 @@ fn resolve_kitty_placement(
         || source_width != image.width
         || source_height != image.height)
         .then_some(ImageSourceRect {
-            x: source_x,
-            y: source_y,
-            width: source_width,
-            height: source_height,
+            x: source_x as f32,
+            y: source_y as f32,
+            width: source_width as f32,
+            height: source_height as f32,
         });
     Some(ResolvedKittyPlacement {
         source_rect,
@@ -3708,10 +3708,10 @@ mod local_output_tests {
         assert_eq!(
             tiles[0].source_rect,
             Some(ImageSourceRect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
             })
         );
     }
@@ -9389,7 +9389,12 @@ fn apply_animation_snapshot(
                 return;
             }
             let started = match animations.get(&id) {
-                Some(previous) if previous.state.running == state.running => previous.started,
+                Some(previous)
+                    if previous.state.running == state.running
+                        && (!state.running || previous.state.current == state.current) =>
+                {
+                    previous.started
+                }
                 _ => std::time::Instant::now(),
             };
             animations.insert(

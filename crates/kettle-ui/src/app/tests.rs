@@ -639,7 +639,6 @@ fn title_test_tab_mux(count: usize) -> (Mux, Vec<u64>) {
     (mux, panes)
 }
 
-#[cfg(unix)]
 fn wait_for_pane_screen(mux: &Mux, pane: u64, done: impl Fn(&str, usize) -> bool) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
@@ -15003,7 +15002,6 @@ fn item_to_click_maps_every_dispatchable_row_type() {
             &ContextMenuItem::ConfigItem {
                 label: "Clear".into(),
                 command: "clear".into(),
-                new_pane: false,
             },
             0
         ),
@@ -17471,7 +17469,7 @@ fn remote_reconnect_menu_uses_new_pane_action() {
 
 #[cfg(unix)]
 #[test]
-fn remote_reconnect_opens_local_shell_without_typing_into_source() {
+fn remote_reconnect_spawns_client_without_typing_into_source() {
     use super::{BroadcastScope, Config, Mux, PtyGeometry};
     let cfg = Config {
         shell: Some("/bin/sh".into()),
@@ -17486,16 +17484,74 @@ fn remote_reconnect_opens_local_shell_without_typing_into_source() {
     let generation = mux.panes[&source].input_generation();
     mux.panes.get_mut(&source).unwrap().read_only = true;
     mux.broadcast = BroadcastScope::All;
-    assert_eq!(
-        super::reconnect_remote_session(&mut mux, &cfg, geometry, waker, ":".into(),).unwrap(),
-        super::PaneInputResult::Queued
-    );
+    super::reconnect_remote_session(
+        &mut mux,
+        &cfg,
+        geometry,
+        waker,
+        kettle_remote::SessionCommand {
+            program: "/bin/cat".into(),
+            args: Vec::new(),
+        },
+    )
+    .unwrap();
     let target = mux.active_focus().unwrap();
     assert_ne!(target, source);
     assert_eq!(mux.panes.len(), 2);
-    assert_eq!(mux.panes[&target].argv, vec!["/bin/sh".to_string()]);
+    assert_eq!(mux.panes[&target].argv, vec!["/bin/cat".to_string()]);
     assert_eq!(mux.panes[&source].input_generation(), generation);
-    assert_eq!(mux.panes[&target].input_generation(), 1);
+    assert_eq!(mux.panes[&target].input_generation(), 0);
+    mux.kill_children();
+}
+
+#[test]
+fn remote_reconnect_argv_child() {
+    let args: Vec<_> = std::env::args().collect();
+    if !args.iter().any(|arg| arg == "kettle-reconnect-argv-probe") {
+        return;
+    }
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--skip", "a'\" b % ^ $ !"])
+    );
+    println!("RECONNECT_ARGV_PRESERVED");
+}
+
+#[test]
+fn remote_reconnect_passes_literal_arguments_to_client() {
+    use super::{Config, PtyGeometry};
+    let cfg = Config {
+        shell: Some("kettle-nonexistent-shell".into()),
+        ..Config::default()
+    };
+    let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
+    let mut mux = Mux::new();
+    let args = [
+        "--exact",
+        "app::tests::remote_reconnect_argv_child",
+        "--nocapture",
+        "--skip",
+        "kettle-reconnect-argv-probe",
+        "--skip",
+        "a'\" b % ^ $ !",
+    ]
+    .map(String::from)
+    .to_vec();
+    super::reconnect_remote_session(
+        &mut mux,
+        &cfg,
+        geometry,
+        Arc::new(|| {}),
+        kettle_remote::SessionCommand {
+            program: std::env::current_exe().unwrap().to_str().unwrap().into(),
+            args: args.clone(),
+        },
+    )
+    .unwrap();
+    let target = mux.active_focus().unwrap();
+    assert_eq!(&mux.panes[&target].argv[1..], args);
+    assert!(wait_for_pane_screen(&mux, target, |text, _| text
+        .contains("RECONNECT_ARGV_PRESERVED")));
     mux.kill_children();
 }
 

@@ -1046,7 +1046,8 @@ impl App {
                         ContextMenuItem::Item { label, .. } => *label,
                         ContextMenuItem::DynamicItem { label, .. } => label.as_str(),
                         ContextMenuItem::LuaItem { label, .. } => label.as_str(),
-                        ContextMenuItem::ConfigItem { label, .. } => label.as_str(),
+                        ContextMenuItem::ConfigItem { label, .. }
+                        | ContextMenuItem::ReconnectItem { label, .. } => label.as_str(),
                         ContextMenuItem::Submenu { label, .. } => label.as_str(),
                         ContextMenuItem::ProfileChoice { label, .. }
                         | ContextMenuItem::WindowChoice { label, .. } => label.as_str(),

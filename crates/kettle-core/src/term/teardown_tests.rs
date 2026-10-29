@@ -840,10 +840,10 @@ fn selected_animation_frame_reaches_virtual_and_relative_tiles() {
             assert_eq!(
                 terminal.placeholder_tiles()[0].source_rect,
                 Some(ImageSourceRect {
-                    x: 0,
-                    y: 0,
-                    width: 1,
-                    height: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 1.0,
                 })
             );
         }

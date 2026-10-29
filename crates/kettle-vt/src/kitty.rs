@@ -324,7 +324,7 @@ impl Default for AnimationState {
 /// only non-testable part.
 ///
 /// - Stopped (`s=1`): the explicitly selected `current` frame, clamped.
-/// - Running: time is mapped over the displayable frames. `loops == 0`
+/// - Running: elapsed zero is the selected frame's start in the timeline. `loops == 0`
 ///   (kitty `v=1`) loops forever; a finite count stops on the last
 ///   displayable frame after that many full passes. `loading` (`s=2`)
 ///   never loops — it holds on the last frame waiting for more frames.
@@ -363,24 +363,30 @@ pub fn playback_state(gaps: &[i32], st: &AnimationState, elapsed_ms: u128) -> (u
     let Some(last_shown) = last_shown else {
         return (clamp_current(), false);
     };
+    let offset: u128 = gaps[..clamp_current()]
+        .iter()
+        .filter(|&&gap| gap > 0)
+        .map(|&gap| gap as u128)
+        .sum();
+    let timeline_ms = elapsed_ms.saturating_add(offset);
     // Finite, non-loading loop count: freeze on the last shown frame once all
     // passes have elapsed.
-    if !st.loading && st.loops > 0 && elapsed_ms >= total * st.loops as u128 {
+    if !st.loading && st.loops > 0 && timeline_ms >= total * st.loops as u128 {
         return (last_shown, false);
     }
     // Loading mode never loops: hold the last shown frame at/after the end.
-    if st.loading && elapsed_ms >= total {
+    if st.loading && timeline_ms >= total {
         return (last_shown, false);
     }
     let advancing = shown_count > 1
         && if st.loading {
-            elapsed_ms < total - gaps[last_shown] as u128
+            timeline_ms < total - gaps[last_shown] as u128
         } else if st.loops > 0 {
-            elapsed_ms < total * st.loops as u128 - gaps[last_shown] as u128
+            timeline_ms < total * st.loops as u128 - gaps[last_shown] as u128
         } else {
             true
         };
-    let mut t = elapsed_ms % total;
+    let mut t = (elapsed_ms % total + offset) % total;
     for (idx, &g) in gaps.iter().enumerate() {
         if g <= 0 {
             continue;
@@ -2626,6 +2632,42 @@ mod tests {
             })
         ));
         assert!(k.image(3).is_none());
+    }
+
+    #[test]
+    fn selected_frame_playback_starts_at_its_gap() {
+        let mut kitty = KittyState::default();
+        kitty.feed(&format!("a=T,i=7,f=32,s=1,v=1;{PX}"));
+        kitty.feed(&format!("a=f,i=7,f=32,s=1,v=1,z=200;{PX}"));
+        kitty.feed(&format!("a=f,i=7,f=32,s=1,v=1,z=300;{PX}"));
+        kitty.feed("a=a,i=7,r=1,z=100,c=2,s=1");
+        kitty.feed("a=a,i=7,s=3");
+        let state = kitty.animation(7).unwrap();
+        let gaps = [100, 200, 300];
+        for (elapsed, expected) in [(0, 1), (199, 1), (200, 2), (499, 2), (500, 0), (600, 1)] {
+            assert_eq!(
+                current_frame(&gaps, state, elapsed),
+                expected,
+                "elapsed={elapsed}"
+            );
+        }
+        kitty.feed("a=a,i=7,c=3");
+        let state = kitty.animation(7).unwrap();
+        assert_eq!(current_frame(&gaps, state, 0), 2);
+        assert_eq!(current_frame(&gaps, state, 300), 0);
+        let finite = AnimationState {
+            loops: 1,
+            current: 2,
+            ..*state
+        };
+        assert_eq!(playback_state(&gaps, &finite, 200), (2, false));
+        assert_eq!(playback_state(&gaps, &finite, 500), (2, false));
+        let loading = AnimationState {
+            loading: true,
+            loops: 0,
+            ..finite
+        };
+        assert_eq!(playback_state(&gaps, &loading, 500), (2, false));
     }
 
     #[test]

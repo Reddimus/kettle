@@ -453,7 +453,6 @@ impl App {
             items.push(ContextMenuItem::ConfigItem {
                 label: mi.label.clone(),
                 command: mi.command.clone(),
-                new_pane: false,
             });
         }
     }
@@ -858,6 +857,7 @@ impl App {
                 | ContextMenuItem::DynamicItem { .. }
                 | ContextMenuItem::LuaItem { .. }
                 | ContextMenuItem::ConfigItem { .. }
+                | ContextMenuItem::ReconnectItem { .. }
                 | ContextMenuItem::Submenu { .. }
                 | ContextMenuItem::WindowChoice { .. }
                 | ContextMenuItem::ProfileChoice { .. }
@@ -1267,8 +1267,7 @@ impl App {
                 let geometry = self.prospective_split_geometry(ws, Dir::Horizontal, false);
                 let waker = self.waker();
                 match reconnect_remote_session(&mut ws.mux, &self.cfg, geometry, waker, command) {
-                    Ok(result) => {
-                        self.report_input_result(result);
+                    Ok(()) => {
                         self.hoover_groups(ws);
                         self.note_focus_change(ws, pre_focus);
                         if ws.window.is_some() {
@@ -1505,7 +1504,8 @@ impl App {
                         enabled: true,
                         hint: String::new(),
                     },
-                    ContextMenuItem::ConfigItem { label, .. } => ContextMenuRow {
+                    ContextMenuItem::ConfigItem { label, .. }
+                    | ContextMenuItem::ReconnectItem { label, .. } => ContextMenuRow {
                         label: label.clone(),
                         separator: false,
                         enabled: true,

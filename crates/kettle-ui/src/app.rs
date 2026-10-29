@@ -7522,7 +7522,7 @@ enum ContextMenuClick {
     /// `CMD\n` to the focused pane's PTY.
     ConfigCommand(String),
     /// Reopen a detected session in a fresh local pane.
-    ReconnectRemote(String),
+    ReconnectRemote(kettle_remote::SessionCommand),
     /// Profile picked from the right-click "Profile ▸" submenu.
     /// Dispatch sets `App::config_path` via the profile-path
     /// resolution helper and calls `reload_config`.
@@ -7592,8 +7592,10 @@ enum ContextMenuItem {
     ConfigItem {
         label: String,
         command: String,
-        /// Reconnect commands run in a fresh local pane.
-        new_pane: bool,
+    },
+    ReconnectItem {
+        label: String,
+        command: kettle_remote::SessionCommand,
     },
     /// A submenu row carries a nested item list; activation replaces the visible
     /// menu level.
@@ -8243,7 +8245,8 @@ fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> usize {
         ContextMenuItem::Item { label, .. } => (label, "", true),
         ContextMenuItem::DynamicItem { label, .. } => (label, "", true),
         ContextMenuItem::LuaItem { label, .. } => (label, "", false),
-        ContextMenuItem::ConfigItem { label, .. } => (label, "", false),
+        ContextMenuItem::ConfigItem { label, .. }
+        | ContextMenuItem::ReconnectItem { label, .. } => (label, "", false),
         ContextMenuItem::Submenu { label, .. } => (label, " ▸", false),
         ContextMenuItem::ProfileChoice { label, .. }
         | ContextMenuItem::WindowChoice { label, .. } => (label, "", false),
@@ -8281,7 +8284,8 @@ fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<
             ContextMenuItem::Item { label, .. } => *label,
             ContextMenuItem::DynamicItem { label, .. } => label.as_str(),
             ContextMenuItem::LuaItem { label, .. } => label.as_str(),
-            ContextMenuItem::ConfigItem { label, .. } => label.as_str(),
+            ContextMenuItem::ConfigItem { label, .. }
+            | ContextMenuItem::ReconnectItem { label, .. } => label.as_str(),
             ContextMenuItem::Submenu { label, .. } => label.as_str(),
             ContextMenuItem::ProfileChoice { label, .. }
             | ContextMenuItem::WindowChoice { label, .. } => label.as_str(),
@@ -8357,6 +8361,7 @@ fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
         } => label.to_ascii_lowercase().starts_with(&needle),
         ContextMenuItem::LuaItem { label, .. }
         | ContextMenuItem::ConfigItem { label, .. }
+        | ContextMenuItem::ReconnectItem { label, .. }
         | ContextMenuItem::Submenu { label, .. }
         | ContextMenuItem::WindowChoice { label, .. }
         | ContextMenuItem::ProfileChoice { label, .. }
@@ -9208,6 +9213,7 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             | ContextMenuItem::DynamicItem { enabled: true, .. }
             | ContextMenuItem::LuaItem { .. }
             | ContextMenuItem::ConfigItem { .. }
+            | ContextMenuItem::ReconnectItem { .. }
             // Submenu rows are dispatchable for keyboard
             // nav (↑↓ lands on them); click / Enter drills in.
             | ContextMenuItem::Submenu { .. }
@@ -9248,13 +9254,12 @@ fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick>
             ..
         } => Some(ContextMenuClick::Action(action.clone())),
         ContextMenuItem::LuaItem { lua_idx, .. } => Some(ContextMenuClick::LuaMenuItem(*lua_idx)),
-        ContextMenuItem::ConfigItem {
-            command, new_pane, ..
-        } => Some(if *new_pane {
-            ContextMenuClick::ReconnectRemote(command.clone())
-        } else {
-            ContextMenuClick::ConfigCommand(command.clone())
-        }),
+        ContextMenuItem::ConfigItem { command, .. } => {
+            Some(ContextMenuClick::ConfigCommand(command.clone()))
+        }
+        ContextMenuItem::ReconnectItem { command, .. } => {
+            Some(ContextMenuClick::ReconnectRemote(command.clone()))
+        }
         ContextMenuItem::Submenu { .. } => Some(ContextMenuClick::DrillIntoSubmenu(idx)),
         ContextMenuItem::WindowChoice { window, panes, .. } => {
             Some(ContextMenuClick::MoveTabToWindow {
@@ -10177,10 +10182,9 @@ fn remote_reconnect_item(
     ctx: &kettle_remote::RemoteContext,
     tr: &kettle_i18n::Translator,
 ) -> Option<ContextMenuItem> {
-    Some(ContextMenuItem::ConfigItem {
+    Some(ContextMenuItem::ReconnectItem {
         label: remote_reconnect_label(ctx, tr),
         command: kettle_remote::clone_session_command(ctx)?,
-        new_pane: true,
     })
 }
 
@@ -10189,22 +10193,13 @@ fn reconnect_remote_session(
     cfg: &Config,
     geometry: PtyGeometry,
     waker: kettle_core::Waker,
-    mut command: String,
-) -> Result<PaneInputResult> {
-    mux.split_with_geometry(
-        Dir::Horizontal,
-        false,
-        cfg,
-        geometry,
-        waker,
-        cfg.shell.iter().cloned().collect(),
-        None,
-    )?;
-    let pane = mux
-        .focused()
-        .ok_or_else(|| anyhow::anyhow!("remote reconnect created no pane"))?;
-    command.push('\n');
-    Ok(pane.feed_input(command.as_bytes()))
+    command: kettle_remote::SessionCommand,
+) -> Result<()> {
+    let argv = std::iter::once(command.program)
+        .chain(command.args)
+        .collect();
+    mux.split_with_geometry(Dir::Horizontal, false, cfg, geometry, waker, argv, None)?;
+    Ok(())
 }
 
 /// Which broadcast scope the group chord turns on, from `broadcast-default`.

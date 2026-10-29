@@ -58,7 +58,7 @@ pub enum RemoteContext {
 /// plausible-looking neighbour.
 ///
 /// Values are validated at parse time (same conservative-charset rule as the
-/// host/user fields) and single-quoted at build time. An endpoint-selecting
+/// host/user fields) and passed literally at build time. An endpoint-selecting
 /// option that cannot be reproduced sets [`unreproducible`](Self::unreproducible)
 /// instead, which suppresses the Reconnect entry entirely.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1898,25 +1898,19 @@ fn argv0_basename(prog: &str) -> String {
     lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
 }
 
-/// SECURITY: does `s` contain a control character (newline, carriage return,
-/// NUL, tab, ESC, …)? A control char in an argv-derived host/user/container
-/// token is the highest-severity case: a newline would split
-/// [`clone_session_command`]'s output into extra shell lines that the caller
-/// auto-executes. Such a token must NEVER become a [`RemoteContext`] (rejected at
-/// parse time) and, defensively, must never be emitted (rejected at build time).
+/// Does `s` contain a control character (newline, carriage return,
+/// NUL, tab, ESC, ...)? Reject these in detected fields and again when building
+/// a reconnect command, even though the command never passes through a shell.
 fn has_control_char(s: &str) -> bool {
     s.chars().any(|c| c.is_control())
 }
 
 /// SECURITY: parse-time validation of a field extracted from a descendant
 /// process's argv (ssh host, user, or option value; container name or option
-/// value) that [`clone_session_command`] later interpolates into an
-/// auto-executed shell command. Rejects (returns `false`) any token that is
+/// value) that [`clone_session_command`] later passes to a client. Rejects (returns `false`) any token that is
 /// empty, longer than [`MAX_FIELD_LEN`], or holds a character (control chars
 /// included) outside a conservative per-field allowlist, so a malformed/hostile
-/// token never becomes a [`RemoteContext`] in the first place (layer 1 of the
-/// defense; the build-time single-quoting in [`clone_session_command`] is
-/// layer 2).
+/// token never becomes a [`RemoteContext`] in the first place.
 ///
 /// `extra` is the field-specific set of punctuation permitted on top of the
 /// common `[A-Za-z0-9]`. Real SSH hosts (DNS names, IPv4/IPv6, `%`-zone,
@@ -1931,16 +1925,7 @@ fn field_is_safe(s: &str, extra: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
 }
 
-/// Longest argv-derived value any field will carry into the auto-executed
-/// Reconnect line. Nothing legitimate comes close — the longest realistic case
-/// is a Windows extended-length path, and even those stay well under this — but
-/// the values come from a descendant process's argv, which the user did not
-/// necessarily type. Without a cap, one field can make the emitted line longer
-/// than the tty's canonical input buffer (4096 bytes on Linux), and the shell
-/// then sees a truncated line: harmless in practice, because truncation lands
-/// inside a `'…'` and leaves an unterminated quote rather than a different
-/// command, but a bounded value is the property to have on a line kettle types
-/// into a PTY for the user.
+/// Longest argv-derived field retained for reconnecting a detected session.
 const MAX_FIELD_LEN: usize = 512;
 
 /// SSH host: DNS labels (`a-z0-9.-`), IPv6 literals (`:`, optional `[ ]`
@@ -1952,18 +1937,8 @@ const SSH_USER_EXTRA: &str = ".-_$\\@";
 /// `,` that separates a multi-hop chain.
 const SSH_JUMP_EXTRA: &str = ".-_:%[]@,";
 /// A filesystem path given as an option value (`ssh -i`/`-F`, `docker
-/// --config`, `kubectl --kubeconfig`, `lxc-attach --lxcpath`). Every character
-/// here is literal inside the POSIX single quotes the value is emitted in
-/// (including `'` itself, which [`shell_single_quote`] closes/escapes/reopens
-/// with the canonical `'\''` idiom), so the set is as wide as real paths need:
-/// `C:\Program Files (x86)\…` is the ordinary shape of a Windows install path,
-/// and a set without `(`/`)` would drop the Reconnect entry for it.
-///
-/// Still excluded — and the reason this is an allowlist at all — is everything
-/// that would matter if the quoting layer were ever wrong: `$`, backtick, `"`,
-/// `;`, `|`, `&&`-style control, redirection, glob, and any control character.
-/// A path needing one of those is not reproduced (see
-/// [`SshOptions::unreproducible`]).
+/// --config`, `kubectl --kubeconfig`, `lxc-attach --lxcpath`). Keep the
+/// existing conservative path allowlist; reconnect passes values literally.
 const FILE_PATH_EXTRA: &str = "./\\-_~: +@()[]{},=#!%'";
 /// Container name/id: Docker/Podman/kubectl/lxc allow `[A-Za-z0-9][A-Za-z0-9_.-]`
 /// plus `/` (kubectl `type/name`, registry-qualified refs) and `:` (tags).
@@ -2061,26 +2036,6 @@ fn parse_short_bundle<'a>(
         consumed_next: false,
         booleans: bundle,
     }
-}
-
-/// SECURITY: POSIX single-quote a dynamic field so it is inert when
-/// interpolated into a shell command — every character between the
-/// quotes is literal, and an embedded single-quote is closed/escaped/reopened
-/// via the canonical `'\''` idiom. Belt-and-suspenders with the parse-time
-/// [`field_is_safe`] check: even a value that somehow slipped through cannot
-/// break out of the quotes.
-fn shell_single_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
 }
 
 /// SSH-session detector. Takes a process's argv (as the process-tree walk
@@ -2265,7 +2220,7 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     // SECURITY: reject any host/user that carries a control
     // char or escapes the conservative per-field charset, so a token that could
     // break out of the auto-executed Reconnect command never becomes a
-    // RemoteContext. (clone_session_command additionally single-quotes — layer 2.)
+    // RemoteContext. The reconnect client receives these as literal arguments.
     if !field_is_safe(&host, SSH_HOST_EXTRA) {
         return None;
     }
@@ -2548,8 +2503,7 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
     }
     // SECURITY: reject a container token that carries a control char or
     // escapes the conservative charset, so it can never become a RemoteContext
-    // whose Reconnect command the caller auto-execs. clone_session_command
-    // also single-quotes it as a second layer.
+    // whose reconnect command the caller spawns directly.
     let container = parse.container?;
     if !field_is_safe(&container, CONTAINER_EXTRA) {
         return None;
@@ -2889,13 +2843,20 @@ fn apply_short_option(
     if short.consumed_next { 2 } else { 1 }
 }
 
+/// A reconnect client and its literal arguments, ready for direct spawning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionCommand {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
 /// Build the command behind the Reconnect menu item.
 ///
 /// Endpoint-selecting options are retained because dropping one can target a
 /// different service. Unreproducible sessions return `None`. Every dynamic
-/// field is control-free and shell-quoted because the caller writes the result
-/// to a PTY with a trailing newline.
-pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
+/// field is control-free. The caller spawns the program directly with these
+/// arguments; no shell parses them.
+pub fn clone_session_command(ctx: &RemoteContext) -> Option<SessionCommand> {
     match ctx {
         RemoteContext::Ssh {
             host,
@@ -2916,7 +2877,10 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
             {
                 return None;
             }
-            let mut cmd = String::from("ssh");
+            let mut cmd = SessionCommand {
+                program: "ssh".into(),
+                args: Vec::new(),
+            };
             // Fixed order (config, identity, jump, port) so the emitted line is
             // deterministic regardless of how the user happened to type it.
             for (flag, value) in [
@@ -2926,18 +2890,18 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
                 ("-p", &options.port),
             ] {
                 if let Some(value) = value {
-                    push_quoted_option(&mut cmd, flag, value)?;
+                    push_session_option(&mut cmd, flag, value)?;
                 }
             }
-            cmd.push(' ');
-            if let Some(u) = user {
+            let destination = if let Some(u) = user {
                 if has_control_char(u) {
                     return None;
                 }
-                cmd.push_str(&shell_single_quote(u));
-                cmd.push('@');
-            }
-            cmd.push_str(&shell_single_quote(host));
+                format!("{u}@{host}")
+            } else {
+                host.clone()
+            };
+            cmd.args.push(destination);
             Some(cmd)
         }
         RemoteContext::Container {
@@ -2948,12 +2912,16 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
             if options.unreproducible || has_control_char(container) {
                 return None;
             }
-            let mut cmd = String::from(match runtime {
+            let program = match runtime {
                 ContainerRuntime::Docker => "docker",
                 ContainerRuntime::Podman => "podman",
                 ContainerRuntime::Kubectl => "kubectl",
                 ContainerRuntime::Lxc => "lxc-attach",
-            });
+            };
+            let mut cmd = SessionCommand {
+                program: program.into(),
+                args: Vec::new(),
+            };
             // Each runtime spells the same concept differently, so re-emit the
             // flag this runtime understands rather than the one that was typed.
             let globals: &[(&str, &Option<String>)] = match runtime {
@@ -2976,22 +2944,23 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
             };
             for (flag, value) in globals {
                 if let Some(value) = value {
-                    push_quoted_option(&mut cmd, flag, value)?;
+                    push_session_option(&mut cmd, flag, value)?;
                 }
             }
-            let c = shell_single_quote(container);
             match runtime {
                 ContainerRuntime::Docker | ContainerRuntime::Podman => {
-                    cmd.push_str(&format!(" exec -it {c} /bin/sh"));
+                    cmd.args
+                        .extend(["exec", "-it", container, "/bin/sh"].map(String::from));
                 }
                 ContainerRuntime::Kubectl => {
-                    cmd.push_str(&format!(" exec -it {c}"));
+                    cmd.args
+                        .extend(["exec", "-it", container].map(String::from));
                     if let Some(value) = &options.pod_container {
-                        push_quoted_option(&mut cmd, "-c", value)?;
+                        push_session_option(&mut cmd, "-c", value)?;
                     }
-                    cmd.push_str(" -- /bin/sh");
+                    cmd.args.extend(["--", "/bin/sh"].map(String::from));
                 }
-                ContainerRuntime::Lxc => cmd.push_str(&format!(" -n {c}")),
+                ContainerRuntime::Lxc => cmd.args.extend(["-n", container].map(String::from)),
             }
             Some(cmd)
         }
@@ -3018,19 +2987,11 @@ fn connection_path_is_absolute_on(path: &str, windows: bool) -> bool {
             && matches!(bytes[2], b'/' | b'\\'))
 }
 
-/// Append ` FLAG 'VALUE'` to a command line being built, or return `None` when
-/// the value carries a control char. The caller propagates that with `?` and
-/// drops the whole Reconnect entry, so a newline can never split the line into
-/// extra auto-executed commands. The host/user/container fields in
-/// [`clone_session_command`] follow the same contract.
-fn push_quoted_option(cmd: &mut String, flag: &str, value: &str) -> Option<()> {
+fn push_session_option(cmd: &mut SessionCommand, flag: &str, value: &str) -> Option<()> {
     if has_control_char(value) {
         return None;
     }
-    cmd.push(' ');
-    cmd.push_str(flag);
-    cmd.push(' ');
-    cmd.push_str(&shell_single_quote(value));
+    cmd.args.extend([flag, value].map(String::from));
     Some(())
 }
 
@@ -3174,7 +3135,9 @@ mod tests {
         assert_eq!(ctx, container_ctx(ContainerRuntime::Docker, "web"));
         assert_eq!(
             clone_session_command(&ctx),
-            Some("docker exec -it 'web' /bin/sh".to_string())
+            Some(session_command(&[
+                "docker", "exec", "-it", "web", "/bin/sh"
+            ]))
         );
         assert!(parse_proc_argv(b"").argv.is_empty());
         assert_eq!(parse_proc_argv(b"\0").argv, [""]);
@@ -3710,47 +3673,46 @@ mod tests {
     /// dispatched command.
     #[test]
     fn clone_session_command_for_all_shapes() {
-        // Dynamic fields are POSIX single-quoted, and the return is `Option`
-        // (None for an unsafe/control-char field).
+        // Unsafe/control-character fields return None.
         // SSH without user.
         assert_eq!(
             clone_session_command(&ssh_ctx("box", None)),
-            Some("ssh 'box'".to_string())
+            Some(session_command(&["ssh", "box"]))
         );
         // SSH with user.
         assert_eq!(
             clone_session_command(&ssh_ctx("box", Some("me"))),
-            Some("ssh 'me'@'box'".to_string())
+            Some(session_command(&["ssh", "me@box"]))
         );
         // Docker.
         assert_eq!(
             clone_session_command(&container_ctx(ContainerRuntime::Docker, "ubuntu")),
-            Some("docker exec -it 'ubuntu' /bin/sh".to_string())
+            Some(session_command(&[
+                "docker", "exec", "-it", "ubuntu", "/bin/sh"
+            ]))
         );
         // Podman.
         assert_eq!(
             clone_session_command(&container_ctx(ContainerRuntime::Podman, "fedora")),
-            Some("podman exec -it 'fedora' /bin/sh".to_string())
+            Some(session_command(&[
+                "podman", "exec", "-it", "fedora", "/bin/sh"
+            ]))
         );
         // Kubectl (note the `--` separator).
         assert_eq!(
             clone_session_command(&container_ctx(ContainerRuntime::Kubectl, "my-pod")),
-            Some("kubectl exec -it 'my-pod' -- /bin/sh".to_string())
+            Some(session_command(&[
+                "kubectl", "exec", "-it", "my-pod", "--", "/bin/sh"
+            ]))
         );
         // LXC.
         assert_eq!(
             clone_session_command(&container_ctx(ContainerRuntime::Lxc, "alpine")),
-            Some("lxc-attach -n 'alpine'".to_string())
+            Some(session_command(&["lxc-attach", "-n", "alpine"]))
         );
     }
 
-    /// SECURITY: the host/user/container fields are argv-derived and the caller
-    /// AUTO-EXECUTES `clone_session_command`'s output by writing it to the PTY
-    /// with a trailing newline. A hostile token must either (a) never become a
-    /// RemoteContext (parse-time rejection in detect_ssh/detect_container) or
-    /// (b) be rendered inert by single-quoting, and a control char (esp.
-    /// newline) must yield None, never a multi-line command. This test
-    /// exercises BOTH layers.
+    /// Detection remains conservative; constructed values are passed literally.
     #[test]
     fn clone_session_command_neutralizes_shell_injection() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -3773,31 +3735,29 @@ mod tests {
             None
         );
 
-        // --- Layer 2: build-time single-quoting + control-char None --------
-        // Even if a metachar value were constructed directly (bypassing the
-        // detectors), single-quoting makes it inert — the `;`/`$()` are literal.
-        let cmd = clone_session_command(&ssh_ctx("h; rm -rf ~", None))
-            .expect("no control char → Some, just quoted");
-        // The metacharacters live entirely inside one quoted argument — there is
-        // no UNQUOTED `;`/`$`/`(` that the shell could act on. (The exact-string
-        // compare below pins this fully; the helper double-checks the property.)
-        assert_eq!(cmd, "ssh 'h; rm -rf ~'");
+        // Build-time validation also rejects control characters.
+        let cmd =
+            clone_session_command(&ssh_ctx("h; rm -rf ~", None)).expect("no control char → Some");
+        assert_eq!(cmd, session_command(&["ssh", "h; rm -rf ~"]));
         assert!(
-            !has_unquoted_metachar(&cmd),
-            "metachars must stay quoted: {cmd}"
+            !cmd.args.iter().any(|arg| has_control_char(arg)),
+            "arguments must be control-free: {cmd:?}"
         );
 
         let cmd = clone_session_command(&container_ctx(ContainerRuntime::Docker, "$(reboot)"))
             .expect("no control char → Some");
-        assert_eq!(cmd, "docker exec -it '$(reboot)' /bin/sh");
+        assert_eq!(
+            cmd,
+            session_command(&["docker", "exec", "-it", "$(reboot)", "/bin/sh"])
+        );
         assert!(
-            !has_unquoted_metachar(&cmd),
-            "container token metachars must stay quoted: {cmd}"
+            !cmd.args.iter().any(|arg| has_control_char(arg)),
+            "container token arguments must be control-free: {cmd:?}"
         );
 
-        // An embedded single-quote is escaped via the `'\''` idiom (no break-out).
+        // An embedded single quote remains literal.
         let cmd = clone_session_command(&ssh_ctx("a'b", None)).unwrap();
-        assert_eq!(cmd, "ssh 'a'\\''b'");
+        assert_eq!(cmd, session_command(&["ssh", "a'b"]));
 
         // A control char (newline) at build time → None (never a multi-line cmd).
         assert_eq!(clone_session_command(&ssh_ctx("h\nrm -rf ~", None)), None);
@@ -3812,26 +3772,57 @@ mod tests {
             container_ctx(ContainerRuntime::Podman, "ok_container"),
         ] {
             if let Some(cmd) = clone_session_command(&ctx) {
-                assert!(!cmd.contains('\n'), "command must be one line: {cmd}");
+                assert!(cmd.args.iter().all(|arg| !arg.contains('\n')));
             }
         }
     }
 
-    /// Test helper: is there a shell metacharacter OUTSIDE single quotes in
-    /// `cmd`? Used to assert the dynamic fields are fully quoted. Tracks a
-    /// simple in/out-of-`'...'` state, since kettle never nests quotes. A
-    /// literal quote becomes the `'\''` idiom, whose `\'` sits outside quotes
-    /// but is a backslash-escape, not a flagged metachar.
-    fn has_unquoted_metachar(cmd: &str) -> bool {
-        let mut in_quote = false;
-        for c in cmd.chars() {
-            match c {
-                '\'' => in_quote = !in_quote,
-                ';' | '$' | '`' | '&' | '|' | '<' | '>' | '(' | ')' if !in_quote => return true,
-                _ => {}
-            }
+    #[test]
+    fn reconnect_arguments_preserve_shell_metacharacters() {
+        let value = "a'\" b % ^ $ !";
+        let command = clone_session_command(&RemoteContext::Ssh {
+            host: value.into(),
+            user: Some(value.into()),
+            options: SshOptions {
+                jump: Some(value.into()),
+                ..SshOptions::default()
+            },
+        })
+        .unwrap();
+        assert_eq!(command.program, "ssh");
+        assert_eq!(command.args, ["-J", value, &format!("{value}@{value}")]);
+        let command = clone_session_command(&RemoteContext::Container {
+            runtime: ContainerRuntime::Kubectl,
+            container: value.into(),
+            options: ContainerOptions {
+                config: Some(value.into()),
+                pod_container: Some(value.into()),
+                ..ContainerOptions::default()
+            },
+        })
+        .unwrap();
+        assert_eq!(command.program, "kubectl");
+        assert_eq!(
+            command.args,
+            [
+                "--kubeconfig",
+                value,
+                "exec",
+                "-it",
+                value,
+                "-c",
+                value,
+                "--",
+                "/bin/sh"
+            ]
+        );
+    }
+
+    fn session_command(argv: &[&str]) -> SessionCommand {
+        SessionCommand {
+            program: argv[0].into(),
+            args: argv[1..].iter().map(|s| s.to_string()).collect(),
         }
-        false
     }
 
     /// `ssh -l bob h` must reproduce the login user end to end. Both the remote
@@ -3845,7 +3836,7 @@ mod tests {
         assert_eq!(format_remote_title(&ctx), "ssh bob@h");
         assert_eq!(
             clone_session_command(&ctx),
-            Some("ssh 'bob'@'h'".to_string())
+            Some(session_command(&["ssh", "bob@h"]))
         );
 
         // The earlier -l wins over the later target's user@ component.
@@ -3939,8 +3930,8 @@ mod tests {
         );
         assert_eq!(format_remote_title(&context), "ssh alice@server");
         assert_eq!(
-            clone_session_command(&context).as_deref(),
-            Some("ssh -p '2222' 'alice'@'server'")
+            clone_session_command(&context),
+            Some(session_command(&["ssh", "-p", "2222", "alice@server"]))
         );
     }
 
@@ -4382,9 +4373,16 @@ mod tests {
         );
         assert_eq!(
             clone_session_command(&ctx),
-            Some(format!(
-                "ssh -i '{key}' -J 'bastion.example' -p '2222' 'box'"
-            ))
+            Some(session_command(&[
+                "ssh",
+                "-i",
+                &key,
+                "-J",
+                "bastion.example",
+                "-p",
+                "2222",
+                "box"
+            ]))
         );
 
         // The joined spellings of the same options carry exactly as far.
@@ -4412,9 +4410,16 @@ mod tests {
         );
         assert_eq!(
             clone_session_command(&joined),
-            Some(format!(
-                "ssh -i '{key}' -J 'bastion.example' -p '2222' 'root'@'box'"
-            ))
+            Some(session_command(&[
+                "ssh",
+                "-i",
+                &key,
+                "-J",
+                "bastion.example",
+                "-p",
+                "2222",
+                "root@box"
+            ]))
         );
 
         // `-F` picks the config that resolves the alias, so the alias alone
@@ -4423,7 +4428,7 @@ mod tests {
         let aliased = detect_ssh(&argv(&["ssh", "-F", &conf, "build"])).unwrap();
         assert_eq!(
             clone_session_command(&aliased),
-            Some(format!("ssh -F '{conf}' 'build'"))
+            Some(session_command(&["ssh", "-F", &conf, "build"]))
         );
     }
 
@@ -4454,24 +4459,24 @@ mod tests {
 
     #[test]
     fn ssh_options_after_the_destination_keep_the_endpoint_and_user_precedence() {
-        let cases: &[(&[&str], &str)] = &[
-            (&["ssh", "box", "-p", "2222"], "ssh -p '2222' 'box'"),
-            (&["ssh", "box", "-l", "bob"], "ssh 'bob'@'box'"),
-            (&["ssh", "alice@box", "-l", "bob"], "ssh 'alice'@'box'"),
-            (&["ssh", "-l", "alice", "bob@box"], "ssh 'alice'@'box'"),
+        let cases: &[(&[&str], &[&str])] = &[
+            (&["ssh", "box", "-p", "2222"], &["ssh", "-p", "2222", "box"]),
+            (&["ssh", "box", "-l", "bob"], &["ssh", "bob@box"]),
+            (&["ssh", "alice@box", "-l", "bob"], &["ssh", "alice@box"]),
+            (&["ssh", "-l", "alice", "bob@box"], &["ssh", "alice@box"]),
             (
                 &["ssh", "box", "-p2222", "echo", "-Pproduction"],
-                "ssh -p '2222' 'box'",
+                &["ssh", "-p", "2222", "box"],
             ),
-            (&["ssh", "box", "--", "-Pproduction"], "ssh 'box'"),
-            (&["ssh", "--", "box", "-Pproduction"], "ssh 'box'"),
+            (&["ssh", "box", "--", "-Pproduction"], &["ssh", "box"]),
+            (&["ssh", "--", "box", "-Pproduction"], &["ssh", "box"]),
         ];
         for (args, expected) in cases {
             let argv = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
             let context = detect_ssh(&argv).expect("SSH destination");
             assert_eq!(
-                clone_session_command(&context).as_deref(),
-                Some(*expected),
+                clone_session_command(&context),
+                Some(session_command(expected)),
                 "{args:?}"
             );
         }
@@ -4521,24 +4526,30 @@ mod tests {
         for (reproducible, expected) in [
             (
                 &["ssh", "-o", "ServerAliveInterval=30", "box"][..],
-                "ssh 'box'",
+                &["ssh", "box"][..],
             ),
             (
                 &["ssh", "-o", "StrictHostKeyChecking=no", "box"],
-                "ssh 'box'",
+                &["ssh", "box"][..],
             ),
-            (&["ssh", "-p", "2222", "box"], "ssh -p '2222' 'box'"),
+            (
+                &["ssh", "-p", "2222", "box"],
+                &["ssh", "-p", "2222", "box"][..],
+            ),
             (
                 &["ssh", "-J", "bastion.example", "box"],
-                "ssh -J 'bastion.example' 'box'",
+                &["ssh", "-J", "bastion.example", "box"][..],
             ),
-            (&["ssh", "-L", "8080:localhost:80", "box"], "ssh 'box'"),
+            (
+                &["ssh", "-L", "8080:localhost:80", "box"],
+                &["ssh", "box"][..],
+            ),
         ] {
             let ctx = detect_ssh(&argv(reproducible))
                 .unwrap_or_else(|| panic!("{reproducible:?} is still an ssh session"));
             assert_eq!(
                 clone_session_command(&ctx),
-                Some(expected.to_string()),
+                Some(session_command(expected)),
                 "{reproducible:?} names one endpoint this crate can rebuild"
             );
         }
@@ -4546,7 +4557,7 @@ mod tests {
         let ctx = detect_ssh(&argv(&["ssh", "-i", &key, "box"])).unwrap();
         assert_eq!(
             clone_session_command(&ctx),
-            Some(format!("ssh -i '{key}' 'box'")),
+            Some(session_command(&["ssh", "-i", &key, "box"])),
             "an absolute identity names one endpoint this crate can rebuild"
         );
     }
@@ -4595,17 +4606,13 @@ mod tests {
             let ctx = detect_ssh(&argv(&["ssh", "-o", kept, "box"])).unwrap();
             assert_eq!(
                 clone_session_command(&ctx),
-                Some("ssh 'box'".to_string()),
+                Some(session_command(&["ssh", "box"])),
                 "`-o {kept}` leaves the endpoint where it was"
             );
         }
     }
 
-    /// A Windows install path is `C:\Program Files (x86)\…` and a POSIX home
-    /// can hold an apostrophe. Both are ordinary paths, and both are inert in
-    /// the POSIX single quotes the value is emitted in (`'` via the `'\''`
-    /// idiom), so rejecting them at parse time would drop a working Reconnect
-    /// entry for no gain.
+    /// Windows paths and apostrophes retain their literal argument values.
     #[test]
     fn ordinary_windows_and_posix_paths_keep_the_reconnect_entry() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -4621,11 +4628,16 @@ mod tests {
                 .expect("an ordinary Windows path keeps the reconnect entry");
             assert_eq!(
                 cmd,
-                r"ssh -i 'C:\Program Files (x86)\OpenSSH\id_ed25519' 'box'"
+                session_command(&[
+                    "ssh",
+                    "-i",
+                    "C:\\Program Files (x86)\\OpenSSH\\id_ed25519",
+                    "box"
+                ])
             );
             assert!(
-                !has_unquoted_metachar(&cmd),
-                "the path's parentheses must stay inside the quotes: {cmd}"
+                !cmd.args.iter().any(|arg| has_control_char(arg)),
+                "the path must remain control-free: {cmd:?}"
             );
         } else {
             assert_eq!(
@@ -4648,18 +4660,24 @@ mod tests {
         .expect("a Windows kubeconfig path is still a kubectl session");
         assert_eq!(
             clone_session_command(&kubeconfig),
-            Some(
-                r"kubectl --kubeconfig 'C:\Program Files (x86)\kube\config' exec -it 'api-0' -- /bin/sh"
-                    .to_string()
-            )
+            Some(session_command(&[
+                "kubectl",
+                "--kubeconfig",
+                "C:\\Program Files (x86)\\kube\\config",
+                "exec",
+                "-it",
+                "api-0",
+                "--",
+                "/bin/sh"
+            ]))
         );
 
-        // An apostrophe is reproduced with the close/escape/reopen idiom.
+        // An apostrophe is preserved literally.
         let key = host_path("/home/o'brien/.ssh/id");
         let apostrophe = detect_ssh(&argv(&["ssh", "-i", &key, "box"])).unwrap();
         assert_eq!(
             clone_session_command(&apostrophe),
-            Some(format!("ssh -i '{}' 'box'", key.replace('\'', r"'\''")))
+            Some(session_command(&["ssh", "-i", &key, "box"]))
         );
 
         // A path that genuinely needs a shell metacharacter is still dropped.
@@ -4677,12 +4695,8 @@ mod tests {
         }
     }
 
-    /// The Reconnect line is typed into a live PTY, and its values come from a
-    /// descendant process's argv rather than from anything the user typed
-    /// here. So a value is bounded. And `-i`, the one endpoint option OpenSSH
-    /// accepts more than once (trying each key in order), is not reproduced by
-    /// keeping the last of several. The key that authenticated may not be the
-    /// key re-emitted, which is a different account on the same host.
+    /// Values remain bounded. Distinct repeated identities cannot be reproduced
+    /// by retaining only one: the key that authenticated might be another one.
     #[test]
     fn oversized_and_repeated_option_values_suppress_the_reconnect() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -4708,7 +4722,7 @@ mod tests {
         let same_key = detect_ssh(&argv(&["ssh", "-i", &key, "-i", &key, "box"])).unwrap();
         assert_eq!(
             clone_session_command(&same_key),
-            Some(format!("ssh -i '{key}' 'box'"))
+            Some(session_command(&["ssh", "-i", &key, "box"]))
         );
     }
 
@@ -4744,7 +4758,15 @@ mod tests {
         );
         assert_eq!(
             clone_session_command(&docker),
-            Some("docker --context 'remote' exec -it 'web' /bin/sh".to_string())
+            Some(session_command(&[
+                "docker",
+                "--context",
+                "remote",
+                "exec",
+                "-it",
+                "web",
+                "/bin/sh"
+            ]))
         );
         // The `--flag=value` spelling of the same option.
         assert_eq!(
@@ -4770,7 +4792,15 @@ mod tests {
         .unwrap();
         assert_eq!(
             clone_session_command(&remote_daemon),
-            Some("docker --host 'tcp://build.example:2375' exec -it 'web' /bin/sh".to_string())
+            Some(session_command(&[
+                "docker",
+                "--host",
+                "tcp://build.example:2375",
+                "exec",
+                "-it",
+                "web",
+                "/bin/sh"
+            ]))
         );
 
         // Podman names the same concept `--connection`, so that is what comes
@@ -4797,7 +4827,15 @@ mod tests {
         );
         assert_eq!(
             clone_session_command(&podman),
-            Some("podman --connection 'prod' exec -it 'api' /bin/sh".to_string())
+            Some(session_command(&[
+                "podman",
+                "--connection",
+                "prod",
+                "exec",
+                "-it",
+                "api",
+                "/bin/sh"
+            ]))
         );
 
         // kubectl: the namespace picks the pod, and `-c` picks which of the
@@ -4820,7 +4858,18 @@ mod tests {
         );
         assert_eq!(
             clone_session_command(&kubectl),
-            Some("kubectl --namespace 'prod' exec -it 'api-0' -c 'sidecar' -- /bin/sh".to_string())
+            Some(session_command(&[
+                "kubectl",
+                "--namespace",
+                "prod",
+                "exec",
+                "-it",
+                "api-0",
+                "-c",
+                "sidecar",
+                "--",
+                "/bin/sh"
+            ]))
         );
 
         // A kubeconfig defines the clusters every other selector resolves in.
@@ -4836,10 +4885,16 @@ mod tests {
         .unwrap();
         assert_eq!(
             clone_session_command(&kubeconfig),
-            Some(
-                "kubectl --kubeconfig '/home/me/.kube/staging' exec -it 'api-0' -- /bin/sh"
-                    .to_string()
-            )
+            Some(session_command(&[
+                "kubectl",
+                "--kubeconfig",
+                "/home/me/.kube/staging",
+                "exec",
+                "-it",
+                "api-0",
+                "--",
+                "/bin/sh"
+            ]))
         );
     }
 
@@ -4933,7 +4988,13 @@ mod tests {
         );
         assert_eq!(
             clone_session_command(&rooted),
-            Some("lxc-attach --lxcpath '/srv/lxc' -n 'web'".to_string())
+            Some(session_command(&[
+                "lxc-attach",
+                "--lxcpath",
+                "/srv/lxc",
+                "-n",
+                "web"
+            ]))
         );
     }
 
@@ -5007,11 +5068,14 @@ mod tests {
         for runtime in ["docker", "podman", "kubectl"] {
             let argv = [runtime, "exec", "web", "sh"].map(String::from);
             let command = clone_session_command(&detect_container(&argv).unwrap()).unwrap();
-            let script = format!(
-                "{runtime}() {{ for arg do last=$arg; done; printf '%s' \"$last\"; }}; {command}"
-            );
+            assert_eq!(command.program, runtime);
             let output = std::process::Command::new("/bin/sh")
-                .args(["-c", &script])
+                .args([
+                    "-c",
+                    "for arg do last=$arg; done; printf '%s' \"$last\"",
+                    runtime,
+                ])
+                .args(&command.args)
                 .env("SHELL", "/host-only/zsh")
                 .output()
                 .unwrap();
@@ -5198,22 +5262,22 @@ mod tests {
         for (reproducible, expected) in [
             (
                 &["podman", "exec", "-it", "web", "sh"][..],
-                "podman exec -it 'web' /bin/sh",
+                &["podman", "exec", "-it", "web", "/bin/sh"][..],
             ),
             (
                 &["docker", "exec", "--user", "root", "web", "sh"],
-                "docker exec -it 'web' /bin/sh",
+                &["docker", "exec", "-it", "web", "/bin/sh"][..],
             ),
             (
                 &["kubectl", "exec", "-it", "api-0", "--", "sh"],
-                "kubectl exec -it 'api-0' -- /bin/sh",
+                &["kubectl", "exec", "-it", "api-0", "--", "/bin/sh"][..],
             ),
         ] {
             let ctx = detect_container(&argv(reproducible))
                 .unwrap_or_else(|| panic!("{reproducible:?} is still a container session"));
             assert_eq!(
                 clone_session_command(&ctx),
-                Some(expected.to_string()),
+                Some(session_command(expected)),
                 "{reproducible:?} names one endpoint this crate can rebuild"
             );
         }
@@ -5478,21 +5542,18 @@ mod tests {
                         panic!("{runtime:?} {table} `{name}` captures a value but emits nothing")
                     });
                     assert!(
-                        cmd.contains(PROBE),
+                        cmd.args.iter().any(|arg| arg.contains(PROBE)),
                         "{runtime:?} {table} `{name}` lands in a slot its reconnect \
-                         command never emits: {cmd}"
+                         command never emits: {cmd:?}"
                     );
                 }
             }
         }
     }
 
-    /// The option values reach the same auto-executed line as the host and
-    /// container names, so they get the same two layers: single-quoted on the
-    /// way out, and a control character anywhere in them means no command at
-    /// all rather than one a newline could split.
+    /// Option values remain literal and control characters suppress reconnect.
     #[test]
-    fn reconnect_option_values_are_quoted_and_control_chars_rejected() {
+    fn reconnect_option_values_are_literal_and_control_chars_rejected() {
         let quoted = clone_session_command(&RemoteContext::Ssh {
             host: "box".into(),
             user: None,
@@ -5501,14 +5562,14 @@ mod tests {
                 ..SshOptions::default()
             },
         })
-        .expect("no control char → Some, just quoted");
+        .expect("no control char → Some");
         assert_eq!(
             quoted,
-            format!("ssh -i '{}' 'box'", host_path("/keys/a b; rm -rf ~"))
+            session_command(&["ssh", "-i", &host_path("/keys/a b; rm -rf ~"), "box"])
         );
         assert!(
-            !has_unquoted_metachar(&quoted),
-            "option-value metachars must stay quoted: {quoted}"
+            !quoted.args.iter().any(|arg| has_control_char(arg)),
+            "option-value arguments must be control-free: {quoted:?}"
         );
 
         assert_eq!(
