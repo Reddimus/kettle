@@ -1896,7 +1896,7 @@ class Runner:
                     # Confirm a native query before any probe calibration.
                     if not cursor_mode and not observer_off and (not self.wait_for(timeline, 2) or not wait_for_text(timeline, "\n", 2)):
                         observer_reason = "typing observer readiness missing"
-                except (OSError, ValueError, KeyError, TypeError) as exc:
+                except (OSError, ValueError, KeyError, TypeError):
                     observer_reason = "typing launch context unavailable or invalid"
             if cursor_mode and observer_reason:
                 return linked_result({"error": "cursor launch window identity unavailable"})
@@ -1996,7 +1996,7 @@ class Runner:
                         raise ValueError("cursor exit log exceeds bound")
                     row.update(cursor.parse_exits(raw.decode("utf-8"), launch_id, info.get("window_id"),
                         probe, payload_records, options["warmup"], options["keys"], percentile))
-                except (OSError, ValueError, TypeError, KeyError) as exc:
+                except (OSError, ValueError, TypeError, KeyError):
                     row.update(error="cursor exit evidence invalid", cursor_exit_valid=False)
             else:
                 row.update(cursor.parse_exits("", launch_id, info.get("window_id"), probe, payload_records,
@@ -2004,7 +2004,7 @@ class Runner:
         if not floor_mode and not cursor_mode:
             try:
                 samples = [] if observer_off else hc.read_jsonl(timeline, 12000, 32 * 1024 * 1024)
-            except (OSError, ValueError, TypeError) as exc:
+            except (OSError, ValueError, TypeError):
                 samples, observer_reason = [], "typing timeline unavailable or invalid"
             if observer_off:
                 observer_reason = "observer off (pilot arm)"
@@ -2888,7 +2888,7 @@ def run_evidence_postprocessing(args) -> int:
         for path in args.trace_input or []:
             text = config_file_bytes(Path(path), 16 * 1024 * 1024, follow=True)[0].decode("utf-8")
             reports.append({"kind": "renderer-trace", "evidence": renderer_trace_evidence(text)})
-    except (OSError, ValueError, RuntimeError) as error:
+    except (OSError, ValueError, RuntimeError):
         # Raw exceptions can contain owner-local paths or fragments of input.
         print("diagnostic input refused: invalid or unreadable evidence", file=sys.stderr)
         return 1
@@ -3710,7 +3710,6 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
     if results.get("meta", {}).get("kind") == "observer-pilot":
         raise ValueError("observer pilot (diagnostic); use --observer-control")
     analysis: Dict[str, dict] = {}
-    kettle = names[0]
     unranked = set(results.get("unranked", []))
     for workload, rows in results["workloads"].items():
         if workload in ("latency", "latency-cursor"):

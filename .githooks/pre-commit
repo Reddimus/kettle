@@ -57,7 +57,7 @@ start_sec=$(date +%s)
 
 # If any shell scripts are touched, run shellcheck against those shell scripts
 # only. The old directory-only filter also passed scripts/*.py and *.ps1 to
-# shellcheck, so an unrelated Python/PowerShell edit failed before the real
+# the linter, so an unrelated Python/PowerShell edit failed before the real
 # gate started. Exclude deleted paths from direct linters, and use an array so
 # a legal path containing spaces remains one argument.
 shell_changes=()

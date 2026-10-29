@@ -93,7 +93,6 @@ class Statistics(unittest.TestCase):
 
 class LaunchFailure(unittest.TestCase):
     def test_a_failed_launch_reports_an_error_not_the_previous_round(self) -> None:
-        import subprocess
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -4674,7 +4673,6 @@ class S3Evidence(unittest.TestCase):
             collect(n=changed)
 
     def test_s3_child_full_interval_and_unknown_signal_fail_strict_policy(self):
-        import copy
         row, native, child = self.inputs()
         for field, value in (("end_ns", 2_000_000_099), ("end_ns", 4_000_000_000), ("start_ns", 10), ("sigwinch", 1), ("pixel_width", 959)):
             changed = {**child, field: value}
@@ -6636,7 +6634,7 @@ class CursorLatency(unittest.TestCase):
 
     def test_payload_mode_bytes_independently(self):
         self.test_native_cursor_handshake_on_owned_socket()
-        import hashlib,re
+        import hashlib
         # Independent bytes for each mode, including all six hidden flips.
         def frame(on):
             return b''.join(f'\x1b[{row};53H\x1b[{7 if on else 27}m'.encode()+b' '*16 for row in range(17,21))+b'\x1b[0m'
@@ -6819,7 +6817,7 @@ class CursorLatency(unittest.TestCase):
                         process.wait(timeout=3);process.stderr.close()
 
     def test_cursor_success_links_exact_retained_bytes(self):
-        import tempfile,contextlib,hashlib,copy
+        import tempfile,contextlib,hashlib
         from unittest.mock import Mock,patch
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);keep=root/'retained.json'
@@ -7132,8 +7130,7 @@ class PublicationFreeze(unittest.TestCase):
         with self.assertRaises(ValueError):facts.verify_estimates(raw,bad)
 
     def test_current_intervals_are_the_only_publication_statistics(self):
-        import importlib.util
-        h=standing._publication_host()
+        standing._publication_host()
         for folder in self.ab:
             session=standing.load_session(folder)
             analysis=standing.analyze(session['results'],session['names'],True)
@@ -8305,7 +8302,6 @@ class ObserverPilot(unittest.TestCase):
                         self.assertEqual(metric['equivalent'],clean)
 
     def test_analysis_straddles_every_bound_and_failed_arm(self):
-        import copy
         for kind, fields in standing.publication.PILOT_BOUNDS.items():
             for field, bounds in fields.items():
                 for direction in (-1,1):
@@ -8399,7 +8395,6 @@ class GhosttyUserConfig(unittest.TestCase):
         self.assertNotIn('Application Support',_json.dumps(closure.public))
 
     def test_nonempty_and_symlink_refuse_fixed_public_reason(self):
-        import contextlib,io
         for name in ('config','config.ghostty'):
             for defect in ('nonempty','symlink','directory','fifo'):
                 path=self.user/name
@@ -8435,7 +8430,6 @@ class GhosttyUserConfig(unittest.TestCase):
         self.assertNotIn('ghostty_user_config',closure.local)
 
     def test_mid_campaign_refusal_outputs_no_private_data(self):
-        from unittest.mock import Mock
         closure=self.capture()
         raw=ObserverPilot().fixture(names=['kettle','ghostty'])
         raw['meta']['complete']=False

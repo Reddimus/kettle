@@ -10956,9 +10956,7 @@ def live_helper_selftest() -> None:
             # Use a real controlling terminal. The parent must reliably make the
             # payload group foreground before the child restores SIGTTOU and
             # execs, or a child racing tcsetpgrp can stop forever.
-            import fcntl
             import select
-            import termios
 
             pty_launcher = (
                 "import fcntl,os,sys,termios\n"
@@ -13519,7 +13517,6 @@ def lazyvcs_screen_evidence(
     sidebar_lines = ["".join(row[:divider_col]) for row in grid]
     editor_lines = ["".join(row[divider_col + 1 :]) for row in grid]
     sidebar_text = "\n".join(sidebar_lines)
-    editor_text = "\n".join(editor_lines)
     for token in (repo_name, "Changes (1)"):
         if token not in sidebar_text:
             missing.append(f"sidebar:{token}")
