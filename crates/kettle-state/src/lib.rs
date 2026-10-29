@@ -1197,7 +1197,17 @@ mod tests {
             "a writer lock must override an unobservable creator PID"
         );
         drop(file);
-        reap_stale_staged_files(&destination, &guard);
+        // A child another test thread forks while `file` is open shares its
+        // open file description, and so its lock, until it execs. The reaper
+        // rightly skips a locked file then, so give such a child time to exec.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            reap_stale_staged_files(&destination, &guard);
+            if !candidate.exists() || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(
             !candidate.exists(),
             "an abandoned staging file is still reclaimed"
