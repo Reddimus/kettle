@@ -236,7 +236,19 @@ class PackageManifestTests(unittest.TestCase):
             MODULE.generate(root, LINUX_TARGET, VERSION)
 
             archive = temporary / "kettle.tar.gz"
-            MODULE.pack_archive(archive, root, LINUX_TARGET, VERSION)
+
+            def cli(operation: str, directory: Path) -> None:
+                subprocess.run(
+                    [
+                        sys.executable, str(SCRIPT), operation,
+                        "--archive", str(archive), "--root", str(directory),
+                        "--target", LINUX_TARGET, "--version", VERSION,
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+
+            cli("pack", root)
             with tarfile.open(archive) as packed:
                 members = packed.getmembers()
                 self.assertEqual(len(members), 128)
@@ -245,7 +257,7 @@ class PackageManifestTests(unittest.TestCase):
                 )
                 self.assertEqual(sum(member.isfile() for member in members), 127)
             output = temporary / "output"
-            MODULE.extract_archive(archive, output, LINUX_TARGET, VERSION)
+            cli("extract", output)
             MODULE.verify(output, LINUX_TARGET, VERSION)
             for index in range(124):
                 self.assertEqual(

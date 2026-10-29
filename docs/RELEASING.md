@@ -25,7 +25,7 @@ use the existing transaction for both binaries and the installation record.
 
 Linux tarballs omit nested directory headers. This preserves
 all nested license files while staying within existing updaters' 128-entry limit.
-Each package is extracted and verified before upload, as well as by the finalizer.
+Each Linux tarball is extracted and verified before upload and by the finalizer.
 
 ```mermaid
 flowchart TD
