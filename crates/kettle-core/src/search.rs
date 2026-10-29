@@ -302,6 +302,7 @@ pub fn bounded_line_search_left<T>(
 #[derive(Clone, Debug)]
 pub struct CompiledSearch {
     regex: MetaRegex,
+    scan_token: Option<SearchScanToken>,
     /// A reverse scan of a logical line that yielded, resumed by the next
     /// call with the same bounds and text.
     reverse_progress: Option<ReverseProgress>,
@@ -330,6 +331,19 @@ struct ReverseProgress {
 }
 
 impl CompiledSearch {
+    /// Bind resumable work to the caller's current scan generation.
+    ///
+    /// Call before scanning when retaining a compiled query across output or layout changes.
+    /// Changing the token discards both directions' saved offsets, even if the current logical
+    /// line is unchanged. Reusing the same token preserves exact work-budget continuations.
+    pub fn set_scan_token(&mut self, token: SearchScanToken) {
+        if self.scan_token != Some(token) {
+            self.forward_progress = None;
+            self.reverse_progress = None;
+            self.scan_token = Some(token);
+        }
+    }
+
     /// Compile an interactive regex. An empty query is valid but has no search program.
     pub fn compile(
         pattern: &str,
@@ -389,6 +403,7 @@ impl CompiledSearch {
         };
         Ok(Some(Self {
             regex,
+            scan_token: None,
             reverse_progress: None,
             forward_progress: None,
             regex_budget: MAX_SEARCH_OPERATION_REGEX_BYTES,
@@ -1444,6 +1459,7 @@ mod tests {
                 let mut found = Vec::new();
                 let mut yields = 0;
                 loop {
+                    search.set_scan_token(SearchScanToken::capture(&term, 1, 1));
                     let batch = search.find_in_range(&term, bounds, SearchDirection::Forward, 512);
                     assert!(!batch.accuracy_limited);
                     found.extend(batch.matches);
@@ -1486,6 +1502,7 @@ mod tests {
             let mut bounds = SearchBounds::new(high, low);
             let mut yields = 0;
             loop {
+                search.set_scan_token(SearchScanToken::capture(&term, 1, 1));
                 let limit = if yields == 0 { 1 } else { 512 };
                 let batch = search.find_in_range(&term, bounds, SearchDirection::Reverse, limit);
                 assert!(!batch.accuracy_limited);
@@ -1511,6 +1528,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn forward_scan_token_change_restarts_after_unrelated_output() {
+        let mut term = empty_term(512, 2);
+        write_ascii(&mut term, 0, 0, &"a".repeat(512));
+        write_ascii(&mut term, 1, 0, "before");
+        let mut search = CompiledSearch::compile(r"(?:aa)*z|a", CaseSensitivity::Always)
+            .unwrap()
+            .unwrap();
+        search.regex_budget = 64 * 1024;
+        let bounds = SearchBounds::new(SearchPoint::new(0, 0), SearchPoint::new(0, 511));
+        search.set_scan_token(SearchScanToken::capture(&term, 1, 1));
+        let highlights = search.find_in_range(&term, bounds, SearchDirection::Forward, 512);
+        assert_eq!(highlights.continuation, Some(bounds.start));
+        assert!(!highlights.matches.is_empty());
+        assert!(highlights.matches.len() < 512);
+
+        // The UI clears highlights and focus on any output generation change,
+        // even when the logical line and the nearby scan's bounds are unchanged.
+        write_ascii(&mut term, 1, 0, "after ");
+        search.set_scan_token(SearchScanToken::capture(&term, 1, 2));
+        let nearby = search.find_in_range(&term, bounds, SearchDirection::Forward, 1);
+        assert_eq!(
+            nearby.matches,
+            [SearchSpan::new(bounds.start, bounds.start)]
+        );
     }
 
     #[test]

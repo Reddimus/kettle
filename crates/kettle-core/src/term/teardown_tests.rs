@@ -1965,6 +1965,39 @@ fn fallback_observes_exit_while_output_remains_readable() {
 }
 
 #[cfg(unix)]
+#[test]
+fn fallback_drains_output_after_another_owner_reaps_the_child() {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::net::UnixStream;
+    let (mut reader, mut writer) = UnixStream::pair().unwrap();
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 7"])
+        .spawn()
+        .unwrap();
+    let mut watcher = UnixPtyWatcher::new(child.id(), reader.as_raw_fd());
+    // Startup diagnostics and UI exit checks can collect status before the pump wakes.
+    assert_eq!(child.wait().unwrap().code(), Some(7));
+    writer.write_all(b"buffered tail").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    assert_eq!(
+        watcher
+            .wait_fallback(reader.as_raw_fd(), Some(deadline))
+            .unwrap(),
+        Some(UnixStartupWake::OutputAndChildExit)
+    );
+    let mut tail = [0; 13];
+    reader.read_exact(&mut tail).unwrap();
+    assert_eq!(&tail, b"buffered tail");
+    assert_eq!(
+        watcher
+            .wait_fallback(reader.as_raw_fd(), Some(deadline))
+            .unwrap(),
+        Some(UnixStartupWake::ChildExit),
+        "a retained slave must still get a bounded drain after the tail"
+    );
+}
+
+#[cfg(unix)]
 struct WatcherTestChild(std::process::Child);
 
 #[cfg(unix)]

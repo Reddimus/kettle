@@ -102,6 +102,11 @@ impl App {
         };
         let current_token =
             kettle_core::SearchScanToken::capture(&term, ws.search.revision, output_generation);
+        ws.search
+            .compiled
+            .as_mut()
+            .expect("compiled search checked")
+            .set_scan_token(current_token);
 
         // Reflow invalidates grid coordinates and restarts from the viewport. Plain PTY output is
         // different: retain a chunked job and advance its token so a process that prints every
@@ -1408,6 +1413,11 @@ impl App {
             ws.search.revision,
             pane.term.output_generation(),
         );
+        ws.search
+            .compiled
+            .as_mut()
+            .expect("compiled search checked")
+            .set_scan_token(token);
         ws.search.invalidate_stale_navigation(token);
         let top_line = term.topmost_line().0;
         let bottom_line = term.bottommost_line().0;

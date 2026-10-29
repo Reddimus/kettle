@@ -954,7 +954,15 @@ impl UnixPtyWatcher {
             }
             let output =
                 result > 0 && poll_fd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0;
-            let child_exit = unix_child_exit_code_unreaped(self.pid)?.is_some();
+            let child_exit = match unix_child_exit_code_unreaped(self.pid) {
+                Ok(status) => status.is_some(),
+                // This watcher owns a direct child's PID, but the Terminal's
+                // status/diagnostic callers can reap it first. That is still
+                // an exit observation: drain readable bytes and bound any
+                // remaining slave holder just as for an unreaped exit.
+                Err(error) if error.raw_os_error() == Some(libc::ECHILD) => true,
+                Err(error) => return Err(error),
+            };
             if output && child_exit {
                 return Ok(Some(UnixStartupWake::OutputAndChildExit));
             }

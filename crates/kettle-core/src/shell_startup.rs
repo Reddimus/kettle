@@ -143,7 +143,7 @@ fn keeps_kettle_out(text: &[u8]) -> bool {
                 .collect();
             folded.windows(b"rcs".len()).any(|window| window == b"rcs")
                 || line
-                    .split(|byte| byte.is_ascii_whitespace() || b";|&()'\"".contains(byte))
+                    .split(|byte| byte.is_ascii_whitespace() || b";|&()'\"<>".contains(byte))
                     .any(|word| {
                         word.strip_prefix(b"-").is_some_and(|options| {
                             options.iter().all(u8::is_ascii_alphabetic) && options.contains(&b'f')
@@ -495,6 +495,32 @@ mod tests {
                 zshenv_keeping_kettle_out(std::slice::from_ref(&rcs)),
                 Some(rcs),
                 "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn short_no_rcs_option_next_to_redirections_withholds_zsh_startup_additions() {
+        let dir = private_tempdir("kettle-shell-startup");
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        std::fs::create_dir_all(dir.path().join("etc")).unwrap();
+        let program = dir.path().join("bin/zsh");
+        let system = dir.path().join("etc/zshenv");
+        let startup = ShellStartup {
+            zsh: Some(dir.path().join("kettle")),
+            fish: None,
+        };
+        for command in [
+            "set -f>/dev/null",
+            "set -f</dev/null",
+            "set -xf>>/dev/null",
+            "set -f<>/dev/null",
+        ] {
+            std::fs::write(&system, format!("{command}\n")).unwrap();
+            assert_eq!(
+                additions(&program, Some(OsStr::new("/original")), &startup),
+                Additions::default(),
+                "{command} must not borrow ZDOTDIR"
             );
         }
     }
