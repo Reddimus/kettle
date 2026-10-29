@@ -892,6 +892,24 @@ fn require_live_bundle_identity(
     Ok(())
 }
 
+/// Refuse when `parent` no longer names the directory opened as `held`.
+///
+/// The exchange is relative to `held`, while the version checks read
+/// `parent`'s path. If the folder was moved and another app restored at that
+/// path during the download, the update would be installed into the moved
+/// folder and reported as applied.
+fn require_parent_identity(parent: &Path, held: &File) -> Result<(), UpdateError> {
+    let current = std::fs::metadata(parent)?;
+    let held = held.metadata()?;
+    if current.dev() != held.dev() || current.ino() != held.ino() {
+        return Err(UpdateError::UnmanagedInstall(format!(
+            "{} was replaced while the update was downloading",
+            parent.display()
+        )));
+    }
+    Ok(())
+}
+
 fn lock_live_bundle(parent: &File, name: &std::ffi::OsStr) -> Result<File, UpdateError> {
     let directory = open_directory_at(parent, &c_name(name)?)?;
     if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
@@ -991,7 +1009,8 @@ fn install_bundle_update_with_download(
         return Err(error);
     }
 
-    if let Err(error) = require_live_bundle_identity(&bundle_lock, &parent_directory, live_name)
+    if let Err(error) = require_parent_identity(parent, &parent_directory)
+        .and_then(|()| require_live_bundle_identity(&bundle_lock, &parent_directory, live_name))
         .and_then(|()| require_live_bundle_upgrade(install, &update.version, verifier))
     {
         staging.discard();
@@ -1652,6 +1671,60 @@ mod tests {
         let _restore = StateHome(std::env::var_os("XDG_STATE_HOME"));
         unsafe { std::env::set_var("XDG_STATE_HOME", state) };
         body()
+    }
+
+    /// The folder holding the app is moved aside during the download and
+    /// another official app restored at its path: the update must not be
+    /// exchanged into the moved folder.
+    #[test]
+    fn an_update_refuses_a_parent_replaced_during_the_download() {
+        let _serial = serialized();
+        let temp = kettle_test_support::private_tempdir("kettle-macos-parent-moved-");
+        let apps = temp.path().join("Apps");
+        std::fs::create_dir(&apps).unwrap();
+        let seal = StubSeal::official();
+        let executable = seed_bundle(&apps, "kettle.app");
+        let install = locate_bundle_install(&executable, &seal).unwrap();
+        let plist = format!(
+            "<plist version=\"1.0\"><dict>\
+             <key>CFBundleShortVersionString</key><string>{}</string>\
+             </dict></plist>",
+            env!("CARGO_PKG_VERSION")
+        );
+        std::fs::write(&install.marker_path, &plist).unwrap();
+        let archive = official_zip();
+        let update = AvailableUpdate {
+            version: semver::Version::new(99, 0, 0),
+            tag: "v99.0.0".into(),
+            release_url: "https://example.invalid/release".into(),
+            download_url: None,
+            asset: Some(crate::ManifestAsset {
+                target: current_target().unwrap().into(),
+                name: "kettle-macos-universal.zip".into(),
+                size: archive.len() as u64,
+                sha256: hex::encode(Sha256::digest(&archive)),
+            }),
+            signed_manifest: None,
+        };
+        let moved = temp.path().join("Apps-moved");
+        let result = with_state_home(&temp.path().join("state"), || {
+            install_bundle_update_with_download(&update, &install, &seal, || {
+                std::fs::rename(&apps, &moved)?;
+                std::fs::create_dir(&apps)?;
+                seed_bundle(&apps, "kettle.app");
+                std::fs::write(&install.marker_path, &plist)?;
+                Ok(archive)
+            })
+        });
+        assert!(
+            matches!(result, Err(UpdateError::UnmanagedInstall(_))),
+            "an update into a moved folder must be refused: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(moved.join("kettle.app/Contents/Info.plist")).unwrap(),
+            plist,
+            "the moved folder's app must not have been replaced"
+        );
     }
 
     #[test]
