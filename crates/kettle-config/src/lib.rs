@@ -893,6 +893,19 @@ pub fn sunrise_sunset_utc_secs(
     lat_deg: f64,
     long_deg: f64,
 ) -> Option<(u32, u32)> {
+    match solar_events(day_of_year, lat_deg, long_deg) {
+        SolarEvents::RiseSet(sunrise, sunset) => Some((sunrise, sunset)),
+        SolarEvents::PolarDay | SolarEvents::PolarNight => None,
+    }
+}
+
+enum SolarEvents {
+    RiseSet(u32, u32),
+    PolarDay,
+    PolarNight,
+}
+
+fn solar_events(day_of_year: u16, lat_deg: f64, long_deg: f64) -> SolarEvents {
     let n = day_of_year as f64;
     // Solar declination (simplified — Spencer's formula).
     // Range: ±23.45° over the year.
@@ -914,9 +927,11 @@ pub fn sunrise_sunset_utc_secs(
     let zenith = (90.833_f64).to_radians();
     let cos_h = (zenith.cos() - lat_rad.sin() * decl.sin()) / (lat_rad.cos() * decl.cos());
     if !(-1.0..=1.0).contains(&cos_h) {
-        // Polar day (sun never sets) or polar night (sun never
-        // rises). Caller's policy decides what to do.
-        return None;
+        return if cos_h > 1.0 {
+            SolarEvents::PolarNight
+        } else {
+            SolarEvents::PolarDay
+        };
     }
     let h_deg = cos_h.acos().to_degrees();
     // Solar noon in UTC minutes: 720 - 4*longitude - eot_min.
@@ -937,7 +952,7 @@ pub fn sunrise_sunset_utc_secs(
         }
         (m * 60.0) as u32
     };
-    Some((wrap(sunrise_min), wrap(sunset_min)))
+    SolarEvents::RiseSet(wrap(sunrise_min), wrap(sunset_min))
 }
 
 /// Pure decision helper for `ThemeSchedule::SunriseSunset`. Returns
@@ -957,21 +972,10 @@ pub fn schedule_decision_sunrise(
     lat_deg: f64,
     long_deg: f64,
 ) -> bool {
-    let Some((sunrise, sunset)) = sunrise_sunset_utc_secs(day_of_year, lat_deg, long_deg) else {
-        // Polar regions: default to dark when the sun's below
-        // the horizon all day, light when it's above. Heuristic:
-        // northern hemisphere winter (Nov-Feb) at high latitude
-        // == polar night == dark; summer == polar day == light.
-        // We approximate via day-of-year: day 80..266 ≈ light.
-        let summer = (80..=266).contains(&day_of_year);
-        return if lat_deg.abs() > 66.5 {
-            // Within polar circle.
-            !((summer && lat_deg > 0.0) || (!summer && lat_deg < 0.0))
-        } else {
-            // Shouldn't happen — non-polar latitudes always have
-            // sunrise/sunset. Default to light defensively.
-            false
-        };
+    let (sunrise, sunset) = match solar_events(day_of_year, lat_deg, long_deg) {
+        SolarEvents::RiseSet(sunrise, sunset) => (sunrise, sunset),
+        SolarEvents::PolarDay => return false,
+        SolarEvents::PolarNight => return true,
     };
     // Handle the case where sunrise > sunset (sun event crosses
     // UTC midnight). In that case the *light* window wraps.
@@ -2141,6 +2145,8 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
     // equals `key` (also normalized). Comments (`#` or `//` lines)
     // and blank lines pass through untouched.
     let needle = normalize_key(key);
+    let finite_scrollback = needle == "scrollback"
+        && Config::parse_text(&candidate_line).scrollback != INFINITE_SCROLLBACK;
     let line_ending = preferred_line_ending(existing);
     let mut out = String::with_capacity(existing.len() + candidate_line.len() + 2);
     let mut replaced = false;
@@ -2150,6 +2156,20 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
         if line.trim().starts_with('[') {
             section.enter(parse::section_header(line.trim()));
             out.push_str(segment);
+            continue;
+        }
+        if section.applies()
+            && finite_scrollback
+            && parse_line_key(line).is_some_and(|key| normalize_key(key) == "scrollback_infinite")
+        {
+            continue;
+        }
+        if section.applies()
+            && needle == "theme"
+            && parse::parse(line)
+                .iter()
+                .any(|entry| entry.key == "palette" && named_palette_theme(&entry.value).is_some())
+        {
             continue;
         }
         if section.applies()
@@ -2875,6 +2895,11 @@ fn parse_colon_palette(value: &str) -> Option<Vec<Rgb>> {
         return None;
     }
     parts.into_iter().map(Rgb::parse).collect()
+}
+
+fn named_palette_theme(value: &str) -> Option<&'static str> {
+    let name = value.trim();
+    Theme::find_name(name).or_else(|| Theme::find_name(&name.replace('_', " ")))
 }
 
 impl Default for Config {
@@ -3697,6 +3722,7 @@ impl Config {
                 continue;
             }
             let ok = match e.key.as_str() {
+                "full-screen" if e.in_keybindings => keybinds::parse_trigger(v).is_some(),
                 // Padding has no runtime clamp; big pads just shrink the body
                 // area (`cap_axis_cells` keeps screenshots safe). Require what
                 // the apply arm does, `valid_padding`: `"inf".parse::<f32>()`
@@ -3869,7 +3895,7 @@ impl Config {
                 "keybind" => v.rsplit_once('=').is_some_and(|(t, a)| {
                     let act = a.trim();
                     keybinds::parse_trigger(t.trim()).is_some()
-                        && (keybinds::is_unbind_token(act) || Action::from_name(act).is_some())
+                        && (keybinds::is_unbind_token(act) || Action::from_name(a).is_some())
                 }),
                 // An unknown `theme = …` name silently falls back to Catppuccin
                 // Mocha (`Theme::default`). Surface the typo so a user copying a
@@ -4196,9 +4222,7 @@ impl Config {
                         // that applies it, so the two cannot disagree.
                         parse_colon_palette(v).is_some()
                     } else {
-                        let name = v.trim();
-                        Theme::find_name(name).is_some()
-                            || Theme::find_name(&name.replace('_', " ")).is_some()
+                        named_palette_theme(v).is_some()
                     }
                 }
                 // Trigger patterns must be valid regex. Otherwise
@@ -4466,15 +4490,10 @@ impl Config {
                         // `palette = NAME` as shorthand for `theme = NAME`,
                         // matched exactly (case-insensitively) by
                         // `Theme::find_name`; an unknown name applies nothing.
-                        let v = e.value.trim();
                         // Try direct match first, then underscore
                         // → space (Terminator uses `_`; kettle
                         // bundled names use spaces).
-                        let candidate = Theme::find_name(v).or_else(|| {
-                            let spaced = v.replace('_', " ");
-                            Theme::find_name(&spaced)
-                        });
-                        if let Some(name) = candidate {
+                        if let Some(name) = named_palette_theme(&e.value) {
                             cfg.theme_name = name.to_string();
                             cfg.theme = Theme::by_name(name);
                         }
@@ -5074,7 +5093,7 @@ impl Config {
                         cfg.gpu_force_software = b;
                     }
                 }
-                "full-screen" | "full_screen" => {
+                "full-screen" | "full_screen" if !e.in_keybindings => {
                     // Terminator parity (config.py:159
                     // `full_screen`): Terminator splits "should start
                     // fullscreen" into its own bool while kettle uses
@@ -5757,7 +5776,6 @@ impl Config {
             selection_foreground: explicit_selection_fg,
         };
         cfg.theme_overrides.apply(&mut cfg.theme);
-        cfg.resolve_theme_mode(None);
         // Terminator parity (config.py:215-216):
         // compose `visible_bell` + `urgent_bell` into kettle's
         // unified `BellMode` when EITHER appears in the config
@@ -5810,6 +5828,7 @@ impl Config {
                 _ => cfg.theme_schedule = None,
             }
         }
+        cfg.resolve_theme_mode(None);
         unknown.sort();
         unknown.dedup();
         (cfg, unknown)
@@ -6957,6 +6976,48 @@ cell-height = 1.2\n";
         let list = Theme::list();
         assert!(list.len() > 400, "expected the full Ghostty set");
         assert!(list.contains(&"TokyoNight Night"));
+    }
+
+    #[test]
+    fn quoted_text_binding_preserves_trailing_spaces() {
+        let cfg = Config::parse_text("keybind = \"ctrl+alt+h=text:git \"\n");
+        let trigger = keybinds::parse_trigger("ctrl+alt+h").unwrap();
+        assert_eq!(
+            cfg.keybinds.get(&trigger),
+            Some(&Action::SendText("git ".into()))
+        );
+        assert_eq!(
+            Action::from_name("  TEXT:git  "),
+            Some(Action::SendText("git  ".into()))
+        );
+        let mut bindings = keybinds::Bindings::new();
+        keybinds::apply_exclusive_keybind(&mut bindings, "ctrl+alt+h=text:git ");
+        assert_eq!(
+            bindings.get(&trigger),
+            Some(&Action::SendText("git ".into()))
+        );
+    }
+
+    #[test]
+    fn quoted_text_binding_limit_counts_trailing_spaces() {
+        let trigger = keybinds::parse_trigger("ctrl+alt+h").unwrap();
+        for (len, valid) in [
+            (keybinds::MAX_SEND_TEXT_BYTES, true),
+            (keybinds::MAX_SEND_TEXT_BYTES + 1, false),
+        ] {
+            let payload = format!("{} ", "x".repeat(len - 1));
+            let text = format!("keybind = \"ctrl+alt+h=text:{payload}\"\n");
+            assert_eq!(
+                Config::parse_text(&text).keybinds.get(&trigger),
+                if valid {
+                    Some(Action::SendText(payload))
+                } else {
+                    None
+                }
+                .as_ref()
+            );
+            assert_eq!(Config::detect_malformed_values(&text).is_empty(), valid);
+        }
     }
 
     #[test]
@@ -10650,6 +10711,29 @@ split_horiz = <Control><Shift>j
         assert!(sunrise_sunset_utc_secs(172, 80.0, 0.0).is_none());
     }
 
+    #[test]
+    fn polar_equinox_schedule_uses_solar_daylight() {
+        for (day, lat, dark) in [
+            (80, -89.9, false),
+            (80, 89.9, false),
+            (266, -89.9, false),
+            (266, 89.9, false),
+            (75, 89.9, true),
+            (84, -89.9, true),
+            (260, -89.9, true),
+            (272, 89.9, true),
+        ] {
+            assert!(super::sunrise_sunset_utc_secs(day, lat, 0.0).is_none());
+            for hour in [0, 12, 23] {
+                assert_eq!(
+                    super::schedule_decision_sunrise(hour * 3600, day, lat, 0.0),
+                    dark,
+                    "day {day}, latitude {lat}, hour {hour}"
+                );
+            }
+        }
+    }
+
     /// Drift guard. `schedule_decision_sunrise`
     /// returns the right dark/light decision for fixed times.
     #[test]
@@ -10675,6 +10759,30 @@ split_horiz = <Control><Shift>j
         assert!(schedule_decision_sunrise(12 * 3600, 1, 80.0, 0.0));
         // lat 80°N day 172 (polar day) → light.
         assert!(!schedule_decision_sunrise(12 * 3600, 172, 80.0, 0.0));
+    }
+
+    #[test]
+    fn incomplete_solar_schedule_still_resolves_forced_theme() {
+        for coordinates in ["", "theme-schedule-lat = 0\n", "theme-schedule-long = 0\n"] {
+            for (mode, expected) in [("light", "TokyoNight Day"), ("dark", "TokyoNight Night")] {
+                let cfg = Config::parse_text(&format!(
+                    "theme = Dracula\ntheme-mode = {mode}\n\
+                     light-theme = TokyoNight Day\ndark-theme = TokyoNight Night\n\
+                     theme-schedule = sunrise/sunset\n{coordinates}\
+                     cursor-fg-color = #112233\n"
+                ));
+                assert!(cfg.theme_schedule.is_none());
+                assert_eq!(cfg.theme_name, expected, "mode {mode}, {coordinates:?}");
+                assert_eq!(cfg.theme.background, Theme::by_name(expected).background);
+                assert_eq!(cfg.theme.cursor_text, Rgb::new(0x11, 0x22, 0x33));
+            }
+        }
+        let cfg = Config::parse_text(
+            "theme = Dracula\ntheme-mode = light\nlight-theme = TokyoNight Day\n\
+             theme-schedule = sunrise/sunset\ntheme-schedule-lat = 0\ntheme-schedule-long = 0\n",
+        );
+        assert!(cfg.theme_schedule.is_some());
+        assert_eq!(cfg.theme_name, "Dracula");
     }
 
     /// Drift guard. `theme-schedule = sunrise/sunset`
@@ -11665,6 +11773,73 @@ split_horiz = <Control><Shift>j
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn persist_theme_replaces_named_palettes_and_keeps_color_overrides() {
+        let dir = tempdir_for("theme-named-palette");
+        let path = dir.join("config");
+        let colors = "#010101:#020202:#030303:#040404:#050505:#060606:#070707:#080808";
+        for original in [
+            "theme = TokyoNight Night\npalette = TokyoNight Night\n".to_string(),
+            format!(
+                "theme = TokyoNight Night\npalette = \"tokyonight_night\"\n\
+                 palette = {colors}\npalette = 4=#abcdef\n"
+            ),
+            "[global_config]\nfont-size = 14\n[profiles]\n[[default]]\n\
+             palette = TokyoNight Night\n[[work]]\npalette = Dracula\n"
+                .to_string(),
+        ] {
+            std::fs::write(&path, &original).unwrap();
+            super::persist_config_toggle(&path, "theme", "Catppuccin Mocha").unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let cfg = Config::parse_text(&text);
+            assert_eq!(cfg.theme_name, "Catppuccin Mocha", "{text}");
+            assert_eq!(
+                cfg.theme.background,
+                Theme::by_name("Catppuccin Mocha").background
+            );
+            if original.contains(colors) {
+                assert!(text.contains(colors));
+                assert!(text.contains("palette = 4=#abcdef"));
+                assert_eq!(cfg.theme.palette[0], Rgb::new(1, 1, 1));
+                assert_eq!(cfg.theme.palette[4], Rgb::new(0xab, 0xcd, 0xef));
+            }
+            if original.contains("[[work]]") {
+                assert!(text.contains("[[work]]\npalette = Dracula\n"));
+            }
+        }
+    }
+
+    #[test]
+    fn persist_finite_scrollback_clears_infinite_override() {
+        let dir = tempdir_for("finite-scrollback");
+        let path = dir.join("config");
+        for (key, original) in [
+            (
+                "scrollback",
+                "scrollback_lines = 100\nscrollback_infinite = True\n",
+            ),
+            (
+                "scrollback-limit",
+                "scrollback_infinite = True\nscrollback_lines = 100\n",
+            ),
+            (
+                "scrollback_lines",
+                "[profiles]\n[[default]]\nscrollback_lines = 100\n\
+              scrollback_infinite = True\nscrollback-infinite = True\n\
+              [[work]]\nscrollback_infinite = True\n",
+            ),
+        ] {
+            std::fs::write(&path, original).unwrap();
+            assert_eq!(Config::parse_text(original).scrollback, INFINITE_SCROLLBACK);
+            super::persist_config_toggle(&path, key, "1000").unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(Config::parse_text(&text).scrollback, 1000, "{text}");
+            if original.contains("[[work]]") {
+                assert!(text.ends_with("[[work]]\nscrollback_infinite = True\n"));
+            }
+        }
+    }
+
     /// Writing a new key into an empty config appends it.
     #[test]
     fn persist_config_toggle_appends_on_missing_key() {
@@ -12338,6 +12513,24 @@ mod terminator_import_tests {
         assert!(bad[0].contains("font"));
     }
 
+    #[test]
+    fn terminator_punctuation_accelerators_replace_defaults() {
+        for (name, key) in [("comma", ','), ("period", '.'), ("bracketleft", '[')] {
+            let (cfg, unknown) =
+                Config::parse_collect(&format!("[keybindings]\nnew_tab = <Control>{name}\n"));
+            assert!(unknown.is_empty(), "{name}: {unknown:?}");
+            assert_eq!(
+                cfg.keybinds.get(&Trigger::new(Mods::CTRL, Key::Char(key))),
+                Some(&Action::NewTab),
+                "{name} must import as its punctuation key"
+            );
+            assert!(
+                !cfg.keybinds
+                    .contains_key(&keybinds::parse_trigger("ctrl+shift+t").unwrap())
+            );
+        }
+    }
+
     /// A config copied from Terminator must actually import. Every line below
     /// is Terminator's own spelling — underscore keys, GTK accelerators, a
     /// Pango font description, a colon palette, and quoted values as
@@ -12542,6 +12735,38 @@ font-size = 15
             Config::parse_text("scrollback_infinite = False\nscrollback_lines = 100\n").scrollback,
             100
         );
+    }
+
+    #[test]
+    fn terminator_fullscreen_accelerators_rebind_and_disable() {
+        let stock = Trigger::new(Mods::empty(), Key::F(11));
+        let imported = Trigger::new(Mods::CTRL, Key::F(11));
+        assert_eq!(
+            Config::default().keybinds.get(&stock),
+            Some(&Action::ToggleFullscreen)
+        );
+        let text = "[global_config]\nfull_screen = True\n\
+                    [keybindings]\nfull_screen = <Control>F11\n";
+        let (cfg, unknown) = Config::parse_collect(text);
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(cfg.keybinds.get(&imported), Some(&Action::ToggleFullscreen));
+        assert!(!cfg.keybinds.contains_key(&stock));
+        assert_eq!(cfg.window_state, WindowState::Fullscreen);
+        assert!(Config::detect_malformed_values(text).is_empty());
+        assert!(cfg.keybinds_declared.contains(&imported));
+
+        let cfg = Config::parse_text("[keybindings]\nfull_screen =\n");
+        assert!(
+            !cfg.keybinds
+                .values()
+                .any(|action| *action == Action::ToggleFullscreen)
+        );
+        assert_eq!(cfg.window_state, WindowState::Normal);
+        assert_eq!(
+            Config::parse_text("full_screen = True\n").window_state,
+            WindowState::Fullscreen
+        );
+        assert!(!Config::detect_malformed_values("full_screen = <Control>F11\n").is_empty());
     }
 
     /// An empty accelerator is Terminator's "this shortcut is disabled".
