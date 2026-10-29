@@ -312,6 +312,82 @@ fn ordinary_graphics_combined_transmission_keeps_a_relative_destination() {
 }
 
 #[test]
+fn cyclic_form_replacement_preserves_the_concrete_origin() {
+    for synchronized in [false, true] {
+        for virtual_origin in [false, true] {
+            for descendant in [false, true] {
+                for parent_placement in [0, 1] {
+                    let mut harness = SyncGraphicsHarness::new();
+                    harness.feed(b"\x1b_Ga=T,i=1,p=1,q=2,f=24,s=1,v=1,C=1;AAAA\x1b\\");
+                    if virtual_origin {
+                        harness.feed(b"\x1b_Ga=p,i=1,p=1,U=1,c=1,r=1,q=2\x1b\\");
+                        harness.feed("\x1b[38;2;0;0;1m\u{10eeee}\u{305}\u{305}\u{305}".as_bytes());
+                    }
+                    if descendant {
+                        harness.feed(b"\x1b_Ga=T,i=2,p=1,P=1,Q=1,q=2,f=24,s=1,v=1;AAAA\x1b\\");
+                    }
+                    assert!(ordinary_reply_bytes(&harness).is_empty());
+                    if synchronized {
+                        harness.feed(b"\x1b[?2026h");
+                    }
+                    let parent = if descendant { 2 } else { 1 };
+                    harness.feed(
+                        format!("\x1b_Ga=p,i=1,p=1,P={parent},Q={parent_placement},q=1\x1b\\")
+                            .as_bytes(),
+                    );
+                    if synchronized {
+                        harness.feed(b"\x1b[?2026l");
+                    }
+                    let replies = ordinary_reply_bytes(&harness);
+                    assert_eq!(replies.len(), 1);
+                    assert!(
+                        replies[0].starts_with("\x1b_Gi=1,p=1;EINVAL:"),
+                        "{replies:?}"
+                    );
+                    assert!(!harness.relatives.lock().unwrap().contains_key(&(1, 1)));
+                    if virtual_origin {
+                        assert!(harness.virtuals.lock().unwrap().contains_key(&(1, 1)));
+                    } else {
+                        assert_eq!(harness.active_ids(), [1]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn z_index_delete_removes_relatives_with_offscreen_virtual_parents() {
+    for synchronized in [false, true] {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b_Ga=T,i=1,p=1,U=1,c=1,r=1,q=2,f=24,s=1,v=1;AAAA\x1b\\");
+        harness.feed("\x1b[38;2;0;0;1m\u{10eeee}\u{305}\u{305}\u{305}".as_bytes());
+        assert_eq!(
+            super::Terminal::placeholder_cells_from_term(&harness.term.lock().unwrap()).len(),
+            1
+        );
+        harness.feed(b"\x1b_Ga=T,i=2,p=1,P=1,Q=1,z=5,q=2,f=24,s=1,v=1;AAAA\x1b\\");
+        harness.feed(b"\r\n\r\n\r\n\r\n");
+        assert!(
+            super::Terminal::placeholder_cells_from_term(&harness.term.lock().unwrap()).is_empty()
+        );
+        assert!(harness.relatives.lock().unwrap().contains_key(&(2, 1)));
+        if synchronized {
+            harness.feed(b"\x1b[?2026h");
+        }
+        harness.feed(b"\x1b_Ga=d,d=z,z=5\x1b\\");
+        if synchronized {
+            harness.feed(b"\x1b[?2026l");
+        }
+        assert!(
+            !harness.relatives.lock().unwrap().contains_key(&(2, 1)),
+            "z-index deletion must not require a visible parent"
+        );
+        assert!(harness.virtuals.lock().unwrap().contains_key(&(1, 1)));
+    }
+}
+
+#[test]
 fn ordinary_graphics_cyclic_relative_update_preserves_its_previous_parent() {
     for synchronized in [false, true] {
         for parent_placement in [0, 1] {
@@ -1794,6 +1870,43 @@ fn partial_scroll_down_crops_at_bottom_margin_and_composes_source_ranges() {
     let crop = clipped.source_crop.expect("bottom crop");
     close(crop.top, 0.2);
     close(crop.bottom, 0.6);
+}
+
+#[test]
+fn separate_top_scrolls_match_coalesced_history_anchors() {
+    let separate: Images = Arc::new(Mutex::new(vec![placement_at(1, 10, 2)]));
+    let coalesced: Images = Arc::new(Mutex::new(vec![placement_at(1, 10, 2)]));
+    for old_screen_top in [10, 11] {
+        assert!(scroll_regular_placements(
+            &separate,
+            GraphicsScroll {
+                direction: GraphicsScrollDirection::Up,
+                top: 0,
+                bottom: 4,
+                lines: 1,
+                old_screen_top,
+                new_screen_top: old_screen_top + 1,
+                screen_lines: 6,
+            }
+        ));
+    }
+    assert!(scroll_regular_placements(
+        &coalesced,
+        GraphicsScroll {
+            direction: GraphicsScrollDirection::Up,
+            top: 0,
+            bottom: 4,
+            lines: 2,
+            old_screen_top: 10,
+            new_screen_top: 12,
+            screen_lines: 6,
+        }
+    ));
+    let separate = separate.lock().unwrap();
+    let coalesced = coalesced.lock().unwrap();
+    assert_eq!(separate[0].abs_line, coalesced[0].abs_line);
+    assert_eq!(separate[0].display_rows, coalesced[0].display_rows);
+    assert_eq!(separate[0].source_rect, coalesced[0].source_rect);
 }
 
 #[test]

@@ -30,6 +30,9 @@
 //! dependency — a source-scan drift guard pins that ("headless means
 //! headless"). It reuses `kettle_render`'s pure VT-reply helpers only.
 
+#[cfg(any(target_os = "linux", test))]
+mod adopted;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -586,6 +589,8 @@ fn exec_stdout_sink() -> std::io::Result<std::io::Stdout> {
 
 /// Run `kettle exec` end to end; returns the process exit code to propagate.
 pub fn run_exec(opts: ExecOpts) -> i32 {
+    #[cfg(target_os = "linux")]
+    adopt_orphaned_descendants();
     let sink = match exec_stdout_sink() {
         Ok(sink) => sink,
         Err(error) => {
@@ -981,6 +986,20 @@ fn run_exec_engine_with_recording_poll(
     }
     // Core can widen narrow grids; metadata must describe the effective PTY.
     let geometry = PtyGeometry::from_cell_size(opts.cols as usize, opts.rows as usize, 8, 16);
+    if geometry.columns > 4096
+        || geometry.rows > 4096
+        || geometry
+            .columns
+            .checked_mul(geometry.rows)
+            .is_none_or(|cells| cells > 262_144)
+    {
+        return startup_failure(
+            opts.mode,
+            capturing,
+            output,
+            "kettle exec: terminal geometry exceeds the 4096-dimension or 262144-cell limit".into(),
+        );
+    }
     opts.cols = geometry.columns as u16;
     opts.rows = geometry.rows as u16;
 
@@ -1152,6 +1171,10 @@ fn run_exec_engine_with_recording_poll(
     #[cfg(windows)]
     let mut pty_close_started_at: Option<Instant> = None;
     let mut last_lifecycle_trace = started;
+    #[cfg(target_os = "linux")]
+    let mut last_adopted_reap = started;
+    #[cfg(target_os = "linux")]
+    let mut adopted_scan = adopted::AdoptedChildren::new(Path::new("/proc/self/task"));
     // The newest title the child set, held until output is ready to take it.
     let mut pending_title: Option<String> = None;
 
@@ -1210,7 +1233,19 @@ fn run_exec_engine_with_recording_poll(
             // the raw PTY channel, then apply the explicit abandon contract.
             drain_recording_slice(&orx, &mut recorder);
             finish_recording(&mut recorder, Duration::ZERO);
-            let _ = output.finish(code, started.elapsed(), OutputFinish::AbandonPending);
+            if let Err(error) = output.finish(code, started.elapsed(), OutputFinish::AbandonPending)
+            {
+                commit_output_failure_exit();
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: stdout delivery failed: {error}"
+                );
+                return if contained {
+                    EXIT_OUTPUT_DELIVERY
+                } else {
+                    EXIT_INTERNAL
+                };
+            }
             log::debug!("kettle exec bounded stop teardown finished");
             return code;
         }
@@ -1246,6 +1281,12 @@ fn run_exec_engine_with_recording_poll(
             }
             std::thread::sleep(IDLE_TURN);
             continue;
+        }
+
+        #[cfg(target_os = "linux")]
+        if last_adopted_reap.elapsed() >= ADOPTED_REAP_INTERVAL {
+            last_adopted_reap = Instant::now();
+            linux_reap_exited_adopted(process_tree.root, &mut adopted_scan);
         }
 
         let trace_lifecycle = elapsed >= Duration::from_secs(4)
@@ -1861,7 +1902,6 @@ impl ExecProcessTree {
 
         #[cfg(target_os = "linux")]
         {
-            let _ = root;
             if let Some(session) = &self.session {
                 complete &= session.terminate();
             } else {
@@ -1872,6 +1912,9 @@ impl ExecProcessTree {
                 );
                 complete = false;
             }
+            // A descendant that left the session with setsid() is out of the
+            // session scan's reach, but it is this process's adopted child.
+            complete &= linux_kill_adopted(Some(root), Instant::now() + LINUX_ADOPTED_KILL_TIME);
         }
 
         #[cfg(all(unix, not(target_os = "linux")))]
@@ -1938,6 +1981,13 @@ fn report_failed_termination(outcome: std::io::Result<()>) -> bool {
 
 #[cfg(target_os = "linux")]
 const LINUX_PROC_SCAN_TIME: Duration = Duration::from_millis(500);
+/// How long timeout teardown waits for adopted descendants to exit after
+/// SIGKILL before reporting that containment failed.
+#[cfg(target_os = "linux")]
+const LINUX_ADOPTED_KILL_TIME: Duration = Duration::from_secs(1);
+/// How often a running command's exited adopted descendants are reaped.
+#[cfg(target_os = "linux")]
+const ADOPTED_REAP_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(target_os = "linux")]
 const LINUX_PROC_SCAN_PROCESSES: usize = 16_384;
 /// The time one session scan may take. Tests that check the order of
@@ -1995,18 +2045,6 @@ impl LinuxProcessIdentity {
     fn read(pid: u32) -> std::io::Result<Option<Self>> {
         Ok(LinuxProcessStat::read(pid)?.map(|stat| stat.identity))
     }
-
-    fn parse(pid: u32, stat: &str) -> Option<Self> {
-        // `comm` is parenthesized and may itself contain spaces or `)`. Split
-        // after its final close-paren; fields below are then 3 onward.
-        let tail = stat.rsplit_once(") ")?.1;
-        let fields = tail.split_ascii_whitespace().collect::<Vec<_>>();
-        Some(Self {
-            pid,
-            session: fields.get(3)?.parse().ok()?,
-            start_time: fields.get(19)?.parse().ok()?,
-        })
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2019,10 +2057,16 @@ struct LinuxProcessStat {
 #[cfg(target_os = "linux")]
 impl LinuxProcessStat {
     fn read(pid: u32) -> std::io::Result<Option<Self>> {
-        Self::from_stat_read(pid, std::fs::read_to_string(format!("/proc/{pid}/stat")))
+        use std::io::Read as _;
+        let bytes = std::fs::File::open(format!("/proc/{pid}/stat")).and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(8193).read_to_end(&mut bytes)?;
+            Ok(bytes)
+        });
+        Self::from_stat_read(pid, bytes)
     }
 
-    fn from_stat_read(pid: u32, result: std::io::Result<String>) -> std::io::Result<Option<Self>> {
+    fn from_stat_read(pid: u32, result: std::io::Result<Vec<u8>>) -> std::io::Result<Option<Self>> {
         let stat = match result {
             Ok(stat) => stat,
             // procfs may return ESRCH if the process exits after open.
@@ -2034,28 +2078,45 @@ impl LinuxProcessStat {
             }
             Err(error) => return Err(error),
         };
-        let tail = stat
-            .rsplit_once(") ")
-            .map(|(_, tail)| tail)
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed /proc stat")
-            })?;
-        let fields = tail.split_ascii_whitespace().collect::<Vec<_>>();
-        let state = fields
-            .first()
-            .and_then(|field| field.as_bytes().first())
-            .copied()
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing process state")
-            })?;
-        let identity = LinuxProcessIdentity::parse(pid, &stat).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "malformed process identity",
-            )
-        })?;
+        let (state, session, start_time) = linux_stat_fields(&stat)?;
+        let identity = LinuxProcessIdentity {
+            pid,
+            session,
+            start_time,
+        };
         Ok(Some(Self { identity, state }))
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_stat_fields(stat: &[u8]) -> std::io::Result<(u8, u32, u64)> {
+    let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed /proc stat");
+    if stat.len() > 8192 {
+        return Err(invalid());
+    }
+    let close = stat
+        .iter()
+        .rposition(|byte| *byte == b')')
+        .ok_or_else(invalid)?;
+    let tail =
+        std::str::from_utf8(stat.get(close + 1..).ok_or_else(invalid)?).map_err(|_| invalid())?;
+    let fields: Vec<_> = tail.split_ascii_whitespace().collect();
+    Ok((
+        *fields
+            .first()
+            .and_then(|field| field.as_bytes().first())
+            .ok_or_else(invalid)?,
+        fields
+            .get(3)
+            .ok_or_else(invalid)?
+            .parse()
+            .map_err(|_| invalid())?,
+        fields
+            .get(19)
+            .ok_or_else(invalid)?
+            .parse()
+            .map_err(|_| invalid())?,
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -2120,6 +2181,249 @@ impl LinuxPidHandle {
             return Ok(true);
         }
         Ok(matches!(stat.state, b'T' | b't' | b'Z' | b'X'))
+    }
+
+    /// Whether every thread of the process has exited. The pidfd turns
+    /// readable only then. The main thread's `Z` state proves less: another
+    /// thread can still be running, and can still fork.
+    fn exited_or_gone(&self) -> std::io::Result<bool> {
+        use std::os::fd::AsRawFd as _;
+
+        let mut poll = libc::pollfd {
+            fd: self.fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `poll` is one valid pollfd, and a zero timeout returns at
+        // once.
+        let ready = unsafe { libc::poll(&raw mut poll, 1, 0) };
+        if ready < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(ready > 0)
+    }
+}
+
+/// Whether this process reaps its orphaned descendants, and if not why,
+/// once the command line has tried. Unset in the MCP server, which never does.
+#[cfg(target_os = "linux")]
+static ADOPTION: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+
+/// Make this `kettle exec` process the reaper of its orphaned descendants.
+///
+/// A descendant that leaves the PTY session with `setsid()` escapes the
+/// session teardown. As a child subreaper, this process receives such a
+/// descendant when its own parent exits, so a timeout or cancellation can
+/// still stop it. Only the command-line path does this: it runs one command
+/// per process, so everything adopted here belongs to that command. The MCP
+/// server runs concurrent commands in one process, where an adopted orphan
+/// cannot be attributed to any one of them.
+///
+/// When that cannot be set up, a timeout or cancellation reports its teardown
+/// as unverified, since an escaped descendant could still be running.
+#[cfg(target_os = "linux")]
+fn adopt_orphaned_descendants() {
+    let _ = ADOPTION.set(enable_orphan_adoption());
+}
+
+#[cfg(target_os = "linux")]
+fn enable_orphan_adoption() -> Result<(), String> {
+    // An ignored SIGCHLD, or SA_NOCLDWAIT, inherited from the launcher makes
+    // the kernel reap children as they exit, and a reaped child's PID can be
+    // reused before the sweep signals it. The PTY backend resets SIGCHLD in
+    // the command before it runs, so this changes nothing for the command.
+    // SAFETY: an all-zero sigaction is SIG_DFL with an empty mask and no
+    // flags.
+    let mut default: libc::sigaction = unsafe { std::mem::zeroed() };
+    default.sa_sigaction = libc::SIG_DFL;
+    // SAFETY: `default` is a valid sigaction, and the old one is not wanted.
+    if unsafe { libc::sigaction(libc::SIGCHLD, &raw const default, std::ptr::null_mut()) } != 0 {
+        return Err(format!(
+            "cannot reset SIGCHLD: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // Adopted children are found in per-thread child lists, which a kernel
+    // built without CONFIG_PROC_CHILDREN does not provide.
+    std::fs::metadata("/proc/thread-self/children")
+        .map_err(|error| format!("cannot read procfs child lists: {error}"))?;
+    // SAFETY: PR_SET_CHILD_SUBREAPER takes an integer flag and no pointers.
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
+        return Err(format!(
+            "cannot become a child subreaper: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// Children of this process that came from the command's tree.
+///
+/// Every thread's procfs list is read, since a child belongs to the thread
+/// that forked it. The PTY child `root` is excluded; its status belongs to the
+/// PTY backend. So is any child still in this process's own session: helpers
+/// this process starts itself stay there, while the command runs in the PTY's
+/// session and an escaped descendant in one it created.
+#[cfg(target_os = "linux")]
+fn linux_adopted_children(
+    scan: &mut adopted::AdoptedChildren,
+    root: Option<u32>,
+    deadline: Instant,
+) -> std::io::Result<adopted::Batch> {
+    // A resumed procfs read may contain a PID reaped in an earlier batch.
+    // Authenticate child ownership again before using its session or PID.
+    // SAFETY: getsid(0) queries this process and takes no pointers.
+    let own_session = unsafe { libc::getsid(0) };
+    if own_session == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    scan.next_batch(root, own_session, deadline, 16_384, |pid| {
+        // SAFETY: waitid receives initialized storage; WNOWAIT retains the child.
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &raw mut status,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT | libc::__WALL,
+            )
+        } != 0
+        {
+            let error = std::io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ECHILD) {
+                Ok(-1)
+            } else {
+                Err(error)
+            };
+        }
+        // SAFETY: getsid takes a PID and no pointers.
+        let session = unsafe { libc::getsid(pid) };
+        if session == -1 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(session)
+        }
+    })
+}
+
+/// Reap adopted descendants that already exited, so a long command that
+/// detaches short-lived helpers does not leave zombies here until it ends.
+#[cfg(target_os = "linux")]
+fn linux_reap_exited_adopted(root: Option<u32>, scan: &mut adopted::AdoptedChildren) {
+    if !matches!(ADOPTION.get(), Some(Ok(()))) {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_millis(5);
+    let children = match linux_adopted_children(scan, root, deadline) {
+        Ok(batch) => batch.children,
+        Err(_) => {
+            *scan = adopted::AdoptedChildren::new(Path::new("/proc/self/task"));
+            return;
+        }
+    };
+    for pid in children {
+        if Instant::now() >= deadline {
+            break;
+        }
+        // SAFETY: `pid` is this process's child and only this process reaps
+        // it; a null status pointer is allowed.
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) };
+    }
+}
+
+/// Kill and reap every descendant adopted during the run, including ones the
+/// kills hand down. Returns whether none remains by `deadline`.
+///
+/// An unreaped child's PID cannot be reused (SIGCHLD was reset so the kernel
+/// does not reap for us), so signalling a listed child reaches only that
+/// process. Each child killed passes its own children to this process as it
+/// exits, so rounds continue until a listing is empty. Where adoption could
+/// not be set up, an escaped descendant may be running unseen, so the
+/// teardown is not verified.
+#[cfg(target_os = "linux")]
+fn linux_kill_adopted(root: Option<u32>, deadline: Instant) -> bool {
+    linux_kill_adopted_as(ADOPTION.get(), root, deadline)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_kill_adopted_as(
+    adoption: Option<&Result<(), String>>,
+    root: Option<u32>,
+    deadline: Instant,
+) -> bool {
+    match adoption {
+        None => return true,
+        Some(Err(reason)) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: cannot stop descendants that left the session: {reason}"
+            );
+            return false;
+        }
+        Some(Ok(())) => {}
+    }
+    let timed_out = |remaining: usize| {
+        let _ = writeln!(
+            std::io::stderr(),
+            "kettle exec: adopted descendant teardown is unverified: scan or exit deadline \
+             expired ({remaining} known descendant(s) remain)"
+        );
+        false
+    };
+    // Killed and not yet reaped. A reaped PID leaves the set, since a later
+    // adoptee may be given the same number.
+    let mut killed: std::collections::HashSet<libc::pid_t> = std::collections::HashSet::new();
+    let mut scan = adopted::AdoptedChildren::new(Path::new("/proc/self/task"));
+    let mut sweep_had_children = false;
+    loop {
+        let batch = match linux_adopted_children(&mut scan, root, deadline) {
+            Ok(batch) => batch,
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: cannot list adopted descendants: {error}"
+                );
+                return false;
+            }
+        };
+        if Instant::now() >= deadline {
+            return timed_out(killed.len() + batch.children.len());
+        }
+        sweep_had_children |= !batch.children.is_empty() || !killed.is_empty();
+        if batch.complete {
+            if !sweep_had_children && killed.is_empty() {
+                return true;
+            }
+            sweep_had_children = false;
+        }
+        let children = batch.children;
+        for &pid in &children {
+            if killed.insert(pid) {
+                // SAFETY: see above; `pid` is an unreaped child of this process.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            if Instant::now() >= deadline {
+                return timed_out(children.len());
+            }
+        }
+        // SIGKILL cannot be blocked, but a child in uninterruptible sleep
+        // exits late, so poll rather than block on any one of them.
+        let mut reaped = Vec::new();
+        for &pid in &killed {
+            // SAFETY: as above; WNOHANG returns at once.
+            if unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) }
+                != 0
+            {
+                reaped.push(pid);
+            }
+            if Instant::now() >= deadline {
+                return timed_out(children.len());
+            }
+        }
+        for pid in reaped {
+            killed.remove(&pid);
+        }
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -2344,6 +2648,30 @@ impl LinuxSession {
         }
         if !linux_signal_process_group(self.process_group, libc::SIGKILL) {
             incomplete = true;
+        }
+        // A killed member hands its children to this process only as it exits,
+        // and the adopted-descendant sweep that follows must see them. Wait
+        // for every kill to land; an unreaped zombie counts as exited.
+        let exit_deadline = Instant::now() + LINUX_ADOPTED_KILL_TIME;
+        loop {
+            let mut all_exited = true;
+            for handle in handles.values() {
+                if !handle.exited_or_gone().unwrap_or(false) {
+                    all_exited = false;
+                }
+            }
+            if all_exited {
+                break;
+            }
+            if Instant::now() >= exit_deadline {
+                incomplete = true;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: a Linux session member did not exit after SIGKILL"
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
         stable && !incomplete
     }
@@ -3019,15 +3347,21 @@ impl WorkerOutput {
         // pending on this thread never reached the worker, so waiting could
         // not deliver it.
         let finish_queued = dispatch_result.is_ok() && self.pending.is_none();
-        let delivered = finish_queued && self.worker_succeeded_within(grace);
-        (dispatch_result, delivered)
+        if finish_queued {
+            match self.worker_succeeded_within(grace) {
+                Ok(delivered) => (dispatch_result, delivered),
+                Err(error) => (Err(error), false),
+            }
+        } else {
+            (dispatch_result, false)
+        }
     }
 
-    fn worker_succeeded_within(&mut self, limit: Duration) -> bool {
+    fn worker_succeeded_within(&mut self, limit: Duration) -> OutputResult<bool> {
         if self.outcome.is_none() {
             match self.outcome_rx.recv_timeout(limit) {
                 Ok(outcome) => self.outcome = Some(outcome),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => return false,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => return Ok(false),
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     self.outcome = Some(Err(OutputDeliveryError::unexpected(
                         "stdout writer stopped without reporting an outcome",
@@ -3035,7 +3369,7 @@ impl WorkerOutput {
                 }
             }
         }
-        matches!(self.outcome, Some(Ok(())))
+        self.poll_worker_outcome()
     }
 
     fn finish_abandoning_pending(&mut self, code: i32, duration: Duration) -> OutputResult<()> {
@@ -5890,16 +6224,16 @@ mod tests {
         while !linux_process_has_exited(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if !linux_process_has_exited(pid) {
-            // Avoid leaking the fixture if the assertion fails.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
-        assert!(
-            linux_process_has_exited(pid),
-            "background session member {pid} survived timeout"
+        let exited = exited_before_cleanup(
+            || linux_process_has_exited(pid),
+            || {
+                // Avoid leaking the fixture if the assertion fails.
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            },
         );
+        assert!(exited, "background session member {pid} survived timeout");
     }
 
     /// The direct child can exit before the deadline while a background member
@@ -5951,14 +6285,17 @@ wait
         while !linux_process_has_exited(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if !linux_process_has_exited(pid) {
-            // Avoid leaking the fixture if the assertion fails.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
+        let exited = exited_before_cleanup(
+            || linux_process_has_exited(pid),
+            || {
+                // Avoid leaking the fixture if the assertion fails.
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            },
+        );
         assert!(
-            linux_process_has_exited(pid),
+            exited,
             "descriptor-free reparented session member {pid} survived deadline teardown"
         );
     }
@@ -6037,11 +6374,14 @@ wait
         while !linux_process_has_exited(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if !linux_process_has_exited(pid) {
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-        }
+        let exited = exited_before_cleanup(
+            || linux_process_has_exited(pid),
+            || {
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            },
+        );
         assert!(
-            linux_process_has_exited(pid),
+            exited,
             "late output deadline lost the root anchor and left session member {pid} alive"
         );
     }
@@ -6059,8 +6399,8 @@ wait
         let opened = std::fs::File::open(format!("/proc/{pid}/stat"));
         child.kill().unwrap();
         child.wait().unwrap();
-        let mut stat = String::new();
-        let result = opened.unwrap().read_to_string(&mut stat).map(|_| stat);
+        let mut stat = Vec::new();
+        let result = opened.unwrap().read_to_end(&mut stat).map(|_| stat);
         assert_eq!(
             result.as_ref().unwrap_err().raw_os_error(),
             Some(libc::ESRCH)
@@ -6078,7 +6418,7 @@ wait
             assert_eq!(error.raw_os_error(), Some(errno));
         }
         assert_eq!(
-            LinuxProcessStat::from_stat_read(1, Ok("malformed".into()))
+            LinuxProcessStat::from_stat_read(1, Ok(b"malformed".to_vec()))
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::InvalidData,
@@ -6141,11 +6481,16 @@ wait
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_process_identity_parser_and_scan_cap_are_pinned() {
-        let parsed = LinuxProcessIdentity::parse(
+        let parsed = LinuxProcessStat::from_stat_read(
             42,
-            "42 (a worker ) name) S 1 2 77 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 999 20",
+            Ok(
+                b"42 (a worker ) name) S 1 2 77 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 999 20"
+                    .to_vec(),
+            ),
         )
-        .expect("parse proc stat with spaces and a close-paren in comm");
+        .expect("parse proc stat with spaces and a close-paren in comm")
+        .expect("process stat exists")
+        .identity;
         assert_eq!(parsed.pid, 42);
         assert_eq!(parsed.session, 77);
         assert_eq!(parsed.start_time, 999);
@@ -6405,7 +6750,11 @@ wait
     #[test]
     #[allow(clippy::zombie_processes)] // teardown deliberately kills the whole fixture session
     fn linux_active_fork_session_helper() {
-        if !invoked_as_fixture(LINUX_FORK_FIXTURE) {
+        if !active_fork_fixture_allowed(
+            invoked_as_fixture(LINUX_FORK_FIXTURE),
+            std::env::var_os("KETTLE_ACTIVE_FORK_FIXTURE").as_deref()
+                == Some(std::ffi::OsStr::new("1")),
+        ) {
             return;
         }
         use std::os::unix::process::CommandExt as _;
@@ -6431,12 +6780,22 @@ wait
     #[test]
     #[allow(clippy::zombie_processes)] // teardown deliberately kills the whole fixture session
     fn linux_active_fork_session_worker() {
-        if !invoked_as_fixture(LINUX_FORK_WORKER_FIXTURE) {
+        if !active_fork_fixture_allowed(
+            invoked_as_fixture(LINUX_FORK_WORKER_FIXTURE),
+            std::env::var_os("KETTLE_ACTIVE_FORK_FIXTURE").as_deref()
+                == Some(std::ffi::OsStr::new("1")),
+        ) {
             return;
         }
         println!("FORK_PID {}", std::process::id());
         let _ = std::io::stdout().flush();
-        loop {
+        let parent = unsafe { libc::getppid() };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut children = Vec::new();
+        while Instant::now() < deadline
+            && unsafe { libc::getppid() } == parent
+            && children.len() < 256
+        {
             let child = std::process::Command::new("sleep")
                 .arg("30")
                 .stdin(std::process::Stdio::null())
@@ -6445,8 +6804,13 @@ wait
                 .spawn()
                 .expect("spawn active-fork descendant");
             println!("FORK_PID {}", child.id());
+            children.push(child);
             let _ = std::io::stdout().flush();
             std::thread::sleep(Duration::from_millis(2));
+        }
+        for mut child in children {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 
@@ -6463,6 +6827,8 @@ wait
         let helper = std::env::current_exe().expect("resolve the unit-test binary");
         let opts = ExecOpts {
             argv: vec![
+                "/usr/bin/env".into(),
+                "KETTLE_ACTIVE_FORK_FIXTURE=1".into(),
                 helper.to_string_lossy().into_owned(),
                 "--exact".into(),
                 LINUX_FORK_FIXTURE.into(),
@@ -6990,5 +7356,214 @@ wait
             libc::SIG_IGN,
             "a committed output failure must leave SIGPIPE ignored"
         );
+    }
+
+    /// A setup that could not make this process a child subreaper leaves
+    /// escaped descendants out of reach, so teardown is not verified.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_adoption_setup_leaves_teardown_unverified() {
+        let failed = Err("the kernel refused".to_string());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(!linux_kill_adopted_as(Some(&failed), None, deadline));
+        // The MCP server never adopts; its teardown is the session's alone.
+        assert!(linux_kill_adopted_as(None, None, deadline));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_expired_adopted_scan_leaves_teardown_unverified() {
+        assert!(!linux_kill_adopted_as(Some(&Ok(())), None, Instant::now(),));
+    }
+
+    /// A process whose main thread exited is a zombie by its stat line while
+    /// another thread still runs, and could still fork. It has not exited.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_whose_main_thread_exited_is_still_running() {
+        // pthread_exit from Python's main thread ends only that thread; the
+        // other one sleeps on (and then waits forever for the GIL).
+        let script = "import ctypes, threading, time\n\
+                      threading.Thread(target=time.sleep, args=(60,)).start()\n\
+                      ctypes.CDLL(None).pthread_exit(None)\n";
+        let Ok(mut child) = std::process::Command::new("python3")
+            .args(["-c", script])
+            .spawn()
+        else {
+            eprintln!("skipped: python3 is not available");
+            return;
+        };
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let identity = loop {
+            let stat = LinuxProcessStat::read(pid).unwrap().unwrap();
+            if stat.state == b'Z' {
+                break stat.identity;
+            }
+            assert!(Instant::now() < deadline, "the main thread never exited");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let handle = LinuxPidHandle::open(identity).unwrap().unwrap();
+        let running = !handle.exited_or_gone().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            running,
+            "a zombie main thread was taken for the whole process"
+        );
+        assert!(handle.exited_or_gone().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_eof_survives_an_intervening_terminal_reply() {
+        let mut opts = opts_for(
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "cat >/dev/null; printf EOF_SEEN".into(),
+            ],
+            None,
+        );
+        opts.timeout = Some(Duration::from_secs(2));
+        let mut bytes = Vec::new();
+        let mut output = DirectOutput::new(OutputMode::Raw, &mut bytes);
+        let code = run_exec_engine_with_recording_poll(
+            opts,
+            &|| None,
+            &mut output,
+            None,
+            false,
+            poll_recording_finish,
+            |mut stdin, replies, gate, events, done| {
+                assert_eq!(stdin.try_write(b"payload").unwrap(), 7);
+                assert_eq!(stdin.try_signal_eof().unwrap(), PtyEofProgress::Pending);
+                assert_eq!(stdin.try_write(b"\x1b[0n").unwrap(), 4);
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while stdin.try_signal_eof().unwrap() == PtyEofProgress::Pending {
+                    assert!(Instant::now() < deadline);
+                }
+                spawn_pty_writer_arbiter(stdin, replies, gate, events, done)
+            },
+        );
+        assert_eq!(
+            code, 0,
+            "child must observe EOF after the reply; output={bytes:?}"
+        );
+        assert!(String::from_utf8_lossy(&bytes).contains("EOF_SEEN"));
+    }
+
+    #[test]
+    fn final_write_grace_preserves_worker_failure() {
+        struct FailsOnFinish;
+        impl Write for FailsOnFinish {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if bytes.windows(b"exit".len()).any(|part| part == b"exit") {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "final write failed",
+                    ))
+                } else {
+                    Ok(bytes.len())
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut output = WorkerOutput::spawn(OutputMode::Json, FailsOnFinish).unwrap();
+        let (result, delivered) =
+            output.queue_final_write(EXIT_TIMEOUT, Duration::ZERO, Duration::from_secs(5));
+        assert!(
+            result.is_err(),
+            "final-write worker error must reach the lifecycle"
+        );
+        assert!(!delivered);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("final write failed")
+        );
+        #[cfg(unix)]
+        for cancel in [false, true] {
+            let cancelled = AtomicBool::new(cancel);
+            let mut opts = long_running_stop_test_opts(Some(Duration::ZERO));
+            opts.mode = OutputMode::Json;
+            let mut output = WorkerOutput::spawn(OutputMode::Json, FailsOnFinish).unwrap();
+            let code = run_exec_engine(opts, &|| None, &mut output, Some(&cancelled), false);
+            if code == EXIT_INTERNAL {
+                eprintln!("skipping final-write lifecycle check: PTY or teardown unavailable");
+                continue;
+            }
+            assert_eq!(
+                code, EXIT_OUTPUT_DELIVERY,
+                "final-write failure must override the stop status"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_stat_accepts_non_utf8_names_before_ascii_fields() {
+        for (pid, session) in [(42, 77), (9999, 1234)] {
+            let mut stat = format!("{pid} (worker ").into_bytes();
+            stat.extend_from_slice(b"\xff ) name) S 1 2 ");
+            stat.extend_from_slice(
+                format!("{session} 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 999 20").as_bytes(),
+            );
+            assert_eq!(
+                linux_stat_fields(&stat).ok(),
+                Some((b'S', session, 999)),
+                "valid non-UTF-8 names must not invalidate owned or unrelated process identities"
+            );
+        }
+    }
+
+    #[test]
+    fn excessive_exec_geometry_is_rejected_before_startup() {
+        for (cols, rows) in [(4097, 1), (1, 4097), (513, 512), (u16::MAX, u16::MAX)] {
+            let mut opts = opts_for(vec!["kettle-no-such-binary-geometry".into()], None);
+            opts.cols = cols;
+            opts.rows = rows;
+            let (code, message) = run_exec_capture(opts);
+            assert_eq!(code, EXIT_INTERNAL);
+            assert!(
+                message.contains("terminal geometry exceeds"),
+                "geometry must be rejected before PTY creation: {message}"
+            );
+        }
+    }
+
+    fn active_fork_fixture_allowed(exact: bool, opt_in: bool) -> bool {
+        exact && opt_in
+    }
+
+    #[test]
+    fn ordinary_exact_selection_does_not_admit_fork_fixtures() {
+        assert!(
+            !active_fork_fixture_allowed(true, false),
+            "ordinary --exact selection must not start fork fixtures"
+        );
+        assert!(!active_fork_fixture_allowed(false, true));
+        assert!(active_fork_fixture_allowed(true, true));
+    }
+
+    fn exited_before_cleanup(exited: impl Fn() -> bool, cleanup: impl FnOnce()) -> bool {
+        let observed = exited();
+        if !observed {
+            cleanup();
+        }
+        observed
+    }
+
+    #[test]
+    fn fallback_cleanup_cannot_hide_a_teardown_failure() {
+        let exited = std::cell::Cell::new(false);
+        let observed = exited_before_cleanup(|| exited.get(), || exited.set(true));
+        assert!(
+            !observed,
+            "fallback cleanup must not count as successful teardown"
+        );
+        assert!(exited.get(), "fallback must still clean up the fixture");
     }
 }

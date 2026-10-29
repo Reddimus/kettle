@@ -14,6 +14,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -176,6 +177,8 @@ esac
             cwd=root,
             check=True,
         )
+        for key in ("commit.gpgSign", "tag.gpgSign"):
+            subprocess.run([real_git, "config", key, "false"], cwd=root, check=True)
         subprocess.run([real_git, "add", "."], cwd=root, check=True)
         subprocess.run(
             [real_git, "commit", "--quiet", "-m", "fixture"],
@@ -209,6 +212,22 @@ def run_release(
 
 @unittest.skipIf(os.name == "nt", "release.sh requires a Unix shell")
 class ReleaseScriptTests(unittest.TestCase):
+    def test_fixture_disables_inherited_signing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            config = Path(raw) / "gitconfig"
+            config.write_text("[commit]\n gpgSign = true\n[tag]\n gpgSign = true\n"
+                              "[gpg]\n program = /usr/bin/false\n")
+            with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config),
+                                             "GIT_CONFIG_NOSYSTEM": "1", "GIT_EDITOR": "/usr/bin/false"}):
+                try:
+                    with release_fixture() as (root, _environment, git):
+                        for key in ("commit.gpgSign", "tag.gpgSign"):
+                            result = subprocess.run([git, "config", "--local", "--get", key],
+                                                    cwd=root, capture_output=True, text=True, check=True)
+                            self.assertEqual(result.stdout.strip(), "false")
+                except subprocess.CalledProcessError as error:
+                    self.fail(f"fixture inherited signing settings: {error}")
+
     def test_release_bump_preserves_archived_version_references(self) -> None:
         with release_fixture() as (root, environment, _real_git):
             result = run_release(root, environment)

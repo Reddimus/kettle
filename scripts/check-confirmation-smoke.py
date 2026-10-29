@@ -102,7 +102,7 @@ def check(binary, out):
             root = Path(scratch)
             config = root / "kettle.conf"
             config.write_text(
-                "restore-session = false\nupdate-policy = off\nrecord = off\n"
+                "language = en\nrestore-session = false\nupdate-policy = off\nrecord = off\n"
                 "shell = /bin/sh\nlogin-shell = false\nshell-integration = false\n"
                 "agent-server = full\nask-before-closing = always\n"
                 "window-width = 100\nwindow-height = 32\ncursor-blink = false\n"

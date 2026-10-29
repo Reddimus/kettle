@@ -1468,9 +1468,12 @@ campaign.
 - **5-run minimum.** Wall-clock and RSS both have system jitter; the
   bench scripts run each measurement 5× and emit all five so the
   spread is visible.
-- **Cold-cache start.** Each invocation is a fresh `exec` /
+- **Fresh-process start.** Each invocation is a fresh `exec` /
   `CreateProcess`; we don't benchmark inside a long-lived process
-  because the user pays the cold-start cost at every shell launch.
+  because the user pays process start-up at every launch. A new process
+  does not clear the OS file or GPU driver caches, and `bench.sh` runs
+  `--version` before sampling, so these are warm-cache starts, not
+  first launches after boot.
 - **`/usr/bin/time -v` for RSS** (Linux/macOS): `Maximum resident
   set size` reports peak resident memory in KB; we convert to MB
   in the table above.

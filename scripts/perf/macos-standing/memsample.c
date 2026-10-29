@@ -17,13 +17,22 @@
 #include <time.h>
 #include <unistd.h>
 
-static int sample(int pid, int timed) {
+static int sample(int pid, int timed, uint64_t *started) {
 	struct rusage_info_v4 usage;
 	struct proc_taskinfo task;
 	if (proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&usage) != 0) {
 		return 1;
 	}
+	if (usage.ri_proc_start_abstime == 0 || (*started != 0 && *started != usage.ri_proc_start_abstime)) {
+		return 1;
+	}
+	*started = usage.ri_proc_start_abstime;
 	if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, sizeof task) != sizeof task) {
+		return 1;
+	}
+	struct rusage_info_v4 after;
+	if (proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&after) != 0 ||
+	    after.ri_proc_start_abstime != *started) {
 		return 1;
 	}
 	// ri_user_time and ri_system_time are in Mach absolute-time units.
@@ -51,8 +60,9 @@ int main(int argc, char **argv) {
 		return 2;
 	}
 	int pid = atoi(argv[1]);
+	uint64_t started = 0;
 	if (argc == 2) {
-		return sample(pid, 0);
+		return sample(pid, 0, &started);
 	}
 	int interval_ms = atoi(argv[2]);
 	int count = atoi(argv[3]);
@@ -61,7 +71,7 @@ int main(int argc, char **argv) {
 		return 2;
 	}
 	for (int i = 0; i < count; i++) {
-		if (sample(pid, 1) != 0) {
+		if (sample(pid, 1, &started) != 0) {
 			// The process exited; the lines so far are the timeline.
 			return i == 0 ? 1 : 0;
 		}

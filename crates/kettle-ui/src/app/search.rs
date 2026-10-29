@@ -17,7 +17,7 @@ impl App {
         kettle_render::search_bar_geometry(
             width as f32,
             height as f32,
-            renderer.cell_w,
+            renderer.overlay_text_cell_width(),
             renderer.cell_h,
             &self.ui_text,
         )
@@ -52,7 +52,7 @@ impl App {
                 map_case_sensitivity(ws.search.case_mode),
             ) {
                 Ok(compiled) => {
-                    ws.search.compiled = compiled;
+                    ws.search.set_compiled(compiled);
                     ws.search.compiled_revision = Some(ws.search.revision);
                     ws.search.status = if query.is_empty() {
                         kettle_render::SearchStatus::Typing
@@ -61,7 +61,7 @@ impl App {
                     };
                 }
                 Err(error) => {
-                    ws.search.compiled = None;
+                    ws.search.set_compiled(None);
                     ws.search.compiled_revision = Some(ws.search.revision);
                     ws.search.status = search_compile_error_status(error);
                 }
@@ -102,6 +102,7 @@ impl App {
         };
         let current_token =
             kettle_core::SearchScanToken::capture(&term, ws.search.revision, output_generation);
+        ws.search.set_scan_token(current_token);
 
         // Reflow invalidates grid coordinates and restarts from the viewport. Plain PTY output is
         // different: retain a chunked job and advance its token so a process that prints every
@@ -745,17 +746,12 @@ impl App {
                     kettle_core::MAX_SEARCH_MATCHES.saturating_sub(scan.matches.len()),
                 )
             };
-            let batch = ws
-                .search
-                .compiled
-                .as_mut()
-                .expect("compiled search checked")
-                .find_in_range(
-                    &term,
-                    bounds,
-                    kettle_core::SearchDirection::Forward,
-                    remaining,
-                );
+            let batch = ws.search.compiled_for_highlights().find_in_range(
+                &term,
+                bounds,
+                kettle_core::SearchDirection::Forward,
+                remaining,
+            );
             let finished = if remaining == 0 {
                 true
             } else {
@@ -1031,6 +1027,7 @@ impl App {
         key: &Key,
         physical_key: Option<&PhysicalKey>,
         text: Option<&str>,
+        unshifted_key: Option<&Key>,
     ) -> bool {
         let macos = cfg!(target_os = "macos");
         let mods = ws.mods;
@@ -1071,7 +1068,7 @@ impl App {
         // to the query and selects it. It is whatever `start_search` is bound
         // to, so a rebound shortcut works too.
         if matches!(
-            resolve_keybind_action(&self.cfg.keybinds, Some(key), None, mods),
+            resolve_keybind_action(&self.cfg.keybinds, Some(key), None, mods, unshifted_key),
             Some((_, Action::StartSearch))
         ) {
             ws.search.focused_control = kettle_render::SearchControl::Editor;
@@ -1079,8 +1076,14 @@ impl App {
             self.sync_search_editor_scroll(ws);
             return true;
         }
-        let bound =
-            resolve_keybind_action(&self.cfg.keybinds, Some(key), physical_key, mods).is_some();
+        let bound = resolve_keybind_action(
+            &self.cfg.keybinds,
+            Some(key),
+            physical_key,
+            mods,
+            unshifted_key,
+        )
+        .is_some();
         let typed = search_bar_text(
             crate::modal_input::accept_text(text, ws.mods),
             mods,
@@ -1319,10 +1322,15 @@ impl App {
         physical_key: Option<&PhysicalKey>,
         repeat: bool,
         event_loop: &ActiveEventLoop,
+        unshifted_key: Option<&Key>,
     ) -> bool {
-        let Some((trigger, action)) =
-            resolve_keybind_action(&self.cfg.keybinds, Some(key), physical_key, ws.mods)
-        else {
+        let Some((trigger, action)) = resolve_keybind_action(
+            &self.cfg.keybinds,
+            Some(key),
+            physical_key,
+            ws.mods,
+            unshifted_key,
+        ) else {
             return false;
         };
         match search_bar_shortcut_kind(&action) {
@@ -1368,7 +1376,7 @@ impl App {
                 map_case_sensitivity(ws.search.case_mode),
             ) {
                 Ok(compiled) => {
-                    ws.search.compiled = compiled;
+                    ws.search.set_compiled(compiled);
                     ws.search.compiled_revision = Some(ws.search.revision);
                 }
                 Err(error) => {
@@ -1408,6 +1416,7 @@ impl App {
             ws.search.revision,
             pane.term.output_generation(),
         );
+        ws.search.set_scan_token(token);
         ws.search.invalidate_stale_navigation(token);
         let top_line = term.topmost_line().0;
         let bottom_line = term.bottommost_line().0;
@@ -1527,7 +1536,9 @@ impl App {
                 // viewport the user is looking at rather than from where Search
                 // opened.
                 Self::anchor_search_to_viewport(ws);
+                let anchor = ws.search.anchor;
                 ws.search.note_edit(std::time::Instant::now());
+                ws.search.anchor = anchor;
             }
             kettle_render::SearchControl::Invert => {
                 ws.search.invert = !ws.search.invert;
@@ -1539,10 +1550,10 @@ impl App {
                 // Invert only changes which way Enter steps. A later search
                 // starts from the matching edge of the viewport; the match on
                 // screen stays.
-                Self::anchor_search_to_viewport(ws);
                 if ws.search.focused.is_none() {
                     ws.search.note_edit(std::time::Instant::now());
                 }
+                Self::anchor_search_to_viewport(ws);
             }
             kettle_render::SearchControl::Close => self.close_search(ws),
         }
@@ -1577,11 +1588,15 @@ impl App {
         let geometry = kettle_render::search_bar_geometry(
             width as f32,
             height as f32,
-            renderer.cell_w,
+            renderer.overlay_text_cell_width(),
             renderer.cell_h,
             &self.ui_text,
         );
-        let columns = kettle_render::search_bar_columns(geometry.editor.2, renderer.cell_w).max(1);
+        let columns = kettle_render::search_bar_columns(
+            geometry.editor.2,
+            renderer.overlay_text_cell_width(),
+        )
+        .max(1);
         ws.search
             .editor
             .ensure_cursor_visible(columns.saturating_sub(2));
@@ -1599,7 +1614,7 @@ impl App {
         Some(kettle_render::search_bar_geometry(
             width as f32,
             height as f32,
-            renderer.cell_w,
+            renderer.overlay_text_cell_width(),
             renderer.cell_h,
             &self.ui_text,
         ))
@@ -1670,7 +1685,10 @@ impl App {
         x: f32,
         geometry: kettle_render::SearchBarGeometry,
     ) -> crate::search_input::QueryPoint {
-        let cell_width = ws.renderer.as_ref().map_or(8.0, |renderer| renderer.cell_w);
+        let cell_width = ws
+            .renderer
+            .as_ref()
+            .map_or(8.0, |renderer| renderer.overlay_text_cell_width());
         let by_cells =
             crate::search_input::QueryPoint::Column(crate::search_input::pointer_query_column(
                 ws.search.editor.horizontal_scroll(),
@@ -1696,7 +1714,10 @@ impl App {
         x: f32,
         geometry: kettle_render::SearchBarGeometry,
     ) -> crate::search_input::QueryPoint {
-        let cell_width = ws.renderer.as_ref().map_or(8.0, |renderer| renderer.cell_w);
+        let cell_width = ws
+            .renderer
+            .as_ref()
+            .map_or(8.0, |renderer| renderer.overlay_text_cell_width());
         let by_cells =
             crate::search_input::QueryPoint::Column(crate::search_input::pointer_query_column(
                 ws.search.editor.horizontal_scroll(),
@@ -1731,8 +1752,9 @@ impl App {
         // from the left edge would pick the wrong end; it always maps through
         // the painted glyphs, the nearest of which is the right end to take.
         renderer.search_editor_rtl()
-            || (x >= geometry.editor.0 + renderer.cell_w * 0.5
-                && x <= geometry.editor.0 + geometry.editor.2 - renderer.cell_w * 0.5)
+            || (x >= geometry.editor.0 + renderer.overlay_text_cell_width() * 0.5
+                && x <= geometry.editor.0 + geometry.editor.2
+                    - renderer.overlay_text_cell_width() * 0.5)
     }
 
     /// End a button press: activate the button if the pointer is still over

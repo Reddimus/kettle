@@ -24,7 +24,8 @@ nonisolated(unsafe) var stopRequested: sig_atomic_t = 0
 signal(SIGTERM) { _ in stopRequested = 1 }
 
 let args = CommandLine.arguments
-guard args.count > 5, args[4] == "--", let timeout = Double(args[3]) else {
+guard args.count > 5, args[4] == "--", let timeout = Double(args[3]),
+      timeout.isFinite, timeout > 0, timeout <= 86_400 else {
     FileHandle.standardError.write("usage: launch OUT_JSON STAMP_FILE TIMEOUT -- ARGV...\n".data(using: .utf8)!)
     exit(2)
 }
@@ -39,6 +40,8 @@ guard parent != 1 else { exit(3) }
 var pid: pid_t = 0
 let cargs = argv.map { strdup($0) } + [nil]
 let started = now()
+let (initialDeadline, deadlineOverflow) = started.addingReportingOverflow(UInt64(timeout * 1e9))
+guard !deadlineOverflow else { exit(2) }
 let spawned = posix_spawn(&pid, argv[0], nil, nil, cargs, environ)
 guard spawned == 0 else {
     FileHandle.standardError.write("spawn failed: \(spawned)\n".data(using: .utf8)!)
@@ -101,7 +104,7 @@ func serviceObserver() {
 }
 var windowAt: UInt64?, stampSeenAt: UInt64?, exitedAt: UInt64?
 var status: Int32 = 0
-var deadline = started + UInt64(timeout * 1e9)
+var deadline = initialDeadline
 var stopped = false
 while now() < deadline {
     serviceObserver()

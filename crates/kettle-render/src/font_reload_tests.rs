@@ -55,3 +55,20 @@ fn a_font_reload_reshapes_the_preview_lanes() {
         reload.contains("self.lane_texts.values_mut().for_each(media_lane::LaneText::invalidate);")
     );
 }
+
+#[test]
+fn a_font_reload_invalidates_both_overflow_arrow_labels() {
+    let source = production_source();
+    let reload = source
+        .split("if self.chrome_style_key != k {")
+        .nth(1)
+        .unwrap()
+        .split("// Ensure one text buffer per pane.")
+        .next()
+        .unwrap();
+    assert!(
+        reload.contains("self.scroll_left_text.clear();")
+            && reload.contains("self.scroll_right_text.clear();"),
+        "overflow arrows retain their old font attributes"
+    );
+}

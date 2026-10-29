@@ -224,13 +224,21 @@ pub fn process_start_token(pid: u32) -> Option<u64> {
 /// unavailable token on either side means "cannot tell", which stays with the
 /// historical bare-pid answer: never prune a record that may still be live.
 pub fn owner_alive(pid: u32, start_token: Option<u64>) -> bool {
+    owner_alive_with(pid, start_token, crate::process::inspect)
+}
+
+fn owner_alive_with(
+    pid: u32,
+    start_token: Option<u64>,
+    inspect: impl FnOnce(u32) -> Result<crate::process::ProcessSnapshot, crate::process::InspectError>,
+) -> bool {
     if !pid_alive(pid) {
         return false;
     }
-    match (start_token, process_start_token(pid)) {
-        (Some(recorded), Some(current)) => recorded == current,
-        _ => true,
-    }
+    let Ok(snapshot) = inspect(pid) else {
+        return true;
+    };
+    !snapshot.exited && start_token.is_none_or(|recorded| recorded == snapshot.identity.start())
 }
 
 /// RAII claim: the entry file lives as long as the guard. Dropped on window
@@ -707,6 +715,52 @@ mod tests {
         assert!(
             pid_alive(std::process::id()),
             "this process must be recognised as alive"
+        );
+    }
+
+    #[test]
+    fn an_exited_owner_is_dead_even_when_its_start_token_matches() {
+        let mut snapshot = crate::process::current().unwrap();
+        snapshot.exited = true;
+        let pid = snapshot.identity.pid();
+        for token in [Some(snapshot.identity.start()), None] {
+            assert!(
+                !owner_alive_with(pid, token, |_| Ok(snapshot)),
+                "an exited process must not retain its records"
+            );
+        }
+        assert!(
+            owner_alive_with(pid, Some(snapshot.identity.start()), |_| {
+                Err(crate::process::InspectError::Unavailable)
+            }),
+            "unavailable inspection retains the conservative pid fallback"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unreaped_exited_owner_is_dead() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let token = process_start_token(pid).unwrap();
+        child.kill().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !crate::process::inspect(pid).is_ok_and(|snapshot| snapshot.exited) {
+            if std::time::Instant::now() >= deadline {
+                child.wait().unwrap();
+                panic!("killed child did not become an unreaped exited process");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let alive = owner_alive(pid, Some(token));
+        let legacy_alive = owner_alive(pid, None);
+        child.wait().unwrap();
+        assert!(
+            !alive && !legacy_alive,
+            "an unreaped exited owner must not be advertised"
         );
     }
 

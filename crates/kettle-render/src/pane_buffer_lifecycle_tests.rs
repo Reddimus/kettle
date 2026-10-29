@@ -247,6 +247,7 @@ fn cursor_glyph_damage_key_reuses_only_identical_vertices() {
     let mut cursor = super::PendingCursorGlyph {
         x: 10.0,
         y: 20.0,
+        row_baseline: 12.0,
         ch: 'x',
         text: "x".into(),
         emoji_qualified: false,
@@ -305,6 +306,15 @@ fn cursor_glyph_damage_key_reuses_only_identical_vertices() {
             Some(&cursor),
             glyphon::Metrics::new(15.0, 19.0),
             "Kettle Mono",
+        ),
+        initial
+    );
+    cursor.row_baseline += 1.0;
+    assert_ne!(
+        super::cursor_glyph_damage_key(
+            Some(&cursor),
+            glyphon::Metrics::new(14.0, 18.0),
+            "Kettle Mono"
         ),
         initial
     );
@@ -1067,4 +1077,63 @@ fn font_family_is_arc_str_not_string() {
         "Renderer.font_family must not revert to String (per-frame alloc on \
              the 60fps render path)"
     );
+}
+
+#[test]
+fn cursor_glyph_tracks_a_mixed_row_baseline() {
+    use super::*;
+    let mut fonts = FontSystem::new();
+    for face in kettle_config::font::all() {
+        load_bundled_font(&mut fonts, face);
+    }
+    let metrics = Metrics::new(14.0, 20.0);
+    let attrs = Attrs::new().family(Family::Name(kettle_config::font::FAMILY));
+    let mut row = TextBuffer::new(&mut fonts, metrics);
+    row.set_wrap(Wrap::None);
+    row.set_rich_text(
+        [
+            ("x", attrs.clone()),
+            (
+                "B",
+                Attrs::new()
+                    .family(Family::Serif)
+                    .weight(Weight::BOLD)
+                    .metrics(Metrics::new(28.0, 30.0)),
+            ),
+        ],
+        &attrs,
+        Shaping::Advanced,
+        None,
+    );
+    row.shape_until_scroll(&mut fonts, false);
+    let mut cursor = TextBuffer::new(&mut fonts, metrics);
+    cursor.set_text("x", &attrs, Shaping::Advanced, None);
+    cursor.shape_until_scroll(&mut fonts, false);
+    let row_y = row.layout_runs().next().unwrap().line_y;
+    let cursor_y = cursor.layout_runs().next().unwrap().line_y;
+    assert!(
+        (row_y - cursor_y).abs() > 0.1,
+        "fixture must have distinct baselines"
+    );
+    let painted = cursor_glyph_top(100.0, row_y, &cursor) + cursor_y;
+    assert!(
+        (painted - (100.0 + row_y)).abs() < 0.01,
+        "cursor baseline {painted} differs from pane baseline {}",
+        100.0 + row_y
+    );
+}
+
+#[test]
+fn font_invalidation_retains_pane_title_slots_until_reordering() {
+    let mut titles = vec!["A".to_string(), "B".to_string()];
+    super::invalidate_pane_titlebar_texts(&mut titles);
+    assert_eq!(
+        titles.len(),
+        2,
+        "font invalidation discarded slots needed to reorder surviving pane B"
+    );
+    assert!(titles.iter().all(String::is_empty));
+    titles.swap(0, 1);
+    titles.truncate(1);
+    assert_eq!(titles, [""]);
 }

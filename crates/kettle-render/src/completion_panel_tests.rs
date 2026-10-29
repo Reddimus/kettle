@@ -1114,3 +1114,21 @@ fn a_static_completion_card_does_not_force_continuous_text_prepare() {
     frame.ssh_query = Some(String::new());
     assert!(text_overlay_requires_continuous_prepare(&frame));
 }
+
+#[test]
+fn bottom_remote_receipt_keeps_the_complete_safety_warning() {
+    let mut card = receipt(true);
+    card.remote = true;
+    card.prefer_top = false;
+    card.pane_rect = (0.0, 0.0, 296.0, 600.0);
+    card.grid_rect = (8.0, 8.0, 280.0, 576.0);
+    let geometry = media_paste_receipt_geometry(&card, None, (8.0, 16.0), 8.0, 16.0).unwrap();
+    if !geometry.compact {
+        let (_, detail) = media_paste_receipt_text(&card, &geometry, 8.0);
+        assert!(
+            detail.contains("Local path only"),
+            "remote safety warning was truncated: {detail:?}"
+        );
+        assert!(geometry.detail_rect.unwrap().2 >= 8.0 * super::remote_warning_columns(&card.tr));
+    }
+}

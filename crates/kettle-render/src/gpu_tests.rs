@@ -52,6 +52,34 @@ fn gpu_pipelines_compile_and_render_offscreen() {
     }
 }
 
+fn await_test_mapping(
+    rx: std::sync::mpsc::Receiver<std::result::Result<(), wgpu::BufferAsyncError>>,
+) -> Result<()> {
+    rx.recv()
+        .map_err(|e| anyhow!("GPU test map channel closed: {e}"))?
+        .map_err(|e| anyhow!("GPU test buffer mapping failed: {e:?}"))
+}
+
+#[test]
+fn failed_gpu_mapping_is_an_error() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Err(wgpu::BufferAsyncError)).unwrap();
+    assert!(
+        await_test_mapping(rx).is_err(),
+        "GPU mapping failure was reported as a skip"
+    );
+}
+
+#[test]
+fn disconnected_gpu_mapping_is_an_error() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    drop(tx);
+    assert!(
+        await_test_mapping(rx).is_err(),
+        "closed GPU mapping channel was reported as a skip"
+    );
+}
+
 /// A half-opaque quad must contribute half its colour, not a quarter.
 ///
 /// The quad shader returns PREMULTIPLIED colour (`rgb * a`). If the
@@ -67,7 +95,9 @@ fn gpu_pipelines_compile_and_render_offscreen() {
 #[test]
 fn a_half_opaque_quad_blends_at_half_not_a_quarter() {
     let _serialized = gpu_test_guard();
-    let Some(pixel) = pollster::block_on(render_one_translucent_quad()) else {
+    let Some(pixel) =
+        pollster::block_on(render_one_translucent_quad()).expect("GPU fixture renders")
+    else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
     };
@@ -90,11 +120,12 @@ fn a_half_opaque_quad_blends_at_half_not_a_quarter() {
 
 /// Draw one 50%-opaque white quad over black and read the centre pixel
 /// back. `None` when the host has no usable adapter.
-async fn render_one_translucent_quad() -> Option<[u8; 3]> {
+async fn render_one_translucent_quad() -> Result<Option<[u8; 3]>> {
     let cfg = gpu_test_config();
-    let (_instance, adapter) = resolve_headless_adapter(&cfg, "alpha_blend_test")
-        .await
-        .ok()?;
+    let (_instance, adapter) = match resolve_headless_adapter(&cfg, "alpha_blend_test").await {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("kettle-alpha-blend-test"),
@@ -102,7 +133,7 @@ async fn render_one_translucent_quad() -> Option<[u8; 3]> {
             ..Default::default()
         })
         .await
-        .ok()?;
+        .map_err(|e| anyhow!("GPU test device request failed: {e:?}"))?;
 
     // Match the offscreen self-test's format so this measures the same
     // pipeline configuration the renderer builds for a real surface.
@@ -193,15 +224,19 @@ async fn render_one_translucent_quad() -> Option<[u8; 3]> {
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = tx.send(result);
     });
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    rx.recv().ok()?.ok()?;
-    let data = slice.get_mapped_range().ok()?;
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| anyhow!("GPU test poll failed: {e:?}"))?;
+    await_test_mapping(rx)?;
+    let data = slice
+        .get_mapped_range()
+        .map_err(|e| anyhow!("GPU test mapped range failed: {e:?}"))?;
     // Centre row, centre pixel — well inside the quad.
     let offset = (size as usize / 2) * bytes_per_row as usize + (size as usize / 2) * 4;
     let pixel = [data[offset], data[offset + 1], data[offset + 2]];
     drop(data);
     readback.unmap();
-    Some(pixel)
+    Ok(Some(pixel))
 }
 
 /// The starfield's stars must land on the GPU where the CPU put them.
@@ -215,7 +250,9 @@ async fn render_one_translucent_quad() -> Option<[u8; 3]> {
 #[test]
 fn starfield_stars_land_where_the_cpu_placed_them() {
     let _serialized = gpu_test_guard();
-    let Some((luma, expected, side)) = pollster::block_on(render_starfield_frame()) else {
+    let Some((luma, expected, side)) =
+        pollster::block_on(render_starfield_frame()).expect("GPU fixture renders")
+    else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
     };
@@ -289,11 +326,12 @@ fn starfield_stars_land_where_the_cpu_placed_them() {
 /// Render one starfield frame offscreen at a time chosen to have stars on
 /// screen, and return its luminance plane, the CPU's star positions, and
 /// the square side used. `None` when the host has no usable adapter.
-async fn render_starfield_frame() -> Option<(Vec<u8>, Vec<[f32; 2]>, u32)> {
+async fn render_starfield_frame() -> Result<Option<(Vec<u8>, Vec<[f32; 2]>, u32)>> {
     let cfg = gpu_test_config();
-    let (_instance, adapter) = resolve_headless_adapter(&cfg, "starfield_layout_test")
-        .await
-        .ok()?;
+    let (_instance, adapter) = match resolve_headless_adapter(&cfg, "starfield_layout_test").await {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("kettle-starfield-test"),
@@ -301,7 +339,7 @@ async fn render_starfield_frame() -> Option<(Vec<u8>, Vec<[f32; 2]>, u32)> {
             ..Default::default()
         })
         .await
-        .ok()?;
+        .map_err(|e| anyhow!("GPU test device request failed: {e:?}"))?;
 
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     // 256 px keeps the readback small while staying wide enough that a
@@ -387,9 +425,13 @@ async fn render_starfield_frame() -> Option<(Vec<u8>, Vec<[f32; 2]>, u32)> {
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = tx.send(result);
     });
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    rx.recv().ok()?.ok()?;
-    let data = slice.get_mapped_range().ok()?;
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| anyhow!("GPU test poll failed: {e:?}"))?;
+    await_test_mapping(rx)?;
+    let data = slice
+        .get_mapped_range()
+        .map_err(|e| anyhow!("GPU test mapped range failed: {e:?}"))?;
     // Green dominates perceived luminance and every star colour carries
     // it, so it is a fine single-channel proxy for this whole test.
     let mut luma = vec![0_u8; (side * side) as usize];
@@ -407,7 +449,7 @@ async fn render_starfield_frame() -> Option<(Vec<u8>, Vec<[f32; 2]>, u32)> {
         .into_iter()
         .filter(|s| s[0].abs() <= half && s[1].abs() <= half)
         .collect();
-    Some((luma, visible, side))
+    Ok(Some((luma, visible, side)))
 }
 
 /// `PreMultiplied` is the only mode that scales the clear.
@@ -535,6 +577,7 @@ fn a_translucent_background_composites_against_a_premultiplied_clear() {
     let _serialized = gpu_test_guard();
     let Some((premultiplied, straight, _postmultiplied)) =
         pollster::block_on(render_black_quad_over_translucent_clear())
+            .expect("GPU fixture renders")
     else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
@@ -569,6 +612,7 @@ fn postmultiplied_presentation_unpremultiplies_the_completed_scene() {
     let _serialized = gpu_test_guard();
     let Some((premultiplied, _wrong_clear, postmultiplied)) =
         pollster::block_on(render_black_quad_over_translucent_clear())
+            .expect("GPU fixture renders")
     else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
@@ -588,11 +632,13 @@ fn postmultiplied_presentation_unpremultiplies_the_completed_scene() {
 /// in that order, all in straight alpha (the first two converted back on
 /// the CPU, the third by the presentation pass). `None` when the host has
 /// no usable adapter.
-async fn render_black_quad_over_translucent_clear() -> Option<([u8; 4], [u8; 4], [u8; 4])> {
+async fn render_black_quad_over_translucent_clear() -> Result<Option<([u8; 4], [u8; 4], [u8; 4])>> {
     let cfg = gpu_test_config();
-    let (_instance, adapter) = resolve_headless_adapter(&cfg, "premultiplied_clear_test")
-        .await
-        .ok()?;
+    let (_instance, adapter) =
+        match resolve_headless_adapter(&cfg, "premultiplied_clear_test").await {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("kettle-premultiplied-clear-test"),
@@ -600,7 +646,7 @@ async fn render_black_quad_over_translucent_clear() -> Option<([u8; 4], [u8; 4],
             ..Default::default()
         })
         .await
-        .ok()?;
+        .map_err(|e| anyhow!("GPU test device request failed: {e:?}"))?;
 
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let size = 8_u32;
@@ -611,7 +657,7 @@ async fn render_black_quad_over_translucent_clear() -> Option<([u8; 4], [u8; 4],
     };
     let alpha = 0.5;
 
-    let render = |clear: wgpu::Color, postmultiplied: bool| -> Option<[u8; 4]> {
+    let render = |clear: wgpu::Color, postmultiplied: bool| -> Result<[u8; 4]> {
         let mut quads = QuadPipeline::new(&device, format);
         quads.upload(
             &device,
@@ -648,7 +694,7 @@ async fn render_black_quad_over_translucent_clear() -> Option<([u8; 4], [u8; 4],
         if let Some(presentation) = presentation.as_mut()
             && !presentation.ensure_target(&device, size, size)
         {
-            return None;
+            return Err(anyhow!("GPU fixture presentation target allocation failed"));
         }
         let scene_view = presentation
             .as_ref()
@@ -729,9 +775,13 @@ async fn render_black_quad_over_translucent_clear() -> Option<([u8; 4], [u8; 4],
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        rx.recv().ok()?.ok()?;
-        let data = slice.get_mapped_range().ok()?;
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| anyhow!("GPU test poll failed: {e:?}"))?;
+        await_test_mapping(rx)?;
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| anyhow!("GPU test mapped range failed: {e:?}"))?;
         let offset = (size as usize / 2) * bytes_per_row as usize + (size as usize / 2) * 4;
         let texel = [
             data[offset],
@@ -741,7 +791,7 @@ async fn render_black_quad_over_translucent_clear() -> Option<([u8; 4], [u8; 4],
         ];
         drop(data);
         readback.unmap();
-        Some(texel)
+        Ok(texel)
     };
 
     let mut premultiplied = render(
@@ -763,7 +813,7 @@ async fn render_black_quad_over_translucent_clear() -> Option<([u8; 4], [u8; 4],
         false,
     )?;
     unpremultiply_rgba8(&mut straight, true);
-    Some((premultiplied, straight, postmultiplied))
+    Ok(Some((premultiplied, straight, postmultiplied)))
 }
 
 #[test]
@@ -781,7 +831,9 @@ fn pane_osc11_bases_replace_without_opacity_or_color_compounding() {
             color: [0.0, 0.0, 1.0, 0.5],
         },
     ];
-    let Some((left, right)) = pollster::block_on(render_quad_layers(&replace, &[])) else {
+    let Some((left, right)) =
+        pollster::block_on(render_quad_layers(&replace, &[])).expect("GPU fixture renders")
+    else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
     };
@@ -817,6 +869,7 @@ fn wallpaper_darkness_endpoints_are_painted_after_the_wallpaper() {
         },
     ];
     let Some((visible, covered)) = pollster::block_on(render_quad_layers(&wallpaper, &pane_layers))
+        .expect("GPU fixture renders")
     else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
@@ -863,8 +916,10 @@ pub(crate) fn assert_shared_quad_pixels_match_standalone() {
     ];
     for (replace, blend) in [(&bases[..], &[][..]), (&wallpaper[..], &dimmed[..])] {
         let standalone = pollster::block_on(render_quad_layers_with(replace, blend, false))
+            .expect("GPU fixture renders")
             .expect("pixel fixture renders after the headless adapter was available");
         let shared = pollster::block_on(render_quad_layers_with(replace, blend, true))
+            .expect("GPU fixture renders")
             .expect("the adapter that drew the standalone layers draws the shared ones");
         assert_eq!(shared, standalone);
     }
@@ -874,7 +929,7 @@ pub(crate) fn assert_shared_quad_pixels_match_standalone() {
 async fn render_quad_layers(
     replace: &[QuadInstance],
     blend: &[QuadInstance],
-) -> Option<([u8; 4], [u8; 4])> {
+) -> Result<Option<([u8; 4], [u8; 4])>> {
     render_quad_layers_with(replace, blend, false).await
 }
 
@@ -885,18 +940,19 @@ async fn render_quad_layers_with(
     replace: &[QuadInstance],
     blend: &[QuadInstance],
     shared: bool,
-) -> Option<([u8; 4], [u8; 4])> {
+) -> Result<Option<([u8; 4], [u8; 4])>> {
     let cfg = gpu_test_config();
-    let (_instance, adapter) = resolve_headless_adapter(&cfg, "pane_base_layers_test")
-        .await
-        .ok()?;
+    let (_instance, adapter) = match resolve_headless_adapter(&cfg, "pane_base_layers_test").await {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             required_limits: live_device_limits(adapter.limits()),
             ..Default::default()
         })
         .await
-        .ok()?;
+        .map_err(|e| anyhow!("GPU test device request failed: {e:?}"))?;
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (mut replace_pipeline, mut blend_pipeline) = if shared {
         let pipelines = SharedPipelines::new(&device, format);
@@ -982,9 +1038,13 @@ async fn render_quad_layers_with(
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = tx.send(result);
     });
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    rx.recv().ok()?.ok()?;
-    let data = slice.get_mapped_range().ok()?;
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| anyhow!("GPU test poll failed: {e:?}"))?;
+    await_test_mapping(rx)?;
+    let data = slice
+        .get_mapped_range()
+        .map_err(|e| anyhow!("GPU test mapped range failed: {e:?}"))?;
     let sample = |x: usize| {
         let offset = 2 * 256 + x * 4;
         [
@@ -1000,7 +1060,23 @@ async fn render_quad_layers_with(
     readback.unmap();
     unpremultiply_rgba8(&mut left, true);
     unpremultiply_rgba8(&mut right, true);
-    Some((left, right))
+    Ok(Some((left, right)))
+}
+
+fn assert_windows_default_backend(selected: wgpu::Backend, dx12_available: bool) {
+    if dx12_available {
+        assert_eq!(
+            selected,
+            wgpu::Backend::Dx12,
+            "available DX12 must be selected"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "available DX12 must be selected")]
+fn available_dx12_rejects_a_vulkan_default() {
+    assert_windows_default_backend(wgpu::Backend::Vulkan, true);
 }
 
 #[cfg(target_os = "windows")]
@@ -1016,11 +1092,14 @@ fn windows_auto_prefers_dx12_without_preinitializing_vulkan() {
         let (_instance, adapter) = resolve_headless_adapter(&cfg, "windows_auto_policy_test")
             .await
             .expect("resolve default Windows adapter");
-        if adapter.get_info().backend != wgpu::Backend::Dx12 {
-            eprintln!("DX12 hardware unavailable on this Windows host; skipped");
-            return;
-        }
-        assert_eq!(adapter.get_info().backend, wgpu::Backend::Dx12);
+        let selected = adapter.get_info().backend;
+        let dx12 = gpu_instance_for_backends(wgpu::Backends::DX12);
+        let dx12_available = request_direct_adapter(&dx12, None, &cfg, cfg.gpu_force_software)
+            .await
+            .is_ok_and(|adapter| {
+                cfg.gpu_force_software || adapter.get_info().device_type != wgpu::DeviceType::Cpu
+            });
+        assert_windows_default_backend(selected, dx12_available);
 
         let unavailable = Config {
             gpu_backend: kettle_config::GpuBackend::Metal,
@@ -1030,7 +1109,7 @@ fn windows_auto_prefers_dx12_without_preinitializing_vulkan() {
             resolve_headless_adapter(&unavailable, "windows_backend_fallback_test")
                 .await
                 .expect("fall back from unavailable Metal on Windows");
-        assert_eq!(adapter.get_info().backend, wgpu::Backend::Dx12);
+        assert_windows_default_backend(adapter.get_info().backend, dx12_available);
     });
 }
 
@@ -1291,6 +1370,31 @@ type BlinkFrames = (
 );
 
 fn grid_prompt_blink_frames() -> Result<Option<BlinkFrames>> {
+    grid_prompt_blink_frames_for(wgpu::TextureFormat::Rgba8UnormSrgb, None)
+}
+
+#[test]
+fn mask_foreground_roundtrips_on_a_non_srgb_target() {
+    let _serialized = gpu_test_guard();
+    let Some((off, _, _, _)) = grid_prompt_blink_frames_for(
+        wgpu::TextureFormat::Rgba8Unorm,
+        Some(Rgb::new(128, 128, 128)),
+    )
+    .expect("non-sRGB glyph fixture renders") else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let peak = off.pixels().map(|pixel| pixel[0]).max().unwrap();
+    assert!(
+        (125..=131).contains(&peak),
+        "mask foreground peak was {peak}, expected 128"
+    );
+}
+
+fn grid_prompt_blink_frames_for(
+    format: wgpu::TextureFormat,
+    foreground: Option<Rgb>,
+) -> Result<Option<BlinkFrames>> {
     pollster::block_on(async {
         let cfg = gpu_test_config();
         let (_instance, adapter) = match resolve_headless_adapter(&cfg, "grid_prompt_blink").await {
@@ -1305,7 +1409,6 @@ fn grid_prompt_blink_frames() -> Result<Option<BlinkFrames>> {
             })
             .await
             .map_err(|e| anyhow!("device: {e:?}"))?;
-        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let theme = cfg.theme;
         let family = cfg.font_family.clone();
         let mut font_system = FontSystem::new();
@@ -1319,13 +1422,17 @@ fn grid_prompt_blink_frames() -> Result<Option<BlinkFrames>> {
         let metrics = Metrics::new(24.0, 30.0);
         let mut measure = TextBuffer::new(&mut font_system, metrics);
         let (cw, ch) = measure_cell(&mut font_system, &mut measure, &family, metrics);
-        let fixtures = [
-            "➜  ~",
-            "$ ~/project",
-            "λ ~/src",
-            "❯ git status",
-            "PS C:\\Users\\dev>",
-        ];
+        let fixtures = if foreground.is_some() {
+            ["MMMM", "HHHH", "WWWW", "####", "@@@@"]
+        } else {
+            [
+                "➜  ~",
+                "$ ~/project",
+                "λ ~/src",
+                "❯ git status",
+                "PS C:\\Users\\dev>",
+            ]
+        };
         let max_cols = fixtures
             .iter()
             .map(|s| s.chars().count())
@@ -1368,7 +1475,8 @@ fn grid_prompt_blink_frames() -> Result<Option<BlinkFrames>> {
 
         let mut instances = Vec::new();
         let mut starts = Vec::new();
-        let default_color = GColor::rgb(theme.foreground.r, theme.foreground.g, theme.foreground.b);
+        let foreground = foreground.unwrap_or(theme.foreground);
+        let default_color = GColor::rgb(foreground.r, foreground.g, foreground.b);
         // Same cell-lock emit the live renderer + screenshot path use.
         emit_cell_locked_glyphs(
             &mut instances,
@@ -1518,7 +1626,9 @@ fn render_grid_prompt_frame(
     slice.map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| anyhow!("GPU test poll failed: {e:?}"))?;
     rx.recv()
         .map_err(|_| anyhow!("map channel closed"))?
         .map_err(|e| anyhow!("buffer map failed: {e:?}"))?;
@@ -1639,7 +1749,9 @@ fn srgb_quad_roundtrip_sample() -> Result<Option<[u8; 3]>> {
         slice.map_async(wgpu::MapMode::Read, move |_| {
             done_set.store(true, Ordering::SeqCst);
         });
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| anyhow!("GPU test poll failed: {e:?}"))?;
         if !done.load(Ordering::SeqCst) {
             return Err(anyhow!("srgb readback timed out"));
         }

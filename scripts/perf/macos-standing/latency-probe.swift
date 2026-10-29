@@ -86,6 +86,8 @@ struct PixelRect: Equatable {
     }
 }
 
+func measurementRegion(_ block: PixelRect) -> PixelRect { block }
+
 /// Mean luma of `rect` and the share of its pixels above `threshold`.
 func regionStats(_ frame: Frame, _ rect: PixelRect, threshold: Double) -> (mean: Double, above: Double) {
     var sum = 0.0, above = 0
@@ -291,7 +293,7 @@ func selfTest() -> Int32 {
     check((try? calibrate(on: [200, 120], off: [20, 21])) == nil, "an unstable state aborts")
 
     let cal = try! calibrate(on: [200], off: [20])
-    let region = block.inset(fraction: 0.25)
+    let region = measurementRegion(block)
     check(abs(regionStats(on, region, threshold: cal.threshold).above - 1) < 1e-9, "on region all above")
     check(regionStats(off, region, threshold: cal.threshold).above == 0, "off region all below")
     var half = off
@@ -302,6 +304,13 @@ func selfTest() -> Int32 {
     check(flippedShare(above: 0, targetOn: false, calibration: cal) == 1, "off target counts pixels below")
     let dark = Calibration(on: 20, off: 200)
     check(flippedShare(above: 0, targetOn: true, calibration: dark) == 1, "light themes invert the sides")
+
+    var threeRows = off
+    paint(&threeRows, PixelRect(x: block.x, y: block.y, width: block.width, height: block.height * 3 / 4), 230)
+    let partialShare = flippedShare(above: regionStats(threeRows, measurementRegion(block),
+        threshold: cal.threshold).above, targetOn: true, calibration: cal)
+    check(pickSample([Observed(displayNs: 1_050, arrivalNs: 1_060, share: partialShare)],
+        postNs: 1_000, censorNs: 500).censored, "three of four rows must not complete a block")
 
     let frames = [Observed(displayNs: 900, arrivalNs: 950, share: 1),
                   Observed(displayNs: 1_016, arrivalNs: 1_020, share: 0.5),
@@ -848,7 +857,7 @@ func run(_ options: Options) async throws -> [String: Any] {
     watched = boxPt.offsetBy(dx: screen.minX, dy: screen.minY)
     config.width = box!.width + 2 * margin
     config.height = box!.height + 2 * margin
-    capture.measure(region: PixelRect(x: margin, y: margin, width: box!.width, height: box!.height).inset(fraction: 0.25),
+    capture.measure(region: measurementRegion(PixelRect(x: margin, y: margin, width: box!.width, height: box!.height)),
                     calibration: calibration)
     try await stream.updateConfiguration(config)
     try await Task.sleep(nanoseconds: 300_000_000)

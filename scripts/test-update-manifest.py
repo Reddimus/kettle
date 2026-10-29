@@ -338,9 +338,10 @@ class ManifestTests(unittest.TestCase):
             release_workflow,
         )
         self.assertGreaterEqual(release_workflow.count("cmp -s"), 4)
+        # pretest, package, finalize, publish and promote each check out once.
         self.assertEqual(
             release_workflow.count("persist-credentials: false"),
-            4,
+            5,
         )
         finalize = release_workflow.split("\n  finalize:\n", 1)[1].split(
             "\n  publish:\n", 1
@@ -353,6 +354,21 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("contents: write", publish)
         self.assertIn("GH_TOKEN:", publish)
         self.assertNotIn("KETTLE_UPDATE_SIGNING_KEY_PEM", publish)
+        promote = release_workflow.split("\n  promote:\n", 1)[1].split(
+            "\n  upgrade:\n", 1
+        )[0]
+        # One promotion at a time across tags, never cancelled midway, and
+        # only to a release newer than the current latest.
+        self.assertIn("group: release-promote", promote)
+        self.assertIn("cancel-in-progress: false", promote)
+        self.assertIn("needs: [publish]", promote)
+        self.assertIn("contents: write", promote)
+        self.assertIn('--require "$tag"', promote)
+        self.assertIn('--above "$current"', promote)
+        self.assertNotIn("KETTLE_UPDATE_SIGNING_KEY_PEM", promote)
+        upgrade = release_workflow.split("\n  upgrade:\n", 1)[1]
+        # The upgrade checks expect latest to be this tag already.
+        self.assertIn("needs: [publish, promote]", upgrade)
         package = release_workflow.split("\n  package:\n", 1)[1].split(
             "\n  finalize:\n", 1
         )[0]

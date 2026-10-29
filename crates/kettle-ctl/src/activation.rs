@@ -246,23 +246,34 @@ impl BuildKey {
 /// an update. Shared per-user state that two primaries would fight over, such
 /// as the restorable session, waits until they have exited.
 #[derive(Clone, Debug, Default)]
-pub struct OtherBuilds(Arc<Mutex<Vec<PathBuf>>>);
+pub struct OtherBuilds(Arc<Mutex<OtherBuildState>>);
+
+#[derive(Debug, Default)]
+struct OtherBuildState {
+    locks: Vec<PathBuf>,
+    // An incomplete scan cannot authorize shared-state writes.
+    rescan: Option<ActivationPaths>,
+}
 
 impl OtherBuilds {
     /// Whether any of them is still running. Checks each lock again, and
-    /// forgets a build once its lock is free.
+    /// forgets a build once its lock is free. Repeats incomplete scans before
+    /// allowing shared-state writes.
     pub fn running(&self) -> bool {
-        let mut locks = self
+        let mut state = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        locks.retain(|lock| {
+        if let Some(paths) = &state.rescan {
+            *state = scan_other_builds(paths);
+        }
+        state.locks.retain(|lock| {
             !matches!(
                 kettle_state::ExclusiveFileLock::try_acquire(lock),
                 Ok(Some(_))
             )
         });
-        !locks.is_empty()
+        state.rescan.is_some() || !state.locks.is_empty()
     }
 }
 
@@ -382,7 +393,9 @@ fn try_become_primary_with(
     }))
 }
 
-/// How many registry entries one sweep reads, like the registry walk's cap.
+/// How many other builds' lock files one sweep handles. Every name in the
+/// private registry directory is read, but only lock files count, so other
+/// entries cannot keep a sweep from ever completing.
 const MAX_SWEEP_ENTRIES: usize = 256;
 
 /// Removes the activation files of builds that are no longer running and
@@ -397,11 +410,30 @@ const MAX_SWEEP_ENTRIES: usize = 256;
 /// held; a launcher that opened it just before then finds it retired and
 /// retries.
 fn sweep_other_builds(paths: &ActivationPaths) -> OtherBuilds {
-    let Ok(entries) = std::fs::read_dir(&paths.base) else {
-        return OtherBuilds::default();
+    OtherBuilds(Arc::new(Mutex::new(scan_other_builds(paths))))
+}
+
+fn scan_other_builds(paths: &ActivationPaths) -> OtherBuildState {
+    let mut state = OtherBuildState {
+        locks: Vec::new(),
+        rescan: Some(paths.clone()),
     };
-    let mut running = Vec::new();
-    for entry in entries.take(MAX_SWEEP_ENTRIES).flatten() {
+    let entries = match std::fs::read_dir(&paths.base) {
+        Ok(entries) => entries,
+        // No activation directory: no other build ever started here.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            state.rescan = None;
+            return state;
+        }
+        Err(_) => return state,
+    };
+    let mut incomplete = false;
+    let mut locks_seen = 0;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            incomplete = true;
+            continue;
+        };
         let name = entry.file_name();
         let Some(build) = name.to_str().and_then(other_build_of_lock) else {
             continue;
@@ -409,13 +441,23 @@ fn sweep_other_builds(paths: &ActivationPaths) -> OtherBuilds {
         if build == Some(paths.build) {
             continue;
         }
+        locks_seen += 1;
+        if locks_seen > MAX_SWEEP_ENTRIES {
+            incomplete = true;
+            break;
+        }
         let lock_path = entry.path();
         // Only regular files: never follow a symlink someone left here.
-        if !std::fs::symlink_metadata(&lock_path).is_ok_and(|meta| meta.file_type().is_file()) {
-            continue;
+        match std::fs::symlink_metadata(&lock_path) {
+            Ok(meta) if meta.file_type().is_file() => {}
+            Ok(_) => continue,
+            Err(_) => {
+                incomplete = true;
+                continue;
+            }
         }
         match kettle_state::ExclusiveFileLock::try_acquire(&lock_path) {
-            Ok(None) => running.push(lock_path),
+            Ok(None) => state.locks.push(lock_path),
             Ok(Some(lock)) => {
                 #[cfg(unix)]
                 for endpoint in other_build_endpoints(paths, build) {
@@ -426,11 +468,15 @@ fn sweep_other_builds(paths: &ActivationPaths) -> OtherBuilds {
                 let _ = lock.remove(&lock_path);
             }
             Err(error) => {
+                incomplete = true;
                 log::debug!("activation sweep skipped {}: {error}", lock_path.display());
             }
         }
     }
-    OtherBuilds(Arc::new(Mutex::new(running)))
+    if !incomplete {
+        state.rescan = None;
+    }
+    state
 }
 
 /// The build an activation lock file belongs to: `Some(None)` for the
@@ -450,15 +496,17 @@ fn other_build_endpoints(paths: &ActivationPaths, build: Option<BuildKey>) -> [P
     match build {
         Some(build) => [
             paths.base.join(keyed_socket_name(build)),
-            paths
-                .private_temp
-                .join(fallback_socket_name(&paths.base, Some(build))),
+            length_safe_unix_socket_path(
+                &fallback_socket_name(&paths.base, Some(build)),
+                &paths.private_temp,
+            ),
         ],
         None => [
             paths.base.join("activation.sock"),
-            paths
-                .private_temp
-                .join(fallback_socket_name(&paths.base, None)),
+            length_safe_unix_socket_path(
+                &fallback_socket_name(&paths.base, None),
+                &paths.private_temp,
+            ),
         ],
     }
 }
@@ -1518,6 +1566,79 @@ mod tests {
         assert_eq!(paths.endpoint_dir.as_deref(), endpoint.parent());
     }
 
+    /// No activation directory means no other build has started, not an
+    /// incomplete scan: shared-state writes must not wait on it forever.
+    #[test]
+    fn a_missing_activation_directory_means_no_other_build() {
+        let dir = kettle_test_support::private_tempdir("kettle-activation-missing-");
+        let paths = activation_paths(&dir.join("absent"), build('a'));
+        assert!(!sweep_other_builds(&paths).running());
+    }
+
+    /// Other entries in the registry directory do not count against the
+    /// sweep's bound, so many of them cannot keep it from completing.
+    #[test]
+    fn many_other_entries_do_not_keep_a_sweep_incomplete() {
+        let dir = kettle_test_support::private_tempdir("kettle-activation-crowded-");
+        ensure_private_dir(&dir).unwrap();
+        for index in 0..MAX_SWEEP_ENTRIES + 44 {
+            std::fs::write(dir.join(format!("{index}.json")), b"{}").unwrap();
+        }
+        // A build that has exited leaves its lock file free.
+        drop(
+            kettle_state::ExclusiveFileLock::try_acquire(&dir.join(keyed_lock_name(build('b'))))
+                .unwrap()
+                .unwrap(),
+        );
+        let paths = activation_paths(&dir, build('a'));
+        assert!(!sweep_other_builds(&paths).running());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_candidates_include_the_second_temp_fallback() {
+        let base = PathBuf::from("/tmp").join("registry-component".repeat(8));
+        let private_temp = PathBuf::from("/tmp").join("temp-component".repeat(12));
+        let paths = activation_paths_with_temp(&base, &private_temp, build('a'));
+        for build in [Some(build('b')), None] {
+            let endpoint =
+                length_safe_unix_socket_path(&fallback_socket_name(&base, build), &private_temp);
+            assert!(
+                other_build_endpoints(&paths, build).contains(&endpoint),
+                "cleanup must include the endpoint in the second temp fallback"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweeping_removes_sockets_in_the_second_temp_fallback() {
+        let dir = kettle_test_support::private_tempdir("kettle-activation-second-fallback-");
+        let base = dir.join("registry-component".repeat(8));
+        let private_temp = dir.join("temp-component".repeat(12));
+        ensure_private_dir(&base).unwrap();
+        let paths = activation_paths_with_temp(&base, &private_temp, build('a'));
+        for build in [Some(build('b')), None] {
+            let name = build.map_or_else(
+                || "activation.lock".to_string(),
+                |build| format!("activation-{}.lock", build.as_str()),
+            );
+            drop(
+                kettle_state::ExclusiveFileLock::try_acquire(&base.join(name))
+                    .unwrap()
+                    .unwrap(),
+            );
+            let endpoint =
+                length_safe_unix_socket_path(&fallback_socket_name(&base, build), &private_temp);
+            ensure_private_dir(endpoint.parent().unwrap()).unwrap();
+            drop(std::os::unix::net::UnixListener::bind(&endpoint).unwrap());
+            sweep_other_builds(&paths);
+            let remains = endpoint.exists();
+            let _ = std::fs::remove_file(&endpoint);
+            assert!(!remains, "the second-fallback socket must be swept");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn activation_measures_non_utf8_paths_after_lossy_conversion() {
@@ -1553,6 +1674,35 @@ mod tests {
 
     fn build(hex_digit: char) -> BuildKey {
         BuildKey::new(&hex_digit.to_string().repeat(16)).unwrap()
+    }
+
+    /// A lock file the sweep cannot open leaves the sweep incomplete: it may
+    /// belong to a running build, so shared state waits until a rescan can
+    /// settle it.
+    #[cfg(unix)]
+    #[test]
+    fn an_incomplete_sweep_blocks_shared_state_until_it_can_finish() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: root opens any file");
+            return;
+        }
+        let dir = kettle_test_support::private_tempdir("kettle-activation-unreadable-");
+        let paths = activation_paths(dir.path(), build('a'));
+        let lock = dir.join(keyed_lock_name(build('b')));
+        std::fs::write(&lock, b"").unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let others = sweep_other_builds(&paths);
+        assert!(
+            others.running(),
+            "an incomplete sweep cannot authorize shared-state writes"
+        );
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            !others.running(),
+            "a complete rescan establishes that no other builds run"
+        );
     }
 
     #[test]

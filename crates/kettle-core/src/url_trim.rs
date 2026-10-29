@@ -29,6 +29,14 @@
 /// single-byte ASCII, and UTF-8 continuation bytes never collide with
 /// any of them, so a multi-byte char inside a URL is left untouched).
 pub fn trim_trailing(s: &str) -> &str {
+    trim_trailing_inner(s, false)
+}
+
+pub(crate) fn trim_path_trailing(s: &str) -> &str {
+    trim_trailing_inner(s, true)
+}
+
+fn trim_trailing_inner(s: &str, path: bool) -> &str {
     let bytes = s.as_bytes();
     let mut opens = [0usize; 3];
     let mut closes = [0usize; 3];
@@ -45,6 +53,17 @@ pub fn trim_trailing(s: &str) -> &str {
     }
     let mut end = bytes.len();
     while end > 0 {
+        if path
+            && [".", ".."].iter().any(|part| {
+                let prefix = &s[..end];
+                prefix == *part
+                    || prefix
+                        .strip_suffix(part)
+                        .is_some_and(|base| base.ends_with(['/', '\\']))
+            })
+        {
+            break;
+        }
         let last = bytes[end - 1];
         let strip = match last {
             // A backtick is never part of a URL (it must be percent-encoded),

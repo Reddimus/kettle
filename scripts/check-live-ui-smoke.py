@@ -257,16 +257,16 @@ class StableProcessHandle:
             if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
                 raise RuntimeError("native Linux cleanup requires Python pidfd support")
             stat_path = Path(f"/proc/{pid}/stat")
-            before = stat_path.read_text(encoding="ascii")
+            before = stat_path.read_bytes()
             pidfd = os.pidfd_open(pid, 0)
             try:
-                after = stat_path.read_text(encoding="ascii")
+                after = stat_path.read_bytes()
 
-                def start_time(value: str) -> int:
+                def start_time(value: bytes) -> int:
                     # Field 2 (`comm`) is parenthesized and may contain spaces.
                     # The remainder begins at field 3, making starttime field 22
                     # index 19 after the final close parenthesis.
-                    fields = value.rsplit(")", 1)[1].split()
+                    fields = value.rsplit(b")", 1)[1].split()
                     if len(fields) < 20:
                         raise ValueError("short /proc stat record")
                     return int(fields[19])
@@ -419,8 +419,8 @@ def _open_stable_process_if_present(
 
 def _linux_process_parent(pid: int) -> int:
     """Read one Linux parent id without being confused by spaces in comm."""
-    value = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-    fields = value.rsplit(")", 1)[1].split()
+    value = Path(f"/proc/{pid}/stat").read_bytes()
+    fields = value.rsplit(b")", 1)[1].split()
     if len(fields) < 2:
         raise RuntimeError(f"short /proc stat record for {pid}")
     return int(fields[1])
@@ -2095,9 +2095,17 @@ def _repository_source_identity_impl(
     if status_bytes and status_last_byte != 0:
         raise RuntimeError("git returned a truncated repository status")
 
-    tracked = git_path_list(["ls-files", "-z", "--cached"])
+    tracked = git_path_list(["ls-files", "-v", "-z", "--cached"])
     tracked_paths: Set[bytes] = set()
-    for raw_path in tracked.split(b"\0"):
+    for entry in tracked.split(b"\0"):
+        if not entry:
+            continue
+        tag, raw_path = bytes(entry[:1]), bytes(entry[2:])
+        if tag.islower() or tag == b"S":
+            raise RuntimeError(
+                "repository index flag suppresses worktree inspection: "
+                + os.fsdecode(raw_path)
+            )
         if raw_path and bytes(raw_path) not in tracked_paths:
             tracked_path = bytes(raw_path)
             tracked_paths.add(tracked_path)
@@ -2584,7 +2592,7 @@ def _regular_file_digest(
     if count_entry:
         budget.add_entry(path)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     fd = os.open(path, flags)
     digest = hashlib.sha256()
     read_bytes = 0
@@ -2621,7 +2629,7 @@ def _regular_file_digest_at(
 ) -> Tuple[int, str]:
     """Hash a file relative to a retained parent directory descriptor."""
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     fd = os.open(name, flags, dir_fd=parent_fd)
     digest = hashlib.sha256()
     read_bytes = 0
@@ -2669,7 +2677,7 @@ def read_bounded_regular_text(path: Path, *, max_bytes: int = 4096) -> str:
     ):
         raise RuntimeError(f"expected a small regular identity record: {path}")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     fd = os.open(path, flags)
     try:
         opened = os.fstat(fd)
@@ -3483,6 +3491,12 @@ def shell_quote(text: str, *, windows: Optional[bool] = None) -> str:
     return "'" + text.replace("'", "'\"'\"'") + "'"
 
 
+def nvim_data_directory_name(*, windows: Optional[bool] = None) -> str:
+    if windows is None:
+        windows = platform.system() == "Windows"
+    return "nvim-data" if windows else "nvim"
+
+
 @dataclass(frozen=True)
 class AgentShellTarget:
     """The shell exercised by the agent/TUI live-window smoke.
@@ -4142,7 +4156,7 @@ class AgentShellTarget:
             )
 
         data_source = Path(self.nvim_data_source()).expanduser()
-        data_target = root / "data" / "nvim"
+        data_target = root / "data" / nvim_data_directory_name(windows=self.powershell)
         data_target.mkdir(mode=0o700)
         for name in ("lazy", "site"):
             source = data_source / name
@@ -4160,7 +4174,8 @@ class AgentShellTarget:
         if self.mode != "wsl":
             root = self.validate_native_sandbox_path(sandbox_path)
             return regular_tree_identity(
-                root / "data" / "nvim" / "lazy" / "lazyvcs.nvim"
+                root / "data" / nvim_data_directory_name(windows=self.powershell)
+                / "lazy" / "lazyvcs.nvim"
             )
         self.validate_wsl_sandbox_path(sandbox_path)
         plugin = posixpath.join(
@@ -4197,7 +4212,8 @@ class AgentShellTarget:
         if self.mode != "wsl":
             root = self.validate_native_sandbox_path(sandbox_path)
             plugin_root = (
-                root / "data" / "nvim" / "lazy" / "lazyvcs.nvim"
+                root / "data" / nvim_data_directory_name(windows=self.powershell)
+                / "lazy" / "lazyvcs.nvim"
             ).resolve(strict=True)
             record = root / "run" / "lazyvcs-loaded-source"
             lines = read_bounded_regular_text(record).splitlines()
@@ -4224,7 +4240,7 @@ root=sys.argv[1]
 record=os.path.join(root,'run','lazyvcs-loaded-source')
 before=os.lstat(record)
 if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_size>4096: raise RuntimeError('invalid LazyVCS module record')
-fd=os.open(record,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+fd=os.open(record,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0))
 try:
   opened=os.fstat(fd)
   if not stat.S_ISREG(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(before.st_dev,before.st_ino): raise RuntimeError('LazyVCS module record changed while opening')
@@ -4267,7 +4283,7 @@ while time.monotonic()<deadline:
   except FileNotFoundError:
     time.sleep(0.05); continue
   if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_size>4096: raise RuntimeError('invalid sandbox marker')
-  fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+  fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0))
   try:
     opened=os.fstat(fd)
     if not stat.S_ISREG(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(before.st_dev,before.st_ino): raise RuntimeError('sandbox marker changed while opening')
@@ -4327,7 +4343,7 @@ raise RuntimeError('timed out waiting for sandbox marker')
             except FileNotFoundError:
                 time.sleep(0.05)
                 continue
-            if value != expected + os.linesep:
+            if value != expected + "\n":
                 raise RuntimeError(
                     f"unexpected configured Neovim readiness marker: {marker}"
                 )
@@ -4369,7 +4385,7 @@ def file_digest(path,count_entry=True):
   before=os.lstat(path)
   if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode): raise RuntimeError(f'identity only accepts a regular file: {{path}}')
   if count_entry: add_entry(path)
-  flags=os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)
+  flags=os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0)
   fd=os.open(path,flags)
   h=hashlib.sha256(); read_bytes=0
   try:
@@ -4593,7 +4609,7 @@ print(json.dumps(result,sort_keys=True))
             "    if scope=='pidfile':\n"
             "      record=root+'/run/nvim.pid'\n"
             "      try:\n"
-            "        flags=os.O_RDONLY|os.O_NONBLOCK|getattr(os,'O_NOFOLLOW',0)\n"
+            "        flags=os.O_RDONLY|getattr(os,'O_NONBLOCK',0)|getattr(os,'O_NOFOLLOW',0)\n"
             "        fd=os.open(record,flags)\n"
             "        try:\n"
             "          meta=os.fstat(fd)\n"
@@ -4719,7 +4735,7 @@ def exact_env_fds():
       pid=int(envpath.split('/')[2])
       if os.stat(os.path.dirname(envpath)).st_uid!=os.geteuid(): continue
       fd=os.pidfd_open(pid,0)
-      if not alive(fd): os.close(fd); continue
+      if not alive(fd): continue
       with open(envpath,'rb') as stream: data=stream.read(4*1024*1024+1)
       if len(data)>4*1024*1024: raise RuntimeError('oversized fixture environment')
       env=data.split(b'\\0')
@@ -5248,14 +5264,16 @@ finally:
                     for pid, parent in parents.items():
                         children.setdefault(parent, []).append(pid)
                     descendants: Set[int] = set()
+                    descendant_order: List[int] = []
                     pending = list(anchor_pids)
                     while pending:
                         parent = pending.pop()
                         for pid in children.get(parent, []):
                             if pid not in descendants:
                                 descendants.add(pid)
+                                descendant_order.append(pid)
                                 pending.append(pid)
-                    for pid in descendants:
+                    for pid in descendant_order:
                         remaining_before(
                             deadline, "retaining sandbox descendants", cap=8
                         )
@@ -5270,6 +5288,21 @@ finally:
                         if platform.system() == "Linux":
                             current_parent = _linux_process_parent(pid)
                             if current_parent not in anchor_pids | descendants:
+                                continue
+                        if platform.system() == "Darwin":
+                            current_parents, _owned = cls._native_process_snapshot(
+                                deadline=deadline
+                            )
+                            parent_handle = next(
+                                (ancestor for ancestor in retained.values()
+                                 if ancestor.pid == current_parents.get(pid)),
+                                None,
+                            )
+                            if (
+                                parent_handle is None
+                                or not parent_handle.matches_current()
+                                or not handle.matches_current()
+                            ):
                                 continue
                         if handle.identity not in retained:
                             retained[handle.identity] = handle
@@ -5606,7 +5639,7 @@ while True:
     # only while a same-session background process still needs an identity-stable
     # cleanup anchor, then returns the payload's real status.
     members = subprocess.Popen(
-        ["ps", "-axo", "pid="],
+        ["ps", "-axo", "pid=,stat="],
         text=True,
         encoding="ascii",
         errors="replace",
@@ -5618,7 +5651,7 @@ while True:
     if members.returncode == 0:
         for line in output.splitlines():
             fields = line.split()
-            if len(fields) == 1:
+            if len(fields) == 2 and not fields[1].startswith("Z"):
                 try:
                     candidate = int(fields[0])
                     if candidate not in (os.getpid(), members.pid) and os.getsid(candidate) == session:
@@ -6328,18 +6361,21 @@ while True:
     def json_ctl(self, method: str, params: Optional[Dict[str, object]] = None) -> Dict[str, object]:
         return json.loads(self.ctl(method, params=params, raw=True).stdout)
 
-    def read_cells(self) -> Dict[str, object]:
+    def read_cells(self, pane: Optional[int] = None) -> Dict[str, object]:
         """Read the complete visible grid through the bounded control API."""
+        params: Dict[str, object] = {"limit": 1536}
+        if pane is not None:
+            params["pane"] = pane
         for attempt in range(5):
             try:
-                result = self.json_ctl("read_cells", {"limit": 1536})
+                result = self.json_ctl("read_cells", params)
                 cells = list(result.get("cells", []))
                 cursor = result.get("next_cursor")
                 snapshot = result.get("snapshot")
                 while cursor is not None:
                     page = self.json_ctl(
                         "read_cells",
-                        {"cursor": cursor, "limit": 1536, "snapshot": snapshot},
+                        {**params, "cursor": cursor, "snapshot": snapshot},
                     )
                     cells.extend(page.get("cells", []))
                     cursor = page.get("next_cursor")
@@ -7297,8 +7333,10 @@ def underline_command(repo: Path, svn_checkout: Optional[Path]) -> str:
             "1..120 | ForEach-Object { "
             "if ($_ % 2 -eq 1) { '{0}[4mUNDERLINE_{2}_{1:D3}{0}[24m link https://example.invalid/{1:D3}' -f $esc,$_,'SENTINEL' } "
             "else { 'PLAIN_{1}_{0:D3} link https://example.invalid/{0:D3}' -f $_,'SENTINEL' }; "
+            "'PATH_SPACER_BEFORE'; "
             "'PATH_POSIX_SENTINEL_{0:D3} crates/kettle-ui/src/app.rs:{0}:1' -f $_; "
-            r"'PATH_WIN_SENTINEL_{0:D3} C:\src\kettle\crates\kettle-ui\src\app.rs:{0}:1' -f $_ }; "
+            "'PATH_SPACER_BETWEEN'; "
+            r"'PATH_WIN_SENTINEL_{0:D3} C:\src\kettle\crates\kettle-ui\src\app.rs:{0}:1' -f $_; 'PATH_SPACER_AFTER' }; "
             "git diff --color=always | delta --paging=never --line-numbers; "
             f"{svn_diff_part}"
             "} | less -R"
@@ -7317,8 +7355,11 @@ def underline_command(repo: Path, svn_checkout: Optional[Path]) -> str:
         "if [ $((i % 2)) -eq 1 ]; then "
         "printf '\\033[4mUNDERLINE_%s_%03d\\033[24m link https://example.invalid/%03d\\n' SENTINEL \"$i\" \"$i\"; "
         "else printf 'PLAIN_%s_%03d link https://example.invalid/%03d\\n' SENTINEL \"$i\" \"$i\"; fi; "
+        "printf 'PATH_SPACER_BEFORE\\n'; "
         "printf 'PATH_POSIX_SENTINEL_%03d crates/kettle-ui/src/app.rs:%d:1\\n' \"$i\" \"$i\"; "
+        "printf 'PATH_SPACER_BETWEEN\\n'; "
         "printf 'PATH_WIN_SENTINEL_%03d %s:%d:1\\n' \"$i\" 'C:\\src\\kettle\\crates\\kettle-ui\\src\\app.rs' \"$i\"; "
+        "printf 'PATH_SPACER_AFTER\\n'; "
         "done; git diff --color=always | delta --paging=never --line-numbers; "
         f"{svn_diff_part}"
         "} | less -R"
@@ -7521,6 +7562,8 @@ def run_underline(kettle: str, root: Path) -> Path:
                 "threshold": threshold,
                 "adjacent_rows": leak_checks,
             })
+        if not any(path_row["adjacent_rows"] for path_row in path_pixel_rows):
+            raise SystemExit(f"underline smoke: no adjacent path rows checked on frame {i}")
         analysis.append({"frame": i, "top_sentinel": found[0][1], "cell": {"width": cell_w, "height": cell_h}, "content": content, "underline_rows": sorted(underline_rows), "sentinels": [{"row": r, "number": n} for r, n in found], "plain_sentinels": [{"row": r, "number": n} for r, n in plain_found], "path_sentinels": [{"row": r, "marker": m, "start_col": s, "end_col": e} for r, m, s, e in path_found], "pixel_rows": pixel_rows, "plain_pixel_rows": plain_pixel_rows, "path_pixel_rows": path_pixel_rows})
     if underline_frames == 0:
         raise SystemExit("underline smoke: no underlined cells observed")
@@ -8156,8 +8199,10 @@ def prompt_marker_command(
 
 
 def codex_cursor_fixture_command(
-    *, queued_input: bool, windows: Optional[bool] = None
+    *, queued_input: bool, windows: Optional[bool] = None,
+    marker: str = "KETTLE_CURSOR_READY",
 ) -> Tuple[str, int, int]:
+    marker_left, marker_right = split_marker(marker)
     row = 6
     text = "queued work" if queued_input else "Explain this codebase"
     col = 3 + len(text) if queued_input else 3
@@ -8173,6 +8218,8 @@ def codex_cursor_fixture_command(
             "$esc + '[6;1H' + $esc + '[1m' + $chevron + $esc + '[22m ' + "
             f"{style}'{text}'{reset} + "
             "$esc + '[8;3Hgpt-5.5 high ' + $dot + ' ~' + "
+            "$esc + '[10;1H' + "
+            f"{shell_quote(marker_left, windows=True)} + {shell_quote(marker_right, windows=True)} + "
             f"$esc + '[{row};{col}H' + $esc + '[?25h'; "
             "[Console]::Write($frame); "
             "Start-Sleep -Seconds 20"
@@ -8185,7 +8232,9 @@ def codex_cursor_fixture_command(
             "\\033[3;2H• Working (2s • esc to interrupt)"
             f"\\033[6;1H\\033[1m›\\033[22m {style}{text}{reset}"
             "\\033[8;3Hgpt-5.5 high · ~"
-            f"\\033[{row};{col}H\\033[?25h'; sleep 20"
+            "\\033[10;1H%s%s"
+            f"\\033[{row};{col}H\\033[?25h' "
+            f"{shell_quote(marker_left, windows=False)} {shell_quote(marker_right, windows=False)}; sleep 20"
         )
     return command, row - 1, col - 1
 
@@ -8276,7 +8325,8 @@ def split_marker(marker: str) -> Tuple[str, str]:
 
 
 def probe_claude_diff_panel(
-    live: "LiveKettle", out: Path, states: List[Dict[str, object]]
+    live: "LiveKettle", out: Path, states: List[Dict[str, object]],
+    *, shell_target: Optional[AgentShellTarget] = None,
 ) -> Dict[str, object]:
     """Drive a live Claude Code REPL through both answers of its diff panel.
 
@@ -8366,6 +8416,12 @@ def probe_claude_diff_panel(
             "status": "skipped",
             "reason": "this checkout is not inside a git repository",
         }
+    target = shell_target or AgentShellTarget()
+    if target.mode == "wsl":
+        translated = target.run_command(["wslpath", "-a", "-u", repo], timeout=15)
+        if translated.returncode != 0 or not translated.stdout.strip().startswith("/"):
+            raise RuntimeError(f"could not translate checkout path for WSL: {translated.stderr}")
+        repo = translated.stdout.strip()
     # The fullscreen renderer is what draws the panel; the env var is the
     # documented equivalent of `"tui": "fullscreen"` and keeps this probe
     # independent of the host user's settings.
@@ -8692,6 +8748,12 @@ def wayland_clipboard_providers_are_reusable_selftest() -> None:
 
 def live_helper_selftest() -> None:
     import importlib.util
+
+    regressions = run(
+        [sys.executable, str(Path(__file__).with_name("test-live-ui-smoke.py"))],
+        timeout=45,
+    )
+    assert regressions.returncode == 0, regressions.stdout + regressions.stderr
 
     projected = {"window": 4, "update_toast": {"message": "fixture"},
                  "update_toast_delivery": {"active": {"window": 4, "presented": False}}}
@@ -10264,7 +10326,7 @@ def live_helper_selftest() -> None:
             assert native_root.name.startswith("kettle-agent-tui-")
             assert (native_root / "config" / "nvim" / "init.lua").is_file()
             ready_record = native_root / "run" / "selftest-ready"
-            ready_record.write_text("SELFTEST_READY\n", encoding="ascii")
+            ready_record.write_bytes(b"SELFTEST_READY\n")
             snapshot_target.wait_for_nvim_sandbox_marker(
                 native_sandbox_path,
                 "selftest-ready",
@@ -10291,7 +10353,7 @@ def live_helper_selftest() -> None:
             assert (
                 native_root
                 / "data"
-                / "nvim"
+                / nvim_data_directory_name(windows=snapshot_target.powershell)
                 / "lazy"
                 / "fixture"
                 / "plugin.lua"
@@ -10299,7 +10361,7 @@ def live_helper_selftest() -> None:
             copied_lazyvcs_module = (
                 native_root
                 / "data"
-                / "nvim"
+                / nvim_data_directory_name(windows=snapshot_target.powershell)
                 / "lazy"
                 / "lazyvcs.nvim"
                 / "lua"
@@ -12178,10 +12240,11 @@ def live_helper_selftest() -> None:
                                 "import ctypes,os,sys,time\n"
                                 "child=os.fork()\n"
                                 "if child:\n"
-                                " open(sys.argv[1],'w').write(str(child)+'\\n')\n"
                                 " os._exit(0)\n"
                                 "os.setsid()\n"
                                 "assert ctypes.CDLL(None).prctl(4,0,0,0,0) == 0\n"
+                                "with open(sys.argv[1]+'.tmp','w') as ready: ready.write(str(os.getpid())+'\\n')\n"
+                                "os.replace(sys.argv[1]+'.tmp',sys.argv[1])\n"
                                 "time.sleep(60)\n"
                             ),
                             str(orphan_record),
@@ -12190,6 +12253,11 @@ def live_helper_selftest() -> None:
                         start_new_session=True,
                     )
                     launcher.wait(timeout=3)
+                    deadline = time.monotonic() + 3
+                    while not orphan_record.exists():
+                        if time.monotonic() >= deadline:
+                            raise AssertionError("nondumpable child did not become ready")
+                        time.sleep(0.01)
                     nondumpable_pid = int(orphan_record.read_text(encoding="ascii"))
                     nondumpable_handle = StableProcessHandle.open(nondumpable_pid)
                     assert _linux_process_parent(nondumpable_pid) == os.getpid(), (
@@ -13421,7 +13489,7 @@ def lazyvcs_sidebar_command(
         "and source:sub(2) or nil; "
         "local loaded = source and vim.uv.fs_realpath(source) or nil; "
         "local plugin_root = vim.uv.fs_realpath(vim.env.XDG_DATA_HOME "
-        ".. '/nvim/lazy/lazyvcs.nvim'); "
+        f".. '/{nvim_data_directory_name(windows=windows)}/lazy/lazyvcs.nvim'); "
         "local loaded_cmp = loaded; local root_cmp = plugin_root; "
         "if vim.fn.has('win32') == 1 then "
         "loaded_cmp = loaded_cmp and loaded_cmp:lower() or nil; "
@@ -13779,7 +13847,6 @@ def probe_tmux_sixel_capability(
     )
     pane_command = f"{shlex.join([python, '-c', probe_code])}; sleep 15"
     capture = ""
-    started = False
     try:
         start_cp = shell_target.run_command(
             [
@@ -13802,7 +13869,6 @@ def probe_tmux_sixel_capability(
                 f"rc={start_cp.returncode} stderr={start_cp.stderr.strip()!r}"
             )
             return result
-        started = True
         for _ in range(30):
             capture_cp = shell_target.run_command(
                 [
@@ -13882,8 +13948,13 @@ def probe_tmux_sixel_capability(
             )
         return result
     finally:
-        if started:
+        original_error = sys.exc_info()[1]
+        try:
             cleanup_tmux_server(shell_target, socket)
+        except BaseException as error:
+            if original_error is None:
+                raise
+            original_error.add_note(f"private tmux cleanup also failed: {error}")
 
 
 def cleanup_tmux_server(
@@ -14121,12 +14192,13 @@ def run_agent_tui(
                 (False, "codex-active-placeholder-cursor"),
                 (True, "codex-active-queued-input-cursor"),
             ):
+                cursor_marker = f"KETTLE_CURSOR_{secrets.token_hex(8).upper()}"
                 command, cursor_row, cursor_col = codex_cursor_fixture_command(
-                    queued_input=queued_input, windows=True
+                    queued_input=queued_input, windows=True, marker=cursor_marker
                 )
                 live.ctl("send_text", params={"text": command}, timeout=8)
                 live.ctl("send_keys", params={"keys": ["enter"]}, timeout=8)
-                live.wait_for_text("gpt-5.5 high", timeout_ms=12000, quiet_ms=250)
+                live.wait_for_text(cursor_marker, timeout_ms=12000, quiet_ms=250)
                 fixture_screen = live.json_ctl("read_screen")
                 fixture_cursor = fixture_screen.get("cursor")
                 if fixture_cursor != [cursor_row, cursor_col] or not fixture_screen.get(
@@ -14309,7 +14381,9 @@ def run_agent_tui(
                 if status != "ok" and require_auth_smoke:
                     raise SystemExit(f"agent-tui smoke: {auth_label} failed: {reason}")
                 if tool == "claude" and status == "ok" and not shell_target.powershell:
-                    diff_probe = probe_claude_diff_panel(live, out, states)
+                    diff_probe = probe_claude_diff_panel(
+                        live, out, states, shell_target=shell_target
+                    )
                     probes.append(diff_probe)
                     if diff_probe.get("status") != "ok" and require_auth_smoke:
                         raise SystemExit(
@@ -15297,7 +15371,7 @@ def run_search_selection(kettle: str, root: Path) -> Path:
         deadline = time.monotonic() + 3.0
         while True:
             geometry = live.json_ctl("ui_geometry")
-            cells = live.json_ctl("read_cells", {"pane": pane, "limit": 1536})
+            cells = live.read_cells(pane=pane)
             titlebar = next(
                 (bar for bar in geometry.get("pane_titlebars", []) if int(bar.get("pane", -1)) == pane),  # type: ignore[union-attr]
                 None,
@@ -16126,15 +16200,17 @@ def run_image_paste_receipt(kettle: str, root: Path) -> Path:
         serialized_screen = json.dumps(redacted_screen, indent=2)
         (out / "screen.json").write_text(serialized_screen + "\n")
     finally:
-        if live is not None:
-            live_owner.__exit__(*sys.exc_info())
-        if clipboard_owner is not None and clipboard_owner.poll() is None:
-            clipboard_owner.terminate()
-            try:
-                clipboard_owner.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                clipboard_owner.kill()
-                clipboard_owner.wait(timeout=2)
+        try:
+            if live is not None:
+                live_owner.__exit__(*sys.exc_info())
+        finally:
+            if clipboard_owner is not None and clipboard_owner.poll() is None:
+                clipboard_owner.terminate()
+                try:
+                    clipboard_owner.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    clipboard_owner.kill()
+                    clipboard_owner.wait(timeout=2)
 
     (out / "analysis.json").write_text(
         json.dumps(
@@ -16407,15 +16483,17 @@ def run_video_paste_receipt(kettle: str, root: Path) -> Path:
                 "video-paste-receipt smoke: later input left stale receipt or path text"
             )
     finally:
-        if live is not None:
-            live_owner.__exit__(*sys.exc_info())
-        if clipboard_owner is not None and clipboard_owner.poll() is None:
-            clipboard_owner.terminate()
-            try:
-                clipboard_owner.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                clipboard_owner.kill()
-                clipboard_owner.wait(timeout=2)
+        try:
+            if live is not None:
+                live_owner.__exit__(*sys.exc_info())
+        finally:
+            if clipboard_owner is not None and clipboard_owner.poll() is None:
+                clipboard_owner.terminate()
+                try:
+                    clipboard_owner.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    clipboard_owner.kill()
+                    clipboard_owner.wait(timeout=2)
 
     (out / "analysis.json").write_text(
         json.dumps(
@@ -16561,11 +16639,7 @@ def run_hover_wheel(kettle: str, root: Path) -> Path:
         )
         + "\n"
     )
-    extra_args = (
-        ["-e", "powershell.exe", "-NoLogo", "-NoProfile"]
-        if platform.system() == "Windows"
-        else []
-    )
+    extra_args = AgentShellTarget().launch_args()
     with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
         marker = "KETTLE_HOVER_WHEEL_BASELINE"
         command = (
@@ -16595,6 +16669,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
         "\n".join(
             [
                 "agent-server = full",
+                "language = en",
                 "text-renderer = grid",
                 "tab-bar = always",
                 "status-bar = off",
@@ -16612,7 +16687,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
         )
         + "\n"
     )
-    extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
+    extra_args = AgentShellTarget().launch_args()
     states: List[Dict[str, object]] = []
     with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
         marker = "KETTLE_INTERACTION_BASELINE"
@@ -17783,7 +17858,8 @@ def run_tab_title(kettle: str, root: Path) -> Path:
     extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
 
     with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
-        live.ctl("send_text", params={"text": command + "\n"})
+        live.ctl("send_text", params={"text": command})
+        live.ctl("send_keys", params={"keys": ["enter"]})
         panes: Dict[str, object] = {}
         for _ in range(50):
             panes = live.json_ctl("list_panes")
@@ -17867,7 +17943,8 @@ def run_split_titlebar_position(
 ) -> Dict[str, object]:
     position = "bottom" if title_at_bottom else "top"
     with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
-        live.ctl("send_text", params={"text": command + "\n"})
+        live.ctl("send_text", params={"text": command})
+        live.ctl("send_keys", params={"keys": ["enter"]})
         live.wait_for_text(marker)
         initial: Dict[str, object] = {}
         for _ in range(50):
@@ -18463,6 +18540,7 @@ def run_dock_menu(kettle: str, root: Path) -> Path:
         "\n".join(
             [
                 "agent-server = full",
+                "language = en",
                 "text-renderer = grid",
                 "restore-session = false",
                 "update-check = false",
@@ -18914,10 +18992,10 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
         publish("v99.0.0")
         live.json_ctl("perform_action", {"action": "reload_config"})
         toast = until(live, presented_update_toast, "toast never appeared")
+        start = time.monotonic()
         assert live.json_ctl("ui_geometry")["tab_bar"]["update_chip"] is None
         assert terminal(live) == before, "toast changed terminal geometry or pending input"
         live.screenshot(out / "toast.png")
-        start = time.monotonic()
         until(live, lambda g: not g.get("update_toast"), "toast did not expire", 10)
         elapsed = time.monotonic() - start
         assert 5.5 < elapsed < 8.5, f"unexpected expiry {elapsed:.2f}s"
@@ -19703,6 +19781,7 @@ def run_theme_picker(kettle: str, root: Path) -> Path:
         "\n".join(
             [
                 "agent-server = full",
+                "language = en",
                 "restore-session = false",
                 "update-check = false",
                 "theme = TokyoNight Night",

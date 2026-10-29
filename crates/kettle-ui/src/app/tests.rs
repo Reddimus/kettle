@@ -1035,7 +1035,7 @@ fn clipboard_images_encode_off_the_window_thread_in_paste_order() {
     let deliver = body("deliver_queued_paste");
     assert!(
         deliver.contains(
-            "if ws.mux.broadcast != broadcast || self.broadcast_recipients(&ws) != recipients {"
+            "(ws.mux.broadcast != broadcast || self.broadcast_recipients(&ws) != recipients)"
         ),
         "a queued broadcast paste must not reach a scope or panes changed since"
     );
@@ -6757,7 +6757,7 @@ fn window_constructors_size_through_the_shared_startup_rule() {
 fn later_saved_windows_do_not_depend_on_the_first_restore_succeeding() {
     let src = production_source();
     let restore = src
-        .split("if let Some((first, rest)) = wins.split_first() {")
+        .split("if let Some((first, _)) = wins.split_first() {")
         .nth(1)
         .expect("multi-window startup restore");
     let (before_loop, _) = restore
@@ -7149,9 +7149,9 @@ fn keys_the_search_bar_does_not_use_reach_the_shortcuts() {
         })
         .expect("native search key branch");
     assert!(
-        native.contains(
-            "if !self.search_key(ws, &event.logical_key, Some(&event.physical_key), text)"
-        ) && native.contains("self.search_bar_shortcut("),
+        native.contains("if !self.search_key(")
+            && native.contains("Some(&event.key_without_modifiers()),")
+            && native.contains("self.search_bar_shortcut("),
         "a native key the bar does not use must reach the shortcuts"
     );
     let ctl = src
@@ -7160,8 +7160,8 @@ fn keys_the_search_bar_does_not_use_reach_the_shortcuts() {
         .and_then(|rest| rest.split("}\n            }").next())
         .expect("control-plane search key branch");
     assert!(
-        ctl.contains("if !self.search_key(ws, key, None, text) {")
-            && ctl.contains("self.search_bar_shortcut(ws, key, None, false, event_loop);"),
+        ctl.contains("if !self.search_key(ws, key, None, text, None) {")
+            && ctl.contains("self.search_bar_shortcut(ws, key, None, false, event_loop, None);"),
         "a dispatched key the bar does not use must reach the shortcuts"
     );
 }
@@ -7596,9 +7596,11 @@ fn ctl_mouse_press_handles_app_chrome_before_panes() {
 #[test]
 fn split_divider_drag_is_wired() {
     let src = production_source();
+    let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
     // Press starts the drag from a seam hit-test.
     assert!(
-        src.contains("let Some(drag) = self.split_drag_at(ws, area, px, py)"),
+        flat.contains("let Some(drag) = self.split_drag_at(")
+            && src.contains("if self.press_split_divider(ws, bcode) {"),
         "left-press must start a split-divider drag on a seam hit"
     );
     assert!(
@@ -7607,8 +7609,10 @@ fn split_divider_drag_is_wired() {
     );
     // Move applies the new ratio.
     assert!(
-        src.contains("if ws.dragging_split.is_some() {")
-            && src.contains("ws.mux.set_split_ratio(ws.mux.active, &path, ratio);"),
+        src.contains("if self.drag_split_divider(ws) {")
+            && src.contains("ws.mux.set_split_ratio(ws.mux.active, &path, ratio);")
+            && finding_body(include_str!("../app.rs"), "drag_split_divider")
+                .contains("self.resize_all(ws);"),
         "CursorMoved must apply the dragged split ratio"
     );
     // Up + focus-loss end the drag.
@@ -7624,6 +7628,82 @@ fn split_divider_drag_is_wired() {
     assert!(
         src.contains(".or_else(|| self.split_seam_hover_icon(ws))"),
         "hovering a divider must show the resize cursor"
+    );
+}
+
+/// Plugins keep per-pane state until `pane_close`, so every pane the mux
+/// destroys itself is reported for one, exactly once.
+#[test]
+fn reaped_and_tab_closed_panes_are_reported_for_pane_close() {
+    let (mut mux, target, sibling) = title_test_split_mux();
+    assert!(mux.take_closed_panes().is_empty());
+    mux.panes.get_mut(&target).unwrap().closed = true;
+    assert!(!mux.reap().mux_empty);
+    assert_eq!(mux.take_closed_panes(), [target]);
+    assert!(
+        mux.take_closed_panes().is_empty(),
+        "each pane is reported once"
+    );
+    assert!(mux.close_tab(), "closing the only tab empties the mux");
+    assert_eq!(mux.take_closed_panes(), [sibling]);
+}
+
+/// The App announces those panes wherever they go: after both reaps,
+/// before every `tab_close`, and for all panes when a window closes.
+#[test]
+fn every_pane_teardown_fires_pane_close() {
+    let src = production_source();
+    for after_reap in src.split("let reaped = ws.mux.reap();").skip(1) {
+        let flat: String = after_reap.split_whitespace().collect();
+        assert!(
+            flat.starts_with(
+                "ifreaped.layout_changed{ws.dragging_split=None;}self.fire_closed_pane_events(ws);"
+            ),
+            "a reap must announce the panes it removed"
+        );
+    }
+    let tab_close = include_str!("automation.rs")
+        .split("fn fire_tab_close_event(")
+        .nth(1)
+        .unwrap()
+        .split("\n    }")
+        .next()
+        .unwrap();
+    assert!(tab_close.contains("self.fire_closed_pane_events(ws);"));
+    let window_close = include_str!("windowing.rs")
+        .split("fn close_window_now(")
+        .nth(1)
+        .unwrap()
+        .split("ws.mux.close_window();")
+        .next()
+        .unwrap();
+    assert!(window_close.contains("self.fire_pane_close_event(ws, pane_id);"));
+}
+
+/// A torn-off window keeps the source window's font zoom: the drag anchor
+/// is placed with the source's tab- and status-bar metrics, so a window
+/// opened at the configured size put the pointer off its tab strip.
+#[test]
+fn torn_off_windows_keep_the_source_font_size() {
+    let app = include_str!("../app.rs");
+    let windowing = include_str!("windowing.rs");
+    let carries = "font_size: ws.renderer.as_ref().map(|r| r.font_size()),";
+    assert_eq!(
+        app.matches(carries).count() + windowing.matches(carries).count(),
+        3,
+        "every non-Wayland tear-off passes its font size"
+    );
+    assert!(windowing.contains("let font_size = ws.renderer.as_ref().map(|r| r.font_size());"));
+    let open = windowing
+        .split("pub(super) fn open_window(")
+        .nth(1)
+        .unwrap()
+        .split("let area = self.area(&ws);")
+        .next()
+        .unwrap();
+    assert!(
+        open.contains("renderer.set_font_size(*font_size);"),
+        "the font size applies before the grid is sized"
     );
 }
 
@@ -7989,7 +8069,12 @@ fn animated_bg_redraw_is_edge_triggered() {
     );
     // The wake interval is the GIF's frame boundary, not a fixed 30 fps.
     assert!(
-        src.contains("} else if let Some(bg_ms) = bg_anim_interval {"),
+        src.contains("let mut wait = animation_wait("),
+        "the scheduler must merge the background frame interval"
+    );
+    assert_eq!(
+        super::animation_wait(false, Some(173), None),
+        Some(std::time::Duration::from_millis(173)),
         "the wait must use the bg frame interval, not the fixed 33ms tick"
     );
 }
@@ -8244,7 +8329,7 @@ fn every_pane_input_writer_reconciles_focus_reports_first() {
             continue;
         }
         let body = chunk.split("\n    }\n").next().unwrap_or(chunk);
-        let first_write = ["feed_input(", "feed_input_shared("]
+        let first_write = ["feed_input(", "feed_input_shared(", "feed_key_inputs("]
             .iter()
             .filter_map(|needle| body.find(needle))
             .min();
@@ -8525,6 +8610,7 @@ fn implicit_zoom_exits_restore_the_saved_font() {
             "Action::SplitDown | Action::SplitUp | Action::SplitAuto => {",
             "Action::ClosePane",
         ),
+        ("Action::DuplicatePane => {", "Action::NextTheme"),
     ] {
         let arm = src.split_once(start).unwrap().1.split_once(end).unwrap().0;
         assert!(arm.contains("} else {\n                    self.restore_scaled_zoom_font(ws);"));
@@ -9339,7 +9425,13 @@ fn every_configurable_named_key_matches_its_real_key() {
     let defaults = kettle_config::keybinds::defaults();
     let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
     assert_eq!(
-        resolve_keybind_action(&defaults, Some(&Key::Named(NamedKey::Space)), None, mods),
+        resolve_keybind_action(
+            &defaults,
+            Some(&Key::Named(NamedKey::Space)),
+            None,
+            mods,
+            None
+        ),
         Some((
             Trigger::new(Mods::CTRL | Mods::SHIFT, KKey::Char(' ')),
             Action::ToggleViMode
@@ -9361,19 +9453,22 @@ fn the_vi_mode_chord_leaves_vi_mode() {
         &defaults,
         &Key::Named(NamedKey::Space),
         &space,
-        cs
+        cs,
+        None,
     ));
     assert!(!is_vi_mode_toggle_chord(
         &defaults,
         &Key::Named(NamedKey::Space),
         &space,
-        ModifiersState::empty()
+        ModifiersState::empty(),
+        None,
     ));
     assert!(!is_vi_mode_toggle_chord(
         &defaults,
         &Key::Character("j".into()),
         &PhysicalKey::Code(KeyCode::KeyJ),
-        ModifiersState::empty()
+        ModifiersState::empty(),
+        None,
     ));
     let src = production_source();
     let intercept = src
@@ -9691,6 +9786,7 @@ fn a_key_that_closes_or_replaces_a_modal_stops_repeating() {
         owner: crate::window_state::ImePreeditOwner::Other,
         generation: ws.ime_focus_generation,
         ended: None,
+        empty_after_focus: false,
     });
     let generation = ws.ime_focus_generation;
 
@@ -9867,11 +9963,150 @@ fn keybind_resolver_uses_logical_before_physical_fallback() {
         Some(&Key::Character("=".into())),
         Some(&PhysicalKey::Code(KeyCode::Equal)),
         mods,
+        None,
     );
     assert_eq!(
         matched,
         Some((Trigger::new(kmods, KKey::Char('=')), Action::ResetFontSize))
     );
+}
+
+/// `new_tab = <Control><Shift>comma` imports as Ctrl+Shift+`,`, but with
+/// Shift held a US keyboard reports `<`. The binding must still fire, or the
+/// import (which replaces the default chord) leaves New Tab without one.
+#[test]
+fn imported_shifted_punctuation_binding_matches_the_shifted_character() {
+    use super::resolve_keybind_action;
+    use kettle_config::{Action, Config};
+    use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+
+    let cfg = Config::parse_text("[keybindings]\nnew_tab = <Control><Shift>comma\n");
+    let matched = resolve_keybind_action(
+        &cfg.keybinds,
+        Some(&Key::Character("<".into())),
+        Some(&PhysicalKey::Code(KeyCode::Comma)),
+        ModifiersState::CONTROL | ModifiersState::SHIFT,
+        None,
+    );
+    assert_eq!(matched.map(|(_, action)| action), Some(Action::NewTab));
+}
+
+/// A Latin layout's own character wins over a US alias of the same key: on
+/// Dvorak, Ctrl+W sits on the US comma key and must reach the shell rather
+/// than open Settings (Ctrl+,). A key whose character is not ASCII, as
+/// AZERTY's `à` on the 0 key, still finds its US alias.
+#[test]
+fn physical_aliases_never_replace_another_latin_character() {
+    use super::resolve_keybind_action;
+    use kettle_config::Action;
+    use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+
+    let defaults = kettle_config::keybinds::defaults();
+    let ctrl = ModifiersState::CONTROL;
+    let dvorak_ctrl_w = resolve_keybind_action(
+        &defaults,
+        Some(&Key::Character("w".into())),
+        Some(&PhysicalKey::Code(KeyCode::Comma)),
+        ctrl,
+        None,
+    );
+    assert_ne!(
+        dvorak_ctrl_w.map(|(_, action)| action),
+        Some(Action::OpenSettings),
+        "Dvorak Ctrl+W opened Settings"
+    );
+    let dvorak_ctrl_bracket = resolve_keybind_action(
+        &defaults,
+        Some(&Key::Character("]".into())),
+        Some(&PhysicalKey::Code(KeyCode::Equal)),
+        ctrl,
+        None,
+    );
+    assert!(
+        !matches!(
+            dvorak_ctrl_bracket.map(|(_, action)| action),
+            Some(Action::IncreaseFontSize | Action::ResetFontSize)
+        ),
+        "Dvorak Ctrl+] changed the font size"
+    );
+    let azerty_ctrl_zero = resolve_keybind_action(
+        &defaults,
+        Some(&Key::Character("à".into())),
+        Some(&PhysicalKey::Code(KeyCode::Digit0)),
+        ctrl,
+        None,
+    );
+    assert_eq!(
+        azerty_ctrl_zero.map(|(_, action)| action),
+        Some(Action::ResetFontSize)
+    );
+}
+
+#[test]
+fn review_shifted_zero_bindings_match_us_keyboard() {
+    use super::resolve_keybind_action;
+    use kettle_config::Config;
+    use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+    let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    for (config, expected) in [
+        ("keybind = ctrl+shift+0=copy\n", Action::Copy),
+        (
+            "keybind = ctrl+shift+0=reset_font_size\n",
+            Action::ResetFontSize,
+        ),
+        (
+            "[keybindings]\nnew_tab = <Control><Shift>0\n",
+            Action::NewTab,
+        ),
+    ] {
+        let cfg = Config::parse_text(config);
+        let matched = resolve_keybind_action(
+            &cfg.keybinds,
+            Some(&Key::Character(")".into())),
+            Some(&PhysicalKey::Code(KeyCode::Digit0)),
+            mods,
+            None,
+        );
+        assert_eq!(
+            matched.map(|(_, action)| action),
+            Some(expected),
+            "{config}"
+        );
+    }
+}
+
+#[test]
+fn review_shifted_punctuation_uses_layout_base_key() {
+    use super::resolve_keybind_action;
+    use kettle_config::Config;
+    use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+    let cfg = Config::parse_text("[keybindings]\nnew_tab = <Control><Shift>comma\n");
+    let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    let physical = PhysicalKey::Code(KeyCode::Comma);
+    let matched = resolve_keybind_action(
+        &cfg.keybinds,
+        Some(&Key::Character(";".into())),
+        Some(&physical),
+        mods,
+        Some(&Key::Character(",".into())),
+    );
+    assert_eq!(matched.map(|(_, action)| action), Some(Action::NewTab));
+    let dvorak = resolve_keybind_action(
+        &cfg.keybinds,
+        Some(&Key::Character("W".into())),
+        Some(&physical),
+        mods,
+        Some(&Key::Character("w".into())),
+    );
+    let logical_only = resolve_keybind_action(
+        &cfg.keybinds,
+        Some(&Key::Character("W".into())),
+        None,
+        mods,
+        Some(&Key::Character("w".into())),
+    );
+    assert_eq!(dvorak, logical_only, "Dvorak must keep its logical binding");
+    assert_ne!(dvorak.map(|(_, action)| action), Some(Action::NewTab));
 }
 
 #[test]
@@ -9891,6 +10126,7 @@ fn keybind_resolver_honors_shifted_digit_rebinds_and_unbinds() {
                     Some(&Key::Character(logical.into())),
                     Some(&physical),
                     mods,
+                    None,
                 );
                 assert_eq!(
                     matched.map(|(_, action)| action),
@@ -9944,7 +10180,7 @@ fn keybind_resolver_falls_back_to_physical_zoom_keys() {
             Action::ResetFontSize,
         ),
     ] {
-        let matched = resolve_keybind_action(&defaults, None, Some(&physical), mods)
+        let matched = resolve_keybind_action(&defaults, None, Some(&physical), mods, None)
             .unwrap_or_else(|| panic!("{physical:?} should resolve"));
         assert_eq!(matched.1, expected);
     }
@@ -9954,6 +10190,7 @@ fn keybind_resolver_falls_back_to_physical_zoom_keys() {
             None,
             Some(&PhysicalKey::Code(KeyCode::KeyA)),
             ctrl,
+            None,
         ),
         None
     );
@@ -11545,7 +11782,7 @@ fn a_held_buttons_reports_stay_with_the_pane_its_press_went_to() {
         "self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, bcode) { return; } // Context menu:",
         "if bcode == 0 { ws.card_press = None; } if ws.card_focus.take().is_some() { ws.accessibility_pending = true; } self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, bcode) { return true; } let bar",
         // Each release ends a gesture of Kettle's own first.
-        "ws.held_buttons.end_own(bcode); if self.confirm_mouse_release(ws, bcode) { return; } // A release ends an editor drag inside the search bar;",
+        "ws.held_buttons.end_own(bcode); // End any split-divider drag on left-button up. if bcode == 0 { ws.dragging_split = None; } if self.confirm_mouse_release(ws, bcode) { return; } // A release ends an editor drag inside the search bar;",
         "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); if self.confirm_mouse_release(ws, sgr) { return; } self.send_mouse(ws, sgr, false, false); return; }",
         "// As natively: a gesture of Kettle's own ends with its release. ws.held_buttons.end_own(bcode);",
     ] {
@@ -13701,76 +13938,100 @@ fn cursor_in_status_bar_band_geometry() {
         0.0,
         22.0,
         600.0,
-        StatusBarMode::Off
+        StatusBarMode::Off,
+        0.0,
+        0.0
     ));
     assert!(!cursor_in_status_bar_band(
         300.0,
         22.0,
         600.0,
-        StatusBarMode::Off
+        StatusBarMode::Off,
+        0.0,
+        0.0
     ));
     // Top: [0, 22).
     assert!(cursor_in_status_bar_band(
         0.0,
         22.0,
         600.0,
-        StatusBarMode::Top
+        StatusBarMode::Top,
+        0.0,
+        0.0
     ));
     assert!(cursor_in_status_bar_band(
         21.0,
         22.0,
         600.0,
-        StatusBarMode::Top
+        StatusBarMode::Top,
+        0.0,
+        0.0
     ));
     assert!(!cursor_in_status_bar_band(
         22.0,
         22.0,
         600.0,
-        StatusBarMode::Top
+        StatusBarMode::Top,
+        0.0,
+        0.0
     ));
     assert!(!cursor_in_status_bar_band(
         300.0,
         22.0,
         600.0,
-        StatusBarMode::Top
+        StatusBarMode::Top,
+        0.0,
+        0.0
     ));
     // Bottom: [578, 600].
     assert!(cursor_in_status_bar_band(
         578.0,
         22.0,
         600.0,
-        StatusBarMode::Bottom
+        StatusBarMode::Bottom,
+        0.0,
+        0.0
     ));
     assert!(cursor_in_status_bar_band(
         600.0,
         22.0,
         600.0,
-        StatusBarMode::Bottom
+        StatusBarMode::Bottom,
+        0.0,
+        0.0
     ));
     assert!(!cursor_in_status_bar_band(
         577.0,
         22.0,
         600.0,
-        StatusBarMode::Bottom
+        StatusBarMode::Bottom,
+        0.0,
+        0.0
     ));
     assert!(!cursor_in_status_bar_band(
         0.0,
         22.0,
         600.0,
-        StatusBarMode::Bottom
+        StatusBarMode::Bottom,
+        0.0,
+        0.0
     ));
     // bar_h == 0 → out of band regardless of mode.
     assert!(!cursor_in_status_bar_band(
         0.0,
         0.0,
         600.0,
-        StatusBarMode::Top
+        StatusBarMode::Top,
+        0.0,
+        0.0
     ));
     assert!(!cursor_in_status_bar_band(
         0.0,
         0.0,
         600.0,
-        StatusBarMode::Bottom
+        StatusBarMode::Bottom,
+        0.0,
+        0.0
     ));
 }
 
@@ -14382,7 +14643,7 @@ fn tear_off_flow_stays_wired() {
     //    the grab offset (open_window's size override).
     assert!(
         src.contains(
-            "WindowOpen::AdoptTab {\n                    tab: dt,\n                    source_color: self.tear_off_source_color(ws),\n                    paste: Box::new(paste),\n                },\n                pos,\n                Some(size),"
+            "WindowOpen::AdoptTab {\n                    tab: dt,\n                    source_color: self.tear_off_source_color(ws),\n                    font_size: ws.renderer.as_ref().map(|r| r.font_size()),\n                    scaled_zoom_prev_font_size: ws.scaled_zoom_prev_font_size,\n                    paste: Box::new(paste),\n                },\n                pos,\n                Some(size),"
         ),
         "the tear must open the torn window at the grab position and source size"
     );
@@ -16124,15 +16385,23 @@ fn session_screenshot_path_under_cache_kettle_shots() {
     use super::session_screenshot_path;
     let cache = std::path::Path::new("/home/u/.cache");
     let p = session_screenshot_path(1_716_422_400, 1234, Some(cache));
-    assert_eq!(
-        p,
-        std::path::PathBuf::from("/home/u/.cache/kettle/shots/kettle-1716422400-1234.png")
+    assert_eq!(p.parent(), Some(cache.join("kettle/shots").as_path()));
+    let name = p.file_stem().unwrap().to_str().unwrap();
+    assert!(
+        name.strip_prefix("kettle-1716422400-1234-")
+            .unwrap()
+            .parse::<u64>()
+            .is_ok()
     );
     // Relative fallback when no cache dir resolves.
     let p = session_screenshot_path(1_716_422_400, 1234, None);
-    assert_eq!(
-        p,
-        std::path::PathBuf::from("kettle-shots/kettle-1716422400-1234.png")
+    assert_eq!(p.parent(), Some(std::path::Path::new("kettle-shots")));
+    let name = p.file_stem().unwrap().to_str().unwrap();
+    assert!(
+        name.strip_prefix("kettle-1716422400-1234-")
+            .unwrap()
+            .parse::<u64>()
+            .is_ok()
     );
     // .png extension is fixed (vs the `session_log_path` .log shape).
     assert_eq!(p.extension().and_then(|s| s.to_str()), Some("png"));
@@ -16488,7 +16757,7 @@ fn the_side_tab_bar_places_rows_through_side_tab_rows() {
     assert!(body.contains("let rows = strip_rows;"));
     // A narrowed horizontal tab has no close button reaching past it.
     let horizontal = src
-        .split("fn tab_bar(&self, ws: &WindowState) -> TabBar {")
+        .split("fn tab_bar_at_height(&self, ws: &WindowState, height: f32) -> TabBar {")
         .nth(1)
         .and_then(|rest| rest.split("\n    fn ").next())
         .expect("tab_bar body");
@@ -16899,7 +17168,7 @@ fn custom_url_handler_failure_falls_back_to_system_open() {
         .nth(1)
         .and_then(|s| s.split("fn paste_clipboard").next())
         .expect("open_url helper present");
-    assert!(open_url.contains("spawn_custom_url_handler(&cmd, uri)"));
+    assert!(open_url.contains("system_opener::open_custom(&cmd, uri);\n            return;"));
     let checked = src
         .split("fn open_checked_file(")
         .nth(1)
@@ -16915,26 +17184,31 @@ fn custom_url_handler_failure_falls_back_to_system_open() {
     let child = helper.find("Command::new(&cmd)").unwrap();
     let wait = helper.find("child.wait()").unwrap();
     assert!(worker < child && child < wait);
-    assert!(
-        open_url.contains("Ok(_) => return,"),
-        "a successful custom-url-handler spawn should own the URL"
-    );
-    assert!(
-        open_url.contains("falling through to system")
-            && open_url.contains("system_opener::open(uri,"),
-        "a failed custom-url-handler spawn must fall back to system open"
-    );
-    let failed_spawn_tail = open_url
-        .split("Err(e) => log::warn!")
+    let opener = include_str!("system_opener.rs");
+    let custom = opener
+        .split("fn open_custom(")
         .nth(1)
-        .expect("custom handler error arm present");
+        .unwrap()
+        .split("\nfn ")
+        .next()
+        .unwrap();
+    assert!(custom.contains("spawn_with("));
     assert!(
-        !failed_spawn_tail
-            .split("system_opener::open(uri,")
+        custom.contains("Ok(()) => Ok(()),"),
+        "a successful handler owns the URL"
+    );
+    let fallback = custom.split("Err(error) => {").nth(1).unwrap();
+    assert!(
+        fallback.contains("falling through to system")
+            && fallback.contains("open::that_detached(target)"),
+        "a failed custom handler must fall back on its worker"
+    );
+    assert!(
+        !fallback
+            .split("open::that_detached(target)")
             .next()
-            .unwrap_or("")
-            .contains("return;"),
-        "custom-url-handler failure must not return before system open"
+            .unwrap()
+            .contains("return;")
     );
 }
 
@@ -17252,4 +17526,925 @@ fn toast_claim_replies_keep_the_requesting_window_after_focus_moves() {
     assert!(route.contains("self.receive_update_toast(&mut ws, window, reply)"));
     assert!(route.contains("self.finish_window_dispatch(el, window, ws)"));
     assert!(route.contains("self.abandon_update_toast_claim(window, reply)"));
+}
+
+#[test]
+fn repeated_default_screenshots_have_distinct_destinations() {
+    let first = super::session_screenshot_path(123, 42, None);
+    let second = super::session_screenshot_path(123, 42, None);
+    assert_ne!(
+        first, second,
+        "captures sharing a timestamp need distinct paths"
+    );
+}
+
+#[test]
+fn screenshot_completion_retains_pending_and_reports_failure_once() {
+    let mut ws = WindowState::new(1, Mux::new());
+    let (tx, rx) = std::sync::mpsc::channel();
+    ws.screenshot_completion = Some(rx);
+    assert!(super::poll_screenshot_completion(&mut ws).is_none());
+    assert!(ws.screenshot_completion.is_some());
+    tx.send(Err("destination exists".into())).unwrap();
+    assert_eq!(
+        super::poll_screenshot_completion(&mut ws),
+        Some(Err("destination exists".into()))
+    );
+    assert!(super::poll_screenshot_completion(&mut ws).is_none());
+}
+
+#[test]
+fn custom_url_launch_uses_the_bounded_opener_worker() {
+    let src = production_source();
+    let open_url = src
+        .split("fn open_url(&mut self, ws: &WindowState, uri: &str, source: LinkSource) {")
+        .nth(1)
+        .unwrap()
+        .split("\n    fn ")
+        .next()
+        .unwrap();
+    assert!(
+        open_url.contains("system_opener::open_custom(&cmd, uri)"),
+        "custom URL process creation must run on the bounded opener worker"
+    );
+}
+
+#[test]
+fn unix_first_shell_title_can_equal_argv0() {
+    assert!(
+        !super::suppress_startup_title("sh", &["sh".into()], false),
+        "a Unix shell's OSC title equal to argv0 is legitimate"
+    );
+    assert!(super::suppress_startup_title(
+        "pwsh",
+        &["pwsh".into()],
+        true
+    ));
+}
+
+#[test]
+fn status_bar_cursor_tracks_tab_and_search_offsets() {
+    use kettle_config::StatusBarMode::{Bottom, Top};
+    assert!(
+        super::cursor_in_status_bar_band(30.0, 22.0, 600.0, Top, 24.0, 0.0),
+        "the top status strip begins below the tab bar"
+    );
+    assert!(!super::cursor_in_status_bar_band(
+        10.0, 22.0, 600.0, Top, 24.0, 0.0
+    ));
+    assert!(super::cursor_in_status_bar_band(
+        550.0, 22.0, 600.0, Bottom, 24.0, 30.0
+    ));
+    assert!(!super::cursor_in_status_bar_band(
+        590.0, 22.0, 600.0, Bottom, 24.0, 30.0
+    ));
+    assert_eq!(super::status_bar_y(600.0, 22.0, Top, 24.0, 30.0), 24.0);
+    assert_eq!(super::status_bar_y(600.0, 22.0, Bottom, 24.0, 30.0), 548.0);
+}
+
+#[test]
+fn restarts_run_focus_change_cleanup() {
+    let src = production_source();
+    let body = src
+        .split("fn process_pending_pane_restarts(")
+        .nth(1)
+        .unwrap()
+        .split("\n    fn ")
+        .next()
+        .unwrap();
+    assert!(
+        body.contains("self.note_focus_change(ws, pre);"),
+        "a replacement tab must clean up the old focus owner"
+    );
+    assert!(
+        body.find("let pre = self.focus_key(ws);").unwrap()
+            < body.find("ws.mux.new_tab_with_").unwrap()
+    );
+}
+
+#[test]
+fn restarts_use_launch_directory_routing() {
+    let src = production_source();
+    let body = src
+        .split("fn process_pending_pane_restarts(")
+        .nth(1)
+        .unwrap()
+        .split("\n    fn ")
+        .next()
+        .unwrap();
+    assert!(
+        body.contains("new_tab_with_launch_geometry("),
+        "restarts must route reported WSL directories through the launcher"
+    );
+}
+
+#[test]
+fn foreign_broadcast_scrolls_request_a_redraw() {
+    let src = production_source();
+    for (method, foreign, accepted) in [
+        (
+            "fn broadcast_input(",
+            "broadcast_write_foreign_delivery(",
+            "delivery.accepted",
+        ),
+        (
+            "fn write_terminal_key_event(",
+            "broadcast_encoded_foreign(",
+            "foreign.accepted",
+        ),
+    ] {
+        let body = src
+            .split(method)
+            .nth(1)
+            .unwrap()
+            .split("\n    fn ")
+            .next()
+            .unwrap();
+        let tail = body.split(foreign).nth(1).unwrap();
+        assert!(
+            tail.contains("other.window")
+                && tail.contains("request_redraw()")
+                && tail.contains(accepted),
+            "accepted foreign input that scrolls must repaint its window: {method}"
+        );
+    }
+}
+
+#[test]
+fn ime_composition_cannot_follow_focus_to_another_pane() {
+    for late_preedit in [false, true] {
+        let (mux, first, second) = title_test_split_mux();
+        let mut ws = WindowState::new(1, mux);
+        assert!(ws.mux.focus_pane(first));
+        super::update_ime_preedit(&mut ws, "compose".into(), None);
+        assert!(ws.mux.focus_pane(second));
+        if late_preedit {
+            super::update_ime_preedit(&mut ws, "composed".into(), None);
+        }
+        assert!(
+            !super::take_ime_commit(&mut ws),
+            "composition must not commit into a different pane"
+        );
+        super::update_ime_preedit(&mut ws, "new".into(), None);
+        assert!(super::take_ime_commit(&mut ws));
+
+        super::update_ime_preedit(&mut ws, "old".into(), None);
+        assert!(ws.mux.focus_pane(first));
+        super::end_modal_composition(&mut ws);
+        super::update_ime_preedit(&mut ws, String::new(), None);
+        assert!(ws.mux.focus_pane(second));
+        super::end_modal_composition(&mut ws);
+        assert!(
+            !super::take_ime_commit(&mut ws),
+            "returning to the pane must not revive an invalidated composition"
+        );
+    }
+    let source = production_source();
+    let focus = source
+        .split("fn note_focus_change(")
+        .nth(1)
+        .unwrap()
+        .split("\n    fn ")
+        .next()
+        .unwrap();
+    assert!(focus.contains("end_modal_composition(ws);"));
+}
+
+#[test]
+fn cancelled_pane_composition_allows_new_preedit_after_focus_moves() {
+    let (mux, first, second) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    assert!(ws.mux.focus_pane(first));
+    super::update_ime_preedit(&mut ws, "old".into(), None);
+    assert!(ws.mux.focus_pane(second));
+    super::end_modal_composition(&mut ws);
+    super::update_ime_preedit(&mut ws, String::new(), None);
+    super::update_ime_preedit(&mut ws, "new".into(), None);
+    assert!(
+        super::take_ime_commit(&mut ws),
+        "a new composition after cancellation must be accepted"
+    );
+}
+
+#[test]
+fn cancelled_pane_composition_allows_fresh_commit_only_input() {
+    let (mux, first, second) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    assert!(ws.mux.focus_pane(first));
+    super::update_ime_preedit(&mut ws, "old".into(), None);
+    assert!(ws.mux.focus_pane(second));
+    super::end_modal_composition(&mut ws);
+    // Cancellation ends the old preedit without sending a Commit.
+    super::update_ime_preedit(&mut ws, String::new(), None);
+    // Wayland sends an empty Preedit before even a commit-only input.
+    super::update_ime_preedit(&mut ws, String::new(), None);
+    assert!(
+        super::take_ime_commit(&mut ws),
+        "fresh commit-only input after cancellation must be accepted"
+    );
+    assert!(ws.ime_preedit_owner.is_none());
+}
+
+#[test]
+fn empty_pane_preedit_still_rejects_late_commit_after_focus_moves() {
+    let (mux, first, second) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    assert!(ws.mux.focus_pane(first));
+    super::update_ime_preedit(&mut ws, "old".into(), None);
+    assert!(ws.mux.focus_pane(second));
+    super::end_modal_composition(&mut ws);
+    super::update_ime_preedit(&mut ws, String::new(), None);
+    assert!(
+        !super::take_ime_commit(&mut ws),
+        "an empty Preedit immediately followed by Commit still belongs to the old pane"
+    );
+    super::update_ime_preedit(&mut ws, String::new(), None);
+    assert!(super::take_ime_commit(&mut ws));
+}
+
+#[test]
+fn launch_recorder_precedes_restored_sibling_windows() {
+    let src = production_source();
+    let startup = src
+        .split("fn resumed_inner(")
+        .nth(1)
+        .unwrap()
+        .split("\nimpl ")
+        .next()
+        .unwrap();
+    let recorder = startup.find("self.recorder = Some(rec);").unwrap();
+    let sibling = startup.find(".open_window(").unwrap();
+    assert!(
+        recorder < sibling,
+        "attach recording before a restored sibling can drain output"
+    );
+    let windows = include_str!("windowing.rs");
+    let setup = windows
+        .split("mux.lua_output_subscribed = self.lua_engine.is_some();")
+        .nth(1)
+        .unwrap()
+        .split("let mut ws = WindowState::new")
+        .next()
+        .unwrap();
+    assert!(
+        setup.contains("self.startup.record.is_some()")
+            && setup.contains("self.cfg.record.enabled()")
+    );
+}
+
+#[test]
+fn modal_pointer_ownership_blocks_terminal_motion() {
+    let src = production_source();
+    let movement = src
+        .split("WindowEvent::CursorMoved { position, .. } => {")
+        .nth(1)
+        .unwrap()
+        .split("WindowEvent::")
+        .next()
+        .unwrap();
+    let report = movement
+        .find("self.send_mouse(ws, input::MOUSE_NO_BUTTON, true, true)")
+        .unwrap();
+    let condition = &movement[report.saturating_sub(100)..report];
+    assert!(
+        condition.contains("!self.pointer_modal_open(ws)"),
+        "modal pointer ownership must gate terminal motion reports"
+    );
+}
+
+#[test]
+fn tab_bar_controls_reconcile_focus_owners() {
+    let src = production_source();
+    let controls = src
+        .split("} else if bcode == 0 && in_bar(bar.new_tab, px, py) {")
+        .nth(1)
+        .unwrap()
+        .split("} else if let Some(seg) =")
+        .next()
+        .unwrap();
+    assert_eq!(
+        controls.matches("self.note_focus_change(ws, pre);").count(),
+        3,
+        "plus and both overflow arrows must reconcile focus owners"
+    );
+    assert_eq!(controls.matches("let pre = self.focus_key(ws);").count(), 3);
+}
+
+#[test]
+fn only_one_window_can_own_the_theme_preview() {
+    use kettle_config::Config;
+    let mut windows = std::collections::BTreeMap::new();
+    let mut first = WindowState::new(1, Mux::new());
+    let mut second = WindowState::new(2, Mux::new());
+    let baseline = (
+        "TokyoNight Night".to_string(),
+        kettle_config::Theme::by_name("TokyoNight Night"),
+    );
+    super::begin_theme_picker_session(&mut first, &mut windows, baseline.clone());
+    first.theme_picker_input.as_mut().unwrap().selected += 1;
+    let live = super::theme_preview_change(
+        &mut first,
+        &Config {
+            theme_name: baseline.0.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    windows.insert(1, first);
+    let restored = super::begin_theme_picker_session(&mut second, &mut windows, live);
+    assert!(
+        windows[&1].theme_picker_input.is_none(),
+        "opening another picker must retire the previous preview owner"
+    );
+    assert!(windows[&1].theme_preview.is_none());
+    assert_eq!(
+        restored.as_ref().map(|state| state.0.as_str()),
+        Some(baseline.0.as_str())
+    );
+    second.theme_picker_input.as_mut().unwrap().query = "Dracula".into();
+    second.theme_picker_input.as_mut().unwrap().selected = 0;
+    let preview = super::theme_preview_change(
+        &mut second,
+        &Config {
+            theme_name: baseline.0.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        super::theme_preview_change(
+            windows.get_mut(&1).unwrap(),
+            &Config {
+                theme_name: preview.0.clone(),
+                ..Default::default()
+            }
+        )
+        .is_none()
+    );
+    second.theme_picker_input = None;
+    let restored = super::theme_preview_change(
+        &mut second,
+        &Config {
+            theme_name: preview.0.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(restored.0, baseline.0);
+    assert_eq!(restored.1.background, baseline.1.background);
+}
+
+#[test]
+fn theme_previews_preserve_configured_color_overrides() {
+    use kettle_config::Config;
+    let cfg = Config::parse_text(
+        "background = #010203\nforeground = #040506\ncursor-color = #070809\npalette = 4=#123456\n",
+    );
+    let baseline = cfg.theme.clone();
+    let mut ws = WindowState::new(1, Mux::new());
+    super::begin_theme_picker(&mut ws, (cfg.theme_name.clone(), baseline.clone()));
+    let picker = ws.theme_picker_input.as_mut().unwrap();
+    picker.query = "Dracula".into();
+    picker.selected = 0;
+    let (name, preview) = super::theme_preview_change(&mut ws, &cfg).unwrap();
+    assert_eq!(
+        preview.background,
+        kettle_config::Rgb::parse("#010203").unwrap(),
+        "preview must retain configured background overrides"
+    );
+    assert_eq!(
+        preview.foreground,
+        kettle_config::Rgb::parse("#040506").unwrap()
+    );
+    assert_eq!(
+        preview.cursor,
+        kettle_config::Rgb::parse("#070809").unwrap()
+    );
+    assert_eq!(
+        preview.palette[4],
+        kettle_config::Rgb::parse("#123456").unwrap()
+    );
+    let committed = cfg.theme_by_name(&name);
+    assert_eq!(preview.background, committed.background);
+    assert_eq!(preview.palette, committed.palette);
+    ws.theme_picker_input = None;
+    let restored = super::theme_preview_change(&mut ws, &cfg).unwrap();
+    assert_eq!(restored.1.background, baseline.background);
+    assert_eq!(restored.1.palette, baseline.palette);
+}
+
+#[test]
+fn command_deadlines_are_maintained_before_gpu_recovery() {
+    let src = production_source();
+    let scheduler = src.split("fn about_to_wait_inner(").nth(1).unwrap();
+    let maintenance = scheduler
+        .find("self.check_pending_run_deadlines(ws);")
+        .unwrap();
+    let recovery = scheduler
+        .find("if self.gpu.as_ref().is_some_and(|g| g.is_lost())")
+        .unwrap();
+    assert!(
+        maintenance < recovery,
+        "GPU recovery waits must not bypass command timeout maintenance"
+    );
+    assert!(scheduler[..recovery].contains("chain(pending_run_wait)"));
+    let recovery = scheduler[recovery..]
+        .split("if ws.pty_resize_retry")
+        .next()
+        .unwrap();
+    assert_eq!(
+        recovery.matches("automation_wait.map_or").count(),
+        2,
+        "both recovery backoff returns must retain the command deadline"
+    );
+}
+
+#[test]
+fn background_frames_do_not_delay_cursor_blink() {
+    use std::time::Duration;
+    assert_eq!(
+        super::animation_wait(false, Some(1000), Some(Duration::from_millis(330))),
+        Some(Duration::from_millis(330)),
+        "a later background frame must not delay the cursor edge"
+    );
+    assert_eq!(
+        super::animation_wait(false, Some(100), Some(Duration::from_millis(530))),
+        Some(Duration::from_millis(100))
+    );
+    assert_eq!(
+        super::animation_wait(true, Some(1000), Some(Duration::from_millis(5))),
+        Some(Duration::from_millis(5))
+    );
+    assert_eq!(super::animation_wait(false, None, None), None);
+}
+
+#[test]
+fn accessibility_reactivation_invalidates_published_tree() {
+    let source = include_str!("../app.rs");
+    let activation = source
+        .split("impl ActivationHandler for AccessibilityActivation")
+        .nth(1)
+        .unwrap()
+        .split("struct AccessibilityActions")
+        .next()
+        .unwrap();
+    assert!(
+        activation.contains("UserEvent::AccessibilityActivated"),
+        "activation must notify the event loop to invalidate the cached tree"
+    );
+    let dispatch = source
+        .split("UserEvent::AccessibilityActivated { window_seq } =>")
+        .nth(1)
+        .expect("activation dispatch");
+    assert!(dispatch.contains("ws.accessibility_key = None;"));
+    assert!(dispatch.contains("ws.accessibility_updated_at = None;"));
+    assert!(dispatch.contains("ws.accessibility_pending = true;"));
+}
+
+fn finding_body<'a>(source: &'a str, name: &str) -> &'a str {
+    source
+        .split(&format!("fn {name}("))
+        .nth(1)
+        .unwrap()
+        .split("\n    }")
+        .next()
+        .unwrap()
+}
+
+#[test]
+fn finding_remote_new_tab_reconciles_search() {
+    let source = include_str!("automation.rs");
+    let branch = source
+        .split("PendingRemoteCommand::NewTab { .. } => {")
+        .nth(1)
+        .unwrap()
+        .split("PendingRemoteCommand::SendText")
+        .next()
+        .unwrap();
+    assert!(
+        branch.contains("let pre = self.focus_key(ws);"),
+        "remote new-tab must capture the previous focus"
+    );
+    assert!(
+        branch.contains("self.note_focus_change(ws, pre);"),
+        "remote new-tab must retarget open search"
+    );
+}
+
+#[test]
+fn finding_trigger_snapshots_reconstruct_graphemes() {
+    let source = include_str!("automation.rs");
+    let body = finding_body(source, "trigger_snapshot");
+    assert!(
+        body.contains("append_row_text"),
+        "trigger snapshots must skip wide spacers and retain combining marks"
+    );
+}
+
+#[test]
+fn finding_narrow_vertical_tabs_remain_selectable() {
+    let source = include_str!("chrome.rs");
+    let body = finding_body(source, "tab_bar_vertical");
+    assert!(
+        body.contains("self.cfg.close_button_on_tab && strip_w >= height"),
+        "a close button must fit inside its vertical tab"
+    );
+    assert!(body.contains("tab_title_rect(rect, close, closable)"));
+}
+
+#[test]
+fn finding_tab_pointer_uses_painted_band() {
+    let body = finding_body(include_str!("chrome.rs"), "cursor_in_tab_bar");
+    assert!(
+        body.contains("self.tab_band(ws, h)"),
+        "tab pointer hits must include the bottom status reservation"
+    );
+    let band = super::tab_band_rect(
+        (800, 600),
+        kettle_config::TabBarPos::Bottom,
+        24.0,
+        180.0,
+        0.0,
+        22.0,
+    );
+    assert!(super::rect_contains(band, 400.0, 560.0));
+    assert!(!super::rect_contains(band, 400.0, 590.0));
+}
+
+#[test]
+fn finding_facts_preserve_local_dismissal() {
+    let body = finding_body(include_str!("chrome.rs"), "apply_update_facts");
+    assert!(
+        body.contains("self.update_local_dismissals"),
+        "incoming disk facts must preserve local dismissals"
+    );
+}
+
+#[test]
+fn finding_watcher_refresh_keeps_working_registration() {
+    let body = finding_body(include_str!("config_reload.rs"), "refresh_config_watcher");
+    assert!(
+        body.contains("Ok(watcher) =>"),
+        "watcher replacement must be installed only after successful registration"
+    );
+    assert!(
+        body.contains("self.config_watcher_path"),
+        "watcher retention must be scoped to the same config path"
+    );
+}
+
+#[test]
+fn finding_modal_blocks_terminal_motion_but_not_release() {
+    let body = finding_body(include_str!("pointer.rs"), "send_mouse_to");
+    assert!(
+        body.contains("motion && self.pointer_modal_open(ws)"),
+        "modal pointer ownership must block terminal motion"
+    );
+}
+
+#[test]
+fn finding_synthetic_divider_drag_uses_native_handlers() {
+    let source = include_str!("ctl.rs");
+    assert!(
+        finding_body(source, "ctl_mouse_press").contains("self.press_split_divider(ws, bcode)"),
+        "synthetic divider presses must arm a split drag"
+    );
+    assert!(
+        finding_body(source, "ctl_mouse_move").contains("self.drag_split_divider(ws)"),
+        "synthetic motion must resize split PTYs"
+    );
+    assert!(include_str!("../app.rs").contains("if self.drag_split_divider(ws)"));
+}
+
+#[test]
+fn finding_stale_crop_failure_cannot_cancel_reload() {
+    let source = include_str!("media.rs");
+    let body = finding_body(source, "finish_lane_crop");
+    let before_result = body.split("let verdict = match &result").next().unwrap();
+    assert!(
+        before_result.contains("item.generation == render.generation"),
+        "crop failures must reject obsolete item generations before changing notices or jobs"
+    );
+    let mark = finding_body(source, "mark_preview_changed");
+    assert!(
+        mark.contains("withdraw_lane_renders(render.pane, render.item, render.generation)"),
+        "withdrawal must be limited to the failed generation"
+    );
+}
+
+#[test]
+fn finding_short_menu_keeps_one_complete_row() {
+    let body = finding_body(include_str!("menus.rs"), "context_menu_geometry");
+    assert!(
+        body.contains(".max(row_h)"),
+        "menu breathing room must yield to one complete row"
+    );
+}
+
+#[test]
+fn finding_ungroup_menu_checks_the_whole_tab() {
+    let body = finding_body(include_str!("menus.rs"), "context_menu_items");
+    let group = body
+        .split("let has_group =")
+        .nth(1)
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    assert!(
+        group.contains("tab_pane_ids"),
+        "Ungroup Tab availability must consider siblings"
+    );
+}
+
+#[test]
+fn finding_layout_picker_reaps_its_children() {
+    let body = finding_body(include_str!("modals.rs"), "layout_picker_key");
+    assert!(
+        body.contains("child.wait()"),
+        "layout launches need a background wait"
+    );
+    assert!(body.contains("std::thread::Builder::new()"));
+}
+
+#[test]
+fn finding_settings_accepts_control_space() {
+    let (_, key) = super::parse_ui_key("space").unwrap();
+    assert!(super::confirmation_space_key(&key));
+    let body = finding_body(include_str!("modals.rs"), "settings_key");
+    assert!(
+        body.contains("confirmation_space_key(key)"),
+        "Settings must activate character-form Space from dispatch_ui_key"
+    );
+}
+
+#[test]
+fn finding_captured_input_survives_broadcast_change() {
+    let body = finding_body(include_str!("paste.rs"), "deliver_queued_paste");
+    assert!(
+        body.contains("!matches!(content, QueuedPasteContent::Input { .. })"),
+        "captured key recipients must bypass paste scope validation"
+    );
+}
+
+#[test]
+fn finding_enlarged_viewer_covers_sibling_lanes() {
+    let body = finding_body(include_str!("preview.rs"), "preview_lane_projections");
+    assert!(
+        body.contains("open.theater || open.fullscreen"),
+        "fullscreen and theater projections must exclude sibling lanes"
+    );
+}
+
+#[test]
+fn finding_query_edit_refreshes_viewport_anchor() {
+    let mut search = crate::search_input::SearchState {
+        anchor: Some(kettle_core::SearchPoint { line: 0, column: 0 }),
+        ..Default::default()
+    };
+    search.note_edit(std::time::Instant::now());
+    assert!(
+        search.anchor.is_none(),
+        "query edits must discard the old viewport anchor"
+    );
+}
+
+#[test]
+fn finding_synthetic_keys_reconcile_focus_before_batch() {
+    let body = finding_body(include_str!("ctl.rs"), "ctl_send_keys");
+    let sync = body.find("self.sync_pane_focus_reports(ws);");
+    let write = body.find("feed_key_inputs(").unwrap();
+    assert!(
+        sync.is_some_and(|sync| sync < write),
+        "ctl_send_keys must send the new pane's focus report before its key batch"
+    );
+}
+
+#[test]
+fn finding_character_space_activates_focused_toast() {
+    let key = winit::keyboard::Key::Character(" ".into());
+    assert!(
+        super::update_toast::owns_key(true, &key, winit::keyboard::ModifiersState::empty()),
+        "focused toast must own character-form Space"
+    );
+    let mut closing = HashSet::new();
+    let physical = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space);
+    super::update_toast::guard_activation(&key, physical, &mut closing);
+    assert!(closing.contains(&physical));
+    let source = include_str!("../app.rs");
+    let branch = source
+        .split("if toast_owns_key {")
+        .nth(1)
+        .unwrap()
+        .split("if ws.ime_preedit")
+        .next()
+        .unwrap();
+    assert!(branch.contains("confirmation_space_key(&key)"));
+}
+
+#[test]
+fn finding_tear_off_retargets_source_search() {
+    let body = finding_body(include_str!("windowing.rs"), "maybe_tear_off");
+    assert!(
+        body.contains("self.note_focus_change(ws, pre_focus);"),
+        "successful tear-off must retarget source search"
+    );
+}
+
+#[test]
+fn finding_hidden_dock_uses_materialized_segments() {
+    let body = finding_body(include_str!("windowing.rs"), "dock_index_in_client");
+    assert!(
+        body.contains("self.tab_bar_at_height(w, height)"),
+        "hidden docking must use the visible bar's segment layout"
+    );
+    assert!(!body.contains("bw * 0.5"));
+}
+
+#[test]
+fn finding_tear_off_anchor_includes_status_bar() {
+    let source = include_str!("windowing.rs");
+    assert!(
+        source.contains("self.tear_off_tab_band(ws, (size.width, size.height)"),
+        "native tear-off anchors must use the destination tab band"
+    );
+    assert!(
+        source.contains("self.tear_off_tab_band(ws, (size.width, size.height), height)"),
+        "Wayland tear-off anchors must use the destination tab band"
+    );
+}
+
+#[test]
+fn trigger_grid_snapshot_preserves_wide_and_combining_text() {
+    let (mux, panes) = title_test_tab_mux(1);
+    let pane = &mux.panes[&panes[0]];
+    let text = "\u{4e16}\u{754c} e\u{301}";
+    assert!(pane.term.apply_local_output(text.as_bytes()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let snapshot = loop {
+        let snapshot = super::automation::trigger_snapshot(&pane.term).unwrap();
+        if snapshot.contains(text) {
+            break snapshot;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "snapshot lost Unicode: {snapshot:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let triggers = super::compile_triggers(&[kettle_config::OutputTrigger {
+        pattern: format!("({text})$"),
+        action: kettle_config::TriggerAction::RunCommand(vec!["notify".into(), "{1}".into()]),
+    }]);
+    assert_eq!(
+        super::match_triggers(&snapshot, &triggers),
+        Some(kettle_config::TriggerAction::RunCommand(vec![
+            "notify".into(),
+            text.into()
+        ]))
+    );
+    mux.kill_children();
+}
+
+#[test]
+fn review_search_projection_uses_natural_text_width() {
+    let src = production_source();
+    let overlay = finding_body(&src, "overlay");
+    let scroll = overlay
+        .split("let search_horizontal_scroll =")
+        .nth(1)
+        .unwrap();
+    assert!(scroll.contains("renderer.overlay_text_cell_width()"));
+    assert!(!scroll.contains("geometry.editor.2, renderer.cell_w"));
+    let ime = finding_body(&src, "update_ime_cursor_area");
+    let search = ime
+        .split("let search_cursor =")
+        .nth(1)
+        .unwrap()
+        .split("let (x, y) =")
+        .next()
+        .unwrap();
+    assert!(search.contains("self.overlay_text_cell_width(ws)"));
+
+    let natural_width = 10.0;
+    let terminal_width = natural_width * 0.5;
+    let geometry = kettle_render::search_bar_geometry(800.0, 600.0, natural_width, 20.0, &EN_TEXT);
+    let columns =
+        kettle_render::search_bar_columns(geometry.editor.2, natural_width).saturating_sub(2);
+    let mut editor = crate::search_input::SearchEditor::default();
+    editor.insert(&"x".repeat(columns + 6), 1024);
+    editor.ensure_cursor_visible(columns);
+    let scroll = crate::search_input::SearchEditor::visible_scroll_for(
+        editor.text(),
+        editor.cursor(),
+        editor.horizontal_scroll(),
+        columns,
+    );
+    assert!(scroll > 0);
+    assert_eq!(scroll, editor.horizontal_scroll());
+    let wrong_columns =
+        kettle_render::search_bar_columns(geometry.editor.2, terminal_width).saturating_sub(2);
+    assert_eq!(
+        crate::search_input::SearchEditor::visible_scroll_for(
+            editor.text(),
+            editor.cursor(),
+            scroll,
+            wrong_columns,
+        ),
+        0,
+        "terminal width reproduces the tail being clipped"
+    );
+}
+
+#[test]
+fn review_recording_header_follows_restore_and_precedes_siblings() {
+    let src = production_source();
+    let startup = finding_body(&src, "resumed_inner");
+    let restore = startup.find(".restore_geometry(").unwrap();
+    let resize = startup[restore..].find("self.resize_all(ws);").unwrap() + restore;
+    let header = startup.find("Recorder::start_target_async(").unwrap();
+    let recorder = startup.find("self.recorder = Some(rec);").unwrap();
+    let sibling = startup.find(".open_window(").unwrap();
+    assert!(
+        restore < resize && resize < header && header < recorder && recorder < sibling,
+        "record the actual restored grid before any sibling can drain output"
+    );
+}
+
+#[test]
+fn review_torn_tab_keeps_scaled_zoom_baseline() {
+    let src = production_source();
+    let mut handoffs = 0;
+    for body in src.split("WindowOpen::AdoptTab {").skip(1) {
+        let fields = body.split('}').next().unwrap();
+        if fields.contains("paste: Box::new(paste)") {
+            handoffs += 1;
+            assert!(
+                fields.contains("scaled_zoom_prev_font_size: ws.scaled_zoom_prev_font_size"),
+                "every live tab handoff must carry the unzoom font size: {fields}"
+            );
+        }
+    }
+    assert_eq!(handoffs, 4);
+    let open = finding_body(include_str!("windowing.rs"), "open_window");
+    assert!(open.contains("ws.scaled_zoom_prev_font_size = scaled_zoom_prev_font_size;"));
+}
+
+#[test]
+fn review_modals_and_early_releases_end_divider_drags() {
+    let src = production_source();
+    for name in ["install_confirm_dialog", "close_all_modals"] {
+        let body = finding_body(&src, name);
+        assert!(body.contains("ws.dragging_split = None;"), "{name}");
+    }
+    let ctl = finding_body(include_str!("ctl.rs"), "ctl_mouse_release");
+    assert!(
+        ctl.find("ws.dragging_split = None;").unwrap()
+            < ctl.find("self.confirm_mouse_release(").unwrap()
+    );
+    let native = src
+        .split("state: ElementState::Released,\n                button,")
+        .nth(1)
+        .unwrap()
+        .split("WindowEvent::CursorLeft")
+        .next()
+        .unwrap();
+    assert!(
+        native.find("ws.dragging_split = None;").unwrap()
+            < native
+                .find("self.confirm_mouse_release(ws, bcode)")
+                .unwrap()
+    );
+}
+
+#[test]
+fn installing_a_preview_overlay_ends_a_divider_drag() {
+    let mut ws = WindowState::new(1, Mux::new());
+    ws.dragging_split = Some(SplitDrag {
+        path: Vec::new(),
+        dir: Dir::Horizontal,
+    });
+    ws.install_preview_overlay(crate::media::Overlay {
+        pane: 7,
+        origin: Some(3),
+        control: None,
+        theater: false,
+        fullscreen: false,
+    });
+    assert!(ws.dragging_split.is_none());
+    let overlay = ws.preview_overlay.unwrap();
+    assert_eq!(overlay.pane, 7);
+    assert_eq!(overlay.origin, Some(3));
+}
+
+#[test]
+fn ready_preview_overlay_ends_divider_drags() {
+    let src = production_source();
+    let ready = finding_body(&src, "open_ready_previews");
+    assert!(ready.contains("self.show_media_item(ws, pane, item)"));
+    let show = finding_body(&src, "show_media_item");
+    assert!(
+        show.contains("ws.install_preview_overlay("),
+        "an asynchronous preview must use the shared overlay transition"
+    );
 }

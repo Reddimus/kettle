@@ -3,7 +3,7 @@
 #
 # Builds a release binary if one isn't present, then runs three
 # measurements 5 times each:
-#   - `kettle --version`     (cold-cache startup floor)
+#   - `kettle --version`     (warm startup floor)
 #   - `kettle --screenshot`  (full GPU pipeline boot + render)
 #   - `kettle --screenshot-menu` (GPU pipeline + menu pass)
 #
@@ -37,6 +37,8 @@ if [ ! -x target/release/kettle ]; then
 fi
 
 BIN="target/release/kettle"
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kettle-bench.XXXXXX")
+trap 'rm -rf "$WORK_DIR"' EXIT
 
 echo "==> kettle build identity"
 "$BIN" --version
@@ -58,7 +60,7 @@ run_bench() {
     # 1024 to get MB. -o uses a temp file so the binary's own
     # stdout/stderr don't get mixed with the timing line.
     local tmp
-    tmp=$(mktemp)
+    tmp="$WORK_DIR/time"
     "$TIME_BIN" -f '%e %M' -o "$tmp" "$@" >/dev/null
     awk '{ printf "  %s s, %.1f MB peak RSS\n", $1, $2 / 1024 }' "$tmp"
     rm -f "$tmp"
@@ -66,8 +68,8 @@ run_bench() {
 }
 
 run_bench "--version (startup floor)" "$BIN" --version
-run_bench "--screenshot (GPU pipeline + render)" "$BIN" --screenshot /tmp/kettle-bench.png
-run_bench "--screenshot-menu (with menu render pass)" "$BIN" --screenshot-menu /tmp/kettle-bench-menu.png
+run_bench "--screenshot (GPU pipeline + render)" "$BIN" --screenshot "$WORK_DIR/kettle-bench.png"
+run_bench "--screenshot-menu (with menu render pass)" "$BIN" --screenshot-menu "$WORK_DIR/kettle-bench-menu.png"
 
 echo ""
 echo "==> done. See docs/PERFORMANCE.md for the published baseline."

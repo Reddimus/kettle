@@ -15,6 +15,7 @@ pub(crate) struct SearchState {
     pub(crate) editor: SearchEditor,
     pub(crate) target_pane: Option<u64>,
     pub(crate) compiled: Option<kettle_core::CompiledSearch>,
+    pub(crate) highlight_compiled: Option<kettle_core::CompiledSearch>,
     pub(crate) compiled_revision: Option<u64>,
     pub(crate) focused: Option<kettle_core::SearchSpan>,
     pub(crate) revealed_focus: Option<kettle_core::SearchSpan>,
@@ -65,6 +66,7 @@ impl Default for SearchState {
             editor: SearchEditor::default(),
             target_pane: None,
             compiled: None,
+            highlight_compiled: None,
             compiled_revision: None,
             focused: None,
             revealed_focus: None,
@@ -98,6 +100,27 @@ impl Default for SearchState {
 }
 
 impl SearchState {
+    pub(crate) fn set_compiled(&mut self, compiled: Option<kettle_core::CompiledSearch>) {
+        // Each job owns its resume offsets, even when its bounds coincide with the other's.
+        self.highlight_compiled = compiled.clone();
+        self.compiled = compiled;
+    }
+
+    pub(crate) fn set_scan_token(&mut self, token: kettle_core::SearchScanToken) {
+        for compiled in [&mut self.compiled, &mut self.highlight_compiled]
+            .into_iter()
+            .flatten()
+        {
+            compiled.set_scan_token(token);
+        }
+    }
+
+    pub(crate) fn compiled_for_highlights(&mut self) -> &mut kettle_core::CompiledSearch {
+        self.highlight_compiled
+            .as_mut()
+            .expect("compiled search checked")
+    }
+
     pub(crate) fn query(&self) -> &str {
         self.editor.text()
     }
@@ -118,7 +141,7 @@ impl SearchState {
             kettle_render::SearchStatus::Searching
         };
         self.start_typing_pause(status, now);
-        self.compiled = None;
+        self.set_compiled(None);
         self.compiled_revision = None;
         self.focused = None;
         self.revealed_focus = None;
@@ -128,6 +151,7 @@ impl SearchState {
         self.visible_turn_pending = false;
         self.typing_scanned_revision = None;
         self.visible_key = None;
+        self.anchor = None;
         self.scan_token = None;
         self.background = None;
     }
@@ -943,6 +967,157 @@ fn next_word_boundary(value: &str, cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{SearchEditor, VisibleSearchKey, VisibleSearchScan};
+
+    fn wrapped_search_term(text: &str) -> alacritty_terminal::Term<kettle_core::EventProxy> {
+        use kettle_core::term::TermSize;
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut term = alacritty_terminal::Term::new(
+            alacritty_terminal::term::Config::default(),
+            &TermSize {
+                columns: 80,
+                screen_lines: 160,
+            },
+            kettle_core::EventProxy::new(tx, std::sync::Arc::new(|| {})),
+        );
+        let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+        parser.advance(&mut term, text.as_bytes());
+        term
+    }
+
+    #[test]
+    fn interleaved_navigation_and_highlights_finish_in_a_wrapped_line() {
+        use kettle_core::{
+            CaseSensitivity, CompiledSearch, SearchBounds, SearchDirection, SearchPoint,
+        };
+        let term = wrapped_search_term(&"a".repeat(12_000));
+        let start = SearchPoint::new(100, 0);
+        let navigation = SearchBounds::new(start, SearchPoint::new(159, 79));
+        let mut visible = SearchBounds::new(start, SearchPoint::new(110, 79));
+        let mut state = super::SearchState::default();
+        state.set_compiled(CompiledSearch::compile("a", CaseSensitivity::Always).unwrap());
+        let mut focused = None;
+        let mut highlighted = Vec::new();
+        let mut visible_done = false;
+        for turn in 0..64 {
+            if focused.is_none() {
+                let batch = state.compiled.as_mut().unwrap().find_in_range(
+                    &term,
+                    navigation,
+                    SearchDirection::Forward,
+                    1,
+                );
+                assert!(!batch.accuracy_limited);
+                if turn == 0 {
+                    assert!(batch.matches.is_empty());
+                    assert!(batch.continuation.is_some());
+                }
+                focused = batch.matches.first().copied();
+            }
+            if !visible_done {
+                let batch = state.compiled_for_highlights().find_in_range(
+                    &term,
+                    visible,
+                    SearchDirection::Forward,
+                    1000 - highlighted.len(),
+                );
+                assert!(!batch.accuracy_limited);
+                if let Some(cursor) = batch.continuation {
+                    visible.start = cursor;
+                } else {
+                    visible_done = true;
+                }
+                highlighted.extend(batch.matches);
+            }
+            if focused.is_some() && visible_done {
+                break;
+            }
+        }
+        assert_eq!(
+            focused.map(|span| span.start),
+            Some(start),
+            "navigation never reached the viewport"
+        );
+        assert!(visible_done, "highlights never finished");
+        assert_eq!(highlighted.len(), 11 * 80);
+        assert_eq!(highlighted.first().unwrap().start, start);
+        assert_eq!(highlighted.last().unwrap().end, visible.end);
+    }
+
+    #[test]
+    fn interleaved_empty_regex_matches_finish_in_a_wrapped_line() {
+        use kettle_core::{
+            CaseSensitivity, CompiledSearch, SearchBounds, SearchDirection, SearchPoint,
+        };
+        let term = wrapped_search_term(&"b".repeat(12_000));
+        let start = SearchPoint::new(100, 0);
+        let navigation = SearchBounds::new(start, SearchPoint::new(149, 79));
+        let visible = SearchBounds::new(start, SearchPoint::new(110, 79));
+        let mut state = super::SearchState::default();
+        state.set_compiled(CompiledSearch::compile("a?", CaseSensitivity::Always).unwrap());
+        let mut navigation_done = false;
+        let mut visible_done = false;
+        for turn in 0..64 {
+            if !navigation_done {
+                let batch = state.compiled.as_mut().unwrap().find_in_range(
+                    &term,
+                    navigation,
+                    SearchDirection::Forward,
+                    1,
+                );
+                assert!(!batch.accuracy_limited);
+                assert!(batch.matches.is_empty());
+                navigation_done = batch.exhausted;
+                if turn == 0 {
+                    assert!(!navigation_done);
+                }
+            }
+            if !visible_done {
+                let batch = state.compiled_for_highlights().find_in_range(
+                    &term,
+                    visible,
+                    SearchDirection::Forward,
+                    1000,
+                );
+                assert!(!batch.accuracy_limited);
+                assert!(batch.matches.is_empty());
+                visible_done = batch.exhausted;
+            }
+            if navigation_done && visible_done {
+                break;
+            }
+        }
+        assert!(navigation_done, "navigation never exhausted the range");
+        assert!(visible_done, "highlights never exhausted the range");
+    }
+
+    #[test]
+    fn output_invalidates_highlight_resume_offsets() {
+        use kettle_core::{
+            CaseSensitivity, CompiledSearch, SearchBounds, SearchDirection, SearchPoint,
+            SearchScanToken,
+        };
+        let term = wrapped_search_term(&"a".repeat(12_000));
+        let bounds = SearchBounds::new(SearchPoint::new(0, 0), SearchPoint::new(149, 79));
+        let mut state = super::SearchState::default();
+        state.set_compiled(CompiledSearch::compile("a", CaseSensitivity::Always).unwrap());
+        state.set_scan_token(SearchScanToken::capture(&term, 1, 1));
+        let first = state.compiled_for_highlights().find_in_range(
+            &term,
+            bounds,
+            SearchDirection::Forward,
+            12_000,
+        );
+        assert!(first.continuation.is_some());
+        assert!(!first.matches.is_empty());
+        state.set_scan_token(SearchScanToken::capture(&term, 1, 2));
+        let restarted = state.compiled_for_highlights().find_in_range(
+            &term,
+            bounds,
+            SearchDirection::Forward,
+            1,
+        );
+        assert_eq!(restarted.matches[0].start, bounds.start);
+    }
 
     #[test]
     fn navigation_invalidates_stale_coordinates_before_reanchoring() {

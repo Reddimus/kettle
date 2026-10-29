@@ -1,16 +1,16 @@
 #[cfg(any(windows, target_os = "linux", test))]
 use std::fs;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 use std::fs::File;
 #[cfg(any(windows, target_os = "linux"))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 use std::fs::OpenOptions;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 use std::io::Read;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 use std::io::Seek;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use std::path::Component;
@@ -35,7 +35,7 @@ use crate::UPDATE_PUBLIC_KEY;
 use crate::current_target;
 
 const MARKER_SCHEMA: u32 = 1;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 const JOURNAL_SCHEMA: u32 = 2;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub(crate) const MAX_ARCHIVE_ENTRIES: usize = 128;
@@ -65,7 +65,7 @@ const FAILED_PENDING_PREFIX: &str = ".kettle-update-failed-";
 const MAX_PENDING_RECORD_BYTES: usize = 1024 * 1024;
 #[cfg(windows)]
 const MAX_FAILED_PENDING_TRANSACTIONS: usize = 8;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 const BACKUP_MARKER_FILE: &str = ".kettle-update-backup.json";
 #[cfg(windows)]
 const WINDOWS_ALLOWED_ROOTS: &[&str] = &[
@@ -196,7 +196,7 @@ struct PendingUpdate {
     last_error: Option<String>,
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct BackupMarker {
@@ -2398,7 +2398,7 @@ fn remove_orphan_windows_backup_checked(
             .file_name()
             .ok_or_else(|| UpdateError::Transaction("backup path has no name".into()))?,
     );
-    let mut tree = hold_windows_two_level_tree(prefix, &root_relative)?;
+    let mut tree = hold_windows_two_level_tree(prefix, &root_relative, Some(BACKUP_MARKER_FILE))?;
     let marker_file = tree
         .files
         .iter_mut()
@@ -2446,7 +2446,7 @@ fn remove_staging_dir_checked(prefix: &Path, staging: &Path) -> Result<(), Updat
             .file_name()
             .ok_or_else(|| UpdateError::Transaction("staging path has no name".into()))?,
     );
-    let tree = hold_windows_two_level_tree(prefix, &root_relative)?;
+    let tree = hold_windows_two_level_tree(prefix, &root_relative, None)?;
     for (relative, _) in &tree.files {
         if !is_allowed_windows_payload_path(relative) {
             return Err(UpdateError::Transaction(format!(
@@ -2459,13 +2459,13 @@ fn remove_staging_dir_checked(prefix: &Path, staging: &Path) -> Result<(), Updat
     sync_parent(prefix)
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn sha256_file(path: &Path) -> Result<String, UpdateError> {
     let mut file = File::open(path)?;
     sha256_open_file(&mut file)
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn sha256_open_file(file: &mut File) -> Result<String, UpdateError> {
     file.rewind()?;
     let mut hash = Sha256::new();
@@ -3549,17 +3549,17 @@ fn require_file(path: &Path, label: impl std::fmt::Display) -> Result<(), Update
     Ok(())
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(test)]
 fn collect_files(root: &Path) -> Result<Vec<PathBuf>, UpdateError> {
     if !root.is_dir() {
         return Err(UpdateError::MissingArchiveFile(root.display().to_string()));
     }
     let mut pending = vec![root.to_path_buf()];
     let mut files = Vec::new();
+    let mut directories = 0;
     while let Some(directory) = pending.pop() {
-        let mut entries = fs::read_dir(&directory)?.collect::<Result<Vec<_>, _>>()?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
             let kind = entry.file_type()?;
             #[cfg(windows)]
             {
@@ -3575,8 +3575,19 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>, UpdateError> {
                 }
             }
             if kind.is_dir() {
+                directories += 1;
+                if directories > MAX_ARCHIVE_ENTRIES {
+                    return Err(UpdateError::UnsafeArchive(
+                        "directory count exceeds the safety limit".into(),
+                    ));
+                }
                 pending.push(entry.path());
             } else if kind.is_file() {
+                if files.len() >= MAX_ARCHIVE_ENTRIES {
+                    return Err(UpdateError::UnsafeArchive(
+                        "file count exceeds the safety limit".into(),
+                    ));
+                }
                 files.push(entry.path());
             } else {
                 return Err(UpdateError::UnsafeArchive(
@@ -3589,7 +3600,7 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>, UpdateError> {
     Ok(files)
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum JournalPhase {
@@ -3599,7 +3610,7 @@ enum JournalPhase {
     Committed,
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum JournalEntryState {
@@ -3620,7 +3631,7 @@ enum TransactionProgress {
     Published,
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Journal {
@@ -3638,7 +3649,7 @@ struct Journal {
     entries: Vec<JournalEntry>,
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct JournalEntry {
@@ -3690,7 +3701,7 @@ struct AnchoredParent {
     path: PathBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn open_anchored_directory(path: &Path) -> Result<File, UpdateError> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
@@ -3746,12 +3757,24 @@ fn anchored_parent_recording(
     before_create: &mut impl FnMut(&str) -> Result<(), UpdateError>,
 ) -> Result<AnchoredParent, UpdateError> {
     validate_relative(relative)?;
-    let mut directory = open_anchored_directory(prefix).map_err(|error| {
+    let directory = open_anchored_directory(prefix).map_err(|error| {
         UpdateError::Transaction(format!(
             "cannot anchor install prefix {}: {error}",
             prefix.display()
         ))
     })?;
+    anchored_parent_recording_from(directory, relative, create_missing, created, before_create)
+}
+
+#[cfg(target_os = "linux")]
+fn anchored_parent_recording_from(
+    mut directory: File,
+    relative: &Path,
+    create_missing: bool,
+    created: &mut Vec<String>,
+    before_create: &mut impl FnMut(&str) -> Result<(), UpdateError>,
+) -> Result<AnchoredParent, UpdateError> {
+    validate_relative(relative)?;
     if !directory_descriptor_path(&directory).is_dir() {
         return Err(UpdateError::Transaction(
             "Linux /proc/self/fd is required for contained self-update writes".into(),
@@ -4073,10 +4096,37 @@ impl WindowsHeldTree {
     }
 }
 
+#[cfg(any(windows, test))]
+fn account_managed_cleanup_file(
+    total: &mut u64,
+    relative: &Path,
+    size: u64,
+    backup_marker: Option<&str>,
+) -> Result<(), UpdateError> {
+    if backup_marker.is_some_and(|marker| relative == Path::new(marker)) {
+        if size > 4096 {
+            return Err(UpdateError::Transaction(
+                "backup marker exceeds the safety limit".into(),
+            ));
+        }
+        return Ok(());
+    }
+    *total = total
+        .checked_add(size)
+        .ok_or_else(|| UpdateError::Transaction("managed cleanup size overflow".into()))?;
+    if *total > MAX_UNPACKED_BYTES {
+        return Err(UpdateError::Transaction(
+            "managed cleanup tree exceeds the size limit".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn hold_windows_two_level_tree(
     prefix: &Path,
     root_relative: &Path,
+    backup_marker: Option<&str>,
 ) -> Result<WindowsHeldTree, UpdateError> {
     let root = open_windows_held_directory(prefix, root_relative)?;
     let mut nested = None;
@@ -4134,16 +4184,12 @@ fn hold_windows_two_level_tree(
                         "nested cleanup directory changed while a file was opened".into(),
                     ));
                 }
-                total = total
-                    .checked_add(held.file.metadata()?.len())
-                    .ok_or_else(|| {
-                        UpdateError::Transaction("managed cleanup size overflow".into())
-                    })?;
-                if total > MAX_UNPACKED_BYTES {
-                    return Err(UpdateError::Transaction(
-                        "managed cleanup tree exceeds the size limit".into(),
-                    ));
-                }
+                account_managed_cleanup_file(
+                    &mut total,
+                    &relative,
+                    held.file.metadata()?.len(),
+                    backup_marker,
+                )?;
                 files.push((relative, held));
             }
             nested = Some(held_nested);
@@ -4159,14 +4205,12 @@ fn hold_windows_two_level_tree(
                     "cleanup root changed while a file was opened".into(),
                 ));
             }
-            total = total
-                .checked_add(held.file.metadata()?.len())
-                .ok_or_else(|| UpdateError::Transaction("managed cleanup size overflow".into()))?;
-            if total > MAX_UNPACKED_BYTES {
-                return Err(UpdateError::Transaction(
-                    "managed cleanup tree exceeds the size limit".into(),
-                ));
-            }
+            account_managed_cleanup_file(
+                &mut total,
+                &relative,
+                held.file.metadata()?.len(),
+                backup_marker,
+            )?;
             files.push((relative, held));
         }
     }
@@ -4348,11 +4392,11 @@ fn anchored_destination(
     Ok((parent, destination))
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn open_regular_nofollow(path: &Path) -> Result<File, UpdateError> {
     let mut options = OpenOptions::new();
     options.read(true);
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
@@ -4374,7 +4418,7 @@ fn open_regular_nofollow(path: &Path) -> Result<File, UpdateError> {
         use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
         metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     let is_reparse = false;
     if !metadata.file_type().is_file() || is_reparse {
         return Err(UpdateError::Transaction(format!(
@@ -4420,7 +4464,7 @@ fn retry_windows_sharing_violation<T>(
     }
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn read_bounded_regular(path: &Path, limit: usize) -> Result<Vec<u8>, UpdateError> {
     let mut file = open_regular_nofollow(path)?;
     let metadata = file.metadata()?;
@@ -5137,12 +5181,12 @@ impl Transaction {
     }
 
     fn finish_cleanup(&mut self) -> Result<(), UpdateError> {
-        validate_backup_tree(&self.prefix, &self.backup_dir, &self.journal)?;
+        let backup_root = validate_backup_tree(&self.prefix, &self.backup_dir, &self.journal)?;
         remove_schema2_journal_checked(&self.prefix, &self.journal_path, &self.journal)?;
         // Once the journal is gone, the transaction is durably committed (or
         // rolled back). A crash during backup cleanup can leave harmless stale
         // data, but can no longer leave a journal that points at missing data.
-        remove_validated_backup_tree(&self.prefix, &self.backup_dir, &self.journal)
+        remove_validated_backup_tree(&self.prefix, &self.backup_dir, &self.journal, &backup_root)
     }
 }
 
@@ -5174,7 +5218,7 @@ fn confirm_committed_transaction(
         return Ok(false);
     }
     let backup_dir = prefix.join(&journal.backup_dir);
-    validate_backup_tree(prefix, &backup_dir, &journal)?;
+    let _backup_root = validate_backup_tree(prefix, &backup_dir, &journal)?;
     let mut transaction = Transaction {
         prefix: prefix.to_path_buf(),
         journal_path,
@@ -5219,7 +5263,7 @@ fn recover_transaction(prefix: &Path) -> Result<(), UpdateError> {
     validate_journal(&journal)?;
     let backup_dir = prefix.join(&journal.backup_dir);
     validate_incomplete_backup_destinations(prefix, &journal)?;
-    validate_backup_tree(prefix, &backup_dir, &journal)?;
+    let _backup_root = validate_backup_tree(prefix, &backup_dir, &journal)?;
     let mut transaction = Transaction {
         prefix: prefix.to_path_buf(),
         journal_path,
@@ -5579,12 +5623,12 @@ fn validate_journal(journal: &Journal) -> Result<(), UpdateError> {
     Ok(())
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn validate_backup_tree(
     prefix: &Path,
     backup_dir: &Path,
     journal: &Journal,
-) -> Result<(), UpdateError> {
+) -> Result<File, UpdateError> {
     if backup_dir.parent() != Some(prefix)
         || backup_dir.file_name().and_then(|name| name.to_str())
             != Some(journal.backup_dir.as_str())
@@ -5593,6 +5637,14 @@ fn validate_backup_tree(
             "backup directory does not match the update journal".into(),
         ));
     }
+    #[cfg(unix)]
+    let root = open_anchored_directory(backup_dir)?;
+    #[cfg(windows)]
+    let root = open_cleanup_anchored_directory(backup_dir)?;
+    #[cfg(target_os = "linux")]
+    let anchored_root = directory_descriptor_path(&root);
+    #[cfg(target_os = "linux")]
+    let backup_dir = anchored_root.as_path();
     let marker_path = backup_dir.join(BACKUP_MARKER_FILE);
     let marker: BackupMarker = serde_json::from_slice(&read_bounded_regular(&marker_path, 4096)?)?;
     if marker.schema != JOURNAL_SCHEMA
@@ -5638,6 +5690,8 @@ fn validate_backup_tree(
     }
 
     let mut directories = vec![backup_dir.to_path_buf()];
+    let mut directory_count = 0;
+    let mut files = Vec::new();
     while let Some(directory) = directories.pop() {
         for entry in fs::read_dir(&directory)? {
             let entry = entry?;
@@ -5665,8 +5719,32 @@ fn validate_backup_tree(
                         entry.path().display()
                     )));
                 }
+                directory_count += 1;
+                if directory_count > MAX_ARCHIVE_ENTRIES {
+                    return Err(UpdateError::Transaction(
+                        "backup tree exceeds the directory limit".into(),
+                    ));
+                }
                 directories.push(entry.path());
-            } else if !metadata.file_type().is_file() {
+            } else if metadata.file_type().is_file() {
+                let path = entry.path();
+                let relative = path
+                    .strip_prefix(backup_dir)
+                    .map_err(|_| UpdateError::Transaction("backup file escaped its root".into()))?;
+                let key = relative_to_string(relative)?.to_ascii_lowercase();
+                if !expected.contains_key(&key) {
+                    return Err(UpdateError::Transaction(format!(
+                        "backup tree contains an unjournaled file {}",
+                        relative.display()
+                    )));
+                }
+                if files.len() >= expected.len() || files.len() >= MAX_ARCHIVE_ENTRIES {
+                    return Err(UpdateError::Transaction(
+                        "backup tree does not exactly cover the update journal".into(),
+                    ));
+                }
+                files.push(path);
+            } else {
                 return Err(UpdateError::Transaction(format!(
                     "backup tree contains a non-regular entry {}",
                     entry.path().display()
@@ -5675,12 +5753,6 @@ fn validate_backup_tree(
         }
     }
 
-    let files = collect_files(backup_dir)?;
-    if files.len() > expected.len() || files.len() > MAX_ARCHIVE_ENTRIES {
-        return Err(UpdateError::Transaction(
-            "backup tree does not exactly cover the update journal".into(),
-        ));
-    }
     let mut seen = std::collections::HashSet::new();
     let mut total = 0_u64;
     for file in files {
@@ -5737,7 +5809,7 @@ fn validate_backup_tree(
             "backup tree does not cover every durable journal entry".into(),
         ));
     }
-    Ok(())
+    Ok(root)
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -5745,13 +5817,20 @@ fn remove_validated_backup_tree(
     prefix: &Path,
     backup_dir: &Path,
     journal: &Journal,
+    root: &File,
 ) -> Result<(), UpdateError> {
+    #[cfg(windows)]
     let backup_root = backup_dir.strip_prefix(prefix).map_err(|_| {
         UpdateError::Transaction("backup directory escaped the install prefix".into())
     })?;
     #[cfg(windows)]
     {
-        let mut tree = hold_windows_two_level_tree(prefix, backup_root)?;
+        let mut tree = hold_windows_two_level_tree(prefix, backup_root, Some(BACKUP_MARKER_FILE))?;
+        if !same_transaction_file_identity(root, &tree.root.directory)? {
+            return Err(UpdateError::Transaction(
+                "backup root changed before cleanup".into(),
+            ));
+        }
         let mut expected = journal
             .entries
             .iter()
@@ -5815,8 +5894,14 @@ fn remove_validated_backup_tree(
             .filter(|entry| entry.existed && entry.state != JournalEntryState::BackupDiscarded)
         {
             let relative = Path::new(&entry.relative);
-            let backup_relative = backup_root.join(relative);
-            let (_parent, backup) = anchored_destination(prefix, &backup_relative, false)?;
+            let parent = anchored_parent_recording_from(
+                root.try_clone()?,
+                relative,
+                false,
+                &mut Vec::new(),
+                &mut |_| Ok(()),
+            )?;
+            let backup = parent.destination(relative)?;
             match fs::remove_file(&backup) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -5832,14 +5917,26 @@ fn remove_validated_backup_tree(
             }
         }
         for relative in directories.into_iter().rev() {
-            let path = backup_dir.join(relative);
+            let parent = anchored_parent_recording_from(
+                root.try_clone()?,
+                &relative,
+                false,
+                &mut Vec::new(),
+                &mut |_| Ok(()),
+            )?;
+            let path = parent.destination(&relative)?;
             match fs::remove_dir(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
         }
-        fs::remove_file(backup_dir.join(BACKUP_MARKER_FILE))?;
+        fs::remove_file(directory_descriptor_path(root).join(BACKUP_MARKER_FILE))?;
+        if !same_transaction_file_identity(root, &open_anchored_directory(backup_dir)?)? {
+            return Err(UpdateError::Transaction(
+                "backup root changed before cleanup".into(),
+            ));
+        }
         fs::remove_dir(backup_dir)?;
         sync_parent(prefix)
     }
@@ -6000,7 +6097,7 @@ fn remove_validated_legacy_backup_tree(
         let root_relative = backup_dir.strip_prefix(prefix).map_err(|_| {
             UpdateError::Transaction("legacy backup directory escaped the install prefix".into())
         })?;
-        let tree = hold_windows_two_level_tree(prefix, root_relative)?;
+        let tree = hold_windows_two_level_tree(prefix, root_relative, None)?;
         let expected = journal
             .entries
             .iter()
@@ -6171,7 +6268,7 @@ fn validate_relative(path: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn relative_to_string(path: &Path) -> Result<String, UpdateError> {
     let parts = path
         .components()
@@ -6253,13 +6350,14 @@ fn remove_new_backup_dir_checked(prefix: &Path, path: &Path) -> Result<(), Updat
             path.file_name()
                 .ok_or_else(|| UpdateError::Transaction("backup path has no name".into()))?,
         );
-        let mut tree = match hold_windows_two_level_tree(prefix, &root_relative) {
-            Ok(tree) => tree,
-            Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
+        let mut tree =
+            match hold_windows_two_level_tree(prefix, &root_relative, Some(BACKUP_MARKER_FILE)) {
+                Ok(tree) => tree,
+                Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
         if tree.nested.is_some() || tree.files.len() > 1 {
             return Err(UpdateError::Transaction(
                 "new backup contains unexpected cleanup state".into(),
@@ -7144,10 +7242,193 @@ mod tests {
         );
     }
 
+    #[test]
+    fn backup_cleanup_accounts_for_the_marker_separately() {
+        let mut total = MAX_UNPACKED_BYTES;
+        account_managed_cleanup_file(
+            &mut total,
+            Path::new(BACKUP_MARKER_FILE),
+            4096,
+            Some(BACKUP_MARKER_FILE),
+        )
+        .expect("a bounded backup marker must fit beside a full payload quota");
+        assert_eq!(total, MAX_UNPACKED_BYTES);
+        assert!(
+            account_managed_cleanup_file(
+                &mut total,
+                Path::new(BACKUP_MARKER_FILE),
+                4097,
+                Some(BACKUP_MARKER_FILE),
+            )
+            .is_err()
+        );
+        for (relative, marker) in [
+            ("README.md", Some(BACKUP_MARKER_FILE)),
+            (
+                "shell-integration/.kettle-update-backup.json",
+                Some(BACKUP_MARKER_FILE),
+            ),
+            (BACKUP_MARKER_FILE, None),
+        ] {
+            let mut total = MAX_UNPACKED_BYTES;
+            assert!(
+                account_managed_cleanup_file(&mut total, Path::new(relative), 1, marker).is_err()
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_backup_cleanup_at_the_quota_confirms_and_removes_orphans() {
+        for orphan in [false, true] {
+            let root = test_tempdir();
+            let mut transaction = Transaction::begin(root.path(), "99.0.0").unwrap();
+            let backup = transaction.backup_dir.join("README.md");
+            File::create(&backup)
+                .unwrap()
+                .set_len(MAX_UNPACKED_BYTES)
+                .unwrap();
+            transaction.journal.entries.push(JournalEntry {
+                relative: "README.md".into(),
+                existed: true,
+                previous_unix_mode: None,
+                previous_size: Some(MAX_UNPACKED_BYTES),
+                previous_sha256: Some(sha256_file(&backup).unwrap()),
+                replacement_size: 1,
+                replacement_sha256: "0".repeat(64),
+                state: JournalEntryState::Installed,
+            });
+            let backup_dir = transaction.backup_dir.clone();
+            transaction.commit().unwrap();
+            if orphan {
+                fs::remove_file(root.path().join(".kettle-update-journal.json")).unwrap();
+                remove_orphan_windows_backup_checked(root.path(), &backup_dir).unwrap();
+            } else {
+                assert!(
+                    confirm_committed_transaction(root.path(), &semver::Version::new(99, 0, 0))
+                        .unwrap()
+                );
+            }
+            assert!(!root.path().join(".kettle-update-journal.json").exists());
+            assert!(!backup_dir.exists());
+        }
+    }
+
+    #[test]
+    fn file_collection_stops_at_the_entry_limit() {
+        for directory in [false, true] {
+            let root = test_tempdir();
+            for index in 0..MAX_ARCHIVE_ENTRIES {
+                let path = root.path().join(format!("entry-{index}"));
+                if directory {
+                    fs::create_dir(path).unwrap();
+                } else {
+                    fs::write(path, b"").unwrap();
+                }
+            }
+            assert!(collect_files(root.path()).is_ok());
+            if directory {
+                fs::create_dir(root.path().join("extra")).unwrap();
+            } else {
+                fs::write(root.path().join("extra"), b"").unwrap();
+            }
+            assert!(
+                collect_files(root.path()).is_err(),
+                "file collection must reject excess entries before collecting the tree"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn backup_validation_rejects_a_symlinked_root() {
+        let root = test_tempdir();
+        let outside = test_tempdir();
+        let marker = outside.path().join(BACKUP_MARKER_FILE);
+        fs::write(
+            &marker,
+            serde_json::to_vec(&BackupMarker {
+                schema: JOURNAL_SCHEMA,
+                product: "kettle".into(),
+                transaction_id: "1-2".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let name = ".kettle-update-backup-1-2";
+        let backup_dir = root.path().join(name);
+        std::os::unix::fs::symlink(outside.path(), &backup_dir).unwrap();
+        let journal = Journal {
+            schema: JOURNAL_SCHEMA,
+            transaction_id: "1-2".into(),
+            target_version: "99.0.0".into(),
+            phase: JournalPhase::Prepared,
+            backup_dir: name.into(),
+            created_directories: std::collections::BTreeMap::new(),
+            entries: vec![],
+        };
+        assert!(
+            validate_backup_tree(root.path(), &backup_dir, &journal).is_err(),
+            "recovery must reject a symlinked backup root before reading its marker"
+        );
+        assert!(marker.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_transaction_recovery_preserves_a_symlinked_backup_root() {
+        let root = test_tempdir();
+        let outside = test_tempdir();
+        let transaction = Transaction::begin(root.path(), "99.0.0").unwrap();
+        let backup_dir = transaction.backup_dir.clone();
+        let moved = outside.path().join("backup");
+        fs::rename(&backup_dir, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &backup_dir).unwrap();
+        drop(transaction);
+
+        assert!(recover_transaction(root.path()).is_err());
+        assert!(moved.join(BACKUP_MARKER_FILE).exists());
+        assert!(root.path().join(".kettle-update-journal.json").exists());
+    }
+
+    #[test]
+    fn backup_validation_rejects_unjournaled_files_before_collection() {
+        let root = test_tempdir();
+        let name = ".kettle-update-backup-1-2";
+        let backup_dir = root.path().join(name);
+        fs::create_dir(&backup_dir).unwrap();
+        fs::write(
+            backup_dir.join(BACKUP_MARKER_FILE),
+            serde_json::to_vec(&BackupMarker {
+                schema: JOURNAL_SCHEMA,
+                product: "kettle".into(),
+                transaction_id: "1-2".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        for index in 0..=MAX_ARCHIVE_ENTRIES {
+            fs::write(backup_dir.join(format!("file-{index}")), b"").unwrap();
+        }
+        let journal = Journal {
+            schema: JOURNAL_SCHEMA,
+            transaction_id: "1-2".into(),
+            target_version: "99.0.0".into(),
+            phase: JournalPhase::Prepared,
+            backup_dir: name.into(),
+            created_directories: std::collections::BTreeMap::new(),
+            entries: vec![],
+        };
+        let error = validate_backup_tree(root.path(), &backup_dir, &journal).unwrap_err();
+        assert!(
+            error.to_string().contains("unjournaled file"),
+            "unexpected files must be rejected during traversal: {error}"
+        );
+    }
+
     /// A backup holding exactly the quota of previous files validates beside
     /// its marker: the preflight that admitted the transaction counted only
     /// the files, and a refusal here would keep Kettle from starting.
-    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn a_backup_at_the_quota_validates_beside_its_marker() {
         let root = test_tempdir();

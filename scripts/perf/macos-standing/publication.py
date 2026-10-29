@@ -509,18 +509,19 @@ def observer_pilot_report(h, results):
         attempts = rows[terminal]
         if not isinstance(attempts, list):
             raise ValueError('observer pilot attempts invalid')
-        grouped = {i: {'on': [], 'off': []} for i in range(planned)}
+        grouped = {}
         for row in attempts:
             if not isinstance(row, dict):
                 raise ValueError('observer pilot attempt invalid')
             pair, arm = row.get('observer_pair'), row.get('observer_arm')
-            if type(pair) is not int or pair not in grouped or arm not in ('on', 'off'):
+            if type(pair) is not int or not 0 <= pair < planned or arm not in ('on', 'off'):
                 raise ValueError('observer pilot pair identity invalid')
-            grouped[pair][arm].append(row)
+            grouped.setdefault(pair, {'on': [], 'off': []})[arm].append(row)
         metrics = {}
         for field, (low_bound, high_bound) in bounds.items():
             values = {'on': [], 'off': []}
-            invalid = {}
+            missing = planned - len(grouped)
+            invalid = {'missing arm': missing} if missing else {}
             for pair, arms in grouped.items():
                 # A pair counts against the desktop allowance only if neither
                 # arm shows any failure that is not the desktop's.

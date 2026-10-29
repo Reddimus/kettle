@@ -40,7 +40,12 @@ esac
 mkdir -p "$out"
 pid=""
 events_pid=""
+button_down=0
 cleanup() {
+  if [ "$button_down" = "1" ]; then
+    xdotool mouseup 1 2>/dev/null || true
+    button_down=0
+  fi
   if [ -n "$events_pid" ] && kill -0 "$events_pid" 2>/dev/null; then
     kill "$events_pid" 2>/dev/null || true
   fi
@@ -50,6 +55,18 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+mouse_down() {
+  button_down=1
+  xdotool mousedown 1
+}
+
+mouse_up() {
+  xdotool mouseup 1
+  button_down=0
+}
 
 cfg="$out/config"
 cat > "$cfg" <<'CFG'
@@ -135,13 +152,13 @@ print(int(r["x"] + r["width"] / 2))
   if [ "$check_cancel" = "1" ]; then
     # --- Esc before the threshold cancels: press, jitter, Esc, release. ---
     xdotool mousemove --sync "$press_x" "$press_y"
-    xdotool mousedown 1
+    mouse_down
     sleep 0.15
     xdotool mousemove --sync $((press_x + 6)) "$press_y"
     sleep 0.15
     xdotool key Escape
     sleep 0.15
-    xdotool mouseup 1
+    mouse_up
     sleep 0.3
     read -r ntabs nwins <<<"$(tab_windows)"
     if [ "$ntabs" != "2" ] || [ "$nwins" != "1" ]; then
@@ -152,7 +169,7 @@ print(int(r["x"] + r["width"] / 2))
 
   # --- The tear: press tab 2, drag past the threshold, keep holding. ---
   xdotool mousemove --sync "$press_x" "$press_y"
-  xdotool mousedown 1
+  mouse_down
   sleep 0.15
   xdotool mousemove --sync $((press_x + 7)) "$press_y"
   sleep 0.1
@@ -166,7 +183,7 @@ print(int(r["x"] + r["width"] / 2))
     sleep 0.1
   done
   if [ -z "$torn" ]; then
-    xdotool mouseup 1
+    mouse_up
     echo "tearoff live smoke [$label]: drag past the threshold never tore a window off" >&2
     exit 1
   fi
@@ -179,7 +196,7 @@ print(int(r["x"] + r["width"] / 2))
   read -r t1x t1y <<<"$(client_xy "$torn")"
   moved="$(python3 -c "print(abs($t1x-$t0x) + abs($t1y-$t0y))")"
   if [ "$moved" -lt 150 ]; then
-    xdotool mouseup 1
+    mouse_up
     echo "tearoff live smoke [$label]: torn window froze mid-drag (moved ${moved}px for a 500px pointer travel)" >&2
     exit 1
   fi
@@ -201,11 +218,11 @@ print(int(r["x"] + r["width"] / 2))
   sleep 0.4
   read -r ntabs nwins <<<"$(tab_windows)"
   if [ "$ntabs" != "2" ] || [ "$nwins" != "2" ]; then
-    xdotool mouseup 1
+    mouse_up
     echo "tearoff live smoke [$label]: Esc during a dock hover merged anyway ($ntabs tabs, $nwins windows)" >&2
     exit 1
   fi
-  xdotool mouseup 1
+  mouse_up
   sleep 0.4
   read -r ntabs nwins <<<"$(tab_windows)"
   if [ "$ntabs" != "2" ] || [ "$nwins" != "2" ]; then
@@ -217,7 +234,7 @@ print(int(r["x"] + r["width"] / 2))
   # carry onto window 1's band, release, expect a merge. ---
   read -r tx ty <<<"$(client_xy "$torn")"
   xdotool mousemove --sync $((tx + 150)) $((ty + ${bar_h%.*} / 2))
-  xdotool mousedown 1
+  mouse_down
   sleep 0.15
   xdotool mousemove --sync $((tx + 158)) $((ty + ${bar_h%.*} / 2))
   sleep 0.1
@@ -230,7 +247,7 @@ print(int(r["x"] + r["width"] / 2))
   sleep 0.2
   xdotool mousemove --sync "$band_cx" "$band_cy"
   sleep 0.9
-  xdotool mouseup 1
+  mouse_up
   sleep 0.3
   xdotool mousemove --sync $((band_cx + 3)) $((band_cy + 2))
   xdotool mousemove --sync $((band_cx + 6)) $((band_cy + 4))

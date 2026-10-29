@@ -1759,7 +1759,7 @@ class Runner:
     def settle_command(self) -> str:
         """Waits for the terminal to reach COLS x ROWS and records the grid it
         ended at (round_grid)."""
-        return f'"{self.probes["stamp"]}" --settle {COLS} {ROWS} {SETTLE_SECONDS} "{self.work / "grid"}"'
+        return f'{shlex.quote(str(self.probes["stamp"]))} --settle {COLS} {ROWS} {SETTLE_SECONDS} {shlex.quote(str(self.work / "grid"))}'
 
     def launch(self, name: str, body: str, timeout: float,
                params: Optional[Dict[str, str]] = None, phases: bool = False,
@@ -1783,7 +1783,7 @@ class Runner:
             frame.clear(timeout)
         if argv is None:
             settled = f"{self.settle_command()}\n" if settle else ""
-            payload = self.script(f'"{self.probes["stamp"]}" "{stamp}"\n. "{params_file}"\n{settled}{body}')
+            payload = self.script(f'{shlex.quote(str(self.probes["stamp"]))} {shlex.quote(str(stamp))}\n. {shlex.quote(str(params_file))}\n{settled}{body}')
             argv = terminal_argv(name, payload, self.work, self.kettle)
         # Every terminal runs with the log filter it ships with, whatever the
         # harness's own shell sets. Kettle's phase stamps go to its stderr,
@@ -1868,9 +1868,9 @@ class Runner:
                 process = self.launch(name, "", deadlines["launch_s"], argv=floor)
                 ready = self.wait_for(Path(str(self.work / "stamp") + ".pid"), 20)
             else:
-                body = f'exec "{self.probes["keyblock"]}" "{log}"'
+                body = f'exec {shlex.quote(str(self.probes["keyblock"]))} {shlex.quote(str(log))}'
                 if cursor_mode:
-                    body += f' cursor "{enable}" "{ack}" {int(deadlines["launch_s"] * 1000)}'
+                    body += f' cursor {shlex.quote(str(enable))} {shlex.quote(str(ack))} {int(deadlines["launch_s"] * 1000)}'
                 process = self.launch(name, body, deadlines["launch_s"],
                     **({"cursor_exit_context": exit_context} if cursor_mode and options.get("exit_logs") else {}))
                 ready = self.wait_for(self.work / "grid", 30 + SETTLE_SECONDS)
@@ -2172,8 +2172,8 @@ class Runner:
                      footprint_detail: bool) -> dict:
         done = self.work / "done"
         hold = max(offsets) + 10
-        process = self.launch(name, f'cat "{flood}"\n"{self.probes["stamp"]}" "{done}"\nexec /bin/sleep {hold}',
-                              150)
+        process = self.launch(name, f'cat {shlex.quote(str(flood))}\n{shlex.quote(str(self.probes["stamp"]))} {shlex.quote(str(done))}\nexec /bin/sleep {hold}',
+                              150 + hold)
         pid = self.pid() if self.wait_for(Path(str(self.work / "stamp") + ".pid"), 20) else None
         if pid is None:
             self.stop(process, 30)
@@ -2214,7 +2214,7 @@ class Runner:
 
     def vtebench(self, name: str, vtebench: Path, benchmarks: Path, dat: Path, seconds: int) -> dict:
         process = self.launch(
-            name, f'exec "{vtebench}" -s -b "{benchmarks}" --dat "$DAT" --max-secs {seconds}', 900,
+            name, f'exec {shlex.quote(str(vtebench))} -s -b {shlex.quote(str(benchmarks))} --dat "$DAT" --max-secs {seconds}', 900,
             params={"DAT": str(dat)},
         )
         if self.finish(process, 900).get("killed", True):
@@ -3283,13 +3283,16 @@ def paired_difference(a: List[Optional[float]], b: List[Optional[float]],
 def latency_keys(run: dict, censor_ms: float) -> Optional[List[float]]:
     """A latency round's keys, with each censored key at the censor bound,
     which can only make a terminal look slower; None if the round failed."""
-    if ("error" in run or run.get("warmup") or run.get("seq_mismatch")
+    if ("error" in run or run.get("killed") or run.get("warmup") or run.get("seq_mismatch")
             or not isinstance(run.get("samples_ms"), list)):
         return None
     censored = run.get("censored") or 0
     if (not isinstance(censored, int) or isinstance(censored, bool) or censored < 0
             or not is_number(censor_ms) or censor_ms <= 0
             or any(not is_number(v) or v < 0 for v in run["samples_ms"])):
+        return None
+    count = len(run["samples_ms"]) + censored
+    if count > 1000 or ("keys" in run and (type(run["keys"]) is not int or run["keys"] != count)):
         return None
     keys = list(run["samples_ms"]) + [float(censor_ms)] * censored
     return keys or None
@@ -4452,6 +4455,7 @@ def bundle_kettle(binary: Path, dest: Path, template: Optional[Path]) -> Path:
     # bundle, loses the previous one, or touches another run's files.
     dest.parent.mkdir(parents=True, exist_ok=True)
     scratch = Path(tempfile.mkdtemp(prefix=f".{dest.name}.", dir=dest.parent))
+    preserve_previous = False
     try:
         partial = scratch / dest.name
         if template:
@@ -4461,17 +4465,30 @@ def bundle_kettle(binary: Path, dest: Path, template: Optional[Path]) -> Path:
             shutil.copy2(REPO / "packaging" / "macos" / "Info.plist", partial / "Contents" / "Info.plist")
         shutil.copy2(binary, partial / "Contents" / "MacOS" / "kettle")
         subprocess.run(["codesign", "--force", "--deep", "-s", "-", str(partial)], check=True, capture_output=True)
-        previous = scratch / "previous"
-        if dest.exists():
-            dest.rename(previous)
+        import fcntl
+
+        lock = os.open(dest.parent, os.O_RDONLY)
         try:
-            partial.rename(dest)
-        except BaseException:
-            if previous.exists():
-                previous.rename(dest)
-            raise
+            # The parent inode serializes swaps without a disposable lock file.
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            previous = scratch / "previous"
+            if dest.exists():
+                dest.rename(previous)
+            try:
+                partial.rename(dest)
+            except BaseException:
+                if previous.exists():
+                    try:
+                        previous.rename(dest)
+                    except BaseException:
+                        preserve_previous = True
+                        raise
+                raise
+        finally:
+            os.close(lock)
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        if not preserve_previous:
+            shutil.rmtree(scratch, ignore_errors=True)
     return dest / "Contents" / "MacOS" / "kettle"
 
 
@@ -4928,7 +4945,7 @@ def latency_entries(names: List[str], ab: bool, opaque: bool, floors: List[str],
         return [name for name in names if name == "kettle" or name in ("kettle-a", "kettle-b")]
     if ab:
         return list(names)
-    return names + (["kettle-opaque"] if opaque else []) + [f"floor-{mode}" for mode in floors]
+    return names + (["kettle-opaque"] if opaque and "kettle-opaque" not in names else []) + [f"floor-{mode}" for mode in floors]
 
 
 def run_latency_check(tools: Path, identity: Optional[str], rebuild: bool = False) -> int:
@@ -5298,6 +5315,8 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     if args.observer_pilot:
         rounds = {workloads[0]: args.observer_pairs * 2}
     offsets = [float(value) for value in args.flood_offsets.split(",") if value]
+    if not offsets or any(not is_number(value) or not 0 <= value <= 3600 for value in offsets):
+        parser.error("--flood-offsets must contain finite offsets from 0 to 3600 seconds")
     unranked: List[str] = []
 
     if args.kettle_b or args.kettle_b_config:
@@ -5335,7 +5354,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         parser.error(str(error))
     latency_names = latency_entries(names, is_ab(kettle), args.latency_kettle_opaque, floors)
     cursor_names = latency_entries(names, is_ab(kettle), False, [], "cursor")
-    if "latency" in workloads and "kettle-opaque" in latency_names:
+    if "latency" in workloads and "kettle-opaque" in latency_names and "kettle-opaque" not in names:
         kettle["kettle-opaque"] = kettle["kettle"]
         kettle_configs["kettle-opaque"] = KETTLE_OPAQUE
     try:

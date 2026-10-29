@@ -240,3 +240,39 @@ fn terminal_cursor_is_suppressed_while_window_is_unfocused() {
     assert!(!super::cursor_focus_gate(true, false));
     assert!(!super::cursor_focus_gate(false, false));
 }
+
+#[test]
+fn separate_combining_glyph_keeps_its_internal_pen_advance() {
+    use super::*;
+    let mut fonts = FontSystem::new();
+    load_bundled_font(&mut fonts, kettle_config::font::REGULAR);
+    let mut buffer = TextBuffer::new(&mut fonts, Metrics::new(24.0, 30.0));
+    buffer.set_wrap(Wrap::None);
+    buffer.set_text(
+        "x\u{301}",
+        &Attrs::new().family(Family::Name(kettle_config::font::FAMILY)),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut fonts, false);
+    let run = buffer.layout_runs().next().unwrap();
+    assert_eq!(
+        run.glyphs.len(),
+        2,
+        "fixture needs separate base and accent glyphs"
+    );
+    let origin = run.glyphs[0].x;
+    let mark = &run.glyphs[1];
+    assert!(
+        mark.x - origin > 2.0,
+        "fixture needs an advanced accent pen"
+    );
+    let expected = mark.physical((40.0 - origin, 0.0), 1.0);
+    let actual = mark.physical((cell_locked_glyph_offset(40.0, mark, origin), 0.0), 1.0);
+    assert!(
+        (actual.x - expected.x).abs() <= 1,
+        "combining mark moved from shaped x={} to cell-locked x={}",
+        expected.x,
+        actual.x
+    );
+}

@@ -642,14 +642,16 @@ rendered under, and a file's identity is checked again after the copy.
 `hand_over` checks the viewer before copying and hands the copy over under
 the store's lock once it is still Kettle's and exit has not begun.
 
-Crash cleanup recognizes only
-`kettle-paste-<canonical-pid>-<canonical-u128-nonce>` and
-`kettle-open-<canonical-pid>-<canonical-u128-nonce>` directories, with
-canonical zero-padded children from `0001.png` through `0064.png` for pasted
-images or `999999.png` for viewer copies. Cleanup runs on a background
+Crash cleanup recognizes only the four store kinds'
+`kettle-<kind>-<canonical-pid>-<canonical-u128-nonce>` directories:
+`kettle-paste-` (pasted PNGs, children `0001.png` through `0064.png`),
+`kettle-open-` (viewer PNG copies, up to `999999.png`), `kettle-video-` (player
+copies with their container's extension) and `kettle-document-` (PDF copies),
+each with canonical zero-padded children. Cleanup runs on a background
 thread so a damaged namespace cannot delay event-loop/window creation. It stops
 after 250 ms, 8,192 root entries, 64 stale attempts, or 32 successful sessions
-per kind; each session is capped at its kind's file count (64 or 32). A candidate must be older than 24 hours,
+per kind; each session is capped at its kind's file count (64 pasted images,
+32 viewer copies, 8 videos or 8 documents). A candidate must be older than 24 hours,
 its creator must be definitively dead (`ESRCH` on Unix; queryable
 non-`STILL_ACTIVE`/invalid PID on Windows), and every child must open relative
 to the held directory as a current-user/private, non-reparse, single-link
@@ -1219,8 +1221,10 @@ pan, grabbing while it pans.
 `media::PreviewFocus` of its pane and item). It is the last `KeyModal`
 and `TextModal`, so another modal opened over it takes keys first, and
 its branch in the key path comes before keybind resolution: every key
-is the lane's, `media::preview_key` mapping Esc, the arrows, `+`/`=`,
-`-`, `0` and `c` and swallowing the rest, any Ctrl, Alt or Command chord
+is the lane's, `media::preview_key` mapping Esc, the arrows, Space,
+Page Up/Down, Home/End, the Menu key and Shift+F10, `+`/`=`, `-`, `0`,
+`c`, `k` (play), `m` (mute), `t` (theater) and `f` (fullscreen), and
+swallowing the rest, any Ctrl, Alt or Command chord
 included, Option on macOS too (`held_modifiers`). `ui_owns_key` keeps
 the releases of those presses from the PTY; a key the terminal already
 had when the lane took the keyboard still sends its release, to the pane
@@ -1485,7 +1489,9 @@ Pane-bound bytes never block the App thread. Each pane owns two bounded input
 lanes: user input (keys, mouse, focus, paste, Lua, legacy remote commands, and
 control requests) and higher-priority terminal protocol replies. Both lanes
 have 64-message channels and independent byte budgets; the worker advances a
-message in at most 8 KiB writes and checks the reply lane between user chunks.
+message in at most 8 KiB writes and takes the next message only when the
+current one is complete, so a reply never lands inside a paste. After each
+message it prefers the other lane, so neither starves.
 The enqueue boundary returns `PaneInputResult::{Queued, ReadOnly,
 Backpressured, Oversize, Failed}`. GUI callers provide throttled visible
 feedback for transient/size failures, read-only remains visible in pane chrome,
@@ -1904,8 +1910,13 @@ whole scrollback buffer:
   that wins with an empty match can shadow a later consuming alternative at
   the same position.
 - **`kettle-ui` owns interaction and scheduling.** Each `WindowState` has one
-  search state and an in-memory per-pane query map; moving between panes does
-  not leak a query into another pane, and no search state is process-global.
+  search state and an in-memory per-pane query map. An open search bar follows
+  focus and carries its query to the newly focused pane, where closing it
+  stores that query; with the bar closed, each pane keeps its own remembered
+  query. No search state is process-global. Navigation and visible highlights
+  use separate `CompiledSearch` instances so alternating work slices cannot
+  discard each other's saved offsets. Both receive the same scan token and
+  reset on query, output, or layout changes.
   The Unicode editor moves, selects, and deletes by grapheme boundary. A scan
   token combines pane output generation, query revision, and terminal layout.
   Query changes and reflow restart work from a fresh viewport anchor. Plain PTY
@@ -2125,7 +2136,15 @@ fields from different moments. A stdout command already accepted by the writer
 remains non-idle until its OS-facing write returns. The final source-progress
 sample is therefore taken behind an authoritative disconnect, when no new pump
 read can race it. Linux process teardown uses the session created for the PTY
-as its ownership boundary. Session membership survives reparenting and cannot be
+as its ownership boundary, and the `kettle exec` command line is also a child
+subreaper: a descendant that left the session with `setsid()` is reparented to
+it when its parent exits, and teardown kills and reaps every such adopted child
+outside Kettle's own session until none remains, while a running command's
+exited adoptees are reaped every 250 ms. Setup first resets an inherited
+ignored `SIGCHLD`, so the kernel never reaps an adopted child before the sweep
+signals it, and a killed session member counts as exited only once its pidfd
+reports that every thread has; when adoption cannot be set up, teardown is
+reported unverified. Session membership survives reparenting and cannot be
 joined by an unrelated process. Before any numeric group signal or session scan,
 teardown stops the original leader through its pidfd and revalidates its PID plus
 start time; that unreaped anchor prevents the kernel from recycling the
@@ -2212,8 +2231,11 @@ detaches the worker; it never waits in a join.
 The input worker is a separate per-pane boundary from the output pump/parser
 pair. User messages are capped at 4 MiB plus the bracketed-paste envelope, with
 a slightly larger aggregate reservation for interactive input already queued.
-Protocol replies have a separate 2 MiB message/aggregate budget; rejecting one
-is terminal because silently losing a reply corrupts the terminal protocol.
+Protocol replies have a separate 2 MiB message/aggregate budget and a 64-reply
+depth. A reply that exceeds the aggregate byte budget or queue depth is dropped
+and logged once per run of drops, so a program that stops reading cannot turn
+its query flood into the loss of the session. A single reply larger than 2 MiB
+fails the input worker and closes the pane.
 Broadcast fan-out returns the strongest result across its targets and scrolls
 only panes that accepted the write. Paste fan-out builds at most one raw and
 one bracketed immutable payload regardless of pane count.
@@ -3162,9 +3184,16 @@ no context reads, clock queries, formatting or writes.
   adoption, and the macOS libproc/`sysctl` process walk in
   `kettle-remote/src/macos.rs`, the only module that crate allows unsafe code
   in) plus UTF-8 conversion after an explicit valid-prefix check. Each
-  site documents its ownership or validity contract. There is no `transmute`,
-  and the only custom `Send`/`Sync` implementation is `Send` for the Windows
-  `CtlListener` in `kettle-ctl`, which solely owns its pipe `HANDLE`. Per-pane
+  site documents its ownership or validity contract. Native media adds
+  AVFoundation/CoreMedia object and buffer lifetimes, AudioQueue output,
+  PulseAudio output and sandbox setup. Dynamic-symbol conversions use
+  `transmute` in `kettle-ctl/src/process.rs` (Windows process queries) and
+  `kettle-media-native/src/pulse.rs`, and `transmute_copy` in the native
+  macOS sandbox loader. Custom `Send` implementations cover the Windows
+  `CtlListener`'s owned pipe `HANDLE`, native audio `Output` handles, and
+  AVFoundation `Frames` and `AudioFrames`. AVFoundation's `Keep` implements
+  both `Send` and `Sync` to share asset lifetime and atomic reference counts,
+  without concurrent calls through the asset. Per-pane
   `Arc<Mutex<...>>` are contended only on PTY read or App snapshot; lock-hold
   times are O(bytes), designed to stay well under one frame's budget per drain
   even on fast scrolling.
@@ -3504,15 +3533,21 @@ action edits the broadcast-group label.
 
 ```mermaid
 flowchart LR
-    A["cfg.background_image"] --> B["decode_bg_image<br/>(PNG / JPEG / WebP /<br/>BMP / GIF)"]
+    A["cfg.background_image<br/>+ background_blur"] --> B["Decode worker<br/>decode_bg_image_frames<br/>(bounded still / animated frames)"]
     B --> C["Optional box blur<br/>3-pass separable"]
-    C --> D["BgImage<br/>(Arc-cached by path)"]
+    C --> D["Later render frame installs<br/>matching result<br/>cache key: path + blur radius"]
     D --> E["imgpipe"]
     E --> F["Render BEFORE pane<br/>backgrounds with UV-mode<br/>dispatch (stretch /<br/>tile / center / scale)"]
 ```
 
-Decoded at config-load (one-shot), kept in a path-keyed cache, rendered
-via the cell-image pipeline. UV-modes + align-horiz/vert configurable.
+During rendering, `Renderer::request_bg_image_reload` submits decoding to a
+worker keyed by `(path, blur_radius)`. `decode_bg_image_frames_with_blur`
+decodes bounded still or animated frames (8192 pixels per edge, up to 128
+animation frames and 128 MiB of animation RGBA) and applies the optional blur.
+On a later frame, `apply_bg_image_worker_result` installs only a result matching
+the pending job and current configuration. Successful results stay cached;
+failed decodes are eligible for retry after three seconds. Frames render via
+the cell-image pipeline. UV-modes + align-horiz/vert configurable.
 See [CONFIG.md](CONFIG.md) for wallpaper settings.
 
 ### Detachable tabs (Chromium-style live tear-off + re-dock)

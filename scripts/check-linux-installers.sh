@@ -319,9 +319,15 @@ echo "linux-installer check: simulated release-tarball channel OK"
 repo=${KETTLE_GITHUB_REPO:-Reddimus/kettle}
 tag="v${version}"
 remote="https://github.com/${repo}.git"
-if ! git ls-remote --exit-code --tags "$remote" "refs/tags/${tag}" >/dev/null 2>&1; then
-  echo "linux-installer check: ${tag} is not published yet; skipping online installer smoke"
-  exit 0
+if git ls-remote --exit-code --tags "$remote" "refs/tags/${tag}" >/dev/null; then
+  :
+else
+  remote_status=$?
+  if [ "$remote_status" = "2" ]; then
+    echo "linux-installer check: ${tag} is not published yet; skipping online installer smoke"
+    exit 0
+  fi
+  fail "could not query published tag ${tag} (git exit ${remote_status})"
 fi
 
 # A signed tag can become visible before the release finalizer publishes its

@@ -338,7 +338,28 @@ struct CanonicalEofRules {
 impl CanonicalEofRules {
     #[cfg(any(unix, test))]
     fn supports_eof(self) -> bool {
-        self.canonical && !self.extproc
+        if !self.canonical || self.extproc {
+            return false;
+        }
+        let Some(byte) = self.veof else {
+            return true;
+        };
+        !(self.istrip && byte >= 0x80
+            || self.iuclc && self.iexten && byte.is_ascii_uppercase()
+            || byte == b'\r' && (self.igncr || self.icrnl)
+            || byte == b'\n'
+            || self.ixon && [self.vstart, self.vstop].contains(&Some(byte))
+            || self.isig && [self.vintr, self.vquit, self.vsusp].contains(&Some(byte))
+            || [self.verase, self.vkill, self.veol].contains(&Some(byte))
+            || self.iexten
+                && [
+                    self.vlnext,
+                    self.vwerase,
+                    self.vreprint,
+                    self.vdiscard,
+                    self.veol2,
+                ]
+                .contains(&Some(byte)))
     }
 }
 
@@ -924,9 +945,6 @@ impl UnixPtyWatcher {
                     remaining.min(self.fallback_timeout_ms)
                 });
             let result = unsafe { libc::poll(&mut poll_fd, 1, timeout) };
-            if result > 0 && poll_fd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
-                return Ok(Some(UnixStartupWake::Output));
-            }
             if result < 0 {
                 let error = io::Error::last_os_error();
                 if error.kind() == io::ErrorKind::Interrupted {
@@ -934,11 +952,28 @@ impl UnixPtyWatcher {
                 }
                 return Err(error);
             }
+            let output =
+                result > 0 && poll_fd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0;
+            let child_exit = match unix_child_exit_code_unreaped(self.pid) {
+                Ok(status) => status.is_some(),
+                // This watcher owns a direct child's PID, but the Terminal's
+                // status/diagnostic callers can reap it first. That is still
+                // an exit observation: drain readable bytes and bound any
+                // remaining slave holder just as for an unreaped exit.
+                Err(error) if error.raw_os_error() == Some(libc::ECHILD) => true,
+                Err(error) => return Err(error),
+            };
+            if output && child_exit {
+                return Ok(Some(UnixStartupWake::OutputAndChildExit));
+            }
+            if output {
+                return Ok(Some(UnixStartupWake::Output));
+            }
+            if child_exit {
+                return Ok(Some(UnixStartupWake::ChildExit));
+            }
             if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
                 return Ok(None);
-            }
-            if unix_child_exit_code_unreaped(self.pid)?.is_some() {
-                return Ok(Some(UnixStartupWake::ChildExit));
             }
             self.fallback_timeout_ms = (self.fallback_timeout_ms * 2).min(1_000);
         }
@@ -1732,6 +1767,10 @@ fn scroll_regular_placements(images: &Images, scroll: GraphicsScroll) -> bool {
             return true;
         }
 
+        if scrolls_into_history && start < 0.0 && end <= region_bottom {
+            return true;
+        }
+
         // Kitty scrolls only images entirely contained by the page margins.
         // Everything else remains at the same visual row; re-anchoring is
         // still required when a top-anchored region advances stable row ids.
@@ -2211,6 +2250,22 @@ fn for_each_completion_input_effect(bytes: &[u8], mut visit: impl FnMut(Completi
             None
         };
 
+        let special = special.or_else(|| {
+            if remaining.first() != Some(&0x1b) || remaining.len() < 2 {
+                return None;
+            }
+            let consumed = if matches!(remaining[1], b'[' | b'O') {
+                remaining
+                    .iter()
+                    .take(64)
+                    .skip(2)
+                    .position(|byte| (0x40..=0x7e).contains(byte))
+                    .map_or(remaining.len().min(64), |end| end + 3)
+            } else {
+                2
+            };
+            Some((consumed, CompletionInputEffect::Clear))
+        });
         if let Some((consumed, effect)) = special {
             if pending_clear {
                 visit(CompletionInputEffect::Clear);
@@ -4179,11 +4234,13 @@ fn vs_dev_powershell_argv(host: &str, install_path: &str) -> Vec<String> {
     ]
 }
 
+#[cfg(any(windows, test))]
+mod shell_probe;
+
 /// Dropdown parity: probe the newest VS via
 /// `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe`
-/// (a fixed location Microsoft documents as stable). Worker thread + 2s
-/// timeout, same shape as `list_wsl_distros` — a hung probe must not freeze
-/// the UI thread (the `detect_shells` cache means this runs once).
+/// (a fixed location Microsoft documents as stable). Like `list_wsl_distros`,
+/// capture is bounded and a timed-out probe is killed and reaped.
 #[cfg(windows)]
 fn vs_dev_info() -> Option<VsDevInfo> {
     let pf86 = std::env::var_os("ProgramFiles(x86)")?;
@@ -4197,25 +4254,17 @@ fn vs_dev_info() -> Option<VsDevInfo> {
     {
         return None;
     }
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(
-            std::process::Command::new(vswhere)
-                .args([
-                    "-latest",
-                    "-products",
-                    "*",
-                    "-requires",
-                    "Microsoft.VisualStudio.Component.CoreEditor",
-                    "-property",
-                    "installationPath",
-                ])
-                .output(),
-        );
-    });
-    let Ok(Ok(out)) = rx.recv_timeout(std::time::Duration::from_secs(2)) else {
-        return None;
-    };
+    let mut command = std::process::Command::new(vswhere);
+    command.args([
+        "-latest",
+        "-products",
+        "*",
+        "-requires",
+        "Microsoft.VisualStudio.Component.CoreEditor",
+        "-property",
+        "installationPath",
+    ]);
+    let out = shell_probe::output(command, std::time::Duration::from_secs(2), 64 * 1024).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -4373,25 +4422,9 @@ fn parse_wsl_distros(text: &str) -> Vec<String> {
 /// host without WSL simply offers no WSL entries.
 #[cfg(windows)]
 fn list_wsl_distros() -> Vec<String> {
-    // Run `wsl.exe -l -q` on a worker thread with a bounded
-    // wait. The dropdown that calls this (new-tab `▾`) runs on the UI thread, so
-    // a wedged LxssManager — the very `Wsl/Service/E_UNEXPECTED` state that
-    // freezes `wsl.exe` — would otherwise hang the whole window ("not
-    // responding"). On timeout we abandon the call and report no distros; the
-    // worker self-terminates if `wsl.exe` ever returns (its `send` no-ops once
-    // the receiver is gone). The process-wide `detect_shells` cache, prewarmed
-    // at startup, runs this at most once, so the worst case is one ~2 s wait on
-    // the first dropdown open. `-l -q` only reads the registry/service (it
-    // doesn't boot a distro), so 2 s is generous.
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(
-            std::process::Command::new("wsl.exe")
-                .args(["-l", "-q"])
-                .output(),
-        );
-    });
-    let Ok(Ok(out)) = rx.recv_timeout(std::time::Duration::from_secs(2)) else {
+    let mut command = std::process::Command::new("wsl.exe");
+    command.args(["-l", "-q"]);
+    let Ok(out) = shell_probe::output(command, std::time::Duration::from_secs(2), 64 * 1024) else {
         return Vec::new();
     };
     if !out.status.success() {
@@ -4591,10 +4624,10 @@ fn is_powershell(path: &std::path::Path) -> bool {
 
 /// Windows limits a process command line to 32,767 UTF-16 code units.
 /// `-EncodedCommand` base64-encodes UTF-16LE, which would put the integration
-/// over that limit. Encoding the source as UTF-8 and decoding it in a fixed
-/// ASCII bootstrap keeps the same quoting safety while using roughly half the
-/// command line. The compile-time cap leaves room for the executable path,
-/// quoting, and future arguments.
+/// over that limit. Deflating the UTF-8 source, base64-encoding it, and
+/// inflating it in a fixed ASCII bootstrap keeps the same quoting safety in
+/// about a third of the command line. A test holds the result under a cap that
+/// leaves room for the executable path, quoting, and future arguments.
 #[cfg(windows)]
 fn powershell_integration_command(path: &std::path::Path) -> CommandBuilder {
     let mut c = CommandBuilder::new(path);
@@ -4605,34 +4638,33 @@ fn powershell_integration_command(path: &std::path::Path) -> CommandBuilder {
 }
 
 #[cfg(any(windows, test))]
-const POWERSHELL_BOOTSTRAP_PREFIX: &str =
-    "& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('";
+const POWERSHELL_BOOTSTRAP_PREFIX: &str = "& ([scriptblock]::Create([IO.StreamReader]::new(\
+    [IO.Compression.DeflateStream]::new([IO.MemoryStream]::new([Convert]::FromBase64String('";
 #[cfg(any(windows, test))]
-const POWERSHELL_BOOTSTRAP_SUFFIX: &str = "'))))";
-#[cfg(any(windows, test))]
+const POWERSHELL_BOOTSTRAP_SUFFIX: &str =
+    "')),[IO.Compression.CompressionMode]::Decompress),[Text.Encoding]::UTF8).ReadToEnd()))";
+// The budget is checked by a test of the real bootstrap; see below.
+#[cfg(test)]
 const POWERSHELL_BOOTSTRAP_MAX_CHARS: usize = 32_767 - 3_000;
-#[cfg(any(windows, test))]
+#[cfg(test)]
 const POWERSHELL_BOOTSTRAP_GROWTH_HEADROOM: usize = 512;
 
 // Keep the embedded command comfortably below CreateProcessW's 32,767-code-unit
 // ceiling. Three thousand code units remain for the executable path, argument
-// quoting, and fixed arguments, while the compile-time assertion keeps another
-// 512 for integration growth. Base64 expands the exact, unmodified UTF-8 source:
-// deleting comment-shaped lines is not semantics-preserving in PowerShell
-// because ordinary quoted strings may cross line boundaries. The payload is
-// ASCII, so bytes and UTF-16 code units are identical.
-#[cfg(any(windows, test))]
-const _: () = assert!(
-    POWERSHELL_BOOTSTRAP_PREFIX.len()
-        + POWERSHELL_INTEGRATION.len().div_ceil(3) * 4
-        + POWERSHELL_BOOTSTRAP_SUFFIX.len()
-        + POWERSHELL_BOOTSTRAP_GROWTH_HEADROOM
-        <= POWERSHELL_BOOTSTRAP_MAX_CHARS
-);
-
+// quoting, and fixed arguments, and a test keeps another 512 for integration
+// growth. The exact, unmodified UTF-8 source is deflated: deleting
+// comment-shaped lines is not semantics-preserving in PowerShell because
+// ordinary quoted strings may cross line boundaries. The payload is ASCII, so
+// bytes and UTF-16 code units are identical.
 #[cfg(any(windows, test))]
 fn powershell_integration_bootstrap(script: &str) -> String {
-    let encoded = base64_standard(script.as_bytes());
+    use std::io::Write as _;
+    let mut deflate = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+    // Writing to and finishing a Vec cannot fail.
+    deflate
+        .write_all(script.as_bytes())
+        .expect("deflating into memory");
+    let encoded = base64_standard(&deflate.finish().expect("deflating into memory"));
     format!("{POWERSHELL_BOOTSTRAP_PREFIX}{encoded}{POWERSHELL_BOOTSTRAP_SUFFIX}")
 }
 
@@ -6124,8 +6156,9 @@ impl Terminal {
                                             }
                                             if let Ok(mut relative_placements) = relatives.lock() {
                                                 relative_placements.retain(
-                                                    |&(image_id, placement_id), _| {
-                                                        let matched = relative_positions
+                                                    |&(image_id, placement_id), entry| {
+                                                        let matched = matches!(delete.target, KittyDeleteTarget::ZIndex { z } if entry.z == z)
+                                                            || relative_positions
                                                             .get(&(image_id, placement_id))
                                                             .is_some_and(|placement| {
                                                                 kitty_delete_matches_placement(
@@ -8637,9 +8670,6 @@ pub enum PtyEofProgress {
 
 #[cfg(unix)]
 struct PendingPtyEof {
-    sequence: [u8; 2],
-    sequence_len: usize,
-    offset: usize,
     rules: CanonicalEofRules,
     configured_veof: u8,
     disabled: u8,
@@ -8662,6 +8692,9 @@ impl PtyStdin {
                 self.input_state.ambiguous_termios = true;
             })?;
             self.input_state.observe(&bytes[..written], before);
+            if written != 0 {
+                self.pending_eof = None;
+            }
             let (after, _, _) = live_canonical_eof_rules(fd).inspect_err(|_| {
                 self.input_state.ambiguous_termios = true;
             })?;
@@ -8699,7 +8732,7 @@ impl PtyStdin {
                     .input_state
                     .record_unterminated(rules)
                     .map_err(anyhow::Error::msg)?;
-                let Some((sequence, sequence_len)) = pty_eof_sequence(
+                let Some(_) = pty_eof_sequence(
                     rules.canonical,
                     configured_veof,
                     disabled,
@@ -8710,9 +8743,6 @@ impl PtyStdin {
                     return Ok(PtyEofProgress::Unsupported);
                 };
                 self.pending_eof = Some(PendingPtyEof {
-                    sequence,
-                    sequence_len,
-                    offset: 0,
                     rules,
                     configured_veof,
                     disabled,
@@ -8731,15 +8761,17 @@ impl PtyStdin {
             }
 
             let pending = self.pending_eof.as_mut().expect("initialized above");
-            let end = pending.offset + 1;
-            let written = self
-                .writer
-                .write_some_checked(&pending.sequence[pending.offset..end])?;
+            let unterminated_record = self
+                .input_state
+                .record_unterminated(pending.rules)
+                .map_err(anyhow::Error::msg)?;
+            let written = self.writer.write_some_checked(&[pending.configured_veof])?;
             if written == 0 {
                 return Ok(PtyEofProgress::Pending);
             }
-            pending.offset += written;
-            if pending.offset < pending.sequence_len {
+            self.input_state
+                .observe(&[pending.configured_veof], pending.rules);
+            if unterminated_record {
                 Ok(PtyEofProgress::Pending)
             } else {
                 self.pending_eof = None;
@@ -9098,6 +9130,16 @@ fn relative_resolver<'a>(
     cells: &[(u64, usize, placeholder::ResolvedCell)],
     relatives: impl IntoIterator<Item = ((u32, u32), &'a RelEntry)>,
 ) -> RelativeResolver {
+    relative_resolver_excluding(images, virtuals, cells, relatives, None)
+}
+
+fn relative_resolver_excluding<'a>(
+    images: &Images,
+    virtuals: &Virtuals,
+    cells: &[(u64, usize, placeholder::ResolvedCell)],
+    relatives: impl IntoIterator<Item = ((u32, u32), &'a RelEntry)>,
+    retiring: Option<PlacementKey>,
+) -> RelativeResolver {
     let mut relatives = relatives.into_iter().peekable();
     if relatives.peek().is_none() {
         return RelativeResolver::default();
@@ -9116,6 +9158,7 @@ fn relative_resolver<'a>(
                         (placement.abs_line, placement.col),
                     ))
                 })
+                .filter(|(key, _)| Some(*key) != retiring)
                 .collect()
         })
         .unwrap_or_default();
@@ -9128,6 +9171,7 @@ fn relative_resolver<'a>(
                     image_id,
                     placement_id,
                 })
+                .filter(|key| Some(*key) != retiring)
                 .collect()
         })
         .unwrap_or_default();
@@ -9260,12 +9304,13 @@ fn apply_kitty_delete_at(
         });
     }
     if let Ok(mut relative_placements) = context.relatives.lock() {
-        relative_placements.retain(|&(image_id, placement_id), _| {
-            let matched = relative_positions
-                .get(&(image_id, placement_id))
-                .is_some_and(|placement| {
-                    kitty_delete_matches_placement(&delete, placement, delete_geometry)
-                })
+        relative_placements.retain(|&(image_id, placement_id), entry| {
+            let matched = matches!(delete.target, KittyDeleteTarget::ZIndex { z } if entry.z == z)
+                || relative_positions
+                    .get(&(image_id, placement_id))
+                    .is_some_and(|placement| {
+                        kitty_delete_matches_placement(&delete, placement, delete_geometry)
+                    })
                 || kitty_delete_matches_virtual(&delete, image_id, placement_id);
             if matched {
                 removed_ids.insert(image_id);
@@ -9778,11 +9823,15 @@ fn apply_graphics_chunk_at(
                     .map_err(|_| GraphicsAdmissionError::Unavailable)?
                     .clone();
                 proposed.insert(key, entry.clone());
-                let resolver = relative_resolver(
+                let resolver = relative_resolver_excluding(
                     context.images,
                     context.virtuals,
                     &Terminal::placeholder_cells_from_term(term),
                     proposed.iter().map(|(&key, entry)| (key, entry)),
+                    (placement != 0).then_some(PlacementKey {
+                        image_id: id,
+                        placement_id: placement,
+                    }),
                 );
                 if resolver.has_cycle(PlacementKey {
                     image_id: id,
@@ -10039,10 +10088,8 @@ mod login_flag_tests;
 #[cfg(all(test, windows))]
 mod default_shell_tests {
     use super::{
-        POWERSHELL_BOOTSTRAP_GROWTH_HEADROOM, POWERSHELL_BOOTSTRAP_MAX_CHARS,
-        POWERSHELL_BOOTSTRAP_PREFIX, POWERSHELL_BOOTSTRAP_SUFFIX, POWERSHELL_INTEGRATION,
-        base64_standard, is_powershell, merge_windows_paths, overlay_windows_parent_env,
-        pick_windows_default_shell, powershell_integration_bootstrap,
+        POWERSHELL_INTEGRATION, base64_standard, is_powershell, merge_windows_paths,
+        overlay_windows_parent_env, pick_windows_default_shell, powershell_integration_bootstrap,
         powershell_integration_command,
     };
     use portable_pty::CommandBuilder;
@@ -10064,30 +10111,8 @@ mod default_shell_tests {
     }
 
     #[test]
-    fn powershell_bootstrap_is_utf8_safe_and_below_the_windows_limit() {
-        let bootstrap = powershell_integration_bootstrap("Aé");
-        assert_eq!(
-            bootstrap,
-            format!("{POWERSHELL_BOOTSTRAP_PREFIX}QcOp{POWERSHELL_BOOTSTRAP_SUFFIX}")
-        );
-
+    fn powershell_launches_with_the_integration_bootstrap() {
         let bootstrap = powershell_integration_bootstrap(POWERSHELL_INTEGRATION);
-        assert!(bootstrap.len() <= POWERSHELL_BOOTSTRAP_MAX_CHARS);
-        assert_eq!(
-            bootstrap.matches(POWERSHELL_BOOTSTRAP_PREFIX).count(),
-            1,
-            "the fixed decoder must appear exactly once"
-        );
-        assert!(
-            bootstrap.is_ascii(),
-            "the CreateProcessW payload must stay one UTF-16 unit per byte"
-        );
-        assert!(
-            bootstrap.len() + POWERSHELL_BOOTSTRAP_GROWTH_HEADROOM
-                <= POWERSHELL_BOOTSTRAP_MAX_CHARS,
-            "the unmodified integration needs useful bootstrap headroom"
-        );
-
         let command = powershell_integration_command(Path::new(PWSH));
         let argv = command.get_argv();
         assert_eq!(argv[1], "-NoExit");

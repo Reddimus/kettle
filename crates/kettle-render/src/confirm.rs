@@ -24,8 +24,7 @@ pub struct ConfirmDialogLayout {
     button_full: Vec<Rect4>,
     heading_full: Rect4,
     body_full: Rect4,
-    button_offsets: Vec<usize>,
-    visible_steps: usize,
+    clip: Rect4,
     button_labels: Vec<String>,
     button_lines: Vec<usize>,
 }
@@ -141,7 +140,29 @@ impl ConfirmDialogLayout {
         };
         let max_scroll = (overflow / body_line).ceil() as usize;
         let scroll_offset = dialog.scroll.min(max_scroll);
-        let shift = scroll_offset as f32 * body_line;
+        let mut shift = scroll_offset as f32 * body_line;
+        if whole_scroll && button_h <= clip.3 {
+            for index in 0..count {
+                let top = heading_h
+                    + heading_gap
+                    + body_h
+                    + action_gap
+                    + if stacked {
+                        index as f32 * (button_h + gap)
+                    } else {
+                        0.0
+                    };
+                let minimum = (top + button_h - clip.3).max(0.0);
+                let first = (minimum / body_line).ceil() as usize;
+                let last = (top / body_line).floor() as usize;
+                // When no line offset exposes the full button, let the two
+                // bracketing offsets reach its visibility boundaries instead.
+                if first > last && (scroll_offset == first || scroll_offset == last) {
+                    shift = shift.clamp(minimum, top);
+                    break;
+                }
+            }
+        }
         let heading_full = (
             clip.0,
             clip.1 - if whole_scroll { shift } else { 0.0 },
@@ -170,7 +191,6 @@ impl ConfirmDialogLayout {
             button_w * count as f32 + gap * count.saturating_sub(1) as f32
         };
         let mut button_full = Vec::with_capacity(count);
-        let mut button_offsets = Vec::with_capacity(count);
         for index in 0..count {
             let bx = clip.0 + inner - actions_w
                 + if stacked {
@@ -185,7 +205,6 @@ impl ConfirmDialogLayout {
                     0.0
                 };
             button_full.push((bx, by, button_w, button_h));
-            button_offsets.push(((by + shift - clip.1) / body_line).floor().max(0.0) as usize);
         }
         let buttons = button_full.iter().map(|&r| intersect(r, clip)).collect();
         Self {
@@ -206,8 +225,7 @@ impl ConfirmDialogLayout {
             button_full,
             heading_full,
             body_full,
-            button_offsets,
-            visible_steps: (clip.3 / body_line).floor().max(1.0) as usize,
+            clip,
             button_labels,
             button_lines,
         }
@@ -217,22 +235,21 @@ impl ConfirmDialogLayout {
         if !self.whole_scroll {
             return self.scroll_offset;
         }
-        let Some(&top) = self.button_offsets.get(index) else {
+        let Some(&button) = self.button_full.get(index) else {
             return self.scroll_offset;
         };
-        let rows = self
-            .button_full
-            .get(index)
-            .map_or(1, |r| (r.3 / self.body_line).ceil() as usize);
-        if top < self.scroll_offset {
-            top.min(self.max_scroll)
-        } else if top + rows > self.scroll_offset + self.visible_steps {
-            (top + rows)
-                .saturating_sub(self.visible_steps)
-                .min(self.max_scroll)
+        let shift = self.clip.1 - self.heading_full.1;
+        let top = button.1 + shift - self.clip.1;
+        let bottom = top + button.3;
+        // Aligned edges can differ by subpixel floating-point roundoff.
+        if button.1 < self.clip.1 - 0.001 {
+            (top / self.body_line).floor().max(0.0) as usize
+        } else if button.1 + button.3 > self.clip.1 + self.clip.3 + 0.001 {
+            ((bottom - self.clip.3) / self.body_line).ceil().max(0.0) as usize
         } else {
             self.scroll_offset
         }
+        .min(self.max_scroll)
     }
 }
 
@@ -443,6 +460,49 @@ mod tests {
             scroll: 0,
         }
     }
+    #[test]
+    fn focused_button_is_fully_visible_when_it_fits() {
+        let mut d = dialog();
+        d.buttons[0].label = "Cancel".into();
+        d.buttons[1].label = "Close window".into();
+        let initial = ConfirmDialogLayout::new((120.0, 100.0), (8.0, 16.0), 1.0, &d);
+        d.scroll = initial.scroll_to_button(0);
+        let focused = ConfirmDialogLayout::new((120.0, 100.0), (8.0, 16.0), 1.0, &d);
+        assert!(
+            (focused.buttons[0].3 - focused.button_full[0].3).abs() < 0.01,
+            "focused button is clipped: {:?} versus {:?}",
+            focused.buttons[0],
+            focused.button_full[0]
+        );
+    }
+
+    #[test]
+    fn focused_button_is_fully_visible_between_line_offsets() {
+        for height in 68..=120 {
+            let surface = (120.0, height as f32);
+            let mut d = dialog();
+            d.buttons[0].label = "Cancel".into();
+            d.buttons[1].label = "Close window".into();
+            for start in [0, usize::MAX] {
+                d.scroll = start;
+                for index in [0, 1, 0] {
+                    let initial = ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &d);
+                    assert!(initial.whole_scroll);
+                    assert!(initial.button_full[index].3 <= initial.clip.3);
+                    d.scroll = initial.scroll_to_button(index);
+                    let focused = ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &d);
+                    assert!(
+                        (focused.buttons[index].3 - focused.button_full[index].3).abs() < 0.01,
+                        "button {index} clipped at {surface:?}: {:?} versus {:?}",
+                        focused.buttons[index],
+                        focused.button_full[index]
+                    );
+                    assert_eq!(focused.scroll_to_button(index), d.scroll);
+                }
+            }
+        }
+    }
+
     #[test]
     fn confirmation_geometry_is_bounded_without_shrinking_readable_fonts() {
         let mut d = dialog();

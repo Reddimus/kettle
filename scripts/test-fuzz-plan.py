@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import unittest
@@ -34,6 +35,18 @@ def seconds_by_target(include: list[dict]) -> dict[str, int]:
 
 
 class Plan(unittest.TestCase):
+    def test_wire_dictionary_version_matches_protocol(self) -> None:
+        root = SCRIPT.parent.parent
+        source = (root / "crates/kettle-media/src/lib.rs").read_text()
+        version = re.search(r"pub const PROTOCOL_VERSION: u16 = (\d+);", source)
+        self.assertIsNotNone(version)
+        dictionary = (root / "fuzz/dict/wire.dict").read_text()
+        token = re.search(r'^version="((?:\\x[0-9a-fA-F]{2})+)"$', dictionary, re.M)
+        self.assertIsNotNone(token)
+        encoded = bytes.fromhex(token[1].replace("\\x", ""))
+        self.assertEqual(encoded, int(version[1]).to_bytes(2, "little"),
+                         "wire dictionary must use the current protocol version")
+
     def setUp(self) -> None:
         self.targets = PLAN.load_targets(TABLE)
 

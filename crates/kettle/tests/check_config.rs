@@ -145,3 +145,24 @@ fn check_config_decodes_utf16_bom_at_resolved_default_path() {
         assert!(stdout.contains("status:  OK"), "{label}: {stdout}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn inaccessible_default_config_is_an_error() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let root = kettle_test_support::private_tempdir("kettle-config-inaccessible-");
+    let blocked = root.path().join("blocked");
+    std::fs::create_dir_all(blocked.join("kettle")).unwrap();
+    std::fs::write(blocked.join("kettle/config"), "record = on\n").unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let output = check_config_command(&blocked).output().unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        !output.status.success(),
+        "inaccessible default config must fail validation: {output:?}"
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("i/o error:"));
+}

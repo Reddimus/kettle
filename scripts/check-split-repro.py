@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -120,6 +121,26 @@ def capture(out: Path, cycle: int, kettle: str, pid: int, base: Dict,
     return bundle
 
 
+def start_workload(kettle: str, pid: int, claude: bool) -> None:
+    fixture = "printf 'KETTLE_CHURN_%s\\n' READY; " + CHURN
+    prime = "claude\r" if claude else shlex.join(["/bin/sh", "-c", fixture]) + "\r"
+    subprocess.run([kettle, "ctl", "--pid", str(pid), "send_text",
+                    "--json", json.dumps({"text": prime})], check=True,
+                   capture_output=True, text=True)
+    # Give the foreground-process scan a chance to publish a snapshot that
+    # includes whatever the primed process spawned.
+    if not claude:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            text = ctl(kettle, pid, "read_screen").get("text", "")
+            if "KETTLE_CHURN_READY" in text.splitlines():
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("churn fixture did not start")
+    time.sleep(6 if claude else 3)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--kettle", default=os.environ.get("KETTLE_BIN", "kettle"))
@@ -178,13 +199,7 @@ def main() -> int:
             time.sleep(0.1)
 
         base = panes(args.kettle, pid)[0]
-        prime = "claude\r" if args.claude else CHURN + "\r"
-        subprocess.run([args.kettle, "ctl", "--pid", str(pid), "send_text",
-                        "--json", json.dumps({"text": prime})], check=True,
-                       capture_output=True, text=True)
-        # Give the foreground-process scan a chance to publish a snapshot that
-        # includes whatever the primed process spawned.
-        time.sleep(6 if args.claude else 3)
+        start_workload(args.kettle, pid, args.claude)
 
         stop = time.monotonic() + args.wall_clock
         for cycle in range(1, args.cycles + 1):

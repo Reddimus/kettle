@@ -278,13 +278,14 @@ def judge(capture: Capture, play_ns: Optional[int], seeks_ns: Sequence[int] = ()
         segment = {
             "from": label,
             "pairs": len(inside),
+            "out_of_target_pairs": sum(not s.inside() for s in inside),
             "unpaired_flashes": len(unpaired),
             "recovery_ms": None if recovered is None else round((inside[recovered].flash_ns - start) / 1e6, 1),
             "steady_pairs": len(steady),
             "steady_low_ms": round(min(s.low_ms for s in steady), 1) if steady else None,
             "steady_high_ms": round(max(s.high_ms for s in steady), 1) if steady else None,
             "steady_mean_ms": round(sum((s.low_ms + s.high_ms) / 2 for s in steady) / len(steady), 1) if steady else None,
-            "before_recovery": [[round(s.low_ms, 1), round(s.high_ms, 1)] for s in inside[: recovered or 0]],
+            "before_recovery": [[round(s.low_ms, 1), round(s.high_ms, 1)] for s in inside[:recovered]],
             # Every pair's band, in order: the spread, not just its extremes.
             "bands_ms": [[round(s.low_ms, 1), round(s.high_ms, 1)] for s in inside],
             "first_pair_ms": round((inside[0].flash_ns - start) / 1e6, 1) if inside else None,
@@ -473,26 +474,31 @@ def measure(kettle: Path, pid: int, probe: Path, out: Path) -> Dict:
          "--key", str(LEFT_ARROW), "--key-at", ",".join(f"{t:g}" for t in SEEKS_AT)],
         stdin=subprocess.DEVNULL)
     try:
-        time.sleep(3.0)
-        heard = lane_target(ctl(k, pid, "ui_geometry", "--raw"))[2]
-        if heard.get("state") != "playing" or heard.get("sound") != "heard":
-            raise RuntimeError(f"the press did not start the video with its sound: {heard}")
-        # The lane takes the keyboard for the arrows to reach it.
-        ctl(k, pid, "perform_action", "--text", "focus_preview")
-        probe_run.wait(timeout=CAPTURE_SECONDS + 30)
+        try:
+            time.sleep(3.0)
+            heard = lane_target(ctl(k, pid, "ui_geometry", "--raw"))[2]
+            if heard.get("state") != "playing" or heard.get("sound") != "heard":
+                raise RuntimeError(f"the press did not start the video with its sound: {heard}")
+            # The lane takes the keyboard for the arrows to reach it.
+            ctl(k, pid, "perform_action", "--text", "focus_preview")
+            probe_run.wait(timeout=CAPTURE_SECONDS + 30)
+        finally:
+            if probe_run.poll() is None:
+                probe_run.terminate()
+                try:
+                    probe_run.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    probe_run.kill()
+                    probe_run.wait(timeout=10)
+        if probe_run.returncode != 0:
+            raise RuntimeError(f"avsync-probe exited {probe_run.returncode}")
+        loaded = load(capture)
+        if len(loaded.run.get("keys_ns") or []) != len(SEEKS_AT):
+            raise RuntimeError("not every seek was pressed")
+        result = judge(loaded, loaded.run.get("click_ns"), loaded.run["keys_ns"])
+        result["output_latency"] = loaded.run["output_latency"]
     finally:
-        if probe_run.poll() is None:
-            probe_run.terminate()
-            probe_run.wait(timeout=10)
-    if probe_run.returncode != 0:
-        raise RuntimeError(f"avsync-probe exited {probe_run.returncode}")
-    loaded = load(capture)
-    if len(loaded.run.get("keys_ns") or []) != len(SEEKS_AT):
-        raise RuntimeError("not every seek was pressed")
-    result = judge(loaded, loaded.run.get("click_ns"), loaded.run["keys_ns"])
-    result["output_latency"] = loaded.run["output_latency"]
-    # The sound was every app's: keep only what was judged.
-    (capture / "audio.f32").unlink()
+        (capture / "audio.f32").unlink(missing_ok=True)
     (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
 
@@ -504,7 +510,7 @@ def summarize(results: Sequence[Dict]) -> Dict:
         "runs": len(results),
         "segments": len(segments),
         "pairs": sum(segment["pairs"] for segment in segments),
-        "out_of_target_pairs": sum(len(segment["before_recovery"]) for segment in segments),
+        "out_of_target_pairs": sum(segment["out_of_target_pairs"] for segment in segments),
         "steady_low_ms": min((s["steady_low_ms"] for s in steady), default=None),
         "steady_high_ms": max((s["steady_high_ms"] for s in steady), default=None),
         "worst_recovery_ms": max((s["recovery_ms"] for s in steady), default=None),
@@ -598,6 +604,12 @@ def self_test() -> int:
     check(not judge(late, late.frames[0][0])["pass"], "sound 200 ms early fails")
     early = synthetic([150.0] * 10)
     check(not judge(early, early.frames[0][0])["pass"], "sound 150 ms late fails")
+    failed = judge(early, early.frames[0][0])
+    check(summarize([failed])["out_of_target_pairs"] == 10, "all ten failed pairs must count")
+    check(len(failed["segments"][0]["before_recovery"]) == 10, "unrecovered prefix must retain all pairs")
+    mixed = synthetic([-1.0, 150.0] + [-1.0] * 6)
+    check(summarize([judge(mixed, mixed.frames[0][0])])["out_of_target_pairs"] == 1,
+          "good pairs before a bad pair must not count as out of target")
     # Edges: +45 at the band's top passes; just past it fails.
     edge = synthetic([-46.0] * 10)
     check(judge(edge, edge.frames[0][0])["pass"], "E = +45 at the top passes")
@@ -685,6 +697,27 @@ def self_test() -> int:
     check("-n" in command and command[-1] == "x.mov" and "pcm_s16le" in command, "fixture command")
 
     from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as raw:
+        out = Path(raw)
+        audio = out / "capture" / "audio.f32"
+        from unittest.mock import Mock
+        process = Mock(returncode=0)
+        process.poll.return_value = 0
+        def captured(*args, **kwargs):
+            audio.write_bytes(b'private system sound')
+            return process
+        with patch(__name__ + ".lane_target", side_effect=[((0, 0, 1, 1), (0, 0), {}),
+                ((0, 0, 1, 1), (0, 0), {"state": "playing", "sound": "heard"})]), \
+                patch(__name__ + ".raise_window"), patch(__name__ + ".time.sleep"), \
+                patch(__name__ + ".subprocess.Popen", side_effect=captured), \
+                patch(__name__ + ".ctl", return_value={"state": "playing", "sound": "heard"}), \
+                patch(__name__ + ".load", side_effect=ValueError('bad capture')):
+            try:
+                measure(Path('kettle'), 42, Path('probe'), out)
+            except ValueError:
+                pass
+        check(not audio.exists(), "analysis failure must delete captured system audio")
 
     kettle = Path("/tmp/Terminal Projects/kettle's $(false)")
     fixture = Path("/tmp/media clips/flash;false.mov")

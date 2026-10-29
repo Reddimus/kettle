@@ -17,7 +17,7 @@ impl App {
     /// Reconcile the live theme with the theme picker after every event (see
     /// `theme_preview_change`).
     pub(super) fn sync_theme_preview(&mut self, ws: &mut WindowState) {
-        if let Some((name, theme)) = theme_preview_change(ws, &self.cfg.theme_name) {
+        if let Some((name, theme)) = theme_preview_change(ws, &self.cfg) {
             self.set_runtime_theme_state(ws, name, theme);
         }
     }
@@ -251,22 +251,33 @@ impl App {
 
     fn refresh_config_watcher(&mut self) {
         let path = self.config_path.clone().or_else(Config::default_path);
-        self._watcher = path.and_then(|path| {
-            let proxy = self.proxy.clone();
-            config_watcher(
-                &path,
-                self.config_trust,
-                self.config_reload_pending.clone(),
-                move || proxy.send_event(UserEvent::ReloadConfig).is_ok(),
-            )
-            .map_err(|error| {
+        let Some(path) = path else {
+            self._watcher = None;
+            self.config_watcher_path = None;
+            return;
+        };
+        let proxy = self.proxy.clone();
+        match config_watcher(
+            &path,
+            self.config_trust,
+            self.config_reload_pending.clone(),
+            move || proxy.send_event(UserEvent::ReloadConfig).is_ok(),
+        ) {
+            Ok(watcher) => {
+                self._watcher = Some(watcher);
+                self.config_watcher_path = Some(path);
+            }
+            Err(error) => {
+                if self.config_watcher_path.as_ref() != Some(&path) {
+                    self._watcher = None;
+                    self.config_watcher_path = None;
+                }
                 log::warn!(
                     "config live-reload unavailable for {}: {error}",
                     path.display()
                 );
-            })
-            .ok()
-        });
+            }
+        }
     }
 
     /// Read and install the process-wide portion of a live configuration once.

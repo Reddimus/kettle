@@ -141,15 +141,19 @@ def s1_urandom(live):
         "send_text",
         params={"text": "head -c 50000000 /dev/urandom; echo; echo DONE-S1\r"},
     )
-    worst = probe_during(live, 20)
-    deadline = time.monotonic() + 120
-    while time.monotonic() < deadline:
-        if "DONE-S1" in live.json_ctl("read_screen").get("text", ""):
-            break
+    try:
+        worst = probe_during(live, 20)
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            if "DONE-S1" in live.json_ctl("read_screen").get("text", "").splitlines():
+                break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError("S1 flood did not complete before its deadline")
+        return {"worst_get_state_during_s": worst}
+    finally:
+        live.ctl("send_keys", params={"keys": ["ctrl+c"]})
         time.sleep(0.5)
-    live.ctl("send_keys", params={"keys": ["ctrl+c"]})
-    time.sleep(0.5)
-    return {"worst_get_state_during_s": worst}
 
 
 def s2_resize_storm(live):

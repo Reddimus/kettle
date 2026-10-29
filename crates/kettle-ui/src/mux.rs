@@ -1831,6 +1831,11 @@ pub struct Mux {
     /// Bounded so a long-running session doesn't accumulate state.
     /// LIFO: `pop_back` returns the most-recently-closed tab.
     pub closed_tabs: std::collections::VecDeque<ClosedTab>,
+    /// Panes the mux destroyed on its own (a closed tab's, or reaped after
+    /// their shell exited), in order, until the App announces them to Lua
+    /// as `pane_close`. An explicit pane close announces its own pane, and a
+    /// detached tab's panes live on in another window, so neither is here.
+    closed_panes: Vec<u64>,
     /// Terminator's `autoclean_groups` (`terminator.py:group_hoover`): forget a
     /// broadcast group once its last pane is gone. Terminator keeps an explicit
     /// group list to prune; kettle's groups are just the names its panes carry,
@@ -1893,6 +1898,7 @@ impl Mux {
             osc52_copy_allowed: true,
             color_scheme_dark: None,
             closed_tabs: std::collections::VecDeque::with_capacity(CLOSED_TAB_RING_CAP),
+            closed_panes: Vec::new(),
             autoclean_groups: true,
         }
     }
@@ -3587,9 +3593,10 @@ impl Mux {
             }
             let mut ids = Vec::new();
             collect_ids(&self.tabs[idx].root, &mut ids);
-            for id in ids {
+            for &id in &ids {
                 self.panes.remove(&id);
             }
+            self.closed_panes.extend(ids);
             self.tabs.remove(idx);
             // Keep `active` valid: clamp if it ran off the end, or shift
             // left if a tab before it was removed.
@@ -3746,6 +3753,11 @@ impl Mux {
         Ok(true)
     }
 
+    /// The panes destroyed since the last call; see `closed_panes`.
+    pub fn take_closed_panes(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.closed_panes)
+    }
+
     /// Reap panes whose child exited; prune empty splits/tabs.
     pub fn reap(&mut self) -> ReapOutcome {
         let dead: Vec<u64> = self
@@ -3764,6 +3776,7 @@ impl Mux {
             self.panes.remove(id);
         }
         Self::reap_tabs(&mut self.tabs, &mut self.active, &dead);
+        self.closed_panes.extend(dead);
         ReapOutcome {
             mux_empty: self.tabs.is_empty(),
             layout_changed,

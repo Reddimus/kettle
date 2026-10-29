@@ -38,7 +38,7 @@ fail later. `kettle.theme()` changes only after the theme is applied.
 | `tab_add` | the new tab's index, from 0 |
 | `tab_close` | the closing tab's index, from 0 |
 | `bell` | pane id |
-| `pane_close` | pane id, before its process is stopped |
+| `pane_close` | pane id, for every pane that ends: an explicit close fires it before the process is stopped; a pane that goes with its tab or window, or whose shell exited, fires it as it is removed |
 | `output` | pane id, the output as a table of byte values |
 | `pane_focus` | previous pane id or nil, new pane id |
 | `title_changed` | pane id, new title |

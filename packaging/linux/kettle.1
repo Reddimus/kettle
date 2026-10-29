@@ -398,11 +398,16 @@ byte-exact input. The window title shows
 while active.
 .TP
 .BI \-\-accent \ COLOR
-Pin this window's chrome tint (peacock parity) to the
-named or hex color. Accepts
-.B "#RRGGBB"
-or any palette name from
-.BR \-\-list\-themes .
+Pin this window's chrome tint (peacock parity). Accepts hex forms
+.BR #RGB ,
+.BR #RRGGBB ,
+.B RRGGBB
+and
+.BR 0xRRGGBB ,
+X11
+.B rgb:rr/gg/bb
+components, or supported X11 color names such as
+.BR teal .
 Per-window accents are on by default
 .RB ( "accent\-color = auto" ):
 every window \(em deduped across all kettle windows and processes

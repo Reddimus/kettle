@@ -19,15 +19,28 @@ import os
 from pathlib import Path
 import signal
 import sys
+import time
 
 root = Path(os.environ["MENU_FIXTURE"])
 tool = Path(sys.argv[0]).name
 args = sys.argv[1:]
 if tool == "kettle":
+    if os.environ["MENU_MODE"] == "delayed":
+        time.sleep(0.6)
     (root / "launch.json").write_text(json.dumps({"pid": os.getpid(), "args": args}))
     if "--new-process" in args:
         signal.pause()
     sys.exit(0)
+if tool == "xdotool" and args[0] == "search" and "--pid" in args:
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            launch = json.loads((root / "launch.json").read_text())
+            break
+        except (FileNotFoundError, json.JSONDecodeError):
+            if time.monotonic() >= deadline:
+                sys.exit(1)
+            time.sleep(0.01)
 with (root / "calls.jsonl").open("a") as log:
     log.write(json.dumps([tool] + args) + "\n")
 if tool == "xdotool":
@@ -38,7 +51,6 @@ if tool == "xdotool":
             count_file = root / "search-count"
             count = int(count_file.read_text()) + 1 if count_file.exists() else 1
             count_file.write_text(str(count))
-            launch = json.loads((root / "launch.json").read_text())
             if (os.environ["MENU_MODE"] == "missing" or count < 3
                     or args[args.index("--pid") + 1] != str(launch["pid"])):
                 sys.exit(1)
@@ -102,6 +114,13 @@ class MenuScreenshotTests(unittest.TestCase):
         self.assertIn(["xdotool", "windowactivate", "--sync", "123"], calls)
         capture = next(call for call in calls if call[0] == "scrot")
         self.assertEqual(capture[1:4], ["-o", "--window", "123"])
+        self.assertFalse(alive)
+
+    def test_delayed_startup_keeps_three_readiness_polls(self):
+        code, stderr, launch, calls, alive = self.run_fixture("delayed")
+        self.assertEqual(code, 0, stderr)
+        searches = [call for call in calls if call[:2] == ["xdotool", "search"]]
+        self.assertEqual(len(searches), 3)
         self.assertFalse(alive)
 
     def test_no_owned_window_fails_without_capture(self):

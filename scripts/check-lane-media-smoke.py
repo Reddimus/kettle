@@ -27,6 +27,7 @@ import argparse
 import datetime
 import json
 import os
+import shlex
 import shutil
 import struct
 import subprocess
@@ -189,11 +190,20 @@ def launch(home, language):
         env.pop(name, None)
     ENV.clear()
     ENV.update(env)
-    log = open(home / "kettle.log", "wb")
-    process = subprocess.Popen([KETTLE, "--new-process", "--config", str(config)], env=env,
-                               stdin=subprocess.DEVNULL, stdout=log, stderr=log)
-    wait_for("the control server", lambda: ctl(process.pid, "ui_geometry"), timeout=60)
-    wait_for("the shell's prompt", lambda: screen_text(process.pid).rstrip().endswith(("%", "$", "#")))
+    with open(home / "kettle.log", "wb") as log:
+        process = subprocess.Popen([KETTLE, "--new-process", "--config", str(config)], env=env,
+                                   stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+    try:
+        wait_for("the control server", lambda: ctl(process.pid, "ui_geometry"), timeout=60)
+        wait_for("the shell's prompt", lambda: screen_text(process.pid).rstrip().endswith(("%", "$", "#")))
+    except BaseException:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        raise
     return process
 
 
@@ -209,7 +219,7 @@ def screen_text(pid):
 
 def show(pid, path):
     before = screen_text(pid).count("Sent to the Kettle media shelf")
-    ctl(pid, "send_text", "--text", f"{KETTLE} show {path}\n")
+    ctl(pid, "send_text", "--text", shlex.join([KETTLE, "show", str(path)]) + "\n")
     try:
         wait_for(f"{path.name} on the shelf",
                  lambda: screen_text(pid).count("Sent to the Kettle media shelf") > before)

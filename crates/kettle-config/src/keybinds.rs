@@ -1027,13 +1027,13 @@ impl Action {
         // name: the folding below would rewrite `text:Hello-World` into
         // `text:hello_world`, so the prefix has to be claimed first and the
         // payload passed through verbatim.
-        let trimmed = s.trim();
+        let trimmed = s.trim_start();
         if let Some(head) = trimmed.get(..5)
             && head.eq_ignore_ascii_case("text:")
         {
             return parse_send_text_payload(&trimmed[5..]).map(SendText);
         }
-        let lowered = trimmed.to_ascii_lowercase().replace('-', "_");
+        let lowered = trimmed.trim_end().to_ascii_lowercase().replace('-', "_");
         Some(match lowered.as_str() {
             "copy_to_clipboard" | "copy" => Copy,
             "paste_from_clipboard" | "paste" => Paste,
@@ -1346,6 +1346,35 @@ fn parse_key(s: &str) -> Option<Key> {
         "plus" => Key::Char('+'),
         "minus" => Key::Char('-'),
         "equal" => Key::Char('='),
+        "comma" => Key::Char(','),
+        "period" => Key::Char('.'),
+        "bracketleft" => Key::Char('['),
+        "bracketright" => Key::Char(']'),
+        "braceleft" => Key::Char('{'),
+        "braceright" => Key::Char('}'),
+        "semicolon" => Key::Char(';'),
+        "colon" => Key::Char(':'),
+        "apostrophe" => Key::Char('\''),
+        "quotedbl" => Key::Char('"'),
+        "grave" => Key::Char('`'),
+        "asciitilde" => Key::Char('~'),
+        "backslash" => Key::Char('\\'),
+        "slash" => Key::Char('/'),
+        "question" => Key::Char('?'),
+        "exclam" => Key::Char('!'),
+        "at" => Key::Char('@'),
+        "numbersign" => Key::Char('#'),
+        "dollar" => Key::Char('$'),
+        "percent" => Key::Char('%'),
+        "asciicircum" => Key::Char('^'),
+        "ampersand" => Key::Char('&'),
+        "asterisk" => Key::Char('*'),
+        "parenleft" => Key::Char('('),
+        "parenright" => Key::Char(')'),
+        "less" => Key::Char('<'),
+        "greater" => Key::Char('>'),
+        "underscore" => Key::Char('_'),
+        "bar" => Key::Char('|'),
         "space" => Key::Char(' '),
         _ => {
             // Only F1..=F12 are real. The winit→Key bridge
@@ -1732,7 +1761,7 @@ pub fn apply_keybind(map: &mut Bindings, value: &str) -> Option<Trigger> {
         map.remove(&t);
         return None;
     }
-    let a = Action::from_name(act_trim)?;
+    let a = Action::from_name(act)?;
     map.insert(t, a);
     Some(t)
 }
@@ -1761,7 +1790,7 @@ pub fn apply_exclusive_keybind(map: &mut Bindings, value: &str) -> Option<Trigge
         map.remove(&t);
         return None;
     }
-    let a = Action::from_name(act_trim)?;
+    let a = Action::from_name(act)?;
     // Drop every OTHER chord for this action first. Parameterized actions
     // (`goto_tab:3`) compare by value, so rebinding one tab's chord leaves the
     // other tabs' chords alone.

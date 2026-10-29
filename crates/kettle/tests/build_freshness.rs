@@ -113,12 +113,32 @@ fn source_libraries_rebuild_only_when_inputs_change() {
         "[workspace]\nresolver = \"3\"\nmembers = [\"crates/*\"]\n",
     )
     .unwrap();
+    let patched = root.join("vendor/patched/src/lib.rs");
+    fs::create_dir_all(patched.parent().unwrap()).unwrap();
+    fs::write(&patched, "pub fn patched() {}\n").unwrap();
     let first = build(&root);
     first.libraries_are_fresh(false);
     let mut hash = first.hash;
     unchanged(&root, &hash);
 
+    for path in [
+        "vendor/target/debug/compiled",
+        "vendor/patched/target/debug/compiled",
+        "vendor/patched/Cargo.lock",
+    ] {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "generated\n").unwrap();
+        assert_eq!(build(&root).hash, hash, "{}", path.display());
+        fs::write(&path, "rebuilt\n").unwrap();
+        assert_eq!(build(&root).hash, hash, "{}", path.display());
+    }
+    unchanged(&root, &hash);
+
     fs::write(root.join("README.md"), "not a protocol input\n").unwrap();
+    unchanged(&root, &hash);
+    fs::write(&patched, "pub fn patched() { }\n").unwrap();
+    changed(&root, &mut hash);
     unchanged(&root, &hash);
     fs::write(
         root.join("crates/kettle-update/src/lib.rs"),

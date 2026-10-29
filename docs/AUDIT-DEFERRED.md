@@ -28,12 +28,14 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   per-terminal ceiling below that would refuse legitimate images. Deferred
   until decoding streams from the accumulated payload. Close by releasing each
   stage before the next, then adding a per-terminal transient ceiling.
-- **Unix descendants can escape timeout teardown with `setsid()`.**
-  `crates/kettle-core/src/term.rs` contains the PTY session, but a detached,
-  reparented process cannot safely be identified by ancestry or PTY access.
-  Deferred because stronger ownership needs process-creation architecture.
-  Close with OS-owned containment, such as a delegated Linux cgroup or a
-  supervisor/subreaper with a proven ownership contract.
+- **`setsid()` descendants outside the Linux command line.** The Linux
+  `kettle exec` command line adopts descendants that leave the PTY session and
+  stops them on timeout or cancellation (`crates/kettle/src/exec.rs`). macOS
+  has no child-subreaper, and the MCP `kettle_run` tool runs concurrent
+  commands in one process, where an adopted orphan cannot be attributed to one
+  command. Deferred because both need a per-command supervisor process. Close
+  by running each MCP command under a supervising `kettle exec` child, and on
+  macOS by a supervisor that tracks its descendants.
 
 ## Terminal and protocol
 

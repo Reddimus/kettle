@@ -56,6 +56,13 @@ fn screen_page(screen: &str, page: &kettle_ctl::protocol::PageRequest, whole: bo
     }
 }
 
+fn command_submission(command: &str) -> String {
+    let line = command.strip_suffix('\n').unwrap_or(command);
+    let mut line = line.strip_suffix('\r').unwrap_or(line).to_owned();
+    line.push('\r');
+    line
+}
+
 impl App {
     /// Start the control server if the policy allows anything, the first pane
     /// exists, and no start has been tried. A failed start is logged and not
@@ -1085,7 +1092,10 @@ impl App {
             let geometry = kettle_render::search_bar_geometry(
                 surface.0 as f32,
                 surface.1 as f32,
-                cell_w,
+                target
+                    .renderer
+                    .as_ref()
+                    .map_or(8.0, |renderer| renderer.overlay_text_cell_width()),
                 cell_h,
                 &self.ui_text,
             );
@@ -1640,7 +1650,7 @@ impl App {
             Ok(m) => m,
             Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
         };
-        let candidates = keybind_candidates(logical.as_ref(), physical.as_ref(), mods);
+        let candidates = keybind_candidates(logical.as_ref(), physical.as_ref(), mods, None);
         let candidate_labels: Vec<String> = candidates.iter().map(Trigger::label).collect();
         let modal_blocked = self.any_modal_open(ws);
         if modal_blocked {
@@ -1659,6 +1669,7 @@ impl App {
             logical.as_ref(),
             physical.as_ref(),
             mods,
+            None,
         ) else {
             return Response::ok(
                 req.id,
@@ -1803,8 +1814,8 @@ impl App {
                 TextModal::Ssh => self.ssh_key(ws, key, text),
                 TextModal::TitleEdit => self.title_edit_key(ws, key, text),
                 TextModal::Search => {
-                    if !self.search_key(ws, key, None, text) {
-                        self.search_bar_shortcut(ws, key, None, false, event_loop);
+                    if !self.search_key(ws, key, None, text, None) {
+                        self.search_bar_shortcut(ws, key, None, false, event_loop, None);
                     }
                 }
                 TextModal::Preview => self.preview_focus_key(ws, key, false),
@@ -2104,6 +2115,9 @@ impl App {
             self.search_mouse_drag(ws);
             return;
         }
+        if self.drag_split_divider(ws) {
+            return;
+        }
         self.promote_tab_drag_if_needed(ws);
         if ws.tab_drag_active && ws.tab_drag_press.is_none() {
             self.reorder_active_tab_for_cursor(ws);
@@ -2279,6 +2293,9 @@ impl App {
         if self.activate_media_paste_receipt_at(ws, px, py, bcode) {
             return true;
         }
+        if self.press_split_divider(ws, bcode) {
+            return true;
+        }
         let pre = self.focus_key(ws);
         ws.mux.focus_at(area, px, py);
         self.note_focus_change(ws, pre);
@@ -2300,6 +2317,9 @@ impl App {
     pub(super) fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
         // As natively: a gesture of Kettle's own ends with its release.
         ws.held_buttons.end_own(bcode);
+        if bcode == 0 {
+            ws.dragging_split = None;
+        }
         if self.confirm_mouse_release(ws, bcode) {
             return true;
         }
@@ -2333,7 +2353,6 @@ impl App {
         }
         if bcode == 0 {
             ws.scrollbar_drag_offset = None;
-            ws.dragging_split = None;
             ws.tab_drag_active = false;
             ws.tab_drag_press = None;
             ws.tab_pressed_idx = None;
@@ -2722,6 +2741,7 @@ impl App {
         conn_id: u64,
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
+        self.sync_pane_focus_reports(ws);
         use kettle_ctl::protocol::{Response, error_codes as ec};
         let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
@@ -3009,15 +3029,7 @@ impl App {
             })
             .unwrap_or(0);
         if let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) {
-            let mut line = command.to_string();
-            // Submit with a CARRIAGE RETURN, not a line feed: CR is the Enter
-            // key a shell's line editor acts on. Under Windows ConPTY only CR is
-            // delivered as Enter (a bare LF is typed but never executes); on a
-            // Unix PTY the line discipline's ICRNL maps CR→LF, so CR works on
-            // both. (A trailing newline already in `command` is left as-is.)
-            if !line.ends_with('\r') && !line.ends_with('\n') {
-                line.push('\r');
-            }
+            let line = command_submission(command);
             // An agent acts as the user — the per-pane read-only
             // toggle (Terminator parity) blocks it, with an explicit error
             // (no PendingRun is registered; nothing was written).
@@ -3117,8 +3129,9 @@ impl App {
                     "timed_out": true,
                     "output": output,
                     "output_truncated": output_truncated,
-                    "hint": "no OSC 133 command-end seen — enable shell integration \
-                             (kettle --shell-integration <shell>) for exit codes",
+                    "hint": "no OSC 133 command-end seen; for exit codes, add the output of \
+                             `kettle --shell-integration <shell>` to the shell's startup file \
+                             and start a new shell",
                 }),
             );
             let _ = run.reply.send(cap_ctl_command_response(resp));
@@ -3185,6 +3198,19 @@ impl App {
 #[cfg(test)]
 mod screen_page_tests {
     use super::*;
+
+    #[test]
+    fn command_terminators_submit_one_carriage_return() {
+        for command in [
+            "echo hello",
+            "echo hello\r",
+            "echo hello\n",
+            "echo hello\r\n",
+        ] {
+            assert_eq!(command_submission(command), "echo hello\r", "{command:?}");
+        }
+        assert_eq!(command_submission("first\nsecond\n"), "first\nsecond\r");
+    }
 
     fn default_page() -> kettle_ctl::protocol::PageRequest {
         kettle_ctl::protocol::PageRequest::from_params(&serde_json::json!({})).unwrap()

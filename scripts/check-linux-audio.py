@@ -103,6 +103,17 @@ def main():
         save()
         try:
             output, _ = process.communicate(timeout=min(120, max(0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired as error:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            output, _ = process.communicate(timeout=10)
+            (args.out_dir / f'{name}.log').write_bytes(output or error.output or b'')
+            result['stages'].append({'name': name, 'exit': process.returncode,
+                                     'pass': False, 'timeout': True})
+            save()
+            raise
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)

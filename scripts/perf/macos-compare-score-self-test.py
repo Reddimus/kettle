@@ -123,6 +123,29 @@ def run_score(terminals: list[str]) -> ScoreResult:
 
 
 class ApplePayloadTests(unittest.TestCase):
+    def test_empty_completion_marker_is_polled_until_written(self):
+        source = SCRIPT.read_text()
+        start = source.index('cat > "$apple_run" <<\'PY\'\n') + len('cat > "$apple_run" <<\'PY\'\n')
+        namespace = {"__name__": "apple_run_test"}
+        exec(compile(source[start:source.index("\nPY\n", start)], str(SCRIPT), "exec"), namespace)
+        namespace['process_ids'] = lambda name: set()
+        namespace['close_window'] = lambda *args: None
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            marker = root / 'marker'
+            fd = os.open(marker, os.O_CREAT | os.O_WRONLY, 0o600)
+            def launch(*args):
+                marker.touch()
+                return subprocess.CompletedProcess([], 0, 'window id 7', '')
+            namespace['osascript'] = launch
+            argv = ['apple-run', '--app', 'terminal', '--timeout', '1', '--launch-timeout', '1',
+                    '--pid-log', str(root / 'pids'), '--marker-dir', raw, '--window-log', str(root / 'windows'),
+                    '--', '/bin/true']
+            with mock.patch.dict(os.environ, {'APPLE_WINDOW_LOG': str(root / 'windows')}), \
+                    mock.patch.object(sys, 'argv', argv), mock.patch.object(tempfile, 'mkstemp', return_value=(fd, str(marker))), \
+                    mock.patch.object(namespace['time'], 'sleep', side_effect=lambda _: marker.write_text('0\n')):
+                self.assertEqual(namespace['main'](), 0, 'an unpublished status is not an invalid status')
+
     @unittest.skipUnless(shutil.which("fish"), "Fish unavailable")
     def test_terminal_payload_records_status_under_fish(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")

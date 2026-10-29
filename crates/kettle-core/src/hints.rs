@@ -448,7 +448,11 @@ fn detect_line(
         }
         for m in re.find_iter(line) {
             let raw = m.as_str();
-            let trimmed = trim_trailing(raw);
+            let trimmed = if *kind == Kind::Path {
+                crate::url_trim::trim_path_trailing(raw)
+            } else {
+                trim_trailing(raw)
+            };
             let before = line[..m.start()].chars().next_back();
             let fragment = (cut.0 && m.start() == 0) || (cut.1 && m.end() == line.len());
             if trimmed.is_empty()
@@ -610,6 +614,29 @@ pub fn labels(n: usize, alphabet: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trailing_dot_components_remain_in_path_hints() {
+        for path in ["/tmp/..", "/tmp/."] {
+            let spans = detect(&[path]);
+            let hint = spans.iter().find(|span| span.kind == Kind::Path).unwrap();
+            assert_eq!(hint.text, path);
+            assert_eq!((hint.start, hint.end), (0, path.len() - 1));
+            assert!(hint.bounded);
+            let mut grid: Grid<Cell> = Grid::new(1, path.len(), 0);
+            for (col, ch) in path.chars().enumerate() {
+                grid[alacritty_terminal::index::Point::new(
+                    alacritty_terminal::index::Line(0),
+                    alacritty_terminal::index::Column(col),
+                )]
+                .c = ch;
+            }
+            assert_eq!(
+                selection_at(&grid, 0, path.len() - 1),
+                Some((0, path.len() - 1))
+            );
+        }
+    }
 
     #[test]
     fn detects_each_kind_with_columns() {

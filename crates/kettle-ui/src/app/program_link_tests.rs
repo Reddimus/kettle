@@ -7,13 +7,15 @@ fn a_custom_file_handler_is_reaped_after_exit() {
     use std::time::{Duration, Instant};
 
     let root = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(root.path()).unwrap();
+    let spaced = root.path().join("handler directory");
+    std::fs::create_dir(&spaced).unwrap();
+    let root = std::fs::canonicalize(&spaced).unwrap();
     let handler = root.join("handler");
     let pid_file = root.join("pid");
     std::fs::write(&pid_file, b"").unwrap();
     std::fs::write(
         &handler,
-        b"#!/bin/sh\nprintf '%s\\n' \"$$\" > \"${1#file://}\"\n",
+        b"#!/bin/sh\nprintf '%s\\n' \"$$\" > \"${0%/*}/pid\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&handler, std::fs::Permissions::from_mode(0o700)).unwrap();

@@ -102,11 +102,14 @@ python3 scripts/perf/macos-standing.py \
   --flood-offsets 3,20 --vtebench-seconds 10 --fd-limit 256 \
   --latency-keys 100 --latency-warmup 20 --memory-sample-ms 100 \
   --blink-validation BLINK-BEFORE.json \
+  --blink-cursor-rect X,Y,WIDTH,HEIGHT --blink-shape SHAPE --blink-timeout SECONDS \
   --label aa-480-hc --out-dir CONTROL
 ```
 
 BLINK-BEFORE.json must be the linked pre-set validation for both control
-entries. Retain and inspect the post-set validation before using the control.
+entries. Replace X,Y,WIDTH,HEIGHT, SHAPE, and SECONDS with the exact cursor
+rectangle, shape, and timeout used for that pre-set validation. Retain and
+inspect the post-set validation before using the control.
 An absent or mismatched validation leaves active blink unproven.
 
 Do not use `--rounds`; it overrides the distinct counts. Floors and opaque do

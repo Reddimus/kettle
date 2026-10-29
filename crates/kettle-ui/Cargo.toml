@@ -166,6 +166,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+alacritty_terminal = "0.26.0"
 kettle-test-support.workspace = true
 url = "2.5"
 # Layout checks run every text-sized surface against the pseudo-locale, which

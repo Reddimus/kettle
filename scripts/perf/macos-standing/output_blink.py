@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import shlex
 import statistics
 import stat
 import subprocess
@@ -241,8 +242,8 @@ def printing_row(records, samples, pid, window, observer_off=False):
         active = [s for s in samples if s['query_start_ns'] >= began and s['query_end_ns'] <= done]
         reason = None if observer_off else coverage_reason(active, began, done)
         # Without a record after done, a late focus change would go unseen.
-        if observer_off and not any(s['query_start_ns'] >= done for s in samples):
-            reason = reason or 'off-arm query after done missing'
+        if not any(s['query_start_ns'] >= done for s in samples):
+            reason = reason or ('off-arm query after done missing' if observer_off else 'query after done missing')
         # Designated query is selected before focus eligibility. Never shop
         # for a lower later sample after the designated query loses focus.
         sample = next((s for s in samples if s['query_start_ns'] >= began + 6_000_000_000), None)
@@ -479,7 +480,7 @@ def collect(runner, name, workload, options, keep, setup=None):
     receipts = [Path(str(context) + '.observer-' + suffix) for suffix in ('request','started','stop','reaped')]
     for path in (context, barrier, log, timeline, Path(str(timeline) + ".self.json"), *receipts):
         path.unlink(missing_ok=True)
-    body = (f'exec "{runner.probes["printing"]}" "{barrier}" "{log}"'
+    body = (f'exec {shlex.quote(str(runner.probes["printing"]))} {shlex.quote(str(barrier))} {shlex.quote(str(log))}'
             if workload == 'output-memory' else 'exec /bin/sleep 30')
     process, observer = None, None
     result, raw = {}, []
@@ -537,16 +538,25 @@ def collect(runner, name, workload, options, keep, setup=None):
                 return {'error': 'observer never confirmed readiness'}
             barrier.touch()
             deadline = time.monotonic() + 10
+            done = None
             while time.monotonic() < deadline:
-                if log.exists() and 'done_ns' in log.read_text():
-                    break
+                if log.exists():
+                    try:
+                        records = read_jsonl(log)
+                        done = records[-1].get('done_ns') if records else None
+                    except (OSError, ValueError):
+                        pass
+                    if integer(done):
+                        break
                 time.sleep(.02)
-            if offsets:
-                # The off arm's last query follows done and carries any late
-                # focus notification; stop the observer only after it.
-                final = origin + offsets[-1] * 1_000_000 + LATENESS_NS
-                while now_ns() < final and (not timeline.exists()
-                                             or timeline.read_bytes().count(b'\n') < len(offsets)):
+            if integer(done):
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    try:
+                        if any(s['query_start_ns'] >= done for s in read_jsonl(timeline)):
+                            break
+                    except (OSError, ValueError):
+                        pass
                     time.sleep(.02)
         else:
             deadline = started + int((options['settle'] + options['window']) * 1e9) + 300_000_000

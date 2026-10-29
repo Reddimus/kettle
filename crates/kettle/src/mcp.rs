@@ -131,6 +131,11 @@ const PRODUCTION_STDOUT_STALL_LIMIT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const STDOUT_STALL_LIMIT: Duration = Duration::from_millis(400);
 
+/// How long shutdown waits, once nothing more can be delivered, for the tools
+/// it cancelled to stop: well beyond what `kettle_run` takes to end its
+/// process tree.
+const CANCELLED_TOOL_TEARDOWN_LIMIT: Duration = Duration::from_secs(10);
+
 /// What the writer thread is doing, so a stalled PEER can be told apart from
 /// busy WORK.
 ///
@@ -150,12 +155,21 @@ struct WriterProgress {
     /// Incremented after each completed write, so "parked in ONE write" is
     /// distinguishable from "writing steadily".
     completed: AtomicU64,
+    failure: Mutex<Option<String>>,
 }
 
 fn stdout_stall_detector(progress: &WriterProgress, limit: Duration) -> impl FnMut() -> bool + '_ {
     let mut seen = progress.completed.load(Ordering::Relaxed);
     let mut since = Instant::now();
     move || {
+        if progress
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return true;
+        }
         let completed = progress.completed.load(Ordering::Relaxed);
         if completed != seen || !progress.in_write.load(Ordering::Relaxed) {
             // Progress, or nothing in flight: the peer is not the problem.
@@ -246,6 +260,13 @@ pub fn run_mcp_with(
             while let Ok(message) = responses_rx.recv() {
                 writer_progress.in_write.store(true, Ordering::Release);
                 let wrote = write_message(&mut output, &message);
+                if let Err(error) = &wrote {
+                    *writer_progress
+                        .failure
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(error.to_string());
+                }
                 writer_progress.in_write.store(false, Ordering::Release);
                 writer_progress.completed.fetch_add(1, Ordering::Release);
                 if wrote.is_err() {
@@ -372,7 +393,9 @@ pub fn run_mcp_with(
     // simply busy, which a fixed time budget would kill.
     drop(jobs_tx);
     stalled |= responses_tx.peer_gone();
-    for worker in workers {
+    let mut workers = workers.into_iter();
+    let mut unjoined = Vec::new();
+    for worker in workers.by_ref() {
         // `JoinHandle` has no timed join, so watch `is_finished` instead.
         if !stalled
             && !wait_unless_stdout_stalled(&progress, STDOUT_STALL_LIMIT, || worker.is_finished())
@@ -380,10 +403,12 @@ pub fn run_mcp_with(
             stalled = true;
         }
         if stalled {
+            unjoined.push(worker);
             break;
         }
         let _ = worker.join();
     }
+    unjoined.extend(workers);
     drop(responses_tx);
     if !stalled {
         // The workers are done and the channel is closed, so the writer is
@@ -392,6 +417,22 @@ pub fn run_mcp_with(
         // upstream notices, and a plain join would hang forever.
         stalled =
             !wait_unless_stdout_stalled(&progress, STDOUT_STALL_LIMIT, || writer.is_finished());
+    }
+    if stalled {
+        // Stalled or failed, nothing more reaches the client, and the process
+        // is about to exit under the tools still running. Exiting skips
+        // `kettle_run`'s teardown, so a child that ignores SIGHUP would outlive
+        // us; cancel them as `notifications/cancelled` would, and let them stop.
+        stop_abandoned_tools(&pending, &unjoined, CANCELLED_TOOL_TEARDOWN_LIMIT);
+    }
+    if let Some(error) = progress
+        .failure
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+    {
+        eprintln!("kettle mcp: stdout write failed: {error}");
+        return 1;
     }
     if stalled {
         eprintln!(
@@ -405,6 +446,26 @@ pub fn run_mcp_with(
     }
     let _ = writer.join();
     0
+}
+
+/// Cancel every pending tool call and wait up to `limit` for `workers` to
+/// finish.
+fn stop_abandoned_tools(
+    pending: &Pending,
+    workers: &[std::thread::JoinHandle<()>],
+    limit: Duration,
+) {
+    for cancelled in pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+    {
+        cancelled.store(true, Ordering::Release);
+    }
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline && !workers.iter().all(std::thread::JoinHandle::is_finished) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// The protocol output channel, plus the one-way latch that records the peer
@@ -2079,5 +2140,126 @@ mod tests {
             &pending,
         );
         assert!(responses_rx.try_recv().is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn broken_stdout_stops_the_server_with_open_or_closed_stdin() {
+        struct BrokenWriter;
+        impl Write for BrokenWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "test reader closed",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for keep_open in [false, true] {
+            let (reader, mut input) = std::os::unix::net::UnixStream::pair().unwrap();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let code = run_mcp_with(
+                    std::io::BufReader::new(reader),
+                    BrokenWriter,
+                    ToolSelection::Full,
+                );
+                done_tx.send(code).unwrap();
+            });
+            input
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+                .unwrap();
+            if !keep_open {
+                input.shutdown(std::net::Shutdown::Write).unwrap();
+            }
+            let result = done_rx.recv_timeout(Duration::from_secs(2));
+            drop(input);
+            server.join().unwrap();
+            assert_eq!(
+                result.ok(),
+                Some(1),
+                "stdout failure must terminate MCP even with stdin open={keep_open}"
+            );
+        }
+    }
+
+    /// A stdout failure ends the server, but not under a running tool: the
+    /// `kettle_run` is cancelled and its child, which ignores SIGHUP and so
+    /// would survive the process exiting, is stopped first.
+    #[cfg(unix)]
+    #[test]
+    fn a_stdout_failure_stops_running_tools_before_exiting() {
+        /// Accepts the initialize response, then fails every write.
+        struct FailsAfterOneLine {
+            lines: usize,
+        }
+        impl Write for FailsAfterOneLine {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.lines == 0 {
+                    return Err(std::io::Error::other("test disk full"));
+                }
+                self.lines = self
+                    .lines
+                    .saturating_sub(buf.iter().filter(|&&byte| byte == b'\n').count());
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        let script = format!(
+            "trap '' HUP; echo $$ > '{}.tmp'; mv '{0}.tmp' '{0}'; exec sleep 120",
+            pid_file.display()
+        );
+        let (reader, mut input) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let code = run_mcp_with(
+                std::io::BufReader::new(reader),
+                FailsAfterOneLine { lines: 1 },
+                ToolSelection::Full,
+            );
+            done_tx.send(code).unwrap();
+        });
+        for message in [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                   "params": init_params(MCP_PROTOCOL_VERSION)}),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": "kettle_run",
+                "arguments": {"command": ["/bin/sh", "-c", script], "timeout_s": 300},
+            }}),
+        ] {
+            input.write_all(format!("{message}\n").as_bytes()).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let pid = loop {
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                break text.trim().parse::<libc::pid_t>().unwrap();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "kettle_run never started its child"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // Its response is the write that fails.
+        input
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n")
+            .unwrap();
+        let code = done_rx.recv_timeout(Duration::from_secs(60));
+        drop(input);
+        server.join().unwrap();
+        assert_eq!(code.ok(), Some(1), "a stdout failure is a failure exit");
+        // SAFETY: signal 0 sends nothing; it only checks that the pid exists.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if alive {
+            // SAFETY: as above, but stopping the child this test started.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(!alive, "the kettle_run child outlived the server");
     }
 }

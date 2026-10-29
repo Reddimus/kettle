@@ -113,3 +113,30 @@ fn toast_text_and_focus_ring_are_readable_in_every_bundled_theme() {
         }
     }
 }
+
+#[test]
+fn toast_uses_chrome_metrics_with_scaled_terminal_cells() {
+    let paint = super::production_source();
+    let shape = paint
+        .split("if let Some(toast) = &overlay.update_toast {")
+        .nth(1)
+        .unwrap()
+        .split("// Context-menu row labels")
+        .next()
+        .unwrap();
+    let ui = include_str!("../../kettle-ui/src/app/update_toast.rs");
+    assert!(
+        shape.contains("self.overlay_text_cell_width()")
+            && ui.contains("renderer.overlay_text_cell_width()")
+            && ui.contains("renderer.overlay_text_line_height()"),
+        "toast uses terminal cell metrics instead of chrome metrics"
+    );
+    for (width_scale, height_scale) in [(0.5, 0.5), (2.0, 2.0)] {
+        let terminal = (8.0 * width_scale, 16.0 * height_scale);
+        let chrome = (terminal.0 / width_scale, terminal.1 / height_scale);
+        let message = "Could not install v6.0.0-aaa-bbbbbbbbbb-cccccccccc.";
+        let geometry = update_toast_geometry((800.0, 600.0), 0.0, 1.0, chrome, 8, message).unwrap();
+        let (text, _) = super::toast_buffer_text(message, geometry.message.2, chrome.0, true);
+        assert!(text.lines().count() as f32 * chrome.1 <= geometry.message.3);
+    }
+}

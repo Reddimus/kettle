@@ -31,7 +31,15 @@ done
 chmod 700 "$VM_DIR"
 chmod 600 "$DISK"
 # The firmware needs writable variable storage; seed it once from the template.
-[ -f "$EFI_VARS" ] || cp "${KETTLE_VM_EFI_VARS_TEMPLATE:-/opt/homebrew/share/qemu/edk2-arm-vars.fd}" "$EFI_VARS"
+if [ ! -f "$EFI_VARS" ]; then
+  (
+    vars_tmp=$(mktemp "$VM_DIR/efi_vars.fd.XXXXXX")
+    trap 'rm -f "$vars_tmp"' EXIT
+    trap 'exit 1' HUP INT TERM
+    cp "${KETTLE_VM_EFI_VARS_TEMPLATE:-/opt/homebrew/share/qemu/edk2-arm-vars.fd}" "$vars_tmp"
+    mv "$vars_tmp" "$EFI_VARS"
+  )
+fi
 chmod 600 "$EFI_VARS"
 
 case "${1:-none}" in
@@ -48,9 +56,17 @@ esac
 if [ -e "$QGA_SOCKET" ] || [ -L "$QGA_SOCKET" ]; then
   [ -S "$QGA_SOCKET" ] && [ ! -L "$QGA_SOCKET" ] \
     || { echo "refusing non-socket guest-agent path: $QGA_SOCKET" >&2; exit 1; }
-  if lsof "$QGA_SOCKET" >/dev/null 2>&1; then
+  command -v lsof >/dev/null 2>&1 \
+    || { echo "lsof is required to inspect the guest-agent socket" >&2; exit 1; }
+  if inspection=$(lsof "$QGA_SOCKET" 2>&1); then
     echo "guest-agent socket is active; is the VM already running?" >&2
     exit 1
+  else
+    inspection_status=$?
+    if [ "$inspection_status" -ne 1 ] || [ -n "$inspection" ]; then
+      printf 'guest-agent socket inspection failed (exit %s): %s\n' "$inspection_status" "$inspection" >&2
+      exit 1
+    fi
   fi
   rm "$QGA_SOCKET"
 fi

@@ -1171,6 +1171,15 @@ mod toast_tests {
     use super::*;
     use crate::update_notice::{Notice, NoticeKind};
 
+    /// Seed a cache file the way Kettle writes one: private whatever the
+    /// process umask. A plain write under a umask of 002 makes it
+    /// group-writable, which the trusted reader rightly refuses, so a test
+    /// expecting a different error would pass for the wrong reason.
+    fn seed(path: &std::path::Path, bytes: &[u8]) {
+        kettle_state::atomic_replace(path, bytes, kettle_state::AtomicWriteOptions::PRIVATE)
+            .unwrap();
+    }
+
     fn notice() -> Notice {
         Notice {
             kind: NoticeKind::Available,
@@ -1217,7 +1226,7 @@ mod toast_tests {
             serde_json::to_vec(&serde_json::json!({"future": "x".repeat(MAX_CACHE_BYTES - 64)}))
                 .unwrap();
         assert!(original.len() < MAX_CACHE_BYTES);
-        std::fs::write(&path, &original).unwrap();
+        seed(&path, &original);
         assert!(toast_transaction(&path, |ledger| ledger.claim(notice(), 100, 1, None)).is_err());
         assert_eq!(std::fs::read(path).unwrap(), original);
     }
@@ -1226,11 +1235,10 @@ mod toast_tests {
     fn concurrent_delivery_claims_preserve_existing_and_future_cache_fields() {
         let directory = kettle_test_support::private_tempdir("kettle-toast-cache-");
         let path = directory.path().join("update-check.json");
-        std::fs::write(
+        seed(
             &path,
             br#"{"last_check":17,"dismissed_version":"v5.0.0","future":{"keep":true}}"#,
-        )
-        .unwrap();
+        );
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
         let jobs: Vec<_> = (1..=4)
             .map(|owner| {
@@ -1268,7 +1276,7 @@ mod toast_tests {
         let directory = kettle_test_support::private_tempdir("kettle-toast-corrupt-");
         let path = directory.path().join("update-check.json");
         let original = b"{incomplete record";
-        std::fs::write(&path, original).unwrap();
+        seed(&path, original);
         assert!(toast_transaction(&path, |ledger| ledger.claim(notice(), 100, 1, None)).is_err());
         assert_eq!(std::fs::read(path).unwrap(), original);
     }

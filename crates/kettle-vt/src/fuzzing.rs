@@ -319,6 +319,12 @@ fn completion_update(update: &CompletionUpdate) {
 
 /// Decode `data` past its first byte with the decoder that byte picks.
 pub fn images(data: &[u8]) {
+    images_with(data, |decoded, limits| {
+        image(decoded, limits);
+    });
+}
+
+fn images_with(data: &[u8], mut visit: impl FnMut(&ImageData, &GraphicsLimits)) {
     let Some((&pick, bytes)) = data.split_first() else {
         return;
     };
@@ -329,15 +335,15 @@ pub fn images(data: &[u8]) {
     };
     let budget = GraphicsBudget::independent(limits).expect("valid limits");
     let text = std::str::from_utf8(bytes).ok();
-    match pick % 5 {
+    match (pick & 0x7f) % 5 {
         0 => {
             if let Some(decoded) = sixel::decode_with_budget(bytes, &budget) {
-                image(&decoded, &limits);
+                visit(&decoded, &limits);
             }
         }
         1 => {
             if let Some(decoded) = text.and_then(|body| iterm::decode_with_budget(body, &budget)) {
-                image(&decoded, &limits);
+                visit(&decoded, &limits);
             }
         }
         2 => {
@@ -348,7 +354,7 @@ pub fn images(data: &[u8]) {
                     continue;
                 };
                 if let KittyOut::Place(placed) = state.feed(body) {
-                    image(&placed.img, &limits);
+                    visit(&placed.img, &limits);
                 }
             }
         }
@@ -460,6 +466,28 @@ mod tests {
         save_seeds("vt", &seeds);
         for case in cases(&seeds, 600, 0x5eed_0101) {
             vt(&case);
+        }
+    }
+
+    #[test]
+    fn small_limit_seeds_decode_with_the_same_protocol() {
+        for (pick, payload) in [
+            (0, &b"\"1;1;1;6#0;2;100;0;0~"[..]),
+            (2, &b"a=T,f=32,s=1,v=1,i=1;AQID/w=="[..]),
+        ] {
+            for flags in [0, 0x80] {
+                let mut seed = vec![pick | flags];
+                seed.extend_from_slice(payload);
+                let mut decoded = 0;
+                super::images_with(&seed, |img, limits| {
+                    super::image(img, limits);
+                    decoded += 1;
+                });
+                assert_eq!(
+                    decoded, 1,
+                    "protocol {pick} must decode with flags {flags:#x}"
+                );
+            }
         }
     }
 

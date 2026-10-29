@@ -47,7 +47,23 @@ where
 {
     let arguments = arguments
         .into_iter()
-        .map(|argument| argument.as_ref().to_string_lossy().into_owned())
+        .flat_map(|argument| {
+            let argument = argument.as_ref().to_string_lossy().into_owned();
+            let mut expanded = Vec::new();
+            if argument.starts_with('-') && !argument.starts_with("--") && argument.len() > 2 {
+                for (offset, flag) in argument[1..].char_indices() {
+                    if matches!(flag, 'm' | 'f' | 'b' | 'H') {
+                        expanded.push(format!("-{flag}"));
+                    } else {
+                        expanded.push(format!("-{}", &argument[offset + 1..]));
+                        return expanded;
+                    }
+                }
+            } else {
+                expanded.push(argument);
+            }
+            expanded
+        })
         .collect::<Vec<_>>();
     if arguments.is_empty() {
         return false;
@@ -169,12 +185,6 @@ fn is_gui_flag(argument: &str) -> bool {
             | "-H"
             | "--new-process"
     ) || argument == "--record-raw-input"
-        || (argument.starts_with('-')
-            && !argument.starts_with("--")
-            && argument.len() > 2
-            && argument[1..]
-                .chars()
-                .all(|flag| matches!(flag, 'm' | 'f' | 'b' | 'H')))
 }
 
 #[cfg(test)]
@@ -236,5 +246,14 @@ mod tests {
             "--record-raw-input"
         ]));
         assert!(should_wait(["--record-dir"]));
+    }
+    #[test]
+    fn value_options_in_short_clusters_launch_asynchronously() {
+        for arguments in [vec!["-mTwork"], vec!["-mdDIR"], vec!["-me", "PROGRAM"]] {
+            assert!(
+                !should_wait(&arguments),
+                "valid GUI cluster must not wait: {arguments:?}"
+            );
+        }
     }
 }

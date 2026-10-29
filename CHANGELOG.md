@@ -14,9 +14,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Build release packages, and the tests that admit them, without restoring
   build caches written by ordinary CI runs.
 - Run weekly advisory coverage, mutation-testing and AddressSanitizer jobs.
+- Never let an older release become latest once a newer one is published,
+  whatever order their release runs finish in.
 
 ### Fixed
 
+- Refuse a symlinked update backup directory during recovery instead of
+  reading and cleaning up whatever it points to.
+- Stop enumerating update and backup trees as soon as they exceed their
+  entry limits, and reject a stray backup file before collecting the tree.
+- Let Windows update cleanup finish when the payload is exactly at its size
+  limit.
+- Keep two macOS updaters started with different state directories from both
+  replacing the app.
+- Show Sixel images' HLS palette colors correctly, and refuse a Sixel image
+  whose declared size cannot be reserved instead of drawing a smaller one.
+- Keep trailing spaces in `text:` key bindings.
+- Saving a theme or a finite scrollback in Settings now sticks: a
+  `palette = NAME` or `scrollback-infinite` line no longer overrides it on the
+  next load.
+- Import Terminator punctuation shortcuts and `[keybindings]` full-screen
+  accelerators as key bindings.
+- Follow the sun correctly near the poles, and apply a forced light or dark
+  theme even when the solar schedule lacks coordinates.
+- Say how to enable shell integration when an agent's `run_command` times out
+  without it.
 - Keep titles, prompt marks, clipboard writes and notifications working in
   every pane while other panes hold all image memory.
 - Stop a large image or control string that is refused for lack of memory from
@@ -25,6 +47,140 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   ownership check, so a tree renamed into their place in the shared
   Applications folder is never deleted.
 - Repair three documentation links to testing sections that had moved.
+- On Linux, stop descendants that left the session with `setsid()` when
+  `kettle exec` times out or is cancelled, instead of leaving them running.
+- Deliver end-of-file from `kettle exec` to a program reading a canonical
+  line even when a terminal reply arrives between its input and the EOF.
+- Report a stdout write failure during `kettle exec`'s final output grace as a
+  delivery failure when the run times out or is cancelled, instead of losing
+  it.
+- Refuse `kettle exec` geometry over 4,096 columns or rows, or 262,144 cells,
+  before allocating the terminal, and read Linux process names as bytes
+  during teardown.
+- Rebuild, and change the build's source id, when a vendored crate changes.
+- Show an artifact from the legacy agy edit tools only when its sidecar
+  metadata says it is user-facing.
+- Launch `kettle-console` without waiting when grouped short options include
+  one that takes a value, such as `-mTwork`.
+- Report a config file that cannot be looked up as a validation error in
+  `kettle check-config` instead of treating it as missing, and write the
+  first-run config privately and atomically.
+- Bound the SSH host table's name padding.
+- In the MCP server, stop and report failure when writing to stdout fails,
+  cancelling running tools and letting them stop their processes first,
+  return a smaller-limit error instead of truncated control results, and
+  accept integer arguments written as `5.0` or `5e0`.
+- Check every parent directory of the media worker before trusting it, and
+  on macOS keep refusing signature checks while any earlier check is stuck
+  past its kill, not only the most recent one.
+- Trust a sticky temporary directory for video frame export only when you or
+  root own it, and keep staging names short whatever the output name.
+- Notice a shell's exit even while it keeps output readable, and kill and
+  reap shell probes that time out, with their output capped.
+- Keep images anchored when a top-anchored scroll region moves them into
+  history over several batches.
+- Read legacy Escape-prefixed keys as one key, and keep Alt-Tab from
+  consuming a completion request.
+- Delete kitty images by relative z-index correctly, and allow replacing a
+  placement whose chain passes through the placement it retires.
+- Keep trailing dot components in file links, strip `(line)` and
+  `(line,col)` suffixes, and recognize expanded Windows home directories.
+- Revalidate a recording path after taking its lock.
+- Bound the regex work in each forward-search step and keep its progress
+  across steps.
+- Recognize grouped short options containing `-f`, and `<` or `>` right after
+  them, in the zsh startup guard.
+- Keep `ESC \` ending a message after a repeated ESC, and report working
+  directories verbatim on Unix.
+- Grow kitty upload buffers geometrically within their bound and charge the
+  memory they actually allocate.
+- Hold the staging lock until a state file is published, so cleanup cannot
+  remove a file mid-publication.
+- Refuse a Kettle state directory component that is another user's directory
+  or symlink, while following the user's own symlinks.
+- Run container reconnects with `/bin/sh` inside the container, and offer no
+  reconnect when it cannot reproduce the session (Docker TLS options,
+  relative or drive-relative SSH identity and config paths, `-S` and
+  `ControlPath`).
+- Stop a crash when a pane closes after a font change and before the next
+  frame.
+- Apply PNG and APNG background limits before reading their metadata, and
+  keep 32-bit Linux from overflowing on a 1080p wallpaper.
+- Draw the cursor on its row's shaped baseline, draw no underline or
+  strikeout on concealed cells, and keep glyph shaping offsets.
+- Place the search caret, pointer and selection correctly inside ligatures.
+- Size and place toasts and remote receipts from their measured text, and
+  wrap long failure messages.
+- Keep a confirmation dialog's focused button fully visible when no whole-line
+  scroll shows it.
+- Keep up to 30 combining marks per cell in snapshots, and the mask
+  foreground on non-sRGB surfaces.
+- Build the Linux release archive in a private temporary file with its size
+  limit enforced, and never overwrite an existing archive.
+- Keep files that survived an interrupted Unix install in its provenance.
+- Reject tracked paths under a symlinked directory in the tracked-file audit.
+- Fix races, quoting and cleanup in the smoke, live-UI, performance and
+  Linux check scripts, including the standing self-test's intermittent
+  keyblock failure.
+- Keep multi-line command buffers whole in Fish completion, and emit no
+  command-start mark for an incomplete PowerShell command.
+- Keep the PowerShell integration working when a profile turns on strict
+  mode.
+- Depend on Arch's `wayland` package, which provides `libwayland-client`.
+- Bring the security, agent, recording, protocol and architecture documents
+  in line with the code, and buffer partial output lines per pane in the
+  example `init.lua`.
+- Give each screenshot its own destination and report a failed capture.
+- Keep a zoomed pane's font when duplicating it.
+- Run custom URL handlers and the system opener off the event loop.
+- Suppress startup titles only on Windows, where ConPTY causes them.
+- Hit-test the status bar where it is drawn.
+- Return focus to a restarted pane, and keep its directory for WSL launches.
+- Redraw after a broadcast that scrolls a pane.
+- Tie IME composition to its pane, end it on focus changes, and accept new
+  input after a cancelled composition.
+- Start recording before restored sibling windows open.
+- Respect menus and other modal pointer owners in mouse motion reports.
+- Keep the new-tab button and tab overflow arrows in step with focus changes.
+- Open a second theme picker from the first one's baseline, and keep
+  configured theme overrides in previews.
+- Run command deadlines before GPU recovery, and wake for the earliest of the
+  animation, background and cursor-blink timers.
+- Give a screen reader that attaches late a current accessibility tree.
+- Keep search on the focused pane after a remote new tab or a tear-off.
+- Keep wide and combining characters in trigger matches.
+- Hide a vertical tab's close button when it cannot fit, and hit-test tabs,
+  tear-off anchors and docking against the tab band as drawn, including the
+  status bar.
+- Keep an update notice dismissed in this window when an older update state
+  arrives later.
+- Keep live config reload working when re-registering its watcher fails.
+- Stop reporting mouse motion to the terminal while a menu or dialog owns the
+  pointer.
+- Resize splits by dragging a divider through the control API.
+- Submit `run_command` with exactly one carriage return whatever line ending
+  it has.
+- Keep a short window's menu at least one full row tall; offer Ungroup when
+  any pane in the tab is grouped; accept Space typed as a character in
+  Settings, toasts and dialogs.
+- Reap layouts opened from the layout picker.
+- Deliver keys typed behind a queued paste to the panes they were typed for
+  when the broadcast scope changes.
+- Hide sibling preview lanes behind the theater and fullscreen viewers.
+- Bound a tab handoff to one deadline however it is fragmented.
+- Tell Lua plugins `pane_close` for every pane that ends: with its tab, its
+  window, or after its shell exits.
+- Keep a torn-off tab's font zoom in its new window.
+- Keep a client's control response when it half-closes its connection after
+  sending a request.
+- Wait to write shared session state until a scan of other running builds has
+  completed, and clean up their stale sockets in every temporary fallback.
+- Keep a replacement control alias when a stale one is pruned at the same
+  time, and prune aliases whose server registration is gone.
+- Refuse a control socket directory that other users can write unless it is
+  sticky, saying how to fix it, and remove only a socket you own when binding.
+- Stop advertising a control server whose process has exited but not yet
+  been reaped.
 
 ## [5.6.0] — 2026-10-28
 

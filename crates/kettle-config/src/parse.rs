@@ -24,6 +24,8 @@ pub struct Entry {
     /// file, or it sends them grepping for a line that is not there.
     pub raw_key: String,
     pub value: String,
+    /// Distinguishes action names from settings such as `full_screen`.
+    pub in_keybindings: bool,
 }
 
 /// Strip ONE matched pair of surrounding quotes from a value.
@@ -262,6 +264,10 @@ pub fn parse(input: &str) -> Vec<Entry> {
             key,
             raw_key,
             value,
+            in_keybindings: section
+                .path
+                .as_ref()
+                .is_some_and(|path| path.first().is_some_and(|name| name == "keybindings")),
         });
     }
     out

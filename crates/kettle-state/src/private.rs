@@ -10,7 +10,7 @@ type CreatedFilePublish = Box<
 >;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CreatedFilePublication {
+pub(super) enum CreatedFilePublication {
     /// Publication added a second name; the staging name still needs removal.
     Linked,
     /// Publication moved the staging name; its cleanup capability must be
@@ -501,6 +501,8 @@ pub fn open_trusted_file_read_following_leaf(
 /// user-owned Kettle components are repaired from the outer namespace through
 /// the leaf. The final component
 /// is opened with `O_NOFOLLOW`; ancestor links resolve to their real directory.
+/// A Kettle component that is another user's directory or symlink is refused;
+/// the user's own symlink is followed and left as they made it.
 pub fn create_private_dirs(directory: &Path) -> io::Result<()> {
     create_private_dirs_impl(directory)
 }
@@ -570,6 +572,10 @@ fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
         return sync_new_entries();
     };
 
+    // Refuse a Kettle component another user owns before creating anything
+    // through it: a link planted in a shared /tmp namespace would otherwise
+    // redirect the creates and the repair below into this user's directories.
+    require_owned_components_trusted(owned, directory)?;
     if let Some(root) = owned.parent() {
         private(root)?;
     }
@@ -594,9 +600,78 @@ fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
     // the redirected open would look legitimate. Narrowing each ancestor before
     // descending through it closes that ordering.
     for path in repair.iter().rev() {
+        if !owned_component_is_repairable(path)? {
+            continue;
+        }
         repair_private_dir_mode(path)?;
     }
     sync_new_entries()
+}
+
+/// Whether a symlink standing in for a Kettle directory may be followed:
+/// only one the effective user owns, such as a directory kept in a dotfiles
+/// repository, and never one another user planted.
+#[cfg(unix)]
+fn follows_namespace_link(link_owner: u32, euid: u32) -> bool {
+    link_owner == euid
+}
+
+/// Check every existing Kettle component from `owned` down to `directory`
+/// before anything is created through them.
+#[cfg(unix)]
+fn require_owned_components_trusted(owned: &Path, directory: &Path) -> io::Result<()> {
+    let mut components: Vec<&Path> = directory
+        .ancestors()
+        .take_while(|path| *path != owned)
+        .collect();
+    components.push(owned);
+    for path in components.into_iter().rev() {
+        // Everything below the first missing component is created here.
+        if std::fs::symlink_metadata(path).is_err() {
+            break;
+        }
+        owned_component_is_repairable(path)?;
+    }
+    Ok(())
+}
+
+/// Classify one Kettle component: `Ok(true)` for a directory to repair,
+/// `Ok(false)` for one that is missing or is the user's own link (left as the
+/// user made it), and an error for anything another user owns.
+#[cfg(unix)]
+fn owned_component_is_repairable(path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    if metadata.file_type().is_symlink() {
+        if follows_namespace_link(metadata.uid(), euid) {
+            return Ok(false);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing a private directory that is a symlink owned by uid {}: {}",
+                metadata.uid(),
+                path.display()
+            ),
+        ));
+    }
+    if metadata.is_dir() && metadata.uid() != euid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing a private directory owned by uid {}: {}",
+                metadata.uid(),
+                path.display()
+            ),
+        ));
+    }
+    Ok(metadata.is_dir())
 }
 
 /// Set one existing directory to `0700`, through a file descriptor rather than
@@ -1249,7 +1324,7 @@ pub(super) fn publish_staged_create(
     staged: &File,
     source: &Path,
     destination: &Path,
-) -> io::Result<()> {
+) -> io::Result<CreatedFilePublication> {
     guard.link_open_file_new(staged, source, destination)
 }
 
@@ -1322,7 +1397,7 @@ pub(super) fn publish_staged_create(
     staged: &File,
     source: &Path,
     destination: &Path,
-) -> io::Result<()> {
+) -> io::Result<CreatedFilePublication> {
     guard.link_open_file_new(staged, source, destination)
 }
 
@@ -1408,8 +1483,8 @@ pub(super) fn publish_staged_create(
     _staged: &File,
     source: &Path,
     destination: &Path,
-) -> io::Result<()> {
-    std::fs::hard_link(source, destination)
+) -> io::Result<CreatedFilePublication> {
+    std::fs::hard_link(source, destination).map(|()| CreatedFilePublication::Linked)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1900,6 +1975,21 @@ pub(crate) mod unix {
                     return Err(error);
                 }
             }
+            if created {
+                // A restrictive umask can remove owner-read on macOS before
+                // open_directory_at can obtain a readable descriptor.
+                if unsafe {
+                    libc::fchmodat(
+                        parent.as_raw_fd(),
+                        name_c.as_ptr(),
+                        0o700,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                } != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+            }
             let child = open_directory_at(parent, name)?;
             let child_metadata = child.metadata()?;
             require_trusted_directory_edge(&parent.metadata()?, &child_metadata, &cursor)?;
@@ -1912,11 +2002,6 @@ pub(crate) mod unix {
                             cursor.display()
                         ),
                     ));
-                }
-                // SAFETY: the parent directory is held and trusted, and the
-                // just-created child name is NUL-terminated.
-                if unsafe { libc::fchmodat(parent.as_raw_fd(), name_c.as_ptr(), 0o700, 0) } != 0 {
-                    return Err(io::Error::last_os_error());
                 }
                 if child.metadata()?.mode() & 0o777 != 0o700 {
                     return Err(io::Error::new(
@@ -2214,7 +2299,17 @@ pub(crate) mod unix {
             staged: &File,
             source: &Path,
             destination: &Path,
-        ) -> io::Result<()> {
+        ) -> io::Result<CreatedFilePublication> {
+            self.link_open_file_new_with_mode(staged, source, destination, HardLinkMode::Native)
+        }
+
+        pub(super) fn link_open_file_new_with_mode(
+            &self,
+            staged: &File,
+            source: &Path,
+            destination: &Path,
+            hard_link_mode: HardLinkMode,
+        ) -> io::Result<CreatedFilePublication> {
             let source = self.validate_path(source)?;
             let destination = self.validate_path(destination)?;
             self.verify()?;
@@ -2230,20 +2325,36 @@ pub(crate) mod unix {
             self.require_leaf_policy(current_user())?;
             let source = c_name(&source, "staged file name")?;
             let destination = c_name(&destination, "destination file name")?;
-            // SAFETY: both names and the verified directory fd are valid.
-            if unsafe {
-                libc::linkat(
-                    self.directory().as_raw_fd(),
-                    source.as_ptr(),
-                    self.directory().as_raw_fd(),
-                    destination.as_ptr(),
-                    0,
-                )
-            } != 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
+            publish_with_atomic_fallback(
+                || {
+                    match hard_link_mode {
+                        HardLinkMode::Native => {}
+                        #[cfg(test)]
+                        HardLinkMode::ForceUnsupported => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Unsupported,
+                                "injected hard-link rejection",
+                            ));
+                        }
+                    }
+                    // SAFETY: both names and the verified directory fd are valid.
+                    if unsafe {
+                        libc::linkat(
+                            self.directory().as_raw_fd(),
+                            source.as_ptr(),
+                            self.directory().as_raw_fd(),
+                            destination.as_ptr(),
+                            0,
+                        )
+                    } == 0
+                    {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                },
+                || rename_no_replace_at(self.directory(), &source, self.directory(), &destination),
+            )
         }
 
         pub(super) fn sync(&self) -> io::Result<()> {
@@ -2314,6 +2425,9 @@ pub(crate) mod unix {
                 if require_user_owned_regular(&file, &candidate).is_err()
                     || self.require_leaf_policy(metadata.uid()).is_err()
                 {
+                    continue;
+                }
+                if fs4::FileExt::try_lock(&file).is_err() {
                     continue;
                 }
                 if self.unlink_open_file(&file, name).is_ok() {
@@ -2610,6 +2724,57 @@ pub(crate) mod unix {
         Ok(Some(StagedUserSelectedFile::new(staged, publish)))
     }
 
+    fn rename_no_replace_at(
+        source_parent: &File,
+        staged_c: &std::ffi::CStr,
+        parent: &File,
+        destination_c: &std::ffi::CStr,
+    ) -> io::Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let renamed = unsafe {
+            libc::renameat2(
+                source_parent.as_raw_fd(),
+                staged_c.as_ptr(),
+                parent.as_raw_fd(),
+                destination_c.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let renamed = {
+            unsafe extern "C" {
+                fn renameatx_np(
+                    from_dir: libc::c_int,
+                    from: *const libc::c_char,
+                    to_dir: libc::c_int,
+                    to: *const libc::c_char,
+                    flags: libc::c_uint,
+                ) -> libc::c_int;
+            }
+            const RENAME_EXCL: libc::c_uint = 0x0000_0004;
+            unsafe {
+                renameatx_np(
+                    source_parent.as_raw_fd(),
+                    staged_c.as_ptr(),
+                    parent.as_raw_fd(),
+                    destination_c.as_ptr(),
+                    RENAME_EXCL,
+                )
+            }
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this platform has no atomic no-replace rename API",
+        ));
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        if renamed == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
     fn create_user_selected_file_publish(
         source_parent: File,
         parent: File,
@@ -2674,55 +2839,7 @@ pub(crate) mod unix {
                         "injected hard-link rejection",
                     )),
                 },
-                || {
-                    #[cfg(any(target_os = "linux", target_os = "android"))]
-                    let renamed = unsafe {
-                        libc::renameat2(
-                            source_parent.as_raw_fd(),
-                            staged_c.as_ptr(),
-                            parent.as_raw_fd(),
-                            destination_c.as_ptr(),
-                            libc::RENAME_NOREPLACE,
-                        )
-                    };
-                    #[cfg(target_os = "macos")]
-                    let renamed = {
-                        unsafe extern "C" {
-                            fn renameatx_np(
-                                from_dir: libc::c_int,
-                                from: *const libc::c_char,
-                                to_dir: libc::c_int,
-                                to: *const libc::c_char,
-                                flags: libc::c_uint,
-                            ) -> libc::c_int;
-                        }
-                        const RENAME_EXCL: libc::c_uint = 0x0000_0004;
-                        unsafe {
-                            renameatx_np(
-                                source_parent.as_raw_fd(),
-                                staged_c.as_ptr(),
-                                parent.as_raw_fd(),
-                                destination_c.as_ptr(),
-                                RENAME_EXCL,
-                            )
-                        }
-                    };
-                    #[cfg(not(any(
-                        target_os = "linux",
-                        target_os = "android",
-                        target_os = "macos"
-                    )))]
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "this platform has no atomic no-replace rename API",
-                    ));
-                    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
-                    if renamed == 0 {
-                        Ok(())
-                    } else {
-                        Err(io::Error::last_os_error())
-                    }
-                },
+                || rename_no_replace_at(&source_parent, &staged_c, &parent, &destination_c),
             )?;
             let post_publish = (|| {
                 let published = entry_stat(&parent, &destination_leaf)?
@@ -4098,63 +4215,7 @@ mod windows {
                         "injected hard-link rejection",
                     )),
                 },
-                || {
-                    let destination_name = &destination_path[..destination_path.len() - 1];
-                    let name_bytes = destination_name
-                        .len()
-                        .checked_mul(std::mem::size_of::<u16>())
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "export destination is too long",
-                            )
-                        })?;
-                    let total_bytes = std::mem::size_of::<FILE_RENAME_INFO>()
-                        .checked_add(name_bytes)
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "export destination is too long",
-                            )
-                        })?;
-                    let words = total_bytes.div_ceil(std::mem::size_of::<u64>());
-                    let mut storage = vec![0_u64; words];
-                    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-                    unsafe {
-                        (*info).Anonymous.ReplaceIfExists = false;
-                        (*info).RootDirectory = std::ptr::null_mut();
-                        (*info).FileNameLength = u32::try_from(name_bytes).map_err(|_| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "export destination is too long",
-                            )
-                        })?;
-                        std::ptr::copy_nonoverlapping(
-                            destination_name.as_ptr(),
-                            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
-                            destination_name.len(),
-                        );
-                    }
-                    let buffer_len = u32::try_from(total_bytes).map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "export destination is too long",
-                        )
-                    })?;
-                    if unsafe {
-                        SetFileInformationByHandle(
-                            file.as_raw_handle() as HANDLE,
-                            FileRenameInfo,
-                            info.cast(),
-                            buffer_len,
-                        )
-                    } != 0
-                    {
-                        Ok(())
-                    } else {
-                        Err(io::Error::last_os_error())
-                    }
-                },
+                || rename_open_file_new(file, &destination_path[..destination_path.len() - 1]),
             )?;
             let post_publish = (|| {
                 let published = inspect.open(&stable_destination)?;
@@ -5021,6 +5082,54 @@ mod windows {
         )
     }
 
+    fn rename_open_file_new(file: &File, destination_name: &[u16]) -> io::Result<()> {
+        let name_bytes = destination_name
+            .len()
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "destination is too long")
+            })?;
+        let total_bytes = std::mem::size_of::<FILE_RENAME_INFO>()
+            .checked_add(name_bytes)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "destination is too long")
+            })?;
+        let words = total_bytes.div_ceil(std::mem::size_of::<u64>());
+        let mut storage = vec![0_u64; words];
+        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        // SAFETY: the aligned buffer holds the header and all trailing UTF-16
+        // code units. The caller provides a stable, non-NUL destination path.
+        unsafe {
+            (*info).Anonymous.ReplaceIfExists = false;
+            (*info).RootDirectory = std::ptr::null_mut();
+            (*info).FileNameLength = u32::try_from(name_bytes).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "destination is too long")
+            })?;
+            std::ptr::copy_nonoverlapping(
+                destination_name.as_ptr(),
+                std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+                destination_name.len(),
+            );
+        }
+        let buffer_len = u32::try_from(total_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "destination is too long"))?;
+        // SAFETY: the creation handle has DELETE access and `info` remains
+        // valid for the duration of this synchronous no-replace rename.
+        if unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle() as HANDLE,
+                FileRenameInfo,
+                info.cast(),
+                buffer_len,
+            )
+        } != 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
     pub(crate) struct PrivateParentGuard {
         path: PathBuf,
         identity: FileIdentity,
@@ -5164,9 +5273,20 @@ mod windows {
             staged: &File,
             source: &Path,
             destination: &Path,
-        ) -> io::Result<()> {
+        ) -> io::Result<CreatedFilePublication> {
+            self.link_open_file_new_with_mode(staged, source, destination, HardLinkMode::Native)
+        }
+
+        pub(super) fn link_open_file_new_with_mode(
+            &self,
+            staged: &File,
+            source: &Path,
+            destination: &Path,
+            hard_link_mode: HardLinkMode,
+        ) -> io::Result<CreatedFilePublication> {
             let source = std::ffi::OsString::from_wide(&self.stable_path(source)?);
-            let destination = std::ffi::OsString::from_wide(&self.stable_path(destination)?);
+            let destination_name = self.stable_path(destination)?;
+            let destination = std::ffi::OsString::from_wide(&destination_name);
             self.verify()?;
 
             let mut options = std::fs::OpenOptions::new();
@@ -5182,7 +5302,17 @@ mod windows {
                     "staged path no longer refers to the open private file",
                 ));
             }
-            std::fs::hard_link(source, destination)
+            publish_with_atomic_fallback(
+                || match hard_link_mode {
+                    HardLinkMode::Native => std::fs::hard_link(source, destination),
+                    #[cfg(test)]
+                    HardLinkMode::ForceUnsupported => Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "injected hard-link rejection",
+                    )),
+                },
+                || rename_open_file_new(staged, &destination_name),
+            )
         }
 
         pub(super) fn reap_matching_children<F>(
@@ -5929,6 +6059,63 @@ mod tests {
         assert_eq!(std::fs::read(destination).unwrap(), b"winner");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn private_create_falls_back_without_clobbering_or_relaxing_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_tempdir();
+        let source = root.path().join("staged");
+        let destination = root.path().join("config");
+        let mut staged = create_private_file_new(&source).unwrap();
+        staged.write_all(b"complete config").unwrap();
+        staged.sync_all().unwrap();
+        let guard = guard_private_parent(&destination).unwrap();
+        guard
+            .link_open_file_new_with_mode(
+                &staged,
+                &source,
+                &destination,
+                HardLinkMode::ForceUnsupported,
+            )
+            .unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete config");
+        assert_eq!(
+            std::fs::metadata(&destination)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let mut next = create_private_file_new(&source).unwrap();
+        next.write_all(b"loser").unwrap();
+        let error = guard
+            .link_open_file_new_with_mode(
+                &next,
+                &source,
+                &destination,
+                HardLinkMode::ForceUnsupported,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete config");
+        assert_eq!(std::fs::read(&source).unwrap(), b"loser");
+
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let error = guard
+            .link_open_file_new_with_mode(
+                &next,
+                &source,
+                &root.path().join("other"),
+                HardLinkMode::ForceUnsupported,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
     #[test]
     fn unsupported_hard_links_fall_back_to_atomic_no_replace_rename() {
         let renamed = std::cell::Cell::new(false);
@@ -5957,6 +6144,76 @@ mod tests {
             !rename_called.get(),
             "a racing destination must never reach a rename fallback"
         );
+    }
+
+    #[test]
+    fn atomic_publication_falls_back_for_every_non_collision_link_error() {
+        for kind in [
+            io::ErrorKind::Unsupported,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::Other,
+        ] {
+            assert_eq!(
+                publish_with_atomic_fallback(|| Err(io::Error::from(kind)), || Ok(())).unwrap(),
+                CreatedFilePublication::Renamed
+            );
+            let error = publish_with_atomic_fallback(
+                || Err(io::Error::from(kind)),
+                || Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        }
+        assert_eq!(
+            publish_with_atomic_fallback(|| Ok(()), || panic!("a successful link needs no rename"))
+                .unwrap(),
+            CreatedFilePublication::Linked
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_create_new_windows_rename_fallback_keeps_the_destination() {
+        let root = crate::test_tempdir();
+        let destination = root.path().join("default.config");
+        let publish = |guard: &PrivateParentGuard, staged: &File, source: &Path, target: &Path| {
+            guard.link_open_file_new_with_mode(
+                staged,
+                source,
+                target,
+                HardLinkMode::ForceUnsupported,
+            )
+        };
+        assert!(
+            crate::atomic_create_new_with_publish(
+                &destination,
+                b"complete config",
+                crate::AtomicWriteOptions::PRIVATE,
+                publish,
+            )
+            .unwrap()
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete config");
+        let file = open_existing_private_file(&destination).unwrap();
+        assert!(has_current_user_only_dacl(&file).unwrap());
+        drop(file);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+
+        let racing = root.path().join("racing.config");
+        assert!(
+            !crate::atomic_create_new_with_publish(
+                &racing,
+                b"ours",
+                crate::AtomicWriteOptions::PRIVATE,
+                |guard, staged, source, target| {
+                    std::fs::write(target, b"winner")?;
+                    publish(guard, staged, source, target)
+                },
+            )
+            .unwrap()
+        );
+        assert_eq!(std::fs::read(&racing).unwrap(), b"winner");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
     }
 
     #[cfg(any(unix, windows))]
@@ -7183,6 +7440,94 @@ mod tests {
             result.unwrap();
             assert!(directory.is_dir());
             assert!(synced.contains(&(metadata.dev(), metadata.ino())));
+        }
+    }
+
+    /// A namespace link someone else planted is never followed; only one the
+    /// user owns is. A test cannot create a second user's link, so the
+    /// ownership decision is checked directly.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_namespace_link_the_user_owns_is_followed() {
+        assert!(follows_namespace_link(501, 501));
+        assert!(!follows_namespace_link(502, 501));
+        assert!(!follows_namespace_link(0, 501));
+    }
+
+    /// The user's own link, such as a directory kept in dotfiles, is followed:
+    /// its target keeps its mode, and Kettle's directories inside it become
+    /// private.
+    #[cfg(unix)]
+    #[test]
+    fn a_namespace_link_the_user_owns_is_followed_without_narrowing_its_target() {
+        const CHILD: &str = "KETTLE_USER_NAMESPACE_LINK_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "private::tests::a_namespace_link_the_user_owns_is_followed_without_narrowing_its_target",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "namespace-link child failed: {status}");
+            return;
+        }
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let root = crate::test_tempdir();
+        let target = root.path().join("dotfiles");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let namespace = root.path().join("kettle");
+        symlink(&target, &namespace).unwrap();
+        // SAFETY: this test changes the environment only in its isolated child.
+        unsafe { std::env::set_var("XDG_STATE_HOME", root.path()) };
+        create_private_dirs(&namespace.join("state/ctl")).unwrap();
+        let mode = |path: &Path| path.metadata().unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode(&target),
+            0o755,
+            "the user's link target keeps its mode"
+        );
+        assert_eq!(mode(&target.join("state")), 0o700);
+        assert_eq!(mode(&target.join("state/ctl")), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_create_restores_missing_parents_under_a_restrictive_umask() {
+        const CHILD: &str = "KETTLE_MISSING_PARENT_UMASK_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "private::tests::private_create_restores_missing_parents_under_a_restrictive_umask", "--nocapture"])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "missing-parent umask child failed: {status}"
+            );
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = crate::test_tempdir();
+        // SAFETY: only the re-executed child changes its process-wide umask.
+        unsafe { libc::umask(0o400) };
+        let path = root.path().join("missing/nested/private");
+        let result = create_private_file_new(&path);
+        assert!(
+            result.is_ok(),
+            "missing parents must restore owner read before opening: {result:?}"
+        );
+        for parent in [
+            root.path().join("missing"),
+            root.path().join("missing/nested"),
+        ] {
+            assert_eq!(
+                parent.metadata().unwrap().permissions().mode() & 0o777,
+                0o700
+            );
         }
     }
 

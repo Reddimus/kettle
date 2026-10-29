@@ -8,10 +8,11 @@ pub(super) fn owns_key(focused: bool, key: &Key, mods: ModifiersState) -> bool {
         && !mods.control_key()
         && !mods.alt_key()
         && !mods.super_key()
-        && matches!(
-            key,
-            Key::Named(NamedKey::Escape | NamedKey::Tab | NamedKey::Enter | NamedKey::Space)
-        )
+        && (confirmation_space_key(key)
+            || matches!(
+                key,
+                Key::Named(NamedKey::Escape | NamedKey::Tab | NamedKey::Enter)
+            ))
 }
 
 pub(super) fn guard_activation(
@@ -19,10 +20,8 @@ pub(super) fn guard_activation(
     physical: PhysicalKey,
     closing: &mut HashSet<PhysicalKey>,
 ) {
-    if matches!(
-        key,
-        Key::Named(NamedKey::Escape | NamedKey::Enter | NamedKey::Space)
-    ) {
+    if confirmation_space_key(key) || matches!(key, Key::Named(NamedKey::Escape | NamedKey::Enter))
+    {
         closing.insert(physical);
     }
 }
@@ -65,7 +64,8 @@ impl App {
         &self,
         ws: &WindowState,
     ) -> Option<kettle_render::UpdateToastGeometry> {
-        let surface = ws.renderer.as_ref()?.surface_size();
+        let renderer = ws.renderer.as_ref()?;
+        let surface = renderer.surface_size();
         let scale = ws.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
         let details = self.ui_text.text(kettle_i18n::Text::UpdateToastDetails);
         let notice = self
@@ -78,7 +78,10 @@ impl App {
             (surface.0 as f32, surface.1 as f32),
             self.area(ws).1,
             scale,
-            Self::cell_size(ws)?,
+            (
+                renderer.overlay_text_cell_width(),
+                renderer.overlay_text_line_height(),
+            ),
             details.width(),
             &self.update_toast_message(&notice),
         )

@@ -1665,6 +1665,15 @@ fn the_wheel_and_a_pinch_pan_or_zoom_a_rendered_item() {
     use super::{LaneWheel, lane_wheel, lane_wheel_steps, pinch_zoom};
     use winit::event::MouseScrollDelta::{LineDelta, PixelDelta};
     let pixels = |x, y| PixelDelta(winit::dpi::PhysicalPosition::new(x, y));
+    let assert_zoom = |wheel, expected: f64| {
+        let LaneWheel::Zoom(actual) = wheel else {
+            panic!("expected wheel zoom, got {wheel:?}");
+        };
+        assert!(
+            (actual - expected).abs() <= expected.abs() * 1e-12,
+            "zoom factor {actual} differs from {expected}"
+        );
+    };
     let cell = (8.0, 16.0);
     assert_eq!(
         lane_wheel(&pixels(3.0, -7.5), false, false, cell, 1.0),
@@ -1690,19 +1699,18 @@ fn the_wheel_and_a_pinch_pan_or_zoom_a_rendered_item() {
         lane_wheel(&LineDelta(0.0, 1.0), true, false, cell, 1.0),
         LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP)
     );
-    assert_eq!(
+    assert_zoom(
         lane_wheel(&LineDelta(0.0, -2.0), true, true, cell, 1.0),
-        LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP.powi(-2)),
-        "Shift does not turn a zoom"
+        kettle_render::MEDIA_ZOOM_STEP.powi(-2),
     );
     assert_eq!(
         lane_wheel(&pixels(0.0, 60.0), true, false, cell, 1.0),
         LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP),
         "a notch's worth of pixels"
     );
-    assert_eq!(
+    assert_zoom(
         lane_wheel(&LineDelta(0.0, 1e6), true, false, cell, 1.0),
-        LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP.powi(10))
+        kettle_render::MEDIA_ZOOM_STEP.powi(10),
     );
     // A control client's whole steps do as a wheel's lines would.
     let steps = |notches, lines, cols| crate::input::WheelSteps {
@@ -1715,9 +1723,9 @@ fn the_wheel_and_a_pinch_pan_or_zoom_a_rendered_item() {
         LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP),
         "the zoom modifier zooms"
     );
-    assert_eq!(
+    assert_zoom(
         lane_wheel_steps(steps(100, 300, 0), true, true, cell),
-        LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP.powi(10))
+        kettle_render::MEDIA_ZOOM_STEP.powi(10),
     );
     assert_eq!(
         lane_wheel_steps(steps(-1, -3, 0), false, false, cell),
@@ -1777,7 +1785,7 @@ fn lane_gestures_are_wired() {
         "ws.selection_autoscroll_edge = 0; // A press the lane took owns the pointer's motion until its // release: it resizes the lane or pans its item, and nothing // else sees it. if self.resize_preview_lane(ws) || self.drag_preview_lane(ws) { self.sync_cursor_icon(ws); return; }",
         "ws.selection_autoscroll_edge = 0; if self.resize_preview_lane(ws) || self.drag_preview_lane(ws) { return; }",
         "// The release of a press a lane took is the lane's. if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); self.sync_cursor_icon(ws); return; } if bcode == 0 && let Some(drag) = ws.lane_drag.take() { self.end_lane_drag(ws, drag); self.sync_cursor_icon(ws); return; } // The release of a press a card took is the card's too.",
-        "ws.held_buttons.end_own(bcode); if self.confirm_mouse_release(ws, bcode) { return true; } if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); return true; } if bcode == 0 && let Some(drag) = ws.lane_drag.take() { self.end_lane_drag(ws, drag); return true; }",
+        "ws.held_buttons.end_own(bcode); if bcode == 0 { ws.dragging_split = None; } if self.confirm_mouse_release(ws, bcode) { return true; } if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); return true; } if bcode == 0 && let Some(drag) = ws.lane_drag.take() { self.end_lane_drag(ws, drag); return true; }",
         "Self::hide_cursor_layer(ws); // Its release may never come here. ws.lane_drag = None; self.end_lane_resize(ws);",
         // Any press ends a drag whose release went elsewhere, natively
         // and from a control client, as does a menu opening; a menu or
@@ -1828,7 +1836,7 @@ fn lane_crops_are_wired() {
         "// The window, its font or its splits changed what a zoomed lane // shows. self.lanes_moved(ws);",
         // A change found withdraws what still waits to read the file, and
         // a canvas change reads it no more either.
-        "// What the lane asked for it and is still waiting reads nothing. self.media.withdraw_lane_renders(render.pane, render.item);",
+        "// What the lane asked for it and is still waiting reads nothing. self.media .withdraw_lane_renders(render.pane, render.item, render.generation);",
         "// A file found changed is read again only by a reload. if reads_a_file && item.source.changed {",
         "Err(RenderError::Failure(FailureCode::Changed)) => { self.mark_preview_changed(ws, &render); return tell(self, ws, LaneNotice::Changed); }",
         "LaneRenderVerdict::Changed => { self.mark_preview_changed(ws, &render); return tell(self, ws, LaneNotice::Changed); }",

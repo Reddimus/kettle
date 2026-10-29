@@ -60,13 +60,42 @@ impl Acc {
             .checked_add(payload.len())
     }
 
+    fn projected_capacity(
+        &self,
+        control: &str,
+        payload: &str,
+        limit: usize,
+    ) -> Option<(usize, usize)> {
+        let new_len = self.projected_bytes(control, payload)?;
+        if new_len == 0 || new_len > limit {
+            return None;
+        }
+        let control_capacity = if self.control.is_empty() {
+            control.len()
+        } else {
+            self.control.capacity()
+        };
+        let needed = self.payload.len().checked_add(payload.len())?;
+        let payload_capacity = if needed > self.payload.capacity() {
+            needed
+                .max(self.payload.capacity().saturating_mul(2))
+                .min(limit.checked_sub(control_capacity)?)
+        } else {
+            self.payload.capacity()
+        };
+        if control_capacity.checked_add(payload_capacity)? > limit {
+            return None;
+        }
+        Some((control_capacity, payload_capacity))
+    }
+
     fn append(&mut self, control: &str, payload: &str, budget: &GraphicsBudget) -> bool {
-        let Some(new_len) = self.projected_bytes(control, payload) else {
+        let Some((control_capacity, payload_capacity)) =
+            self.projected_capacity(control, payload, budget.limits().transmission_bytes)
+        else {
             return false;
         };
-        if new_len == 0 || new_len > budget.limits().transmission_bytes {
-            return false;
-        }
+        let new_len = control_capacity + payload_capacity;
         if let Some(r) = self.in_flight.as_mut() {
             if !r.try_grow_to(new_len) {
                 return false;
@@ -87,13 +116,32 @@ impl Acc {
             };
             self.reservation = Some(r);
         }
+        // A moving reallocation can briefly retain both payload buffers.
+        let _reallocation = if payload_capacity > self.payload.capacity()
+            && self.payload.capacity() > 0
+        {
+            let Some(reservation) = budget.reserve_transient_cpu(self.payload.capacity()) else {
+                return false;
+            };
+            Some(reservation)
+        } else {
+            None
+        };
         if self.control.is_empty() {
-            if self.control.try_reserve_exact(control.len()).is_err() {
+            if self
+                .control
+                .try_reserve_exact(control_capacity - self.control.len())
+                .is_err()
+            {
                 return false;
             }
             self.control.push_str(control);
         }
-        if self.payload.try_reserve_exact(payload.len()).is_err() {
+        if self
+            .payload
+            .try_reserve_exact(payload_capacity - self.payload.len())
+            .is_err()
+        {
             return false;
         }
         self.payload.push_str(payload);
@@ -101,7 +149,9 @@ impl Acc {
     }
 
     fn buffered_bytes(&self) -> usize {
-        self.control.len().saturating_add(self.payload.len())
+        self.control
+            .capacity()
+            .saturating_add(self.payload.capacity())
     }
 }
 
@@ -1767,7 +1817,9 @@ impl KittyState {
     fn in_flight_append_fits(&self, slot: Option<&Acc>, control: &str, payload: &str) -> bool {
         let old_slot_bytes = slot.map_or(0, Acc::buffered_bytes);
         let new_slot_bytes = match slot {
-            Some(acc) => acc.projected_bytes(control, payload),
+            Some(acc) => acc
+                .projected_capacity(control, payload, self.budget.limits().transmission_bytes)
+                .and_then(|(control, payload)| control.checked_add(payload)),
             None => control.len().checked_add(payload.len()),
         };
         new_slot_bytes
@@ -2228,6 +2280,39 @@ mod tests {
             KittyOut::None => None,
             _ => panic!("query must not place, delete, or animate an image"),
         }
+    }
+
+    #[test]
+    fn chunked_upload_growth_is_amortized_and_charged() {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+        let mut acc = Acc::default();
+        let chunk = "AQID".repeat(1024);
+        let mut growths = 0;
+        let mut capacity = 0;
+        for _ in 0..256 {
+            assert!(acc.append("a=t,f=32,s=512,v=512", &chunk, &budget));
+            if acc.payload.capacity() != capacity {
+                growths += 1;
+                capacity = acc.payload.capacity();
+            }
+            let allocated = acc.control.capacity() + acc.payload.capacity();
+            assert!(
+                budget.usage().0 >= allocated,
+                "allocated upload capacity must be charged"
+            );
+            assert!(
+                budget.in_flight_usage().1 >= allocated,
+                "in-flight capacity must be charged"
+            );
+        }
+        assert_eq!(acc.payload, chunk.repeat(256));
+        assert!(
+            growths <= 12,
+            "256 continuation chunks grew the buffer {growths} times"
+        );
+        drop(acc);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+        assert_eq!(budget.in_flight_usage(), (0, 0));
     }
 
     #[test]

@@ -1039,7 +1039,11 @@ impl LaneText {
             sender: line(font_system),
             counter: line(font_system),
             hint: line(font_system),
-            status: line(font_system),
+            status: {
+                let mut buffer = line(font_system);
+                buffer.set_wrap(Wrap::WordOrGlyph);
+                buffer
+            },
             page_counter: line(font_system),
             scrub_label: line(font_system),
             controls: [
@@ -1172,9 +1176,11 @@ impl LaneText {
             (&mut self.page_counter, &page_counter, page_rect, false),
             (&mut self.scrub_label, &scrub_label, scrub_rect, false),
         ];
-        for ((buffer, text, rect, bold), shaped) in lines.into_iter().zip(&mut self.shaped) {
+        for (index, ((buffer, text, rect, bold), shaped)) in
+            lines.into_iter().zip(&mut self.shaped).enumerate()
+        {
             buffer.set_metrics(metrics);
-            buffer.set_size(Some(rect.2), Some(rect.3));
+            buffer.set_size(Some(rect.2), (index != 4).then_some(rect.3));
             if shaped.as_deref() != Some(text) {
                 let attrs = Attrs::new().family(Family::Name(family));
                 let attrs = if bold {
@@ -1259,19 +1265,21 @@ impl LaneText {
             time.scale = geometry.transport_text_scale;
             areas.push(time);
         }
-        if let Some(status) = self.shaped[4]
+        if self.shaped[4]
             .as_deref()
-            .filter(|status| !status.is_empty())
+            .is_some_and(|status| !status.is_empty())
         {
             let (x, y, w, h) = geometry.image_area;
-            let text = status.chars().count() as f32 * glyph_width;
-            let left = x + ((w - text) / 2.0).max(0.0);
-            let top = y + ((h - line_height) / 2.0).max(0.0);
-            areas.push(area(
-                &self.status,
-                (left, top, w - (left - x), line_height),
-                description,
-            ));
+            let text_width = self
+                .status
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0, f32::max);
+            let text_height = self.status.layout_runs().count() as f32 * line_height;
+            let mut status = area(&self.status, geometry.image_area, description);
+            status.left = x + ((w - text_width) / 2.0).max(0.0);
+            status.top = y + ((h - text_height) / 2.0).max(0.0);
+            areas.push(status);
         }
         let (x, y, _, _) = geometry.image_area;
         for (row, buffer) in self.rows.iter().enumerate() {
@@ -1289,8 +1297,8 @@ impl LaneText {
             geometry.previous,
             geometry.next,
             geometry.open_outside,
-            (!collapsed).then_some(geometry.toggle),
-            collapsed.then_some(geometry.toggle),
+            (!collapsed || geometry.pinning).then_some(geometry.toggle),
+            (collapsed && !geometry.pinning).then_some(geometry.toggle),
             Some(geometry.close),
             geometry.mode.filter(|_| !source),
             geometry.mode.filter(|_| source),
@@ -1759,6 +1767,42 @@ mod tests {
     }
 
     #[test]
+    fn header_only_viewer_paints_the_pin_action() {
+        let mut lane = viewer((1, 1), None);
+        lane.rect = (0.0, 0.0, 800.0, 100.0);
+        lane.pin_label = Some("Pin".into());
+        let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        assert!(!geometry.full && geometry.pinning);
+        let mut fonts = FontSystem::new();
+        let metrics = Metrics::new(14.0, 18.0);
+        let mut text = LaneText::new(&mut fonts, metrics);
+        text.shape(&mut fonts, metrics, "monospace", &lane, &geometry, 8.0);
+        let color = GColor::rgb(200, 200, 200);
+        let areas = text.areas(
+            &geometry,
+            true,
+            MediaLaneMode::Rendered,
+            None,
+            None,
+            None,
+            (color, color, color),
+            8.0,
+            18.0,
+        );
+        assert!(
+            areas
+                .iter()
+                .any(|area| std::ptr::eq(area.buffer, &text.controls[3])),
+            "header-only Pin action painted the expand arrow"
+        );
+        assert!(
+            !areas
+                .iter()
+                .any(|area| std::ptr::eq(area.buffer, &text.controls[4]))
+        );
+    }
+
+    #[test]
     fn overlay_header_action_pins_and_keeps_close_available() {
         let mut lane = viewer((1, 1), Some((64, 48)));
         lane.pin_label = Some("Pin".into());
@@ -2167,6 +2211,51 @@ mod tests {
         assert!(
             (ih * 1000.0 / 300.0 - iw).abs() <= 0.5 || (iw * 300.0 / 1000.0 - ih).abs() <= 0.5,
             "{iw}x{ih}"
+        );
+    }
+
+    #[test]
+    fn failure_status_wraps_and_keeps_its_remediation_visible() {
+        let mut fonts = FontSystem::new();
+        crate::load_bundled_font(&mut fonts, kettle_config::font::REGULAR);
+        let metrics = Metrics::new(14.0, 18.0);
+        let mut text = LaneText::new(&mut fonts, metrics);
+        let mut lane = viewer((1, 1), None);
+        lane.rect = (0.0, 0.0, 300.0, 500.0);
+        lane.status = kettle_i18n::Translator::default()
+            .text(kettle_i18n::Text::MediaViewerFileNoDecoder)
+            .into();
+        let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        text.shape(
+            &mut fonts,
+            metrics,
+            kettle_config::font::FAMILY,
+            &lane,
+            &geometry,
+            8.0,
+        );
+        let rows = text.status.layout_runs().count();
+        assert!(rows > 1, "failure guidance stayed on one clipped line");
+        let color = GColor::rgb(200, 200, 200);
+        let areas = text.areas(
+            &geometry,
+            false,
+            MediaLaneMode::Rendered,
+            None,
+            None,
+            None,
+            (color, color, color),
+            8.0,
+            18.0,
+        );
+        let area = areas
+            .iter()
+            .find(|area| std::ptr::eq(area.buffer, &text.status))
+            .unwrap();
+        assert!(area.top >= geometry.image_area.1);
+        assert!(
+            area.top + rows as f32 * 18.0 <= (area.bounds.bottom as f32) + 1.0,
+            "remediation extends below the status paint bounds"
         );
     }
 

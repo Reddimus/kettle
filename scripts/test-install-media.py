@@ -543,6 +543,19 @@ sys.exit(module.main())
                 self.assertEqual(removed.returncode, 0, removed.stderr)
                 self.assertFalse((self.prefix / "share/kettle").exists())
 
+    def test_retry_preserves_pending_files_omitted_from_new_plan(self):
+        self.assertEqual(self.helper().returncode, 0)
+        path = "share/kettle/optional"
+        killed = self.helper((path, b"optional"), kill_at=1)
+        self.assertEqual(killed.returncode, 9, killed.stderr)
+        retry = self.helper()
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        manifest = json.loads((self.prefix / "share/kettle/install-files.json").read_text())
+        self.assertIn(path, [record["path"] for record in manifest["files"]])
+        removed = self.uninstall()
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertFalse((self.prefix / path).exists())
+
     def test_equal_bytes_alone_never_adopt_a_file(self):
         files = [("share/kettle/a", b"a")]
         # Someone else's file with exactly the bytes and mode Kettle would write.

@@ -2395,6 +2395,7 @@ dependencies = [
  "anyhow",
  "criterion",
  "crossbeam-channel",
+ "flate2",
  "fs4",
  "kettle-state",
  "kettle-test-support",
@@ -2573,6 +2574,7 @@ version = "5.6.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
+ "alacritty_terminal",
  "anyhow",
  "arboard",
  "async-channel",

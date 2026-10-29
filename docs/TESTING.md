@@ -103,6 +103,19 @@ Do not assume either gate is offline.
 identity and Cargo caching. On Unix, the Cargo fixture also edits, renames and
 deletes linked sources and creates missing targets. Unchanged source-only
 libraries must stay cached; the executable refreshes its Git status each build.
+The fixtures also prove that `vendor/target`, `vendor/*/target`, and package-local
+vendor lockfiles do not change identity, while vendored source and the vendor
+workspace lockfile still count. Cargo's recursive directory watches can rerun
+the build scripts after generated files change; those watches remain necessary
+to detect new, renamed, and deleted sources. Generated contents are never read
+by the source hash walker.
+
+`cargo test -p kettle adopted_scan_` exercises the Linux child-list scanner with
+portable fixtures for work limits, deadlines, and continuation past live children.
+Linux CI must also run the native exec teardown tests. The `kettle-state` test
+`private_create_falls_back_without_clobbering_or_relaxing_permissions` injects
+unsupported hard links and exercises the native atomic rename fallback,
+no-clobber behavior, and private-directory checks.
 
 Use these to isolate a failure or validate the area you changed:
 
@@ -236,6 +249,14 @@ All paths below are relative to the repository root.
 | `kettle-remote` | `crates/kettle-remote/src/` | Process ancestry and remote-session detection |
 | `kettle-test-support` | `crates/kettle-test-support/src/`, `crates/kettle-test-support/tests/` | Shared fixtures, source scans, MSRV drift |
 | `kettle` | `crates/kettle/src/`, `crates/kettle/tests/` | CLI, exec, MCP, source identity, native preview |
+
+The `search_input` tests in `kettle-ui` alternate navigation and highlight
+scans within one long wrapped line, including zero-width regex matches, and
+check that output invalidates saved highlight offsets. They need no window or
+GPU. In `kettle-core`, `shell_probe::cleanup_tests` uses a controllable child
+on every platform to cover failed termination, polling errors, bounded cleanup,
+and eventual background reaping. The Windows pipe tests still require a native
+Windows runner.
 
 ### Drift guards and source scans
 

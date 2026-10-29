@@ -92,11 +92,18 @@ the loss silent. The persistent title and desktop notification (or the
 explicit `kettle exec` stderr diagnostic) signal the stop out of band instead,
 and the cast holds every complete event accepted before capture stopped.
 
-The GUI event loop, `kettle exec` lifecycle, and PTY parser never write, flush,
-or close recording files. One worker owns secure target initialization, timed
-flushes, and final close. It buffers complete NDJSON records and rolls a failed
-batch back to the preceding committed boundary, so an early stop retains a
-replayable valid-JSON prefix rather than a partial event.
+The GUI starts recording asynchronously: a worker owns secure target
+initialization, writes, timed flushes and final close, keeping filesystem I/O
+off the GUI event loop and PTY parser. `kettle exec --record` instead initializes
+its target synchronously, including opening, securing, locking, truncating and
+flushing the header, before creating the PTY. It fails closed if initialization
+fails, so the child never runs without its requested trace. These startup
+filesystem operations can block and are outside the execution timeout and
+lifecycle cancellation polling. After initialization, a worker owns exec's
+recording writes, flushes and final close too. It buffers complete NDJSON
+records and rolls a failed batch back to the preceding committed boundary,
+so an early stop retains a replayable valid-JSON prefix rather than a partial
+event.
 
 Starting a managed recording prunes the managed namespace toward
 `record-max-files` and `record-max-directory-bytes` (50 files and 5 GiB by
@@ -178,9 +185,11 @@ by default:
 - **Keystrokes are redacted to tokens.** A typed password is recorded as its
   length + timing (`······`), never the characters. `--record-raw-input`
   (`KETTLE_RECORD_RAW_INPUT=1`, or `record-raw-input = on`) opts into literal
-  capture — ⚠ the trace can then contain typed secrets; leave it off unless you
-  need byte-exact input. The window title shows **`[REC RAW]`** while raw
-  capture is active so it is never silent.
+  capture of printable key text — ⚠ the trace can then contain typed secrets.
+  Named keys and modifier chords remain tokens (for example `Enter` and
+  `Ctrl+c`), so this is not a byte-exact PTY input stream. Leave it off unless
+  you need unredacted printable key text. The window title shows **`[REC RAW]`**
+  while raw capture is active so it is never silent.
 - **Paste events record only length**, in a `kettle:paste len=N` marker.
   Pasted text echoed by the shell or application still appears in the output.
 - The native window title carries **`[REC]`** while capture is active and

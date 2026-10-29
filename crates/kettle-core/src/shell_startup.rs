@@ -127,7 +127,8 @@ pub fn zshenv_keeping_kettle_out(candidates: &[PathBuf]) -> Option<PathBuf> {
 /// A line whose first non-blank byte is `#` is a comment wherever it ends up
 /// running, so it is skipped; any other line counts, trailing comment and all.
 fn keeps_kettle_out(text: &[u8]) -> bool {
-    text.split(|byte| *byte == b'\n')
+    let keeps_out = text
+        .split(|byte| *byte == b'\n')
         .filter(|line| line.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'#'))
         .any(|line| {
             if line
@@ -141,8 +142,116 @@ fn keeps_kettle_out(text: &[u8]) -> bool {
                 .filter(|byte| **byte != b'_')
                 .map(u8::to_ascii_lowercase)
                 .collect();
-            folded.windows(b"rcs".len()).any(|window| window == b"rcs")
-        })
+            folded.windows(b"rcs".len()).any(|window| window == b"rcs") || sets_no_rcs(line)
+        });
+    if keeps_out || !text.windows(2).any(|pair| pair == b"\\\n") {
+        return keeps_out;
+    }
+    // Also inspect continued commands. Keep the physical-line check above so a
+    // backslash inside a comment cannot hide the next line's option command.
+    let mut continued = Vec::with_capacity(text.len());
+    for line in text.split_inclusive(|byte| *byte == b'\n') {
+        continued.extend_from_slice(line.strip_suffix(b"\\\n").unwrap_or(line));
+    }
+    continued
+        .split(|byte| *byte == b'\n')
+        .filter(|line| line.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'#'))
+        .any(sets_no_rcs)
+}
+
+fn sets_no_rcs(line: &[u8]) -> bool {
+    // Redirections can precede the command or appear between its option words.
+    static REDIRECTIONS: std::sync::OnceLock<regex::bytes::Regex> = std::sync::OnceLock::new();
+    let redirections = REDIRECTIONS.get_or_init(|| {
+        regex::bytes::Regex::new(r#"[0-9]*[<>]{1,2}&?\s*(?:'[^']*'|"[^"]*"|[^\s;|&()'"<>]+)"#)
+            .unwrap()
+    });
+    let line = redirections.replace_all(line, b" ".as_slice());
+    line.split(|byte| b";|&(){}".contains(byte)).any(|command| {
+        let mut words = command
+            .split(|byte| byte.is_ascii_whitespace() || b"'\"<>".contains(byte))
+            .filter(|word| !word.is_empty());
+        let command = words.find(|word| {
+            !matches!(
+                *word,
+                b"if"
+                    | b"then"
+                    | b"else"
+                    | b"elif"
+                    | b"do"
+                    | b"!"
+                    | b"builtin"
+                    | b"command"
+                    | b"noglob"
+                    | b"nocorrect"
+            ) && !word.contains(&b'=')
+        });
+        let Some(command @ (b"set" | b"setopt" | b"unsetopt")) = command else {
+            return false;
+        };
+        while let Some(word) = words.next() {
+            let Some(options) = word.strip_prefix(b"-").or_else(|| word.strip_prefix(b"+")) else {
+                if command == b"set" {
+                    break;
+                }
+                continue;
+            };
+            if options.is_empty() || !options.iter().all(u8::is_ascii_alphabetic) {
+                break;
+            }
+            if options.contains(&b'f') && (word[0] == b'-' || command == b"unsetopt") {
+                return true;
+            }
+            if options.ends_with(b"o") {
+                let _ = words.next();
+            }
+        }
+        false
+    })
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::keeps_kettle_out;
+
+    #[test]
+    fn short_startup_options_belong_to_option_commands() {
+        for code in [
+            "set -f",
+            "set -xf>/dev/null",
+            "true; set -f",
+            "if true; then builtin set -f; fi",
+            "'builtin' 'set' '-f'",
+            "FOO=bar set -f",
+            "set +x -f",
+            "set -o xtrace -f",
+            ">/dev/null set -f",
+            "set >/dev/null -f",
+            "set 2>/dev/null -xf",
+            "set -x > /dev/null -f",
+            "set 2>&1 -f",
+            "set >'/tmp/shell output' -f",
+            "setopt -f",
+            "setopt promptsubst -f",
+            "unsetopt -f",
+            "unsetopt +f",
+            "set \\\n-f",
+            "# comment \\\nset -f",
+        ] {
+            assert!(keeps_kettle_out(code.as_bytes()), "{code}");
+        }
+        for code in [
+            "[ -f /etc/site.zsh ] && source /etc/site.zsh",
+            "[[ -f /etc/site.zsh ]]",
+            "grep -f /etc/patterns /etc/site.zsh",
+            "set -- -f",
+            "set positional -f",
+            "set +f",
+            "setopt +f",
+        ] {
+            assert!(!keeps_kettle_out(code.as_bytes()), "{code}");
+        }
+    }
 }
 
 /// Open `path` to read without waiting for a writer, as opening a FIFO
@@ -490,6 +599,90 @@ mod tests {
                 "{spelling}"
             );
         }
+    }
+
+    #[test]
+    fn file_tests_and_unrelated_flags_preserve_zsh_startup_additions() {
+        let dir = private_tempdir("kettle-shell-startup");
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        std::fs::create_dir_all(dir.path().join("etc")).unwrap();
+        let program = dir.path().join("bin/zsh");
+        let system = dir.path().join("etc/zshenv");
+        let startup = ShellStartup {
+            zsh: Some(dir.path().join("kettle")),
+            fish: None,
+        };
+        for code in [
+            "if [ -f /etc/site.zsh ]; then . /etc/site.zsh; fi",
+            "[ -f /etc/zshenv.local ] && . /etc/zshenv.local",
+            "if [[ -f /etc/profile ]]; then source /etc/profile; fi",
+            "test -f /etc/site.zsh && source /etc/site.zsh",
+            "grep -f /etc/patterns /etc/site.zsh",
+            "printf '%s' -f",
+            "set -- -f",
+            "set positional -f",
+        ] {
+            std::fs::write(&system, code).unwrap();
+            assert_eq!(
+                zshenv_keeping_kettle_out(std::slice::from_ref(&system)),
+                None,
+                "{code}"
+            );
+            assert!(
+                additions(&program, Some(OsStr::new("/original")), &startup)
+                    .env
+                    .contains(&("ZDOTDIR", dir.path().join("kettle").into_os_string())),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn short_no_rcs_option_next_to_redirections_withholds_zsh_startup_additions() {
+        let dir = private_tempdir("kettle-shell-startup");
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        std::fs::create_dir_all(dir.path().join("etc")).unwrap();
+        let program = dir.path().join("bin/zsh");
+        let system = dir.path().join("etc/zshenv");
+        let startup = ShellStartup {
+            zsh: Some(dir.path().join("kettle")),
+            fish: None,
+        };
+        for command in [
+            "set -f>/dev/null",
+            "set -f</dev/null",
+            "set -xf>>/dev/null",
+            "set -f<>/dev/null",
+        ] {
+            std::fs::write(&system, format!("{command}\n")).unwrap();
+            assert_eq!(
+                additions(&program, Some(OsStr::new("/original")), &startup),
+                Additions::default(),
+                "{command} must not borrow ZDOTDIR"
+            );
+        }
+    }
+
+    #[test]
+    fn short_no_rcs_option_withholds_zsh_startup_additions() {
+        let dir = private_tempdir("kettle-shell-startup");
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        std::fs::create_dir_all(dir.path().join("etc")).unwrap();
+        let program = dir.path().join("bin/zsh");
+        let system = dir.path().join("etc/zshenv");
+        std::fs::write(&system, "set -f\n").unwrap();
+        assert_eq!(
+            zshenv_keeping_kettle_out(std::slice::from_ref(&system)),
+            Some(system)
+        );
+        let startup = ShellStartup {
+            zsh: Some(dir.path().join("kettle")),
+            fish: None,
+        };
+        assert_eq!(
+            additions(&program, Some(OsStr::new("/original")), &startup),
+            Additions::default()
+        );
     }
 
     /// A whole-line comment changes nothing zsh does, so naming `NO_RCS` or

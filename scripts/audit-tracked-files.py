@@ -187,6 +187,8 @@ def audit_text(path: str, data: bytes, exact: bool = False) -> tuple[str | None,
         text = data.decode("utf-8")
     except UnicodeDecodeError as error:
         return None, [f"{path}: invalid UTF-8 at byte {error.start}"]
+    if "\0" in text:
+        errors.append(f"{path}: NUL byte in text")
     if text.startswith("\ufeff"):
         errors.append(f"{path}: unexpected UTF-8 BOM")
     # Kept byte for byte (`-text`): its line endings and white space are
@@ -260,6 +262,12 @@ def audit(root: Path) -> dict[str, Any]:
             errors.append(f"{relative}: unsafe or non-canonical tracked path")
             continue
         path = root.joinpath(*pure.parts)
+        if any(
+            root.joinpath(*pure.parts[:index]).is_symlink()
+            for index in range(1, len(pure.parts))
+        ):
+            errors.append(f"{relative}: tracked path has a symlinked parent")
+            continue
         if not path.exists() and not path.is_symlink():
             errors.append(f"{relative}: tracked path is missing from the worktree")
             continue
@@ -282,7 +290,8 @@ def audit(root: Path) -> dict[str, Any]:
             data = path.read_bytes()
 
         suffix = pure.suffix.lower()
-        is_binary = suffix in BINARY_EXTENSIONS or b"\0" in data
+        structured = suffix in {".json", ".toml", ".yaml", ".yml"} or relative == "Cargo.lock"
+        is_binary = not structured and (suffix in BINARY_EXTENSIONS or b"\0" in data)
         text: str | None = None
         if is_symlink:
             pass

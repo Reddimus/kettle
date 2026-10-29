@@ -29,6 +29,28 @@ pub struct UpdateFacts {
     pub dismissed_failed: Option<String>,
 }
 
+#[derive(Default)]
+pub(crate) struct LocalDismissals {
+    pub available: Option<String>,
+    pub failed: Option<String>,
+}
+
+impl LocalDismissals {
+    pub fn apply(&self, facts: &mut UpdateFacts) {
+        let Some(release) = &facts.release else {
+            return;
+        };
+        for (local, dismissed) in [
+            (&self.available, &mut facts.dismissed_available),
+            (&self.failed, &mut facts.dismissed_failed),
+        ] {
+            if local.as_deref() == Some(release.tag.as_str()) {
+                *dismissed = local.clone();
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Release {
     pub tag: String,
@@ -147,6 +169,35 @@ pub(crate) fn release_url(tag: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_disk_snapshot_cannot_undo_a_local_dismissal() {
+        for state in [ReleaseState::Available, ReleaseState::Failed] {
+            let mut old = UpdateFacts {
+                release: release("v5.2.0", state),
+                ..facts()
+            };
+            assert!(active_notice(&old, false).is_some());
+            let local = LocalDismissals {
+                available: Some("v5.2.0".into()),
+                failed: Some("v5.2.0".into()),
+            };
+            local.apply(&mut old);
+            assert!(active_notice(&old, false).is_none());
+            old.release = release("v5.3.0", state);
+            assert!(
+                active_notice(&old, false).is_some(),
+                "a new release stays visible"
+            );
+            old.dismissed_available = Some("v5.3.0".into());
+            old.dismissed_failed = Some("v5.3.0".into());
+            local.apply(&mut old);
+            assert!(
+                active_notice(&old, false).is_none(),
+                "preserve another process's dismissal"
+            );
+        }
+    }
 
     fn facts() -> UpdateFacts {
         UpdateFacts {

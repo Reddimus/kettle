@@ -268,7 +268,7 @@ impl App {
     /// Build the right-click context-menu item list. Each `Item`'s
     /// `enabled` flag is computed from current state: Copy needs a
     /// selection, the split rows need an unzoomed tab, and Ungroup needs
-    /// the focused pane to be in a group. `show_context_menu` runs the list
+    /// any pane in the active tab to be in a group. `show_context_menu` runs the list
     /// through `filter_disabled`, which hides disabled rows and the
     /// separators they would orphan (Terminator-style) instead of greying
     /// them out. That cuts visual clutter and leaves every visible row
@@ -279,14 +279,16 @@ impl App {
             .focused()
             .and_then(|p| p.term.term.lock().ok().map(|t| t.selection.is_some()))
             .unwrap_or(false);
-        // Only enable Ungroup when the focused pane has a group_name set.
-        // Otherwise the row is filtered out until it's actionable, since a
-        // greyed-out row confuses new users.
         let has_group = ws
             .mux
-            .focused()
-            .map(|p| p.group_name.as_ref().is_some_and(|g| !g.is_empty()))
-            .unwrap_or(false);
+            .tab_pane_ids(ws.mux.active)
+            .iter()
+            .filter_map(|id| ws.mux.panes.get(id))
+            .any(|pane| {
+                pane.group_name
+                    .as_ref()
+                    .is_some_and(|group| !group.is_empty())
+            });
         // Terminator parity, terminal_popup_menu.py "Read only":
         // checked while the focused pane drops user input.
         let read_only = ws.mux.focused().map(|p| p.read_only).unwrap_or(false);
@@ -1371,7 +1373,7 @@ impl App {
             return None;
         }
         let max_h = (surface_h - kettle_render::menu::PANEL_BREATHING)
-            .max(1.0)
+            .max(row_h)
             .min((surface_h - 8.0).max(1.0));
         let panel_h = natural_h.min(max_h);
         // Dropdown parity: include the right-aligned hint budget —

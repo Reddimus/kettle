@@ -1144,6 +1144,46 @@ class Safety(unittest.TestCase):
         self.assertIn("/tmp/kettle", str(raised.exception))
         standing.require_bundles({"kettle-b": "/tmp/kettle"}, allow_bare=True)
 
+    def test_failed_bundle_rollback_preserves_the_previous_copy(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            binary = root / 'kettle'
+            binary.write_bytes(b'new')
+            dest = root / 'Local.app'
+            dest.mkdir()
+            (dest / 'original').write_bytes(b'old')
+            rename = Path.rename
+            def racing_rename(path, target):
+                if path.name == 'Local.app' and path.parent != root:
+                    dest.mkdir()
+                    (dest / 'concurrent').write_text('other writer')
+                    raise OSError('publish failed')
+                return rename(path, target)
+            with mock.patch.object(standing.subprocess, 'run'), mock.patch.object(Path, 'rename', racing_rename):
+                with self.assertRaises(OSError):
+                    standing.bundle_kettle(binary, dest, None)
+            backups = list(root.glob('.Local.app.*/previous/original'))
+            self.assertEqual(len(backups), 1, 'failed rollback deleted the only original bundle')
+            self.assertEqual(backups[0].read_bytes(), b'old')
+
+    @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('swiftc'), 'needs macOS and swiftc')
+    def test_launch_rejects_invalid_timeout_before_spawning(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            binary = root / 'launch'
+            subprocess.run(['swiftc', '-O', '-swift-version', '5', '-o', str(binary),
+                            str(HERE / 'macos-standing' / 'launch.swift')], check=True, capture_output=True, timeout=60)
+            for value in ('nan', 'inf', '-1', '0', '1e300'):
+                sentinel = root / 'spawned'
+                with self.subTest(timeout=value):
+                    result = subprocess.run([str(binary), str(root / 'out'), str(root / 'stamp'), value, '--',
+                                             '/usr/bin/touch', str(sentinel)], capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 2, 'invalid timeout spawned a child or trapped')
+                    self.assertFalse(sentinel.exists(), 'invalid timeout spawned a child')
+
     @unittest.skipUnless(sys.platform == "darwin", "bundles and codesign are macOS")
     def test_a_local_build_is_measured_inside_a_signed_bundle(self) -> None:
         if SNAPSHOT_LAYOUT:
@@ -1349,10 +1389,11 @@ class Safety(unittest.TestCase):
             work = Path(tmp)
             probe = work / "stubborn.sh"
             # Ignores SIGTERM and starts a child in the probe's process group.
-            probe.write_text("#!/bin/sh\ntrap '' TERM\n/bin/sleep 60 &\necho $! > \"$2.pid\"\nwait\n")
+            probe.write_text("#!/bin/sh\ntrap '' TERM\n/bin/sleep 60 &\necho $! > \"$2.pid.tmp\"\nmv \"$2.pid.tmp\" \"$2.pid\"\nwait\n")
             probe.chmod(0o755)
             runner = standing.Runner({"launch": probe, "stamp": probe}, work, {"kettle": "/bin/true"})
             process = runner.launch("kettle", "true", 1)
+            self.addCleanup(runner.stop_current)
             pid_file = work / "stamp.pid"
             deadline = time.monotonic() + 5
             while not pid_file.exists() and time.monotonic() < deadline:
@@ -1389,11 +1430,12 @@ class Safety(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             probe = work / "wedged.sh"
-            probe.write_text("#!/bin/sh\ntrap '' TERM\n/bin/sleep 60 &\necho $! > \"$2.pid\"\nwait\n")
+            probe.write_text("#!/bin/sh\ntrap '' TERM\n/bin/sleep 60 &\necho $! > \"$2.pid.tmp\"\nmv \"$2.pid.tmp\" \"$2.pid\"\nwait\n")
             probe.chmod(0o755)
             runner = standing.Runner({"launch": probe, "stamp": probe}, work, {"kettle": "/bin/true"})
             runner.grace = 0.2
             process = runner.launch("kettle", "true", 0.2)
+            self.addCleanup(runner.stop_current)
             deadline = time.monotonic() + 5
             while not (work / "stamp.pid").exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
@@ -2064,6 +2106,28 @@ class Payloads(unittest.TestCase):
         probe.chmod(0o755)
         return standing.Runner({"launch": probe, "stamp": probe}, work, {"kettle": "/bin/true"})
 
+    def test_payload_paths_are_literal_shell_arguments(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as raw:
+            work = Path(raw) / "standing-$USER-$(touch injected)-'quote"
+            work.mkdir()
+            stamp = work / 'stamp-probe'
+            stamp.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >> "$CHECK_ARGS"\n')
+            stamp.chmod(0o755)
+            runner = standing.Runner({'launch': stamp, 'stamp': stamp}, work, {'kettle': '/bin/true'})
+            with mock.patch.object(standing.subprocess, 'Popen'):
+                runner.launch('kettle', 'printf "%s" "$DAT"', 1, params={'DAT': 'literal data'})
+            payload = next(work.glob('payload-*.sh'))
+            args = Path(raw) / 'arguments'
+            result = subprocess.run(['sh', str(payload)], cwd=raw, env={**os.environ, 'CHECK_ARGS': str(args)},
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, 'literal data')
+            self.assertEqual(args.read_text().splitlines(),
+                [str(work / 'stamp'), '--settle', '120', '36', str(standing.SETTLE_SECONDS), str(work / 'grid')])
+            self.assertFalse((Path(raw) / 'injected').exists())
+
     def test_payload_script_is_reused_across_launches(self) -> None:
         # macOS assesses a script the first time it runs (about 120 ms), so
         # a fresh script per launch adds that to every terminal's shell time.
@@ -2164,6 +2228,18 @@ class FloodTimeline(unittest.TestCase):
         row = standing.flood_row(timeline([(2.95, 100), (3.05, 90), (19.9, 80), (20.0, 70)]), self.DONE, (3, 20))
         self.assertEqual((row["done3_mib"], row["done20_mib"]), (90, 70))
 
+    def test_publication_flood_requires_designated_sample_evidence(self):
+        spec = importlib.util.spec_from_file_location('flood_missing_facts', HERE / 'macos-standing/publication_factcheck.py')
+        facts = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(facts)
+        for evidence in ({}, {'timeline': []}, {'timeline': [[2999, 100]]}):
+            row = {'done3_mib': 100, **evidence}
+            raw = [{'workloads': {'startup': {'kettle': [{'child_ms': 1}]},
+                                 'idle': {'kettle': [{'frontmost': True, 'footprint_mib': 1}]},
+                                 'flood-memory': {'kettle': [row]}}}]
+            with self.subTest(evidence=evidence), self.assertRaisesRegex(ValueError, 'flood designated sample'):
+                facts.spot_rows(raw, require_typing=False)
+
     def test_publication_flood_selection_at_rounded_boundary(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "flood_facts", HERE / "macos-standing/publication_factcheck.py")
@@ -2243,6 +2319,18 @@ class FloodTimeline(unittest.TestCase):
             empty.write_text("")
             self.assertIsNone(standing.read_stamp(empty, timeout=0.3))
 
+    def test_flood_launch_lives_through_requested_offsets(self):
+        import tempfile
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as raw:
+            runner = standing.Runner({'stamp': Path('/stamp')}, Path(raw), {})
+            runner.launch = Mock()
+            runner.wait_for = Mock(return_value=False)
+            runner.stop = Mock()
+            runner.flood_memory('kettle', Path('/flood'), [3, 180], False, False)
+            self.assertGreaterEqual(runner.launch.call_args.args[2], 340,
+                                    'launch ends before the observation and startup allowances')
+
     def test_the_sampler_writes_a_file_and_stops_before_the_terminal(self) -> None:
         import inspect
 
@@ -2274,6 +2362,41 @@ class IdleFocus(unittest.TestCase):
 
 
 class MemsampleLoop(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('clang'), 'needs macOS and clang')
+    def test_pid_reuse_during_or_between_samples_stops_the_timeline(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            fixture, binary = root / 'sampler.c', root / 'sampler'
+            fixture.write_text(r'''#include <libproc.h>
+#include <string.h>
+static int tasks, between;
+static int fixture_rusage(int pid, int flavor, rusage_info_t *raw) {
+    struct rusage_info_v4 *usage = (struct rusage_info_v4 *)raw;
+    memset(usage, 0, sizeof *usage);
+    usage->ri_proc_start_abstime = tasks >= (between ? 1 : 2) ? 22 : 11;
+    return 0;
+}
+static int fixture_info(int pid, int flavor, uint64_t arg, void *buffer, int size) {
+    memset(buffer, 0, size); tasks++; return size;
+}
+#define proc_pid_rusage fixture_rusage
+#define proc_pidinfo fixture_info
+#define main sampler_main
+#include "''' + str(HERE / 'macos-standing' / 'memsample.c') + r'''"
+#undef main
+int main(int argc, char **argv) {
+    between = argc > 1;
+    char *args[] = {"memsample", "123", "1", "3"};
+    return sampler_main(4, args);
+}
+''')
+            subprocess.run(['clang', '-O', '-o', str(binary), str(fixture)], check=True, capture_output=True, timeout=30)
+            for extra, count in (([], 1), (['between'], 0)):
+                with self.subTest(mode=extra):
+                    result = subprocess.run([str(binary), *extra], capture_output=True, text=True, timeout=5)
+                    self.assertEqual(len(result.stdout.splitlines()), count, 'replacement PID entered the memory timeline')
+
     @unittest.skipUnless(sys.platform == "darwin" and shutil.which("clang"), "needs macOS and clang")
     def test_memsample_loop_mode_samples_own_process(self) -> None:
         import json
@@ -2454,6 +2577,76 @@ def latency_meta(day, rounds=2, **extra):
             "latency": {"keys": 4, "warmup": 1, "censor_ms": 500, "inject": "hid", "signed": "ad hoc"}, **extra}
 
 
+class NativeSynchronization(unittest.TestCase):
+    def test_fake_probe_tests_always_clean_up_after_pid_read_failure(self):
+        from unittest import mock
+        for method in (Safety.test_a_probe_that_ignores_stop_is_killed_with_its_group_and_reported,
+                       Safety.test_a_probe_that_never_finishes_is_cleaned_up_and_reported):
+            with self.subTest(method=method.__name__), mock.patch.object(standing.Runner, 'launch'), \
+                    mock.patch.object(standing.Runner, 'stop_current') as stop, \
+                    mock.patch.object(Path, 'exists', return_value=True), \
+                    mock.patch.object(Path, 'read_text', return_value=''):
+                with self.assertRaises(ValueError):
+                    method(self)
+                self.doCleanups()
+                stop.assert_called_once()
+
+    def test_observer_test_waits_for_writer_exit(self):
+        import fcntl, pty
+        from unittest import mock
+        child = mock.Mock(pid=123)
+        child.poll.return_value = None
+        def spawned(*args, **kwargs):
+            self.output = Path(kwargs['env']['KETTLE_S3_CHILD_OBSERVATION'])
+            self.output.touch(mode=0o600)
+            return child
+        def waited(*args, **kwargs):
+            self.output.write_text(json_dumps(dict(cols=100, rows=30, pixel_width=800, pixel_height=480,
+                session_id=123, pid=123, clock='CLOCK_UPTIME_RAW', sigwinch=0, t_ns=1, end_ns=2_000_000_001)))
+            child.poll.return_value = 0
+            return 0
+        child.wait.side_effect = waited
+        method = S3Evidence.test_s3_shell_observer_reads_native_grid_and_holds_two_seconds
+        with mock.patch.object(subprocess, 'run'), mock.patch.object(subprocess, 'Popen', side_effect=spawned), \
+                mock.patch.object(pty, 'openpty', return_value=(42, 43)), mock.patch.object(fcntl, 'ioctl'), \
+                mock.patch.object(os, 'close'):
+            try:
+                getattr(method, '__wrapped__', method)(self)
+            except ValueError as error:
+                self.fail(f'observer output parsed before writer exit: {error}')
+
+    def test_keyblock_tests_wait_for_final_log_before_closing_pty(self):
+        import pty, select, tempfile
+        from unittest import mock
+        for method, count in ((Latency.test_keyblock_toggles_on_each_byte_and_logs_in_order, 3),
+                              (Latency.test_keyblock_cursor_mode_waits_on_a_real_terminal, 7)):
+            with self.subTest(method=method.__name__), tempfile.TemporaryDirectory() as raw:
+                case = Latency()
+                case.root = Path(raw)
+                (case.root / 'ack').write_text('ENABLED 1\n')
+                ready = False
+                queries = 0
+                def records(*args):
+                    nonlocal ready, queries
+                    queries += 1
+                    ready = queries >= 2
+                    return {i: (1, i * 10, i * 10 + 1) for i in range(1, count + int(ready))}
+                def closed(fd):
+                    if fd == 42:
+                        self.assertTrue(ready, 'PTY closed before final log record')
+                frame = b'\x1b[?25l\x1b[2 q\x1b[27m\x1b[7m\x1b[2;3H' + b'\x1b[' * 3 + b'\x1b[0m'
+                if count == 7:
+                    frame += b'\x1b[?25h\x1b[1 q\x1b[2;3H'
+                with mock.patch.object(pty, 'fork', return_value=(123, 42)), \
+                        mock.patch.object(select, 'select', return_value=([42], [], [])), \
+                        mock.patch.object(os, 'read', return_value=frame), mock.patch.object(os, 'write'), \
+                        mock.patch.object(os, 'close', side_effect=closed), mock.patch.object(os, 'open', return_value=43), \
+                        mock.patch.object(os, 'mkfifo'), mock.patch.object(os, 'waitpid', return_value=(0, 0)), \
+                        mock.patch.object(subprocess, 'run'), mock.patch.object(time, 'sleep'), \
+                        mock.patch.object(standing, 'read_keyblock_log', side_effect=records):
+                    getattr(method, "__wrapped__", method)(case)
+
+
 class Latency(unittest.TestCase):
     def setUp(self) -> None:
         import tempfile
@@ -2512,6 +2705,10 @@ class Latency(unittest.TestCase):
                 frame = read_until(b"\x1b[0m")
                 self.assertIn(expected, frame)
                 self.assertEqual(frame.count(b"\x1b["), 9, "one write: 4 moves, 4 attributes, one reset")
+            deadline = clock.monotonic() + 5
+            while len(standing.read_keyblock_log(log)) < 3 and clock.monotonic() < deadline:
+                clock.sleep(0.02)
+            self.assertEqual(sorted(standing.read_keyblock_log(log)), [1, 2, 3])
         finally:
             os.close(fd)
             os.waitpid(pid, 0)
@@ -2577,6 +2774,10 @@ class Latency(unittest.TestCase):
             os.write(fd, b"j")
             self.assertIn(b"\x1b[2;3H", read_until(b"\x1b[2;3H"), "a measured flip parks the visible cursor")
             self.assertEqual(os.waitpid(pid, os.WNOHANG), (0, 0))
+            deadline = clock.monotonic() + 5
+            while len(standing.read_keyblock_log(log)) < 7 and clock.monotonic() < deadline:
+                clock.sleep(0.02)
+            self.assertEqual(sorted(standing.read_keyblock_log(log)), list(range(1, 8)))
         finally:
             os.close(fd)
             os.waitpid(pid, 0)
@@ -2616,6 +2817,15 @@ class Latency(unittest.TestCase):
                 os.kill(pid, 9)
                 os.waitpid(pid, 0)
 
+    def test_retained_latency_key_counts_are_bounded_and_consistent(self):
+        for row in (dict(samples_ms=[1.], censored=1001),
+                    dict(samples_ms=[1.] * 1000, censored=1),
+                    dict(samples_ms=[1.], censored=1, keys=3),
+                    dict(samples_ms=[1.], censored=0, keys=True)):
+            with self.subTest(row={k: v for k, v in row.items() if k != 'samples_ms'}):
+                self.assertIsNone(standing.latency_keys(row, 500), 'invalid retained key count accepted')
+        self.assertEqual(len(standing.latency_keys(dict(samples_ms=[1.] * 999, censored=1, keys=1000), 500)), 1000)
+
     def test_a_torn_log_record_is_dropped(self) -> None:
         path = self.root / "log"
         path.write_bytes(standing.KEYBLOCK_RECORD.pack(1, 1, 10, 20) + b"\x00" * 7)
@@ -2643,6 +2853,25 @@ class Latency(unittest.TestCase):
         self.assertEqual(len({bodies[name] for name in ("kettle", "kettle-opaque", "alacritty")}), 1)
         self.assertIsNone(bodies["kettle"][1])
         self.assertEqual(bodies["floor-ca"][1][:2], ["/f", "ca"], "a floor is its own window")
+
+    def test_explicit_opaque_variant_keeps_its_config_and_one_rotation_entry(self):
+        from unittest import mock
+        names = ['kettle', 'kettle-opaque']
+        self.assertEqual(standing.latency_entries(names, False, True, []), names,
+                         'automatic opaque variant duplicated an explicit entry')
+        for automatic in (True, False):
+            extras = []
+            def checked(lines):
+                extras.append(lines)
+                if lines:
+                    raise RuntimeError('stop before preflight')
+            argv = ['standing', '--workloads', 'latency', '--kettle-variant', 'opaque=opacity=0.8']
+            if not automatic:
+                argv.append('--no-latency-kettle-opaque')
+            with mock.patch.object(sys, 'argv', argv), mock.patch.object(standing, 'config_entries', side_effect=checked):
+                with self.assertRaisesRegex(RuntimeError, 'stop before preflight'):
+                    standing.main()
+            self.assertEqual(extras[-1], 'opacity=0.8')
 
     def test_the_opaque_variant_and_floors_join_standing_sessions_only(self) -> None:
         self.assertIn("background-opacity = 1", standing.KETTLE_OPAQUE)
@@ -4518,7 +4747,8 @@ class ConfigClosureTests(unittest.TestCase):
         text = parser.read_text().split('pub fn parse_collect(text: &str)')[1].split('\n    }\n')[0]
         text = re.sub(r'//[^\n]*', '', text)
         keys = set()
-        for match in re.finditer(r'^ {16}("[a-z0-9_-]+"(?:\s*\|\s*"[a-z0-9_-]+")*)\s*=>', text, re.M):
+        # An arm may carry a guard (`"full-screen" | "full_screen" if ... =>`).
+        for match in re.finditer(r'^ {16}("[a-z0-9_-]+"(?:\s*\|\s*"[a-z0-9_-]+")*)(?:\s+if\s[^\n]*?)?\s*=>', text, re.M):
             keys.update(k.replace('_', '-') for k in re.findall(r'"([a-z0-9_-]+)"', match[1]))
         self.assertEqual(standing.CONFIG_KEYS, keys)
         self.assertIn('cfg.background_image = e.value.trim().to_string()', text)
@@ -4760,9 +4990,7 @@ class S3Evidence(unittest.TestCase):
                 process = subprocess.Popen([str(binary), "--observe-only"], stdin=slave, stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL, start_new_session=True,
                     env={**os.environ, "KETTLE_S3_CHILD_OBSERVATION": str(output)})
-                deadline = time.monotonic() + 5
-                while not output.exists() and process.poll() is None and time.monotonic() < deadline:
-                    time.sleep(.02)
+                self.assertEqual(process.wait(timeout=5), 0)
                 record = standing.native_json(standing.private_native_text(output, 4096))
                 self.assertEqual((record["cols"], record["rows"], record["pixel_width"], record["pixel_height"]), (100, 30, 800, 480))
                 self.assertEqual(record["session_id"], process.pid)
@@ -4770,7 +4998,6 @@ class S3Evidence(unittest.TestCase):
                 self.assertEqual(record["clock"], "CLOCK_UPTIME_RAW")
                 self.assertEqual(record["sigwinch"], 0)
                 self.assertGreaterEqual(record["end_ns"] - record["t_ns"], 2_000_000_000)
-                self.assertEqual(process.wait(timeout=5), 0)
             finally:
                 if process is not None and process.poll() is None:
                     process.terminate()
@@ -5373,6 +5600,22 @@ class OutputBlink(unittest.TestCase):
         return ([{'began_ns':began}]+[dict(seq=i+1, deadline_ns=began+i*100_000_000,
             write_ns=began+i*100_000_000, write_end_ns=began+i*100_000_000+500)
             for i in range(80)]+[{'done_ns':began+8_000_000_000}])
+
+    def test_dense_printing_requires_query_after_done(self):
+        samples = self.samples()[:80]
+        row = standing.hc.printing_row(self.printing(), samples, 42, 7)
+        self.assertFalse(row['printing_valid'], 'dense printing accepted an unobserved focus tail')
+        self.assertEqual(row['printing_reason'], 'query after done missing')
+
+    def test_shared_control_recipe_carries_blink_setup_identity(self):
+        text = (HERE / 'standing-method.md').read_text()
+        end = text.index('--label aa-480-hc')
+        start = text.rfind('```sh', 0, end) + len('```sh')
+        argv = shlex.split(text[start:end].replace('\\\n', ' '))
+        for flag in ('--blink-validation', '--blink-cursor-rect', '--blink-shape', '--blink-timeout'):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, argv, 'shared control recipe omits blink setup identity')
+                self.assertFalse(argv[argv.index(flag) + 1].startswith('--'))
 
     def test_optional_selection_and_defaults(self):
         import argparse
@@ -6300,6 +6543,25 @@ int main(int argc, char **argv) { return payload_main(argc,argv); }
             self.assertIsNone(runner.observation_context)
             self.assertEqual(standing.latency_keys(row,500),[10.,500.])
             self.assertFalse(any(k.startswith('typing_') for k in row))
+
+    def test_successful_probe_with_failed_cleanup_is_not_counted(self):
+        import tempfile,contextlib
+        from unittest.mock import Mock,patch
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp);runner=standing.Runner({k:work/k for k in ('latency-floor','observer','latency-probe')},work,{})
+            runner.launch=Mock(return_value=Mock());runner.wait_for=Mock(return_value=True)
+            runner.pid=Mock(return_value=42);runner.stop=Mock(return_value=False)
+            p,_,a=self.fixture()
+            p['samples'] = [dict(seq=i,warmup=True,t_post=800_000_000,display=810_000_000) for i in range(7,27)] + p['samples']
+            def probe(*args):(work/'latency.json').write_text(_json.dumps(p))
+            @contextlib.contextmanager
+            def verified(*args):yield a
+            with patch.object(standing.hc,'start_observer'),patch.object(standing,'run_latency_probe',side_effect=probe),\
+                 patch.object(standing,'verified_probe_use',verified),patch.object(standing,'wait_for_text',return_value=True),\
+                 patch.object(standing.time,'sleep'),patch.object(standing,'read_keyblock_log',return_value={i:(1,1_000_000_000,1_000_000_000) for i in range(1,29)}):
+                row=runner.latency('floor-layer',dict(keys=2,warmup=20,censor_ms=500,inject='hid'),7,work/'keep.json')
+            self.assertTrue(row['killed'])
+            self.assertIsNone(standing.latency_keys(row, 500), 'killed round entered latency statistics')
 
     def test_invalid_launch_context_is_metric_local(self):
         import tempfile, contextlib
@@ -7363,6 +7625,20 @@ class ObserverPilot(unittest.TestCase):
                       mode='standing', rounds={p.PILOT_WORKLOADS[kind]: len(differences)*2},
                       latency=dict(keys=2, censor_ms=500)), workloads={p.PILOT_WORKLOADS[kind]: rows})
 
+    def test_large_pilot_plan_does_not_allocate_missing_pairs(self):
+        from unittest.mock import patch
+        raw = self.fixture(names=['kettle'], differences=[])
+        raw['meta']['observer_pilot']['pairs'] = 1_000_000_000
+        def bounded_range(count):
+            self.assertLess(count, 1000, 'unchecked pilot count allocated groups')
+            return range(count)
+        with patch.object(standing.publication, 'range', side_effect=bounded_range, create=True):
+            result = self.report(raw)
+        metric = result['terminals']['kettle']['metrics']['mean_ms']
+        self.assertEqual(metric['valid_pairs'], 0)
+        self.assertEqual(metric['invalid_pairs_by_reason'], {'missing arm': 1_000_000_000})
+        self.assertFalse(result['equivalent'])
+
     def report(self, raw):
         return standing.publication.observer_pilot_report(standing._publication_host(), raw)
 
@@ -7696,19 +7972,14 @@ class ObserverPilot(unittest.TestCase):
             got = standing.hc.printing_row(records, bad, 42, 7, observer_off=arm_off)
             self.assertEqual(got['printing_reason'], 'focus evidence unavailable', arm_off)
 
-    def test_printing_off_arm_stops_its_observer_after_the_final_query(self):
+    def test_printing_both_arms_stop_the_observer_after_the_final_query(self):
         import tempfile
         from unittest.mock import patch
         fixture = OutputBlink()
-        for arm, waits in (('off', True), ('on', False)):
+        for arm in ('off', 'on'):
             with self.subTest(arm=arm), tempfile.TemporaryDirectory() as tmp:
                 work = Path(tmp)
-                stopped = []
-                clock = iter([11_000_000_000, 15_000_000_000, 19_000_000_000, 21_000_000_000])
-                reads = []
-                def now():
-                    reads.append(1)
-                    return next(clock)
+                reads, stopped = [], []
                 class Runner:
                     def __init__(self): self.work=work; self.probes={'observer':'observer', 'printing':'printing'}
                     def launch(self,*args):
@@ -7721,14 +7992,19 @@ class ObserverPilot(unittest.TestCase):
                     (work/'hc-timeline.jsonl').write_text('ready')
                     (work/'hc-printing.jsonl').write_text('done_ns')
                     return object()
+                def records(path, *args):
+                    if path.name == 'hc-printing.jsonl':
+                        return fixture.printing()
+                    reads.append(1)
+                    return fixture.samples()[:80] if len(reads) < 3 else fixture.samples()
                 with patch.object(standing.hc, 'start_observer', side_effect=observer), \
-                     patch.object(standing.hc, 'now_ns', side_effect=now), \
-                     patch.object(standing.hc, 'read_jsonl', return_value=fixture.samples()):
-                    standing.hc.collect(Runner(), 'fixture', 'output-memory',
+                     patch.object(standing.hc, 'now_ns', return_value=11_000_000_000), \
+                     patch.object(standing.hc.time, 'sleep'), \
+                     patch.object(standing.hc, 'read_jsonl', side_effect=records):
+                    row = standing.hc.collect(Runner(), 'fixture', 'output-memory',
                         dict(activate=False, settle=2.5, window=6., observer_arm=arm), work/'saved', fixture.setup())
-                # origin = 12 s; the last off-arm query is due at 20.6 s, so the
-                # observer may stop only once the clock reads past 20.85 s.
-                self.assertEqual(stopped, [4] if waits else [1])
+                self.assertEqual(stopped, [3], 'observer stopped before a complete query after done')
+                self.assertTrue(row['printing_valid'], row)
 
     def test_sparse_blink_boundaries_counters_and_focus(self):
         import copy

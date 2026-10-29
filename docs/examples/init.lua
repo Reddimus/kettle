@@ -95,7 +95,8 @@ kettle.add_url_handler(
 --   - "tab_add"          → tab index appended; payload = new index
 --   - "tab_close"        → tab being closed; payload = closing index
 --   - "bell"             → bell rang in a pane; payload = pane id
---   - "pane_close"        → pane about to close; payload = pane id
+--   - "pane_close"        → a pane ended (closed, with its tab or window,
+--                          or its shell exited); payload = pane id
 --   - "output"           → pane produced output; payload = (pane id,
 --                          bytes since last emission). Throttled at
 --                          the dispatch site so a busy build doesn't
@@ -116,16 +117,44 @@ end)
 -- prints its final line. Replace the pattern with whatever your
 -- build system emits.
 local last_notify = 0
-kettle.on("output", function(pane_id, bytes)
-    -- Coalescing — don't spam notifications.
-    local now = os.time()
-    if now - last_notify < 5 then return end
-    -- `bytes` is a table of byte values; this makes them one string.
-    local text = string.char(table.unpack(bytes))
-    if text:find("BUILD SUCCESSFUL") or text:find("Compiling%s*$") then
+local partial_lines = {}
+local announced = {}
+local function notify_build(pane_id, now)
+    -- Coalescing — don't spam notifications, but keep collecting output.
+    if now - last_notify >= 5 then
         last_notify = now
         kettle.notify("kettle", "Build done in pane " .. tostring(pane_id))
     end
+end
+kettle.on("pane_close", function(pane_id)
+    partial_lines[pane_id] = nil
+    announced[pane_id] = nil
+end)
+kettle.on("output", function(pane_id, bytes)
+    local now = os.time()
+    -- `bytes` is a table of byte values; this makes them one string.
+    local text = (partial_lines[pane_id] or "") .. string.char(table.unpack(bytes))
+    local first = 1
+    while true do
+        local last = text:find("[\r\n]", first)
+        if not last then break end
+        local line = text:sub(first, last - 1)
+        if not announced[pane_id] and
+            (line:find("BUILD SUCCESSFUL") or line:find("Compiling%s*$")) then
+            notify_build(pane_id, now)
+        end
+        announced[pane_id] = nil
+        first = last + 1
+    end
+    local tail = text:sub(first)
+    -- A build's last line may never get a newline, so the success message
+    -- also counts while its line is still open, once.
+    if not announced[pane_id] and tail:find("BUILD SUCCESSFUL") then
+        notify_build(pane_id, now)
+        announced[pane_id] = true
+    end
+    -- Bound retained output even when a program never ends its line.
+    partial_lines[pane_id] = tail:sub(math.max(1, #tail - 4095))
 end)
 
 -------------------------------------------------------------------------------

@@ -834,13 +834,16 @@ jobs:
             return 1
           }
 
+          # A re-run finds its release already public. It then only proves the
+          # public assets are exactly this run's and never uploads over them;
+          # promotion is the promote job's.
+          already_public=
           existing=$(find_release)
           if [ -n "$existing" ]; then
             release_id=${existing%% *}
             is_draft=${existing##* }
             if [ "$is_draft" != true ]; then
-              echo "::error::release $tag already exists and is public"
-              exit 1
+              already_public=1
             fi
           else
             gh release create "$tag" --verify-tag --draft --generate-notes --title "$tag"
@@ -866,6 +869,9 @@ jobs:
             dist/package-metadata/PKGBUILD
           )
           for attempt in 1 2 3; do
+            if [ -n "$already_public" ]; then
+              break
+            fi
             if gh release upload "$tag" "${files[@]}" --clobber; then
               break
             fi
@@ -898,10 +904,77 @@ jobs:
             sleep 5
           done
           test "$verified" = 1
+          if [ -n "$already_public" ]; then
+            echo "release $tag is already public with exactly these assets"
+            exit 0
+          fi
           # Publish by id for the same reason, so the transition cannot depend
           # on GitHub having associated the tag with a still-draft release.
+          # "latest", where clients read the update feed, is left to the
+          # promote job.
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-            -F draft=false -f make_latest=true >/dev/null
+            -F draft=false -f make_latest=false >/dev/null
+
+  # Moves "latest", where clients read the update feed, to the newest
+  # published release, and never to an older one. One promotion runs at a time
+  # across every tag; a pending one that GitHub replaces with a newer run is
+  # harmless, since that run promotes the newest release, its own included. A
+  # failed promotion can be re-run on its own: publishing is already done.
+  promote:
+    name: point latest at the newest release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: release-promote
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Point latest at the newest published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          releases_json="$RUNNER_TEMP/releases.json"
+          latest_err="$RUNNER_TEMP/latest.err"
+          # Waits while the list has not caught up with this run's own
+          # publication (exit 3), then moves latest only to a strictly newer
+          # release, and stops once latest is the newest. Any other failed
+          # lookup fails the job instead of guessing.
+          for _ in $(seq 1 20); do
+            gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              > "$releases_json"
+            if ! current=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" \
+              --jq .tag_name 2>"$latest_err"); then
+              grep -q 'HTTP 404' "$latest_err" || { cat "$latest_err" >&2; exit 1; }
+              current=
+            fi
+            status=0
+            target=$(python3 scripts/newest-release.py --require "$tag" \
+              --above "$current" "$releases_json") || status=$?
+            if [ "$status" = 3 ]; then
+              sleep 5
+              continue
+            fi
+            test "$status" = 0
+            if [ -z "$target" ]; then
+              echo "latest (${current:-none}) is the newest published release"
+              exit 0
+            fi
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${target}" \
+              -f make_latest=true >/dev/null
+            sleep 3
+          done
+          echo "::error::latest did not settle on the newest published release"
+          exit 1
 
   # Every published release is installed from the one before it and updated
   # with `kettle update` on Linux (x86_64, arm64) and macOS. It runs after
@@ -909,7 +982,8 @@ jobs:
   # follow-up release. See upgrade.yml.
   upgrade:
     name: upgrade from the previous release
-    needs: publish
+    # Upgrades check that latest is this tag, so they wait for promotion.
+    needs: [publish, promote]
     if: github.event_name == 'push'
     uses: ./.github/workflows/upgrade.yml
     with:

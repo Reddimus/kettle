@@ -1789,24 +1789,6 @@ pub fn media_paste_receipt_geometry(
             (x, bottom - inset_y - card_h, card_w, card_h)
         }
     };
-    let choose_corner = |card_w: f32, card_h: f32| {
-        if card_w + inset_x * 2.0 > width || card_h + inset_y * 2.0 > height {
-            return None;
-        }
-        let right_top = (rect_for_corner(card_w, card_h, true, true), true);
-        let right_bottom = (rect_for_corner(card_w, card_h, false, true), false);
-        let left_top = (rect_for_corner(card_w, card_h, true, false), true);
-        let left_bottom = (rect_for_corner(card_w, card_h, false, false), false);
-        let candidates = if receipt.prefer_top {
-            [right_top, right_bottom, left_top, left_bottom]
-        } else {
-            [right_bottom, right_top, left_bottom, left_top]
-        };
-        candidates.into_iter().find(|(candidate, _)| {
-            completion_rect.is_none_or(|other| !rects_overlap(*candidate, other))
-        })
-    };
-
     let expanded_w = (cw * 42.0).min(width - inset_x * 2.0);
     let pad = (cw * 0.75).round().max(6.0);
     let detail_lines = if receipt.remote { 4.0 } else { 2.0 };
@@ -1824,10 +1806,34 @@ pub fn media_paste_receipt_geometry(
     } else {
         5.0
     };
+    let choose_corner = |card_w: f32, card_h: f32, expanded: bool| {
+        if card_w + inset_x * 2.0 > width || card_h + inset_y * 2.0 > height {
+            return None;
+        }
+        let right_top = (rect_for_corner(card_w, card_h, true, true), true);
+        let right_bottom = (rect_for_corner(card_w, card_h, false, true), false);
+        let left_top = (rect_for_corner(card_w, card_h, true, false), true);
+        let left_bottom = (rect_for_corner(card_w, card_h, false, false), false);
+        let candidates = if receipt.prefer_top {
+            [right_top, right_bottom, left_top, left_bottom]
+        } else {
+            [right_bottom, right_top, left_bottom, left_top]
+        };
+        candidates.into_iter().find(|(candidate, top_lane)| {
+            let final_detail_w = if *top_lane {
+                detail_w
+            } else {
+                detail_w + pad - 5.0 - 24.0_f32.max(text_line_height * 1.5) - text_cell_width * 0.5
+            };
+            (!expanded || !receipt.remote || final_detail_w >= text_cell_width * min_detail_columns)
+                && completion_rect.is_none_or(|other| !rects_overlap(*candidate, other))
+        })
+    };
+
     let expanded_corner = (expanded_w >= text_cell_width * min_expanded_columns
         && detail_w >= text_cell_width * min_detail_columns
         && expanded_h + inset_y * 2.0 <= height)
-        .then(|| choose_corner(expanded_w, expanded_h))
+        .then(|| choose_corner(expanded_w, expanded_h, true))
         .flatten();
 
     if receipt.expanded
@@ -1924,7 +1930,7 @@ pub fn media_paste_receipt_geometry(
             top_lane,
         )
     } else {
-        choose_corner(card_w, card_h)?
+        choose_corner(card_w, card_h, false)?
     };
     let dismiss_rect = (
         rect.0 + rect.2 - dismiss_inset - dismiss_size,
@@ -2549,6 +2555,8 @@ struct PendingCursorGlyph {
     /// Surface-pixel top-left of the cursor cell.
     x: f32,
     y: f32,
+    /// Owning row baseline, relative to the cursor cell top.
+    row_baseline: f32,
     /// The character under the cursor (drawn in `color`).
     ch: char,
     /// Base plus the snapshot's bounded attached marks.
@@ -2566,6 +2574,15 @@ struct PendingCursorGlyph {
     clip: (f32, f32, f32, f32),
 }
 
+fn invalidate_pane_titlebar_texts(texts: &mut [String]) {
+    texts.iter_mut().for_each(String::clear);
+}
+
+fn cursor_glyph_top(cell_top: f32, row_baseline: f32, buffer: &TextBuffer) -> f32 {
+    let own_baseline = buffer.layout_runs().next().map_or(0.0, |run| run.line_y);
+    cell_top + row_baseline - own_baseline
+}
+
 fn cursor_glyph_damage_key(
     cursor: Option<&PendingCursorGlyph>,
     metrics: Metrics,
@@ -2577,6 +2594,7 @@ fn cursor_glyph_damage_key(
     let mut hash = std::hash::DefaultHasher::new();
     cursor.x.to_bits().hash(&mut hash);
     cursor.y.to_bits().hash(&mut hash);
+    cursor.row_baseline.to_bits().hash(&mut hash);
     cursor.ch.hash(&mut hash);
     cursor.text.hash(&mut hash);
     cursor.emoji_qualified.hash(&mut hash);
@@ -5494,11 +5512,13 @@ impl Renderer {
             if self.chrome_style_key != k {
                 self.chrome_style_key = k;
                 self.card_label_texts.clear();
-                self.pane_titlebar_texts.clear();
+                invalidate_pane_titlebar_texts(&mut self.pane_titlebar_texts);
                 self.tab_texts.clear();
                 self.tab_close_text.clear();
                 self.tabbar_text.clear();
                 self.new_tab_arrow_text.clear();
+                self.scroll_left_text.clear();
+                self.scroll_right_text.clear();
                 self.status_bar_text.clear();
                 self.resize_overlay_text.clear();
                 self.update_toast_text.iter_mut().for_each(String::clear);
@@ -6700,6 +6720,7 @@ impl Renderer {
         if overlay.confirm_dialog.is_none()
             && let Some(search) = overlay.search.as_ref()
         {
+            let cw = self.overlay_text_cell_width();
             let geometry = search_bar_geometry(sw, sh, cw, ch, &search.tr);
             search_rect = geometry.rect;
             let row_h = geometry.reserved_height / geometry.rows.max(1) as f32;
@@ -7253,11 +7274,12 @@ impl Renderer {
                 toast.geometry.details,
                 toast.geometry.close,
             ];
+            let text_cell_width = self.overlay_text_cell_width();
             for (i, (text, rect)) in texts.into_iter().zip(rects).enumerate() {
                 let buffer = &mut self.update_toast_buffers[i];
                 buffer.set_metrics(metrics);
                 buffer.set_size(Some(rect.2), Some(rect.3));
-                let (displayed, wrap) = toast_buffer_text(text, rect.2, cw, i == 0);
+                let (displayed, wrap) = toast_buffer_text(text, rect.2, text_cell_width, i == 0);
                 buffer.set_wrap(wrap);
                 if self.update_toast_text[i] != displayed {
                     buffer.set_text(
@@ -7714,6 +7736,7 @@ impl Renderer {
         // Pre-size for the menu / settings-overlay rows it collects.
         let mut menu_areas: Vec<TextArea> = Vec::with_capacity(48);
         if let Some(toast) = &overlay.update_toast {
+            let text_line_height = self.overlay_text_line_height();
             let (x, y, w, h) = toast.geometry.rect;
             let alpha = toast.opacity.clamp(0.0, 1.0);
             let background = theme.palette[0];
@@ -7751,11 +7774,12 @@ impl Renderer {
                     left: ax,
                     top: if i == 0 {
                         ay + (ah
-                            - self.update_toast_buffers[i].layout_runs().count().max(1) as f32 * ch)
+                            - self.update_toast_buffers[i].layout_runs().count().max(1) as f32
+                                * text_line_height)
                             .max(0.0)
                             * 0.5
                     } else {
-                        ay + (ah - ch).max(0.0) * 0.5
+                        ay + (ah - text_line_height).max(0.0) * 0.5
                     },
                     scale: 1.0,
                     bounds: TextBounds {
@@ -9272,7 +9296,7 @@ impl Renderer {
         // text/position/style changed. A main text prepare also forces this tiny
         // prepare because both renderers share an atlas that may have repacked.
         // Menu-highlight and other quad-only frames reuse retained vertices.
-        if let Some((gx, gy, gcolor, gclip, gtext, gattrs)) = self
+        if let Some((gx, gy, gcolor, gclip, gtext, gattrs, baseline)) = self
             .pending_cursor_glyph
             .as_ref()
             .map(|c| {
@@ -9283,6 +9307,7 @@ impl Renderer {
                     c.clip,
                     c.text.as_str(),
                     c.attrs.as_attrs(),
+                    c.row_baseline,
                 )
             })
             .filter(|_| need_cursor_prepare)
@@ -9300,7 +9325,7 @@ impl Renderer {
             let area = TextArea {
                 buffer: &self.cursor_glyph_buffer,
                 left: gx,
-                top: gy,
+                top: cursor_glyph_top(gy, baseline, &self.cursor_glyph_buffer),
                 scale: 1.0,
                 bounds: TextBounds {
                     left: gclip.0 as i32,
@@ -10415,25 +10440,18 @@ impl Renderer {
             // `push_underline_quads` draws each style as a distinct shape,
             // including DOUBLE_UNDERLINE's second line; see its doc comment
             // for the undercurl approximation's limits.
-            if flags.intersects(Flags::ALL_UNDERLINES) {
-                let line_color = sc
-                    .underline_color
-                    .map(|c| color::resolve(c, theme, term_colors))
-                    .unwrap_or(fg);
-                let x = ox + col as f32 * cw;
-                let y = oy + vrow as f32 * ch;
-                push_underline_quads(quads, x, y, cw, ch, col, flags, line_color);
-            }
-            if flags.contains(Flags::STRIKEOUT) {
-                quads.push(rect(
-                    ox + col as f32 * cw,
-                    oy + vrow as f32 * ch + ch * 0.5,
-                    cw,
-                    1.0,
-                    fg,
-                    1.0,
-                ));
-            }
+            let line_color = sc
+                .underline_color
+                .map(|c| color::resolve(c, theme, term_colors))
+                .unwrap_or(fg);
+            push_cell_decorations(
+                quads,
+                (ox + col as f32 * cw, oy + vrow as f32 * ch, cw, ch),
+                col,
+                flags,
+                fg,
+                line_color,
+            );
             // Combining (zero-width) marks layered on this cell — a decomposed
             // accent (`e`+U+0301), an emoji ZWJ sequence, a variation selector.
             // Append them right after the base char so the shaper composes the
@@ -10572,6 +10590,7 @@ impl Renderer {
                     self.pending_cursor_glyph = Some(PendingCursorGlyph {
                         x: bx,
                         y: by,
+                        row_baseline: 0.0,
                         ch: gch,
                         text: std::iter::once(gch).chain(gmarks.iter().copied()).collect(),
                         emoji_qualified: gmarks.contains(&'\u{FE0F}'),
@@ -10748,6 +10767,13 @@ impl Renderer {
         // `scroll.vertical` is already non-zero or `scroll.line > 0`, and
         // nothing here sets either.)
         buf.shape_until_scroll(&mut self.font_system, false);
+        if draw_cursor
+            && matches!(shape, EShape::Block)
+            && let Some(cursor) = self.pending_cursor_glyph.as_mut()
+            && let Some(run) = buf.layout_runs().find(|run| run.line_i == cvrow as usize)
+        {
+            cursor.row_baseline = run.line_y - cvrow as f32 * ch;
+        }
         // Return the scratch (with its grown String buffers) to the pool for the
         // next frame/pane.
         self.span_scratch = spans;
@@ -13013,7 +13039,7 @@ fn segment_clusters(buffer: &TextBuffer, segment: &SearchBarSegment) -> Vec<Sear
     if segment.control != Some(SearchControl::Editor) {
         return clusters;
     }
-    clusters
+    let clusters = clusters
         .into_iter()
         .filter(|cluster| cluster.end > EDITOR_MARK_LEN)
         .map(|cluster| SearchEditorCluster {
@@ -13021,7 +13047,41 @@ fn segment_clusters(buffer: &TextBuffer, segment: &SearchBarSegment) -> Vec<Sear
             end: cluster.end - EDITOR_MARK_LEN,
             ..cluster
         })
-        .collect()
+        .collect();
+    grapheme_clusters(&segment.text, clusters)
+}
+
+fn grapheme_clusters(text: &str, clusters: Vec<SearchEditorCluster>) -> Vec<SearchEditorCluster> {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    let mut result = Vec::new();
+    for cluster in clusters {
+        let Some(text) = text.get(cluster.start..cluster.end) else {
+            result.push(cluster);
+            continue;
+        };
+        let count = text.graphemes(true).count();
+        if count <= 1 {
+            result.push(cluster);
+            continue;
+        }
+        let count = count as f32;
+        for (index, (byte, grapheme)) in text.grapheme_indices(true).enumerate() {
+            let width = (cluster.right - cluster.left) / count;
+            let left = if cluster.rtl {
+                cluster.right - (index + 1) as f32 * width
+            } else {
+                cluster.left + index as f32 * width
+            };
+            result.push(SearchEditorCluster {
+                start: cluster.start + byte,
+                end: cluster.start + byte + grapheme.len(),
+                left,
+                right: left + width,
+                rtl: cluster.rtl,
+            });
+        }
+    }
+    result
 }
 
 /// The clusters in the first line of `buffer`, sorted by byte. The glyphs of
@@ -13735,6 +13795,26 @@ fn pane_outline(
 #[cfg(test)]
 mod pane_window_corner_tests;
 
+fn push_cell_decorations(
+    quads: &mut Vec<QuadInstance>,
+    cell: Rect4,
+    col: usize,
+    flags: Flags,
+    fg: Rgb,
+    line_color: Rgb,
+) {
+    if flags.contains(Flags::HIDDEN) {
+        return;
+    }
+    let (x, y, cw, ch) = cell;
+    if flags.intersects(Flags::ALL_UNDERLINES) {
+        push_underline_quads(quads, x, y, cw, ch, col, flags, line_color);
+    }
+    if flags.contains(Flags::STRIKEOUT) {
+        quads.push(rect(x, y + ch * 0.5, cw, 1.0, fg, 1.0));
+    }
+}
+
 /// Draws one cell's underline segment(s), giving each `Flags::ALL_UNDERLINES`
 /// style its own shape instead of one straight 1px line. This renderer's only
 /// chrome/cell primitive is the axis-aligned quad (`QuadInstance`/`rect`), so
@@ -14399,6 +14479,15 @@ fn cell_locked_pen_x(cell_left: f32, x_offset_px: f32) -> f32 {
     (cell_left + x_offset_px).round()
 }
 
+fn cell_locked_glyph_offset(
+    cell_left: f32,
+    glyph: &glyphon::cosmic_text::LayoutGlyph,
+    cluster_x: f32,
+) -> f32 {
+    let x_off_px = glyph.font_size * glyph.x_offset;
+    cell_locked_pen_x(cell_left + (glyph.x - cluster_x), x_off_px) - glyph.x - x_off_px
+}
+
 /// Emit cell-locked glyph instances for ONE shaped `TextBuffer`, appending to
 /// `out`. This is the single source of truth for the Grid (cell-locked)
 /// renderer's per-glyph emit: `emit_pane_glyphs` (live panes), the offscreen
@@ -14437,9 +14526,14 @@ fn emit_cell_locked_glyphs(
             }
         }
         let line_y = run.line_y;
+        let mut active_cell = None;
+        let mut cluster_x = 0.0;
         for glyph in run.glyphs.iter() {
             let col = glyph_grid_col(char_starts, glyph.start);
-            let fs = glyph.font_size;
+            if active_cell != Some(col) {
+                active_cell = Some(col);
+                cluster_x = glyph.x;
+            }
             // Pin the pen to the cell, snapped to an integer physical pixel
             // (crisp + cache-friendly: x_bin = 0), while keeping any intra-
             // cluster x_offset. Feeding cosmic-text's `physical()` an offset that
@@ -14447,8 +14541,7 @@ fn emit_cell_locked_glyphs(
             // vertical + subpixel math, so the rasterized bitmap is byte-
             // identical to glyphon's.
             let cell_left = origin.0 + col as f32 * cell_w;
-            let x_off_px = fs * glyph.x_offset;
-            let off_x = cell_locked_pen_x(cell_left, x_off_px) - glyph.x - x_off_px;
+            let off_x = cell_locked_glyph_offset(cell_left, glyph, cluster_x);
             let phys = glyph.physical((off_x, origin.1), 1.0);
             let key = phys.cache_key;
             let mut image = None;
@@ -14734,6 +14827,17 @@ fn text_layout_damage_key(
         pv.snap.display_offset.hash(&mut h);
     }
     h.finish()
+}
+
+fn screenshot_text_buffer(
+    fonts: &mut FontSystem,
+    metrics: Metrics,
+    size: (f32, f32),
+) -> TextBuffer {
+    let mut buffer = TextBuffer::new(fonts, metrics);
+    buffer.set_size(Some(size.0), Some(size.1));
+    buffer.set_wrap(Wrap::None);
+    buffer
 }
 
 /// The current crate version in the offscreen demo's compile line.
@@ -15090,8 +15194,7 @@ pub fn capture_png_with_annotation(
             .family(Family::Name(&fam))
             .color(gc(theme.foreground));
 
-        let mut tab_buf = TextBuffer::new(&mut font_system, metrics);
-        tab_buf.set_size(Some(wf), Some(tab_h));
+        let mut tab_buf = screenshot_text_buffer(&mut font_system, metrics, (wf, tab_h));
         tab_buf.set_rich_text(
             [
                 (tab0_label.as_str(), fg.clone()),
@@ -15108,8 +15211,7 @@ pub fn capture_png_with_annotation(
         // version — never a hardcoded literal — so the hero /
         // showcase screenshots track the real product version forever.
         let compile_line = format!("kettle v{SCREENSHOT_DEMO_VERSION}\n");
-        let mut left = TextBuffer::new(&mut font_system, metrics);
-        left.set_size(Some(split_x - pad), Some(lh));
+        let mut left = screenshot_text_buffer(&mut font_system, metrics, (split_x - pad, lh));
         left.set_rich_text(
             [
                 (demo_user, grn.clone()),
@@ -15142,8 +15244,7 @@ pub fn capture_png_with_annotation(
 
         let (cpu_used, cpu_free) = screenshot_meter(37, 100);
         let (memory_used, memory_free) = screenshot_meter(51, 320);
-        let mut right = TextBuffer::new(&mut font_system, metrics);
-        right.set_size(Some(wf - split_x - pad), Some(lh));
+        let mut right = screenshot_text_buffer(&mut font_system, metrics, (wf - split_x - pad, lh));
         right.set_rich_text(
             [
                 ("  kettle — cross-platform terminal\n\n", mag.clone()),

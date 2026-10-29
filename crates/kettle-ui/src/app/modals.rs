@@ -156,6 +156,7 @@ impl App {
         // silently lost.
         self.finish_selection_gesture(ws);
         ws.card_press = None;
+        ws.dragging_split = None;
         // The press that opens a question also owns its later release.
         ws.confirm_pointer_release |= ws
             .held_buttons
@@ -1337,10 +1338,12 @@ impl App {
                 };
                 fld = 0;
             }
-            Key::Named(NamedKey::ArrowRight)
-            | Key::Named(NamedKey::ArrowLeft)
-            | Key::Named(NamedKey::Space)
-            | Key::Named(NamedKey::Enter) => {
+            key if confirmation_space_key(key)
+                || matches!(
+                    key,
+                    Key::Named(NamedKey::ArrowRight | NamedKey::ArrowLeft | NamedKey::Enter)
+                ) =>
+            {
                 let dir = match key {
                     Key::Named(NamedKey::ArrowRight) => 1,
                     Key::Named(NamedKey::ArrowLeft) => -1,
@@ -1673,15 +1676,30 @@ impl App {
                 if let Some(name) = name {
                     let exe = std::env::current_exe()
                         .unwrap_or_else(|_| std::path::PathBuf::from("kettle"));
-                    if let Err(e) = std::process::Command::new(&exe)
-                        .arg("--layout")
-                        .arg(&name)
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn()
+                    // The layout opens as its own Kettle process, alive as
+                    // long as its windows, so its reaper waits that long. It
+                    // is spawned on the reaper's thread: if that thread cannot
+                    // start, no child is left unreaped. Not capped, as trigger
+                    // commands are: each is one deliberate pick.
+                    if let Err(error) = std::thread::Builder::new()
+                        .name("kettle-layout".into())
+                        .spawn(move || {
+                            if let Err(error) = std::process::Command::new(&exe)
+                                .arg("--layout")
+                                .arg(&name)
+                                .stdin(std::process::Stdio::null())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()
+                                .and_then(|mut child| child.wait())
+                            {
+                                log::warn!(
+                                    "layout picker: spawn/wait `kettle --layout {name}`: {error}"
+                                );
+                            }
+                        })
                     {
-                        log::warn!("layout picker: spawn `kettle --layout {name}`: {e}");
+                        log::warn!("layout picker: reaper failed to start: {error}");
                     }
                 }
             }
@@ -1719,7 +1737,7 @@ impl App {
         self.close_all_modals(ws);
         ws.settings_nav = settings;
         let live = (self.cfg.theme_name.clone(), self.cfg.theme.clone());
-        if let Some((name, theme)) = begin_theme_picker(ws, live) {
+        if let Some((name, theme)) = begin_theme_picker_session(ws, &mut self.windows, live) {
             self.set_runtime_theme_state(ws, name, theme);
         }
     }

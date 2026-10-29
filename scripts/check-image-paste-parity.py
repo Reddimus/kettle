@@ -326,7 +326,7 @@ def main():
     spec.loader.exec_module(helpers)
     config = out / "config"
     config.write_text(
-        "agent-server = full\nrecord = off\nrestore-session = false\nupdate-check = false\npaste-images = on\npaste-image-preview = on\nwindow-width = 92\nwindow-height = 28\n"
+        "language = en\nagent-server = full\nrecord = off\nrestore-session = false\nupdate-check = false\npaste-images = on\npaste-image-preview = on\nwindow-width = 92\nwindow-height = 28\n"
     )
     image = out / "fixture.png"
     helpers.write_image_receipt_fixture(image)

@@ -86,7 +86,7 @@ pub(crate) fn stable_hash(bytes: impl IntoIterator<Item = u8>) -> u64 {
 ///
 /// Two arrangements are safe, and the second is easy to miss:
 ///
-/// - owned by us, so nobody else can touch what we put inside; or
+/// - owned by us, without group/other writes unless sticky; or
 /// - owned by root with the sticky bit set. That is the standard shared
 ///   temporary directory: world-writable, but the sticky bit stops one user
 ///   unlinking another's entries, which is exactly the property that matters.
@@ -102,10 +102,10 @@ pub(crate) fn unix_dir_is_safe_for_endpoint(is_dir: bool, uid: u32, mode: u32) -
     if !is_dir {
         return false;
     }
-    if uid == unsafe { libc::geteuid() } {
-        return true;
-    }
     const S_ISVTX: u32 = 0o1000;
+    if uid == unsafe { libc::geteuid() } {
+        return mode & 0o022 == 0 || mode & S_ISVTX != 0;
+    }
     uid == 0 && mode & S_ISVTX != 0
 }
 
@@ -152,7 +152,8 @@ pub(crate) fn ensure_owned_dir(dir: &std::path::Path) -> std::io::Result<()> {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
-                    "control socket directory is neither owned by this user nor a sticky shared root: {}",
+                    "control socket directory {} must be owned by this user and writable by \
+                     no one else (`chmod 700` it), or be a sticky directory owned by root",
                     dir.display()
                 ),
             ));
@@ -527,10 +528,27 @@ mod endpoint_dir_safety_tests {
     const PLAIN_WORLD_WRITABLE: u32 = 0o40777;
 
     #[test]
+    fn an_existing_writable_endpoint_directory_is_rejected() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = kettle_test_support::private_tempdir("kettle-ctl-directory-mode-");
+        let dir = root.join("custom-endpoints");
+        std::fs::create_dir(&dir).unwrap();
+        for mode in [0o777, 0o770] {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                super::ensure_owned_dir(&dir).is_err(),
+                "a non-sticky writable directory must be rejected"
+            );
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        super::ensure_owned_dir(&dir).expect("a sticky directory we own protects the endpoint");
+    }
+
+    #[test]
     fn a_directory_we_own_is_safe() {
         let us = unsafe { libc::geteuid() };
         assert!(unix_dir_is_safe_for_endpoint(true, us, 0o40700));
-        assert!(unix_dir_is_safe_for_endpoint(
+        assert!(!unix_dir_is_safe_for_endpoint(
             true,
             us,
             PLAIN_WORLD_WRITABLE

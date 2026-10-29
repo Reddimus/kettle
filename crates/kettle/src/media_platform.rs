@@ -632,7 +632,10 @@ fn exit_of(status: std::process::ExitStatus) -> WorkerExit {
 
 /// A regular executable file, not a link, owned by this user or root, with
 /// neither it nor its directory writable by anyone else, by mode or (on macOS)
-/// by ACL, and no set-id bits.
+/// by ACL, and no set-id bits. Every directory above it is held to the policy
+/// the external decoders are trusted by, which lets macOS's admin group write
+/// as root does: `/Applications` is `drwxrwxr-x root:admin`, and the private
+/// state directory policy would refuse every standard install.
 #[cfg(unix)]
 fn inspect(path: &Path) -> Result<FileIdentity, UnavailableCause> {
     use std::os::unix::fs::MetadataExt as _;
@@ -644,6 +647,7 @@ fn inspect(path: &Path) -> Result<FileIdentity, UnavailableCause> {
         }
         Err(_) => return Err(UnavailableCause::UnsafeWorkerFile),
     };
+    kettle_media_native::tools::trust(path).map_err(|_| UnavailableCause::UnsafeWorkerFile)?;
     let directory = path
         .parent()
         .and_then(|directory| std::fs::metadata(directory).ok())
@@ -695,7 +699,7 @@ mod signature {
     use std::io::Read as _;
     use std::path::Path;
     use std::process::{Child, Command, ExitStatus, Stdio};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     use kettle_media::client::UnavailableCause;
@@ -708,11 +712,12 @@ mod signature {
         run: Duration::from_secs(30),
         reap: Duration::from_secs(1),
     };
-    /// Set while a `codesign` run killed at its deadline has not exited, as a
-    /// filesystem stuck in uninterruptible I/O can make it. No run starts
-    /// meanwhile, because it would hang the same way, so at most one is left
-    /// behind.
-    static CODESIGN_UNREAPED: AtomicBool = AtomicBool::new(false);
+    /// How many `codesign` runs killed at their deadline have not exited, as a
+    /// filesystem stuck in uninterruptible I/O can make them. No run starts
+    /// while any is outstanding, because it would hang the same way. A count,
+    /// not a flag: with two stuck at once, the first to exit must not clear
+    /// the guard while the other is still stuck.
+    static CODESIGN_UNREAPED: AtomicUsize = AtomicUsize::new(0);
     /// More than `codesign --display` ever reports; the rest is not read.
     const MAX_REPORT_BYTES: u64 = 64 * 1024;
     /// More architectures than any worker has.
@@ -816,14 +821,14 @@ mod signature {
     /// Run `command` with no input or standard output, and report whether it
     /// succeeded and the start of what it wrote to stderr. A run past
     /// `bounds.run` is killed and given `bounds.reap` to exit; one that does
-    /// not is left to a reaper with `unreaped` set, and while it is set no run
-    /// starts.
+    /// not is left to a reaper and counted in `unreaped`, and while any is
+    /// counted no run starts.
     pub(super) fn run_bounded(
         mut command: Command,
         bounds: Bounds,
-        unreaped: &'static AtomicBool,
+        unreaped: &'static AtomicUsize,
     ) -> Result<(bool, Vec<u8>), UnavailableCause> {
-        if unreaped.load(Ordering::Acquire) {
+        if unreaped.load(Ordering::Acquire) > 0 {
             return Err(UnavailableCause::CheckFailed);
         }
         let mut child = command
@@ -856,19 +861,21 @@ mod signature {
         }
     }
 
-    /// Give `child` `grace` to exit. One that does not is reaped by a thread
-    /// whenever it does, with `unreaped` set until then. Without that thread
-    /// it stays set, and no `codesign` runs again in this process.
-    pub(super) fn reap(mut child: Child, grace: Duration, unreaped: &'static AtomicBool) {
+    /// Give `child` `grace` to exit. One that does not is counted in
+    /// `unreaped` and reaped by a thread whenever it does. Without that thread,
+    /// or if it cannot wait, it stays counted, and no `codesign` runs again in
+    /// this process.
+    pub(super) fn reap(mut child: Child, grace: Duration, unreaped: &'static AtomicUsize) {
         if wait_until(&mut child, Instant::now() + grace).is_some() {
             return;
         }
-        unreaped.store(true, Ordering::Release);
+        unreaped.fetch_add(1, Ordering::AcqRel);
         let _ = std::thread::Builder::new()
             .name("kettle-codesign-reap".into())
             .spawn(move || {
-                let _ = child.wait();
-                unreaped.store(false, Ordering::Release);
+                if child.wait().is_ok() {
+                    unreaped.fetch_sub(1, Ordering::AcqRel);
+                }
             });
     }
 
@@ -1003,6 +1010,53 @@ mod tests {
 
         fn chmod(path: &Path, mode: u32) {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        #[test]
+        fn writable_ancestor_cannot_redirect_a_safe_worker() {
+            let root = kettle_test_support::private_tempdir("kettle-worker-ancestor-");
+            let shared = root.path().join("shared");
+            let bin = shared.join("install/bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            chmod(&shared, 0o777);
+            let worker = bin.join(WORKER_NAME);
+            std::fs::write(&worker, "worker").unwrap();
+            chmod(&worker, 0o755);
+            assert_eq!(
+                inspect(&worker),
+                Err(UnavailableCause::UnsafeWorkerFile),
+                "writable ancestor must make the installation untrusted"
+            );
+        }
+
+        /// A worker under a directory only the admin group may also write,
+        /// as one in `/Applications` is, is trusted.
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn an_admin_writable_ancestor_like_applications_is_trusted() {
+            use std::os::unix::ffi::OsStrExt as _;
+            let root = kettle_test_support::private_tempdir("kettle-worker-applications-");
+            let applications = root.path().join("Applications");
+            let bin = applications.join("kettle.app/Contents/MacOS");
+            std::fs::create_dir_all(&bin).unwrap();
+            let name = std::ffi::CString::new(applications.as_os_str().as_bytes()).unwrap();
+            // SAFETY: `name` is NUL-terminated; uid -1 leaves the owner as is.
+            if unsafe { libc::chown(name.as_ptr(), u32::MAX, 80) } != 0 {
+                eprintln!("skipped: this user cannot give a directory to the admin group");
+                return;
+            }
+            chmod(&applications, 0o775);
+            let worker = bin.join(WORKER_NAME);
+            std::fs::write(&worker, "worker").unwrap();
+            chmod(&worker, 0o755);
+            assert!(inspect(&worker).is_ok(), "{:?}", inspect(&worker));
+            // Any other group with write access is not trusted.
+            // SAFETY: as above; gid 20 is `staff`, which is not root.
+            if unsafe { libc::chown(name.as_ptr(), u32::MAX, 20) } != 0 {
+                return;
+            }
+            chmod(&applications, 0o775);
+            assert_eq!(inspect(&worker), Err(UnavailableCause::UnsafeWorkerFile));
         }
 
         #[test]
@@ -1607,13 +1661,13 @@ mod tests {
         };
         use super::*;
         use std::process::Command;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
         /// A guard of its own for each test, as production has one for
         /// `codesign`.
-        fn unreaped() -> &'static AtomicBool {
-            Box::leak(Box::new(AtomicBool::new(false)))
+        fn unreaped() -> &'static AtomicUsize {
+            Box::leak(Box::new(AtomicUsize::new(0)))
         }
 
         fn bounds(run: Duration) -> Bounds {
@@ -1908,6 +1962,77 @@ mod tests {
             }
         }
 
+        /// Two checks outlive their kill at once: the first to exit must not
+        /// reopen the guard while the second is still running.
+        #[test]
+        fn two_stuck_checks_keep_the_guard_until_both_are_reaped() {
+            let unreaped = unreaped();
+            let short = Command::new("/bin/sleep").arg("0.5").spawn().unwrap();
+            let short_pid = libc::pid_t::try_from(short.id()).unwrap();
+            reap(short, Duration::ZERO, unreaped);
+            let long = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+            reap(long, Duration::ZERO, unreaped);
+            // A zombie still answers signal 0, so its pid is gone only once
+            // the reaper has waited for it.
+            let deadline = std::time::Instant::now() + Duration::from_secs(4);
+            // SAFETY: signal 0 sends nothing; it only checks the pid exists.
+            while unsafe { libc::kill(short_pid, 0) } == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the short run was never reaped"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // The reaper updates the guard just after its wait returns.
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(unreaped.load(Ordering::Acquire), 1);
+            let directory = tempfile::tempdir().unwrap();
+            let marker = directory.path().join("ran");
+            let mut touch = Command::new("/usr/bin/touch");
+            touch.arg(&marker);
+            assert_eq!(
+                run_bounded(touch, bounds(Duration::from_secs(10)), unreaped),
+                Err(UnavailableCause::CheckFailed),
+                "the long run is still outstanding"
+            );
+            assert!(!marker.exists());
+        }
+
+        #[test]
+        fn concurrent_checks_both_run() {
+            let root = tempfile::tempdir().unwrap();
+            let entered = root.path().join("entered");
+            let release = root.path().join("release");
+            let second = root.path().join("second");
+            let unreaped = unreaped();
+            let mut first = Command::new("/bin/sh");
+            first
+                .args([
+                    "-c",
+                    "touch \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.01; done",
+                    "test",
+                ])
+                .arg(&entered)
+                .arg(&release);
+            let worker = std::thread::spawn(move || {
+                run_bounded(first, bounds(Duration::from_secs(10)), unreaped)
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !entered.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(entered.exists());
+            let mut next = Command::new("/usr/bin/touch");
+            next.arg(&second);
+            let result = run_bounded(next, bounds(Duration::from_secs(10)), unreaped);
+            std::fs::write(&release, b"").unwrap();
+            assert_eq!(worker.join().unwrap(), Ok((true, Vec::new())));
+            // A check in progress is not stuck, so it does not hold others off.
+            assert_eq!(result, Ok((true, Vec::new())));
+            assert!(second.exists());
+            assert_eq!(unreaped.load(Ordering::Acquire), 0);
+        }
+
         #[test]
         fn a_stuck_check_is_stopped_at_its_deadline() {
             let mut sleep = Command::new("/bin/sleep");
@@ -1920,7 +2045,7 @@ mod tests {
             );
             assert!(started.elapsed() < Duration::from_secs(10));
             // Killed and reaped within its grace: nothing is left behind.
-            assert!(!unreaped.load(Ordering::Acquire));
+            assert_eq!(unreaped.load(Ordering::Acquire), 0);
         }
 
         #[test]
@@ -1932,7 +2057,7 @@ mod tests {
             let child = slow.spawn().unwrap();
             let unreaped = unreaped();
             reap(child, Duration::ZERO, unreaped);
-            assert!(unreaped.load(Ordering::Acquire));
+            assert_eq!(unreaped.load(Ordering::Acquire), 1);
             // Meanwhile no run starts: this one would leave a marker.
             let directory = tempfile::tempdir().unwrap();
             let marker = directory.path().join("ran");
@@ -1945,7 +2070,7 @@ mod tests {
             assert!(!marker.exists());
             // Once the child exits the reaper clears the guard.
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
-            while unreaped.load(Ordering::Acquire) {
+            while unreaped.load(Ordering::Acquire) > 0 {
                 assert!(std::time::Instant::now() < deadline, "never reaped");
                 std::thread::sleep(Duration::from_millis(20));
             }

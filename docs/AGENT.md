@@ -96,11 +96,17 @@ incomplete lossless PTY delivery into success. MCP cancellation takes precedence
 
 Kettle owns the PTY-created process group on macOS and the PTY-created session
 on Linux. A Unix descendant that deliberately calls `setsid()` leaves that
-boundary; Kettle will not infer ownership from ancestry or an open PTY
-descriptor and risk killing an unrelated same-user process. Fully containing
-that case requires an OS-owned supervisor/cgroup. When Kettle cannot verify the
-scope it did own was terminated, timeout/cancellation reports 125 rather than a
-misleading 124/130.
+boundary. On Linux, the `kettle exec` command line is a child subreaper: such a
+descendant is reparented to Kettle when its own parent exits, so a timeout or
+cancellation kills and reaps it too. Where the kernel refuses a subreaper or
+has no per-thread child lists, such a timeout or cancellation reports 125,
+since an escaped descendant could still be running. That ownership is the kernel's, not an
+inference from ancestry or an open PTY descriptor, so it cannot reach an
+unrelated same-user process. macOS has no equivalent, and the MCP `kettle_run`
+tool runs concurrent commands in one server process, where an adopted process
+cannot be attributed to one command; in both, a `setsid()` descendant can
+outlive the run. When Kettle cannot verify the scope it did own was terminated,
+timeout/cancellation reports 125 rather than a misleading 124/130.
 
 A real stdout write or flush failure is different from deadline abandonment.
 Kettle reports it on stderr, stops and reaps the owned process scope, and
@@ -856,8 +862,10 @@ the one deciding whether to retry.
 
 `run_command` correlates the shell's OSC 133 command-end marker to learn the
 exit code. **Without shell integration** there is no marker, so the call returns
-`{timed_out: true, …}` after `timeout_s` (default 15) with a hint to run
-`kettle --shell-integration <shell>`. Output is still captured either way.
+`{timed_out: true, …}` after `timeout_s` (default 15) with a hint to add the
+output of `kettle --shell-integration <shell>` to the shell's startup file and
+start a new shell (see [SHELL-INTEGRATION.md](SHELL-INTEGRATION.md)). Output is
+still captured either way.
 
 A pane the user has toggled **Read only** (right-click menu /
 `toggle_read_only`) rejects `send_text`, `send_keys` and `run_command` with
@@ -1561,10 +1569,16 @@ should fail the run. It saves PNG screenshots,
 `analysis.json` under `target/diagnostics/agent-tui-*`. Explicit `--out-dir`
 overrides that location. The harness fails if a captured state is blank
 or lacks visible terminal cells. Missing optional CLIs/tools are reported as skips;
-the shell and prompt-shaped states always run. The Codex/Claude legs remain
-version/help captures or opt-in noninteractive authenticated prompts; they do
-not test interactive image-paste shortcuts. When tmux is available, the run
-also writes `tmux.png`, `tmux.screen.json`, and `tmux.cells.json`. A
+the shell and prompt-shaped states always run. After a successful authenticated
+Claude marker prompt on Linux or macOS, the harness also launches an interactive
+`CLAUDE_CODE_NO_FLICKER=1 claude` REPL in this repository and sends `/diff` at
+narrow and wide window sizes. It captures `claude-diff-panel-narrow` and
+`claude-diff-panel-wide` states to check the width-dependent refusal and panel.
+A missing REPL prompt, including login, repository-trust or first-run dialogs,
+produces a captured `claude-diff-panel-no-repl` skip; the harness does not answer
+those dialogs. Strict auth mode fails if this probe skips or fails, even when
+the marker prompt passed. These probes do not test interactive image-paste shortcuts. When tmux is
+available, the run also writes `tmux.png`, `tmux.screen.json`, and `tmux.cells.json`. A
 compile-capable tmux with nonzero cell-pixel geometry additionally produces
 `tmux-sixel.png` and pixel evidence. Zero geometry produces a captured
 `tmux-sixel-fallback` state but remains an explicit render skip; an older,
@@ -1732,9 +1746,11 @@ This is also desktop-local because it opens real GUI terminal windows.
 - **Terminal-wide, not per-client.** Once enabled, every same-user client gets
   the selected mode across all windows in the process without an additional
   prompt, pairing token, or per-client capability grant.
-- **Auditable.** Every connection and every mutating method is logged. When the
-  dev-record recorder is active, each agent action is annotated in the `.cast`
-  trace as an `m` marker (`kettle:agent <method> conn=N`).
+- **Audit coverage.** Connection opens and closes and selected methods are
+  logged; the normal log is not a complete mutation audit. When the dev-record
+  recorder is active, each dispatched agent request other than an internal
+  probe is annotated in the `.cast` trace as an `m` marker
+  (`kettle:agent <method> conn=N`).
 
 If you don't want any of this, do nothing — it stays off.
 

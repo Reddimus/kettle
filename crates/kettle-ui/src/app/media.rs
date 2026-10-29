@@ -1186,6 +1186,14 @@ impl App {
     ) {
         use kettle_media::FailureCode;
         use kettle_media::client::RenderError;
+        if !self
+            .window_by_seq(ws, render.window)
+            .and_then(|window| window.mux.panes.get(&render.pane))
+            .and_then(|pane| pane.media_shelf.get(render.item))
+            .is_some_and(|item| item.generation == render.generation)
+        {
+            return;
+        }
         let verdict = match &result {
             Ok(output) => self
                 .window_by_seq(ws, render.window)
@@ -1266,7 +1274,8 @@ impl App {
         render: &crate::media::LaneRender,
     ) {
         // What the lane asked for it and is still waiting reads nothing.
-        self.media.withdraw_lane_renders(render.pane, render.item);
+        self.media
+            .withdraw_lane_renders(render.pane, render.item, render.generation);
         if let Some(item) = self
             .window_by_seq(ws, render.window)
             .and_then(|window| window.mux.panes.get_mut(&render.pane))
