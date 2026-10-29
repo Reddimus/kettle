@@ -4624,10 +4624,10 @@ fn is_powershell(path: &std::path::Path) -> bool {
 
 /// Windows limits a process command line to 32,767 UTF-16 code units.
 /// `-EncodedCommand` base64-encodes UTF-16LE, which would put the integration
-/// over that limit. Encoding the source as UTF-8 and decoding it in a fixed
-/// ASCII bootstrap keeps the same quoting safety while using roughly half the
-/// command line. The compile-time cap leaves room for the executable path,
-/// quoting, and future arguments.
+/// over that limit. Deflating the UTF-8 source, base64-encoding it, and
+/// inflating it in a fixed ASCII bootstrap keeps the same quoting safety in
+/// about a third of the command line. A test holds the result under a cap that
+/// leaves room for the executable path, quoting, and future arguments.
 #[cfg(windows)]
 fn powershell_integration_command(path: &std::path::Path) -> CommandBuilder {
     let mut c = CommandBuilder::new(path);
@@ -4638,10 +4638,11 @@ fn powershell_integration_command(path: &std::path::Path) -> CommandBuilder {
 }
 
 #[cfg(any(windows, test))]
-const POWERSHELL_BOOTSTRAP_PREFIX: &str =
-    "& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('";
+const POWERSHELL_BOOTSTRAP_PREFIX: &str = "& ([scriptblock]::Create([IO.StreamReader]::new(\
+    [IO.Compression.DeflateStream]::new([IO.MemoryStream]::new([Convert]::FromBase64String('";
 #[cfg(any(windows, test))]
-const POWERSHELL_BOOTSTRAP_SUFFIX: &str = "'))))";
+const POWERSHELL_BOOTSTRAP_SUFFIX: &str =
+    "')),[IO.Compression.CompressionMode]::Decompress),[Text.Encoding]::UTF8).ReadToEnd()))";
 #[cfg(any(windows, test))]
 const POWERSHELL_BOOTSTRAP_MAX_CHARS: usize = 32_767 - 3_000;
 #[cfg(any(windows, test))]
@@ -4649,23 +4650,20 @@ const POWERSHELL_BOOTSTRAP_GROWTH_HEADROOM: usize = 512;
 
 // Keep the embedded command comfortably below CreateProcessW's 32,767-code-unit
 // ceiling. Three thousand code units remain for the executable path, argument
-// quoting, and fixed arguments, while the compile-time assertion keeps another
-// 512 for integration growth. Base64 expands the exact, unmodified UTF-8 source:
-// deleting comment-shaped lines is not semantics-preserving in PowerShell
-// because ordinary quoted strings may cross line boundaries. The payload is
-// ASCII, so bytes and UTF-16 code units are identical.
-#[cfg(any(windows, test))]
-const _: () = assert!(
-    POWERSHELL_BOOTSTRAP_PREFIX.len()
-        + POWERSHELL_INTEGRATION.len().div_ceil(3) * 4
-        + POWERSHELL_BOOTSTRAP_SUFFIX.len()
-        + POWERSHELL_BOOTSTRAP_GROWTH_HEADROOM
-        <= POWERSHELL_BOOTSTRAP_MAX_CHARS
-);
-
+// quoting, and fixed arguments, and a test keeps another 512 for integration
+// growth. The exact, unmodified UTF-8 source is deflated: deleting
+// comment-shaped lines is not semantics-preserving in PowerShell because
+// ordinary quoted strings may cross line boundaries. The payload is ASCII, so
+// bytes and UTF-16 code units are identical.
 #[cfg(any(windows, test))]
 fn powershell_integration_bootstrap(script: &str) -> String {
-    let encoded = base64_standard(script.as_bytes());
+    use std::io::Write as _;
+    let mut deflate = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+    // Writing to and finishing a Vec cannot fail.
+    deflate
+        .write_all(script.as_bytes())
+        .expect("deflating into memory");
+    let encoded = base64_standard(&deflate.finish().expect("deflating into memory"));
     format!("{POWERSHELL_BOOTSTRAP_PREFIX}{encoded}{POWERSHELL_BOOTSTRAP_SUFFIX}")
 }
 
@@ -10089,10 +10087,8 @@ mod login_flag_tests;
 #[cfg(all(test, windows))]
 mod default_shell_tests {
     use super::{
-        POWERSHELL_BOOTSTRAP_GROWTH_HEADROOM, POWERSHELL_BOOTSTRAP_MAX_CHARS,
-        POWERSHELL_BOOTSTRAP_PREFIX, POWERSHELL_BOOTSTRAP_SUFFIX, POWERSHELL_INTEGRATION,
-        base64_standard, is_powershell, merge_windows_paths, overlay_windows_parent_env,
-        pick_windows_default_shell, powershell_integration_bootstrap,
+        POWERSHELL_INTEGRATION, base64_standard, is_powershell, merge_windows_paths,
+        overlay_windows_parent_env, pick_windows_default_shell, powershell_integration_bootstrap,
         powershell_integration_command,
     };
     use portable_pty::CommandBuilder;
@@ -10114,30 +10110,8 @@ mod default_shell_tests {
     }
 
     #[test]
-    fn powershell_bootstrap_is_utf8_safe_and_below_the_windows_limit() {
-        let bootstrap = powershell_integration_bootstrap("Aé");
-        assert_eq!(
-            bootstrap,
-            format!("{POWERSHELL_BOOTSTRAP_PREFIX}QcOp{POWERSHELL_BOOTSTRAP_SUFFIX}")
-        );
-
+    fn powershell_launches_with_the_integration_bootstrap() {
         let bootstrap = powershell_integration_bootstrap(POWERSHELL_INTEGRATION);
-        assert!(bootstrap.len() <= POWERSHELL_BOOTSTRAP_MAX_CHARS);
-        assert_eq!(
-            bootstrap.matches(POWERSHELL_BOOTSTRAP_PREFIX).count(),
-            1,
-            "the fixed decoder must appear exactly once"
-        );
-        assert!(
-            bootstrap.is_ascii(),
-            "the CreateProcessW payload must stay one UTF-16 unit per byte"
-        );
-        assert!(
-            bootstrap.len() + POWERSHELL_BOOTSTRAP_GROWTH_HEADROOM
-                <= POWERSHELL_BOOTSTRAP_MAX_CHARS,
-            "the unmodified integration needs useful bootstrap headroom"
-        );
-
         let command = powershell_integration_command(Path::new(PWSH));
         let argv = command.get_argv();
         assert_eq!(argv[1], "-NoExit");

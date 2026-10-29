@@ -2395,6 +2395,7 @@ dependencies = [
  "anyhow",
  "criterion",
  "crossbeam-channel",
+ "flate2",
  "fs4",
  "kettle-state",
  "kettle-test-support",
