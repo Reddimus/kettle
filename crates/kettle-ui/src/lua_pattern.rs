@@ -55,6 +55,8 @@ impl Budget {
         self.remaining.store(MAX_PATTERN_STEPS, Ordering::Relaxed);
     }
 
+    // Rust 1.99 renames fetch_update to try_update; the MSRV (1.95) predates it.
+    #[allow(deprecated)]
     fn charge(&self, steps: usize) -> Result<()> {
         if self.tripped.load(Ordering::Relaxed)
             || self
