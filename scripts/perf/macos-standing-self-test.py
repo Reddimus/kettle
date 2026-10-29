@@ -4747,7 +4747,8 @@ class ConfigClosureTests(unittest.TestCase):
         text = parser.read_text().split('pub fn parse_collect(text: &str)')[1].split('\n    }\n')[0]
         text = re.sub(r'//[^\n]*', '', text)
         keys = set()
-        for match in re.finditer(r'^ {16}("[a-z0-9_-]+"(?:\s*\|\s*"[a-z0-9_-]+")*)\s*=>', text, re.M):
+        # An arm may carry a guard (`"full-screen" | "full_screen" if ... =>`).
+        for match in re.finditer(r'^ {16}("[a-z0-9_-]+"(?:\s*\|\s*"[a-z0-9_-]+")*)(?:\s+if\s[^\n]*?)?\s*=>', text, re.M):
             keys.update(k.replace('_', '-') for k in re.findall(r'"([a-z0-9_-]+)"', match[1]))
         self.assertEqual(standing.CONFIG_KEYS, keys)
         self.assertIn('cfg.background_image = e.value.trim().to_string()', text)

@@ -4240,7 +4240,7 @@ root=sys.argv[1]
 record=os.path.join(root,'run','lazyvcs-loaded-source')
 before=os.lstat(record)
 if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_size>4096: raise RuntimeError('invalid LazyVCS module record')
-fd=os.open(record,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|os.O_NONBLOCK)
+fd=os.open(record,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0))
 try:
   opened=os.fstat(fd)
   if not stat.S_ISREG(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(before.st_dev,before.st_ino): raise RuntimeError('LazyVCS module record changed while opening')
@@ -4283,7 +4283,7 @@ while time.monotonic()<deadline:
   except FileNotFoundError:
     time.sleep(0.05); continue
   if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_size>4096: raise RuntimeError('invalid sandbox marker')
-  fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|os.O_NONBLOCK)
+  fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0))
   try:
     opened=os.fstat(fd)
     if not stat.S_ISREG(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(before.st_dev,before.st_ino): raise RuntimeError('sandbox marker changed while opening')
@@ -4385,7 +4385,7 @@ def file_digest(path,count_entry=True):
   before=os.lstat(path)
   if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode): raise RuntimeError(f'identity only accepts a regular file: {{path}}')
   if count_entry: add_entry(path)
-  flags=os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|os.O_NONBLOCK
+  flags=os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0)
   fd=os.open(path,flags)
   h=hashlib.sha256(); read_bytes=0
   try:
@@ -4609,7 +4609,7 @@ print(json.dumps(result,sort_keys=True))
             "    if scope=='pidfile':\n"
             "      record=root+'/run/nvim.pid'\n"
             "      try:\n"
-            "        flags=os.O_RDONLY|os.O_NONBLOCK|getattr(os,'O_NOFOLLOW',0)\n"
+            "        flags=os.O_RDONLY|getattr(os,'O_NONBLOCK',0)|getattr(os,'O_NOFOLLOW',0)\n"
             "        fd=os.open(record,flags)\n"
             "        try:\n"
             "          meta=os.fstat(fd)\n"
