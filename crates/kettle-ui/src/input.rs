@@ -146,6 +146,8 @@ impl WheelAccum {
         // discard vertical progress.
         if wheel_reverses(dy, self.notches) {
             self.notches = 0.0;
+        }
+        if wheel_reverses(dy, self.lines) {
             self.lines = 0.0;
         }
         if wheel_reverses(dx, self.cols) {
@@ -410,6 +412,17 @@ pub fn encode_app_keypad(
     }
     let c = match key {
         Key::Named(NamedKey::Enter) => b'M',
+        Key::Named(NamedKey::Insert) => b'p',
+        Key::Named(NamedKey::End) => b'q',
+        Key::Named(NamedKey::ArrowDown) => b'r',
+        Key::Named(NamedKey::PageDown) => b's',
+        Key::Named(NamedKey::ArrowLeft) => b't',
+        Key::Named(NamedKey::Clear) => b'u',
+        Key::Named(NamedKey::ArrowRight) => b'v',
+        Key::Named(NamedKey::Home) => b'w',
+        Key::Named(NamedKey::ArrowUp) => b'x',
+        Key::Named(NamedKey::PageUp) => b'y',
+        Key::Named(NamedKey::Delete) => b'n',
         Key::Character(s) => match s.chars().next()? {
             '0' => b'p',
             '1' => b'q',
@@ -782,6 +795,7 @@ fn encode_kitty_key_event(
 }
 
 struct KittyKeyEvent {
+    has_layout_identity: bool,
     logical_key: Key,
     key_without_modifiers: Key,
     text: Option<String>,
@@ -794,6 +808,7 @@ struct KittyKeyEvent {
 impl From<&KeyEvent> for KittyKeyEvent {
     fn from(event: &KeyEvent) -> Self {
         Self {
+            has_layout_identity: true,
             logical_key: event.logical_key.clone(),
             key_without_modifiers: event.key_without_modifiers(),
             text: event.text.as_deref().map(str::to_owned),
@@ -831,6 +846,7 @@ fn synthetic_key_event(key: &Key, mods: ModifiersState) -> KittyKeyEvent {
     };
 
     KittyKeyEvent {
+        has_layout_identity: false,
         logical_key: key.clone(),
         // Agent tokens describe logical keys rather than a physical keyboard
         // position, so no layout-derived alternate key is available.
@@ -1135,17 +1151,16 @@ fn kitty_textual_base(
     };
     if character.chars().count() == 1 {
         let shifted = character.chars().next()?;
-        let mut unshifted = if mods.shift_key() {
-            shifted.to_lowercase().next().unwrap_or(shifted)
+        let unshifted = if mods.shift_key() {
+            match event.key_without_modifiers.as_ref() {
+                Key::Character(base) if event.has_layout_identity && base.chars().count() == 1 => {
+                    base.chars().next()?
+                }
+                _ => shifted.to_lowercase().next().unwrap_or(shifted),
+            }
         } else {
             shifted
         };
-        if mods.shift_key()
-            && unshifted == shifted
-            && let Key::Character(without_modifiers) = event.key_without_modifiers.as_ref()
-        {
-            unshifted = without_modifiers.chars().next().unwrap_or(unshifted);
-        }
         let primary = u32::from(unshifted);
         let alternate = u32::from(shifted);
         if mode.contains(TermMode::REPORT_ALTERNATE_KEYS) && primary != alternate {
@@ -1274,6 +1289,7 @@ mod tests {
         repeat: bool,
     ) -> KittyKeyEvent {
         KittyKeyEvent {
+            has_layout_identity: true,
             logical_key,
             key_without_modifiers,
             text: text.map(str::to_owned),
@@ -1759,6 +1775,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn kitty_shifted_turkish_i_uses_the_layout_identity() {
+        let event = protocol_event(
+            Key::Character("I".into()),
+            Key::Character("\u{131}".into()),
+            Some("I"),
+            "I",
+            KeyLocation::Standard,
+            ElementState::Pressed,
+            false,
+        );
+        assert_eq!(
+            encode_kitty_key_event(
+                &event,
+                ModifiersState::SHIFT,
+                TermMode::REPORT_ALL_KEYS_AS_ESC
+            ),
+            Some(b"\x1b[305;2u".to_vec()),
+            "the primary code must be the layout's dotless i"
+        );
     }
 
     #[test]
@@ -2375,6 +2413,34 @@ mod tests {
     /// Application-keypad mode (DECKPAM) makes unmodified
     /// numpad keys emit SS3 sequences; without it (and off the numpad) they send
     /// plain ASCII via the normal encoder.
+    #[test]
+    fn app_keypad_encodes_num_lock_off_navigation() {
+        for (key, code) in [
+            (NamedKey::Insert, b'p'),
+            (NamedKey::End, b'q'),
+            (NamedKey::ArrowDown, b'r'),
+            (NamedKey::PageDown, b's'),
+            (NamedKey::ArrowLeft, b't'),
+            (NamedKey::Clear, b'u'),
+            (NamedKey::ArrowRight, b'v'),
+            (NamedKey::Home, b'w'),
+            (NamedKey::ArrowUp, b'x'),
+            (NamedKey::PageUp, b'y'),
+            (NamedKey::Delete, b'n'),
+        ] {
+            assert_eq!(
+                encode_app_keypad(
+                    &Key::Named(key),
+                    KeyLocation::Numpad,
+                    ModifiersState::empty(),
+                    TermMode::APP_KEYPAD
+                ),
+                Some(vec![0x1b, b'O', code]),
+                "Num Lock-off {key:?} must retain its keypad identity"
+            );
+        }
+    }
+
     #[test]
     fn app_keypad_emits_ss3_for_numpad() {
         use winit::keyboard::{Key, KeyLocation, NamedKey, SmolStr};
@@ -3435,6 +3501,20 @@ mod tests {
         assert!(
             total >= 1,
             "small pixel deltas must accumulate, got {total}"
+        );
+    }
+
+    #[test]
+    fn wheel_reversal_discards_lines_after_notches_are_drained() {
+        use winit::event::MouseScrollDelta;
+        let mut accum = WheelAccum::default();
+        let forward = accum.feed(&MouseScrollDelta::LineDelta(0.0, 1.0), 0.5);
+        assert_eq!(forward.notches, 1);
+        assert_eq!(forward.lines, 1);
+        let reverse = accum.feed(&MouseScrollDelta::LineDelta(0.0, -0.75), 0.5);
+        assert_eq!(
+            reverse.lines, -1,
+            "line residue must reset independently of notch residue"
         );
     }
 

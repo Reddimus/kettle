@@ -29,7 +29,9 @@ pub use private::{
     stage_user_selected_file_new, truncate_private_file, validate_trusted_directory,
 };
 #[cfg(unix)]
-pub use tree::{TreeRemovalLimits, directory_is_empty, remove_directory_tree_at};
+pub use tree::{
+    TreeRemovalLimits, directory_is_empty, remove_directory_tree_at, remove_owned_readonly_tree_at,
+};
 
 /// Maximum on-disk size of the shared remote-command spool.
 ///

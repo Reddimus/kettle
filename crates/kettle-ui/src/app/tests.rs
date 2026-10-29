@@ -983,6 +983,7 @@ fn echo_bypass_timestamp_only_marks_windows_that_accepted_input() {
             result: PaneInputResult::ReadOnly,
             accepted: true,
             receipt_accepted: false,
+            pending_accepted: false,
         },
         input_time,
     );
@@ -992,6 +993,7 @@ fn echo_bypass_timestamp_only_marks_windows_that_accepted_input() {
             result: PaneInputResult::ReadOnly,
             accepted: false,
             receipt_accepted: false,
+            pending_accepted: false,
         },
         input_time,
     );
@@ -8434,6 +8436,59 @@ fn docking_retargets_pane_owned_focus_state() {
         .unwrap();
     assert!(before < attach && attach < notify);
     assert!(notify < dock.find("self.resize_all(target);").unwrap());
+}
+
+#[test]
+fn docked_paste_owners_are_dismissed_independently_on_input() {
+    let now = std::time::Instant::now();
+    let mut ws = WindowState::new(2, Mux::new());
+    ws.media_paste_receipt = Some(crate::window_state::MediaPasteReceiptState::new_image(
+        9,
+        "old.png".into(),
+        crate::paste_image::PastedImagePreview {
+            image: kettle_core::ImageData::solid(1, 1, [0, 0, 0, 255]).unwrap(),
+            original_width: 1,
+            original_height: 1,
+        },
+        false,
+        true,
+        now,
+    ));
+    let mut donor = WindowState::new(1, Mux::new());
+    donor.pending_video_paste_receipt = Some(crate::window_state::PendingVideoPasteReceipt {
+        pane_id: 7,
+        generation: 41,
+        request: crate::video_preview::VideoPasteRequest::from_user_paths(
+            &[std::env::current_dir().unwrap().join("missing.mp4")],
+            crate::video_preview::VideoPasteSource::Drop,
+        )
+        .unwrap(),
+        remote: false,
+        prefer_top: true,
+        created_at: now,
+        previous_receipt: None,
+    });
+    let tab = crate::mux::Tab {
+        root: crate::mux::Node::Leaf(7),
+        focus: 7,
+        title_override: None,
+        zoomed: false,
+        last_output_at: None,
+        last_seen_at: None,
+        bell: false,
+        lanes: Default::default(),
+    };
+    ws.adopt_moved_paste_state(donor.take_moved_paste_state(&tab, now));
+    App::dismiss_media_paste_receipt_after_input(&mut ws, 7, PaneInputResult::Backpressured);
+    assert!(ws.expects_video_preview(7, 41));
+    App::dismiss_media_paste_receipt_after_input(&mut ws, 7, PaneInputResult::Queued);
+    assert!(
+        !ws.expects_video_preview(7, 41),
+        "accepted input must cancel its own docked preview"
+    );
+    assert_eq!(ws.media_paste_receipt.as_ref().unwrap().pane_id, 9);
+    App::dismiss_media_paste_receipt_after_input(&mut ws, 9, PaneInputResult::Queued);
+    assert!(ws.media_paste_receipt.is_none());
 }
 
 /// A video preview requested before its tab moved reaches the window the

@@ -52,6 +52,44 @@ pub fn remove_directory_tree_at(
     held: &File,
     limits: TreeRemovalLimits,
 ) -> io::Result<()> {
+    remove_tree_at(parent, name, held, limits, false)
+}
+
+/// Remove a user-owned or root-owned tree, repairing read-only modes through
+/// held descriptors. Directories owned by another user are never entered.
+pub fn remove_owned_readonly_tree_at(
+    parent: &File,
+    name: &OsStr,
+    held: &File,
+    limits: TreeRemovalLimits,
+) -> io::Result<()> {
+    remove_tree_at(parent, name, held, limits, true)
+}
+
+fn prepare_owned_directory(directory: &File) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    let owner = directory.metadata()?.uid();
+    if owner != uid && owner != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "untrusted directory owner",
+        ));
+    }
+    if owner == uid {
+        directory.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn remove_tree_at(
+    parent: &File,
+    name: &OsStr,
+    held: &File,
+    limits: TreeRemovalLimits,
+    repair_owned: bool,
+) -> io::Result<()> {
     let root = held.metadata()?;
     if !root.is_dir() {
         return Err(io::Error::new(
@@ -60,7 +98,17 @@ pub fn remove_directory_tree_at(
         ));
     }
     let mut remaining = limits.max_entries;
-    remove_contents(held, root.dev(), 0, limits.max_depth, &mut remaining)?;
+    if repair_owned {
+        prepare_owned_directory(held)?;
+    }
+    remove_contents(
+        held,
+        root.dev(),
+        0,
+        limits.max_depth,
+        &mut remaining,
+        repair_owned,
+    )?;
 
     let name = c_string(name)?;
     if identity(&stat_at(parent, &name)?) != (root.dev(), root.ino()) {
@@ -86,6 +134,7 @@ fn remove_contents(
     depth: usize,
     max_depth: usize,
     remaining: &mut usize,
+    repair_owned: bool,
 ) -> io::Result<()> {
     // Collect first, then remove. Unlinking while a stream is open leaves
     // whether later entries appear unspecified, and the list is bounded by the
@@ -125,7 +174,17 @@ fn remove_contents(
                 "a directory changed while it was being removed",
             ));
         }
-        remove_contents(&child, device, depth + 1, max_depth, remaining)?;
+        if repair_owned {
+            prepare_owned_directory(&child)?;
+        }
+        remove_contents(
+            &child,
+            device,
+            depth + 1,
+            max_depth,
+            remaining,
+            repair_owned,
+        )?;
         drop(child);
         unlink_at(directory, &name, libc::AT_REMOVEDIR)?;
     }

@@ -2783,6 +2783,7 @@ pub enum UserEvent {
     },
     /// Fresh update facts, read off the UI thread.
     UpdateFacts(Box<crate::update_notice::UpdateFacts>),
+    UpdateCheckFinished,
     UpdateToastClaimed {
         window: u64,
         reply: crate::update_toast::ClaimReply,
@@ -4322,6 +4323,7 @@ fn paste_paths_into_target(
         result,
         accepted: result.is_queued(),
         receipt_accepted: result.is_queued(),
+        pending_accepted: false,
     })
 }
 
@@ -11743,9 +11745,11 @@ impl App {
         let scroll_to_bottom = prepare_input && self.cfg.scroll_on_keystroke;
         let scope = ws.mux.broadcast.clone();
         let cfg = &self.cfg;
-        let receipt_pane = prepare_input
-            .then(|| Self::media_paste_receipt_pane(ws))
-            .flatten();
+        let receipt_pane = if prepare_input {
+            Self::media_paste_receipt_owners(ws)
+        } else {
+            Default::default()
+        };
         let (mut delivery, recipients) = ws.mux.broadcast_encoded(
             self.cfg.modify_other_keys,
             modified_enter,
@@ -11763,9 +11767,11 @@ impl App {
         }
         if Mux::scope_crosses_windows(&scope) {
             for other in self.windows.values_mut() {
-                let receipt_pane = prepare_input
-                    .then(|| Self::media_paste_receipt_pane(other))
-                    .flatten();
+                let receipt_pane = if prepare_input {
+                    Self::media_paste_receipt_owners(other)
+                } else {
+                    Default::default()
+                };
                 let (foreign, recipients) = other.mux.broadcast_encoded_foreign(
                     &scope,
                     self.cfg.modify_other_keys,
@@ -14989,7 +14995,7 @@ impl App {
         scroll_to_bottom: bool,
         input_time: std::time::Instant,
     ) -> PaneInputResult {
-        let receipt_pane = Self::media_paste_receipt_pane(ws);
+        let receipt_pane = Self::media_paste_receipt_owners(ws);
         let local = ws
             .mux
             .broadcast_write_delivery(bytes, scroll_to_bottom, receipt_pane);
@@ -14999,7 +15005,7 @@ impl App {
         if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
             let scope = ws.mux.broadcast.clone();
             for other in self.windows.values_mut() {
-                let receipt_pane = Self::media_paste_receipt_pane(other);
+                let receipt_pane = Self::media_paste_receipt_owners(other);
                 let delivery = other.mux.broadcast_write_foreign_delivery(
                     &scope,
                     bytes,
@@ -20354,6 +20360,7 @@ impl App {
                 let _ = (tag, notify);
                 self.request_update_facts(true);
             }
+            UserEvent::UpdateCheckFinished => self.request_update_facts(true),
             UserEvent::UpdateFacts(facts) => {
                 if self.update_facts_refresh.complete() {
                     self.apply_update_facts(ws, *facts);

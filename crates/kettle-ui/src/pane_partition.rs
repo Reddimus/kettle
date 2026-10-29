@@ -162,11 +162,31 @@ impl Metrics {
     /// The pixels `cells` whole cells and the padding on both sides take
     /// along the vertical (`rows`) or horizontal axis.
     fn extent(self, cells: f32, vertical: bool) -> f32 {
-        if vertical {
+        let pixels = if vertical {
             cells * self.cell.1 + 2.0 * self.padding.1
         } else {
             cells * self.cell.0 + 2.0 * self.padding.0
+        };
+        if self.cells_in(pixels, vertical) >= cells {
+            return pixels;
         }
+        // Round content and padding upward separately so removing padding
+        // cannot take the grid below the selected cell count.
+        let upward = |value: f64| {
+            let rounded = value as f32;
+            if f64::from(rounded) < value {
+                rounded.next_up()
+            } else {
+                rounded
+            }
+        };
+        let (cell, padding) = if vertical {
+            (self.cell.1, self.padding.1)
+        } else {
+            (self.cell.0, self.padding.0)
+        };
+        let content = upward(f64::from(cells) * f64::from(cell));
+        upward(f64::from(content) + f64::from(2.0 * padding))
     }
 
     /// The whole cells that fit in `pixels` along an axis, after padding.
@@ -422,6 +442,32 @@ mod tests {
         } else {
             0.0
         }
+    }
+
+    #[test]
+    fn fractional_extents_round_trip_larger_cell_counts() {
+        let metrics = Metrics::new((25.639301, 18.0), (89.72882, 8.0), 0.0, false).unwrap();
+        assert_eq!(
+            metrics.cells_in(metrics.extent(115.0, false), false),
+            115.0,
+            "rounding must preserve every selected cell, even when one ULP is insufficient"
+        );
+    }
+
+    #[test]
+    fn fractional_cell_extents_preserve_the_terminal_column_floor() {
+        let metrics = Metrics::new((12.000001, 18.0), (8.0, 8.0), 0.0, false).unwrap();
+        let partition = partition_leaf(
+            (0.0, 0.0, 449.0, 600.0),
+            metrics,
+            Some(LaneRequest::new(LaneSide::Right, 0.4, true)),
+        );
+        assert!(matches!(partition.lane, Some(LaneShare::Expanded(_))));
+        let cols = ((partition.terminal.2 - 16.0) / 12.000001).floor() as usize;
+        assert_eq!(
+            cols, 20,
+            "snapped pixels must retain the selected 20 terminal columns"
+        );
     }
 
     /// Every part lies in the leaf, no two overlap, and together they cover

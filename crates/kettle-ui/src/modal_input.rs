@@ -32,10 +32,17 @@ pub(crate) fn accept_committed_text(text: &str) -> Option<&str> {
 /// Append `text` to a modal buffer, dropping control characters and stopping at
 /// [`MAX_MODAL_INPUT_BYTES`]. Returns whether anything was added.
 ///
+/// At most `MAX_MODAL_INPUT_BYTES` source bytes are inspected.
 /// Truncation is silent because these fields have no overflow status line.
 pub(crate) fn push_text(buf: &mut String, text: &str) -> bool {
+    if buf.len() >= MAX_MODAL_INPUT_BYTES {
+        return false;
+    }
     let mut changed = false;
-    for ch in text.chars() {
+    for (offset, ch) in text.char_indices() {
+        if offset + ch.len_utf8() > MAX_MODAL_INPUT_BYTES {
+            break;
+        }
         if ch.is_control() {
             continue;
         }
@@ -44,6 +51,9 @@ pub(crate) fn push_text(buf: &mut String, text: &str) -> bool {
         }
         buf.push(ch);
         changed = true;
+        if buf.len() >= MAX_MODAL_INPUT_BYTES {
+            break;
+        }
     }
     changed
 }
@@ -121,6 +131,19 @@ mod tests {
             !backspace(&mut empty),
             "backspace on empty reports no change"
         );
+    }
+
+    #[test]
+    fn push_text_bounds_control_only_source_before_filtering() {
+        let mut buf = String::new();
+        let oversized = format!("{}x", "\t".repeat(MAX_MODAL_INPUT_BYTES));
+        assert!(
+            !push_text(&mut buf, &oversized),
+            "text beyond the source budget must not be scanned"
+        );
+        assert!(buf.is_empty());
+        let mut full = "x".repeat(MAX_MODAL_INPUT_BYTES);
+        assert!(!push_text(&mut full, &oversized));
     }
 
     #[test]

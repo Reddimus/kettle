@@ -40,6 +40,7 @@ use kettle_ctl::{CtlPolicy, SharedCtlPolicy};
 
 /// Max concurrent connections; excess are dropped immediately.
 const MAX_CONNECTIONS: usize = 8;
+pub(crate) const INBOX_CAP: usize = 4 * MAX_CONNECTIONS;
 /// Per-connection event queue cap (subscribers only). On overflow we drop +
 /// flag `lag` so a slow client can't make the App allocate without bound.
 const EVENT_QUEUE_CAP: usize = 256;
@@ -88,6 +89,10 @@ const DEFAULT_CONNECTION_POLICY: ConnectionPolicy = ConnectionPolicy {
     response_wait: SERVER_RESPONSE_TIMEOUT,
     subscriber_keepalive: SUBSCRIBER_KEEPALIVE,
 };
+
+fn inbox_channel() -> (Sender<CtlServerMsg>, Receiver<CtlServerMsg>) {
+    crossbeam_channel::bounded(INBOX_CAP)
+}
 
 /// A reply channel for one request (a 1-slot oneshot).
 pub type ReplyTx = Sender<Response>;
@@ -678,7 +683,7 @@ impl CtlServer {
         let policy = SharedCtlPolicy::new(policy);
         let access = policy.clone();
 
-        let (tx, rx) = crossbeam_channel::unbounded::<CtlServerMsg>();
+        let (tx, rx) = inbox_channel();
         let accept = match std::thread::Builder::new()
             .name("kettle-ctl-accept".into())
             .spawn(move || accept_loop(listener, tx, wake, access, DEFAULT_CONNECTION_POLICY))
@@ -1489,10 +1494,51 @@ mod tests {
     ) -> (String, Receiver<CtlServerMsg>) {
         let endpoint = test_endpoint(tag);
         let listener = CtlListener::bind(&endpoint).expect("bind test control listener");
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = inbox_channel();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
         std::thread::spawn(move || accept_loop(listener, tx, wake, access, policy));
         (endpoint, rx)
+    }
+
+    #[test]
+    fn connection_churn_keeps_the_app_inbox_bounded() {
+        let (tx, rx) = inbox_channel();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+            for conn_id in 0..96 {
+                active.fetch_add(1, Ordering::Relaxed);
+                let (event_tx, _event_rx) = crossbeam_channel::bounded(EVENT_CHANNEL_CAP);
+                let (start_tx, start_rx) = std::sync::mpsc::sync_channel(0);
+                let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+                let exit = ConnectionExit {
+                    active: active.clone(),
+                    conn_id,
+                    tx: tx.clone(),
+                    wake: wake.clone(),
+                };
+                let worker = std::thread::spawn(move || {
+                    let _ = start_rx.recv();
+                    drop(exit);
+                    let _ = ended_tx.send(());
+                });
+                finish_worker_spawn(Ok(worker), conn_id, event_tx, &tx, &wake, start_tx, &active);
+                ended_rx.recv().unwrap();
+                let _ = progress_tx.send(());
+            }
+        });
+        for _ in 0..16 {
+            progress_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        let _ = progress_rx.recv_timeout(Duration::from_millis(100));
+        assert!(
+            rx.len() <= 32,
+            "connection churn retained {} messages",
+            rx.len()
+        );
+        drop(rx);
+        producer.join().unwrap();
     }
 
     /// A connection that ends frees its place under `MAX_CONNECTIONS` before

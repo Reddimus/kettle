@@ -154,6 +154,33 @@ impl App {
         (previous, pending)
     }
 
+    fn dismiss_media_paste_state_for_input_pane(ws: &mut WindowState, pane_id: u64) {
+        let receipt = ws
+            .media_paste_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.pane_id == pane_id);
+        let pending = ws
+            .pending_video_paste_receipt
+            .as_ref()
+            .is_some_and(|pending| pending.pane_id == pane_id);
+        if receipt && pending {
+            Self::dismiss_media_paste_receipt_on_input(ws);
+            return;
+        }
+        if receipt {
+            ws.media_paste_receipt = None;
+        }
+        if pending {
+            ws.pending_video_paste_receipt = None;
+        }
+        if receipt || pending {
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     pub(super) fn dismiss_media_paste_receipt_for_pane(
         &mut self,
         ws: &mut WindowState,
@@ -168,7 +195,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|receipt| receipt.pane_id == pane_id)
         {
-            Self::dismiss_media_paste_receipt_on_input(ws);
+            Self::dismiss_media_paste_state_for_input_pane(ws, pane_id);
             return;
         }
         if let Some(window) = self.windows.values_mut().find(|window| {
@@ -181,19 +208,21 @@ impl App {
                     .as_ref()
                     .is_some_and(|receipt| receipt.pane_id == pane_id)
         }) {
-            Self::dismiss_media_paste_receipt_on_input(window);
+            Self::dismiss_media_paste_state_for_input_pane(window, pane_id);
         }
     }
 
-    pub(super) fn media_paste_receipt_pane(ws: &WindowState) -> Option<u64> {
-        ws.media_paste_receipt
-            .as_ref()
-            .map(|receipt| receipt.pane_id)
-            .or_else(|| {
-                ws.pending_video_paste_receipt
-                    .as_ref()
-                    .map(|receipt| receipt.pane_id)
-            })
+    pub(super) fn media_paste_receipt_owners(ws: &WindowState) -> crate::mux::PasteReceiptOwners {
+        crate::mux::PasteReceiptOwners {
+            receipt: ws
+                .media_paste_receipt
+                .as_ref()
+                .map(|receipt| receipt.pane_id),
+            pending: ws
+                .pending_video_paste_receipt
+                .as_ref()
+                .map(|pending| pending.pane_id),
+        }
     }
 
     pub(super) fn dismiss_media_paste_receipt_after_input(
@@ -201,8 +230,8 @@ impl App {
         pane_id: u64,
         result: PaneInputResult,
     ) {
-        if result.is_queued() && Self::media_paste_receipt_pane(ws) == Some(pane_id) {
-            Self::dismiss_media_paste_receipt_on_input(ws);
+        if result.is_queued() {
+            Self::dismiss_media_paste_state_for_input_pane(ws, pane_id);
         }
     }
 
@@ -210,8 +239,16 @@ impl App {
         ws: &mut WindowState,
         delivery: PaneInputDelivery,
     ) {
-        if delivery.receipt_accepted {
-            Self::dismiss_media_paste_receipt_on_input(ws);
+        let owners = Self::media_paste_receipt_owners(ws);
+        if delivery.receipt_accepted
+            && let Some(pane_id) = owners.receipt
+        {
+            Self::dismiss_media_paste_state_for_input_pane(ws, pane_id);
+        }
+        if delivery.pending_accepted
+            && let Some(pane_id) = owners.pending
+        {
+            Self::dismiss_media_paste_state_for_input_pane(ws, pane_id);
         }
     }
 
@@ -691,14 +728,14 @@ impl App {
             if let Some(rec) = self.recorder.as_mut() {
                 rec.record_marker(&format!("kettle:paste len={}", text.chars().count()));
             }
-            let receipt_pane = Self::media_paste_receipt_pane(ws);
+            let receipt_pane = Self::media_paste_receipt_owners(ws);
             let local = ws.mux.broadcast_paste_delivery(text, receipt_pane);
             Self::dismiss_media_paste_receipt_after_delivery(ws, local);
             let mut result = local.result;
             if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
                 let scope = ws.mux.broadcast.clone();
                 for other in self.windows.values_mut() {
-                    let receipt_pane = Self::media_paste_receipt_pane(other);
+                    let receipt_pane = Self::media_paste_receipt_owners(other);
                     let delivery =
                         other
                             .mux
@@ -914,7 +951,7 @@ impl App {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
     ) -> PaneInputDelivery {
-        let receipt_pane = Self::media_paste_receipt_pane(ws);
+        let receipt_pane = Self::media_paste_receipt_owners(ws);
         let delivery = ws.mux.broadcast_paste_paths_foreign_delivery(
             scope,
             paths,

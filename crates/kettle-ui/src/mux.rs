@@ -223,6 +223,21 @@ impl PaneInputResult {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PasteReceiptOwners {
+    pub receipt: Option<u64>,
+    pub pending: Option<u64>,
+}
+
+impl From<Option<u64>> for PasteReceiptOwners {
+    fn from(receipt: Option<u64>) -> Self {
+        Self {
+            receipt,
+            pending: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PaneInputDelivery {
     pub result: PaneInputResult,
@@ -231,6 +246,7 @@ pub(crate) struct PaneInputDelivery {
     /// broadcast can succeed elsewhere while that pane rejects, which must not
     /// create success chrome or dismiss a still-valid receipt there.
     pub receipt_accepted: bool,
+    pub pending_accepted: bool,
 }
 
 impl PaneInputDelivery {
@@ -239,6 +255,7 @@ impl PaneInputDelivery {
             result: PaneInputResult::Queued,
             accepted: false,
             receipt_accepted: false,
+            pending_accepted: false,
         }
     }
 
@@ -252,11 +269,20 @@ impl PaneInputDelivery {
         self.record(result);
     }
 
-    fn record_for(&mut self, pane_id: u64, receipt_pane: Option<u64>, result: PaneInputResult) {
-        if receipt_pane == Some(pane_id) {
+    fn record_for(
+        &mut self,
+        pane_id: u64,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
+        result: PaneInputResult,
+    ) {
+        let owners = receipt_pane.into();
+        if owners.receipt == Some(pane_id) {
             self.record_receipt_target(result);
         } else {
             self.record(result);
+        }
+        if owners.pending == Some(pane_id) {
+            self.pending_accepted |= result.is_queued();
         }
     }
 }
@@ -645,17 +671,9 @@ fn initial_pane_title(argv: &[String]) -> String {
         return "kettle".into();
     };
     if arg0 == "ssh" {
-        let host = argv
-            .iter()
-            .skip(1)
-            .find(|a| !a.starts_with('-'))
-            .cloned()
-            .unwrap_or_default();
-        return if host.is_empty() {
-            "ssh".into()
-        } else {
-            format!("ssh {host}")
-        };
+        return kettle_remote::detect_ssh(argv)
+            .map(|context| kettle_remote::format_remote_title(&context))
+            .unwrap_or_else(|| "ssh".into());
     }
     // Basename of the program path — `/usr/bin/htop` → `htop`. Falls back
     // to the raw arg if it has no path separators.
@@ -1730,8 +1748,22 @@ pub struct ClosedTab {
     /// Argv of the first leaf — empty means the configured shell.
     pub argv: Vec<String>,
     /// OSC-7 cwd of the first leaf at the moment of close, or `None`
-    /// if no usable cwd was reported.
+    /// if no cwd was reported.
     pub cwd: Option<String>,
+}
+
+impl ClosedTab {
+    fn capture(original_index: usize, argv: Vec<String>, raw_cwd: Option<String>) -> Self {
+        Self {
+            original_index,
+            argv,
+            cwd: raw_cwd,
+        }
+    }
+
+    fn launch(&self) -> (Vec<String>, Option<String>) {
+        launch_cwd(self.argv.clone(), self.cwd.clone())
+    }
 }
 
 /// Max closed-tab snapshots held for `Action::UndoCloseTab`. Browser-
@@ -3581,11 +3613,8 @@ impl Mux {
             // we undo evicts the oldest.
             let first_leaf = self.tabs[idx].root.first_leaf();
             if let Some(pane) = self.panes.get(&first_leaf) {
-                let snap = ClosedTab {
-                    original_index: idx,
-                    argv: pane.argv.clone(),
-                    cwd: usable_cwd(pane.term.current_dir_or_native()),
-                };
+                let snap =
+                    ClosedTab::capture(idx, pane.argv.clone(), pane.term.current_dir_or_native());
                 if self.closed_tabs.len() >= CLOSED_TAB_RING_CAP {
                     self.closed_tabs.pop_front();
                 }
@@ -3732,7 +3761,8 @@ impl Mux {
         };
         // Re-spawn the same argv + cwd. Empty argv → configured shell
         // (matches `new_tab_with`'s contract).
-        let id = self.spawn_pane(cfg, geometry, waker, snap.cwd.as_deref(), &snap.argv)?;
+        let (argv, cwd) = snap.launch();
+        let id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
         self.closed_tabs.pop_back();
         let insert_at = snap.original_index.min(self.tabs.len());
         self.tabs.insert(
@@ -3860,7 +3890,7 @@ impl Mux {
         &mut self,
         bytes: &[u8],
         scroll_to_bottom: bool,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         self.broadcast_write_inner(bytes, scroll_to_bottom, receipt_pane)
     }
@@ -3869,7 +3899,7 @@ impl Mux {
         &mut self,
         bytes: &[u8],
         scroll_to_bottom: bool,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         // Respect the `BroadcastScope` enum. Off short-circuits; Tab keeps the
         // active-tab behavior; All targets every pane window-wide; Group(name)
@@ -3910,7 +3940,7 @@ impl Mux {
         scope: &BroadcastScope,
         bytes: &[u8],
         scroll_to_bottom: bool,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         let mut delivery = PaneInputDelivery::new();
         for id in self.foreign_target_ids(scope) {
@@ -3933,7 +3963,7 @@ impl Mux {
         policy: ModifyOtherKeysMode,
         sample_automatic_context: bool,
         scroll_to_bottom: bool,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
         encode: F,
     ) -> (PaneInputDelivery, Vec<u64>)
     where
@@ -3956,7 +3986,7 @@ impl Mux {
         policy: ModifyOtherKeysMode,
         sample_automatic_context: bool,
         scroll_to_bottom: bool,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
         encode: F,
     ) -> (PaneInputDelivery, Vec<u64>)
     where
@@ -3979,7 +4009,7 @@ impl Mux {
         policy: ModifyOtherKeysMode,
         sample_automatic_context: bool,
         scroll_to_bottom: bool,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
         encode: F,
     ) -> (PaneInputDelivery, Vec<u64>)
     where
@@ -4105,7 +4135,7 @@ impl Mux {
     pub(crate) fn broadcast_paste_delivery(
         &mut self,
         text: &str,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         let ids = self.broadcast_target_ids();
         self.paste_into(ids, text, receipt_pane)
@@ -4119,7 +4149,7 @@ impl Mux {
         &mut self,
         scope: &BroadcastScope,
         text: &str,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         let ids = self.foreign_target_ids(scope);
         self.paste_into(ids, text, receipt_pane)
@@ -4130,7 +4160,7 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         let ids = self.broadcast_target_ids();
         self.paste_paths_into(ids, paths, trailing_space, max_text_bytes, receipt_pane)
@@ -4156,7 +4186,7 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         let ids = self.foreign_target_ids(scope);
         self.paste_paths_into(ids, paths, trailing_space, max_text_bytes, receipt_pane)
@@ -4196,7 +4226,7 @@ impl Mux {
         &mut self,
         ids: Vec<u64>,
         text: &str,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         if ids.is_empty() {
             return PaneInputDelivery::new();
@@ -4246,7 +4276,7 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         let targets = ids
             .iter()
@@ -4261,6 +4291,7 @@ impl Mux {
                 result: PaneInputResult::Oversize,
                 accepted: false,
                 receipt_accepted: false,
+                pending_accepted: false,
             };
         }
 
@@ -4775,11 +4806,10 @@ pub(crate) fn quote_path_for(kind: PaneShellKind, s: &str) -> String {
             let mut out = String::with_capacity(s.len() + 2);
             out.push('\'');
             for ch in s.chars() {
-                if ch == '\'' {
-                    out.push_str("''");
-                } else {
+                if matches!(ch, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
                     out.push(ch);
                 }
+                out.push(ch);
             }
             out.push('\'');
             out
@@ -4980,6 +5010,20 @@ mod node_tests {
             "the production slice retained a test-only item"
         );
         production
+    }
+
+    #[test]
+    fn docked_paste_owners_keep_separate_broadcast_results() {
+        let owners = PasteReceiptOwners {
+            receipt: Some(9),
+            pending: Some(7),
+        };
+        let mut delivery = PaneInputDelivery::new();
+        delivery.record_for(9, owners, PaneInputResult::Backpressured);
+        delivery.record_for(7, owners, PaneInputResult::Queued);
+        assert!(delivery.pending_accepted);
+        assert!(!delivery.receipt_accepted);
+        assert!(delivery.accepted);
     }
 
     #[test]
@@ -7045,6 +7089,22 @@ mod node_tests {
     }
 
     #[test]
+    fn initial_ssh_title_skips_option_operands() {
+        for args in [
+            vec!["ssh", "-p", "2222", "alice@server"],
+            vec!["ssh", "-J", "bastion", "alice@server"],
+            vec!["ssh", "-i", "/tmp/key", "alice@server"],
+        ] {
+            let argv: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert_eq!(
+                initial_pane_title(&argv),
+                "ssh alice@server",
+                "title must name the destination"
+            );
+        }
+    }
+
+    #[test]
     fn initial_pane_title_seeds_ssh_with_target_else_kettle() {
         // Plain shell (or empty argv) → "kettle" placeholder; the
         // cwd-basename fallback fills it in once OSC 7 arrives.
@@ -7528,6 +7588,22 @@ mod node_tests {
         );
         // Already-POSIX / unrecognized → None (caller keeps the original).
         assert_eq!(windows_path_to_wsl(Path::new("/home/me/v.mp4")), None);
+    }
+
+    #[test]
+    fn powershell_paths_escape_typographic_single_quotes() {
+        for quote in ['\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}'] {
+            let path = format!("C:\\tmp\\x{quote}; whoami; #.txt");
+            assert!(path_types_exactly(
+                &["pwsh".into()],
+                std::path::Path::new(&path)
+            ));
+            assert_eq!(
+                quote_path_for(PaneShellKind::PowerShell, &path),
+                format!("'C:\\tmp\\x{quote}{quote}; whoami; #.txt'"),
+                "PowerShell quote delimiters must be doubled"
+            );
+        }
     }
 
     #[test]
@@ -8575,6 +8651,28 @@ mod node_tests {
             TabActivity::Output,
             "backward clock should NOT trigger Silent"
         );
+    }
+
+    #[test]
+    fn closed_wsl_tabs_restore_the_reported_linux_directory() {
+        let snap = ClosedTab::capture(
+            0,
+            vec!["wsl.exe".into(), "-d".into(), "Ubuntu".into()],
+            Some("/home/kettle-undo-close-regression/project".into()),
+        );
+        let (argv, cwd) = snap.launch();
+        assert_eq!(
+            argv,
+            [
+                "wsl.exe",
+                "--cd",
+                "/home/kettle-undo-close-regression/project",
+                "-d",
+                "Ubuntu"
+            ],
+            "undo close must restore WSL cwd through its launcher"
+        );
+        assert_eq!(cwd, None);
     }
 
     #[test]

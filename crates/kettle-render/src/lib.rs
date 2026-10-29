@@ -11923,7 +11923,9 @@ pub fn detect_gpus() -> Vec<GpuAdapterInfo> {
     pollster::block_on(enumerate_adapter_infos(&gpu_instance()))
 }
 
-fn pin_match_rank_fields(vendor: u32, device: u32, name: &str, cfg: &Config) -> u8 {
+/// Rank an adapter against a saved pin: IDs, exact name, then name substring.
+/// `u8::MAX` means no match. Shared with the Settings adapter picker.
+pub fn pin_match_rank_fields(vendor: u32, device: u32, name: &str, cfg: &Config) -> u8 {
     if cfg.gpu_vendor_id != 0
         && cfg.gpu_device_id != 0
         && vendor == cfg.gpu_vendor_id

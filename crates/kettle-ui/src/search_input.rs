@@ -512,6 +512,10 @@ impl SearchEditor {
     /// An edit that continues the last one's `run` joins its step. Returns
     /// whether the text changed.
     fn edited(&mut self, before: EditorSnapshot, run: Option<EditRun>) -> bool {
+        let boundary = grapheme_boundary_at_or_before(&self.text, self.cursor);
+        if boundary != self.cursor {
+            self.cursor = next_grapheme_boundary(&self.text, boundary);
+        }
         if before.text == self.text {
             return false;
         }
@@ -725,6 +729,13 @@ impl SearchEditor {
     }
 
     pub(crate) fn move_left(&mut self, selecting: bool, by_word: bool) {
+        if !selecting
+            && !by_word
+            && let Some(selection) = self.selection()
+        {
+            self.move_cursor(selection.start, false);
+            return;
+        }
         let next = if by_word {
             previous_word_boundary(&self.text, self.cursor)
         } else {
@@ -734,6 +745,13 @@ impl SearchEditor {
     }
 
     pub(crate) fn move_right(&mut self, selecting: bool, by_word: bool) {
+        if !selecting
+            && !by_word
+            && let Some(selection) = self.selection()
+        {
+            self.move_cursor(selection.end, false);
+            return;
+        }
         let next = if by_word {
             next_word_boundary(&self.text, self.cursor)
         } else {
@@ -1175,6 +1193,56 @@ mod tests {
                 assert!(search.anchor.is_none());
                 assert!(search.unlimited_retry_at.is_none());
             }
+        }
+    }
+
+    #[test]
+    fn inserting_a_joiner_keeps_the_caret_on_a_grapheme_boundary() {
+        let mut editor = SearchEditor::from_text("\u{1f469}\u{1f4bb}".into(), 64);
+        editor.set_cursor_at(super::QueryPoint::Byte(4), false);
+        assert!(editor.insert("\u{200d}", 64).changed);
+        assert_eq!(
+            editor.cursor(),
+            editor.text().len(),
+            "the caret must follow the joined emoji"
+        );
+        assert!(editor.backspace());
+        assert_eq!(
+            editor.text(),
+            "",
+            "Backspace must delete the whole joined emoji"
+        );
+        assert!(editor.undo());
+        assert_eq!(editor.cursor(), editor.text().len());
+    }
+
+    #[test]
+    fn plain_arrows_collapse_forward_and_reversed_selections() {
+        for reversed in [false, true] {
+            let mut editor = SearchEditor::from_text("abc".into(), 64);
+            editor.set_character_selection(
+                if reversed { 3 } else { 0 },
+                if reversed { 0 } else { 3 },
+            );
+            editor.move_left(false, false);
+            assert_eq!(
+                editor.cursor(),
+                0,
+                "Left must collapse to the selection start"
+            );
+            editor.insert("x", 64);
+            assert_eq!(editor.text(), "xabc");
+            let mut editor = SearchEditor::from_text("abc".into(), 64);
+            editor.set_character_selection(
+                if reversed { 3 } else { 0 },
+                if reversed { 0 } else { 3 },
+            );
+            editor.move_right(false, false);
+            assert_eq!(
+                editor.cursor(),
+                3,
+                "Right must collapse to the selection end"
+            );
         }
     }
 

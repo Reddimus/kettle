@@ -102,11 +102,12 @@ impl App {
     /// replies + a connection table.
     pub(super) fn drain_ctl(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
         use crate::ctl_server::CtlServerMsg;
-        // Pull all pending messages first so we don't hold a `&self.ctl` borrow
+        // Pull a bounded batch first so we don't hold a `&self.ctl` borrow
         // while calling `&mut self` handlers.
         let mut msgs = Vec::new();
         if let Some(ctl) = &self.ctl {
-            while let Some(m) = ctl.try_recv() {
+            for _ in 0..crate::ctl_server::INBOX_CAP {
+                let Some(m) = ctl.try_recv() else { break };
                 msgs.push(m);
             }
         }

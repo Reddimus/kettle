@@ -287,23 +287,55 @@ pub(crate) fn verify(_: &Path, _: &OwnedFiles) -> Result<(), ()> {
 /// cannot change is still removed when it is empty.
 #[cfg(unix)]
 pub(crate) fn remove_tree(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let metadata = path.symlink_metadata()?;
-    if !metadata.is_dir() {
-        return std::fs::remove_file(path);
-    }
-    let writable = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
-    match std::fs::read_dir(path) {
-        Ok(entries) => {
-            for entry in entries {
-                remove_tree(&entry?.path())?;
-            }
+    remove_tree_with(path, || {})
+}
+
+#[cfg(unix)]
+fn remove_tree_with(path: &Path, opened: impl FnOnce()) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let parent = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let name_c = std::ffi::CString::new(name.as_bytes())?;
+    // SAFETY: parent is held and name_c is a NUL-terminated child name.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        let flags = match error.raw_os_error() {
+            Some(libc::ELOOP | libc::ENOTDIR) => 0,
+            Some(libc::EACCES) => libc::AT_REMOVEDIR,
+            _ => return Err(error),
+        };
+        // SAFETY: unlinkat resolves only this entry in the held parent; it never follows links.
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), name_c.as_ptr(), flags) } == 0 {
+            return Ok(());
         }
-        // Unlisted, it can still go if it is empty.
-        Err(_) if writable.is_err() => {}
-        Err(error) => return Err(error),
+        return Err(std::io::Error::last_os_error());
     }
-    std::fs::remove_dir(path)
+    // SAFETY: openat transferred ownership of a valid descriptor.
+    let held = unsafe { std::fs::File::from_raw_fd(fd) };
+    opened();
+    kettle_state::remove_owned_readonly_tree_at(
+        &parent,
+        name,
+        &held,
+        kettle_state::TreeRemovalLimits {
+            max_depth: 64,
+            max_entries: 8192,
+        },
+    )
 }
 
 /// Remove what is left under `root` that no pane will get again: this
@@ -387,6 +419,29 @@ mod tests {
                 ("fish/fish/vendor_conf.d/kettle.fish", "fish\n".into()),
             ],
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_does_not_follow_a_swapped_directory() {
+        use std::os::unix::fs::symlink;
+        let base = kettle_test_support::private_tempdir("kettle-cleanup-swap-");
+        let staging = base.path().join(".staging-test");
+        let moved = base.path().join("moved");
+        let outside = base.path().join("outside");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let sentinel = outside.join("keep");
+        std::fs::write(&sentinel, b"outside").unwrap();
+        let _ = remove_tree_with(&staging, || {
+            std::fs::rename(&staging, &moved).unwrap();
+            symlink(&outside, &staging).unwrap();
+        });
+        assert_eq!(
+            std::fs::read(&sentinel).ok().as_deref(),
+            Some(&b"outside"[..]),
+            "cleanup must never traverse a replacement symlink"
+        );
     }
 
     /// Every directory a file sits in is known, parents first, and each

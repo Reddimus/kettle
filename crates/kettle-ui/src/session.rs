@@ -637,8 +637,30 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
     if let Some(dir) = p.parent() {
         kettle_state::create_private_dirs(dir)?;
     }
-    let text = serde_json::to_string_pretty(s)
-        .map_err(|e| std::io::Error::other(format!("serialize session: {e}")))?;
+    struct SessionBytes(Vec<u8>);
+    impl std::io::Write for SessionBytes {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.0.len().saturating_add(bytes.len()) as u64 > MAX_SESSION_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "outgoing session exceeds the size limit",
+                ));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut text = SessionBytes(Vec::new());
+    serde_json::to_writer_pretty(&mut text, s).map_err(|error| {
+        std::io::Error::new(
+            error.io_error_kind().unwrap_or(std::io::ErrorKind::Other),
+            format!("serialize session: {error}"),
+        )
+    })?;
+    let text = text.0;
     // A missing or unreadable file is simply "not what we are about to write".
     match open_session_file(p) {
         Ok((file, size)) => {
@@ -657,7 +679,7 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
                     .take(text.len() as u64 + 1)
                     .read_to_end(&mut on_disk)
                     .is_ok()
-                    && on_disk == text.as_bytes()
+                    && on_disk == text.as_slice()
                     && kettle_state::restrict_private_file(&file).is_ok()
                 {
                     return Ok(());
@@ -669,7 +691,7 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
     }
     kettle_state::atomic_replace(
         p,
-        text.as_bytes(),
+        text.as_slice(),
         kettle_state::AtomicWriteOptions::PRIVATE,
     )?;
     Ok(())
@@ -1124,6 +1146,44 @@ mod tests {
             ours,
             "a same-length replacement must be corrected, not mistaken for our \
              own last write"
+        );
+    }
+
+    #[test]
+    fn a_dual_written_legacy_session_cannot_replace_the_file_with_oversized_output() {
+        let dir = private_tempdir();
+        let path = dir.path().join("session.json");
+        let tab = STab {
+            root: SNode::Leaf {
+                cwd: None,
+                cmd: vec![],
+                group: None,
+            },
+            focus: 0,
+            title_override: Some("x".repeat(9 * 1024 * 1024)),
+            zoomed: false,
+        };
+        let legacy = Session {
+            tabs: vec![tab],
+            ..Session::default()
+        };
+        let original = serde_json::to_vec(&legacy).unwrap();
+        assert!(original.len() as u64 <= MAX_SESSION_BYTES);
+        std::fs::write(&path, &original).unwrap();
+        let mut loaded = load_from_path(&path).expect("a valid compact legacy session");
+        loaded.windows.push(SWindow {
+            tabs: loaded.tabs.clone(),
+            active: 0,
+            geometry: None,
+        });
+        assert!(
+            save_to_path(&loaded, &path).is_err(),
+            "oversized outgoing sessions must be rejected"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "the previous snapshot must survive"
         );
     }
 

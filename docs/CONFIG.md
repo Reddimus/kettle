@@ -181,6 +181,9 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `colorterm` | string | `truecolor` | The `COLORTERM` value exported to the PTY (advertises 24-bit color) |
 | `env` | `KEY=VALUE` | — | Repeatable; exports user environment variables to every spawned pane. Names must use portable env syntax (`[A-Za-z_][A-Za-z0-9_]*`), empty values are allowed, and later duplicates win. Kettle still owns terminal identity vars through `term`, `colorterm`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION`, and sets `KETTLE_PANE_ID` and `KETTLE_PID` after these entries so they cannot be overridden; user vars are also appended to `WSLENV` for Windows → WSL launches |
 
+SSH pane titles show the destination after skipping option operands, including
+`-p`, `-J`, and `-i` (for example, `ssh -p 2222 alice@server` shows `ssh alice@server`).
+
 ### Scrollback search
 
 `Ctrl+Shift+F` opens a responsive search bar at the bottom of the
@@ -845,6 +848,8 @@ See [`kettle.example.config`](kettle.example.config).
 The Settings panel uses sentence case for labels and display values. Config
 values keep their existing spelling. For example, `gpu-backend = auto` displays
 as **Automatic**, while `gpu-backend = dx12` displays as **DirectX 12**.
+GPU device labels resolve ID-only and name-only pins against detected adapters;
+**Automatic** means no adapter is pinned.
 `scrollback-bytes = 120MB` displays as **120 MB** under **Scrollback memory**.
 **Update check interval** displays hours as **24 h**. The panel also displays
 `13 pt`, `6 px`, `10 s`, and `99%`. See [SETTINGS.md](SETTINGS.md).

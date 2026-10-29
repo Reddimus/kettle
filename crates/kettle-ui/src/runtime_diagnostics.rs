@@ -10,6 +10,7 @@ use serde::Serialize;
 
 const SCHEMA_VERSION: u32 = 1;
 const RETAINED_INCIDENTS: usize = 10;
+const MAX_INCIDENT_SCAN: usize = 4096;
 const MAX_ERROR_CHARS: usize = 2048;
 const NORMAL_STALL: Duration = Duration::from_secs(10);
 // Deliberately precedes the renderer's 30-second fatal watchdog so the
@@ -129,11 +130,14 @@ impl RuntimeTracker {
         self.shared.windows.store(count, Ordering::Release);
     }
 
-    pub(crate) fn record_exit(&self, error: &str) {
+    pub(crate) fn record_exit(&self, _error: &str) {
         let phase = self.snapshot();
-        if let Err(write_error) =
-            write_incident(&self.shared, "event_loop_exit", &phase, Some(error))
-        {
+        if let Err(write_error) = write_incident(
+            &self.shared,
+            "event_loop_exit",
+            &phase,
+            Some("event_loop_error"),
+        ) {
             log::warn!("runtime diagnostic write failed: {write_error}");
         }
     }
@@ -343,7 +347,18 @@ fn publish_incident(dir: &Path, unix_ms: u128, pid: u32, bytes: &[u8]) -> io::Re
 }
 
 fn prune_incidents(dir: &Path, preserve: &Path) -> io::Result<()> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
+    prune_incidents_with(dir, preserve, |path| std::fs::remove_file(path))
+}
+
+fn prune_incidents_with(
+    dir: &Path,
+    preserve: &Path,
+    mut remove: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut entries = std::fs::read_dir(dir)?;
+    let mut files: Vec<PathBuf> = entries
+        .by_ref()
+        .take(MAX_INCIDENT_SCAN)
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
@@ -352,17 +367,32 @@ fn prune_incidents(dir: &Path, preserve: &Path) -> io::Result<()> {
                 .is_some_and(|name| name.starts_with("runtime-") && name.ends_with(".json"))
         })
         .collect();
+    let scan_limited = entries.next().is_some();
     files.sort();
-    while files.len() > RETAINED_INCIDENTS {
-        let Some(index) = files.iter().position(|path| path != preserve) else {
+    let mut excess = files.len().saturating_sub(RETAINED_INCIDENTS);
+    let mut cleanup_error = None;
+    for stale in files.iter().filter(|path| *path != preserve) {
+        if excess == 0 {
             break;
-        };
-        let stale = files.remove(index);
-        match std::fs::remove_file(stale) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
         }
+        match remove(stale) {
+            Ok(()) => excess -= 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => excess -= 1,
+            Err(error) => {
+                cleanup_error.get_or_insert(error);
+            }
+        }
+    }
+    if excess > 0
+        && let Some(error) = cleanup_error
+    {
+        return Err(error);
+    }
+    if scan_limited {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "incident scan limit reached",
+        ));
     }
     Ok(())
 }
@@ -438,6 +468,84 @@ mod tests {
         drop(resumed);
         assert_eq!(tracker.snapshot().name, "idle");
         tracker.stop();
+    }
+
+    #[test]
+    fn exit_incidents_do_not_retain_spawn_details() {
+        let root = kettle_test_support::private_tempdir("kettle-runtime-privacy-");
+        let tracker = RuntimeTracker::start(Some(root.path().to_owned()), "test".into());
+        tracker
+            .record_exit("spawn /private/alice/bin/missing: PATH=/private/alice/secrets:/usr/bin");
+        tracker.stop();
+        let path = std::fs::read_dir(diagnostic_dir(Some(root.path())))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(
+            !text.contains("/private/alice") && !text.contains("PATH="),
+            "runtime incidents must discard executable paths and environment values"
+        );
+        let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(event["error"], "event_loop_error");
+    }
+
+    #[test]
+    fn runtime_retention_continues_past_an_undeletable_incident() {
+        let root = kettle_test_support::private_tempdir("kettle-runtime-retention-");
+        for index in 0..12 {
+            std::fs::write(
+                root.path().join(format!("runtime-{index:04}.json")),
+                b"{}\n",
+            )
+            .unwrap();
+        }
+        let busy = root.path().join("runtime-0000.json");
+        let preserve = root.path().join("runtime-0011.json");
+        let result = prune_incidents_with(root.path(), &preserve, |path| {
+            if path == busy {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            } else {
+                std::fs::remove_file(path)
+            }
+        });
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            RETAINED_INCIDENTS,
+            "one undeletable incident must not defeat retention"
+        );
+        assert!(result.is_ok());
+        assert!(busy.exists() && preserve.exists());
+    }
+
+    #[test]
+    fn runtime_retention_bounds_each_scan_and_makes_progress_on_a_backlog() {
+        let root = kettle_test_support::private_tempdir("kettle-runtime-backlog-");
+        for index in 0..=MAX_INCIDENT_SCAN {
+            std::fs::write(
+                root.path().join(format!("runtime-{index:05}.json")),
+                b"{}\n",
+            )
+            .unwrap();
+        }
+        let preserve = root
+            .path()
+            .join(format!("runtime-{:05}.json", MAX_INCIDENT_SCAN));
+        assert_eq!(
+            prune_incidents(root.path(), &preserve).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            RETAINED_INCIDENTS + 1
+        );
+        prune_incidents(root.path(), &preserve).unwrap();
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            RETAINED_INCIDENTS
+        );
+        assert!(preserve.exists());
     }
 
     #[test]
