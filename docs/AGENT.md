@@ -862,8 +862,10 @@ the one deciding whether to retry.
 
 `run_command` correlates the shell's OSC 133 command-end marker to learn the
 exit code. **Without shell integration** there is no marker, so the call returns
-`{timed_out: true, …}` after `timeout_s` (default 15) with a hint to run
-`kettle --shell-integration <shell>`. Output is still captured either way.
+`{timed_out: true, …}` after `timeout_s` (default 15) with a hint to add the
+output of `kettle --shell-integration <shell>` to the shell's startup file and
+start a new shell (see [SHELL-INTEGRATION.md](SHELL-INTEGRATION.md)). Output is
+still captured either way.
 
 A pane the user has toggled **Read only** (right-click menu /
 `toggle_read_only`) rejects `send_text`, `send_keys` and `run_command` with

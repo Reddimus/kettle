@@ -3117,8 +3117,9 @@ impl App {
                     "timed_out": true,
                     "output": output,
                     "output_truncated": output_truncated,
-                    "hint": "no OSC 133 command-end seen — enable shell integration \
-                             (kettle --shell-integration <shell>) for exit codes",
+                    "hint": "no OSC 133 command-end seen; for exit codes, add the output of \
+                             `kettle --shell-integration <shell>` to the shell's startup file \
+                             and start a new shell",
                 }),
             );
             let _ = run.reply.send(cap_ctl_command_response(resp));
