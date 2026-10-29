@@ -261,6 +261,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   after a wide character clipped at the left edge.
 - Keep desktop notifications working after one fails on Linux.
 - Return a cancelled Wayland tab drag to its own window.
+- Check a WebP wallpaper's chunk sizes, frame dimensions and memory budget
+  before decoding it.
+- Try other GPUs of the same model during device-loss recovery instead of
+  excluding every one of them.
+- Draw IME composition text on its own opaque layer above terminal text and
+  inline cards, keeping the cursor and composed characters visible.
+- Keep the paste receipt clear of the update toast.
+- Restore the whole clipboard after the modal-shortcut smoke test, or skip
+  the test, instead of overwriting the user's clipboard.
+- Make an interrupted Unix uninstall resumable through a private journal of
+  verified files.
+- Reject audio that arrives a full second late in the A/V sync check.
+- Check a process's start time before `macos-compare` signals it, so a
+  reused process ID is never signalled.
 
 ## [5.6.0] — 2026-10-28
 
