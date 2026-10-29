@@ -14,8 +14,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Build release packages, and the tests that admit them, without restoring
   build caches written by ordinary CI runs.
 - Run weekly advisory coverage, mutation-testing and AddressSanitizer jobs.
-- Publish releases one at a time, and never mark an older release as latest
-  after a newer one.
+- Never let an older release become latest once a newer one is published,
+  whatever order their release runs finish in.
 
 ### Fixed
 
