@@ -165,6 +165,8 @@ class LiveUiTests(unittest.TestCase):
             self.fail(str(error))
         fake_os.close.assert_called_once_with(77)
 
+    # The cleanup sends SIGSTOP and SIGKILL, which Windows does not define.
+    @unittest.skipIf(sys.platform == "win32", "no SIGSTOP or SIGKILL on Windows")
     def test_darwin_descendant_pid_reuse_is_not_signalled(self):
         for relationship in ("reparented", "ancestor_reused", "candidate_reused", "owned_chain"):
             with self.subTest(relationship=relationship):

@@ -429,6 +429,7 @@ script-fixture-self-test:
     python3 scripts/check-stress-live.py --self-test
     python3 scripts/test-script-regressions.py
     python3 scripts/test-linux-checks.py
+    python3 scripts/test-newest-release.py
 
 # Live stress: binary floods, resize storms, hundreds of tabs, huge pastes
 # and titles, config churn, hostile media and parallel control clients
