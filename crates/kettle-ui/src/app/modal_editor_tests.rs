@@ -190,3 +190,66 @@ fn inside_presses_keep_fields_and_outside_presses_keep_confirmation() {
     ));
     assert!(ws.confirm_dialog.is_some());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn modal_word_editing_uses_physical_option_after_native_masking() {
+    for kind in FIELDS {
+        for policy in [
+            MacosOptionAsAlt::None,
+            MacosOptionAsAlt::Left,
+            MacosOptionAsAlt::Right,
+            MacosOptionAsAlt::Both,
+        ] {
+            for left in [false, true] {
+                for shift in [false, true] {
+                    for (key, cursor, expected_cursor, expected_text) in [
+                        (NamedKey::ArrowLeft, 7, 4, "one two"),
+                        (NamedKey::ArrowRight, 0, 4, "one two"),
+                        (NamedKey::Backspace, 7, 4, "one "),
+                        (NamedKey::Delete, 0, 0, "two"),
+                    ] {
+                        let mut ws = field(kind);
+                        ws.macos_raw_mods = ModifiersState::ALT;
+                        ws.macos_raw_mods.set(ModifiersState::SHIFT, shift);
+                        ws.macos_left_option_pressed = left;
+                        ws.macos_right_option_pressed = !left;
+                        refresh_macos_modifiers(&mut ws, policy);
+                        let editor = modal_editor_mut(&mut ws).unwrap();
+                        *editor = "one two".into();
+                        editor.set_cursor_at(crate::text_editor::QueryPoint::Byte(cursor), false);
+                        assert!(modals::edit_modal_text(
+                            &mut ws,
+                            &Key::Named(key),
+                            || None,
+                            |_| false
+                        ));
+                        let editor = modal_editor(&ws).unwrap();
+                        assert_eq!(editor.text(), expected_text, "{kind:?}/{policy:?}/{key:?}");
+                        assert_eq!(
+                            editor.cursor(),
+                            expected_cursor,
+                            "{kind:?}/{policy:?}/{key:?}"
+                        );
+                        if shift && matches!(key, NamedKey::ArrowLeft | NamedKey::ArrowRight) {
+                            assert_eq!(
+                                editor.selection(),
+                                Some(cursor.min(expected_cursor)..cursor.max(expected_cursor))
+                            );
+                        }
+                        assert!(!modals::edit_modal_text(
+                            &mut ws,
+                            &Key::Character("\u{e9}".into()),
+                            || None,
+                            |_| false
+                        ));
+                        assert_eq!(
+                            ws.mods,
+                            macos_effective_modifiers(ws.macos_raw_mods, policy, left, !left)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

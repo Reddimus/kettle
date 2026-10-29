@@ -992,6 +992,48 @@ fn reset_and_clear_scrollback_change_the_terminal_not_the_child() {
 }
 
 #[test]
+fn oversized_initial_titles_do_not_open_an_empty_editor() {
+    let (mut mux, panes) = title_test_tab_mux(1);
+    let limit = crate::modal_input::MAX_MODAL_INPUT_BYTES;
+    for title in ["x".repeat(limit + 1), "\u{65e5}".repeat(limit / 3 + 1)] {
+        mux.tabs[0].title_override = Some(title.clone());
+        mux.panes.get_mut(&panes[0]).unwrap().title = title.clone();
+        mux.panes.get_mut(&panes[0]).unwrap().group_name = Some(title.clone());
+        for scope in [
+            TitleEditScope::Tab,
+            TitleEditScope::Window,
+            TitleEditScope::Pane,
+            TitleEditScope::Group,
+        ] {
+            assert!(
+                begin_title_edit(&mux, scope, GroupBulkScope::Single, &title).is_none(),
+                "{scope:?}"
+            );
+        }
+        assert_eq!(mux.tabs[0].title_override.as_deref(), Some(title.as_str()));
+        assert_eq!(mux.panes[&panes[0]].title, title);
+        assert_eq!(
+            mux.panes[&panes[0]].group_name.as_deref(),
+            Some(title.as_str())
+        );
+    }
+    for title in [
+        String::new(),
+        "x".repeat(limit),
+        "\u{65e5}".repeat(limit / 3),
+    ] {
+        mux.tabs[0].title_override = Some(title.clone());
+        let edit = begin_title_edit(&mux, TitleEditScope::Tab, GroupBulkScope::Single, "").unwrap();
+        assert_eq!(edit.input.text(), title);
+        assert!(apply_mux_title_edit(&mut mux, &edit));
+        assert_eq!(
+            mux.tabs[0].title_override.as_deref().unwrap_or_default(),
+            title
+        );
+    }
+}
+
+#[test]
 fn pane_title_edit_never_follows_focus_to_a_sibling() {
     let (mut mux, target, sibling) = title_test_split_mux();
     mux.panes.get_mut(&target).unwrap().title = "pane-a-before".into();

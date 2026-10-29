@@ -1712,14 +1712,19 @@ focus-or-open request, recording identity and default-launch compatibility.
 `kettle-ui` tests exercise the shared editor on ASCII, combining marks, emoji
 ZWJ sequences and CJK, then wire title, command, SSH, layout, theme and Settings
 path state through the same editor accessors. They cover keyboard commands,
-clipboard failure, selection replacement and mid-string IME projections. The
+clipboard failure, selection replacement and mid-string IME projections. Native
+macOS modifier tests apply every Option-as-Alt policy before word commands in
+each modal field. Title initialization tests reject oversized ASCII and UTF-8
+values without clearing existing overrides and accept values at the byte cap. The
 shared outside-press mutation sink is exercised for every transient popup,
 Settings capture and confirmation, including the context menu's right-click
 exception. Native and control input both use this sink.
 
 `kettle-render::text_field` tests load the bundled fonts without a GPU and
 compare caret and selection placement with the shaped pointer stops, including
-long scrolled inputs, grapheme clusters, CJK and RTL. Localized prefix/hint slot
+long scrolled inputs, grapheme clusters, CJK and RTL. Fitting RTL text must keep
+all shaped clusters visible and retain its full selection width at every caret
+boundary, including Home and stale logical scroll offsets. Localized prefix/hint slot
 tests cover English and Spanish at narrow widths. These unit checks do not
 replace native IME candidate-window, pointer drag, clipboard and live-GPU checks
 on macOS and Linux; record those separately when run.

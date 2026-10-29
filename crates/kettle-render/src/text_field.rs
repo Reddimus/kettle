@@ -105,7 +105,10 @@ fn layout_text_field(
             }
         })
         .unwrap_or(field.text.len());
-    let desired = stop_x(stops, scroll_byte);
+    // A logical boundary can sit at the right edge of an RTL run. Never
+    // displace fitting text, or scroll past the shaped text's overflow.
+    let max_scroll = (clusters.iter().map(|c| c.right).fold(0.0_f32, f32::max) - width).max(0.0);
+    let desired = stop_x(stops, scroll_byte).clamp(0.0, max_scroll);
     let scroll = desired.clamp((cursor_x - width).max(0.0), cursor_x.max(0.0));
     let text_left = editor.0 + 2.0 - scroll;
     let clamp = |x: f32| x.clamp(editor.0, editor.0 + editor.2);
@@ -179,6 +182,77 @@ mod tests {
     use unicode_segmentation::UnicodeSegmentation as _;
 
     #[test]
+    fn fitting_rtl_text_stays_visible_at_every_caret_and_scroll_boundary() {
+        let mut fonts = FontSystem::new();
+        for face in kettle_config::font::all() {
+            crate::load_bundled_font(&mut fonts, face);
+        }
+        let metrics = Metrics::new(13.0, 26.0);
+        let mut buffer = TextBuffer::new(&mut fonts, metrics);
+        buffer.set_wrap(glyphon::cosmic_text::Wrap::None);
+        for text in [
+            "\u{627}\u{644}\u{633}\u{644}\u{627}\u{645}",
+            "\u{5e9}\u{5dc}\u{5d5}\u{5dd} abc",
+        ] {
+            for cursor in text
+                .grapheme_indices(true)
+                .map(|(i, _)| i)
+                .chain([text.len()])
+            {
+                for horizontal_scroll in [0, 1, 20] {
+                    let field = TextFieldOverlay {
+                        text: text.into(),
+                        cursor_byte: cursor,
+                        selection: Some((0, text.len())),
+                        horizontal_scroll,
+                        rect: (20.0, 30.0, 400.0, 26.0),
+                        prefix: String::new(),
+                        hint: String::new(),
+                        accent_palette: 5,
+                    };
+                    let layout = prepare_text_field(
+                        &mut fonts,
+                        &mut buffer,
+                        &field,
+                        8.0,
+                        metrics,
+                        "JetBrains Mono",
+                    );
+                    assert!(
+                        layout.stops.iter().all(|&(_, x)| x >= layout.editor.0 + 2.0
+                            && x <= layout.editor.0 + layout.editor.2 - 2.0),
+                        "{text:?}/{cursor}/{horizontal_scroll}: {:?}",
+                        layout.stops
+                    );
+                    let clusters = segment_clusters(
+                        &buffer,
+                        &SearchBarSegment {
+                            control: Some(SearchControl::Editor),
+                            rect: layout.editor,
+                            left: layout.editor.0,
+                            text: text.into(),
+                            rtl: starts_right_to_left(text),
+                        },
+                    );
+                    assert!(
+                        clusters
+                            .iter()
+                            .all(|c| layout.text_left + c.left >= layout.editor.0
+                                && layout.text_left + c.right <= layout.editor.0 + layout.editor.2)
+                    );
+                    let selection_width: f32 = layout.selection.iter().map(|r| r.2).sum();
+                    let shaped_width: f32 = cluster_spans(&clusters, 0, text.len())
+                        .iter()
+                        .map(|(a, b)| b - a)
+                        .sum();
+                    assert!(shaped_width > 0.0);
+                    assert!((selection_width - shaped_width).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn modal_paint_hit_testing_and_caret_use_the_same_shaped_stops() {
         let mut fonts = FontSystem::new();
         for face in kettle_config::font::all() {
@@ -192,6 +266,9 @@ mod tests {
             "a\u{301}\u{1f469}\u{200d}\u{1f4bb}\u{65e5}\u{672c}z",
             "\u{65e5}\u{672c}\u{8a9e}".repeat(20).as_str(),
             "\u{627}\u{644}\u{633}\u{644}\u{627}\u{645}",
+            "\u{627}\u{644}\u{633}\u{644}\u{627}\u{645}"
+                .repeat(20)
+                .as_str(),
         ] {
             for cursor in text
                 .grapheme_indices(true)

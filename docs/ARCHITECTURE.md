@@ -1548,6 +1548,8 @@ Option on macOS and Ctrl elsewhere move or delete words. The platform's
 select-all, cut, copy and paste shortcuts use the existing clipboard. A failed
 clipboard write keeps a cut selection. Inputs share search's 4 KiB byte ceiling
 and single-line normalization; over-limit replacements leave the text intact.
+Title editing refuses initial values over this limit, preserving oversized
+restored titles instead of opening an empty editor.
 
 `kettle-render::text_field` shapes modal editor projections with search's
 shaping and grapheme-cluster helpers. Selection spans, caret positions,

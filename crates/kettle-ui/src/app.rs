@@ -323,7 +323,7 @@ fn pty_key_modifiers(ws: &WindowState, key: &Key) -> ModifiersState {
 
 /// Whether Option is physically down, whatever `macos-option-as-alt` says.
 ///
-/// On macOS the search bar binds its word-wise motions to Option, and only on
+/// On macOS the search and modal editors bind word-wise motions to Option on
 /// Backspace, Delete and the horizontal arrows, all keys `option_is_meta_for`
 /// exempts. So the composition policy has no say here either. Reading the
 /// masked `ws.mods` would leave `delete_word_backward` and `move_left(by_word)`
@@ -7855,19 +7855,25 @@ fn begin_title_edit(
         }
     };
     let input = match (scope, bulk, &target) {
-        (TitleEditScope::Window, _, TitleEditTarget::Window) => window_title.to_string(),
+        (TitleEditScope::Window, _, TitleEditTarget::Window) => window_title,
         (TitleEditScope::Tab, _, TitleEditTarget::Tab(panes)) => {
             let idx = mux.tab_index_of_any_pane(panes)?;
-            mux.tabs[idx].title_override.clone().unwrap_or_default()
+            mux.tabs[idx].title_override.as_deref().unwrap_or_default()
         }
-        (TitleEditScope::Pane, _, TitleEditTarget::Pane(id)) => mux.panes.get(id)?.title.clone(),
+        (TitleEditScope::Pane, _, TitleEditTarget::Pane(id)) => mux.panes.get(id)?.title.as_str(),
         (TitleEditScope::Group, GroupBulkScope::Single, TitleEditTarget::Pane(id)) => {
-            mux.panes.get(id)?.group_name.clone().unwrap_or_default()
+            mux.panes.get(id)?.group_name.as_deref().unwrap_or_default()
         }
         (TitleEditScope::Group, GroupBulkScope::Tab, TitleEditTarget::Tab(_))
-        | (TitleEditScope::Group, GroupBulkScope::Window, TitleEditTarget::Window) => String::new(),
+        | (TitleEditScope::Group, GroupBulkScope::Window, TitleEditTarget::Window) => "",
         _ => return None,
     };
+    // Restored titles can exceed the editor cap. Refuse to open rather than
+    // turn a rejected initialization into an empty, committable override.
+    if input.len() > crate::modal_input::MAX_MODAL_INPUT_BYTES {
+        log::warn!("title exceeds the modal editor byte limit; leaving the title unchanged");
+        return None;
+    }
     Some(TitleEditState {
         scope,
         target,

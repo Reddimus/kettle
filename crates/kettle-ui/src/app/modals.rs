@@ -2,6 +2,29 @@
 
 use super::*;
 
+pub(super) fn edit_modal_text(
+    ws: &mut WindowState,
+    key: &Key,
+    read: impl FnMut() -> Option<String>,
+    write: impl FnMut(&str) -> bool,
+) -> bool {
+    let mut mods = ws.mods;
+    // Option-as-Alt governs composition, not the editor's word commands.
+    if matches!(
+        key,
+        Key::Named(
+            NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::Backspace | NamedKey::Delete
+        )
+    ) && option_physically_held(ws)
+    {
+        mods.insert(ModifiersState::ALT);
+    }
+    let Some(editor) = modal_editor_mut(ws) else {
+        return false;
+    };
+    crate::modal_input::edit_key(editor, key, mods, read, write)
+}
+
 impl App {
     /// Shared native/control press dispatch. Returning true owns the entire click.
     pub(super) fn dismiss_modal_outside(&mut self, ws: &mut WindowState, button: u8) -> bool {
@@ -253,16 +276,14 @@ impl App {
     }
 
     fn modal_editor_key(&mut self, ws: &mut WindowState, key: &Key) -> bool {
-        let mods = ws.mods;
-        let Some(editor) = modal_editor_mut(ws) else {
+        let Some(editor) = modal_editor(ws) else {
             return false;
         };
         let before = editor.text().to_string();
         let clipboard = std::cell::RefCell::new(self.clipboard.as_mut());
-        let handled = crate::modal_input::edit_key(
-            editor,
+        let handled = edit_modal_text(
+            ws,
             key,
-            mods,
             || {
                 clipboard
                     .borrow_mut()
@@ -277,7 +298,7 @@ impl App {
             },
         );
         if handled {
-            let changed = editor.text() != before;
+            let changed = modal_editor(ws).is_some_and(|editor| editor.text() != before);
             if changed {
                 reset_modal_results(ws);
             }
