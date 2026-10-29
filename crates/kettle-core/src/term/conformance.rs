@@ -280,23 +280,19 @@ fn vi_cursor_stays_bounded_and_selection_is_invalidated_by_reflow() {
 fn kitty_keyboard_stack_caps_and_evicts_its_oldest_mode() {
     let (mut term, mut processor, rx) = kitty_keyboard_harness(20, 5);
 
-    // The engine's maximum keyboard stack depth is 16. A seventeenth push
-    // must evict from the keyboard stack, not remove index zero from the
-    // unrelated title stack, which panics when no title was ever saved.
-    // Distinct modes also let us prove that the oldest keyboard entry, not
-    // the newest, was evicted.
-    for flags in 0..=16 {
-        feed(
-            &mut term,
-            &mut processor,
-            format!("\x1b[>{flags}u").as_bytes(),
-        );
+    // Overflow must evict the oldest keyboard entry, leaving the unrelated
+    // title stack alone even when no title was ever saved.
+    feed(&mut term, &mut processor, b"\x1b[>1u");
+    for _ in 0..4096 {
+        feed(&mut term, &mut processor, b"\x1b[>2u");
     }
-    feed(&mut term, &mut processor, b"\x1b[<15u\x1b[?u");
+    feed(&mut term, &mut processor, b"\x1b[<4095u\x1b[?u");
 
-    assert_eq!(drain_pty(&rx), "\x1b[?1u");
-    assert!(term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
-    assert!(!term.mode().contains(TermMode::REPORT_EVENT_TYPES));
+    assert_eq!(drain_pty(&rx), "\x1b[?2u");
+    assert!(term.mode().contains(TermMode::REPORT_EVENT_TYPES));
+    assert!(!term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
+    feed(&mut term, &mut processor, b"\x1b[<1u\x1b[?u");
+    assert_eq!(drain_pty(&rx), "\x1b[?0u");
 }
 
 #[test]

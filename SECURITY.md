@@ -296,10 +296,11 @@ and confinement, described below.
   rules: the user's own gesture, never a control request, a Lua action or a
   changed file; its frames are checked to be the size it opened at before a
     byte of their pixels is read, charged to the same account and held by the
-  lane, never the item. Its sound plays only from that worker, granted sound
-  on macOS only when asked for (see Media worker sandbox), and only once the
-  user played it; a control request or a Lua action may mute it, never
-  unmute it.
+  lane, never the item. On macOS its sound plays from that worker, granted
+  sound only when asked for (see Media worker sandbox). On Linux decoded
+  samples pass through the parent to a separate, confined PCM audio broker
+  (see Video playback sessions). Sound starts only once the user played it;
+  a control request or a Lua action may mute it, never unmute it.
   While the user has given a lane the keyboard (`focus_preview`), no key
   pressed, chord, input-method text or control client's
   `send_keys`/`send_text` reaches a pane in that window; getting one
@@ -336,7 +337,11 @@ and confinement, described below.
   everything it started every 25 ms and kills them above 768 MiB together;
   a tree that cannot be measured fails the job. A worker process or a child
   of one that outlives its job, or a reply accepted from a worker that then
-  crashed, is in scope.
+  crashed, is in scope. Linux playback also starts a separate PCM broker
+  using the same worker executable and early setup. It opens its PulseAudio
+  output connection before confinement, then confines itself without source-file
+  grants before consuming samples. It receives no encoded media or source
+  files; its held audio connection is the separate sound-output boundary.
 - **Media worker sandbox** — before it reads a byte of a job's media or
   fonts, the worker opens the files the job names (its source, checked as
   rendering checks it, and its fallback fonts) and confines itself, and
@@ -399,9 +404,16 @@ and confinement, described below.
   exactly as a video job does, before reading a byte of it, and stays
     confined for the whole session, granted sound (see Media worker sandbox)
   only on macOS, only when sound was asked for, and then with Apple's
-  decoder alone: an external decoder never runs with that grant. It reads nothing from
-  the parent but one-byte commands, writes frames only of the size it
-  opened at, decodes
+  decoder alone: an external decoder never runs with that grant. It accepts
+  one-byte playback commands from the parent and, on Linux, validated PCM
+  feedback messages. On Linux the confined decoder sends fixed 20 ms stereo
+  48 kHz float PCM blocks through the parent to the separate audio broker;
+  generation, sequence and cumulative credits bound transport to four
+  outstanding blocks. The broker validates finite samples and frame bounds,
+  and returns consumption, playback-clock and failure feedback through the
+  parent to the decoder. It keeps its pre-confinement PulseAudio connection,
+  cannot open another socket, and ends on parent closure or a 5 s lease lapse.
+  The decoding worker writes video frames only of the size it opened at, decodes
   only while playing into three buffers, and ends when the parent closes
   it, leaves, or sends nothing for 5 s (it then kills its own process
   group, decoder and all), when a frame goes unread for 5 s, when a playing
@@ -417,10 +429,10 @@ and confinement, described below.
   (a FIFO, device or directory is refused without blocking), an external
   request's attested device and inode must match it, at most its cap plus
   one byte is read, and a file that changes while it is read is refused. An
-  image's format comes from its content; only PNG, JPEG, WebP, BMP and the
-  first frame of a GIF are decoded, and the dimensions and decoded size the
-  decoder reports are checked against 8192 pixels an edge and 64 MiB before
-  any pixel is decoded. BMP and WebP headers are read first, and a WebP lossy
+  image's format comes from its content; only PNG, JPEG, WebP, BMP, the
+  first frame of a GIF and the first image of a TIFF are decoded. The
+  dimensions and decoded size the decoder reports are checked against 8192
+  pixels an edge and 64 MiB before any pixel is decoded. BMP and WebP headers are read first, and a WebP lossy
   frame must declare the size of the canvas or animation frame it fills.
   Reading a file other than the one opened or attested, a decode or resize
   that allocates past those caps, a decoder panic reached from hostile

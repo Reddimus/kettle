@@ -248,14 +248,17 @@ or selected (`render_selection_as_diagram`), or a file a pane names
 (`preview_link`). See [Automation and MCP](AGENT.md#showing-media).
 
 A shown video is its poster, the middle frame, with a play glyph and its
-length on the card and its size, codec, length and sound in the lane;
-nothing in Kettle plays it yet, and the model still has not seen it. Which
-videos get a poster depends on the platform's decoders: on macOS, MP4 and
+length on the card and its size, codec, length and sound in the lane.
+The user can open the lane and use Play/Pause, seek and mute controls to play
+supported video inside Kettle. Showing media does not give its pixels to the
+model. Which videos get a poster depends on the platform's decoders: on macOS, MP4 and
 QuickTime through Apple's own (AVFoundation); everywhere else, and every
 other container on macOS, the user's own ffmpeg, which Kettle never installs.
-Without it, the user hears what to install and the agent's result says the
-video could not be shown. The card's menu and the lane's `↗` open a private
-copy of the file in QuickTime Player on macOS (MP4 and QuickTime with the
+When no decoder is available, an accessible path-based video request falls
+back to a shelf file card: the agent receives a successful `status: "sent"`
+result with file metadata and reason `codec_unavailable`. A byte-based request
+has no path for a file card and retains the render failure. The card's menu
+and the lane's `↗` open a private copy of the file in QuickTime Player on macOS (MP4 and QuickTime with the
 codecs every Mac plays) or mpv on Linux (`/usr/bin/mpv`). This is separate
 from a pasted video's receipt below, which stays informational with no open
 action.
@@ -324,7 +327,7 @@ Kettle supports the progressive [Kitty keyboard protocol](https://sw.kovidgoyal.
 end to end. It answers `CSI ? u` capability queries, applies set/push/pop mode
 requests, and emits negotiated CSI-u press, repeat, and release events. The
 encoder covers alternate key codes, associated text, left/right modifiers,
-keypad keys, F13-F35, navigation, media, and volume keys. A bounded 16-entry
+keypad keys, F13-F35, navigation, media, and volume keys. A bounded 4,096-entry
 mode stack prevents a client from growing terminal state indefinitely.
 
 With no negotiated Kitty flags, Kettle retains the xterm-compatible bytes for

@@ -116,16 +116,29 @@ end)
 -- prints its final line. Replace the pattern with whatever your
 -- build system emits.
 local last_notify = 0
+local partial_lines = {}
+kettle.on("pane_close", function(pane_id)
+    partial_lines[pane_id] = nil
+end)
 kettle.on("output", function(pane_id, bytes)
-    -- Coalescing — don't spam notifications.
     local now = os.time()
-    if now - last_notify < 5 then return end
     -- `bytes` is a table of byte values; this makes them one string.
-    local text = string.char(table.unpack(bytes))
-    if text:find("BUILD SUCCESSFUL") or text:find("Compiling%s*$") then
-        last_notify = now
-        kettle.notify("kettle", "Build done in pane " .. tostring(pane_id))
+    local text = (partial_lines[pane_id] or "") .. string.char(table.unpack(bytes))
+    local first = 1
+    while true do
+        local last = text:find("[\r\n]", first)
+        if not last then break end
+        local line = text:sub(first, last - 1)
+        -- Coalescing — don't spam notifications, but keep collecting output.
+        if now - last_notify >= 5 and
+            (line:find("BUILD SUCCESSFUL") or line:find("Compiling%s*$")) then
+            last_notify = now
+            kettle.notify("kettle", "Build done in pane " .. tostring(pane_id))
+        end
+        first = last + 1
     end
+    -- Bound retained output even when a program never ends its line.
+    partial_lines[pane_id] = text:sub(math.max(first, #text - 4095))
 end)
 
 -------------------------------------------------------------------------------

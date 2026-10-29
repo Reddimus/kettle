@@ -1569,10 +1569,16 @@ should fail the run. It saves PNG screenshots,
 `analysis.json` under `target/diagnostics/agent-tui-*`. Explicit `--out-dir`
 overrides that location. The harness fails if a captured state is blank
 or lacks visible terminal cells. Missing optional CLIs/tools are reported as skips;
-the shell and prompt-shaped states always run. The Codex/Claude legs remain
-version/help captures or opt-in noninteractive authenticated prompts; they do
-not test interactive image-paste shortcuts. When tmux is available, the run
-also writes `tmux.png`, `tmux.screen.json`, and `tmux.cells.json`. A
+the shell and prompt-shaped states always run. After a successful authenticated
+Claude marker prompt on Linux or macOS, the harness also launches an interactive
+`CLAUDE_CODE_NO_FLICKER=1 claude` REPL in this repository and sends `/diff` at
+narrow and wide window sizes. It captures `claude-diff-panel-narrow` and
+`claude-diff-panel-wide` states to check the width-dependent refusal and panel.
+A missing REPL prompt, including login, repository-trust or first-run dialogs,
+produces a captured `claude-diff-panel-no-repl` skip; the harness does not answer
+those dialogs. Strict auth mode fails if this probe skips or fails, even when
+the marker prompt passed. These probes do not test interactive image-paste shortcuts. When tmux is
+available, the run also writes `tmux.png`, `tmux.screen.json`, and `tmux.cells.json`. A
 compile-capable tmux with nonzero cell-pixel geometry additionally produces
 `tmux-sixel.png` and pixel evidence. Zero geometry produces a captured
 `tmux-sixel-fallback` state but remains an explicit render skip; an older,
@@ -1740,9 +1746,11 @@ This is also desktop-local because it opens real GUI terminal windows.
 - **Terminal-wide, not per-client.** Once enabled, every same-user client gets
   the selected mode across all windows in the process without an additional
   prompt, pairing token, or per-client capability grant.
-- **Auditable.** Every connection and every mutating method is logged. When the
-  dev-record recorder is active, each agent action is annotated in the `.cast`
-  trace as an `m` marker (`kettle:agent <method> conn=N`).
+- **Audit coverage.** Connection opens and closes and selected methods are
+  logged; the normal log is not a complete mutation audit. When the dev-record
+  recorder is active, each dispatched agent request other than an internal
+  probe is annotated in the `.cast` trace as an `m` marker
+  (`kettle:agent <method> conn=N`).
 
 If you don't want any of this, do nothing — it stays off.
 

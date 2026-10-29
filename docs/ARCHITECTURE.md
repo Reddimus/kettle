@@ -3181,9 +3181,16 @@ no context reads, clock queries, formatting or writes.
   adoption, and the macOS libproc/`sysctl` process walk in
   `kettle-remote/src/macos.rs`, the only module that crate allows unsafe code
   in) plus UTF-8 conversion after an explicit valid-prefix check. Each
-  site documents its ownership or validity contract. There is no `transmute`,
-  and the only custom `Send`/`Sync` implementation is `Send` for the Windows
-  `CtlListener` in `kettle-ctl`, which solely owns its pipe `HANDLE`. Per-pane
+  site documents its ownership or validity contract. Native media adds
+  AVFoundation/CoreMedia object and buffer lifetimes, AudioQueue output,
+  PulseAudio output and sandbox setup. Dynamic-symbol conversions use
+  `transmute` in `kettle-ctl/src/process.rs` (Windows process queries) and
+  `kettle-media-native/src/pulse.rs`, and `transmute_copy` in the native
+  macOS sandbox loader. Custom `Send` implementations cover the Windows
+  `CtlListener`'s owned pipe `HANDLE`, native audio `Output` handles, and
+  AVFoundation `Frames` and `AudioFrames`. AVFoundation's `Keep` implements
+  both `Send` and `Sync` to share asset lifetime and atomic reference counts,
+  without concurrent calls through the asset. Per-pane
   `Arc<Mutex<...>>` are contended only on PTY read or App snapshot; lock-hold
   times are O(bytes), designed to stay well under one frame's budget per drain
   even on fast scrolling.
@@ -3523,15 +3530,21 @@ action edits the broadcast-group label.
 
 ```mermaid
 flowchart LR
-    A["cfg.background_image"] --> B["decode_bg_image<br/>(PNG / JPEG / WebP /<br/>BMP / GIF)"]
+    A["cfg.background_image<br/>+ background_blur"] --> B["Decode worker<br/>decode_bg_image_frames<br/>(bounded still / animated frames)"]
     B --> C["Optional box blur<br/>3-pass separable"]
-    C --> D["BgImage<br/>(Arc-cached by path)"]
+    C --> D["Later render frame installs<br/>matching result<br/>cache key: path + blur radius"]
     D --> E["imgpipe"]
     E --> F["Render BEFORE pane<br/>backgrounds with UV-mode<br/>dispatch (stretch /<br/>tile / center / scale)"]
 ```
 
-Decoded at config-load (one-shot), kept in a path-keyed cache, rendered
-via the cell-image pipeline. UV-modes + align-horiz/vert configurable.
+During rendering, `Renderer::request_bg_image_reload` submits decoding to a
+worker keyed by `(path, blur_radius)`. `decode_bg_image_frames_with_blur`
+decodes bounded still or animated frames (8192 pixels per edge, up to 128
+animation frames and 128 MiB of animation RGBA) and applies the optional blur.
+On a later frame, `apply_bg_image_worker_result` installs only a result matching
+the pending job and current configuration. Successful results stay cached;
+failed decodes are eligible for retry after three seconds. Frames render via
+the cell-image pipeline. UV-modes + align-horiz/vert configurable.
 See [CONFIG.md](CONFIG.md) for wallpaper settings.
 
 ### Detachable tabs (Chromium-style live tear-off + re-dock)
