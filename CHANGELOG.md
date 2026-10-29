@@ -27,6 +27,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Spanish: "Editar grupo de paneles:", the shorter "Atajos" Settings tab
   where the full label cannot fit, and translated names for the built-in
   themes.
+- Share one streaming control-sequence stripper between `kettle exec`
+  (including MCP `kettle_run`) and session logs. Session logs now also drop
+  8-bit C1 sequences and a stray string terminator, which exec already did.
+  Exec now counts UTF-8 continuation bytes and escape-prefix bytes toward its
+  64 KiB recovery bound, and a fresh ESC at the bound starts a new sequence
+  instead of showing its payload as text.
 
 ### Fixed
 
@@ -284,6 +290,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Let the control API drag panes the same way the pointer does.
 - Remove only staging directories that an update recorded next to the macOS
   app, never other directories whose names match the pattern.
+- Bound the control server's request queue per connection and the work each
+  UI frame takes from it, so a busy client cannot stall the window.
+- Never drop a key release owed to a terminal when the paste queue is full
+  or the window loses focus.
+- Read file-card metadata in the media worker instead of on the UI thread.
+- Translate a pasted path for another WSL distribution only through a
+  verified mount of the same file.
+- Stop Wayland blur discovery from blocking the UI.
+- Keep split layouts within the depth that saved sessions can load.
+- Keep a concurrently saved session when a backup is recovered.
+- Finish a file card whose metadata cannot be read instead of leaving it
+  checking, and keep size and explanation in `kettle show` replies for files.
+- Leave a saved layout unchanged when another process holds its lock at
+  startup, instead of replacing it on the next save.
+- Refresh links and search highlights when terminal output lands while a
+  frame is being prepared, instead of keeping stale ones until the next
+  output.
 
 ## [5.6.0] — 2026-10-28
 
