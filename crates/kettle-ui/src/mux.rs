@@ -555,6 +555,7 @@ impl PtyInputQueue {
 
     fn enqueue_key_release(
         &self,
+        focus_reporting: bool,
         key: winit::keyboard::PhysicalKey,
         bytes: Arc<[u8]>,
     ) -> PaneInputResult {
@@ -567,11 +568,14 @@ impl PtyInputQueue {
                 pending.push_back((key, bytes));
             }
         }
-        self.retry_pending_reports()
+        self.retry_pending_reports(focus_reporting)
     }
 
-    fn retry_pending_reports(&self) -> PaneInputResult {
+    fn retry_pending_reports(&self, focus_reporting: bool) -> PaneInputResult {
         let mut pending = self.pending_focus.lock().unwrap_or_else(|e| e.into_inner());
+        if !focus_reporting {
+            pending.desired = None;
+        }
         let result = self.flush_focus_report(&mut pending);
         if !result.is_queued() {
             return result;
@@ -590,8 +594,8 @@ impl PtyInputQueue {
         PaneInputResult::Queued
     }
 
-    fn enqueue_user(&self, bytes: Arc<[u8]>) -> PaneInputResult {
-        let result = self.retry_pending_reports();
+    fn enqueue_user(&self, focus_reporting: bool, bytes: Arc<[u8]>) -> PaneInputResult {
+        let result = self.retry_pending_reports(focus_reporting);
         if !result.is_queued() {
             return result;
         }
@@ -1126,8 +1130,9 @@ impl Pane {
             return result;
         }
         let input = bytes.as_ref();
+        let focus_reporting = self.focus_reporting_enabled();
         self.term.with_completion_input_admission(&[input], || {
-            let result = self.pty_input.enqueue_user(bytes.clone());
+            let result = self.pty_input.enqueue_user(focus_reporting, bytes.clone());
             self.record_user_input(result, !bytes.is_empty());
             (result, result.is_queued())
         })
@@ -1153,9 +1158,12 @@ impl Pane {
             joined.extend_from_slice(input);
         }
         let boundaries: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
+        let focus_reporting = self.focus_reporting_enabled();
         self.term.with_completion_input_admission(&boundaries, || {
             let nonempty = !joined.is_empty();
-            let result = self.pty_input.enqueue_user(Arc::from(joined));
+            let result = self
+                .pty_input
+                .enqueue_user(focus_reporting, Arc::from(joined));
             self.record_user_input(result, nonempty);
             (result, result.is_queued())
         })
@@ -1181,7 +1189,16 @@ impl Pane {
     }
 
     pub(crate) fn retry_pending_reports(&self) -> PaneInputResult {
-        self.pty_input.retry_pending_reports()
+        self.pty_input
+            .retry_pending_reports(self.focus_reporting_enabled())
+    }
+
+    fn focus_reporting_enabled(&self) -> bool {
+        self.term
+            .term
+            .lock()
+            .ok()
+            .is_some_and(|term| term.mode().contains(kettle_core::TermMode::FOCUS_IN_OUT))
     }
 
     pub(crate) fn feed_key_release(
@@ -1189,7 +1206,9 @@ impl Pane {
         key: winit::keyboard::PhysicalKey,
         bytes: Arc<[u8]>,
     ) -> PaneInputResult {
-        let result = self.pty_input.enqueue_key_release(key, bytes);
+        let result = self
+            .pty_input
+            .enqueue_key_release(self.focus_reporting_enabled(), key, bytes);
         self.record_user_input(result, true);
         result
     }
@@ -5530,10 +5549,117 @@ mod node_tests {
         assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[I");
         // Focus-out occurred with reporting disabled, so the caller sent nothing.
         assert_eq!(queue.enqueue_focus_report(true), PaneInputResult::Queued);
-        assert_eq!(queue.retry_pending_reports(), PaneInputResult::Queued);
-        assert_eq!(queue.retry_pending_reports(), PaneInputResult::Queued);
+        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
         let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
         assert_eq!(delivered, [b"\x1b[I".to_vec()]);
+    }
+
+    #[test]
+    fn disabled_focus_retry_discards_report_while_input_is_still_full() {
+        for focused in [false, true] {
+            let (queue, rx) = input_queue_fixture();
+            for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+                assert_eq!(
+                    queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                    PaneInputResult::Queued
+                );
+            }
+            assert_eq!(
+                queue.enqueue_focus_report(focused),
+                PaneInputResult::Backpressured
+            );
+            assert_eq!(queue.retry_pending_reports(false), PaneInputResult::Queued);
+            assert_eq!(queue.retry_pending_reports(false), PaneInputResult::Queued);
+            let old: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+            assert_eq!(old, vec![b"old".to_vec(); PTY_INPUT_QUEUE_DEPTH]);
+            assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+            assert!(rx.is_empty(), "discarded reports must not return");
+            assert_eq!(queue.enqueue_focus_report(focused), PaneInputResult::Queued);
+            assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+            assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+            assert_eq!(
+                rx.try_recv().unwrap().bytes.as_ref(),
+                if focused {
+                    &b"\x1b[I"[..]
+                } else {
+                    &b"\x1b[O"[..]
+                }
+            );
+            assert!(rx.is_empty(), "retries must not duplicate a new transition");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disabled_focus_reporting_discards_backpressured_reports_on_every_retry_path() {
+        use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &["/bin/cat".into()],
+            None,
+        )
+        .expect("PTY fixture");
+        let pane = mux.panes.values_mut().next().unwrap();
+        let mode = PrivateMode::Named(NamedPrivateMode::ReportFocusInOut);
+        let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
+        for focused in [false, true] {
+            for path in ["wakeup", "input", "key batch", "key release"] {
+                let (queue, rx) = input_queue_fixture();
+                pane.pty_input = queue;
+                pane.term.term.lock().unwrap().set_private_mode(mode);
+                for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+                    assert_eq!(pane.feed_input(b"old"), PaneInputResult::Queued);
+                }
+                assert_eq!(
+                    pane.feed_focus_report(focused),
+                    PaneInputResult::Backpressured
+                );
+                pane.term.term.lock().unwrap().unset_private_mode(mode);
+                while rx.try_recv().is_ok() {}
+                let result = match path {
+                    "wakeup" => pane.retry_pending_reports(),
+                    "input" => pane.feed_input(b"typed"),
+                    "key batch" => pane.feed_key_inputs(&[b"typed".to_vec()]),
+                    "key release" => pane.feed_key_release(key, Arc::from(&b"release"[..])),
+                    _ => unreachable!(),
+                };
+                assert_eq!(result, PaneInputResult::Queued);
+                let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+                let expected = match path {
+                    "wakeup" => vec![],
+                    "key release" => vec![b"release".to_vec()],
+                    _ => vec![b"typed".to_vec()],
+                };
+                assert_eq!(delivered, expected, "focus={focused}, retry={path}");
+
+                pane.term.term.lock().unwrap().set_private_mode(mode);
+                assert_eq!(pane.retry_pending_reports(), PaneInputResult::Queued);
+                assert!(rx.is_empty(), "discarded reports must not return");
+                assert_eq!(pane.feed_focus_report(focused), PaneInputResult::Queued);
+                assert_eq!(pane.retry_pending_reports(), PaneInputResult::Queued);
+                assert_eq!(pane.retry_pending_reports(), PaneInputResult::Queued);
+                assert_eq!(
+                    rx.try_recv().unwrap().bytes.as_ref(),
+                    if focused {
+                        &b"\x1b[I"[..]
+                    } else {
+                        &b"\x1b[O"[..]
+                    }
+                );
+                assert!(rx.is_empty(), "retries must not duplicate a new transition");
+            }
+        }
+        mux.kill_children();
     }
 
     #[test]
@@ -5541,20 +5667,20 @@ mod node_tests {
         let (queue, rx) = input_queue_fixture();
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(Arc::from(&b"old"[..])),
+                queue.enqueue_user(true, Arc::from(&b"old"[..])),
                 PaneInputResult::Queued
             );
         }
         let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
         for _ in 0..2 {
             assert_eq!(
-                queue.enqueue_key_release(key, Arc::from(&b"\x1b[1;1:3A"[..])),
+                queue.enqueue_key_release(true, key, Arc::from(&b"\x1b[1;1:3A"[..])),
                 PaneInputResult::Backpressured
             );
         }
         while rx.try_recv().is_ok() {}
         assert_eq!(
-            queue.enqueue_user(Arc::from(&b"typed"[..])),
+            queue.enqueue_user(true, Arc::from(&b"typed"[..])),
             PaneInputResult::Queued
         );
         let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
@@ -5566,7 +5692,7 @@ mod node_tests {
         let (queue, rx) = input_queue_fixture();
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(Arc::from(&b"old"[..])),
+                queue.enqueue_user(true, Arc::from(&b"old"[..])),
                 PaneInputResult::Queued
             );
         }
@@ -5579,8 +5705,8 @@ mod node_tests {
             PaneInputResult::Backpressured
         );
         while rx.try_recv().is_ok() {}
-        assert_eq!(queue.retry_pending_reports(), PaneInputResult::Queued);
-        assert_eq!(queue.retry_pending_reports(), PaneInputResult::Queued);
+        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
         assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[I");
         assert!(rx.is_empty());
     }
@@ -5596,7 +5722,7 @@ mod node_tests {
         queue.waker = waker.clone();
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(Arc::from(&b"old"[..])),
+                queue.enqueue_user(true, Arc::from(&b"old"[..])),
                 PaneInputResult::Queued
             );
         }
@@ -5627,13 +5753,15 @@ mod node_tests {
             1,
             "restored capacity must wake the event loop once"
         );
-        assert_eq!(queue.retry_pending_reports(), PaneInputResult::Queued);
+        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
         assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[O");
     }
 
     #[cfg(unix)]
     #[test]
     fn pending_focus_follows_a_pane_to_another_window() {
+        use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+
         let cfg = Config {
             shell_integration: false,
             login_shell: false,
@@ -5653,11 +5781,17 @@ mod node_tests {
         let (queue, rx) = input_queue_fixture();
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(Arc::from(&b"old"[..])),
+                queue.enqueue_user(true, Arc::from(&b"old"[..])),
                 PaneInputResult::Queued
             );
         }
         source.panes.get_mut(&id).unwrap().pty_input = queue;
+        source.panes[&id]
+            .term
+            .term
+            .lock()
+            .unwrap()
+            .set_private_mode(PrivateMode::Named(NamedPrivateMode::ReportFocusInOut));
         assert_eq!(
             source.panes[&id].feed_focus_report(false),
             PaneInputResult::Backpressured
@@ -5680,7 +5814,7 @@ mod node_tests {
         let (queue, rx) = input_queue_fixture();
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(Arc::from(&b"old"[..])),
+                queue.enqueue_user(true, Arc::from(&b"old"[..])),
                 PaneInputResult::Queued
             );
         }
@@ -5690,7 +5824,7 @@ mod node_tests {
         );
         while rx.try_recv().is_ok() {}
         assert_eq!(
-            queue.enqueue_user(Arc::from(&b"typed"[..])),
+            queue.enqueue_user(true, Arc::from(&b"typed"[..])),
             PaneInputResult::Queued
         );
         let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
@@ -5722,7 +5856,7 @@ mod node_tests {
 
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(Arc::from(&b"x"[..])),
+                queue.enqueue_user(true, Arc::from(&b"x"[..])),
                 PaneInputResult::Queued
             );
         }
@@ -5731,7 +5865,7 @@ mod node_tests {
             PTY_INPUT_QUEUE_DEPTH
         );
         assert_eq!(
-            queue.enqueue_user(Arc::from(&b"y"[..])),
+            queue.enqueue_user(true, Arc::from(&b"y"[..])),
             PaneInputResult::Backpressured
         );
         assert_eq!(
@@ -5778,12 +5912,12 @@ mod node_tests {
         let release = || Arc::<[u8]>::from(&b"\x1b[<0;1;1m"[..]);
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(Arc::from(&b"a"[..])),
+                queue.enqueue_user(true, Arc::from(&b"a"[..])),
                 PaneInputResult::Queued
             );
         }
         assert_eq!(
-            queue.enqueue_user(Arc::from(&b"a"[..])),
+            queue.enqueue_user(true, Arc::from(&b"a"[..])),
             PaneInputResult::Backpressured,
             "ordinary input stops at the lane's depth"
         );
@@ -5817,16 +5951,16 @@ mod node_tests {
 
         // A lane full by bytes still takes a release.
         assert_eq!(
-            queue.enqueue_user(Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES])),
+            queue.enqueue_user(true, Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES])),
             PaneInputResult::Queued
         );
         let rest = MAX_QUEUED_USER_INPUT_BYTES - queued_user_bytes.load(Ordering::Acquire);
         assert_eq!(
-            queue.enqueue_user(Arc::from(vec![b'y'; rest])),
+            queue.enqueue_user(true, Arc::from(vec![b'y'; rest])),
             PaneInputResult::Queued
         );
         assert_eq!(
-            queue.enqueue_user(Arc::from(&b"z"[..])),
+            queue.enqueue_user(true, Arc::from(&b"z"[..])),
             PaneInputResult::Backpressured
         );
         assert_eq!(
@@ -5867,7 +6001,7 @@ mod node_tests {
         };
 
         assert_eq!(
-            queue.enqueue_user(Arc::from(vec![b'x'; 4 * 1024 * 1024 + 12])),
+            queue.enqueue_user(true, Arc::from(vec![b'x'; 4 * 1024 * 1024 + 12])),
             PaneInputResult::Queued
         );
         assert_eq!(
@@ -5877,7 +6011,7 @@ mod node_tests {
         let aggregate_headroom =
             MAX_QUEUED_USER_INPUT_BYTES - queued_user_bytes.load(Ordering::Acquire);
         assert_eq!(
-            queue.enqueue_user(Arc::from(vec![b'b'; aggregate_headroom])),
+            queue.enqueue_user(true, Arc::from(vec![b'b'; aggregate_headroom])),
             PaneInputResult::Queued,
             "the exact aggregate byte budget must remain admissible"
         );
@@ -5886,13 +6020,16 @@ mod node_tests {
             MAX_QUEUED_USER_INPUT_BYTES
         );
         assert_eq!(
-            queue.enqueue_user(Arc::from(&b"b"[..])),
+            queue.enqueue_user(true, Arc::from(&b"b"[..])),
             PaneInputResult::Backpressured,
             "one byte over the bounded user-input budget is retryable, not read-only or failed"
         );
         assert!(!failed.load(Ordering::Acquire));
         assert_eq!(
-            queue.enqueue_user(Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES + 1])),
+            queue.enqueue_user(
+                true,
+                Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES + 1])
+            ),
             PaneInputResult::Oversize,
             "oversized user input must be distinct and must not kill the pane"
         );
@@ -6060,7 +6197,7 @@ mod node_tests {
             PaneInputResult::Failed
         );
         assert_eq!(
-            queue.enqueue_user(Arc::from(&b"user"[..])),
+            queue.enqueue_user(true, Arc::from(&b"user"[..])),
             PaneInputResult::Failed,
             "a disconnected user-input worker is terminal rather than retryable"
         );
