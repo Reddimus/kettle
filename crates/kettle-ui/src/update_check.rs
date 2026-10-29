@@ -1020,7 +1020,10 @@ mod tests {
         }))
         .unwrap();
         assert!(original.len() < super::MAX_CACHE_BYTES);
-        std::fs::write(&path, &original).unwrap();
+        // Private, as the app writes it: a umask of 002 would leave a plain
+        // write group-writable, and the trusted reader refuses that.
+        kettle_state::atomic_replace(&path, &original, kettle_state::AtomicWriteOptions::PRIVATE)
+            .unwrap();
         assert!(super::load_cache_at(&path).is_some());
         let persisted = super::mutate_cache_at(&path, |cache| cache.note_available("v5.2.0"));
         assert!(

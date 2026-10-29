@@ -7089,6 +7089,14 @@ mod node_tests {
     }
 
     #[test]
+    fn initial_ssh_title_retains_uri_destination() {
+        assert_eq!(
+            initial_pane_title(&["ssh".into(), "ssh://alice@server:2222".into()]),
+            "ssh alice@server"
+        );
+    }
+
+    #[test]
     fn initial_ssh_title_skips_option_operands() {
         for args in [
             vec!["ssh", "-p", "2222", "alice@server"],

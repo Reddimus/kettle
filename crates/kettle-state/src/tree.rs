@@ -66,6 +66,39 @@ pub fn remove_owned_readonly_tree_at(
     remove_tree_at(parent, name, held, limits, true)
 }
 
+/// Open a directory for tree removal without following a symbolic link.
+///
+/// If read access is denied, Linux can hold the object with `O_PATH` and
+/// macOS can use search access. Only this user's directories use that fallback;
+/// [`remove_owned_readonly_tree_at`] repairs their mode through the held object
+/// before listing them. Other owners retain the original access error.
+pub fn open_directory_for_tree_removal_at(parent: &File, name: &OsStr) -> io::Result<File> {
+    let name = c_string(name)?;
+    match open_directory_at(parent, &name) {
+        Ok(directory) => Ok(directory),
+        Err(error) => {
+            if error.raw_os_error() != Some(libc::EACCES) {
+                return Err(error);
+            }
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let access = libc::O_PATH;
+            #[cfg(target_os = "macos")]
+            let access = libc::O_SEARCH;
+            #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+            return Err(error);
+            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            {
+                let directory = open_directory_with_access_at(parent, &name, access)?;
+                // SAFETY: geteuid has no preconditions.
+                if directory.metadata()?.uid() != unsafe { libc::geteuid() } {
+                    return Err(error);
+                }
+                Ok(directory)
+            }
+        }
+    }
+}
+
 fn prepare_owned_directory(directory: &File) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     // SAFETY: geteuid has no preconditions.
@@ -78,7 +111,20 @@ fn prepare_owned_directory(directory: &File) -> io::Result<()> {
         ));
     }
     if owner == uid {
-        directory.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        let result = directory.set_permissions(std::fs::Permissions::from_mode(0o700));
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if result
+            .as_ref()
+            .is_err_and(|error| error.raw_os_error() == Some(libc::EBADF))
+        {
+            // fchmod cannot operate on O_PATH. This kernel-managed link names
+            // the held object even after a rename, never the caller's pathname.
+            return std::fs::set_permissions(
+                format!("/proc/self/fd/{}", directory.as_raw_fd()),
+                std::fs::Permissions::from_mode(0o700),
+            );
+        }
+        result?;
     }
     Ok(())
 }
@@ -167,7 +213,11 @@ fn remove_contents(
         if listed.0 != device {
             return Err(io::Error::other("refusing to descend onto another device"));
         }
-        let child = open_directory_at(directory, &name)?;
+        let child = if repair_owned {
+            open_directory_for_tree_removal_at(directory, OsStr::from_bytes(name.to_bytes()))?
+        } else {
+            open_directory_at(directory, &name)?
+        };
         let opened = child.metadata()?;
         if (opened.dev(), opened.ino()) != listed {
             return Err(io::Error::other(
@@ -236,12 +286,20 @@ fn unlink_at(directory: &File, name: &CStr, flags: libc::c_int) -> io::Result<()
 }
 
 fn open_directory_at(directory: &File, name: &CStr) -> io::Result<File> {
+    open_directory_with_access_at(directory, name, libc::O_RDONLY)
+}
+
+fn open_directory_with_access_at(
+    directory: &File,
+    name: &CStr,
+    access: libc::c_int,
+) -> io::Result<File> {
     // SAFETY: `directory` is an open descriptor and `name` is NUL-terminated.
     let fd = unsafe {
         libc::openat(
             directory.as_raw_fd(),
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
     if fd < 0 {
@@ -349,6 +407,25 @@ mod tests {
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
             .open(path)
             .unwrap()
+    }
+
+    #[test]
+    fn removes_an_unreadable_owned_subdirectory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = crate::test_tempdir();
+        let tree = root.path().join("tree");
+        let child = tree.join("child");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("file"), b"x").unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o300)).unwrap();
+        let parent = open_dir(root.path());
+        let held = open_dir(&tree);
+        let result = remove_owned_readonly_tree_at(&parent, OsStr::new("tree"), &held, LIMITS);
+        if result.is_err() {
+            fs::set_permissions(&child, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        result.unwrap();
+        assert!(!tree.exists());
     }
 
     #[test]

@@ -30,7 +30,8 @@ pub use private::{
 };
 #[cfg(unix)]
 pub use tree::{
-    TreeRemovalLimits, directory_is_empty, remove_directory_tree_at, remove_owned_readonly_tree_at,
+    TreeRemovalLimits, directory_is_empty, open_directory_for_tree_removal_at,
+    remove_directory_tree_at, remove_owned_readonly_tree_at,
 };
 
 /// Maximum on-disk size of the shared remote-command spool.

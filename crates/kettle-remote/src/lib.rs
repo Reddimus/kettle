@@ -2093,6 +2093,7 @@ fn shell_single_quote(s: &str) -> String {
 /// Host extraction:
 ///   - `ssh host`                            → host=host, user=None
 ///   - `ssh user@host`                       → host=host, user=Some(user)
+///   - `ssh ssh://user@host:2222`            → host=host, user=Some(user), port=Some("2222")
 ///   - `ssh -p 22 user@host`                 → same, port=Some("22")
 ///   - `ssh -o StrictHostKeyChecking=no host` → host=host
 ///   - `sshpass -p secret ssh user@host`     → host=host, user=Some(user)
@@ -2148,7 +2149,7 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     // Capture `-l user` so Reconnect / the remote title keep the login user.
     // OpenSSH keeps the first command-line value obtained, so an earlier `-l`
     // also wins over a later target's `user@` component.
-    let mut flag_user: Option<&str> = None;
+    let mut flag_user: Option<String> = None;
     // The remaining endpoint-selecting options travel with the host: `box` on
     // its own is not a service, and a Reconnect that dropped `-p`/`-J`/`-i`
     // would open a session on a different one.
@@ -2174,13 +2175,19 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
             if target.is_some() {
                 break; // The remote command starts at the second operand.
             }
-            target = Some(a.as_str());
-            if flag_user.is_none()
-                && let Some((user, host)) = a.split_once('@')
-                && !user.is_empty()
-                && !host.is_empty()
-            {
-                flag_user = Some(user);
+            let (user, host, port) = ssh_destination_parts(a)?;
+            target = Some(host);
+            if flag_user.is_none() {
+                flag_user = user;
+            }
+            if let Some(port) = port {
+                capture_first_option(
+                    &mut options.port,
+                    &mut port_seen,
+                    &mut options.unreproducible,
+                    port,
+                    true,
+                );
             }
             // OpenSSH also parses options after the destination, unless `--`
             // ended option processing. The first login name still wins.
@@ -2194,7 +2201,7 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
             match flag {
                 'l' => {
                     if flag_user.is_none() {
-                        flag_user = Some(value);
+                        flag_user = Some(value.to_owned());
                     }
                 }
                 'p' => capture_first_option(
@@ -2250,12 +2257,8 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
         }
         i += if short.consumed_next { 2 } else { 1 };
     }
-    let raw = target?;
-    let (target_user, host) = match raw.split_once('@') {
-        Some((u, h)) if !u.is_empty() && !h.is_empty() => (Some(u), h.to_string()),
-        _ => (None, raw.to_string()),
-    };
-    let user = flag_user.or(target_user).map(str::to_string);
+    let host = target?.to_owned();
+    let user = flag_user;
     if host.is_empty() {
         return None;
     }
@@ -2276,6 +2279,59 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
         user,
         options,
     })
+}
+
+fn ssh_destination_parts(raw: &str) -> Option<(Option<String>, &str, Option<&str>)> {
+    let Some(authority) = raw.strip_prefix("ssh://") else {
+        return Some(match raw.split_once('@') {
+            Some((user, host)) if !user.is_empty() && !host.is_empty() => {
+                (Some(user.to_owned()), host, None)
+            }
+            _ => (None, raw, None),
+        });
+    };
+    // OpenSSH permits an empty URI path, but no remote path, query or fragment.
+    let authority = authority.strip_suffix('/').unwrap_or(authority);
+    let (user, host_port) = match authority.split_once('@') {
+        Some((user, host)) if !user.is_empty() => (Some(ssh_uri_user(user)?), host),
+        Some(_) => return None,
+        None => (None, authority),
+    };
+    let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
+        let (host, rest) = bracketed.split_once(']')?;
+        let port = if rest.is_empty() {
+            None
+        } else {
+            Some(rest.strip_prefix(':')?)
+        };
+        (host, port)
+    } else {
+        match host_port.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (host_port, None),
+        }
+    };
+    if let Some(port) = port
+        && (!ssh_port_is_safe(port) || port.parse::<u16>().ok()? == 0)
+    {
+        return None;
+    }
+    Some((user, host, port))
+}
+
+fn ssh_uri_user(raw: &str) -> Option<String> {
+    let mut decoded = Vec::with_capacity(raw.len());
+    let mut bytes = raw.bytes();
+    while let Some(byte) = bytes.next() {
+        decoded.push(if byte == b'%' {
+            let high = char::from(bytes.next()?).to_digit(16)?;
+            let low = char::from(bytes.next()?).to_digit(16)?;
+            (high * 16 + low) as u8
+        } else {
+            byte
+        });
+    }
+    String::from_utf8(decoded).ok()
 }
 
 /// OpenSSH's complete set of value-taking single-char options (the ssh(1)
@@ -3864,6 +3920,109 @@ mod tests {
         // docker exec with no container arg → None.
         assert!(detect_container(&argv(&["docker", "exec"])).is_none());
         assert!(detect_container(&argv(&["docker", "exec", "-it"])).is_none());
+    }
+
+    #[test]
+    fn detect_ssh_retains_uri_destination() {
+        let argv = ["ssh", "ssh://alice@server:2222"].map(str::to_owned);
+        let context = detect_ssh(&argv).expect("valid SSH URI");
+        assert_eq!(
+            context,
+            RemoteContext::Ssh {
+                host: "server".into(),
+                user: Some("alice".into()),
+                options: SshOptions {
+                    port: Some("2222".into()),
+                    ..SshOptions::default()
+                },
+            }
+        );
+        assert_eq!(format_remote_title(&context), "ssh alice@server");
+        assert_eq!(
+            clone_session_command(&context).as_deref(),
+            Some("ssh -p '2222' 'alice'@'server'")
+        );
+    }
+
+    #[test]
+    fn detect_ssh_uri_destination_preserves_option_precedence() {
+        for (args, user, port) in [
+            (
+                vec!["ssh", "-l", "bob", "-p", "2200", "ssh://alice@server:2222"],
+                "bob",
+                "2200",
+            ),
+            (
+                vec!["ssh", "ssh://alice@server:2222", "-l", "bob", "-p", "2200"],
+                "alice",
+                "2222",
+            ),
+        ] {
+            let argv: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert_eq!(
+                detect_ssh(&argv),
+                Some(RemoteContext::Ssh {
+                    host: "server".into(),
+                    user: Some(user.into()),
+                    options: SshOptions {
+                        port: Some(port.into()),
+                        ..SshOptions::default()
+                    },
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn detect_ssh_uri_destination_validates_authority() {
+        for destination in ["ssh://server", "ssh://server/"] {
+            assert_eq!(
+                detect_ssh(&["ssh".into(), destination.into()]),
+                Some(ssh_ctx("server", None))
+            );
+        }
+        assert_eq!(
+            detect_ssh(&["ssh".into(), "ssh://al%69ce@server".into()]),
+            Some(ssh_ctx("server", Some("alice")))
+        );
+        assert_eq!(
+            detect_ssh(&["ssh".into(), "ssh://alice@[2001:db8::1]:2222/".into()]),
+            Some(RemoteContext::Ssh {
+                host: "2001:db8::1".into(),
+                user: Some("alice".into()),
+                options: SshOptions {
+                    port: Some("2222".into()),
+                    ..SshOptions::default()
+                },
+            })
+        );
+        for destination in [
+            "ssh://",
+            "ssh://alice@",
+            "ssh://server:",
+            "ssh://server:0",
+            "ssh://server:65536",
+            "ssh://server:abc",
+            "ssh://server/path",
+            "ssh://server?query",
+            "ssh://server#fragment",
+            "ssh://$(reboot)@server",
+            "ssh://alice@server\n",
+            "ssh://server:22;reboot",
+            "ssh://alice%@server",
+            "ssh://alice%0a@server",
+            "ssh://alice%00@server",
+            "ssh://alice%3breboot@server",
+            "ssh://alice%ff@server",
+            "ssh://alice@[::1",
+            "ssh://alice@[::1]:bad",
+        ] {
+            assert_eq!(
+                detect_ssh(&["ssh".into(), destination.into()]),
+                None,
+                "{destination}"
+            );
+        }
     }
 
     /// Drift guard. `detect_ssh` walks argv shapes that

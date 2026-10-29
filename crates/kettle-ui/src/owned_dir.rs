@@ -292,7 +292,7 @@ pub(crate) fn remove_tree(path: &Path) -> std::io::Result<()> {
 
 #[cfg(unix)]
 fn remove_tree_with(path: &Path, opened: impl FnOnce()) -> std::io::Result<()> {
-    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::fd::AsRawFd as _;
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     let parent = std::fs::OpenOptions::new()
@@ -303,29 +303,21 @@ fn remove_tree_with(path: &Path, opened: impl FnOnce()) -> std::io::Result<()> {
         .file_name()
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
     let name_c = std::ffi::CString::new(name.as_bytes())?;
-    // SAFETY: parent is held and name_c is a NUL-terminated child name.
-    let fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name_c.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        let error = std::io::Error::last_os_error();
-        let flags = match error.raw_os_error() {
-            Some(libc::ELOOP | libc::ENOTDIR) => 0,
-            Some(libc::EACCES) => libc::AT_REMOVEDIR,
-            _ => return Err(error),
-        };
-        // SAFETY: unlinkat resolves only this entry in the held parent; it never follows links.
-        if unsafe { libc::unlinkat(parent.as_raw_fd(), name_c.as_ptr(), flags) } == 0 {
-            return Ok(());
+    let held = match kettle_state::open_directory_for_tree_removal_at(&parent, name) {
+        Ok(held) => held,
+        Err(error) => {
+            let flags = match error.raw_os_error() {
+                Some(libc::ELOOP | libc::ENOTDIR) => 0,
+                Some(libc::EACCES) => libc::AT_REMOVEDIR,
+                _ => return Err(error),
+            };
+            // SAFETY: unlinkat resolves only this entry in the held parent; it never follows links.
+            if unsafe { libc::unlinkat(parent.as_raw_fd(), name_c.as_ptr(), flags) } == 0 {
+                return Ok(());
+            }
+            return Err(std::io::Error::last_os_error());
         }
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: openat transferred ownership of a valid descriptor.
-    let held = unsafe { std::fs::File::from_raw_fd(fd) };
+    };
     opened();
     kettle_state::remove_owned_readonly_tree_at(
         &parent,
@@ -442,6 +434,72 @@ mod tests {
             Some(&b"outside"[..]),
             "cleanup must never traverse a replacement symlink"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_replaces_an_unreadable_owned_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = kettle_test_support::private_tempdir("kettle-owned-unreadable-");
+        let files = nested();
+        let directory = install(base.path(), &files, |_| None, false).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let result = install(base.path(), &files, |_| None, false);
+        // Restore access even when the regression leaves the old tree behind.
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert_eq!(result, Ok(directory.clone()));
+        assert_eq!(verify(&directory, &files), Ok(()));
+        remove_tree(&directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_replaces_an_unreadable_owned_subdirectory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = kettle_test_support::private_tempdir("kettle-owned-unreadable-child-");
+        let files = nested();
+        let directory = install(base.path(), &files, |_| None, false).unwrap();
+        let child = directory.join("fish/fish");
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let result = install(base.path(), &files, |_| None, false);
+        if result.is_err() {
+            std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        assert_eq!(result, Ok(directory.clone()));
+        assert_eq!(verify(&directory, &files), Ok(()));
+        remove_tree(&directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_repairs_only_the_held_unreadable_directory_after_a_swap() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let base = kettle_test_support::private_tempdir("kettle-unreadable-swap-");
+        let staging = base.path().join("staging");
+        let moved = base.path().join("moved");
+        let outside = base.path().join("outside");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("old"), b"old").unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("keep"), b"outside").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o500)).unwrap();
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let result = remove_tree_with(&staging, || {
+            std::fs::rename(&staging, &moved).unwrap();
+            symlink(&outside, &staging).unwrap();
+        });
+        assert!(result.is_err(), "a swapped name must be refused");
+        assert!(
+            moved.exists(),
+            "the unreadable directory must have been opened"
+        );
+        assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 0);
+        assert_eq!(std::fs::read(outside.join("keep")).unwrap(), b"outside");
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o500
+        );
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     /// Every directory a file sits in is known, parents first, and each
