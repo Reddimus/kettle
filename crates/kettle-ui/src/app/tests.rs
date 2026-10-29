@@ -17663,8 +17663,11 @@ fn remote_reconnect_environment_child() {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn remote_reconnect_preserves_client_environment_and_invocation() {
+fn remote_reconnect_environment_fixture() -> (
+    super::Config,
+    super::PtyGeometry,
+    kettle_remote::SessionCommand,
+) {
     use super::{Config, PtyGeometry};
     use kettle_remote::ProcessTree;
     let args = [
@@ -17735,6 +17738,13 @@ fn remote_reconnect_preserves_client_environment_and_invocation() {
         ..Default::default()
     };
     let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
+    (cfg, geometry, command)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn remote_reconnect_preserves_client_environment_and_invocation() {
+    let (cfg, geometry, command) = remote_reconnect_environment_fixture();
     for existing_pane in [false, true] {
         let mut mux = Mux::new();
         if existing_pane {
@@ -17756,6 +17766,164 @@ fn remote_reconnect_preserves_client_environment_and_invocation() {
         mux.kill_children();
         assert!(passed, "client must receive captured env and invocation");
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn remote_reconnect_replays_preserve_environment_and_invocation() {
+    let (cfg, geometry, command) = remote_reconnect_environment_fixture();
+    for replay in [
+        "duplicate-pane",
+        "duplicate-tab",
+        "split",
+        "undo-close",
+        "move",
+    ] {
+        let mut mux = Mux::new();
+        super::reconnect_remote_session(
+            &mut mux,
+            &cfg,
+            geometry,
+            Arc::new(|| {}),
+            Some(command.clone()),
+        )
+        .unwrap();
+        let original = mux.active_focus().unwrap();
+        assert!(wait_for_pane_screen(&mux, original, |text, _| {
+            text.contains("RECONNECT_ENV_AND_ARGV0_PRESERVED")
+        }));
+        match replay {
+            "duplicate-pane" => mux
+                .duplicate_focused_pane_geometry(
+                    super::Dir::Horizontal,
+                    &cfg,
+                    geometry,
+                    Arc::new(|| {}),
+                )
+                .unwrap(),
+            "duplicate-tab" => mux
+                .duplicate_focused_tab_geometry(&cfg, geometry, Arc::new(|| {}))
+                .unwrap(),
+            "split" => mux
+                .split_geometry(
+                    super::Dir::Horizontal,
+                    false,
+                    &cfg,
+                    geometry,
+                    Arc::new(|| {}),
+                )
+                .unwrap(),
+            "undo-close" => {
+                mux.close_tab_at(0);
+                assert!(
+                    mux.undo_close_tab_geometry(&cfg, geometry, Arc::new(|| {}))
+                        .unwrap()
+                );
+            }
+            "move" => {
+                let tab = mux.detach_tab(0).unwrap();
+                mux = Mux::new();
+                mux.attach_tab(tab, None);
+                mux.duplicate_focused_tab_geometry(&cfg, geometry, Arc::new(|| {}))
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let target = mux.active_focus().unwrap();
+        assert_ne!(target, original);
+        let passed = wait_for_pane_screen(&mux, target, |text, _| {
+            text.contains("RECONNECT_ENV_AND_ARGV0_PRESERVED")
+        });
+        let screen = mux.panes[&target].term.screen_text(0).unwrap().text;
+        assert!(
+            passed,
+            "{replay} lost the captured launch settings: {screen}"
+        );
+        mux.duplicate_focused_tab_geometry(&cfg, geometry, Arc::new(|| {}))
+            .unwrap();
+        let target = mux.active_focus().unwrap();
+        let passed = wait_for_pane_screen(&mux, target, |text, _| {
+            text.contains("RECONNECT_ENV_AND_ARGV0_PRESERVED")
+        });
+        mux.kill_children();
+        assert!(passed, "{replay} must retain settings for the next replay");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_reconnect_session_restore_falls_back_to_configured_shell() {
+    let cfg = super::Config {
+        shell: Some("/bin/sh".into()),
+        login_shell: false,
+        shell_integration: false,
+        ..Default::default()
+    };
+    let geometry = super::PtyGeometry::from_cell_size(80, 24, 8, 16);
+    let mut mux = Mux::new();
+    super::reconnect_remote_session(
+        &mut mux,
+        &cfg,
+        geometry,
+        Arc::new(|| {}),
+        Some(kettle_remote::SessionCommand {
+            program: "/bin/cat".into(),
+            args: Vec::new(),
+            environment: Default::default(),
+            argv0: Some("private-client-mode".into()),
+        }),
+    )
+    .unwrap();
+    let bytes = serde_json::to_vec(&mux.snapshot()).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("private-client-mode"));
+    let saved = serde_json::from_slice(&bytes).unwrap();
+    mux.kill_children();
+    let mut restored = Mux::new();
+    assert!(restored.restore(&saved, &cfg, 8, 16, &|| Arc::new(|| {})));
+    let target = restored.active_focus().unwrap();
+    let argv = restored.panes[&target].argv.clone();
+    restored.kill_children();
+    assert_eq!(
+        argv,
+        vec!["/bin/sh".to_owned()],
+        "private launch cannot be replayed from a session"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn remote_reconnect_environment_session_restore_omits_private_values() {
+    let (mut cfg, geometry, mut command) = remote_reconnect_environment_fixture();
+    cfg.shell = Some("/bin/sh".into());
+    command.argv0 = None;
+    let mut mux = Mux::new();
+    super::reconnect_remote_session(&mut mux, &cfg, geometry, Arc::new(|| {}), Some(command))
+        .unwrap();
+    let bytes = serde_json::to_vec(&mux.snapshot()).unwrap();
+    let json = String::from_utf8_lossy(&bytes);
+    for private in [
+        "tcp://client:2376",
+        "from-client",
+        "from-config",
+        "DOCKER_HOST",
+    ] {
+        assert!(
+            !json.contains(private),
+            "session must omit private settings"
+        );
+    }
+    let saved = serde_json::from_slice(&bytes).unwrap();
+    mux.kill_children();
+    let mut restored = Mux::new();
+    assert!(restored.restore(&saved, &cfg, 8, 16, &|| Arc::new(|| {})));
+    let target = restored.active_focus().unwrap();
+    let argv = restored.panes[&target].argv.clone();
+    restored.kill_children();
+    assert_eq!(
+        argv,
+        vec!["/bin/sh".to_owned()],
+        "environment alone makes a session launch unreproducible"
+    );
 }
 
 #[test]
@@ -17916,9 +18084,11 @@ fn restarts_use_launch_directory_routing() {
         .next()
         .unwrap();
     assert!(
-        body.contains("new_tab_with_launch_geometry("),
+        body.contains("new_tab_with_launch_settings_geometry("),
         "restarts must route reported WSL directories through the launcher"
     );
+    assert!(body.contains("pane.reconnect_launch.clone()"));
+    assert!(body.contains("launch.as_ref()"));
 }
 
 #[test]

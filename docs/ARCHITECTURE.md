@@ -3403,7 +3403,14 @@ Other additions:
   configuration; absent allowlisted variables are removed from the child.
   Unreadable, oversized, invalid, or cwd-dependent connection environments refuse
   reconnect through the existing failure notice instead of selecting defaults.
-  Debug output redacts captured values.
+  Debug output redacts captured values. Each reconnected pane owns its captured
+  environment and invocation name in memory. Duplicate pane/tab, splits that
+  clone the command, undo-close, and exit-action restart reuse those settings;
+  live pane/tab moves carry them into the destination window. A split that
+  falls back to the configured shell drops the client settings. Session and
+  layout snapshots save reconnected panes with an empty command, so restore
+  opens the configured shell without persisting private environment values or
+  replaying a client against a different endpoint.
   Windows retains its current environment behavior. Treat detected process
   arguments as untrusted: validate fields against their specific character sets
   and a 512-byte limit, then reject controls again before direct spawning.

@@ -10209,31 +10209,18 @@ fn reconnect_remote_session(
     let argv = std::iter::once(command.program)
         .chain(command.args)
         .collect();
-    let mut client_cfg = Config {
-        login_shell: false,
-        shell_integration: false,
-        ..cfg.clone()
-    };
-    let mut remove_env = Vec::new();
-    for (name, value) in command.environment.iter() {
-        client_cfg.env.retain(|(key, _)| key != name);
-        match value {
-            Some(value) => client_cfg.env.push((name.to_owned(), value.to_owned())),
-            None => remove_env.push(name.to_owned()),
-        }
-    }
     mux.split_with_launch(
         Dir::Horizontal,
         false,
-        &client_cfg,
+        cfg,
         geometry,
         waker,
         argv,
         None,
-        &kettle_core::LaunchOverrides {
-            argv0: command.argv0.as_deref(),
-            remove_env: &remove_env,
-        },
+        Some(&crate::mux::ReconnectLaunch {
+            argv0: command.argv0,
+            environment: command.environment,
+        }),
     )?;
     Ok(())
 }
@@ -13080,19 +13067,22 @@ impl App {
         let (cols, rows) = self.grid_of(ws, self.area(ws));
         let geometry = self.pty_geometry_for_grid(ws, cols, rows);
         for pane_id in pane_ids {
-            let restart_info: Option<(Vec<String>, Option<String>)> = ws
-                .mux
-                .panes
-                .get(&pane_id)
-                .map(|pane| (pane.argv.clone(), pane.term.current_dir_or_native()));
-            if let Some((argv, cwd)) = restart_info {
+            let restart_info = ws.mux.panes.get(&pane_id).map(|pane| {
+                (
+                    pane.argv.clone(),
+                    pane.term.current_dir_or_native(),
+                    pane.reconnect_launch.clone(),
+                )
+            });
+            if let Some((argv, cwd, launch)) = restart_info {
                 let pre = self.focus_key(ws);
-                if let Err(error) = ws.mux.new_tab_with_launch_geometry(
+                if let Err(error) = ws.mux.new_tab_with_launch_settings_geometry(
                     &self.cfg,
                     geometry,
                     waker.clone(),
                     argv,
                     cwd,
+                    launch.as_ref(),
                 ) {
                     log::warn!("exit-action = restart: spawn failed for pane {pane_id}: {error}");
                 } else {

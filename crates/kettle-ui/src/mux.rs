@@ -13,6 +13,13 @@ use kettle_core::{
     CursorShape, PtyGeometry, PtyOutputSender, TermEvent, Terminal, TerminalCapabilities, Waker,
 };
 
+/// Private, in-memory settings for replaying a detected client directly.
+#[derive(Clone)]
+pub(crate) struct ReconnectLaunch {
+    pub argv0: Option<String>,
+    pub environment: kettle_remote::ConnectionEnvironment,
+}
+
 /// At the PTY reader's 64 KiB maximum chunk size, this bounds lossless recorder
 /// backlog to 512 KiB per pane. The sender blocks before taking the terminal
 /// lock, so backpressure cannot deadlock rendering.
@@ -871,9 +878,11 @@ pub struct Pane {
     pub last_output_generation: Option<u64>,
     /// Launching argv ([] means the configured shell). Kept so
     /// `Action::UndoCloseTab` reopens SSH and `-e PROG` tabs as the same
-    /// connection or TUI, not a generic shell. It does not track environment
-    /// or later cwd changes; the closed-tab snapshot records the cwd itself.
+    /// connection or TUI, not a generic shell. The closed-tab snapshot records
+    /// later cwd changes itself.
     pub argv: Vec<String>,
+    /// Captured connection settings never enter session files.
+    pub(crate) reconnect_launch: Option<ReconnectLaunch>,
     /// Most recently detected SSH/container context, updated by the background
     /// process scanner. `None` means no context was detected or the scanner has
     /// not run yet. A detected context supplies the pane title prefix. The
@@ -1750,14 +1759,21 @@ pub struct ClosedTab {
     /// OSC-7 cwd of the first leaf at the moment of close, or `None`
     /// if no cwd was reported.
     pub cwd: Option<String>,
+    reconnect_launch: Option<ReconnectLaunch>,
 }
 
 impl ClosedTab {
-    fn capture(original_index: usize, argv: Vec<String>, raw_cwd: Option<String>) -> Self {
+    fn capture(
+        original_index: usize,
+        argv: Vec<String>,
+        raw_cwd: Option<String>,
+        reconnect_launch: Option<ReconnectLaunch>,
+    ) -> Self {
         Self {
             original_index,
             argv,
             cwd: raw_cwd,
+            reconnect_launch,
         }
     }
 
@@ -2051,14 +2067,7 @@ impl Mux {
         cwd: Option<&str>,
         argv: &[String],
     ) -> Result<u64> {
-        self.spawn_pane_with_launch(
-            cfg,
-            geometry,
-            waker,
-            cwd,
-            argv,
-            &kettle_core::LaunchOverrides::default(),
-        )
+        self.spawn_pane_with_launch(cfg, geometry, waker, cwd, argv, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2069,7 +2078,7 @@ impl Mux {
         waker: Waker,
         cwd: Option<&str>,
         argv: &[String],
-        launch: &kettle_core::LaunchOverrides<'_>,
+        launch: Option<&ReconnectLaunch>,
     ) -> Result<u64> {
         let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) =
             crossbeam_channel::bounded(TERM_EVENT_QUEUE_DEPTH);
@@ -2099,7 +2108,17 @@ impl Mux {
         // Allocated before the spawn so the child's environment can name its
         // pane. A failed spawn leaves a harmless gap; ids are never reused.
         let id = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let pane_env = pane_environment(cfg, id, std::process::id());
+        let mut pane_env = pane_environment(cfg, id, std::process::id());
+        let mut remove_env = Vec::new();
+        if let Some(launch) = launch {
+            for (name, value) in launch.environment.iter() {
+                pane_env.retain(|(key, _)| key != name);
+                match value {
+                    Some(value) => pane_env.push((name.to_owned(), value.to_owned())),
+                    None => remove_env.push(name.to_owned()),
+                }
+            }
+        }
         // Kettle's Codex integration for the pane's shell, offered while
         // `agent-display-codex` and agent previews are on, checked again now.
         #[cfg(unix)]
@@ -2122,9 +2141,12 @@ impl Mux {
             &cfg.term,
             &cfg.colorterm,
             &pane_env,
-            launch,
-            cfg.login_shell,
-            cfg.shell_integration,
+            &kettle_core::LaunchOverrides {
+                argv0: launch.and_then(|settings| settings.argv0.as_deref()),
+                remove_env: &remove_env,
+            },
+            launch.is_none() && cfg.login_shell,
+            launch.is_none() && cfg.shell_integration,
             &shell_startup,
             TerminalCapabilities {
                 osc52_copy: self.osc52_copy_allowed,
@@ -2184,6 +2206,7 @@ impl Mux {
                 pty_output_close_phase: PtyOutputClosePhase::NotStarted,
                 last_output_generation: None,
                 argv: argv.to_vec(),
+                reconnect_launch: launch.cloned(),
                 remote_context: None,
                 foreground_process: None,
                 agent_attached: false,
@@ -2206,6 +2229,10 @@ impl Mux {
                 cmd: self
                     .panes
                     .get(id)
+                    // A session cannot reproduce private connection settings.
+                    // Empty cmd restores the configured shell, including when
+                    // an older Kettle reads this snapshot.
+                    .filter(|p| p.reconnect_launch.is_none())
                     .map(|p| p.term.argv.clone())
                     .unwrap_or_default(),
                 // Persist broadcast-group membership so a restored pane rejoins
@@ -2501,14 +2528,7 @@ impl Mux {
         argv: &[String],
         cwd: Option<&str>,
     ) -> Result<()> {
-        self.new_tab_with_overrides(
-            cfg,
-            geometry,
-            waker,
-            argv,
-            cwd,
-            &kettle_core::LaunchOverrides::default(),
-        )
+        self.new_tab_with_overrides(cfg, geometry, waker, argv, cwd, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2519,7 +2539,7 @@ impl Mux {
         waker: Waker,
         argv: &[String],
         cwd: Option<&str>,
-        launch: &kettle_core::LaunchOverrides<'_>,
+        launch: Option<&ReconnectLaunch>,
     ) -> Result<()> {
         let id = self.spawn_pane_with_launch(cfg, geometry, waker, cwd, argv, launch)?;
         let new_tab = Tab {
@@ -2584,8 +2604,21 @@ impl Mux {
         argv: Vec<String>,
         raw_cwd: Option<String>,
     ) -> Result<()> {
+        self.new_tab_with_launch_settings_geometry(cfg, geometry, waker, argv, raw_cwd, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_tab_with_launch_settings_geometry(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        argv: Vec<String>,
+        raw_cwd: Option<String>,
+        launch: Option<&ReconnectLaunch>,
+    ) -> Result<()> {
         let (argv, cwd) = launch_cwd(argv, raw_cwd);
-        self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref())
+        self.new_tab_with_overrides(cfg, geometry, waker, &argv, cwd.as_deref(), launch)
     }
 
     /// Open a new tab running `ssh -t <target>` (SSH multiplexing).
@@ -2647,15 +2680,24 @@ impl Mux {
     /// via `wsl --cd <dir>` (which accepts both Windows and Linux paths) and the
     /// Windows spawn cwd is left unset. Otherwise the new pane would open in the
     /// home dir.
-    fn clone_focused_launch(&self, cfg: &Config) -> (Vec<String>, Option<String>) {
-        let (mut argv, raw_cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
-            Some(pane) => (pane.argv.clone(), pane.term.current_dir_or_native()),
-            None => (Vec::new(), None),
-        };
+    fn clone_focused_launch(
+        &self,
+        cfg: &Config,
+    ) -> (Vec<String>, Option<String>, Option<ReconnectLaunch>) {
+        let (mut argv, raw_cwd, launch) =
+            match self.active_focus().and_then(|id| self.panes.get(&id)) {
+                Some(pane) => (
+                    pane.argv.clone(),
+                    pane.term.current_dir_or_native(),
+                    pane.reconnect_launch.clone(),
+                ),
+                None => (Vec::new(), None, None),
+            };
         if argv.is_empty() {
             argv = shell_argv(cfg);
         }
-        launch_cwd(argv, raw_cwd)
+        let (argv, cwd) = launch_cwd(argv, raw_cwd);
+        (argv, cwd, launch)
     }
 
     /// Resolve the command a split should spawn when no interactive foreground
@@ -2667,15 +2709,25 @@ impl Mux {
     /// full-screen app instead of becoming a prompt. Use the configured shell in
     /// the focused cwd for those direct launchers, while preserving exact cloning
     /// for shells, WSL, SSH, and ordinary explicit commands.
-    fn split_focused_launch(&self, cfg: &Config) -> (Vec<String>, Option<String>) {
-        let (mut argv, raw_cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
-            Some(pane) => (pane.argv.clone(), pane.term.current_dir_or_native()),
-            None => (Vec::new(), None),
-        };
+    fn split_focused_launch(
+        &self,
+        cfg: &Config,
+    ) -> (Vec<String>, Option<String>, Option<ReconnectLaunch>) {
+        let (mut argv, raw_cwd, mut launch) =
+            match self.active_focus().and_then(|id| self.panes.get(&id)) {
+                Some(pane) => (
+                    pane.argv.clone(),
+                    pane.term.current_dir_or_native(),
+                    pane.reconnect_launch.clone(),
+                ),
+                None => (Vec::new(), None, None),
+            };
         if split_falls_back_to_shell(&argv, cfg.always_split_with_profile) {
             argv = shell_argv(cfg);
+            launch = None;
         }
-        launch_cwd(argv, raw_cwd)
+        let (argv, cwd) = launch_cwd(argv, raw_cwd);
+        (argv, cwd, launch)
     }
 
     /// Terminator's `split_to_group` (`paned.py`: `if widget.group and
@@ -2737,8 +2789,15 @@ impl Mux {
         // Clone shell-like launches, but keep direct agent/editor panes
         // split-friendly by falling back to a shell in the focused cwd. See
         // `split_focused_launch`.
-        let (argv, cwd) = self.split_focused_launch(cfg);
-        let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
+        let (argv, cwd, launch) = self.split_focused_launch(cfg);
+        let new_id = self.spawn_pane_with_launch(
+            cfg,
+            geometry,
+            waker,
+            cwd.as_deref(),
+            &argv,
+            launch.as_ref(),
+        )?;
         self.inherit_split_group(cfg, new_id);
         let a = self.active;
         let grafted = self
@@ -2796,20 +2855,11 @@ impl Mux {
         argv: Vec<String>,
         raw_cwd: Option<String>,
     ) -> Result<()> {
-        self.split_with_launch(
-            dir,
-            new_first,
-            cfg,
-            geometry,
-            waker,
-            argv,
-            raw_cwd,
-            &kettle_core::LaunchOverrides::default(),
-        )
+        self.split_with_launch(dir, new_first, cfg, geometry, waker, argv, raw_cwd, None)
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn split_with_launch(
+    pub(crate) fn split_with_launch(
         &mut self,
         dir: Dir,
         new_first: bool,
@@ -2818,7 +2868,7 @@ impl Mux {
         waker: Waker,
         argv: Vec<String>,
         raw_cwd: Option<String>,
-        launch: &kettle_core::LaunchOverrides<'_>,
+        launch: Option<&ReconnectLaunch>,
     ) -> Result<()> {
         let (argv, cwd) = launch_cwd(argv, raw_cwd);
         if self.tabs.is_empty() {
@@ -3687,8 +3737,12 @@ impl Mux {
             // we undo evicts the oldest.
             let first_leaf = self.tabs[idx].root.first_leaf();
             if let Some(pane) = self.panes.get(&first_leaf) {
-                let snap =
-                    ClosedTab::capture(idx, pane.argv.clone(), pane.term.current_dir_or_native());
+                let snap = ClosedTab::capture(
+                    idx,
+                    pane.argv.clone(),
+                    pane.term.current_dir_or_native(),
+                    pane.reconnect_launch.clone(),
+                );
                 if self.closed_tabs.len() >= CLOSED_TAB_RING_CAP {
                     self.closed_tabs.pop_front();
                 }
@@ -3748,8 +3802,8 @@ impl Mux {
         }
         // Clone via the shared helper so a WSL tab duplicates
         // with `wsl --cd <dir>` instead of falling back to the home dir.
-        let (argv, cwd) = self.clone_focused_launch(cfg);
-        self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref())
+        let (argv, cwd, launch) = self.clone_focused_launch(cfg);
+        self.new_tab_with_overrides(cfg, geometry, waker, &argv, cwd.as_deref(), launch.as_ref())
     }
 
     /// Split the focused pane and run the *same* program in the new
@@ -3789,8 +3843,15 @@ impl Mux {
         }
         // Clone the focused pane's argv + cwd, WSL-aware, as
         // `duplicate_focused_tab` does.
-        let (argv, cwd) = self.clone_focused_launch(cfg);
-        let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
+        let (argv, cwd, launch) = self.clone_focused_launch(cfg);
+        let new_id = self.spawn_pane_with_launch(
+            cfg,
+            geometry,
+            waker,
+            cwd.as_deref(),
+            &argv,
+            launch.as_ref(),
+        )?;
         let a = self.active;
         let grafted = self
             .tabs
@@ -3836,7 +3897,14 @@ impl Mux {
         // Re-spawn the same argv + cwd. Empty argv → configured shell
         // (matches `new_tab_with`'s contract).
         let (argv, cwd) = snap.launch();
-        let id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
+        let id = self.spawn_pane_with_launch(
+            cfg,
+            geometry,
+            waker,
+            cwd.as_deref(),
+            &argv,
+            snap.reconnect_launch.as_ref(),
+        )?;
         self.closed_tabs.pop_back();
         let insert_at = snap.original_index.min(self.tabs.len());
         self.tabs.insert(
@@ -8741,6 +8809,7 @@ mod node_tests {
             0,
             vec!["wsl.exe".into(), "-d".into(), "Ubuntu".into()],
             Some("/home/kettle-undo-close-regression/project".into()),
+            None,
         );
         let (argv, cwd) = snap.launch();
         assert_eq!(
@@ -8768,6 +8837,7 @@ mod node_tests {
                 original_index,
                 argv: argv.clone(),
                 cwd: cwd.clone(),
+                reconnect_launch: None,
             });
         }
         let cfg = Config {
@@ -8806,6 +8876,7 @@ mod node_tests {
                 original_index: i,
                 argv: vec![format!("argv-{i}")],
                 cwd: Some(format!("/tmp/{i}")),
+                reconnect_launch: None,
             });
         }
         // Cap honored: oldest 3 entries fell off the front.

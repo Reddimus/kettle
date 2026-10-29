@@ -296,7 +296,14 @@ as its invocation, while portable Unix fixtures cover replacement resolution
 and preserved `argv[0]`. The copied Bash fixture blocks in a builtin on an open
 pipe; a Linux/macOS regression checks that it creates no descendants. The UI
 PTY probe checks the captured environment and original invocation in both a
-split and an empty mux, without a window or GPU. A separate UI regression
+split and an empty mux, without a window or GPU.
+`remote_reconnect_replays_preserve_environment_and_invocation` repeats the
+probe after duplicate pane/tab, split, undo-close, and a live tab move, then
+checks another replay from each result. Session round-trip tests
+`remote_reconnect_session_restore_falls_back_to_configured_shell` and
+`remote_reconnect_environment_session_restore_omits_private_values` verify
+shell fallback for invocation-only and environment-only settings and ensure
+private values stay out of JSON. A separate UI regression
 checks that an unavailable environment routes to the existing failure notice
 without creating a pane. Ignored probe functions run only as subprocess fixtures. Native branches run on their respective CI hosts;
 a macOS pass does not verify procfs or Windows. Windows keeps its existing
