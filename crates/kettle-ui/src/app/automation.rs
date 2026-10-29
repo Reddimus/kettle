@@ -2,6 +2,27 @@
 
 use super::*;
 
+pub(super) fn trigger_snapshot(terminal: &kettle_core::Terminal) -> Option<String> {
+    let t = terminal.term.lock().ok()?;
+    use kettle_core::Dimensions;
+    let rows = t.screen_lines();
+    let cols = t.columns();
+    let from = rows.saturating_sub(50);
+    let mut s = String::with_capacity((rows - from) * cols);
+    for r in from..rows {
+        kettle_core::grid_text::append_row_text(t.grid(), r as i32, cols, &mut s);
+        // Trim the row's grid padding BEFORE the newline, or a
+        // capture group like `(.+)$` embeds up to a full row of
+        // trailing spaces in the spawned command's argv. The
+        // previous row already ends in '\n', so the trim never
+        // eats earlier rows.
+        let keep = s.trim_end_matches(' ').len();
+        s.truncate(keep);
+        s.push('\n');
+    }
+    Some(s)
+}
+
 impl App {
     /// Drain commands a Lua callback (event hook or menu-item) just enqueued.
     /// Handles every LuaCommand variant: SendText, ExecAction, Notify, SetTheme.
@@ -562,6 +583,7 @@ impl App {
                     // also fires LuaEvent::TabAdd so plugins
                     // listening for tab_add see remote-triggered tabs
                     // the same as keyboard ones.
+                    let pre = self.focus_key(ws);
                     let area = self.area(ws);
                     let (cols, rows) = self.grid_of(ws, area);
                     let geometry = self.pty_geometry_for_grid(ws, cols, rows);
@@ -569,6 +591,7 @@ impl App {
                     if let Err(e) = ws.mux.new_tab_geometry(&self.cfg, geometry, waker) {
                         log::warn!("remote-control: new-tab failed: {e}");
                     } else {
+                        self.note_focus_change(ws, pre);
                         self.fire_tab_add_event(ws);
                     }
                 }
@@ -624,37 +647,12 @@ impl App {
         // only — scanning the whole scrollback every wakeup would
         // burn CPU on a chatty pane. Last 50 rows is the typical
         // "what just happened" window.
-        let snapshots: Vec<String> = {
-            let mut out = Vec::with_capacity(ws.mux.panes.len());
-            for pane in ws.mux.panes.values() {
-                if let Ok(t) = pane.term.term.lock() {
-                    use kettle_core::Dimensions;
-                    let rows = t.screen_lines();
-                    let cols = t.columns();
-                    let from = rows.saturating_sub(50);
-                    let mut s = String::with_capacity((rows - from) * cols);
-                    for r in from..rows {
-                        for c in 0..cols {
-                            let p = kettle_core::Point::new(
-                                kettle_core::Line(r as i32),
-                                kettle_core::Column(c),
-                            );
-                            s.push(t.grid()[p].c);
-                        }
-                        // Trim the row's grid padding BEFORE the newline, or a
-                        // capture group like `(.+)$` embeds up to a full row of
-                        // trailing spaces in the spawned command's argv. The
-                        // previous row already ends in '\n', so the trim never
-                        // eats earlier rows.
-                        let keep = s.trim_end_matches(' ').len();
-                        s.truncate(keep);
-                        s.push('\n');
-                    }
-                    out.push(s);
-                }
-            }
-            out
-        };
+        let snapshots: Vec<String> = ws
+            .mux
+            .panes
+            .values()
+            .filter_map(|pane| trigger_snapshot(&pane.term))
+            .collect();
         for snap in &snapshots {
             if let Some(action) = match_triggers(snap, &self.compiled_triggers) {
                 match action {

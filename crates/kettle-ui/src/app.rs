@@ -1953,10 +1953,15 @@ fn modal_accessibility_projection(
 #[derive(Clone)]
 struct AccessibilityActivation {
     initial: TreeUpdate,
+    proxy: EventLoopProxy<UserEvent>,
+    window_seq: u64,
 }
 
 impl ActivationHandler for AccessibilityActivation {
     fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
+        let _ = self.proxy.send_event(UserEvent::AccessibilityActivated {
+            window_seq: self.window_seq,
+        });
         Some(self.initial.clone())
     }
 }
@@ -2739,6 +2744,9 @@ pub enum UserEvent {
     NativeFullscreenExited {
         window_seq: u64,
         generation: u64,
+    },
+    AccessibilityActivated {
+        window_seq: u64,
     },
     /// An assistive-technology action addressed to a specific OS window.
     /// AccessKit can invoke this callback off the winit dispatch path, so it is
@@ -5562,6 +5570,7 @@ fn startup_monitor(event_loop: &ActiveEventLoop) -> Option<StartupMonitor> {
     })
 }
 
+#[cfg(test)]
 fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) -> bool {
     if bar_h <= 0.0 {
         return false;
@@ -9962,6 +9971,7 @@ pub struct App {
     /// command/cwd fields are consumed once and are gone by then.
     named_layout_writable: bool,
     _watcher: Option<notify::RecommendedWatcher>,
+    config_watcher_path: Option<std::path::PathBuf>,
     /// Drop guard for the remote-control watcher.
     _remote_watcher: Option<notify::RecommendedWatcher>,
     /// Ordered, bounded Lua side effects. Each send remains a distinct shared
@@ -9980,6 +9990,7 @@ pub struct App {
     lua_startup_fired: bool,
     /// What is true about updates for this process; see `update_notice`.
     update_facts: crate::update_notice::UpdateFacts,
+    update_local_dismissals: crate::update_notice::LocalDismissals,
     /// This process dismissed its restart notice, until it exits.
     update_restart_dismissed: bool,
     update_toast: Option<crate::update_toast::Toast>,
@@ -11020,6 +11031,9 @@ impl App {
             config_path: startup.config.clone(),
             config_trust: startup.config_trust,
             config_malformed_last: Vec::new(),
+            config_watcher_path: watcher
+                .as_ref()
+                .and_then(|_| startup.config.clone().or_else(Config::default_path)),
             startup,
             _watcher: watcher,
             _remote_watcher: remote_watcher,
@@ -11028,6 +11042,7 @@ impl App {
             lua_engine,
             lua_startup_fired: false,
             update_facts: crate::update_notice::UpdateFacts::default(),
+            update_local_dismissals: crate::update_notice::LocalDismissals::default(),
             update_restart_dismissed: false,
             update_toast: None,
             update_toast_receipts: None,
@@ -11248,6 +11263,56 @@ impl App {
             path: s.path.clone(),
             dir: s.dir,
         })
+    }
+
+    fn press_split_divider(&self, ws: &mut WindowState, button: u8) -> bool {
+        if button != 0 || self.pointer_modal_open(ws) {
+            return false;
+        }
+        let Some(drag) =
+            self.split_drag_at(ws, self.area(ws), ws.cursor.x as f32, ws.cursor.y as f32)
+        else {
+            return false;
+        };
+        let dir = drag.dir;
+        ws.dragging_split = Some(drag);
+        if let Some(window) = &ws.window {
+            window.set_cursor(Self::resize_cursor_for(dir));
+            window.request_redraw();
+        }
+        true
+    }
+
+    fn drag_split_divider(&mut self, ws: &mut WindowState) -> bool {
+        if ws.dragging_split.is_none() {
+            return false;
+        }
+        let (path, dir) = {
+            let d = ws.dragging_split.as_ref().unwrap();
+            (d.path.clone(), d.dir)
+        };
+        let area = self.area(ws);
+        let seams = ws.mux.split_seams(ws.mux.active, area);
+        match seams.iter().find(|s| s.path == path).map(|s| s.rect) {
+            Some(rect) => {
+                let ratio =
+                    crate::mux::ratio_from_pos(rect, dir, ws.cursor.x as f32, ws.cursor.y as f32);
+                ws.mux.set_split_ratio(ws.mux.active, &path, ratio);
+                // The layout-tree
+                // ratio changed, but each pane's PTY grid is resized
+                // only by resize_all (the keyboard resize path reaches
+                // it via handle_action's tail). Without this the child
+                // TUIs keep their old cols/rows — rendering clipped —
+                // until some unrelated event fires a resize.
+                self.resize_all(ws);
+                if let Some(w) = &ws.window {
+                    w.set_cursor(Self::resize_cursor_for(dir));
+                    w.request_redraw();
+                }
+            }
+            None => ws.dragging_split = None,
+        }
+        true
     }
 
     /// The resize cursor to show while merely HOVERING a divider
@@ -18722,6 +18787,16 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.finish_window_dispatch(el, window_seq, ws);
             }
+            UserEvent::AccessibilityActivated { window_seq } => {
+                if let Some(ws) = self.windows.get_mut(&window_seq) {
+                    ws.accessibility_key = None;
+                    ws.accessibility_updated_at = None;
+                    ws.accessibility_pending = true;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                }
+            }
             UserEvent::AccessibilityAction {
                 window_seq,
                 request,
@@ -19972,6 +20047,7 @@ impl App {
             UserEvent::Activation
             | UserEvent::PastedImageEncoded
             | UserEvent::NativeFullscreenExited { .. }
+            | UserEvent::AccessibilityActivated { .. }
             | UserEvent::RemoteScanReady
             | UserEvent::MediaRendered
             | UserEvent::LanePlayback
@@ -20501,36 +20577,7 @@ impl App {
                 // rect is re-fetched from the live seams so a mid-drag layout
                 // change (a pane elsewhere closing) can't desync the math; if
                 // the split has vanished, cancel the drag.
-                if ws.dragging_split.is_some() {
-                    let (path, dir) = {
-                        let d = ws.dragging_split.as_ref().unwrap();
-                        (d.path.clone(), d.dir)
-                    };
-                    let area = self.area(ws);
-                    let seams = ws.mux.split_seams(ws.mux.active, area);
-                    match seams.iter().find(|s| s.path == path).map(|s| s.rect) {
-                        Some(rect) => {
-                            let ratio = crate::mux::ratio_from_pos(
-                                rect,
-                                dir,
-                                ws.cursor.x as f32,
-                                ws.cursor.y as f32,
-                            );
-                            ws.mux.set_split_ratio(ws.mux.active, &path, ratio);
-                            // The layout-tree
-                            // ratio changed, but each pane's PTY grid is resized
-                            // only by resize_all (the keyboard resize path reaches
-                            // it via handle_action's tail). Without this the child
-                            // TUIs keep their old cols/rows — rendering clipped —
-                            // until some unrelated event fires a resize.
-                            self.resize_all(ws);
-                            if let Some(w) = &ws.window {
-                                w.set_cursor(Self::resize_cursor_for(dir));
-                                w.request_redraw();
-                            }
-                        }
-                        None => ws.dragging_split = None,
-                    }
+                if self.drag_split_divider(ws) {
                     return;
                 }
                 // Any real mouse movement undoes the hide-while-typing
@@ -21094,15 +21141,7 @@ impl App {
                 // a drag-to-resize gesture rather than focusing a pane / starting
                 // a selection. Seams are hit-tested over the same content `area`
                 // the panes lay out in, with a small grab tolerance.
-                if bcode == 0
-                    && let Some(drag) = self.split_drag_at(ws, area, px, py)
-                {
-                    let dir = drag.dir;
-                    ws.dragging_split = Some(drag);
-                    if let Some(w) = &ws.window {
-                        w.set_cursor(Self::resize_cursor_for(dir));
-                        w.request_redraw();
-                    }
+                if self.press_split_divider(ws, bcode) {
                     return;
                 }
                 let pre = self.focus_key(ws);
@@ -21808,7 +21847,9 @@ impl App {
                             }
                             return;
                         }
-                        Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                        key if confirmation_space_key(&key)
+                            || matches!(key, Key::Named(NamedKey::Enter)) =>
+                        {
                             let details =
                                 self.update_toast_focus == Some(ACCESSIBILITY_UPDATE_DETAILS_ID);
                             self.dismiss_update_toast(ws);

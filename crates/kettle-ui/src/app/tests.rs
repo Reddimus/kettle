@@ -1035,7 +1035,7 @@ fn clipboard_images_encode_off_the_window_thread_in_paste_order() {
     let deliver = body("deliver_queued_paste");
     assert!(
         deliver.contains(
-            "if ws.mux.broadcast != broadcast || self.broadcast_recipients(&ws) != recipients {"
+            "(ws.mux.broadcast != broadcast || self.broadcast_recipients(&ws) != recipients)"
         ),
         "a queued broadcast paste must not reach a scope or panes changed since"
     );
@@ -7596,9 +7596,11 @@ fn ctl_mouse_press_handles_app_chrome_before_panes() {
 #[test]
 fn split_divider_drag_is_wired() {
     let src = production_source();
+    let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
     // Press starts the drag from a seam hit-test.
     assert!(
-        src.contains("let Some(drag) = self.split_drag_at(ws, area, px, py)"),
+        flat.contains("let Some(drag) = self.split_drag_at(")
+            && src.contains("if self.press_split_divider(ws, bcode) {"),
         "left-press must start a split-divider drag on a seam hit"
     );
     assert!(
@@ -7607,8 +7609,10 @@ fn split_divider_drag_is_wired() {
     );
     // Move applies the new ratio.
     assert!(
-        src.contains("if ws.dragging_split.is_some() {")
-            && src.contains("ws.mux.set_split_ratio(ws.mux.active, &path, ratio);"),
+        src.contains("if self.drag_split_divider(ws) {")
+            && src.contains("ws.mux.set_split_ratio(ws.mux.active, &path, ratio);")
+            && finding_body(include_str!("../app.rs"), "drag_split_divider")
+                .contains("self.resize_all(ws);"),
         "CursorMoved must apply the dragged split ratio"
     );
     // Up + focus-loss end the drag.
@@ -8249,7 +8253,7 @@ fn every_pane_input_writer_reconciles_focus_reports_first() {
             continue;
         }
         let body = chunk.split("\n    }\n").next().unwrap_or(chunk);
-        let first_write = ["feed_input(", "feed_input_shared("]
+        let first_write = ["feed_input(", "feed_input_shared(", "feed_key_inputs("]
             .iter()
             .filter_map(|needle| body.find(needle))
             .min();
@@ -16594,7 +16598,7 @@ fn the_side_tab_bar_places_rows_through_side_tab_rows() {
     assert!(body.contains("let rows = strip_rows;"));
     // A narrowed horizontal tab has no close button reaching past it.
     let horizontal = src
-        .split("fn tab_bar(&self, ws: &WindowState) -> TabBar {")
+        .split("fn tab_bar_at_height(&self, ws: &WindowState, height: f32) -> TabBar {")
         .nth(1)
         .and_then(|rest| rest.split("\n    fn ").next())
         .expect("tab_bar body");
@@ -17813,4 +17817,332 @@ fn background_frames_do_not_delay_cursor_blink() {
         Some(Duration::from_millis(5))
     );
     assert_eq!(super::animation_wait(false, None, None), None);
+}
+
+#[test]
+fn accessibility_reactivation_invalidates_published_tree() {
+    let source = include_str!("../app.rs");
+    let activation = source
+        .split("impl ActivationHandler for AccessibilityActivation")
+        .nth(1)
+        .unwrap()
+        .split("struct AccessibilityActions")
+        .next()
+        .unwrap();
+    assert!(
+        activation.contains("UserEvent::AccessibilityActivated"),
+        "activation must notify the event loop to invalidate the cached tree"
+    );
+    let dispatch = source
+        .split("UserEvent::AccessibilityActivated { window_seq } =>")
+        .nth(1)
+        .expect("activation dispatch");
+    assert!(dispatch.contains("ws.accessibility_key = None;"));
+    assert!(dispatch.contains("ws.accessibility_updated_at = None;"));
+    assert!(dispatch.contains("ws.accessibility_pending = true;"));
+}
+
+fn finding_body<'a>(source: &'a str, name: &str) -> &'a str {
+    source
+        .split(&format!("fn {name}("))
+        .nth(1)
+        .unwrap()
+        .split("\n    }")
+        .next()
+        .unwrap()
+}
+
+#[test]
+fn finding_remote_new_tab_reconciles_search() {
+    let source = include_str!("automation.rs");
+    let branch = source
+        .split("PendingRemoteCommand::NewTab { .. } => {")
+        .nth(1)
+        .unwrap()
+        .split("PendingRemoteCommand::SendText")
+        .next()
+        .unwrap();
+    assert!(
+        branch.contains("let pre = self.focus_key(ws);"),
+        "remote new-tab must capture the previous focus"
+    );
+    assert!(
+        branch.contains("self.note_focus_change(ws, pre);"),
+        "remote new-tab must retarget open search"
+    );
+}
+
+#[test]
+fn finding_trigger_snapshots_reconstruct_graphemes() {
+    let source = include_str!("automation.rs");
+    let body = finding_body(source, "trigger_snapshot");
+    assert!(
+        body.contains("append_row_text"),
+        "trigger snapshots must skip wide spacers and retain combining marks"
+    );
+}
+
+#[test]
+fn finding_narrow_vertical_tabs_remain_selectable() {
+    let source = include_str!("chrome.rs");
+    let body = finding_body(source, "tab_bar_vertical");
+    assert!(
+        body.contains("self.cfg.close_button_on_tab && strip_w >= height"),
+        "a close button must fit inside its vertical tab"
+    );
+    assert!(body.contains("tab_title_rect(rect, close, closable)"));
+}
+
+#[test]
+fn finding_tab_pointer_uses_painted_band() {
+    let body = finding_body(include_str!("chrome.rs"), "cursor_in_tab_bar");
+    assert!(
+        body.contains("self.tab_band(ws, h)"),
+        "tab pointer hits must include the bottom status reservation"
+    );
+    let band = super::tab_band_rect(
+        (800, 600),
+        kettle_config::TabBarPos::Bottom,
+        24.0,
+        180.0,
+        0.0,
+        22.0,
+    );
+    assert!(super::rect_contains(band, 400.0, 560.0));
+    assert!(!super::rect_contains(band, 400.0, 590.0));
+}
+
+#[test]
+fn finding_facts_preserve_local_dismissal() {
+    let body = finding_body(include_str!("chrome.rs"), "apply_update_facts");
+    assert!(
+        body.contains("self.update_local_dismissals"),
+        "incoming disk facts must preserve local dismissals"
+    );
+}
+
+#[test]
+fn finding_watcher_refresh_keeps_working_registration() {
+    let body = finding_body(include_str!("config_reload.rs"), "refresh_config_watcher");
+    assert!(
+        body.contains("Ok(watcher) =>"),
+        "watcher replacement must be installed only after successful registration"
+    );
+    assert!(
+        body.contains("self.config_watcher_path"),
+        "watcher retention must be scoped to the same config path"
+    );
+}
+
+#[test]
+fn finding_modal_blocks_terminal_motion_but_not_release() {
+    let body = finding_body(include_str!("pointer.rs"), "send_mouse_to");
+    assert!(
+        body.contains("motion && self.pointer_modal_open(ws)"),
+        "modal pointer ownership must block terminal motion"
+    );
+}
+
+#[test]
+fn finding_synthetic_divider_drag_uses_native_handlers() {
+    let source = include_str!("ctl.rs");
+    assert!(
+        finding_body(source, "ctl_mouse_press").contains("self.press_split_divider(ws, bcode)"),
+        "synthetic divider presses must arm a split drag"
+    );
+    assert!(
+        finding_body(source, "ctl_mouse_move").contains("self.drag_split_divider(ws)"),
+        "synthetic motion must resize split PTYs"
+    );
+    assert!(include_str!("../app.rs").contains("if self.drag_split_divider(ws)"));
+}
+
+#[test]
+fn finding_stale_crop_failure_cannot_cancel_reload() {
+    let source = include_str!("media.rs");
+    let body = finding_body(source, "finish_lane_crop");
+    let before_result = body.split("let verdict = match &result").next().unwrap();
+    assert!(
+        before_result.contains("item.generation == render.generation"),
+        "crop failures must reject obsolete item generations before changing notices or jobs"
+    );
+    let mark = finding_body(source, "mark_preview_changed");
+    assert!(
+        mark.contains("withdraw_lane_renders(render.pane, render.item, render.generation)"),
+        "withdrawal must be limited to the failed generation"
+    );
+}
+
+#[test]
+fn finding_short_menu_keeps_one_complete_row() {
+    let body = finding_body(include_str!("menus.rs"), "context_menu_geometry");
+    assert!(
+        body.contains(".max(row_h)"),
+        "menu breathing room must yield to one complete row"
+    );
+}
+
+#[test]
+fn finding_ungroup_menu_checks_the_whole_tab() {
+    let body = finding_body(include_str!("menus.rs"), "context_menu_items");
+    let group = body
+        .split("let has_group =")
+        .nth(1)
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    assert!(
+        group.contains("tab_pane_ids"),
+        "Ungroup Tab availability must consider siblings"
+    );
+}
+
+#[test]
+fn finding_layout_picker_reaps_its_children() {
+    let body = finding_body(include_str!("modals.rs"), "layout_picker_key");
+    assert!(
+        body.contains("child.wait()"),
+        "layout launches need a background wait"
+    );
+    assert!(body.contains("std::thread::Builder::new()"));
+}
+
+#[test]
+fn finding_settings_accepts_control_space() {
+    let (_, key) = super::parse_ui_key("space").unwrap();
+    assert!(super::confirmation_space_key(&key));
+    let body = finding_body(include_str!("modals.rs"), "settings_key");
+    assert!(
+        body.contains("confirmation_space_key(key)"),
+        "Settings must activate character-form Space from dispatch_ui_key"
+    );
+}
+
+#[test]
+fn finding_captured_input_survives_broadcast_change() {
+    let body = finding_body(include_str!("paste.rs"), "deliver_queued_paste");
+    assert!(
+        body.contains("!matches!(content, QueuedPasteContent::Input { .. })"),
+        "captured key recipients must bypass paste scope validation"
+    );
+}
+
+#[test]
+fn finding_enlarged_viewer_covers_sibling_lanes() {
+    let body = finding_body(include_str!("preview.rs"), "preview_lane_projections");
+    assert!(
+        body.contains("open.theater || open.fullscreen"),
+        "fullscreen and theater projections must exclude sibling lanes"
+    );
+}
+
+#[test]
+fn finding_query_edit_refreshes_viewport_anchor() {
+    let mut search = crate::search_input::SearchState {
+        anchor: Some(kettle_core::SearchPoint { line: 0, column: 0 }),
+        ..Default::default()
+    };
+    search.note_edit(std::time::Instant::now());
+    assert!(
+        search.anchor.is_none(),
+        "query edits must discard the old viewport anchor"
+    );
+}
+
+#[test]
+fn finding_synthetic_keys_reconcile_focus_before_batch() {
+    let body = finding_body(include_str!("ctl.rs"), "ctl_send_keys");
+    let sync = body.find("self.sync_pane_focus_reports(ws);");
+    let write = body.find("feed_key_inputs(").unwrap();
+    assert!(
+        sync.is_some_and(|sync| sync < write),
+        "ctl_send_keys must send the new pane's focus report before its key batch"
+    );
+}
+
+#[test]
+fn finding_character_space_activates_focused_toast() {
+    let key = winit::keyboard::Key::Character(" ".into());
+    assert!(
+        super::update_toast::owns_key(true, &key, winit::keyboard::ModifiersState::empty()),
+        "focused toast must own character-form Space"
+    );
+    let mut closing = HashSet::new();
+    let physical = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space);
+    super::update_toast::guard_activation(&key, physical, &mut closing);
+    assert!(closing.contains(&physical));
+    let source = include_str!("../app.rs");
+    let branch = source
+        .split("if toast_owns_key {")
+        .nth(1)
+        .unwrap()
+        .split("if ws.ime_preedit")
+        .next()
+        .unwrap();
+    assert!(branch.contains("confirmation_space_key(&key)"));
+}
+
+#[test]
+fn finding_tear_off_retargets_source_search() {
+    let body = finding_body(include_str!("windowing.rs"), "maybe_tear_off");
+    assert!(
+        body.contains("self.note_focus_change(ws, pre_focus);"),
+        "successful tear-off must retarget source search"
+    );
+}
+
+#[test]
+fn finding_hidden_dock_uses_materialized_segments() {
+    let body = finding_body(include_str!("windowing.rs"), "dock_index_in_client");
+    assert!(
+        body.contains("self.tab_bar_at_height(w, height)"),
+        "hidden docking must use the visible bar's segment layout"
+    );
+    assert!(!body.contains("bw * 0.5"));
+}
+
+#[test]
+fn finding_tear_off_anchor_includes_status_bar() {
+    let source = include_str!("windowing.rs");
+    assert!(
+        source.contains("self.tear_off_tab_band(ws, (size.width, size.height)"),
+        "native tear-off anchors must use the destination tab band"
+    );
+    assert!(
+        source.contains("self.tear_off_tab_band(ws, (size.width, size.height), height)"),
+        "Wayland tear-off anchors must use the destination tab band"
+    );
+}
+
+#[test]
+fn trigger_grid_snapshot_preserves_wide_and_combining_text() {
+    let (mux, panes) = title_test_tab_mux(1);
+    let pane = &mux.panes[&panes[0]];
+    let text = "\u{4e16}\u{754c} e\u{301}";
+    assert!(pane.term.apply_local_output(text.as_bytes()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let snapshot = loop {
+        let snapshot = super::automation::trigger_snapshot(&pane.term).unwrap();
+        if snapshot.contains(text) {
+            break snapshot;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "snapshot lost Unicode: {snapshot:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let triggers = super::compile_triggers(&[kettle_config::OutputTrigger {
+        pattern: format!("({text})$"),
+        action: kettle_config::TriggerAction::RunCommand(vec!["notify".into(), "{1}".into()]),
+    }]);
+    assert_eq!(
+        super::match_triggers(&snapshot, &triggers),
+        Some(kettle_config::TriggerAction::RunCommand(vec![
+            "notify".into(),
+            text.into()
+        ]))
+    );
+    mux.kill_children();
 }

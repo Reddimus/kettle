@@ -2484,6 +2484,10 @@ impl App {
     ) -> Vec<kettle_render::MediaLanePanel> {
         self.pane_layout(ws, self.area(ws))
             .into_iter()
+            .filter(|(pane, _)| {
+                ws.preview_overlay
+                    .is_none_or(|open| !(open.theater || open.fullscreen) || open.pane == *pane)
+            })
             .filter_map(|(pane, partition)| {
                 let (rect, collapsed) = self.preview_placement(ws, pane, partition)?;
                 self.preview_lane_panel(ws, pane, rect, collapsed)

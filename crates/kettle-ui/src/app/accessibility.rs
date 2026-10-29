@@ -81,6 +81,8 @@ impl App {
             window,
             AccessibilityActivation {
                 initial: Self::initial_accessibility_tree(tr),
+                proxy: proxy.clone(),
+                window_seq,
             },
             AccessibilityActions { proxy, window_seq },
             AccessibilityDeactivation,

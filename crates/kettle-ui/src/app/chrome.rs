@@ -46,26 +46,7 @@ impl App {
         if h <= 0.0 {
             return false;
         }
-        let (sw, sh) = ws
-            .renderer
-            .as_ref()
-            .map(|r| r.surface_size())
-            .unwrap_or((800, 600));
-        // For Left/Right strips, the cursor must be within
-        // `cfg.tab_bar_width` of the configured edge.
-        match self.cfg.tab_bar_pos {
-            TabBarPos::Left => {
-                let x = ws.cursor.x as f32;
-                (0.0..self.cfg.tab_bar_width).contains(&x)
-            }
-            TabBarPos::Right => {
-                let x = ws.cursor.x as f32;
-                x >= sw as f32 - self.cfg.tab_bar_width && x <= sw as f32
-            }
-            TabBarPos::Top | TabBarPos::Bottom => {
-                cursor_in_tab_bar_band(ws.cursor.y as f32, h, sh as f32, self.cfg.tab_bar_pos)
-            }
-        }
+        rect_contains(self.tab_band(ws, h), ws.cursor.x as f32, ws.cursor.y as f32)
     }
 
     pub(super) fn tab_bar_h(&self, ws: &WindowState) -> f32 {
@@ -114,6 +95,10 @@ impl App {
         if height <= 0.0 {
             return TabBar::hidden();
         }
+        self.tab_bar_at_height(ws, height)
+    }
+
+    pub(super) fn tab_bar_at_height(&self, ws: &WindowState, height: f32) -> TabBar {
         let band = self.tab_band(ws, height);
         let sw = band.2;
         let y = band.1;
@@ -364,16 +349,12 @@ impl App {
                     })
                     .unwrap_or(RenderTabActivity::Normal);
                 let rect = (strip_x, seg_y, strip_w, height);
-                let close = tab_close_rect(
-                    strip_x + strip_w - height,
-                    seg_y,
-                    height,
-                    self.cfg.close_button_on_tab,
-                );
+                let closable = self.cfg.close_button_on_tab && strip_w >= height;
+                let close = tab_close_rect(strip_x + strip_w - height, seg_y, height, closable);
                 TabSeg {
                     idx: i,
                     rect,
-                    title_rect: tab_title_rect(rect, close, self.cfg.close_button_on_tab),
+                    title_rect: tab_title_rect(rect, close, closable),
                     // ✕ hit zone = the trailing-right square of the
                     // segment (same axis convention as horizontal).
                     close,
@@ -536,8 +517,9 @@ impl App {
     pub(super) fn apply_update_facts(
         &mut self,
         ws: &mut WindowState,
-        facts: crate::update_notice::UpdateFacts,
+        mut facts: crate::update_notice::UpdateFacts,
     ) {
+        self.update_local_dismissals.apply(&mut facts);
         self.update_toast_unavailable = None;
         if self.update_facts != facts {
             let previous = self.update_notice();
@@ -583,10 +565,12 @@ impl App {
         match notice.kind {
             NoticeKind::Available => {
                 crate::update_check::record_dismissed(&notice.tag);
+                self.update_local_dismissals.available = Some(notice.tag.clone());
                 self.update_facts.dismissed_available = Some(notice.tag);
             }
             NoticeKind::Failed => {
                 crate::update_check::record_dismissed_failed(&notice.tag);
+                self.update_local_dismissals.failed = Some(notice.tag.clone());
                 self.update_facts.dismissed_failed = Some(notice.tag);
             }
             NoticeKind::RestartPending => self.update_restart_dismissed = true,

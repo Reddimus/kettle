@@ -481,9 +481,9 @@ impl MediaService {
         });
     }
 
-    pub(crate) fn withdraw_lane_renders(&mut self, pane: u64, item: u64) {
+    pub(crate) fn withdraw_lane_renders(&mut self, pane: u64, item: u64, generation: u64) {
         let _ = self.queue.cancel(|push| {
-            matches!(push.requester, Requester::Lane(render) if render.pane == pane && render.item == item)
+            matches!(push.requester, Requester::Lane(render) if render.pane == pane && render.item == item && render.generation == generation)
         });
     }
 
@@ -726,7 +726,7 @@ mod tests {
         ] {
             service.admit(sender, later, push_for(Requester::Lane(lane)));
         }
-        service.withdraw_lane_renders(3, 9);
+        service.withdraw_lane_renders(3, 9, 0);
         assert!(service.take_lane_failures().is_empty(), "silent");
         let left: Vec<_> = service
             .queue
@@ -742,6 +742,37 @@ mod tests {
             })
             .collect();
         assert_eq!(left, [(3, 8), (4, 9)]);
+    }
+
+    #[test]
+    fn stale_crop_withdrawal_keeps_a_reloaded_items_page() {
+        let mut service = MediaService::default();
+        let old = LaneRender {
+            window: 1,
+            pane: 3,
+            item: 9,
+            generation: 0,
+            tile: Some(1),
+            page: None,
+            preview: None,
+        };
+        let replacement = LaneRender {
+            generation: 1,
+            tile: None,
+            ..old
+        };
+        let later = Instant::now() + std::time::Duration::from_secs(60);
+        service.admit(Sender::LaneTile(3), later, push_for(Requester::Lane(old)));
+        service.admit(
+            Sender::Lane(3),
+            later,
+            push_for(Requester::Lane(replacement)),
+        );
+        service.withdraw_lane_renders(3, 9, 0);
+        let left = service.queue.cancel(|_| true);
+        assert_eq!(left.len(), 1, "stale crop cancelled replacement page");
+        assert!(matches!(left[0].requester, Requester::Lane(render) if render == replacement));
+        assert!(service.take_lane_failures().is_empty());
     }
 
     /// The lane's end of the channel closes before the App is woken, by a

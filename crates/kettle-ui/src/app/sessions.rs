@@ -3,17 +3,69 @@
 use super::*;
 
 /// Receive one legacy handoff; the sender closes its write half after the JSON.
-/// A read timeout bounds stalls while waiting for that EOF.
+/// One deadline bounds the entire receive, including fragmented sends.
 #[cfg(unix)]
 fn receive_handoff_session(
     socket: &std::os::unix::net::UnixStream,
 ) -> std::io::Result<crate::session::Session> {
+    receive_handoff_session_until(
+        socket,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )
+}
+
+#[cfg(unix)]
+fn receive_handoff_session_until(
+    socket: &std::os::unix::net::UnixStream,
+    deadline: std::time::Instant,
+) -> std::io::Result<crate::session::Session> {
     const LIMIT: usize = 1024 * 1024;
-    socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    // macOS refuses SO_RCVTIMEO after the peer shuts down its write half.
+    // Readiness and nonblocking recvmsg keep every fragment on one deadline.
+    socket.set_nonblocking(true)?;
     let mut payload = vec![0u8; LIMIT + 1];
     let mut used = 0;
     loop {
-        let (n, fds) = crate::fd_transport::recv_fds(socket, &mut payload[used..], 64)?;
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "tab handoff receive deadline expired",
+                )
+            })?;
+        use std::os::fd::AsRawFd as _;
+        let mut readiness = libc::pollfd {
+            fd: socket.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout_ms = (remaining.as_millis() + 1).min(i32::MAX as u128) as i32;
+        // SAFETY: readiness describes the live socket for this one poll call.
+        let ready = unsafe { libc::poll(&mut readiness, 1, timeout_ms) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 || std::time::Instant::now() >= deadline {
+            continue;
+        }
+        let (n, fds) = match crate::fd_transport::recv_fds(socket, &mut payload[used..], 64) {
+            Ok(received) => received,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         for fd in fds {
             // SAFETY: recv_fds transferred ownership; PTY adoption is unsupported.
             unsafe {
@@ -212,6 +264,32 @@ mod tests {
     use super::receive_handoff_session;
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn fragmented_handoff_cannot_extend_receive_deadline() {
+        use std::io::Write as _;
+        use std::time::{Duration, Instant};
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            for _ in 0..100 {
+                if sender.write_all(b" ").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let started = Instant::now();
+        let result =
+            super::receive_handoff_session_until(&receiver, started + Duration::from_millis(80));
+        let elapsed = started.elapsed();
+        drop(receiver);
+        writer.join().unwrap();
+        assert!(result.is_err());
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "fragments extended the receive to {elapsed:?}"
+        );
+    }
 
     #[test]
     fn handoff_receives_fragmented_session() {

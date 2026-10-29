@@ -128,6 +128,7 @@ impl SearchState {
         self.visible_turn_pending = false;
         self.typing_scanned_revision = None;
         self.visible_key = None;
+        self.anchor = None;
         self.scan_token = None;
         self.background = None;
     }

@@ -626,6 +626,9 @@ impl App {
         pressed: bool,
         motion: bool,
     ) -> MouseReport {
+        if motion && self.pointer_modal_open(ws) {
+            return MouseReport::Swallowed;
+        }
         let held = matches!(at, MouseAt::Held { .. });
         // A held button's pane that left the screen gets its release, but
         // no drag: the pointer is nowhere over it.

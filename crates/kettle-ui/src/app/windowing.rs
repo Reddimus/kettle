@@ -623,11 +623,12 @@ impl App {
             .unwrap_or(12.0)
             .min(f64::from(size.height) - 24.0);
         let strip_w = f64::from(self.cfg.tab_bar_width).max(8.0);
+        let destination_band = self.tear_off_tab_band(ws, (size.width, size.height), bar_h as f32);
         let grab = match self.cfg.tab_bar_pos {
             TabBarPos::Top => (ftc.0 + in_seg_x, ftc.1 + bar_h * 0.5),
             TabBarPos::Bottom => (
                 ftc.0 + in_seg_x,
-                ftc.1 + f64::from(size.height) - bar_h * 0.5,
+                ftc.1 + f64::from(destination_band.1) + bar_h * 0.5,
             ),
             TabBarPos::Left => (ftc.0 + strip_w * 0.5, ftc.1 + in_seg_y),
             TabBarPos::Right => (
@@ -657,6 +658,7 @@ impl App {
         // it active, while the FSM's armed index can go stale across reorders.
         let closing_idx = ws.mux.active;
         self.release_held_buttons_in_tab(ws, closing_idx);
+        let pre_focus = self.focus_key(ws);
         let Some(dt) = ws.mux.detach_tab(closing_idx) else {
             return false;
         };
@@ -682,6 +684,7 @@ impl App {
             .map_err(|open| *open)
         {
             Ok(torn_seq) => {
+                self.note_focus_change(ws, pre_focus);
                 self.fire_tab_close_event(ws, closing_idx);
                 self.ctl_broadcast(
                     "tab_moved",
@@ -842,6 +845,22 @@ impl App {
         )
     }
 
+    fn tear_off_tab_band(&self, ws: &WindowState, surface: (u32, u32), height: f32) -> Rect {
+        let bottom_status = if self.cfg.status_bar == kettle_config::StatusBarMode::Bottom {
+            self.status_bar_h(ws)
+        } else {
+            0.0
+        };
+        tab_band_rect(
+            surface,
+            self.cfg.tab_bar_pos,
+            height,
+            self.cfg.tab_bar_width,
+            0.0,
+            bottom_status,
+        )
+    }
+
     /// Insertion slot if the (approximated) screen
     /// cursor is over this window's tab band; `None` when it isn't (or
     /// the window can't host a dock right now).
@@ -872,32 +891,10 @@ impl App {
         if dist_to_rect(cx, cy, band) > 0.0 {
             return None;
         }
-        let bar = self.tab_bar(w);
+        let height = Self::cell_size(w).map_or(24.0, |(_, ch)| ch + 8.0);
+        let bar = self.tab_bar_at_height(w, height);
         let vertical = self.cfg.tab_bar_pos.is_vertical();
-        let slot = (bar.height > 0.0)
-            .then(|| dock_insertion_tab(&bar.segments, vertical, if vertical { cy } else { cx }))
-            .flatten();
-        if slot.is_some() {
-            slot
-        } else {
-            // Hidden bar (single-tab auto, preview not applied yet): use
-            // the geometry the bar WILL have once the preview materializes
-            // it, so the slot can't flip between the first hit-test and
-            // the next one. Vertically the lone segment occupies the strip's
-            // first bar_h; horizontally the slot flips at the band centre.
-            let bh = w.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0);
-            let (mid, c) = if vertical {
-                (bh * 0.5, cy)
-            } else {
-                // The tab1/tab2 boundary is the FULL band centre (the tab strip
-                // divides the full width so its boundaries align with pane
-                // splits — see `tab_strip_layout`), not the button-trimmed
-                // strip centre; the slot flip must sit on that same boundary.
-                let (bx, _, bw, _) = band;
-                (bx + bw * 0.5, cx)
-            };
-            Some(if c < mid { 0 } else { 1 })
-        }
+        dock_insertion_tab(&bar.segments, vertical, if vertical { cy } else { cx })
     }
 
     /// Which window's tab band is under the screen
@@ -1564,12 +1561,11 @@ impl App {
             let (x, y, width, height) = segment.unwrap_or((0.0, 0.0, 80.0, 24.0));
             let along_x = (press.0 - f64::from(x)).clamp(8.0, f64::from(width.max(16.0)) - 8.0);
             let along_y = (press.1 - f64::from(y)).clamp(4.0, f64::from(height.max(8.0)) - 4.0);
+            let size = window.inner_size();
+            let destination_band = self.tear_off_tab_band(ws, (size.width, size.height), height);
             match self.cfg.tab_bar_pos {
                 TabBarPos::Top => (along_x, along_y),
-                TabBarPos::Bottom => (
-                    along_x,
-                    f64::from(window.inner_size().height) - f64::from(height) + along_y,
-                ),
+                TabBarPos::Bottom => (along_x, f64::from(destination_band.1) + along_y),
                 TabBarPos::Left => (along_x, along_y),
                 TabBarPos::Right => (
                     f64::from(window.inner_size().width) - f64::from(width) + along_x,

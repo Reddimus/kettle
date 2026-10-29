@@ -543,7 +543,9 @@ impl App {
         // Broadcast goes where its scope reaches now. A different scope, or
         // the same scope over other panes (another tab, a group that changed),
         // could reach panes the paste was never meant for.
-        if ws.mux.broadcast != broadcast || self.broadcast_recipients(&ws) != recipients {
+        if !matches!(content, QueuedPasteContent::Input { .. })
+            && (ws.mux.broadcast != broadcast || self.broadcast_recipients(&ws) != recipients)
+        {
             self.discard_queued_paste(content);
             self.finish_window_dispatch(el, window, ws);
             return;

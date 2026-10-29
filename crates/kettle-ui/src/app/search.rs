@@ -1537,7 +1537,9 @@ impl App {
                 // viewport the user is looking at rather than from where Search
                 // opened.
                 Self::anchor_search_to_viewport(ws);
+                let anchor = ws.search.anchor;
                 ws.search.note_edit(std::time::Instant::now());
+                ws.search.anchor = anchor;
             }
             kettle_render::SearchControl::Invert => {
                 ws.search.invert = !ws.search.invert;
@@ -1549,10 +1551,10 @@ impl App {
                 // Invert only changes which way Enter steps. A later search
                 // starts from the matching edge of the viewport; the match on
                 // screen stays.
-                Self::anchor_search_to_viewport(ws);
                 if ws.search.focused.is_none() {
                     ws.search.note_edit(std::time::Instant::now());
                 }
+                Self::anchor_search_to_viewport(ws);
             }
             kettle_render::SearchControl::Close => self.close_search(ws),
         }

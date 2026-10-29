@@ -8,10 +8,11 @@ pub(super) fn owns_key(focused: bool, key: &Key, mods: ModifiersState) -> bool {
         && !mods.control_key()
         && !mods.alt_key()
         && !mods.super_key()
-        && matches!(
-            key,
-            Key::Named(NamedKey::Escape | NamedKey::Tab | NamedKey::Enter | NamedKey::Space)
-        )
+        && (confirmation_space_key(key)
+            || matches!(
+                key,
+                Key::Named(NamedKey::Escape | NamedKey::Tab | NamedKey::Enter)
+            ))
 }
 
 pub(super) fn guard_activation(
@@ -19,10 +20,8 @@ pub(super) fn guard_activation(
     physical: PhysicalKey,
     closing: &mut HashSet<PhysicalKey>,
 ) {
-    if matches!(
-        key,
-        Key::Named(NamedKey::Escape | NamedKey::Enter | NamedKey::Space)
-    ) {
+    if confirmation_space_key(key) || matches!(key, Key::Named(NamedKey::Escape | NamedKey::Enter))
+    {
         closing.insert(physical);
     }
 }

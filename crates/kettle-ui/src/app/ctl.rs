@@ -56,6 +56,13 @@ fn screen_page(screen: &str, page: &kettle_ctl::protocol::PageRequest, whole: bo
     }
 }
 
+fn command_submission(command: &str) -> String {
+    let line = command.strip_suffix('\n').unwrap_or(command);
+    let mut line = line.strip_suffix('\r').unwrap_or(line).to_owned();
+    line.push('\r');
+    line
+}
+
 impl App {
     /// Start the control server if the policy allows anything, the first pane
     /// exists, and no start has been tried. A failed start is logged and not
@@ -2107,6 +2114,9 @@ impl App {
             self.search_mouse_drag(ws);
             return;
         }
+        if self.drag_split_divider(ws) {
+            return;
+        }
         self.promote_tab_drag_if_needed(ws);
         if ws.tab_drag_active && ws.tab_drag_press.is_none() {
             self.reorder_active_tab_for_cursor(ws);
@@ -2280,6 +2290,9 @@ impl App {
 
         let area = self.area(ws);
         if self.activate_media_paste_receipt_at(ws, px, py, bcode) {
+            return true;
+        }
+        if self.press_split_divider(ws, bcode) {
             return true;
         }
         let pre = self.focus_key(ws);
@@ -2725,6 +2738,7 @@ impl App {
         conn_id: u64,
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
+        self.sync_pane_focus_reports(ws);
         use kettle_ctl::protocol::{Response, error_codes as ec};
         let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
@@ -3012,15 +3026,7 @@ impl App {
             })
             .unwrap_or(0);
         if let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) {
-            let mut line = command.to_string();
-            // Submit with a CARRIAGE RETURN, not a line feed: CR is the Enter
-            // key a shell's line editor acts on. Under Windows ConPTY only CR is
-            // delivered as Enter (a bare LF is typed but never executes); on a
-            // Unix PTY the line discipline's ICRNL maps CR→LF, so CR works on
-            // both. (A trailing newline already in `command` is left as-is.)
-            if !line.ends_with('\r') && !line.ends_with('\n') {
-                line.push('\r');
-            }
+            let line = command_submission(command);
             // An agent acts as the user — the per-pane read-only
             // toggle (Terminator parity) blocks it, with an explicit error
             // (no PendingRun is registered; nothing was written).
@@ -3189,6 +3195,19 @@ impl App {
 #[cfg(test)]
 mod screen_page_tests {
     use super::*;
+
+    #[test]
+    fn command_terminators_submit_one_carriage_return() {
+        for command in [
+            "echo hello",
+            "echo hello\r",
+            "echo hello\n",
+            "echo hello\r\n",
+        ] {
+            assert_eq!(command_submission(command), "echo hello\r", "{command:?}");
+        }
+        assert_eq!(command_submission("first\nsecond\n"), "first\nsecond\r");
+    }
 
     fn default_page() -> kettle_ctl::protocol::PageRequest {
         kettle_ctl::protocol::PageRequest::from_params(&serde_json::json!({})).unwrap()
