@@ -2869,3 +2869,94 @@ fn recording_markers_can_span_output_events() {
         "recording marker must be found across PTY chunks"
     );
 }
+
+/// The internal supervisor uses the in-process capture engine, including its
+/// byte-tail cap and startup diagnostics, before writing the captured bytes.
+#[cfg(unix)]
+#[test]
+fn exec_internal_capture_preserves_raw_strip_tail_and_status() {
+    for strip in [false, true] {
+        let mut flags = vec!["--internal-capture-tail", "--timeout", "10"];
+        if strip {
+            flags.push("--strip-ansi");
+        }
+        let (code, output, error) = run_exec(
+            &flags,
+            &["sh", "-c", "printf '\\033[31mred\\033[0m'; exit 7"],
+            None,
+        );
+        assert_eq!(code, 7, "{error}");
+        assert_eq!(output, if strip { "red" } else { "\x1b[31mred\x1b[0m" });
+    }
+    let (code, output, error) = run_exec(
+        &["--internal-capture-tail", "--strip-ansi", "--timeout", "10"],
+        &[
+            "sh",
+            "-c",
+            "head -c 1100000 /dev/zero | tr '\\000' x; printf TAIL; exit 9",
+        ],
+        None,
+    );
+    assert_eq!(code, 9, "{error}");
+    assert_eq!(output.len(), 1024 * 1024);
+    assert!(output.ends_with("TAIL"));
+    let (code, output, error) = run_exec(
+        &["--internal-capture-tail", "--strip-ansi"],
+        &["/kettle-test-missing-command"],
+        None,
+    );
+    assert_eq!(code, 125, "{error}");
+    assert!(output.contains("cannot start PTY"), "{output}");
+}
+
+/// Unix signal handling is also exercised on macOS; escaped-session ownership
+/// has separate native Linux coverage in mcp_supervisor.rs.
+#[cfg(unix)]
+#[test]
+fn exec_sigterm_and_sigint_follow_bounded_cancellation() {
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        let mut child = kettle()
+            .args([
+                "exec",
+                "--",
+                "sh",
+                "-c",
+                "trap '' HUP; echo READY; exec sleep 2",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let output = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            let mut reader = std::io::BufReader::new(output);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            let _ = tx.send(line);
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .contains("READY")
+        );
+        // SAFETY: the positive PID is our unreaped supervisor, not reusable.
+        let sent = unsafe { libc::kill(child.id() as i32, signal) };
+        assert_eq!(sent, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("signal cancellation hung");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.code(), Some(130), "signal {signal}");
+    }
+}

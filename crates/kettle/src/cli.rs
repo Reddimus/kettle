@@ -447,7 +447,8 @@ pub(crate) enum Cmd {
     /// stdout (the non-interactive counterpart to the GUI). Propagates the
     /// child's exit code; 124 when `--timeout` expires and owned-process
     /// teardown is verified, 74 on stdout delivery failure, 125 on an internal
-    /// error or unverified teardown.
+    /// error or unverified teardown. On Unix, SIGTERM/SIGINT cancel the run
+    /// with bounded tree teardown and exit 130 (125 if unverified).
     Exec(ExecArgs),
     /// Drive a running kettle's agent control server: call a method (e.g.
     /// `list_panes`, `read_screen`, `screenshot`, `send_text`, `run_command`) or stream
@@ -636,6 +637,9 @@ pub(crate) struct ExecArgs {
     /// Also record the session to an asciicast (.cast) file.
     #[arg(long, value_name = "PATH")]
     pub(crate) record: Option<std::path::PathBuf>,
+    /// Internal MCP transport: capture the bounded byte tail before emitting it.
+    #[arg(long, hide = true, conflicts_with_all = ["json", "record"])]
+    pub(crate) internal_capture_tail: bool,
     /// The command (and its arguments) to run.
     #[arg(required = true, num_args = 1.., allow_hyphen_values = true, value_name = "CMD", last = false, trailing_var_arg = true)]
     pub(crate) argv: Vec<String>,

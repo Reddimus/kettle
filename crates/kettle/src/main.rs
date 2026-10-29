@@ -670,9 +670,9 @@ fn main() -> anyhow::Result<()> {
                     // A real terminal remains attached to the user, and
                     // /dev/null/NUL stays closed rather than being mistaken for
                     // useful input.
-                    forward_stdin: exec::stdin_is_pipe(),
+                    forward_stdin: !args.internal_capture_tail && exec::stdin_is_pipe(),
                 };
-                std::process::exit(exec::run_exec(opts));
+                std::process::exit(exec::run_exec(opts, args.internal_capture_tail));
             }
             Cmd::Ctl(args) => {
                 std::process::exit(ctl_cli::run_ctl(args));
@@ -3562,6 +3562,7 @@ mod tests {
         // `--launch-codex` is run only by the function `agent-setup --print`
         // prints.
         let allow_missing: &[&str] = &[
+            "internal-capture-tail",
             "tab-handoff",
             "tab-handoff-fd",
             "reopen",

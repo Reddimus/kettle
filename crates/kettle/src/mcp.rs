@@ -2187,7 +2187,9 @@ mod tests {
     /// A stdout failure ends the server, but not under a running tool: the
     /// `kettle_run` is cancelled and its child, which ignores SIGHUP and so
     /// would survive the process exiting, is stopped first.
-    #[cfg(unix)]
+    // Linux exercises the real supervisor binary in mcp_supervisor.rs instead;
+    // current_exe() inside this unit-test binary would name the test harness.
+    #[cfg(all(unix, not(target_os = "linux")))]
     #[test]
     fn a_stdout_failure_stops_running_tools_before_exiting() {
         /// Accepts the initialize response, then fails every write.

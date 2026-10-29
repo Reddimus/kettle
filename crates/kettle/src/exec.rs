@@ -375,9 +375,52 @@ fn exec_stdout_sink() -> std::io::Result<std::io::Stdout> {
 }
 
 /// Run `kettle exec` end to end; returns the process exit code to propagate.
-pub fn run_exec(opts: ExecOpts) -> i32 {
+pub fn run_exec(opts: ExecOpts, capture_tail: bool) -> i32 {
+    // Only a CLI process installs handlers; concurrent in-process captures must
+    // never change the MCP server's process-global signal dispositions.
+    #[cfg(unix)]
+    let signals = match ExecSignals::register() {
+        Ok(signals) => signals,
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: cannot register cancellation signals: {error}"
+            );
+            return EXIT_INTERNAL;
+        }
+    };
+    #[cfg(unix)]
+    let cancelled = Some(signals.cancelled.as_ref());
+    #[cfg(not(unix))]
+    let cancelled = None;
+
     #[cfg(target_os = "linux")]
     adopt_orphaned_descendants();
+    #[cfg(target_os = "linux")]
+    if capture_tail && let Err(error) = supervisor::cancellation_mask(libc::SIG_UNBLOCK) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "kettle exec: cannot unblock supervisor cancellation: {error}"
+        );
+        return EXIT_INTERNAL;
+    }
+    if capture_tail {
+        let mut sink = TailSink::new(1024 * 1024);
+        let mut output = DirectOutput::new(opts.mode, &mut sink);
+        let code = run_exec_engine(opts, &default_size_probe, &mut output, cancelled, true);
+        // Preserve bytes until the MCP parent performs the same lossy UTF-8
+        // conversion as in-process capture, including a split multibyte tail.
+        return match std::io::stdout().write_all(sink.tail()) {
+            Ok(()) => code,
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: cannot write capture tail: {error}"
+                );
+                EXIT_OUTPUT_DELIVERY
+            }
+        };
+    }
     let sink = match exec_stdout_sink() {
         Ok(sink) => sink,
         Err(error) => {
@@ -398,13 +441,83 @@ pub fn run_exec(opts: ExecOpts) -> i32 {
             return EXIT_INTERNAL;
         }
     };
-    run_exec_engine(opts, &default_size_probe, &mut output, None, false)
+    run_exec_engine(opts, &default_size_probe, &mut output, cancelled, false)
+}
+
+/// Whether exited children reap themselves here (SIGCHLD ignored, or
+/// `SA_NOCLDWAIT`), as a parent can arrange before starting Kettle. Such a
+/// child could vanish and its PID/group be reused before a supervisor sees
+/// its exit; callers must refuse to spawn when ownership cannot be retained.
+#[cfg(unix)]
+pub(crate) fn children_reap_themselves() -> std::io::Result<bool> {
+    // SAFETY: an all-zero sigaction is a valid value for the query to fill,
+    // and a null new action changes nothing.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut current) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(current.sa_sigaction == libc::SIG_IGN || current.sa_flags & libc::SA_NOCLDWAIT != 0)
+}
+
+#[cfg(unix)]
+struct ExecSignals {
+    cancelled: Arc<AtomicBool>,
+    registrations: Vec<signal_hook::SigId>,
+}
+
+#[cfg(unix)]
+impl ExecSignals {
+    fn register() -> std::io::Result<Self> {
+        let mut signals = Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            registrations: Vec::new(),
+        };
+        for signal in [libc::SIGTERM, libc::SIGINT] {
+            signals.registrations.push(signal_hook::flag::register(
+                signal,
+                signals.cancelled.clone(),
+            )?);
+        }
+        Ok(signals)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ExecSignals {
+    fn drop(&mut self) {
+        for id in self.registrations.drain(..) {
+            signal_hook::low_level::unregister(id);
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+#[path = "exec_supervisor.rs"]
+mod supervisor;
+
+/// Linux isolates orphan adoption per MCP command. macOS (no subreaper) and
+/// Windows retain the in-process path and its existing platform containment.
+pub fn run_mcp_capture(opts: ExecOpts, cancelled: Option<&AtomicBool>) -> (i32, String) {
+    #[cfg(target_os = "linux")]
+    {
+        supervisor::capture(opts, cancelled)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        match cancelled {
+            Some(cancelled) => run_exec_capture_cancellable(opts, cancelled),
+            None => run_exec_capture(opts),
+        }
+    }
 }
 
 /// Run a command headlessly and CAPTURE its output in-process instead of
-/// streaming it to stdout. This is the engine behind the `kettle_run` MCP tool.
+/// streaming it to stdout. Used directly by MCP on macOS/Windows; Linux MCP
+/// invokes the same engine in a supervising CLI child.
 /// Returns `(exit_code, output)`; the output is the tail-capped (1 MiB) child
 /// output in the requested mode (strip-ansi recommended for agent assertions).
+#[cfg(any(not(target_os = "linux"), test))]
 pub fn run_exec_capture(opts: ExecOpts) -> (i32, String) {
     run_exec_capture_inner(opts, None)
 }
@@ -414,6 +527,7 @@ pub fn run_exec_capture(opts: ExecOpts) -> (i32, String) {
 /// and any recorder gets a bounded grace to finalize before returning
 /// [`EXIT_CANCELLED`]. A writer that fails or exceeds the grace reports an
 /// incomplete trace; a stalled writer is detached.
+#[cfg(any(not(target_os = "linux"), test))]
 pub fn run_exec_capture_cancellable(opts: ExecOpts, cancelled: &AtomicBool) -> (i32, String) {
     run_exec_capture_inner(opts, Some(cancelled))
 }
@@ -475,6 +589,7 @@ impl Write for TailSink {
     }
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn run_exec_capture_inner(opts: ExecOpts, cancelled: Option<&AtomicBool>) -> (i32, String) {
     let mut sink = TailSink::new(1024 * 1024);
     let mut output = DirectOutput::new(opts.mode, &mut sink);
@@ -1050,6 +1165,18 @@ fn run_exec_engine_with_recording_poll(
             match state {
                 ExecCompletion::Recording { code, deadline } => {
                     if recording_finished(&mut recorder, deadline) {
+                        // Finish containment before publishing the exit event,
+                        // while the direct child's identity is still reserved.
+                        #[cfg(target_os = "linux")]
+                        let code = if ADOPTION.get().is_some() && !process_tree.terminate(&term) {
+                            let _ = writeln!(
+                                std::io::stderr(),
+                                "kettle exec: normal-exit process-tree teardown was not verified"
+                            );
+                            EXIT_INTERNAL
+                        } else {
+                            code
+                        };
                         output_or_stop!(output.finish(
                             code,
                             started.elapsed(),
@@ -1302,6 +1429,21 @@ fn run_exec_engine_with_recording_poll(
             Ok(Some(code)) => {
                 child_gone_at = Some(Instant::now());
                 child_exit_code = Some(code);
+                // Escaped orphans can retain a PTY writer. Stop them before
+                // waiting for EOF, and sweep again after session teardown.
+                #[cfg(target_os = "linux")]
+                if !linux_kill_adopted(process_tree.root, Instant::now() + LINUX_ADOPTED_KILL_TIME)
+                {
+                    let _ = process_tree.terminate(&term);
+                    let _ = term.child_exit_code();
+                    finish_recording(&mut recorder, RECORD_FINISH_TIMEOUT);
+                    let _ = output.finish(
+                        EXIT_INTERNAL,
+                        started.elapsed(),
+                        OutputFinish::AbandonPending,
+                    );
+                    return EXIT_INTERNAL;
+                }
             }
             Ok(None) => {}
             Err(error) => {
@@ -2006,9 +2148,9 @@ static ADOPTION: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::
 /// session teardown. As a child subreaper, this process receives such a
 /// descendant when its own parent exits, so a timeout or cancellation can
 /// still stop it. Only the command-line path does this: it runs one command
-/// per process, so everything adopted here belongs to that command. The MCP
-/// server runs concurrent commands in one process, where an adopted orphan
-/// cannot be attributed to any one of them.
+/// per process, so everything adopted here belongs to that command. Linux MCP
+/// starts a separate CLI supervisor for each concurrent command instead of
+/// adopting orphans in the server.
 ///
 /// When that cannot be set up, a timeout or cancellation reports its teardown
 /// as unverified, since an escaped descendant could still be running.

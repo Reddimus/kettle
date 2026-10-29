@@ -186,6 +186,44 @@ Linux CI must also run the native exec teardown tests. The `kettle-state` test
 unsupported hard links and exercises the native atomic rename fallback,
 no-clobber behavior, and private-directory checks.
 
+The Linux MCP supervisor regressions must run on a native Linux runner with
+`setsid`, `sh`, `sleep`, procfs and pidfds available:
+
+```sh
+cargo test -p kettle --test mcp_supervisor
+cargo test -p kettle --test exec exec_sigterm_and_sigint_follow_bounded_cancellation
+```
+
+`mcp_supervisor_stops_setsid_on_exit_timeout_and_cancel` launches `sleep 300`
+under `setsid`, uses the PID the fixture prints (pinned with a pidfd), and checks
+normal exit, timeout and cancellation separately. Cancellation still emits no
+MCP reply. `cancelling_one_mcp_supervisor_preserves_the_other_tree_and_output`
+keeps two commands alive together, cancels one, verifies the other's exact PID
+is alive, then checks its complete output and cleanup. The SIGTERM regression
+checks that real `kettle exec` exits 130 and leaves no escaped sleep process;
+the stdout-failure regression checks server shutdown cancels supervised tools.
+These are native Linux tests, not soft skips on failure. On the former
+in-process implementation the escaped sleep survives all three stop modes;
+the former CLI signal disposition also exits by SIGTERM instead of returning
+130. Those pre-change Linux failures require Linux execution to demonstrate.
+
+Portable Unix coverage includes `exec_internal_capture_preserves_raw_strip_tail_and_status`,
+`exec_sigterm_and_sigint_follow_bounded_cancellation`, and
+`mcp_capture_matches_internal_in_process_capture`. They pin the byte tail cap,
+raw/stripped output, nonzero status, cwd, geometry, startup diagnostics and exact
+MCP text/structured content, including existing truncation semantics. The
+internal-capture regression was run before implementation on macOS and failed
+with 125 instead of 7: the CLI tried to spawn the unknown internal switch as
+the command. The portable signal regression also failed against the original
+source: SIGTERM produced no numeric exit code instead of 130.
+`exec::supervisor::tests::supervisor_*` also run on Unix: both pipes
+under pressure, ignored SIGTERM escalation, outer timeout, inherited writers,
+argument boundaries, and refusal to spawn with autoreaping SIGCHLD.
+Linux runtime containment cannot be certified by these portable tests. If the Linux target standard library is installed, try
+`cargo check --locked --offline -p kettle --target x86_64-unknown-linux-gnu`;
+a missing cross C compiler can still block dependency build scripts. Record
+that limitation and run the native suite in Linux CI.
+
 Use these to isolate a failure or validate the area you changed:
 
 | Recipe | What it checks; when to use it | Prerequisites |

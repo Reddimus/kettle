@@ -20,14 +20,16 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   reviewed glyphon path does not call the affected `pop()` method, and a fork
   adds supply-chain surface. Close #207 when upstream accepts `lru >=0.18.2`;
   remove the audit ignores and `scripts/check-lru-scope.py` together.
-- **`setsid()` descendants outside the Linux command line.** The Linux
-  `kettle exec` command line adopts descendants that leave the PTY session and
-  stops them on timeout or cancellation (`crates/kettle/src/exec.rs`). macOS
-  has no child-subreaper, and the MCP `kettle_run` tool runs concurrent
-  commands in one process, where an adopted orphan cannot be attributed to one
-  command. Deferred because both need a per-command supervisor process. Close
-  by running each MCP command under a supervising `kettle exec` child, and on
-  macOS by a supervisor that tracks its descendants.
+- **`setsid()` descendants on macOS.** macOS has no child subreaper. Both
+  `kettle exec` and the in-process MCP `kettle_run` path can leave descendants
+  that deliberately leave the PTY process group. Deferred until a macOS
+  supervisor tracks descendants across session changes. Close with native
+  normal-exit, timeout, cancellation and concurrent-command isolation tests.
+  Linux MCP now gives each command its own supervising `kettle exec` child;
+  its subreaper adopts escaped descendants and bounds teardown on normal exit,
+  timeout and cancellation (`crates/kettle/src/exec{,_supervisor}.rs`). Native
+  Linux regression coverage lives in `crates/kettle/tests/mcp_supervisor.rs`;
+  those tests must run on Linux, not be inferred from macOS results.
 
 ## Terminal and protocol
 

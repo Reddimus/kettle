@@ -1395,6 +1395,38 @@ so a write stalled for 30 seconds also ends a connection with stdin open.
 On that failure it detaches blocked transport threads; the CLI exits with
 status 1.
 
+On Linux, each MCP `kettle_run` command starts its own `kettle exec` child,
+located with `std::env::current_exe()` (never `PATH`). The server does not become
+a subreaper: each child adopts only its command's orphans, so concurrent commands
+cannot claim or kill each other's detached descendants. Argument boundaries are
+preserved through `Command`, with `--cwd`, `--cols`, `--rows`, `--timeout`,
+`--strip-ansi` (or default raw), and `--` before argv. The hidden internal
+`--internal-capture-tail` switch selects the existing in-process capture engine,
+disables stdin forwarding, and writes its final 1 MiB byte tail to stdout.
+Conversion to lossy UTF-8 happens once in the parent, just as in direct capture;
+startup diagnostics still appear in the capture. The existing MCP text cap,
+exit codes, `structuredContent.exit_code`/`truncated`, and the separate control
+command's `output_truncated` contract are unchanged.
+
+The parent multiplexes stdout and stderr using nonblocking reads with bounded
+64 KiB slices and independent 1 MiB tail buffers (at most one extra cap of
+compaction slack each). Neither pipe can block draining the other or checking
+cancellation. The child enforces the command timeout; the parent allows ten
+additional seconds for startup, teardown and tail delivery, then kills a wedged
+supervisor and returns 125 with an explicit unverified-teardown diagnostic.
+An inherited ignored SIGCHLD or SA_NOCLDWAIT is refused before spawning, using
+the same ownership check as media workers: autoreaping would allow PID reuse
+before cancellation. MCP cancellation sends SIGTERM once, allowing five seconds
+for the child's normal teardown; expiry escalates to SIGKILL and 125.
+SIGTERM/SIGINT are blocked in the fork/exec handoff until the child has installed its cancellation handlers
+and enabled adoption, so immediate cancellation cannot kill it before setup.
+Pipe EOF after supervisor exit and reaping after a forced kill each have a
+250 ms bound. A process stuck in kernel sleep may remain unreaped; no tool worker
+waits indefinitely for it. Supervisor stderr is drained independently and is
+included only on supervisor transport/watchdog failures, without duplicating
+ordinary command output. MCP still suppresses responses to cancelled calls.
+macOS (which has no subreaper) and Windows retain the in-process MCP path.
+
 The surface is multi-window aware: `get_state` reports
 `{windows, focused_window}`; `list_tabs` / `list_panes` enumerate every
 window and tag each entry with its `window`; `--pane N` resolves across
@@ -2202,8 +2234,13 @@ as its ownership boundary, and the `kettle exec` command line is also a child
 subreaper: a descendant that left the session with `setsid()` is reparented to
 it when its parent exits, and teardown kills and reaps every such adopted child
 outside Kettle's own session until none remains, while a running command's
-exited adoptees are reaped every 250 ms. Setup first resets an inherited
-ignored `SIGCHLD`, so the kernel never reaps an adopted child before the sweep
+exited adoptees are reaped every 250 ms. On normal command exit, an initial
+adopted-child sweep stops escaped descendants holding the PTY open. Before
+returning ordinary success or failure, session teardown and another adopted
+sweep run while the direct child's unreaped identity is still held; unverified
+cleanup returns 125. Unix `kettle exec` maps SIGTERM and SIGINT to the same
+bounded cancellation path as MCP (130 on verified teardown, otherwise 125).
+Setup first resets an inherited ignored `SIGCHLD`, so the kernel never reaps an adopted child before the sweep
 signals it, and a killed session member counts as exited only once its pidfd
 reports that every thread has; when adoption cannot be set up, teardown is
 reported unverified. Session membership survives reparenting and cannot be
