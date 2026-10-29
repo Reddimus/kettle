@@ -2300,6 +2300,16 @@ pub(crate) mod unix {
             source: &Path,
             destination: &Path,
         ) -> io::Result<()> {
+            self.link_open_file_new_with_mode(staged, source, destination, HardLinkMode::Native)
+        }
+
+        pub(super) fn link_open_file_new_with_mode(
+            &self,
+            staged: &File,
+            source: &Path,
+            destination: &Path,
+            hard_link_mode: HardLinkMode,
+        ) -> io::Result<()> {
             let source = self.validate_path(source)?;
             let destination = self.validate_path(destination)?;
             self.verify()?;
@@ -2315,20 +2325,37 @@ pub(crate) mod unix {
             self.require_leaf_policy(current_user())?;
             let source = c_name(&source, "staged file name")?;
             let destination = c_name(&destination, "destination file name")?;
-            // SAFETY: both names and the verified directory fd are valid.
-            if unsafe {
-                libc::linkat(
-                    self.directory().as_raw_fd(),
-                    source.as_ptr(),
-                    self.directory().as_raw_fd(),
-                    destination.as_ptr(),
-                    0,
-                )
-            } != 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
+            publish_with_atomic_fallback(
+                || {
+                    match hard_link_mode {
+                        HardLinkMode::Native => {}
+                        #[cfg(test)]
+                        HardLinkMode::ForceUnsupported => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Unsupported,
+                                "injected hard-link rejection",
+                            ));
+                        }
+                    }
+                    // SAFETY: both names and the verified directory fd are valid.
+                    if unsafe {
+                        libc::linkat(
+                            self.directory().as_raw_fd(),
+                            source.as_ptr(),
+                            self.directory().as_raw_fd(),
+                            destination.as_ptr(),
+                            0,
+                        )
+                    } == 0
+                    {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                },
+                || rename_no_replace_at(self.directory(), &source, self.directory(), &destination),
+            )
+            .map(|_| ())
         }
 
         pub(super) fn sync(&self) -> io::Result<()> {
@@ -2698,6 +2725,57 @@ pub(crate) mod unix {
         Ok(Some(StagedUserSelectedFile::new(staged, publish)))
     }
 
+    fn rename_no_replace_at(
+        source_parent: &File,
+        staged_c: &std::ffi::CStr,
+        parent: &File,
+        destination_c: &std::ffi::CStr,
+    ) -> io::Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let renamed = unsafe {
+            libc::renameat2(
+                source_parent.as_raw_fd(),
+                staged_c.as_ptr(),
+                parent.as_raw_fd(),
+                destination_c.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let renamed = {
+            unsafe extern "C" {
+                fn renameatx_np(
+                    from_dir: libc::c_int,
+                    from: *const libc::c_char,
+                    to_dir: libc::c_int,
+                    to: *const libc::c_char,
+                    flags: libc::c_uint,
+                ) -> libc::c_int;
+            }
+            const RENAME_EXCL: libc::c_uint = 0x0000_0004;
+            unsafe {
+                renameatx_np(
+                    source_parent.as_raw_fd(),
+                    staged_c.as_ptr(),
+                    parent.as_raw_fd(),
+                    destination_c.as_ptr(),
+                    RENAME_EXCL,
+                )
+            }
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this platform has no atomic no-replace rename API",
+        ));
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        if renamed == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
     fn create_user_selected_file_publish(
         source_parent: File,
         parent: File,
@@ -2762,55 +2840,7 @@ pub(crate) mod unix {
                         "injected hard-link rejection",
                     )),
                 },
-                || {
-                    #[cfg(any(target_os = "linux", target_os = "android"))]
-                    let renamed = unsafe {
-                        libc::renameat2(
-                            source_parent.as_raw_fd(),
-                            staged_c.as_ptr(),
-                            parent.as_raw_fd(),
-                            destination_c.as_ptr(),
-                            libc::RENAME_NOREPLACE,
-                        )
-                    };
-                    #[cfg(target_os = "macos")]
-                    let renamed = {
-                        unsafe extern "C" {
-                            fn renameatx_np(
-                                from_dir: libc::c_int,
-                                from: *const libc::c_char,
-                                to_dir: libc::c_int,
-                                to: *const libc::c_char,
-                                flags: libc::c_uint,
-                            ) -> libc::c_int;
-                        }
-                        const RENAME_EXCL: libc::c_uint = 0x0000_0004;
-                        unsafe {
-                            renameatx_np(
-                                source_parent.as_raw_fd(),
-                                staged_c.as_ptr(),
-                                parent.as_raw_fd(),
-                                destination_c.as_ptr(),
-                                RENAME_EXCL,
-                            )
-                        }
-                    };
-                    #[cfg(not(any(
-                        target_os = "linux",
-                        target_os = "android",
-                        target_os = "macos"
-                    )))]
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "this platform has no atomic no-replace rename API",
-                    ));
-                    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
-                    if renamed == 0 {
-                        Ok(())
-                    } else {
-                        Err(io::Error::last_os_error())
-                    }
-                },
+                || rename_no_replace_at(&source_parent, &staged_c, &parent, &destination_c),
             )?;
             let post_publish = (|| {
                 let published = entry_stat(&parent, &destination_leaf)?
@@ -6015,6 +6045,63 @@ mod tests {
         let error = staged.publish().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(destination).unwrap(), b"winner");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_create_falls_back_without_clobbering_or_relaxing_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_tempdir();
+        let source = root.path().join("staged");
+        let destination = root.path().join("config");
+        let mut staged = create_private_file_new(&source).unwrap();
+        staged.write_all(b"complete config").unwrap();
+        staged.sync_all().unwrap();
+        let guard = guard_private_parent(&destination).unwrap();
+        guard
+            .link_open_file_new_with_mode(
+                &staged,
+                &source,
+                &destination,
+                HardLinkMode::ForceUnsupported,
+            )
+            .unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete config");
+        assert_eq!(
+            std::fs::metadata(&destination)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let mut next = create_private_file_new(&source).unwrap();
+        next.write_all(b"loser").unwrap();
+        let error = guard
+            .link_open_file_new_with_mode(
+                &next,
+                &source,
+                &destination,
+                HardLinkMode::ForceUnsupported,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete config");
+        assert_eq!(std::fs::read(&source).unwrap(), b"loser");
+
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let error = guard
+            .link_open_file_new_with_mode(
+                &next,
+                &source,
+                &root.path().join("other"),
+                HardLinkMode::ForceUnsupported,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]

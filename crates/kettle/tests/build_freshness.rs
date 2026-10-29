@@ -121,6 +121,20 @@ fn source_libraries_rebuild_only_when_inputs_change() {
     let mut hash = first.hash;
     unchanged(&root, &hash);
 
+    for path in [
+        "vendor/target/debug/compiled",
+        "vendor/patched/target/debug/compiled",
+        "vendor/patched/Cargo.lock",
+    ] {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "generated\n").unwrap();
+        assert_eq!(build(&root).hash, hash, "{}", path.display());
+        fs::write(&path, "rebuilt\n").unwrap();
+        assert_eq!(build(&root).hash, hash, "{}", path.display());
+    }
+    unchanged(&root, &hash);
+
     fs::write(root.join("README.md"), "not a protocol input\n").unwrap();
     unchanged(&root, &hash);
     fs::write(&patched, "pub fn patched() { }\n").unwrap();

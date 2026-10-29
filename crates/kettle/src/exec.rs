@@ -30,6 +30,9 @@
 //! dependency — a source-scan drift guard pins that ("headless means
 //! headless"). It reuses `kettle_render`'s pure VT-reply helpers only.
 
+#[cfg(any(target_os = "linux", test))]
+mod adopted;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1170,6 +1173,8 @@ fn run_exec_engine_with_recording_poll(
     let mut last_lifecycle_trace = started;
     #[cfg(target_os = "linux")]
     let mut last_adopted_reap = started;
+    #[cfg(target_os = "linux")]
+    let mut adopted_scan = adopted::AdoptedChildren::new(Path::new("/proc/self/task"));
     // The newest title the child set, held until output is ready to take it.
     let mut pending_title: Option<String> = None;
 
@@ -1281,7 +1286,7 @@ fn run_exec_engine_with_recording_poll(
         #[cfg(target_os = "linux")]
         if last_adopted_reap.elapsed() >= ADOPTED_REAP_INTERVAL {
             last_adopted_reap = Instant::now();
-            linux_reap_exited_adopted(process_tree.root);
+            linux_reap_exited_adopted(process_tree.root, &mut adopted_scan);
         }
 
         let trace_lifecycle = elapsed >= Duration::from_secs(4)
@@ -2260,78 +2265,71 @@ fn enable_orphan_adoption() -> Result<(), String> {
 /// this process starts itself stay there, while the command runs in the PTY's
 /// session and an escaped descendant in one it created.
 #[cfg(target_os = "linux")]
-fn linux_adopted_children(root: Option<u32>) -> std::io::Result<Vec<libc::pid_t>> {
-    // SAFETY: getsid(0) queries the calling process and takes no pointers.
+fn linux_adopted_children(
+    scan: &mut adopted::AdoptedChildren,
+    root: Option<u32>,
+    deadline: Instant,
+) -> std::io::Result<adopted::Batch> {
+    // A resumed procfs read may contain a PID reaped in an earlier batch.
+    // Authenticate child ownership again before using its session or PID.
+    // SAFETY: getsid(0) queries this process and takes no pointers.
     let own_session = unsafe { libc::getsid(0) };
-    let mut children = Vec::new();
-    for task in std::fs::read_dir("/proc/self/task")? {
-        let task = task?.path();
-        let list = match std::fs::read_to_string(task.join("children")) {
-            Ok(list) => list,
-            // A thread that exited after the directory was listed. A thread
-            // that is still there without a list hides its children.
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound
-                    && matches!(std::fs::symlink_metadata(&task),
-                        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound) =>
-            {
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        for pid in list.split_ascii_whitespace() {
-            let pid: libc::pid_t = pid.parse().map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed child list")
-            })?;
-            if u32::try_from(pid).ok() == root {
-                continue;
-            }
-            // SAFETY: getsid takes a PID and no pointers. An unreaped child,
-            // zombie or not, keeps its PID and session until reaped here.
-            let session = unsafe { libc::getsid(pid) };
-            if session != -1 && session != own_session {
-                children.push(pid);
-            }
-        }
+    if own_session == -1 {
+        return Err(std::io::Error::last_os_error());
     }
-    children.sort_unstable();
-    children.dedup();
-    Ok(children)
+    scan.next_batch(root, own_session, deadline, 16_384, |pid| {
+        // SAFETY: waitid receives initialized storage; WNOWAIT retains the child.
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &raw mut status,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT | libc::__WALL,
+            )
+        } != 0
+        {
+            let error = std::io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ECHILD) {
+                Ok(-1)
+            } else {
+                Err(error)
+            };
+        }
+        // SAFETY: getsid takes a PID and no pointers.
+        let session = unsafe { libc::getsid(pid) };
+        if session == -1 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(session)
+        }
+    })
 }
 
 /// Reap adopted descendants that already exited, so a long command that
 /// detaches short-lived helpers does not leave zombies here until it ends.
 #[cfg(target_os = "linux")]
-fn linux_reap_exited_adopted(root: Option<u32>) {
-    /// Where the next pass starts, so passes rotate through a long list.
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
+fn linux_reap_exited_adopted(root: Option<u32>, scan: &mut adopted::AdoptedChildren) {
     if !matches!(ADOPTION.get(), Some(Ok(()))) {
         return;
     }
-    let Ok(children) = linux_adopted_children(root) else {
-        return;
+    let deadline = Instant::now() + Duration::from_millis(5);
+    let children = match linux_adopted_children(scan, root, deadline) {
+        Ok(batch) => batch.children,
+        Err(_) => {
+            *scan = adopted::AdoptedChildren::new(Path::new("/proc/self/task"));
+            return;
+        }
     };
-    if children.is_empty() {
-        return;
-    }
-    let start = NEXT.fetch_add(MAX_ADOPTED_REAPED_PER_PASS, Ordering::Relaxed) % children.len();
-    for &pid in children
-        .iter()
-        .cycle()
-        .skip(start)
-        .take(MAX_ADOPTED_REAPED_PER_PASS.min(children.len()))
-    {
+    for pid in children {
+        if Instant::now() >= deadline {
+            break;
+        }
         // SAFETY: `pid` is this process's child and only this process reaps
         // it; a null status pointer is allowed.
-        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) };
     }
 }
-
-/// Most adopted children one periodic pass polls, so a command that detaches
-/// very many helpers cannot stall its output; the rest wait for a later pass
-/// or the teardown sweep.
-#[cfg(target_os = "linux")]
-const MAX_ADOPTED_REAPED_PER_PASS: usize = 1024;
 
 /// Kill and reap every descendant adopted during the run, including ones the
 /// kills hand down. Returns whether none remains by `deadline`.
@@ -2367,16 +2365,19 @@ fn linux_kill_adopted_as(
     let timed_out = |remaining: usize| {
         let _ = writeln!(
             std::io::stderr(),
-            "kettle exec: {remaining} adopted descendant(s) did not exit after SIGKILL"
+            "kettle exec: adopted descendant teardown is unverified: scan or exit deadline \
+             expired ({remaining} known descendant(s) remain)"
         );
         false
     };
     // Killed and not yet reaped. A reaped PID leaves the set, since a later
     // adoptee may be given the same number.
     let mut killed: std::collections::HashSet<libc::pid_t> = std::collections::HashSet::new();
+    let mut scan = adopted::AdoptedChildren::new(Path::new("/proc/self/task"));
+    let mut sweep_had_children = false;
     loop {
-        let children = match linux_adopted_children(root) {
-            Ok(children) => children,
+        let batch = match linux_adopted_children(&mut scan, root, deadline) {
+            Ok(batch) => batch,
             Err(error) => {
                 let _ = writeln!(
                     std::io::stderr(),
@@ -2385,9 +2386,17 @@ fn linux_kill_adopted_as(
                 return false;
             }
         };
-        if children.is_empty() {
-            return true;
+        if Instant::now() >= deadline {
+            return timed_out(killed.len() + batch.children.len());
         }
+        sweep_had_children |= !batch.children.is_empty() || !killed.is_empty();
+        if batch.complete {
+            if !sweep_had_children && killed.is_empty() {
+                return true;
+            }
+            sweep_had_children = false;
+        }
+        let children = batch.children;
         for &pid in &children {
             if killed.insert(pid) {
                 // SAFETY: see above; `pid` is an unreaped child of this process.
@@ -2402,7 +2411,9 @@ fn linux_kill_adopted_as(
         let mut reaped = Vec::new();
         for &pid in &killed {
             // SAFETY: as above; WNOHANG returns at once.
-            if unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) } != 0 {
+            if unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) }
+                != 0
+            {
                 reaped.push(pid);
             }
             if Instant::now() >= deadline {
@@ -7357,6 +7368,12 @@ wait
         assert!(!linux_kill_adopted_as(Some(&failed), None, deadline));
         // The MCP server never adopts; its teardown is the session's alone.
         assert!(linux_kill_adopted_as(None, None, deadline));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_expired_adopted_scan_leaves_teardown_unverified() {
+        assert!(!linux_kill_adopted_as(Some(&Ok(())), None, Instant::now(),));
     }
 
     /// A process whose main thread exited is a zombie by its stat line while

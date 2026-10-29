@@ -15,8 +15,8 @@ impl Inputs {
             files: Vec::new(),
             links: Vec::new(),
         };
-        inputs.visit(&repo_root.join("crates"), 0);
-        inputs.visit(&repo_root.join("vendor"), 0);
+        inputs.visit(&repo_root.join("crates"), 0, false);
+        inputs.visit(&repo_root.join("vendor"), 0, true);
         inputs.files.sort();
         inputs.files.push(repo_root.join("Cargo.toml"));
         inputs.files.push(repo_root.join("Cargo.lock"));
@@ -24,18 +24,26 @@ impl Inputs {
         inputs
     }
 
-    fn visit(&mut self, dir: &Path, depth: usize) {
+    fn visit(&mut self, dir: &Path, depth: usize, vendored: bool) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
+            // Match generated vendor paths in .gitignore before following
+            // links or reading contents. The vendor workspace lockfile counts.
+            if vendored
+                && ((depth <= 1 && entry.file_name() == "target")
+                    || (depth == 1 && entry.file_name() == "Cargo.lock"))
+            {
+                continue;
+            }
             let path = entry.path();
             if entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
                 self.links.push(path.clone());
             }
             // Follow logical paths as before; bound directory-link loops.
             match std::fs::metadata(&path) {
-                Ok(kind) if kind.is_dir() && depth < 32 => self.visit(&path, depth + 1),
+                Ok(kind) if kind.is_dir() && depth < 32 => self.visit(&path, depth + 1, vendored),
                 Ok(kind) if kind.is_file() => self.files.push(path),
                 _ => {}
             }
@@ -56,8 +64,8 @@ impl Inputs {
     }
 }
 
-/// Hash all files under `crates/` and `vendor/` plus the workspace manifest and lockfile,
-/// and register their inputs with Cargo.
+/// Hash sources under `crates/` and `vendor/` plus the workspace manifest and lockfile,
+/// excluding generated vendor paths, and register their inputs with Cargo.
 pub fn tracked_source_hash(repo_root: &Path) -> u64 {
     let inputs = Inputs::collect(repo_root);
     for path in [

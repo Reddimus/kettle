@@ -1134,18 +1134,55 @@ fn ctl_result(method: &str, result: &Value, fits: &dyn Fn(&Value) -> bool) -> Va
     .into_iter()
     .flatten()
     {
-        if text.len() > MAX_TOOL_TEXT_BYTES {
-            continue;
-        }
-        let response = json!({"content": [{"type": "text", "text": text}],
-            "structuredContent": {"truncated": false}});
-        if fits(&response) {
+        if let Some(response) = ctl_text_result(text, false, fits) {
             return response;
         }
+    }
+    if method == "run_command" {
+        if let Some(output) = result.get("output").and_then(Value::as_str) {
+            let mut shortened = result.clone();
+            shortened["output_truncated"] = json!(true);
+            let mut low = 0;
+            let mut high = output.len().min(MAX_TOOL_TEXT_BYTES);
+            let mut best = None;
+            // Measure both JSON encodings: the output is escaped inside JSON,
+            // which is itself escaped inside the MCP text response.
+            while low <= high {
+                let middle = low + (high - low) / 2;
+                let end = output.floor_char_boundary(middle);
+                shortened["output"] = json!(&output[..end]);
+                let response = serde_json::to_string(&shortened)
+                    .ok()
+                    .and_then(|text| ctl_text_result(text, true, fits));
+                if let Some(response) = response {
+                    best = Some(response);
+                    low = middle + 1;
+                } else if middle == 0 {
+                    break;
+                } else {
+                    high = middle - 1;
+                }
+            }
+            if let Some(response) = best {
+                return response;
+            }
+        }
+        return error_result(
+            "run_command: response metadata is too large; the command has already run",
+        );
     }
     error_result(&format!(
         "{method}: response is too large; request a smaller limit"
     ))
+}
+
+fn ctl_text_result(text: String, truncated: bool, fits: &dyn Fn(&Value) -> bool) -> Option<Value> {
+    if text.len() > MAX_TOOL_TEXT_BYTES {
+        return None;
+    }
+    let response = json!({"content": [{"type": "text", "text": text}],
+        "structuredContent": {"truncated": truncated}});
+    fits(&response).then_some(response)
 }
 
 fn ctl_discovery_error(error: &impl std::fmt::Display) -> Value {
@@ -2413,6 +2450,52 @@ mod tests {
             json!(FailureCode::RenderParse.model_message())
         );
     }
+    #[test]
+    fn capped_command_results_preserve_status_and_json() {
+        for output in [
+            "x".repeat(MAX_TOOL_TEXT_BYTES),
+            "\n\"é".repeat(MAX_TOOL_TEXT_BYTES / 4),
+        ] {
+            let command = json!({"exit_code": 17, "output": output,
+                "output_truncated": false, "pane": 42, "timed_out": false});
+            let fits = |result: &Value| crate::mcp::response_fits(&json!(1), false, result);
+            let result = ctl_result("run_command", &command, &fits);
+            assert_ne!(result["isError"], true, "{result}");
+            assert!(fits(&result));
+            let text = result["content"][0]["text"].as_str().unwrap();
+            assert!(text.len() <= MAX_TOOL_TEXT_BYTES);
+            let delivered: Value = serde_json::from_str(text).unwrap();
+            assert_eq!(delivered["exit_code"], 17);
+            assert_eq!(delivered["pane"], 42);
+            assert_eq!(delivered["timed_out"], false);
+            assert_eq!(delivered["output_truncated"], true);
+            let shortened = delivered["output"].as_str().unwrap();
+            assert!(!shortened.is_empty());
+            assert!(output.starts_with(shortened));
+            assert!(shortened.len() < output.len());
+        }
+    }
+
+    #[test]
+    fn small_command_results_are_unchanged_and_transport_caps_trim_only_output() {
+        let command = json!({"exit_code": 3, "output": "hello", "output_truncated": true});
+        let response = ctl_result("run_command", &command, &|_| true);
+        let delivered: Value =
+            serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(delivered, command);
+
+        let command =
+            json!({"exit_code": 0, "output": "x".repeat(5000), "output_truncated": false});
+        let fits = |response: &Value| serde_json::to_vec(response).unwrap().len() <= 1024;
+        let response = ctl_result("run_command", &command, &fits);
+        assert!(fits(&response));
+        let delivered: Value =
+            serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(delivered["exit_code"], 0);
+        assert_eq!(delivered["output_truncated"], true);
+        assert!(!delivered["output"].as_str().unwrap().is_empty());
+    }
+
     #[test]
     fn control_pages_remain_complete_json() {
         let cell = json!({"text":"x", "column":1, "line":0,

@@ -121,6 +121,39 @@ fn this_build_embeds_the_hash_it_reports() {
 }
 
 #[test]
+fn generated_vendor_files_do_not_change_identity() {
+    let root = tempfile::tempdir().unwrap();
+    workspace(root.path());
+    for path in [
+        "vendor/Cargo.toml",
+        "vendor/Cargo.lock",
+        "vendor/patched/src/lib.rs",
+    ] {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "source").unwrap();
+    }
+    let before = source_hash(root.path());
+    for path in [
+        "vendor/target/debug/compiled",
+        "vendor/patched/target/debug/compiled",
+        "vendor/patched/Cargo.lock",
+    ] {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "generated").unwrap();
+        assert_eq!(source_hash(root.path()), before, "{}", path.display());
+    }
+    fs::write(root.path().join("vendor/Cargo.lock"), "changed dependency").unwrap();
+    assert_ne!(source_hash(root.path()), before);
+    fs::write(root.path().join("vendor/Cargo.lock"), "source").unwrap();
+    let target_module = root.path().join("vendor/patched/src/target/mod.rs");
+    fs::create_dir_all(target_module.parent().unwrap()).unwrap();
+    fs::write(target_module, "pub fn target() {}\n").unwrap();
+    assert_ne!(source_hash(root.path()), before);
+}
+
+#[test]
 fn vendored_source_edit_changes_build_identity() {
     let root = tempfile::tempdir().unwrap();
     workspace(root.path());

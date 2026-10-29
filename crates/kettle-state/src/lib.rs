@@ -217,8 +217,9 @@ pub fn atomic_replace(
 /// Durably create `destination` without replacing an existing path.
 ///
 /// Returns `Ok(true)` when the file was created and `Ok(false)` when another
-/// writer won the race. A hard link publishes the already-synced staged inode
-/// atomically on the same filesystem, avoiding a partially written final path.
+/// writer won the race. A hard link or a supported atomic no-replace rename
+/// publishes the already-synced staged inode on the same filesystem, avoiding
+/// a partially written final path.
 pub fn atomic_create_new(
     destination: &Path,
     bytes: &[u8],
@@ -299,7 +300,7 @@ pub fn atomic_create_new(
             "created destination does not refer to the staged private file",
         ));
     }
-    // `destination` now durably owns the staged content via the hard link.
+    // `destination` now owns the synced staged content.
     // Remove only the exact still-open staged object; neither platform falls
     // back to deleting a possibly swapped path.
     private::discard_created_private_file(staged, &staged_path);
