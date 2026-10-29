@@ -236,6 +236,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   differently.
 - On Unix, export video frames through the output directory checked at the
   start, so a directory swapped meanwhile cannot redirect the file.
+- Reconnect a remote pane by running its client with literal arguments
+  instead of a shell command line, so no shell parses host names or values.
+- Refuse a JPEG image whose decode would exceed the graphics budget before
+  decoding it, using a bounded header scan.
+- Start kitty animation playback from the selected frame, and restart it
+  when the same frame is selected again.
+- Keep every cell of an image stretched across more Unicode placeholder
+  cells than it has pixels.
+- Fail the build, naming the file, when a bundled theme cannot be read,
+  instead of leaving it out.
+- Bound title templates to 4 KiB.
+- Reset modes, character sets and the saved cursor on a soft terminal reset
+  (DECSTR), and report terminfo capabilities with real escape bytes, so
+  programs that probe for undercurl get it.
+- Keep scrollback anchors when the window grows.
+- Stop a clipboard owner that keeps sending refused data from holding a paste
+  on X11.
+- Remove a pasted image whose handoff fails after it was saved.
+- Report an external viewer that cannot start instead of leaving its action
+  waiting.
+- Stop PDF verification promptly when it is cancelled or runs out of time.
+- Fit wide and right-to-left file names on file cards, and keep text aligned
+  after a wide character clipped at the left edge.
+- Keep desktop notifications working after one fails on Linux.
+- Return a cancelled Wayland tab drag to its own window.
 
 ## [5.6.0] — 2026-10-28
 
