@@ -19,13 +19,38 @@ pub(super) fn begin_settings_text_edit(
 pub(super) fn cancel_modal_pointer_composition(
     ws: &mut WindowState,
     mut set_ime_allowed: impl FnMut(bool),
+    discard_marked_text: impl FnOnce(),
 ) {
     if ws.ime_preedit.is_some() {
         end_modal_composition(ws);
         // Moving the caret must also discard the platform's unfinished phrase;
         // otherwise another Preedit would restart it at the new insertion point.
         set_ime_allowed(false);
+        discard_marked_text();
         set_ime_allowed(true);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn discard_native_marked_text(window: &winit::window::Window) {
+    use objc2_app_kit::NSView;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Some(_main_thread) = objc2_foundation::MainThreadMarker::new() else {
+        return;
+    };
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: winit lends a live NSView for this window, and the marker above
+    // ensures AppKit is called on the main thread.
+    let view = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
+    if let Some(context) = view.inputContext() {
+        // winit 0.30.13's IME toggle only clears its own marked-text buffer.
+        context.discardMarkedText();
     }
 }
 
@@ -282,11 +307,20 @@ impl App {
         }
         if ws.ime_preedit.is_some() {
             let window = ws.window.clone();
-            cancel_modal_pointer_composition(ws, |allowed| {
-                if let Some(window) = &window {
-                    window.set_ime_allowed(allowed);
-                }
-            });
+            cancel_modal_pointer_composition(
+                ws,
+                |allowed| {
+                    if let Some(window) = &window {
+                        window.set_ime_allowed(allowed);
+                    }
+                },
+                || {
+                    #[cfg(target_os = "macos")]
+                    if let Some(window) = &window {
+                        discard_native_marked_text(window);
+                    }
+                },
+            );
             let Some(committed) = self.modal_text_projection(ws) else {
                 return false;
             };

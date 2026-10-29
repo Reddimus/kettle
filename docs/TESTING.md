@@ -1716,10 +1716,15 @@ clipboard failure, selection replacement and mid-string IME projections. Native
 macOS modifier tests apply every Option-as-Alt policy before word commands in
 each modal field. Title and Settings path initialization tests reject oversized
 ASCII and UTF-8 values and accept values at the byte cap. Pointer composition
-tests model the platform's unfinished phrase, require IME disable/enable before
-caret movement, reject a queued old commit and accept fresh composition at the
-new caret. These tests inject the platform toggle; they do not run a native IME. The
-shared outside-press mutation sink is exercised for every transient popup,
+tests model an AppKit phrase surviving winit's IME toggle and require explicit
+native cancellation between disable and enable before caret movement. They reject
+a queued old commit and accept fresh composition at the new caret. Run
+`cargo test -j 2 --locked --offline -p kettle-ui review_pointer_cancels_platform_composition_before_moving_caret`
+for this regression. These tests inject the toggle and native cancellation; they
+do not run a native IME. For native verification, compose a phrase, click elsewhere
+in each modal field, and continue composing; only the new phrase should commit at
+the clicked position. The shared outside-press mutation sink is exercised for
+every transient popup,
 Settings capture and confirmation, including the context menu's right-click
 exception. Native and control input both use this sink.
 

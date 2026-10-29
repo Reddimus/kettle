@@ -124,19 +124,32 @@ fn review_settings_value_slot_uses_natural_font_width() {
 
 #[test]
 fn review_pointer_cancels_platform_composition_before_moving_caret() {
+    use std::cell::{Cell, RefCell};
+
     for kind in FIELDS {
         let mut ws = field(kind);
         *modal_editor_mut(&mut ws).unwrap() = "ab".into();
         update_ime_preedit(&mut ws, "phrase".into(), None);
         let generation = ws.ime_focus_generation;
-        let mut allowed = Vec::new();
-        let mut platform_phrase = Some("phrase");
-        modals::cancel_modal_pointer_composition(&mut ws, |value| {
-            allowed.push(value);
-            if !value {
-                platform_phrase = None;
-            }
-        });
+        let calls = RefCell::new(Vec::new());
+        let allowed = Cell::new(true);
+        let platform_phrase = Cell::new(Some("phrase"));
+        modals::cancel_modal_pointer_composition(
+            &mut ws,
+            |value| {
+                calls
+                    .borrow_mut()
+                    .push(if value { "enable" } else { "disable" });
+                allowed.set(value);
+                // winit 0.30.13 clears its own buffer on disable, but AppKit's
+                // input context retains the unfinished phrase across the toggle.
+            },
+            || {
+                assert!(!allowed.get());
+                calls.borrow_mut().push("discard");
+                platform_phrase.set(None);
+            },
+        );
         assert_eq!(modal_editor(&ws).unwrap().cursor(), 2);
         assert!(ws.ime_preedit.is_none());
         assert_ne!(ws.ime_focus_generation, generation);
@@ -144,7 +157,7 @@ fn review_pointer_cancels_platform_composition_before_moving_caret() {
             .unwrap()
             .set_cursor_at(crate::text_editor::QueryPoint::Byte(0), false);
         // An uncancelled input method can continue its phrase after the click.
-        if let Some(phrase) = platform_phrase {
+        if let Some(phrase) = platform_phrase.get() {
             update_ime_preedit(&mut ws, phrase.into(), None);
             update_ime_preedit(&mut ws, String::new(), None);
             if take_ime_commit(&mut ws) {
@@ -153,10 +166,11 @@ fn review_pointer_cancels_platform_composition_before_moving_caret() {
         }
         assert_eq!(modal_editor(&ws).unwrap().text(), "ab", "{kind:?}");
         assert_eq!(
-            allowed,
-            [false, true],
-            "{kind:?}: cancel the platform's phrase"
+            calls.into_inner(),
+            ["disable", "discard", "enable"],
+            "{kind:?}: discard the native phrase before re-enabling IME"
         );
+        assert!(allowed.get());
         assert!(
             !take_ime_commit(&mut ws),
             "a queued old commit must be dropped"
@@ -170,7 +184,11 @@ fn review_pointer_cancels_platform_composition_before_moving_caret() {
         crate::modal_input::push_text(modal_editor_mut(&mut ws).unwrap(), "new");
         assert_eq!(modal_editor(&ws).unwrap().text(), "newab");
         let generation = ws.ime_focus_generation;
-        modals::cancel_modal_pointer_composition(&mut ws, |_| panic!("no active phrase"));
+        modals::cancel_modal_pointer_composition(
+            &mut ws,
+            |_| panic!("no active phrase"),
+            || panic!("no native phrase to discard"),
+        );
         assert_eq!(ws.ime_focus_generation, generation);
     }
 }
