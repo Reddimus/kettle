@@ -174,6 +174,12 @@ const MAX_REPORTED_CWD_BYTES: usize = 8192;
 /// ground state. This bounds desynchronization when a producer never emits a
 /// terminator without immediately exposing the rejected payload downstream.
 const MAX_SEQ_RESYNC_BYTES: usize = 64 * 1024;
+/// Control strings up to this size are held without charging the shared
+/// graphics account. Titles, working-directory and prompt marks, clipboard
+/// writes and notifications from one pane then keep parsing however much
+/// image memory other panes hold; each terminal holds at most one string,
+/// so this costs at most this much per pane.
+const UNMETERED_SEQ_BYTES: usize = MAX_SEQ_RESYNC_BYTES;
 const PRIVATE_OSC_START_LEN: usize = 2 + completion::PREFIX.len();
 
 fn escape_continues(byte: u8) -> bool {
@@ -1284,24 +1290,33 @@ impl Extractor {
             self.bail(0);
             return false;
         };
-        if new_len > self.budget.limits().sequence_bytes {
+        let limit = self.budget.limits().sequence_bytes;
+        if new_len > limit {
             self.bail(0);
             return false;
         }
-        if let Some(r) = self.seq_reservation.as_mut() {
-            if !r.try_grow_to(new_len) {
-                self.bail(0);
-                return false;
+        // A shortage of shared memory is not this string's fault, and the
+        // string may legitimately run to the sequence limit. Discard through
+        // that limit, as an oversized string would be, rather than through
+        // only the short resync window, which would resume ground state
+        // inside the payload and paint the rest of it as text.
+        let room = limit - self.seq.len();
+        if new_len > UNMETERED_SEQ_BYTES {
+            if let Some(r) = self.seq_reservation.as_mut() {
+                if !r.try_grow_to(new_len) {
+                    self.bail(room);
+                    return false;
+                }
+            } else {
+                let Some(r) = self.budget.reserve_transient_cpu(new_len) else {
+                    self.bail(room);
+                    return false;
+                };
+                self.seq_reservation = Some(r);
             }
-        } else {
-            let Some(r) = self.budget.reserve_transient_cpu(new_len) else {
-                self.bail(0);
-                return false;
-            };
-            self.seq_reservation = Some(r);
         }
         if self.seq.try_reserve_exact(bytes.len()).is_err() {
-            self.bail(0);
+            self.bail(room);
             return false;
         }
         self.seq.extend_from_slice(bytes);
@@ -3772,6 +3787,54 @@ mod tests {
         assert_eq!(whole, b"after", "one read leaked the private payload");
         for size in [1, 2, 3, 7, 64] {
             assert_eq!(read(size), whole, "reads of {size} bytes");
+        }
+    }
+
+    /// An extractor whose process graphics account other terminals have filled.
+    fn extractor_with_exhausted_process_account() -> (Extractor, Vec<crate::GraphicsReservation>) {
+        let limits = crate::GraphicsLimits::default();
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let held = (0..limits.process_cpu_bytes / limits.retained_bytes)
+            .map(|_| {
+                budget
+                    .query_scope()
+                    .reserve_retained_cpu(limits.retained_bytes)
+                    .unwrap()
+            })
+            .collect();
+        assert!(budget.reserve_transient_cpu(1).is_none());
+        (Extractor::with_budget(budget), held)
+    }
+
+    /// Other panes holding all image memory must not stop this pane's
+    /// ordinary control strings from parsing.
+    #[test]
+    fn small_control_strings_parse_while_the_shared_account_is_full() {
+        let (mut ex, _held) = extractor_with_exhausted_process_account();
+        let out = ex.feed(b"\x1b]133;A\x07ok");
+        assert!(
+            out.iter()
+                .any(|c| matches!(c, Chunk::Prompt(PromptKind::PromptStart))),
+            "OSC 133 must parse with the graphics account full, got {out:?}"
+        );
+        assert_eq!(passed(&out), b"ok");
+    }
+
+    /// A string refused for lack of shared memory is dropped through its real
+    /// terminator. Recovering after only the resync window would resume ground
+    /// state inside the payload and paint the rest of it on the grid.
+    #[test]
+    fn a_string_refused_for_memory_does_not_leak_its_payload() {
+        let mut input = b"\x1b]2;".to_vec();
+        input.extend(std::iter::repeat_n(b'A', 2 * MAX_SEQ_RESYNC_BYTES));
+        input.extend_from_slice(b"\x07ok");
+        for size in [input.len(), 4096, 7] {
+            let (mut ex, _held) = extractor_with_exhausted_process_account();
+            let text: Vec<u8> = input
+                .chunks(size)
+                .flat_map(|piece| passed(&ex.feed(piece)))
+                .collect();
+            assert_eq!(text, b"ok", "reads of {size} bytes");
         }
     }
 
