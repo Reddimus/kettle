@@ -6,6 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.6.0] — 2026-10-28
+
+### Added
+
+- Open focused media previews' context menus with the mouse or keyboard,
+  including in narrow splits.
+
 ### Changed
 
 - Announce updates once per release and state in brief top-center toasts.
@@ -13,6 +20,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep media-preview header expansion available in short and narrow panes.
 - Route control-API mouse clicks to the centered media viewer and its menus.
 - Deliver update-toast replies to the requesting window after focus changes.
 - Keep default journey and treemap labels readable over colored fills.
@@ -41,6 +49,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Maintenance
 
+- Make native process-deadline tests independent of shell helper timing.
 - Refresh reviewed Rust dependencies and pinned workflow actions.
 
 - Upgrade the diagram renderer family together and retire the released lexer backport.
