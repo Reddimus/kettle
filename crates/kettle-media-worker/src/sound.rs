@@ -357,12 +357,17 @@ impl Feeder {
             if !frame.is_finite() {
                 return Err(());
             }
+            // Progress is measured from the last reading, not the highest:
+            // macOS subtracts the output's latency from the position, so
+            // moving to a slower device steps the clock back, and it then
+            // advances from there.
             let progress = self.progress.get_or_insert_with(|| (frame, Instant::now()));
             if frame > progress.0 {
-                *progress = (frame, Instant::now());
+                progress.1 = Instant::now();
             } else if progress.1.elapsed() > CLOCK_WITHIN {
                 return Err(());
             }
+            progress.0 = frame;
             self.awaiting_clock = None;
         } else if wish.playing {
             // No clock while playing, from the start or once it was lost:
@@ -823,6 +828,39 @@ mod tests {
         feeder.round(wish.get(), &shared).unwrap();
         told.lock().unwrap().played = Some(601.0);
         feeder.round(wish.get(), &shared).unwrap();
+    }
+
+    /// A clock stepped back by a latency change, then advancing, is alive
+    /// however long it stays below the position it had reached.
+    #[test]
+    fn a_clock_that_steps_back_and_advances_stays_alive() {
+        let (speaker, told) = stand(3);
+        told.lock().unwrap().played = Some(96_000.0);
+        let mut feeder = Feeder::new(
+            speaker,
+            Box::new(Blocks(VecDeque::from([(0.5, 48_000, 0)]))),
+            0,
+            false,
+        );
+        let wish = SoundWish::new(false);
+        let shared = Shared {
+            wish: wish.clone(),
+            heard: Mutex::new(None),
+            state: AtomicU8::new(RUNNING),
+        };
+        wish.hear(PlayCommand::Play);
+        feeder.round(wish.get(), &shared).unwrap();
+        // Two seconds of output latency at 48 kHz move the clock back.
+        let mut frame = 0.0;
+        for _ in 0..6 {
+            told.lock().unwrap().played = Some(frame);
+            assert!(
+                feeder.round(wish.get(), &shared).is_ok(),
+                "an advancing clock was given up at frame {frame}"
+            );
+            std::thread::sleep(CLOCK_WITHIN / 4);
+            frame += 12_000.0;
+        }
     }
 
     #[test]
