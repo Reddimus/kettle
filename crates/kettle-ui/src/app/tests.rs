@@ -325,6 +325,7 @@ fn an_accepted_press_keeps_its_release_when_the_paste_queue_fills() {
     let (mux, ids) = title_test_tab_mux(1);
     let pane = ids[0];
     let mut ws = WindowState::new(1, mux);
+    enable_key_release_reporting(&ws.mux);
     let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
     let queued = |content| key_release_test_paste(pane, content);
     let mut queue = std::collections::VecDeque::from([queued(QueuedPasteContent::Image {
@@ -373,6 +374,7 @@ fn full_paste_queue_focus_loss_releases_an_accepted_press_once() {
             let (mux, ids) = title_test_tab_mux(1);
             let pane = ids[0];
             let mut ws = WindowState::new(1, mux);
+            enable_key_release_reporting(&ws.mux);
             let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
             let queued = |content| key_release_test_paste(pane, content);
             let release = TerminalKeyRelease::new(Arc::from(&b"release"[..]), !deferred);
