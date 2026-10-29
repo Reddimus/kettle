@@ -168,6 +168,7 @@ fn image_paste_holds_enter_and_keeps_its_original_recipient() {
     let target = *mux.panes.keys().find(|id| **id != focused).unwrap();
     let mut ws = WindowState::new(1, mux);
     let queued = |content| super::QueuedPaste {
+        key_releases: Vec::new(),
         window: 1,
         target: Some(target),
         receipt_pane: Some(target),
@@ -240,6 +241,7 @@ fn image_paste_holds_enter_and_keeps_its_original_recipient() {
 #[test]
 fn held_keys_behind_an_encoding_paste_join_one_queue_entry() {
     let queued = |content| super::QueuedPaste {
+        key_releases: Vec::new(),
         window: 1,
         target: Some(1),
         receipt_pane: Some(1),
@@ -275,6 +277,7 @@ fn held_keys_behind_an_encoding_paste_join_one_queue_entry() {
 #[test]
 fn deferred_authored_input_obeys_the_existing_queue_byte_limit() {
     let queued = |content| super::QueuedPaste {
+        key_releases: Vec::new(),
         window: 1,
         target: Some(1),
         receipt_pane: Some(1),
@@ -1692,9 +1695,36 @@ fn the_pty_key_path_never_reads_the_masked_modifiers() {
     );
     assert_eq!(
         body.matches("encode_key_event_for_mode(").count(),
-        4,
-        "focused pane, local broadcast, foreign broadcast and retained releases \
-             must use the same modifiers"
+        3,
+        "focused pane, local broadcast and foreign broadcast must use the same modifiers"
+    );
+    assert_eq!(
+        body.matches("key_release_bytes(").count(),
+        3,
+        "each press path must save its release with those same modifiers and mode"
+    );
+    let release = src
+        .split("fn key_release_bytes(")
+        .nth(1)
+        .unwrap()
+        .split("\n}")
+        .next()
+        .unwrap();
+    assert!(release.contains("encode_key_event_for_mode(cfg, &release, mods, mode)"));
+    let delivery = body
+        .split("if !prepare_input {")
+        .nth(1)
+        .unwrap()
+        .split("if ws.terminal_key_recipients.len()")
+        .next()
+        .unwrap();
+    assert!(
+        delivery.contains("terminal_key_release_bytes")
+            && delivery.contains("send_or_defer_key_releases")
+    );
+    assert!(
+        !delivery.contains("pty_key_modifiers"),
+        "release delivery must use the saved press modifiers"
     );
 }
 
@@ -5847,7 +5877,7 @@ fn a_card_takes_its_press_and_release_before_anything_behind_it() {
         .find("if self.release_card(ws, px, py, bcode) {")
         .expect("release");
     let drag = release
-        .find("&& let Some(drag) = ws.pane_drag.take()")
+        .find("if self.release_pane_drag(ws, bcode, event_loop) {")
         .expect("pane drag");
     let report = release
         .find("if self.send_mouse(ws, bcode, false, false) {")
@@ -7884,22 +7914,49 @@ fn the_pane_bell_indicator_is_wired_to_real_pane_state() {
     );
 }
 
-/// An OSC 52 read answers with every write the program made before it,
-/// including one latched after the drain took the pane's writes.
 #[test]
-fn an_osc52_read_applies_earlier_writes_first() {
-    let src = production_source();
-    let load = src
-        .split("TermEvent::ClipboardLoad(target, fmt) => {")
-        .nth(1)
-        .and_then(|body| {
-            body.split("TermEvent::TextAreaSizeRequest(fmt) => {")
-                .next()
-        })
-        .expect("ClipboardLoad arm");
-    let applied = load.find("self.store_osc52_writes(pane.term.take_clipboard_stores());");
-    let read = load.find("get_osc52_clipboard(");
-    assert!(applied.is_some() && applied < read, "{applied:?} {read:?}");
+fn osc52_reads_answer_a_then_b_before_a_drain() {
+    use kettle_core::{TermEvent, event::EventListener};
+    let (tx, rx) = crossbeam_channel::bounded(1024);
+    let proxy = kettle_core::EventProxy::new(tx, Arc::new(|| {}));
+    for (text, encoded) in [("A", "QQ=="), ("B", "Qg==")] {
+        proxy.send_event(TermEvent::ClipboardStore(
+            ClipboardType::Clipboard,
+            text.into(),
+        ));
+        proxy.send_event(TermEvent::ClipboardLoad(
+            ClipboardType::Clipboard,
+            Arc::new(move |text| {
+                assert_eq!(
+                    text,
+                    if encoded == "QQ==" { "A" } else { "B" },
+                    "OSC 52 read observed a later write"
+                );
+                format!("\x1b]52;c;{encoded}\x07")
+            }),
+        ));
+    }
+    struct Clipboard(String);
+    impl super::Osc52Clipboard for Clipboard {
+        fn store(&mut self, _: ClipboardType, text: String) {
+            self.0 = text;
+        }
+        fn load(&mut self, _: ClipboardType) -> String {
+            self.0.clone()
+        }
+    }
+    let mut clipboard = Clipboard(String::new());
+    let mut replies = Vec::new();
+    for event in proxy
+        .take_clipboard_events()
+        .into_iter()
+        .chain(rx.try_iter())
+    {
+        if let Some(reply) = super::apply_osc52_event(&mut clipboard, event) {
+            replies.push(reply);
+        }
+    }
+    assert_eq!(replies, ["\x1b]52;c;QQ==\x07", "\x1b]52;c;Qg==\x07"]);
 }
 
 /// A key event queued behind a paste still being prepared keeps its press and
@@ -7951,7 +8008,11 @@ fn process_status_cannot_reap_a_pane_before_the_ordered_pty_exit() {
     // never left behind it.
     let read = drain.find("let exited = pane.term.take_exited();");
     let taken = drain.find("pane.term.take_title()");
-    let queue = drain.find("while let Ok(ev) = pane.rx.try_recv() {");
+    let queue = drain.find(".take_clipboard_events()");
+    assert!(
+        drain.contains(".chain(pane.rx.try_iter())"),
+        "drain both clipboard and reply queues before applying exit policy"
+    );
     let applied = drain.find("if exited && !pane.closed {");
     assert!(
         read.is_some() && read < taken && taken < queue && queue < applied,
@@ -8626,7 +8687,7 @@ fn mouse_and_focus_reports_use_chronological_user_input() {
         .nth(1)
         .and_then(|body| body.split("\n    pub fn ").next())
         .expect("focus-report sender");
-    assert!(focus_sender.contains("enqueue_user"));
+    assert!(focus_sender.contains("enqueue_focus_report"));
     let release_lane = mux
         .split("fn enqueue_mouse_release(")
         .nth(1)
@@ -19030,4 +19091,201 @@ fn ready_preview_overlay_ends_divider_drags() {
         show.contains("ws.install_preview_overlay("),
         "an asynchronous preview must use the shared overlay transition"
     );
+}
+
+#[test]
+fn pending_shell_action_runs_the_latest_shortcut_on_completion() {
+    let mut pending = super::PendingShellAction::default();
+    assert_eq!(pending.request(1, 0, None), None);
+    assert_eq!(pending.request(2, 1, None), None);
+    let shells = vec![
+        ("First".into(), vec!["first".into()]),
+        ("Second".into(), vec!["second".into()]),
+    ];
+    assert_eq!(pending.complete(&shells), Some((2, vec!["second".into()])));
+    assert_eq!(pending.complete(&shells), None);
+    for (language, text) in [
+        (kettle_i18n::Language::En, "Detecting shells…"),
+        (kettle_i18n::Language::Es, "Detectando shells…"),
+    ] {
+        let tr = kettle_i18n::Translator::new(language);
+        let items = App::shell_menu_items(None, &tr);
+        assert!(
+            matches!(items.as_slice(), [ContextMenuItem::Item {label, enabled: false, ..}] if *label == text)
+        );
+    }
+    assert_eq!(
+        pending.request(1, 1, Some(&shells)),
+        Some(vec!["second".into()])
+    );
+    assert_eq!(pending.request(1, 0, None), None);
+    assert_eq!(
+        pending.request(2, 1, Some(&shells)),
+        Some(vec!["second".into()])
+    );
+    assert_eq!(
+        pending.complete(&shells),
+        None,
+        "a newer ready shortcut supersedes the held shortcut"
+    );
+}
+
+#[test]
+fn terminal_owned_key_focus_loss_sends_exactly_one_release() {
+    let (mux, pane, _) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
+    ws.terminal_owned_key_releases.insert(key);
+    ws.terminal_key_recipients
+        .entry(key)
+        .or_default()
+        .insert(pane);
+    ws.terminal_key_release_bytes
+        .insert((key, pane), Arc::from(&b"\x1b[1;1:3A"[..]));
+    assert_eq!(
+        ws.mux.panes[&pane].feed_input(b"\x1b[1;1A"),
+        PaneInputResult::Queued
+    );
+    let mut releases = Vec::new();
+    super::release_terminal_owned_keys(&mut ws, |id, key, bytes| releases.push((id, key, bytes)));
+    super::release_terminal_owned_keys(&mut ws, |id, key, bytes| releases.push((id, key, bytes)));
+    assert_eq!(
+        releases.len(),
+        1,
+        "focus loss must release a terminal-owned key exactly once"
+    );
+    assert_eq!(
+        (releases[0].0, releases[0].1, releases[0].2.as_ref()),
+        (pane, key, &b"\x1b[1;1:3A"[..])
+    );
+    assert!(
+        ws.suppressed_key_releases.contains(&key),
+        "the later physical release must be suppressed"
+    );
+    assert!(ws.terminal_key_recipients.is_empty());
+    ws.mux.kill_children();
+}
+
+#[test]
+fn control_pane_drag_arms_moves_and_drops_a_pane() {
+    let (mux, moving, target) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    let area = (0.0, 0.0, 800.0, 600.0);
+    let before = ws.mux.leaves(0, area);
+    let source = before.iter().find(|(id, _)| *id == moving).unwrap().1;
+    let destination = before.iter().find(|(id, _)| *id == target).unwrap().1;
+    ws.cursor =
+        winit::dpi::PhysicalPosition::new((source.0 + 10.0) as f64, (source.1 + 10.0) as f64);
+    super::arm_pane_drag(&mut ws, moving);
+    assert!(ws.pane_drag.is_some());
+    ws.cursor.x += 1.0;
+    super::update_pane_drag(&mut ws, area);
+    assert!(
+        !ws.pane_drag.as_ref().unwrap().live,
+        "jitter must remain a click"
+    );
+    ws.cursor = winit::dpi::PhysicalPosition::new(
+        (destination.0 + destination.2 / 2.0) as f64,
+        (destination.1 + destination.3 - 2.0) as f64,
+    );
+    super::update_pane_drag(&mut ws, area);
+    assert!(ws.pane_drag.as_ref().unwrap().live);
+    assert_eq!(
+        ws.pane_drag.as_ref().unwrap().target.map(|target| target.0),
+        Some(target)
+    );
+    assert_eq!(
+        super::finish_pane_drag(&mut ws),
+        Some((true, false)),
+        "control release must commit the pane move"
+    );
+    assert!(ws.pane_drag.is_none());
+    assert_ne!(ws.mux.leaves(0, area), before);
+    ws.mux.kill_children();
+    let src = production_source();
+    for (method, call) in [
+        ("fn ctl_mouse_press(", "self.press_pane_drag(ws, bcode)"),
+        ("fn ctl_mouse_move(", "self.drag_pane(ws)"),
+        (
+            "fn ctl_mouse_release(",
+            "self.release_pane_drag(ws, bcode, event_loop)",
+        ),
+    ] {
+        let body = src
+            .split(method)
+            .nth(1)
+            .unwrap()
+            .split("\n    fn ")
+            .next()
+            .unwrap();
+        assert!(
+            body.contains(call),
+            "control input must use shared pane gesture handling: {call}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn osc52_wire_reads_answer_a_then_b_before_a_drain() {
+    let (mux, id, _) = title_test_split_mux();
+    assert!(mux.panes[&id].term.apply_local_output(
+        b"\x1b]52;c;QQ==\x07\x1b]52;c;?\x07\x1b]52;c;Qg==\x07\x1b]52;c;?\x07OSC52-DONE"
+    ));
+    assert!(wait_for_pane_screen(&mux, id, |text, _| text.contains("OSC52-DONE")));
+    struct Clipboard(String);
+    impl super::Osc52Clipboard for Clipboard {
+        fn store(&mut self, _: ClipboardType, text: String) {
+            self.0 = text;
+        }
+        fn load(&mut self, _: ClipboardType) -> String {
+            self.0.clone()
+        }
+    }
+    let mut clipboard = Clipboard(String::new());
+    let replies: Vec<_> = mux.panes[&id]
+        .term
+        .take_clipboard_events()
+        .into_iter()
+        .filter_map(|event| super::apply_osc52_event(&mut clipboard, event))
+        .collect();
+    mux.kill_children();
+    assert_eq!(
+        replies,
+        ["\x1b]52;c;QQ==\x07", "\x1b]52;c;Qg==\x07"],
+        "parsed OSC 52 reads must answer A then B"
+    );
+}
+
+#[test]
+fn deferred_key_releases_fence_later_authored_input() {
+    use super::{QueuedPaste, QueuedPasteContent, paste::defer_authored_input};
+    let queued = |bytes: &[u8]| QueuedPaste {
+        window: 1,
+        target: Some(10),
+        receipt_pane: None,
+        broadcast: BroadcastScope::Off,
+        recipients: Vec::new(),
+        content: QueuedPasteContent::Input {
+            targets: vec![(10, bytes.to_vec())],
+            prepare_input: true,
+        },
+        key_releases: Vec::new(),
+    };
+    let mut press = queued(b"\x1b[1;1A");
+    let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
+    press
+        .key_releases
+        .push((10, key, Arc::from(&b"\x1b[1;1:3A"[..])));
+    let mut queue = std::collections::VecDeque::from([press]);
+    assert_eq!(
+        defer_authored_input(&mut queue, queued(b"typed")),
+        Some(PaneInputResult::Queued)
+    );
+    assert_eq!(
+        queue.len(),
+        2,
+        "later input must stay behind the saved release"
+    );
+    assert_eq!(queue[0].key_releases[0].2.as_ref(), b"\x1b[1;1:3A");
 }

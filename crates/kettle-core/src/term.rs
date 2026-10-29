@@ -1144,6 +1144,8 @@ pub struct LaunchOverrides<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalCapabilities {
     pub osc52_copy: bool,
+    /// Forward clipboard reads to an owner that enforces the live policy.
+    pub osc52_read: bool,
     pub unnegotiated_modified_enter: bool,
     /// Spawn the command inside an OS-owned descendant containment boundary.
     /// Currently meaningful for headless automation on Windows.
@@ -1162,6 +1164,7 @@ impl Default for TerminalCapabilities {
     fn default() -> Self {
         Self {
             osc52_copy: true,
+            osc52_read: false,
             unnegotiated_modified_enter: true,
             contain_process_tree: false,
             observe_child_exit: false,
@@ -4062,6 +4065,8 @@ fn child_wslenv(parent: &str, extra_env: &[(String, String)]) -> String {
 /// the argv to spawn for it.
 pub type ShellChoice = (String, Vec<String>);
 
+static SHELL_CACHE: std::sync::OnceLock<Vec<ShellChoice>> = std::sync::OnceLock::new();
+
 /// Auto-detect the shells to offer in
 /// the new-tab dropdown, Windows-Terminal style (and in WT's order). Always
 /// returns at least one entry.
@@ -4079,8 +4084,7 @@ pub type ShellChoice = (String, Vec<String>);
 /// `Ctrl+Shift+N` press. Detection is injected into the inner helpers so
 /// they are unit-testable without depending on what is installed.
 pub fn detect_shells() -> Vec<ShellChoice> {
-    static CACHE: std::sync::OnceLock<Vec<ShellChoice>> = std::sync::OnceLock::new();
-    CACHE
+    SHELL_CACHE
         .get_or_init(|| {
             #[cfg(windows)]
             {
@@ -4099,14 +4103,24 @@ pub fn detect_shells() -> Vec<ShellChoice> {
         .clone()
 }
 
+/// Return cached choices while shell detection runs in the background.
+pub fn cached_shells() -> Option<Vec<ShellChoice>> {
+    cached_shells_from(&SHELL_CACHE)
+}
+
+fn cached_shells_from(cache: &std::sync::OnceLock<Vec<ShellChoice>>) -> Option<Vec<ShellChoice>> {
+    cache.get().cloned()
+}
+
 /// Dropdown parity: warm the `detect_shells` cache off the UI thread
 /// (the probes can block up to ~4s worst-case on a wedged WSL service + a
 /// slow vswhere). Spawned once from `App::resumed`.
-pub fn prewarm_shell_detection() {
+pub fn prewarm_shell_detection(waker: crate::Waker) {
     let _ = std::thread::Builder::new()
         .name("kettle-shell-probe".into())
-        .spawn(|| {
+        .spawn(move || {
             let _ = detect_shells();
+            waker();
         });
 }
 
@@ -5415,6 +5429,12 @@ impl Terminal {
         };
         let history_limit = effective_scrollback_lines(scrollback, scrollback_bytes, cols, rows);
         let mut tconf = TermConfig {
+            // Live OSC 52 permissions are enforced by the UI at journal drain.
+            osc52: if capabilities.osc52_read {
+                alacritty_terminal::term::Osc52::CopyPaste
+            } else {
+                alacritty_terminal::term::Osc52::OnlyCopy
+            },
             scrolling_history: history_limit,
             // Kettle's winit input path implements Kitty's negotiated CSI-u
             // protocol (including repeat/release, keypad identities, alternate
@@ -7999,9 +8019,9 @@ impl Terminal {
         self.latched.take_cursor_blinking_changed()
     }
 
-    /// The newest OSC 52 write for each target since the last call.
-    pub fn take_clipboard_stores(&self) -> Vec<(crate::ClipboardType, String)> {
-        self.latched.take_clipboard_stores()
+    /// OSC 52 stores and loads in arrival order since the last call.
+    pub fn take_clipboard_events(&self) -> Vec<TermEvent> {
+        self.latched.take_clipboard_events()
     }
 
     /// Whether the reader finished: the PTY closed after the last of its

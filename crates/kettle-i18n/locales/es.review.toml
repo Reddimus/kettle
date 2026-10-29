@@ -19,6 +19,7 @@
 # expanded and readable, after a rejected 33-file batch left input unchanged.
 
 [status]
+menu_detecting_shells = "draft"
 theme_builtin_dark = "draft"
 theme_builtin_light = "draft"
 update_toast_details = "accepted"

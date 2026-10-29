@@ -2674,6 +2674,7 @@ struct QueuedPaste {
     /// The panes a broadcast paste reaches, every window's, when it was made.
     recipients: Vec<u64>,
     content: QueuedPasteContent,
+    key_releases: Vec<(u64, PhysicalKey, Arc<[u8]>)>,
 }
 
 enum QueuedPasteContent {
@@ -2726,6 +2727,7 @@ const QUEUED_PASTE_BYTES_MAX: usize = 4 * LOCAL_PASTE_MAX;
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     Wakeup,
+    ShellsDetected,
     /// The paste encoder finished a clipboard image's PNG.
     PastedImageEncoded,
     #[cfg(target_os = "linux")]
@@ -9941,6 +9943,7 @@ pub struct App {
     #[cfg(target_os = "linux")]
     agent_launches: kettle_ctl::agent_launch::LaunchScopes,
     proxy: EventLoopProxy<UserEvent>,
+    pending_shell_action: PendingShellAction,
     /// Private, bounded bare-launch activation inbox. The IPC thread waits for
     /// this event-loop thread to confirm window creation before telling the
     /// secondary launcher it may exit.
@@ -10452,6 +10455,175 @@ fn completion_anchor_col(cursor_col: usize, input_prefix: &str) -> usize {
 #[cfg(test)]
 mod completion_surface_tests;
 
+const MAX_TERMINAL_OWNED_KEYS: usize = 256;
+
+fn key_release_bytes(
+    cfg: &Config,
+    event: &winit::event::KeyEvent,
+    mods: ModifiersState,
+    mode: kettle_core::TermMode,
+) -> Option<Arc<[u8]>> {
+    if !mode.contains(kettle_core::TermMode::REPORT_EVENT_TYPES) {
+        return None;
+    }
+    let mut release = event.clone();
+    release.state = ElementState::Released;
+    release.repeat = false;
+    encode_key_event_for_mode(cfg, &release, mods, mode)
+        .filter(|bytes| !bytes.is_empty())
+        .map(Arc::from)
+}
+
+fn release_terminal_owned_keys(
+    ws: &mut WindowState,
+    mut send: impl FnMut(u64, PhysicalKey, Arc<[u8]>),
+) {
+    for ((key, pane), bytes) in std::mem::take(&mut ws.terminal_key_release_bytes) {
+        send(pane, key, bytes);
+    }
+    ws.suppressed_key_releases
+        .extend(ws.terminal_owned_key_releases.drain());
+    ws.terminal_key_recipients.clear();
+}
+
+#[derive(Default)]
+struct PendingShellAction(Option<(u64, usize)>);
+
+impl PendingShellAction {
+    fn request(
+        &mut self,
+        window: u64,
+        index: usize,
+        shells: Option<&[kettle_core::term::ShellChoice]>,
+    ) -> Option<Vec<String>> {
+        match shells {
+            Some(shells) => {
+                self.0 = None;
+                shells.get(index).map(|(_, argv)| argv.clone())
+            }
+            None => {
+                self.0 = Some((window, index));
+                None
+            }
+        }
+    }
+
+    fn complete(
+        &mut self,
+        shells: &[kettle_core::term::ShellChoice],
+    ) -> Option<(u64, Vec<String>)> {
+        let (window, index) = self.0.take()?;
+        shells.get(index).map(|(_, argv)| (window, argv.clone()))
+    }
+}
+
+fn update_pane_drag(ws: &mut WindowState, area: Rect) -> bool {
+    if ws.pane_drag.is_none() {
+        return false;
+    }
+    let (cx, cy) = (ws.cursor.x as f32, ws.cursor.y as f32);
+    let (ox, oy) = ws.pane_drag.as_ref().map(|d| d.origin).unwrap_or((cx, cy));
+    let (dx, dy) = (cx - ox, cy - oy);
+    let live = ws.pane_drag.as_ref().is_some_and(|d| d.live)
+        || (dx * dx + dy * dy).sqrt() > PANE_DRAG_THRESHOLD_PX;
+    let moving = ws.pane_drag.as_ref().map(|d| d.pane);
+    // Computed before the &mut borrow below: `pane_rect_at`
+    // needs `&ws.mux` and the write needs `&mut ws.pane_drag`.
+    let target = if live {
+        ws.mux.pane_rect_at(area, cx, cy).and_then(|(id, rect)| {
+            // A pane cannot be dropped onto itself: the tree
+            // half refuses it, so offering the hint would
+            // promise a move that never happens.
+            (Some(id) != moving)
+                .then(|| {
+                    crate::mux::pane_drop_zone(rect, cx, cy)
+                        .map(|(dir, before)| (id, rect, dir, before))
+                })
+                .flatten()
+        })
+    } else {
+        None
+    };
+    if let Some(drag) = ws.pane_drag.as_mut() {
+        let changed = drag.live != live
+            || drag.target.map(|t| t.0) != target.map(|t| t.0)
+            || drag.target.map(|t| (t.2, t.3)) != target.map(|t| (t.2, t.3));
+        drag.live = live;
+        drag.target = target;
+        return changed;
+    }
+    false
+}
+
+fn arm_pane_drag(ws: &mut WindowState, pane: u64) {
+    let rename_on_click = ws.mux.active_focus() == Some(pane);
+    ws.mux.focus_pane(pane);
+    ws.pane_drag = Some(PaneDrag {
+        pane,
+        origin: (ws.cursor.x as f32, ws.cursor.y as f32),
+        live: false,
+        rename_on_click,
+        target: None,
+    });
+}
+
+fn finish_pane_drag(ws: &mut WindowState) -> Option<(bool, bool)> {
+    let drag = ws.pane_drag.take()?;
+    let moved = drag.live
+        && drag.target.is_some_and(|(target, _, dir, before)| {
+            ws.mux.move_pane_beside(drag.pane, target, dir, before)
+        });
+    Some((moved, !drag.live && drag.rename_on_click))
+}
+
+trait Osc52Clipboard {
+    fn store(&mut self, target: ClipboardType, text: String);
+    fn load(&mut self, target: ClipboardType) -> String;
+}
+
+fn apply_osc52_event(clipboard: &mut impl Osc52Clipboard, event: TermEvent) -> Option<String> {
+    match event {
+        TermEvent::ClipboardStore(target, text) => {
+            clipboard.store(target, text);
+            None
+        }
+        TermEvent::ClipboardLoad(target, fmt) => {
+            let text = clipboard.load(target);
+            Some(fmt(clamp_osc52(&text, OSC52_MAX)))
+        }
+        _ => unreachable!(),
+    }
+}
+
+impl Osc52Clipboard for App {
+    fn store(&mut self, target: ClipboardType, text: String) {
+        self.store_osc52_writes(vec![(target, text)]);
+    }
+
+    fn load(&mut self, target: ClipboardType) -> String {
+        // OSC 52 read lets a (remote) program exfiltrate the
+        // clipboard; denied by default — reply empty so the
+        // protocol stays well-formed without leaking.
+        if self.cfg.osc52.can_paste() {
+            self.clipboard
+                .as_mut()
+                .and_then(|c| match get_osc52_clipboard(c, target) {
+                    Ok(text) => Some(text),
+                    Err(error) => {
+                        log::warn!(
+                            "clipboard read failed (OSC 52 {target:?} target): \
+                             {error}"
+                        );
+                        None
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    }
+}
+
 impl App {
     /// The map key of the WindowState whose OS window is `wid`, if any.
     /// Returns `WindowState::seq`, which is the map key by invariant.
@@ -10532,8 +10704,8 @@ impl App {
         let focused = (ws.os_focus_known && ws.window_focused)
             .then(|| ws.mux.active_focus())
             .flatten();
-        let (lost, gained) = focus_report_transition(ws.focus_reported_pane, focused);
-        ws.focus_reported_pane = focused;
+        let (lost, gained) = focus_report_transition(ws.focus_observed_pane, focused);
+        ws.focus_observed_pane = focused;
         for (pane_id, focus) in [(lost, false), (gained, true)] {
             let Some(pane_id) = pane_id else {
                 continue;
@@ -10559,13 +10731,13 @@ impl App {
     /// `CSI I` follows a `CSI O`. Called only after a detach succeeded, so a
     /// failed transfer reports nothing.
     fn release_focus_report_to(&mut self, ws: &mut WindowState, dt: &crate::mux::DetachedTab) {
-        let Some(reported) = ws.focus_reported_pane else {
+        let Some(reported) = ws.focus_observed_pane else {
             return;
         };
         let Some((_, pane)) = dt.panes.iter().find(|(id, _)| *id == reported) else {
             return;
         };
-        ws.focus_reported_pane = None;
+        ws.focus_observed_pane = None;
         let reporting = pane
             .term
             .term
@@ -11079,6 +11251,7 @@ impl App {
         let plan = startup_plan(&startup, &initial_cfg, another_build_running);
         let ctl_policy = ctl_overrides(&startup).resolve(initial_cfg.ctl_policy());
         let mut app = App {
+            pending_shell_action: PendingShellAction::default(),
             #[cfg(target_os = "linux")]
             wayland: None,
             #[cfg(target_os = "linux")]
@@ -11684,12 +11857,61 @@ impl App {
         result
     }
 
+    fn send_or_defer_key_releases(
+        &mut self,
+        ws: &mut WindowState,
+        releases: Vec<(u64, PhysicalKey, Arc<[u8]>)>,
+    ) {
+        if let Some(paste) = self.queued_pastes.back_mut() {
+            paste.key_releases.extend(releases);
+        } else {
+            self.send_key_releases(Some(ws), &releases);
+        }
+    }
+
+    fn send_key_releases(
+        &mut self,
+        ws: Option<&WindowState>,
+        releases: &[(u64, PhysicalKey, Arc<[u8]>)],
+    ) {
+        let mut result = PaneInputResult::Queued;
+        for mux in ws
+            .map(|ws| &ws.mux)
+            .into_iter()
+            .chain(self.windows.values().map(|ws| &ws.mux))
+        {
+            result = result.merge(mux.release_key_to(releases));
+        }
+        self.report_input_result(result);
+    }
+
     fn write_terminal_key_event(
         &mut self,
         ws: &mut WindowState,
         event: &winit::event::KeyEvent,
         prepare_input: bool,
     ) {
+        if !prepare_input {
+            let key = event.physical_key;
+            ws.terminal_key_recipients.remove(&key);
+            let mut releases = Vec::new();
+            ws.terminal_key_release_bytes.retain(|(kept, pane), bytes| {
+                if *kept == key {
+                    releases.push((*pane, key, bytes.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            self.send_or_defer_key_releases(ws, releases);
+            return;
+        }
+        if ws.terminal_key_recipients.len() >= MAX_TERMINAL_OWNED_KEYS
+            && !ws.terminal_key_recipients.contains_key(&event.physical_key)
+        {
+            self.report_input_result(PaneInputResult::Backpressured);
+            return;
+        }
         if self.defer_terminal_input(ws, Some(event), &[], prepare_input, false) {
             if prepare_input {
                 self.clear_selection_on_input(ws);
@@ -11701,26 +11923,6 @@ impl App {
         self.sync_pane_focus_reports(ws);
         let mods = pty_key_modifiers(ws, &event.logical_key);
         let modified_enter = key_is_modified_enter(&event.logical_key, mods);
-        if !prepare_input {
-            let recipients = ws
-                .terminal_key_recipients
-                .remove(&event.physical_key)
-                .unwrap_or_default();
-            let cfg = &self.cfg;
-            let mut result = PaneInputResult::Queued;
-            for mux in
-                std::iter::once(&ws.mux).chain(self.windows.values().map(|window| &window.mux))
-            {
-                result = result.merge(mux.release_key_to(
-                    &recipients,
-                    cfg.modify_other_keys,
-                    modified_enter,
-                    |mode| encode_key_event_for_mode(cfg, event, mods, mode),
-                ));
-            }
-            self.report_input_result(result);
-            return;
-        }
         if !ws.mux.is_broadcast_on() {
             let mode = ws
                 .mux
@@ -11735,6 +11937,11 @@ impl App {
                 && !bytes.is_empty()
                 && let Some(pane_id) = ws.mux.active_focus()
             {
+                if let Some(release) = key_release_bytes(&self.cfg, event, mods, mode) {
+                    ws.terminal_key_release_bytes
+                        .entry((event.physical_key, pane_id))
+                        .or_insert(release);
+                }
                 ws.terminal_key_recipients
                     .entry(event.physical_key)
                     .or_default()
@@ -11757,13 +11964,26 @@ impl App {
         } else {
             Default::default()
         };
+        let mut release_bytes = std::collections::HashMap::new();
         let (mut delivery, recipients) = ws.mux.broadcast_encoded(
             self.cfg.modify_other_keys,
             modified_enter,
             scroll_to_bottom,
             receipt_pane,
-            |mode| encode_key_event_for_mode(cfg, event, mods, mode),
+            |id, mode| {
+                if let Some(release) = key_release_bytes(cfg, event, mods, mode) {
+                    release_bytes.insert(id, release);
+                }
+                encode_key_event_for_mode(cfg, event, mods, mode)
+            },
         );
+        for id in &recipients {
+            if let Some(bytes) = release_bytes.remove(id) {
+                ws.terminal_key_release_bytes
+                    .entry((event.physical_key, *id))
+                    .or_insert(bytes);
+            }
+        }
         ws.terminal_key_recipients
             .entry(event.physical_key)
             .or_default()
@@ -11785,8 +12005,20 @@ impl App {
                     modified_enter,
                     scroll_to_bottom,
                     receipt_pane,
-                    |mode| encode_key_event_for_mode(cfg, event, mods, mode),
+                    |id, mode| {
+                        if let Some(release) = key_release_bytes(cfg, event, mods, mode) {
+                            release_bytes.insert(id, release);
+                        }
+                        encode_key_event_for_mode(cfg, event, mods, mode)
+                    },
                 );
+                for id in &recipients {
+                    if let Some(bytes) = release_bytes.remove(id) {
+                        ws.terminal_key_release_bytes
+                            .entry((event.physical_key, *id))
+                            .or_insert(bytes);
+                    }
+                }
                 ws.terminal_key_recipients
                     .entry(event.physical_key)
                     .or_default()
@@ -12625,8 +12857,7 @@ impl App {
         }
     }
 
-    /// Copy a pane's latched OSC 52 writes to the system clipboard, oldest
-    /// first, when the config allows programs to copy.
+    /// Apply OSC 52 stores when the config allows programs to copy.
     fn store_osc52_writes(&mut self, writes: Vec<(ClipboardType, String)>) {
         for (target, s) in writes {
             // Normalize complete card clusters before clipping so a
@@ -12699,11 +12930,8 @@ impl App {
                 bell = true;
                 bell_panes.push(pane_id);
             }
-            // Titles, cursor-blink switches and OSC 52 writes are latched by
-            // the terminal too, the newest kept, so a program repeating them
-            // cannot fill the event queue. They are taken before the queue
-            // below, so a program that writes the clipboard and then reads it
-            // back sees its write.
+            // Titles and cursor-blink switches keep only their newest state.
+            // Clipboard operations are drained in their journal order below.
             match pane.term.take_title() {
                 Some(kettle_core::TitleChange::Set(t)) => {
                     // Ignore the bogus full-exe-path title conhost/
@@ -12752,8 +12980,12 @@ impl App {
                 ws.blink_on = true;
                 ws.last_blink = std::time::Instant::now();
             }
-            self.store_osc52_writes(pane.term.take_clipboard_stores());
-            while let Ok(ev) = pane.rx.try_recv() {
+            for ev in pane
+                .term
+                .take_clipboard_events()
+                .into_iter()
+                .chain(pane.rx.try_iter())
+            {
                 match ev {
                     TermEvent::PtyWrite(s) => {
                         if pane.queue_protocol_reply(s.as_bytes()).is_failed() {
@@ -12762,40 +12994,10 @@ impl App {
                             break;
                         }
                     }
-                    TermEvent::ClipboardLoad(target, fmt) => {
-                        // A write latched since the take above was made before
-                        // this read: apply it first, so the program reads it.
-                        self.store_osc52_writes(pane.term.take_clipboard_stores());
-                        // OSC 52 read lets a (remote) program exfiltrate the
-                        // clipboard; denied by default — reply empty so the
-                        // protocol stays well-formed without leaking.
-                        let text = if self.cfg.osc52.can_paste() {
-                            self.clipboard
-                                .as_mut()
-                                .and_then(|c| match get_osc52_clipboard(c, target) {
-                                    Ok(text) => Some(text),
-                                    Err(error) => {
-                                        log::warn!(
-                                            "clipboard read failed (OSC 52 {target:?} target): \
-                                             {error}"
-                                        );
-                                        None
-                                    }
-                                })
-                                .unwrap_or_default()
-                        } else {
-                            String::new()
-                        };
-                        // Bound the reply symmetrically with the write path
-                        // above: the OS clipboard is outside kettle's control
-                        // (a big log/diff/webpage copy is plausible with no
-                        // attacker involved, and a malicious remote program
-                        // querying via OSC 52 `?` shouldn't be able to force an
-                        // unbounded base64 encode + single PTY write either
-                        // way).
-                        let text = clamp_osc52(&text, OSC52_MAX);
-                        let reply = fmt(text);
-                        if pane.queue_protocol_reply(reply.as_bytes()).is_failed() {
+                    event @ (TermEvent::ClipboardStore(..) | TermEvent::ClipboardLoad(..)) => {
+                        if let Some(reply) = apply_osc52_event(self, event)
+                            && pane.queue_protocol_reply(reply.as_bytes()).is_failed()
+                        {
                             log::error!("closing pane {pane_id}: bounded PTY input queue failed");
                             pane.closed = true;
                             break;
@@ -16126,13 +16328,11 @@ impl App {
                 }
             }
             Action::NewTabShell(n) => {
-                // Ctrl+Shift+N opens the Nth dropdown
-                // entry (Windows Terminal's profile shortcuts). The list is
-                // process-cached + prewarmed; out-of-range is a silent no-op,
-                // same as GotoTab clamping.
-                let shells = kettle_core::term::detect_shells();
-                if let Some((_, argv)) = shells.get(n as usize) {
-                    let argv = argv.clone();
+                let shells = kettle_core::term::cached_shells();
+                if let Some(argv) =
+                    self.pending_shell_action
+                        .request(ws.seq, n as usize, shells.as_deref())
+                {
                     self.open_tab_with_argv(ws, &argv);
                 }
             }
@@ -18867,6 +19067,30 @@ impl ApplicationHandler<UserEvent> for App {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("user_event");
         match ev {
+            UserEvent::ShellsDetected => {
+                let Some(shells) = kettle_core::term::cached_shells() else {
+                    return;
+                };
+                let pending = self.pending_shell_action.complete(&shells);
+                let seqs: Vec<_> = self.windows.keys().copied().collect();
+                for seq in seqs {
+                    let Some(mut ws) = self.windows.remove(&seq) else {
+                        continue;
+                    };
+                    if let Some(anchor) = ws.context_menu.as_ref().filter(|menu| {
+                        matches!(menu.items.as_slice(), [ContextMenuItem::Item { label, enabled: false, .. }]
+                            if *label == self.ui_text.text(kettle_i18n::Text::MenuDetectingShells))
+                    }).map(|menu| menu.anchor) {
+                        let items = Self::new_tab_menu_items(&shells, &self.ui_text);
+                        self.show_context_menu(&mut ws, items, anchor.0, anchor.1);
+                        if let Some(window) = &ws.window { window.request_redraw(); }
+                    }
+                    if let Some((_, argv)) = pending.as_ref().filter(|(window, _)| *window == seq) {
+                        self.open_tab_with_argv(&mut ws, argv);
+                    }
+                    self.finish_window_dispatch(el, seq, ws);
+                }
+            }
             #[cfg(target_os = "linux")]
             UserEvent::Wayland => self.poll_wayland(el),
             UserEvent::Activation => self.drain_activation_requests(el),
@@ -20206,7 +20430,10 @@ impl App {
         // Warm the shell-detection cache (wsl.exe /
         // vswhere probes, bounded ~2s each) off the UI thread so the first
         // dropdown open / Ctrl+Shift+N press doesn't pay it.
-        kettle_core::term::prewarm_shell_detection();
+        let proxy = self.proxy.clone();
+        kettle_core::term::prewarm_shell_detection(Arc::new(move || {
+            let _ = proxy.send_event(UserEvent::ShellsDetected);
+        }));
     }
 
     fn user_event_inner(&mut self, ws: &mut WindowState, _el: &ActiveEventLoop, ev: UserEvent) {
@@ -20220,7 +20447,8 @@ impl App {
             UserEvent::Wayland => {}
             // Consumed by the outer window-less dispatch before a WindowState
             // is checked out.
-            UserEvent::Activation
+            UserEvent::ShellsDetected
+            | UserEvent::Activation
             | UserEvent::PastedImageEncoded
             | UserEvent::NativeFullscreenExited { .. }
             | UserEvent::AccessibilityActivated { .. }
@@ -20260,6 +20488,9 @@ impl App {
                 }
             }
             UserEvent::Wakeup => {
+                for pane in ws.mux.panes.values() {
+                    let _ = pane.retry_pending_reports();
+                }
                 // Semantic terminal events and direct-child lifecycle edges
                 // are not paint damage. Drain them before the output-generation
                 // gate so a quiet exit is applied even when the window is
@@ -20811,42 +21042,7 @@ impl App {
                 // from the CURRENT layout rather than caching it at press time
                 // — a pane closing mid-drag reshuffles every rect, and a stale
                 // target would highlight a pane that is no longer there.
-                if ws.pane_drag.is_some() {
-                    let area = self.area(ws);
-                    let (cx, cy) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                    let (ox, oy) = ws.pane_drag.as_ref().map(|d| d.origin).unwrap_or((cx, cy));
-                    let (dx, dy) = (cx - ox, cy - oy);
-                    let live = ws.pane_drag.as_ref().is_some_and(|d| d.live)
-                        || (dx * dx + dy * dy).sqrt() > PANE_DRAG_THRESHOLD_PX;
-                    let moving = ws.pane_drag.as_ref().map(|d| d.pane);
-                    // Computed before the &mut borrow below: `pane_rect_at`
-                    // needs `&ws.mux` and the write needs `&mut ws.pane_drag`.
-                    let target = if live {
-                        ws.mux.pane_rect_at(area, cx, cy).and_then(|(id, rect)| {
-                            // A pane cannot be dropped onto itself: the tree
-                            // half refuses it, so offering the hint would
-                            // promise a move that never happens.
-                            (Some(id) != moving)
-                                .then(|| {
-                                    crate::mux::pane_drop_zone(rect, cx, cy)
-                                        .map(|(dir, before)| (id, rect, dir, before))
-                                })
-                                .flatten()
-                        })
-                    } else {
-                        None
-                    };
-                    if let Some(drag) = ws.pane_drag.as_mut() {
-                        let changed = drag.live != live
-                            || drag.target.map(|t| t.0) != target.map(|t| t.0)
-                            || drag.target.map(|t| (t.2, t.3)) != target.map(|t| (t.2, t.3));
-                        drag.live = live;
-                        drag.target = target;
-                        if changed && let Some(w) = &ws.window {
-                            w.request_redraw();
-                        }
-                    }
-                }
+                self.drag_pane(ws);
                 // Drive the detach FSM from the press origin.
                 // Distance decides click-vs-drag; WINDOW-BOUNDS CONTAINMENT
                 // decides inside/outside — Windows' SetCapture keeps
@@ -21305,24 +21501,7 @@ impl App {
                 // gesture; the release decides between editing the title and
                 // moving the pane. Opening the editor on press would put a text
                 // field over the pane the user just picked up.
-                let (cx, cy) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                if bcode == 0
-                    && let Some(clicked_pane_id) = self.pane_at_titlebar_click(ws, cx, cy)
-                {
-                    let already_focused = ws.mux.active_focus() == Some(clicked_pane_id);
-                    let pre = self.focus_key(ws);
-                    ws.mux.focus_at(area, cx, cy);
-                    self.note_focus_change(ws, pre);
-                    ws.pane_drag = Some(PaneDrag {
-                        pane: clicked_pane_id,
-                        origin: (cx, cy),
-                        live: false,
-                        rename_on_click: already_focused,
-                        target: None,
-                    });
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
+                if self.press_pane_drag(ws, bcode) {
                     return;
                 }
                 // A left-press on a split divider seam starts
@@ -21500,26 +21679,8 @@ impl App {
                 // press returns before any button is noted as held -- but "today"
                 // is exactly the kind of reasoning that leaves a gesture armed
                 // when one of them grows a new early return.
-                if bcode == 0
-                    && let Some(drag) = ws.pane_drag.take()
-                {
-                    if drag.live {
-                        if let Some((target, _, dir, before)) = drag.target
-                            && ws.mux.move_pane_beside(drag.pane, target, dir, before)
-                        {
-                            // Same two follow-ups every tree edit needs:
-                            // re-size every PTY to its new rect, and persist the
-                            // layout so a restore brings the pane back where the
-                            // user put it.
-                            self.resize_all(ws);
-                            self.save_session(ws);
-                        }
-                    } else if drag.rename_on_click {
-                        self.handle_action(ws, Action::EditPaneTitle, event_loop);
-                    }
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
+                if self.release_pane_drag(ws, bcode, event_loop) {
+                    return;
                 }
                 // A left-release while a torn window is tracked is the DROP.
                 // Two shapes: (a) the synthesized release winit posts to the
@@ -21806,8 +21967,11 @@ impl App {
                     // a later unrelated release cannot be mistaken for the
                     // missing half of an old shortcut.
                     ws.suppressed_key_releases.clear();
-                    ws.terminal_owned_key_releases.clear();
-                    ws.terminal_key_recipients.clear();
+                    let mut releases = Vec::new();
+                    release_terminal_owned_keys(ws, |pane, key, bytes| {
+                        releases.push((pane, key, bytes))
+                    });
+                    self.send_or_defer_key_releases(ws, releases);
                     ws.closing_keys.clear();
                     ws.ime_preedit = None;
                     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);

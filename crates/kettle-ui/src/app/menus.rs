@@ -1053,13 +1053,27 @@ impl App {
         self.show_context_menu(ws, items, sw * 0.5 - 140.0, sh * 0.4);
     }
 
+    pub(super) fn shell_menu_items(
+        shells: Option<&[kettle_core::term::ShellChoice]>,
+        tr: &kettle_i18n::Translator,
+    ) -> Vec<ContextMenuItem> {
+        match shells {
+            Some(shells) => Self::new_tab_menu_items(shells, tr),
+            None => vec![ContextMenuItem::Item {
+                label: tr.text(kettle_i18n::Text::MenuDetectingShells),
+                action: Action::NewTabShell(0),
+                enabled: false,
+            }],
+        }
+    }
+
     /// Open the new-tab `▾` dropdown at
     /// `(px, py)` — detected shells (process-cached in kettle-core, prewarmed
     /// at startup) plus the Settings / Command palette / About bottom rows.
     pub(super) fn open_new_tab_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
         self.close_all_modals(ws);
-        let shells = kettle_core::term::detect_shells();
-        let items = Self::new_tab_menu_items(&shells, &self.ui_text);
+        let shells = kettle_core::term::cached_shells();
+        let items = Self::shell_menu_items(shells.as_deref(), &self.ui_text);
         self.show_context_menu(ws, items, px, py);
     }
 

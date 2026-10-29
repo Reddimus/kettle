@@ -3,8 +3,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub use alacritty_terminal::event::Event as TermEvent;
-use alacritty_terminal::event::EventListener;
+pub use alacritty_terminal::event::{Event as TermEvent, EventListener};
+#[cfg(test)]
 use alacritty_terminal::term::ClipboardType;
 use crossbeam_channel::Sender;
 
@@ -157,6 +157,81 @@ pub enum TitleChange {
     Reset,
 }
 
+const MAX_CLIPBOARD_LOADS: usize = 1024;
+const MAX_CLIPBOARD_ENTRIES: usize = 2 * MAX_CLIPBOARD_LOADS + 2;
+const MAX_CLIPBOARD_ENTRY_BYTES: usize = 1024 * 1024;
+const MAX_CLIPBOARD_BYTES: usize = 2 * MAX_CLIPBOARD_ENTRY_BYTES;
+
+#[derive(Default)]
+struct ClipboardJournal {
+    entries: Vec<TermEvent>,
+    bytes: usize,
+    loads: usize,
+}
+
+impl ClipboardJournal {
+    fn push(&mut self, mut event: TermEvent) -> bool {
+        let first = self.entries.is_empty();
+        match &mut event {
+            TermEvent::ClipboardStore(target, text) => {
+                match crate::scrub_card_markers(std::mem::take(text)) {
+                    Ok(clean) => *text = clean,
+                    Err(error) => {
+                        log::warn!("OSC 52: could not prepare text: {error}");
+                        return false;
+                    }
+                }
+                if text.len() > MAX_CLIPBOARD_ENTRY_BYTES {
+                    let mut end = MAX_CLIPBOARD_ENTRY_BYTES;
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text.truncate(end);
+                    text.shrink_to_fit();
+                }
+                // Targets can alias the same system clipboard, so every read
+                // is a coalescing boundary, including reads of the other target.
+                let after_read = self
+                    .entries
+                    .iter()
+                    .rposition(|entry| matches!(entry, TermEvent::ClipboardLoad(..)))
+                    .map_or(0, |index| index + 1);
+                if let Some(index) = self.entries[after_read..].iter().position(
+                    |entry| matches!(entry, TermEvent::ClipboardStore(kept, _) if kept == target),
+                ) {
+                    self.remove_store(after_read + index);
+                }
+                self.bytes += text.len();
+            }
+            TermEvent::ClipboardLoad(..) => {
+                if self.loads == MAX_CLIPBOARD_LOADS {
+                    return false;
+                }
+                self.loads += 1;
+            }
+            _ => unreachable!(),
+        }
+        self.entries.push(event);
+        while self.entries.len() > MAX_CLIPBOARD_ENTRIES || self.bytes > MAX_CLIPBOARD_BYTES {
+            let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| matches!(entry, TermEvent::ClipboardStore(..)))
+            else {
+                break;
+            };
+            self.remove_store(index);
+        }
+        first
+    }
+
+    fn remove_store(&mut self, index: usize) {
+        if let TermEvent::ClipboardStore(_, text) = self.entries.remove(index) {
+            self.bytes -= text.len();
+        }
+    }
+}
+
 /// Terminal events that only matter as their latest state, held until the
 /// owner takes them. They are latched here, not queued: output that repeats
 /// them, such as `cat` of a binary file or a loop setting the title, would
@@ -167,10 +242,7 @@ pub(crate) struct LatchedEvents {
     cursor_blinking_changed: AtomicBool,
     exited: AtomicBool,
     title: Mutex<Option<TitleChange>>,
-    /// OSC 52 writes, the newest for each target, oldest first: where both
-    /// targets are one system clipboard (macOS, Windows), the newer write
-    /// must be applied last.
-    clipboard: Mutex<Vec<(ClipboardType, String)>>,
+    clipboard: Mutex<ClipboardJournal>,
 }
 
 impl LatchedEvents {
@@ -190,8 +262,9 @@ impl LatchedEvents {
         self.title.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
-    pub(crate) fn take_clipboard_stores(&self) -> Vec<(ClipboardType, String)> {
-        std::mem::take(&mut *self.clipboard.lock().unwrap_or_else(|e| e.into_inner()))
+    pub(crate) fn take_clipboard_events(&self) -> Vec<TermEvent> {
+        let mut journal = self.clipboard.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *journal).entries
     }
 
     /// Latch `event` if it is one of the latched kinds. Returns whether it
@@ -215,13 +288,11 @@ impl LatchedEvents {
                 .unwrap_or_else(|e| e.into_inner())
                 .replace(TitleChange::Reset)
                 .is_none(),
-            TermEvent::ClipboardStore(target, text) => {
-                let mut stores = self.clipboard.lock().unwrap_or_else(|e| e.into_inner());
-                let first = stores.is_empty();
-                stores.retain(|(kept, _)| *kept != target);
-                stores.push((target, text));
-                first
-            }
+            event @ (TermEvent::ClipboardStore(..) | TermEvent::ClipboardLoad(..)) => self
+                .clipboard
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(event),
             other => return Err(other),
         })
     }
@@ -292,6 +363,11 @@ impl EventProxy {
 
     pub(crate) fn latched(&self) -> Arc<LatchedEvents> {
         Arc::clone(&self.latched)
+    }
+
+    /// Take OSC 52 operations in arrival order.
+    pub fn take_clipboard_events(&self) -> Vec<TermEvent> {
+        self.latched.take_clipboard_events()
     }
 
     fn wake_owner(&self) {
@@ -455,13 +531,30 @@ mod tests {
         assert_eq!(latched.take_title(), None);
         assert!(latched.take_cursor_blinking_changed());
         assert_eq!(
-            latched.take_clipboard_stores(),
+            latched
+                .take_clipboard_events()
+                .into_iter()
+                .map(|event| match event {
+                    TermEvent::ClipboardStore(target, text) => (target, text),
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>(),
             vec![
                 (ClipboardType::Clipboard, "copy 9999".into()),
                 (ClipboardType::Selection, "selected".into()),
             ]
         );
-        assert!(latched.take_clipboard_stores().is_empty());
+        assert!(
+            latched
+                .take_clipboard_events()
+                .into_iter()
+                .map(|event| match event {
+                    TermEvent::ClipboardStore(target, text) => (target, text),
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>()
+                .is_empty()
+        );
         // Writes come back oldest first: where both targets are one system
         // clipboard, the newer must be applied last.
         for (target, text) in [
@@ -472,7 +565,14 @@ mod tests {
             proxy.send_event(TermEvent::ClipboardStore(target, text.into()));
         }
         assert_eq!(
-            latched.take_clipboard_stores(),
+            latched
+                .take_clipboard_events()
+                .into_iter()
+                .map(|event| match event {
+                    TermEvent::ClipboardStore(target, text) => (target, text),
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>(),
             vec![
                 (ClipboardType::Selection, "b".into()),
                 (ClipboardType::Clipboard, "c".into()),
@@ -494,6 +594,96 @@ mod tests {
     /// Replies are the only events that reach the bounded queue. A program
     /// asking faster than the window answers loses the newest replies while
     /// the queue is full; the queue never grows and the pane stays open.
+    #[test]
+    fn clipboard_journal_normalizes_before_its_byte_limit() {
+        let (proxy, _, _) = gated_proxy(1024);
+        let prefix = "A".repeat(super::MAX_CLIPBOARD_ENTRY_BYTES - 2);
+        let marker: String = std::iter::once('\u{10eeee}')
+            .chain(std::iter::repeat_n('\u{0305}', 8))
+            .collect();
+        proxy.send_event(TermEvent::ClipboardStore(
+            ClipboardType::Clipboard,
+            format!("{prefix}{marker}Z"),
+        ));
+        let entries = proxy.take_clipboard_events();
+        let TermEvent::ClipboardStore(_, text) = &entries[0] else {
+            panic!("expected store");
+        };
+        assert!(
+            text.ends_with(" Z"),
+            "normalize complete card clusters before enforcing the journal byte cap"
+        );
+        assert_eq!(text.len(), super::MAX_CLIPBOARD_ENTRY_BYTES);
+        assert!(text.starts_with(&prefix));
+    }
+
+    #[test]
+    fn clipboard_journal_bounds_stores_and_refuses_newest_loads() {
+        let (proxy, rx, _) = gated_proxy(1024);
+        for index in 0..super::MAX_CLIPBOARD_LOADS + 10 {
+            proxy.send_event(TermEvent::ClipboardStore(
+                ClipboardType::Clipboard,
+                "x".repeat(super::MAX_CLIPBOARD_ENTRY_BYTES + 1),
+            ));
+            proxy.send_event(TermEvent::ClipboardLoad(
+                ClipboardType::Clipboard,
+                Arc::new(move |_| index.to_string()),
+            ));
+        }
+        let journal = proxy.latched.clipboard.lock().unwrap();
+        assert_eq!(journal.loads, super::MAX_CLIPBOARD_LOADS);
+        assert!(journal.bytes <= super::MAX_CLIPBOARD_BYTES);
+        assert!(journal.entries.len() <= super::MAX_CLIPBOARD_ENTRIES);
+        let loads: Vec<_> = journal
+            .entries
+            .iter()
+            .filter_map(|event| match event {
+                TermEvent::ClipboardLoad(_, fmt) => Some(fmt("")),
+                TermEvent::ClipboardStore(_, text) => {
+                    assert!(text.len() <= super::MAX_CLIPBOARD_ENTRY_BYTES);
+                    None
+                }
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            loads,
+            (0..super::MAX_CLIPBOARD_LOADS)
+                .map(|index| index.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn clipboard_reads_keep_intervening_writes() {
+        let (proxy, _rx, _) = gated_proxy(1024);
+        for text in ["A", "B"] {
+            proxy.send_event(TermEvent::ClipboardStore(
+                ClipboardType::Clipboard,
+                text.into(),
+            ));
+            proxy.send_event(TermEvent::ClipboardLoad(
+                ClipboardType::Clipboard,
+                Arc::new(str::to_owned),
+            ));
+        }
+        let mut clipboard = String::new();
+        let mut replies = Vec::new();
+        for event in proxy.take_clipboard_events() {
+            match event {
+                TermEvent::ClipboardStore(_, text) => clipboard = text,
+                TermEvent::ClipboardLoad(_, fmt) => replies.push(fmt(&clipboard)),
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(
+            replies,
+            ["A", "B"],
+            "each read must observe the preceding write"
+        );
+    }
+
     #[test]
     fn a_full_queue_drops_replies_without_blocking_or_growing() {
         let (proxy, rx, woke) = gated_proxy(2);

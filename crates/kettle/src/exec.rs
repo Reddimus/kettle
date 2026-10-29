@@ -1350,8 +1350,8 @@ fn run_exec_engine_with_recording_poll(
             }
         };
         // Headless exec has no clipboard sink and advertises no DA1 extension
-        // 52, so latched OSC 52 writes are discarded here.
-        drop(term.take_clipboard_stores());
+        // 52, so OSC 52 clipboard operations are discarded here.
+        drop(term.take_clipboard_events());
         // Titles are latched, the newest kept, so a run of them is one title
         // event. Held until output is ready, and counted as backlog until
         // then so completion cannot drop it.

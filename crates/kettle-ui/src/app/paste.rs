@@ -394,6 +394,7 @@ impl App {
         } else {
             ws.mux.active_focus().into_iter().collect()
         };
+        let mut release_bytes = Vec::new();
         let targets: Vec<(u64, Vec<u8>)> = ids
             .into_iter()
             .filter_map(|id| {
@@ -408,6 +409,11 @@ impl App {
                         self.cfg.modify_other_keys,
                         key_is_modified_enter(&event.logical_key, mods),
                     );
+                    if prepare_input
+                        && let Some(release) = key_release_bytes(&self.cfg, event, mods, mode)
+                    {
+                        release_bytes.push(((event.physical_key, id), release));
+                    }
                     encode_key_event_for_mode(&self.cfg, event, mods, mode)?
                 } else {
                     bytes.to_vec()
@@ -416,7 +422,9 @@ impl App {
             })
             .collect();
         let reached: Vec<u64> = targets.iter().map(|(id, _)| *id).collect();
+        release_bytes.retain(|((_, id), _)| reached.contains(id));
         let paste = QueuedPaste {
+            key_releases: Vec::new(),
             window: ws.seq,
             target: paste_target(&ws.mux),
             receipt_pane: ws.mux.active_focus(),
@@ -433,6 +441,9 @@ impl App {
         if let Some(event) = event.filter(|_| prepare_input)
             && result.is_some_and(|result| result.is_queued())
         {
+            for (key, bytes) in release_bytes {
+                ws.terminal_key_release_bytes.entry(key).or_insert(bytes);
+            }
             ws.terminal_key_recipients
                 .entry(event.physical_key)
                 .or_default()
@@ -506,6 +517,7 @@ impl App {
         }
         let recipients = self.broadcast_recipients(ws);
         self.queued_pastes.push_back(QueuedPaste {
+            key_releases: Vec::new(),
             window: ws.seq,
             target: paste_target(&ws.mux),
             receipt_pane: ws.mux.active_focus(),
@@ -569,6 +581,7 @@ impl App {
             broadcast,
             recipients,
             content,
+            key_releases,
         } = paste;
         // A single-pane paste follows its pane, which may have changed window.
         let window = target
@@ -580,6 +593,7 @@ impl App {
             .unwrap_or(window);
         let Some(mut ws) = self.windows.remove(&window) else {
             self.discard_queued_paste(content);
+            self.send_key_releases(None, &key_releases);
             return;
         };
         // Broadcast goes where its scope reaches now. A different scope, or
@@ -589,6 +603,7 @@ impl App {
             && (ws.mux.broadcast != broadcast || self.broadcast_recipients(&ws) != recipients)
         {
             self.discard_queued_paste(content);
+            self.send_key_releases(Some(&ws), &key_releases);
             self.finish_window_dispatch(el, window, ws);
             return;
         }
@@ -634,6 +649,7 @@ impl App {
                 video,
             } => self.paste_paths_to(&mut ws, target, receipt_pane, paths, trailing_space, video),
         }
+        self.send_key_releases(Some(&ws), &key_releases);
         self.finish_window_dispatch(el, window, ws);
     }
 
@@ -1204,6 +1220,7 @@ pub(super) fn defer_authored_input(
                     targets: queued,
                     prepare_input: queued_prepare,
                 },
+            key_releases,
             ..
         }),
         QueuedPasteContent::Input {
@@ -1211,6 +1228,8 @@ pub(super) fn defer_authored_input(
             prepare_input,
         },
     ) = (queue.back_mut(), &input.content)
+        && key_releases.is_empty()
+        && input.key_releases.is_empty()
         && queued_prepare == prepare_input
         && queued.len() == targets.len()
         && queued.iter().zip(targets).all(|(a, b)| a.0 == b.0)

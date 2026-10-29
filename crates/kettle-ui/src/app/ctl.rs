@@ -2069,12 +2069,12 @@ impl App {
                 handled = self.ctl_mouse_press(ws, event_loop, button.expect("validated button"));
             }
             "release" => {
-                handled = self.ctl_mouse_release(ws, button.expect("validated button"));
+                handled = self.ctl_mouse_release(ws, event_loop, button.expect("validated button"));
             }
             "click" => {
                 let bcode = button.expect("validated button");
                 let pressed = self.ctl_mouse_press(ws, event_loop, bcode);
-                let released = self.ctl_mouse_release(ws, bcode);
+                let released = self.ctl_mouse_release(ws, event_loop, bcode);
                 handled = pressed || released;
             }
             "wheel" => {
@@ -2117,6 +2117,9 @@ impl App {
             == SearchPointerRoute::Bar
         {
             self.search_mouse_drag(ws);
+            return;
+        }
+        if self.drag_pane(ws) {
             return;
         }
         if self.drag_split_divider(ws) {
@@ -2309,6 +2312,9 @@ impl App {
         if self.activate_media_paste_receipt_at(ws, px, py, bcode) {
             return true;
         }
+        if self.press_pane_drag(ws, bcode) {
+            return true;
+        }
         if self.press_split_divider(ws, bcode) {
             return true;
         }
@@ -2330,7 +2336,12 @@ impl App {
         false
     }
 
-    pub(super) fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
+    pub(super) fn ctl_mouse_release(
+        &mut self,
+        ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
+        bcode: u8,
+    ) -> bool {
         // As natively: a gesture of Kettle's own ends with its release.
         ws.held_buttons.end_own(bcode);
         if bcode == 0 {
@@ -2361,6 +2372,9 @@ impl App {
         if self.release_card(ws, px, py, bcode) {
             return true;
         }
+        if self.release_pane_drag(ws, bcode, event_loop) {
+            return true;
+        }
         // The release goes where its press did, if a program got it.
         let mut handled = self.send_mouse(ws, bcode, false, false);
         if selection_release_matches(ws.selection_button, bcode) {
@@ -2374,7 +2388,6 @@ impl App {
             ws.tab_pressed_idx = None;
             ws.detach_drag = std::mem::take(&mut ws.detach_drag).on_mouse_up();
             ws.drag_press = None;
-            ws.pane_drag = None;
             handled = true;
         }
         handled

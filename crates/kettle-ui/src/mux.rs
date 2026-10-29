@@ -2,8 +2,8 @@
 //! independent terminal; splits tile the tab area; focus moves by geometry.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -346,6 +346,7 @@ fn run_pty_input_worker<F>(
     failed: &AtomicBool,
     stop: &AtomicBool,
     waker: &Waker,
+    user_backpressured: &AtomicBool,
     mut try_write: F,
 ) where
     F: FnMut(&[u8]) -> Result<usize>,
@@ -389,7 +390,11 @@ fn run_pty_input_worker<F>(
                         .is_some_and(|(_, pending)| pending.advance(written))
                     {
                         prefer_reply = !current.as_ref().is_some_and(|(reply, _)| *reply);
+                        let was_user = current.as_ref().is_some_and(|(reply, _)| !*reply);
                         current = None;
+                        if was_user && user_backpressured.swap(false, Ordering::AcqRel) {
+                            (waker)();
+                        }
                     }
                 }
                 Err(error) => {
@@ -438,7 +443,17 @@ fn run_pty_input_worker<F>(
     }
 }
 
+#[derive(Default)]
+struct PendingFocusReport {
+    desired: Option<bool>,
+    delivered: Option<bool>,
+}
+
 struct PtyInputQueue {
+    pending_focus: Mutex<PendingFocusReport>,
+    pending_key_releases:
+        Mutex<std::collections::VecDeque<(winit::keyboard::PhysicalKey, Arc<[u8]>)>>,
+    user_backpressured: Arc<AtomicBool>,
     user_tx: Sender<QueuedPtyInput>,
     reply_tx: Sender<QueuedPtyInput>,
     queued_user_bytes: Arc<AtomicUsize>,
@@ -461,6 +476,8 @@ impl PtyInputQueue {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_failed = failed.clone();
         let worker_stop = stop.clone();
+        let user_backpressured = Arc::new(AtomicBool::new(false));
+        let worker_backpressured = user_backpressured.clone();
         let worker_waker = waker.clone();
         let mut pty_stdin = term.stdin_handle()?;
         std::thread::Builder::new()
@@ -472,11 +489,15 @@ impl PtyInputQueue {
                     &worker_failed,
                     &worker_stop,
                     &worker_waker,
+                    &worker_backpressured,
                     |bytes| pty_stdin.try_write(bytes),
                 );
             })
             .context("cannot spawn PTY input worker")?;
         Ok(Self {
+            pending_focus: Mutex::default(),
+            pending_key_releases: Mutex::default(),
+            user_backpressured,
             user_tx,
             reply_tx,
             queued_user_bytes,
@@ -496,6 +517,9 @@ impl PtyInputQueue {
         drop(user_rx);
         drop(reply_rx);
         Self {
+            pending_focus: Mutex::default(),
+            pending_key_releases: Mutex::default(),
+            user_backpressured: Arc::default(),
             user_tx,
             reply_tx,
             queued_user_bytes: Arc::new(AtomicUsize::new(0)),
@@ -507,15 +531,94 @@ impl PtyInputQueue {
         }
     }
 
+    fn enqueue_focus_report(&self, focused: bool) -> PaneInputResult {
+        let mut pending = self.pending_focus.lock().unwrap_or_else(|e| e.into_inner());
+        pending.desired = (pending.delivered != Some(focused)).then_some(focused);
+        self.flush_focus_report(&mut pending)
+    }
+
+    fn flush_focus_report(&self, pending: &mut PendingFocusReport) -> PaneInputResult {
+        let Some(focused) = pending.desired else {
+            return PaneInputResult::Queued;
+        };
+        let result = self.enqueue_user_raw(Arc::from(if focused {
+            &b"\x1b[I"[..]
+        } else {
+            &b"\x1b[O"[..]
+        }));
+        if result.is_queued() {
+            pending.delivered = Some(focused);
+            pending.desired = None;
+        }
+        result
+    }
+
+    fn enqueue_key_release(
+        &self,
+        key: winit::keyboard::PhysicalKey,
+        bytes: Arc<[u8]>,
+    ) -> PaneInputResult {
+        {
+            let mut pending = self
+                .pending_key_releases
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !pending.iter().any(|(kept, _)| *kept == key) {
+                pending.push_back((key, bytes));
+            }
+        }
+        self.retry_pending_reports()
+    }
+
+    fn retry_pending_reports(&self) -> PaneInputResult {
+        let mut pending = self.pending_focus.lock().unwrap_or_else(|e| e.into_inner());
+        let result = self.flush_focus_report(&mut pending);
+        if !result.is_queued() {
+            return result;
+        }
+        let mut releases = self
+            .pending_key_releases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        while let Some((_, bytes)) = releases.front() {
+            let result = self.enqueue_user_raw(bytes.clone());
+            if !result.is_queued() {
+                return result;
+            }
+            releases.pop_front();
+        }
+        PaneInputResult::Queued
+    }
+
     fn enqueue_user(&self, bytes: Arc<[u8]>) -> PaneInputResult {
-        self.enqueue(
+        let result = self.retry_pending_reports();
+        if !result.is_queued() {
+            return result;
+        }
+        self.enqueue_user_raw(bytes)
+    }
+
+    fn enqueue_user_raw(&self, bytes: Arc<[u8]>) -> PaneInputResult {
+        let required = bytes.len();
+        let result = self.enqueue(
             &self.user_tx,
             &self.queued_user_bytes,
             (MAX_USER_INPUT_MESSAGE_BYTES, MAX_QUEUED_USER_INPUT_BYTES),
             PTY_INPUT_QUEUE_DEPTH,
             bytes,
             false,
-        )
+        );
+        if result == PaneInputResult::Backpressured {
+            self.user_backpressured.store(true, Ordering::Release);
+            // Capacity can return before the retry edge is published.
+            if self.user_tx.len() < PTY_INPUT_QUEUE_DEPTH
+                && self.queued_user_bytes.load(Ordering::Acquire)
+                    <= MAX_QUEUED_USER_INPUT_BYTES.saturating_sub(required)
+            {
+                (self.waker)();
+            }
+        }
+        result
     }
 
     /// Queue a mouse release on the user lane, from the room only releases
@@ -1074,11 +1177,21 @@ impl Pane {
         if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
             return result;
         }
-        self.pty_input.enqueue_user(Arc::from(if focused {
-            &b"\x1b[I"[..]
-        } else {
-            &b"\x1b[O"[..]
-        }))
+        self.pty_input.enqueue_focus_report(focused)
+    }
+
+    pub(crate) fn retry_pending_reports(&self) -> PaneInputResult {
+        self.pty_input.retry_pending_reports()
+    }
+
+    pub(crate) fn feed_key_release(
+        &self,
+        key: winit::keyboard::PhysicalKey,
+        bytes: Arc<[u8]>,
+    ) -> PaneInputResult {
+        let result = self.pty_input.enqueue_key_release(key, bytes);
+        self.record_user_input(result, true);
+        result
     }
 
     /// Queue a terminal-protocol reply or report irrespective of read-only
@@ -2150,6 +2263,7 @@ impl Mux {
             &shell_startup,
             TerminalCapabilities {
                 osc52_copy: self.osc52_copy_allowed,
+                osc52_read: true,
                 unnegotiated_modified_enter: unnegotiated_modified_enter(cfg.modify_other_keys),
                 contain_process_tree: false,
                 observe_child_exit: true,
@@ -4109,7 +4223,7 @@ impl Mux {
         encode: F,
     ) -> (PaneInputDelivery, Vec<u64>)
     where
-        F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+        F: FnMut(u64, kettle_core::TermMode) -> Option<Vec<u8>>,
     {
         let ids = self.broadcast_target_ids();
         self.write_encoded_into(
@@ -4132,7 +4246,7 @@ impl Mux {
         encode: F,
     ) -> (PaneInputDelivery, Vec<u64>)
     where
-        F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+        F: FnMut(u64, kettle_core::TermMode) -> Option<Vec<u8>>,
     {
         let ids = self.foreign_target_ids(scope);
         self.write_encoded_into(
@@ -4155,7 +4269,7 @@ impl Mux {
         encode: F,
     ) -> (PaneInputDelivery, Vec<u64>)
     where
-        F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+        F: FnMut(u64, kettle_core::TermMode) -> Option<Vec<u8>>,
     {
         let target_modes = ids.into_iter().filter_map(|id| {
             let pane = self.panes.get(&id)?;
@@ -4186,19 +4300,12 @@ impl Mux {
 
     pub(crate) fn release_key_to(
         &self,
-        recipients: &std::collections::HashSet<u64>,
-        policy: ModifyOtherKeysMode,
-        sample_automatic_context: bool,
-        mut encode: impl FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+        releases: &[(u64, winit::keyboard::PhysicalKey, Arc<[u8]>)],
     ) -> PaneInputResult {
         let mut result = PaneInputResult::Queued;
-        for id in recipients {
-            let Some(pane) = self.panes.get(id) else {
-                continue;
-            };
-            let mode = pane.effective_key_mode(policy, sample_automatic_context);
-            if let Some(bytes) = encode(mode) {
-                result = result.merge(pane.feed_input(&bytes));
+        for (id, key, bytes) in releases {
+            if let Some(pane) = self.panes.get(id) {
+                result = result.merge(pane.feed_key_release(*key, bytes.clone()));
             }
         }
         result
@@ -5013,11 +5120,11 @@ pub(crate) fn format_paths_for_targets<'a>(
 
 pub(crate) fn encode_target_modes(
     targets: impl IntoIterator<Item = (u64, kettle_core::TermMode)>,
-    mut encode: impl FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+    mut encode: impl FnMut(u64, kettle_core::TermMode) -> Option<Vec<u8>>,
 ) -> Vec<(u64, Vec<u8>)> {
     targets
         .into_iter()
-        .filter_map(|(id, mode)| encode(mode).map(|bytes| (id, bytes)))
+        .filter_map(|(id, mode)| encode(id, mode).map(|bytes| (id, bytes)))
         .collect()
 }
 
@@ -5244,7 +5351,7 @@ mod node_tests {
         let kitty = kettle_core::TermMode::REPORT_ALL_KEYS_AS_ESC
             | kettle_core::TermMode::REPORT_EVENT_TYPES;
         let targets = [(10, kettle_core::TermMode::empty()), (20, kitty)];
-        let press = encode_target_modes(targets, |mode| {
+        let press = encode_target_modes(targets, |_, mode| {
             Some(
                 if mode.contains(kettle_core::TermMode::REPORT_ALL_KEYS_AS_ESC) {
                     b"\x1b[97;1u".to_vec()
@@ -5255,7 +5362,7 @@ mod node_tests {
         });
         assert_eq!(press, [(10, b"a".to_vec()), (20, b"\x1b[97;1u".to_vec())]);
 
-        let release = encode_target_modes(targets, |mode| {
+        let release = encode_target_modes(targets, |_, mode| {
             mode.contains(kettle_core::TermMode::REPORT_EVENT_TYPES)
                 .then(|| b"\x1b[97;1:3u".to_vec())
         });
@@ -5287,9 +5394,10 @@ mod node_tests {
         let (a, b, c) = (ids[0], ids[1], ids[2]);
         assert!(mux.focus_pane(a));
         mux.broadcast = BroadcastScope::Tab;
-        let (_, pressed) = mux.broadcast_encoded(cfg.modify_other_keys, false, false, None, |_| {
-            Some(b"\x1b[97;1u".to_vec())
-        });
+        let (_, pressed) =
+            mux.broadcast_encoded(cfg.modify_other_keys, false, false, None, |_, _| {
+                Some(b"\x1b[97;1u".to_vec())
+            });
         let mut recipients: std::collections::HashSet<_> = pressed.into_iter().collect();
         assert_eq!(recipients, std::collections::HashSet::from([a]));
 
@@ -5297,7 +5405,7 @@ mod node_tests {
         mux.broadcast = BroadcastScope::All;
         mux.panes.get_mut(&c).unwrap().read_only = true;
         let (_, repeated) =
-            mux.broadcast_encoded(cfg.modify_other_keys, false, false, None, |_| {
+            mux.broadcast_encoded(cfg.modify_other_keys, false, false, None, |_, _| {
                 Some(b"\x1b[97;1:2u".to_vec())
             });
         recipients.extend(repeated);
@@ -5311,9 +5419,16 @@ mod node_tests {
             .map(|id| mux.panes[id].input_generation())
             .collect();
         assert_eq!(
-            mux.release_key_to(&recipients, cfg.modify_other_keys, false, |_| {
-                Some(b"\x1b[97;1:3u".to_vec())
-            }),
+            mux.release_key_to(
+                &recipients
+                    .iter()
+                    .map(|id| (
+                        *id,
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA),
+                        Arc::from(&b"\x1b[97;1:3u"[..])
+                    ))
+                    .collect::<Vec<_>>()
+            ),
             PaneInputResult::Queued
         );
         assert_eq!(mux.panes[&a].input_generation(), before[0] + 1);
@@ -5322,12 +5437,201 @@ mod node_tests {
         mux.kill_children();
     }
 
+    fn input_queue_fixture() -> (PtyInputQueue, Receiver<QueuedPtyInput>) {
+        let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        let (reply_tx, _) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        (
+            PtyInputQueue {
+                pending_focus: Mutex::default(),
+                pending_key_releases: Mutex::default(),
+                user_backpressured: Arc::default(),
+                user_tx,
+                reply_tx,
+                queued_user_bytes: Arc::new(AtomicUsize::new(0)),
+                queued_reply_bytes: Arc::new(AtomicUsize::new(0)),
+                dropped_replies: AtomicUsize::new(0),
+                failed: Arc::new(AtomicBool::new(false)),
+                stop: Arc::new(AtomicBool::new(false)),
+                waker: Arc::new(|| {}),
+            },
+            user_rx,
+        )
+    }
+
+    #[test]
+    fn backpressured_key_release_precedes_later_authored_input() {
+        let (queue, rx) = input_queue_fixture();
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_user(Arc::from(&b"old"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
+        for _ in 0..2 {
+            assert_eq!(
+                queue.enqueue_key_release(key, Arc::from(&b"\x1b[1;1:3A"[..])),
+                PaneInputResult::Backpressured
+            );
+        }
+        while rx.try_recv().is_ok() {}
+        assert_eq!(
+            queue.enqueue_user(Arc::from(&b"typed"[..])),
+            PaneInputResult::Queued
+        );
+        let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+        assert_eq!(delivered, [b"\x1b[1;1:3A".to_vec(), b"typed".to_vec()]);
+    }
+
+    #[test]
+    fn backpressured_focus_coalesces_latest_state() {
+        let (queue, rx) = input_queue_fixture();
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_user(Arc::from(&b"old"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        assert_eq!(
+            queue.enqueue_focus_report(false),
+            PaneInputResult::Backpressured
+        );
+        assert_eq!(
+            queue.enqueue_focus_report(true),
+            PaneInputResult::Backpressured
+        );
+        while rx.try_recv().is_ok() {}
+        assert_eq!(queue.retry_pending_reports(), PaneInputResult::Queued);
+        assert_eq!(queue.retry_pending_reports(), PaneInputResult::Queued);
+        assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[I");
+        assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn input_worker_wakes_when_user_capacity_returns() {
+        let (mut queue, rx) = input_queue_fixture();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let count = wakes.clone();
+        let waker: Waker = Arc::new(move || {
+            count.fetch_add(1, Ordering::AcqRel);
+        });
+        queue.waker = waker.clone();
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_user(Arc::from(&b"old"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        assert_eq!(
+            queue.enqueue_focus_report(false),
+            PaneInputResult::Backpressured
+        );
+        assert_eq!(wakes.load(Ordering::Acquire), 0);
+        let stop = AtomicBool::new(false);
+        let mut written = 0;
+        run_pty_input_worker(
+            crossbeam_channel::never(),
+            rx.clone(),
+            &queue.failed,
+            &stop,
+            &waker,
+            &queue.user_backpressured,
+            |bytes| {
+                written += 1;
+                if written == PTY_INPUT_QUEUE_DEPTH {
+                    stop.store(true, Ordering::Release);
+                }
+                Ok(bytes.len())
+            },
+        );
+        assert_eq!(
+            wakes.load(Ordering::Acquire),
+            1,
+            "restored capacity must wake the event loop once"
+        );
+        assert_eq!(queue.retry_pending_reports(), PaneInputResult::Queued);
+        assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[O");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_focus_follows_a_pane_to_another_window() {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut source = Mux::new();
+        source
+            .new_tab_with_geometry(
+                &cfg,
+                PtyGeometry::from_cell_size(80, 24, 8, 16),
+                Arc::new(|| {}),
+                &["/bin/cat".into()],
+                None,
+            )
+            .unwrap();
+        let id = source.active_focus().unwrap();
+        let (queue, rx) = input_queue_fixture();
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_user(Arc::from(&b"old"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        source.panes.get_mut(&id).unwrap().pty_input = queue;
+        assert_eq!(
+            source.panes[&id].feed_focus_report(false),
+            PaneInputResult::Backpressured
+        );
+        let tab = source.detach_tab(0).unwrap();
+        let mut target = Mux::new();
+        target.attach_tab(tab, None);
+        while rx.try_recv().is_ok() {}
+        assert_eq!(
+            target.panes[&id].retry_pending_reports(),
+            PaneInputResult::Queued
+        );
+        assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[O");
+        assert!(rx.is_empty());
+        target.kill_children();
+    }
+
+    #[test]
+    fn backpressured_focus_precedes_later_authored_input() {
+        let (queue, rx) = input_queue_fixture();
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_user(Arc::from(&b"old"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        assert_eq!(
+            queue.enqueue_focus_report(false),
+            PaneInputResult::Backpressured
+        );
+        while rx.try_recv().is_ok() {}
+        assert_eq!(
+            queue.enqueue_user(Arc::from(&b"typed"[..])),
+            PaneInputResult::Queued
+        );
+        let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+        assert_eq!(
+            delivered,
+            [b"\x1b[O".to_vec(), b"typed".to_vec()],
+            "refused focus must precede later input"
+        );
+    }
+
     #[test]
     fn full_user_channel_is_backpressure_and_releases_failed_reservation() {
         let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
         let (reply_tx, _reply_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
         let queued_user_bytes = Arc::new(AtomicUsize::new(0));
         let queue = PtyInputQueue {
+            pending_focus: Mutex::default(),
+            pending_key_releases: Mutex::default(),
+            user_backpressured: Arc::default(),
             user_tx,
             reply_tx,
             queued_user_bytes: queued_user_bytes.clone(),
@@ -5381,6 +5685,9 @@ mod node_tests {
         let (reply_tx, _reply_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
         let queued_user_bytes = Arc::new(AtomicUsize::new(0));
         let queue = PtyInputQueue {
+            pending_focus: Mutex::default(),
+            pending_key_releases: Mutex::default(),
+            user_backpressured: Arc::default(),
             user_tx,
             reply_tx,
             queued_user_bytes: queued_user_bytes.clone(),
@@ -5466,6 +5773,9 @@ mod node_tests {
         let wakes = Arc::new(AtomicUsize::new(0));
         let wakes_for_callback = wakes.clone();
         let queue = PtyInputQueue {
+            pending_focus: Mutex::default(),
+            pending_key_releases: Mutex::default(),
+            user_backpressured: Arc::default(),
             user_tx,
             reply_tx,
             queued_user_bytes: queued_user_bytes.clone(),
@@ -5580,23 +5890,31 @@ mod node_tests {
         let mut reply_tx = Some(reply_tx);
         let mut written = Vec::new();
         let mut writes = 0usize;
-        run_pty_input_worker(reply_rx, user_rx, &failed, &stop, &waker, |bytes| {
-            let count = bytes.len().min(97);
-            written.extend_from_slice(&bytes[..count]);
-            writes += 1;
-            if writes == 1 {
-                queued_reply_bytes.store(reply_bytes.len(), Ordering::Release);
-                reply_tx
-                    .take()
-                    .unwrap()
-                    .send(QueuedPtyInput {
-                        bytes: reply_bytes.clone(),
-                        queued_bytes: queued_reply_bytes.clone(),
-                    })
-                    .unwrap();
-            }
-            Ok(count)
-        });
+        run_pty_input_worker(
+            reply_rx,
+            user_rx,
+            &failed,
+            &stop,
+            &waker,
+            &AtomicBool::new(false),
+            |bytes| {
+                let count = bytes.len().min(97);
+                written.extend_from_slice(&bytes[..count]);
+                writes += 1;
+                if writes == 1 {
+                    queued_reply_bytes.store(reply_bytes.len(), Ordering::Release);
+                    reply_tx
+                        .take()
+                        .unwrap()
+                        .send(QueuedPtyInput {
+                            bytes: reply_bytes.clone(),
+                            queued_bytes: queued_reply_bytes.clone(),
+                        })
+                        .unwrap();
+                }
+                Ok(count)
+            },
+        );
 
         let mut expected = user_bytes.to_vec();
         expected.extend_from_slice(&reply_bytes);
@@ -5633,10 +5951,18 @@ mod node_tests {
         let stop = AtomicBool::new(false);
         let waker: Waker = Arc::new(|| {});
         let mut written = Vec::new();
-        run_pty_input_worker(reply_rx, user_rx, &failed, &stop, &waker, |bytes| {
-            written.extend_from_slice(bytes);
-            Ok(bytes.len())
-        });
+        run_pty_input_worker(
+            reply_rx,
+            user_rx,
+            &failed,
+            &stop,
+            &waker,
+            &AtomicBool::new(false),
+            |bytes| {
+                written.extend_from_slice(bytes);
+                Ok(bytes.len())
+            },
+        );
 
         assert_eq!(written, b"1u2");
         assert_eq!(queued_user_bytes.load(Ordering::Acquire), 0);

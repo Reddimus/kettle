@@ -1586,12 +1586,44 @@ fn decrqm_reports_mode_state() {
 }
 
 #[test]
+fn osc52_wire_reads_preserve_intervening_stores() {
+    let (mut term, mut parser, rx, journal) = harness_latched(8, 2);
+    term.set_options(TermConfig {
+        osc52: alacritty_terminal::term::Osc52::CopyPaste,
+        ..TermConfig::default()
+    });
+    feed(
+        &mut term,
+        &mut parser,
+        b"\x1b]52;c;QQ==\x07\x1b]52;c;?\x07\x1b]52;c;Qg==\x07\x1b]52;c;?\x07",
+    );
+    let mut clipboard = String::new();
+    let mut replies = Vec::new();
+    for event in journal.take_clipboard_events() {
+        match event {
+            TermEvent::ClipboardStore(_, text) => clipboard = text,
+            TermEvent::ClipboardLoad(_, format) => replies.push(format(&clipboard)),
+            _ => panic!("unexpected clipboard operation"),
+        }
+    }
+    assert_eq!(replies, ["\x1b]52;c;QQ==\x07", "\x1b]52;c;Qg==\x07"]);
+    assert!(rx.is_empty());
+}
+
+#[test]
 fn osc52_copy_emits_clipboard_store() {
     let (mut t, mut p, _rx, latched) = harness_latched(8, 2);
     // base64("hi") = "aGk=" ; OSC 52 ; c ; <b64> ST
     feed(&mut t, &mut p, b"\x1b]52;c;aGk=\x07");
     assert_eq!(
-        latched.take_clipboard_stores(),
+        latched
+            .take_clipboard_events()
+            .into_iter()
+            .map(|event| match event {
+                TermEvent::ClipboardStore(target, text) => (target, text),
+                _ => panic!("expected clipboard store"),
+            })
+            .collect::<Vec<_>>(),
         vec![(crate::ClipboardType::Clipboard, "hi".to_string())],
         "OSC 52 c sets clipboard"
     );

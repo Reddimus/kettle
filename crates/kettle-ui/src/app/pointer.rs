@@ -21,6 +21,60 @@ fn selection_point_to_grid(
 }
 
 impl App {
+    pub(super) fn press_pane_drag(&mut self, ws: &mut WindowState, button: u8) -> bool {
+        if button != 0 {
+            return false;
+        }
+        let Some(pane) = self.pane_at_titlebar_click(ws, ws.cursor.x as f32, ws.cursor.y as f32)
+        else {
+            return false;
+        };
+        let pre = self.focus_key(ws);
+        arm_pane_drag(ws, pane);
+        self.note_focus_change(ws, pre);
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn drag_pane(&self, ws: &mut WindowState) -> bool {
+        if ws.pane_drag.is_none() {
+            return false;
+        }
+        let area = self.area(ws);
+        if update_pane_drag(ws, area)
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn release_pane_drag(
+        &mut self,
+        ws: &mut WindowState,
+        button: u8,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
+        if button != 0 {
+            return false;
+        }
+        let Some((moved, rename)) = finish_pane_drag(ws) else {
+            return false;
+        };
+        if moved {
+            self.resize_all(ws);
+            self.save_session(ws);
+        } else if rename {
+            self.handle_action(ws, Action::EditPaneTitle, event_loop);
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        true
+    }
+
     /// Clear the focused pane's selection (called when the user types —
     /// every modern terminal does this so a stale highlight doesn't
     /// confuse the next copy/paste). No-op when nothing is selected.
