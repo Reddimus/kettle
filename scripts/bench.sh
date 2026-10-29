@@ -3,7 +3,7 @@
 #
 # Builds a release binary if one isn't present, then runs three
 # measurements 5 times each:
-#   - `kettle --version`     (cold-cache startup floor)
+#   - `kettle --version`     (warm startup floor)
 #   - `kettle --screenshot`  (full GPU pipeline boot + render)
 #   - `kettle --screenshot-menu` (GPU pipeline + menu pass)
 #
