@@ -310,6 +310,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   frame is being prepared, instead of keeping stale ones until the next
   output.
 
+### Security
+
+- Stop PTY children from inheriting open descriptors numbered above a
+  lowered `RLIMIT_NOFILE` soft limit, and fail the spawn rather than leave
+  any descriptor unchecked.
+
 ## [5.6.0] — 2026-10-28
 
 ### Added
