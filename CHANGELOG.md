@@ -14,6 +14,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Build release packages, and the tests that admit them, without restoring
   build caches written by ordinary CI runs.
 - Run weekly advisory coverage, mutation-testing and AddressSanitizer jobs.
+- Publish releases one at a time, and never mark an older release as latest
+  after a newer one.
 
 ### Fixed
 
@@ -113,6 +115,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   scroll shows it.
 - Keep up to 30 combining marks per cell in snapshots, and the mask
   foreground on non-sRGB surfaces.
+- Build the Linux release archive in a private temporary file with its size
+  limit enforced, and never overwrite an existing archive.
+- Keep files that survived an interrupted Unix install in its provenance.
+- Reject tracked paths under a symlinked directory in the tracked-file audit.
+- Fix races, quoting and cleanup in the smoke, live-UI, performance and
+  Linux check scripts, including the standing self-test's intermittent
+  keyblock failure.
 
 ## [5.6.0] — 2026-10-28
 
