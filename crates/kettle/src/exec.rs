@@ -93,7 +93,8 @@ const FINAL_WRITE_GRACE: Duration = Duration::from_millis(250);
 const EVENT_SLICE_MESSAGES: usize = 256;
 /// Healthy local recording sinks finish well inside this bound. Crossing it is
 /// treated as an observable persistence failure instead of extending command
-/// completion indefinitely.
+/// completion indefinitely. Imposed stops reuse this grace, adding at most
+/// 2 s to the existing stop teardown before detaching a stalled writer.
 const RECORD_FINISH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Exit code whenever the complete `--timeout` deadline expires (coreutils
@@ -410,7 +411,9 @@ pub fn run_exec_capture(opts: ExecOpts) -> (i32, String) {
 
 /// Capture a headless command while observing an MCP cancellation flag. When
 /// cancellation is requested, the child is killed, output is settle-drained,
-/// and any recorder is finalized before returning [`EXIT_CANCELLED`].
+/// and any recorder gets a bounded grace to finalize before returning
+/// [`EXIT_CANCELLED`]. A writer that fails or exceeds the grace reports an
+/// incomplete trace; a stalled writer is detached.
 pub fn run_exec_capture_cancellable(opts: ExecOpts, cancelled: &AtomicBool) -> (i32, String) {
     run_exec_capture_inner(opts, Some(cancelled))
 }
@@ -656,7 +659,7 @@ fn stop_after_output_failure(
     let _ = wait_for_exit_code(term);
     std::thread::sleep(SETTLE);
     drain_recording_slice(raw_output, recorder);
-    finish_recording(recorder, Duration::ZERO);
+    finish_recording(recorder, RECORD_FINISH_TIMEOUT);
     let code = if contained {
         EXIT_OUTPUT_DELIVERY
     } else {
@@ -1018,7 +1021,7 @@ fn run_exec_engine_with_recording_poll(
             // readiness again. Preserve the bounded audit tail directly from
             // the raw PTY channel, then apply the explicit abandon contract.
             drain_recording_slice(&orx, &mut recorder);
-            finish_recording(&mut recorder, Duration::ZERO);
+            finish_recording(&mut recorder, RECORD_FINISH_TIMEOUT);
             if let Err(error) = output.finish(code, started.elapsed(), OutputFinish::AbandonPending)
             {
                 commit_output_failure_exit();
@@ -1262,7 +1265,7 @@ fn run_exec_engine_with_recording_poll(
                 &pty_channel_disconnected,
                 &last_pty_output_at
             ));
-            finish_recording(&mut recorder, Duration::ZERO);
+            finish_recording(&mut recorder, RECORD_FINISH_TIMEOUT);
             let _ = output.finish(
                 EXIT_INTERNAL,
                 started.elapsed(),
@@ -1311,7 +1314,7 @@ fn run_exec_engine_with_recording_poll(
                 let _ = wait_for_exit_code(&term);
                 std::thread::sleep(SETTLE);
                 drain_recording_slice(&orx, &mut recorder);
-                finish_recording(&mut recorder, Duration::ZERO);
+                finish_recording(&mut recorder, RECORD_FINISH_TIMEOUT);
                 let _ = output.finish(
                     EXIT_INTERNAL,
                     started.elapsed(),
@@ -1337,7 +1340,7 @@ fn run_exec_engine_with_recording_poll(
                     &pty_channel_disconnected,
                     &last_pty_output_at
                 ));
-                finish_recording(&mut recorder, Duration::ZERO);
+                finish_recording(&mut recorder, RECORD_FINISH_TIMEOUT);
                 let _ = output.finish(
                     EXIT_INTERNAL,
                     started.elapsed(),
@@ -1478,7 +1481,7 @@ fn run_exec_engine_with_recording_poll(
             let _ = wait_for_exit_code(&term);
             std::thread::sleep(SETTLE);
             drain_recording_slice(&orx, &mut recorder);
-            finish_recording(&mut recorder, Duration::ZERO);
+            finish_recording(&mut recorder, RECORD_FINISH_TIMEOUT);
             let _ = output.finish(
                 EXIT_INTERNAL,
                 started.elapsed(),
@@ -6818,6 +6821,170 @@ wait
         // SAFETY: OpenProcess transferred this handle to us; this is its only close.
         unsafe { CloseHandle(process) };
         assert!(exited, "Windows descendant {pid} survived Job termination");
+    }
+
+    #[cfg(any(unix, windows))]
+    fn recorder_stop_case(name: &str, timeout: bool, stalled: bool) {
+        // A subprocess captures the real stderr diagnostic without redirecting
+        // process-global handles underneath parallel tests.
+        if std::env::var("KETTLE_TEST_RECORDER_STOP").as_deref() != Ok(name) {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &format!("exec::tests::{name}"), "--nocapture"])
+                .env("KETTLE_TEST_RECORDER_STOP", name)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(
+                result.status.success(),
+                "fixture failed: {}\n{stderr}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+            assert_eq!(
+                stderr.contains("finalization exceeded"),
+                stalled,
+                "{stderr}"
+            );
+            assert_eq!(stderr.contains("trace is incomplete"), stalled, "{stderr}");
+            return;
+        }
+
+        let dir = kettle_test_support::private_tempdir("kettle-exec-recorder-stop-");
+        let record = dir.path().join("stop.cast");
+        let ready = dir.path().join("ready");
+        #[cfg(unix)]
+        let argv = vec![
+            "sh".into(),
+            "-c".into(),
+            "printf recorded-before-stop; touch ready; exec sleep 30".into(),
+        ];
+        #[cfg(windows)]
+        let argv = vec![
+            "cmd.exe".into(),
+            "/D".into(),
+            "/S".into(),
+            "/C".into(),
+            "echo recorded-before-stop & type nul > ready & ping -n 30 127.0.0.1 >NUL".into(),
+        ];
+        let opts = ExecOpts {
+            argv,
+            cwd: Some(dir.path().to_path_buf()),
+            record: Some(record.clone()),
+            timeout: Some(Duration::from_secs(if timeout { 1 } else { 30 })),
+            ..long_running_stop_test_opts(None)
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel = cancelled.clone();
+        let trigger = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ready.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "child did not announce readiness"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if !timeout {
+                cancel.store(true, Ordering::Release);
+            }
+        });
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let (code, output) = kettle_core::record::testing::with_test_final_flush_hook(
+            move || {
+                entered_tx.send(Instant::now()).unwrap();
+                if stalled {
+                    // The sender is dropped on assertion failure too.
+                    let _ = release_rx.recv();
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            },
+            || run_exec_capture_cancellable(opts, &cancelled),
+        );
+        let returned = Instant::now();
+        trigger.join().unwrap();
+        assert_eq!(
+            code,
+            if timeout {
+                EXIT_TIMEOUT
+            } else {
+                EXIT_CANCELLED
+            }
+        );
+        assert!(output.contains("recorded-before-stop"), "{output:?}");
+        let entered = entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let finishing = returned.saturating_duration_since(entered);
+        if stalled {
+            assert!(
+                finishing >= RECORD_FINISH_TIMEOUT - Duration::from_millis(500),
+                "writer was detached before receiving its grace: {finishing:?}"
+            );
+            assert!(
+                finishing < RECORD_FINISH_TIMEOUT + Duration::from_millis(500),
+                "stalled flush extended teardown past the grace: {finishing:?}"
+            );
+            release_tx.send(()).unwrap();
+            // Only the deliberately detached case needs a cleanup wait.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(file) = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&record)
+                    && fs4::FileExt::try_lock(&file).is_ok()
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "released writer retained its lock"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        } else {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&record)
+                .unwrap();
+            fs4::FileExt::try_lock(&file).expect("capture returned with the cast still locked");
+            let mut cast = String::new();
+            std::io::Read::read_to_string(&mut file, &mut cast).unwrap();
+            assert!(cast.ends_with('\n'), "final event must end in a newline");
+            let lines: Vec<serde_json::Value> = cast
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(lines[0]["version"], 2);
+            assert!(
+                lines.len() >= 2,
+                "cast must contain an event after its header"
+            );
+            assert_eq!(lines.last().unwrap()[1], "o");
+            assert!(lines.iter().skip(1).any(|event| {
+                event[2]
+                    .as_str()
+                    .is_some_and(|text| text.contains("recorded-before-stop"))
+            }));
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn cancelled_capture_joins_delayed_recorder() {
+        recorder_stop_case("cancelled_capture_joins_delayed_recorder", false, false);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn timeout_capture_joins_delayed_recorder() {
+        recorder_stop_case("timeout_capture_joins_delayed_recorder", true, false);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn cancelled_capture_bounds_stalled_recorder() {
+        recorder_stop_case("cancelled_capture_bounds_stalled_recorder", false, true);
     }
 
     #[test]

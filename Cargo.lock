@@ -2338,6 +2338,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "crossbeam-channel",
+ "fs4",
  "image",
  "kettle-config",
  "kettle-core",

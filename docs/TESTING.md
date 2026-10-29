@@ -519,6 +519,16 @@ It checks grid text and SGR state. The neighboring recorder round-trip test
 also writes a trace through the real recorder before reading it back.
 See [RECORDING.md](RECORDING.md) for the recording format and user controls.
 
+The `exec::` tests also exercise timeout and cancellation with a real locked
+cast file. The dev-only `kettle-core/test-recording` feature supplies a
+thread-scoped hook before the persistence worker's final flush. A 100 ms delay
+checks that capture returns with a complete, newline-terminated trace and an
+immediately available exclusive lock, without a finalization warning. A gated
+flush checks that a stuck writer receives the two-second grace, then detaches
+with a warning within that bound (plus scheduling tolerance). Subprocesses
+capture stderr without redirecting handles shared by parallel tests. These
+portable tests run on Windows CI too, where the active file lock blocks reads.
+
 To turn an interactive failure into a regression:
 
 1. Reduce the output to the bytes needed to show the fault.

@@ -21,6 +21,8 @@ workspace = true
 asciicast = ["dep:serde_json", "dep:fs4"]
 # The entry points the fuzz targets (fuzz/) call. Never in a shipped build.
 fuzzing = []
+# Deterministic persistence stalls for downstream regression tests only.
+test-recording = ["asciicast"]
 
 [dependencies]
 unicode-width.workspace = true

@@ -10,6 +10,29 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError};
 
 use crate::Waker;
 
+#[cfg(feature = "test-recording")]
+thread_local! {
+    static FINAL_FLUSH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce() + Send>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run with a hook just before the next worker's final flush. The hook is
+/// scoped to this thread and restored on unwind, so parallel tests stay isolated.
+#[cfg(feature = "test-recording")]
+pub fn with_test_final_flush_hook<T>(
+    hook: impl FnOnce() + Send + 'static,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Box<dyn FnOnce() + Send>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FINAL_FLUSH_HOOK.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+    let _restore = Restore(FINAL_FLUSH_HOOK.with(|slot| slot.replace(Some(Box::new(hook)))));
+    run()
+}
+
 /// A single queued write stays small enough that a producer never clones an
 /// attacker-controlled PTY burst into one correspondingly large allocation.
 pub(crate) const MAX_PERSISTENCE_ITEM_BYTES: usize = 128 * 1024;
@@ -120,6 +143,8 @@ impl AsyncFileWriter {
         let worker_queued_bytes = Arc::clone(&queued_bytes);
         let worker_status = Arc::clone(&status);
         let worker_notifier = Arc::clone(&notifier);
+        #[cfg(feature = "test-recording")]
+        let final_flush_hook = FINAL_FLUSH_HOOK.with(|slot| slot.take());
         let worker = std::thread::Builder::new()
             .name(thread_name.into())
             .spawn(move || {
@@ -129,6 +154,8 @@ impl AsyncFileWriter {
                     &worker_queued_bytes,
                     &worker_status,
                     &worker_notifier,
+                    #[cfg(feature = "test-recording")]
+                    final_flush_hook,
                 );
             })?;
         Ok(Self {
@@ -299,6 +326,7 @@ fn run_writer(
     queued_bytes: &AtomicUsize,
     status: &AtomicU8,
     notifier: &Mutex<Option<Waker>>,
+    #[cfg(feature = "test-recording")] mut final_flush_hook: Option<Box<dyn FnOnce() + Send>>,
 ) {
     let mut dirty = false;
     let mut flush_deadline = Instant::now() + DEFAULT_FLUSH_INTERVAL;
@@ -353,6 +381,10 @@ fn run_writer(
                 dirty = false;
             }
             Err(RecvTimeoutError::Disconnected) => {
+                #[cfg(feature = "test-recording")]
+                if let Some(hook) = final_flush_hook.take() {
+                    hook();
+                }
                 if writer.flush().is_err() {
                     set_failure(status, notifier, AsyncWriterStatus::IoError);
                     return;

@@ -131,8 +131,11 @@ without running the command. Capture stops at a complete event boundary before
 512 MiB. Events cross a bounded persistence queue; overload or a later
 write/flush failure stops capture, reports the incomplete trace on stderr, and
 does not kill a child that is already running. Normal completion flushes and
-joins the worker within a fixed bound. Timeout and cancellation retain their
-own deadline and never wait in a blocking writer join.
+joins the worker within a two-second bound. Timeout and cancellation use the
+same recorder grace after stopping the process scope, adding up to two seconds
+to teardown. A healthy writer closes and unlocks the cast before returning;
+a writer that fails or misses the grace reports an incomplete trace and is
+detached. Joins only occur after the worker has exited.
 
 ### ConPTY caveats (Windows)
 
