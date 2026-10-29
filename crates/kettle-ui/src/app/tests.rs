@@ -17787,6 +17787,81 @@ fn empty_pane_preedit_still_rejects_late_commit_after_focus_moves() {
 }
 
 #[test]
+fn default_ui_entry_points_honor_recording_config() {
+    use kettle_core::record::RecordingTarget;
+
+    let root = crate::test_tempdir();
+    let config = root.path().join("config");
+    let recordings = root.path().join("casts");
+    std::fs::write(
+        &config,
+        format!(
+            "record = on\nrecord-dir = {}\nrecord-raw-input = on\n",
+            recordings.display()
+        ),
+    )
+    .unwrap();
+    let startup = App::default_startup_options(Some(config.clone()));
+    let crate::RecordingPolicy::Enabled { target, raw_input } = startup.recording else {
+        panic!("default UI launch must resolve record = on without a supplied policy");
+    };
+    assert_eq!(target, RecordingTarget::Directory(recordings));
+    assert!(raw_input);
+    assert_eq!(startup.config, Some(config.clone()));
+
+    std::fs::write(&config, "record = off\nrecord-raw-input = on\n").unwrap();
+    assert!(matches!(
+        App::default_startup_options(Some(config)).recording,
+        crate::RecordingPolicy::Disabled
+    ));
+
+    // Exercise the headless startup seam above and pin both public callers to it.
+    let library = kettle_test_support::production_source(include_str!("../lib.rs"));
+    let run = library.split("pub fn run()").nth(1).unwrap();
+    assert!(run.split("\n}").next().unwrap().contains("App::run()"));
+    let app = production_source();
+    let run = app.split("pub fn run()").nth(1).unwrap();
+    assert!(
+        run.split("\n    }")
+            .next()
+            .unwrap()
+            .contains("Self::default_startup_options(Config::default_path())")
+    );
+}
+
+#[test]
+fn default_ui_startup_uses_default_recording_directory() {
+    let root = crate::test_tempdir();
+    let config = root.path().join("config");
+    std::fs::write(&config, "record = on\n").unwrap();
+    let startup = App::default_startup_options(Some(config));
+    let expected = kettle_config::Config::default_path()
+        .and_then(|path| path.parent().map(|parent| parent.join("recordings")));
+    match (startup.recording, expected) {
+        (crate::RecordingPolicy::Enabled { target, raw_input }, Some(directory)) => {
+            assert_eq!(
+                target,
+                kettle_core::record::RecordingTarget::Directory(directory)
+            );
+            assert!(!raw_input);
+        }
+        (crate::RecordingPolicy::Disabled, None) => {}
+        unexpected => panic!("unexpected default recording policy: {unexpected:?}"),
+    }
+}
+
+#[test]
+fn default_ui_startup_without_config_does_not_record() {
+    let root = crate::test_tempdir();
+    for config in [None, Some(root.path().join("missing"))] {
+        assert!(matches!(
+            App::default_startup_options(config).recording,
+            crate::RecordingPolicy::Disabled
+        ));
+    }
+}
+
+#[test]
 fn launch_recorder_precedes_restored_sibling_windows() {
     let src = production_source();
     let startup = src

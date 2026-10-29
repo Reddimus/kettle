@@ -10625,7 +10625,26 @@ impl App {
     }
 
     pub fn run() -> Result<()> {
-        Self::run_with(crate::Options::default())
+        Self::run_with(Self::default_startup_options(Config::default_path()))
+    }
+
+    fn default_startup_options(config: Option<std::path::PathBuf>) -> crate::Options {
+        let mut startup = crate::Options {
+            config,
+            ..crate::Options::default()
+        };
+        let config = startup
+            .config
+            .as_deref()
+            .filter(|path| path.exists())
+            .and_then(|path| {
+                prepare_config_directory(path, startup.config_trust)
+                    .map(|()| Config::load_from_with_trust(path, startup.config_trust))
+                    .ok()
+            })
+            .unwrap_or_default();
+        startup.recording = crate::RecordingPolicy::from_config(&config);
+        startup
     }
 
     pub fn run_with(mut startup: crate::Options) -> Result<()> {

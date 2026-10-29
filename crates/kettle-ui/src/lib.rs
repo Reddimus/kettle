@@ -266,6 +266,84 @@ pub enum RecordingPolicy {
     },
 }
 
+impl RecordingPolicy {
+    /// Resolve config-only recording before launching the UI or fingerprinting
+    /// a binary launch for activation. Explicit CLI/environment targets are
+    /// resolved by the binary before calling this fallback.
+    pub fn from_config(config: &kettle_config::Config) -> Self {
+        if !config.record.enabled() {
+            return Self::Disabled;
+        }
+        let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let directory = config
+            .record_dir
+            .as_deref()
+            .map(|path| expand_user_path_with(path, std::env::var(home_key).ok()))
+            .or_else(|| {
+                kettle_config::Config::default_path()
+                    .and_then(|path| path.parent().map(|parent| parent.join("recordings")))
+            });
+        match directory {
+            Some(directory) => Self::Enabled {
+                target: kettle_core::record::RecordingTarget::Directory(directory),
+                raw_input: config.record_raw_input,
+            },
+            None => Self::Disabled,
+        }
+    }
+}
+
+/// Expand a leading `~` in a config recording directory.
+fn expand_user_path_with(path: &std::path::Path, home: Option<String>) -> std::path::PathBuf {
+    let Some(s) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if (s == "~" || s.starts_with("~/"))
+        && let Some(home) = home.filter(|h| !h.is_empty())
+    {
+        let mut expanded = std::path::PathBuf::from(home);
+        if let Some(rest) = s.strip_prefix("~/") {
+            expanded.push(rest);
+        }
+        return expanded;
+    }
+    path.to_path_buf()
+}
+
+#[cfg(test)]
+mod recording_policy_tests {
+    #[test]
+    fn record_dir_tilde_is_expanded_to_home() {
+        use super::expand_user_path_with;
+        use std::path::{Path, PathBuf};
+        let home = Some("/home/k".to_string());
+        // `~` and `~/...` expand; a bare-relative or absolute path is untouched.
+        assert_eq!(
+            expand_user_path_with(Path::new("~/.cache/kettle/records"), home.clone()),
+            PathBuf::from("/home/k/.cache/kettle/records")
+        );
+        assert_eq!(
+            expand_user_path_with(Path::new("~"), home.clone()),
+            PathBuf::from("/home/k")
+        );
+        assert_eq!(
+            expand_user_path_with(Path::new("/abs/records"), home.clone()),
+            PathBuf::from("/abs/records")
+        );
+        // `~user` (no slash) is NOT expanded — only `~`/`~/`.
+        assert_eq!(
+            expand_user_path_with(Path::new("~bob/x"), home),
+            PathBuf::from("~bob/x")
+        );
+        // Without a home dir, expansion no-ops and the caller sees the literal
+        // path. No stray `~` dir under CWD is created here.
+        assert_eq!(
+            expand_user_path_with(Path::new("~/x"), None),
+            PathBuf::from("~/x")
+        );
+    }
+}
+
 /// First-tab startup overrides from the CLI.
 #[derive(Debug, Default, Clone)]
 pub struct Options {
@@ -360,7 +438,7 @@ pub struct Options {
 
 /// Launch kettle with default startup (blocks until all windows close).
 pub fn run() -> anyhow::Result<()> {
-    run_with(Options::default())
+    App::run()
 }
 
 /// Launch kettle, applying first-tab CLI [`Options`].

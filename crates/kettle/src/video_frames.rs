@@ -531,9 +531,14 @@ fn write_out_attested(
         .unwrap_or(Path::new("."));
     let name = out.file_name().ok_or(OutputRefusal::Unwritable)?;
     let name = CString::new(name.as_bytes()).map_err(|_| OutputRefusal::Unwritable)?;
+    // Linux can pin a writable/searchable directory without read permission.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let access = libc::O_PATH;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let access = libc::O_RDONLY;
     let parent = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .custom_flags(access | libc::O_DIRECTORY | libc::O_CLOEXEC)
         .open(directory)
         .map_err(|_| OutputRefusal::Unwritable)?;
     // SAFETY: the held parent, NUL-terminated leaf and stat output are valid.
@@ -547,7 +552,10 @@ fn write_out_attested(
         )
     } == 0
     {
-        if found.st_dev as u64 == input.dev && found.st_ino as u64 == input.ino {
+        // The stat field widths vary across Unix targets.
+        #[allow(clippy::unnecessary_cast)]
+        let is_input = found.st_dev as u64 == input.dev && found.st_ino as u64 == input.ino;
+        if is_input {
             return Err(OutputRefusal::IsInput);
         }
         if found.st_mode & libc::S_IFMT == libc::S_IFLNK {
@@ -898,6 +906,38 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn output_in_write_search_only_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Root bypasses the permission check this regression exercises.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping write/search-only directory check as root");
+            return;
+        }
+        let root = kettle_test_support::private_tempdir("kettle-video-write-search-");
+        let input = root.path().join("clip.webm");
+        std::fs::write(&input, b"video").unwrap();
+        let exports = root.path().join("exports");
+        std::fs::create_dir(&exports).unwrap();
+        let out = exports.join("frames.jpg");
+        std::fs::set_permissions(&exports, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let unreadable = std::fs::read_dir(&exports).is_err();
+        let result = write_out(&out, &input, b"jpeg");
+        // Restore enumeration permission before asserting, so failures clean up.
+        std::fs::set_permissions(&exports, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(unreadable);
+        assert_eq!(result, Ok(()));
+        assert_eq!(std::fs::read(&out).unwrap(), b"jpeg");
+        assert_eq!(
+            std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read(&input).unwrap(), b"video");
+        assert_eq!(std::fs::read_dir(&exports).unwrap().count(), 1);
     }
 
     #[cfg(unix)]
