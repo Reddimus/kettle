@@ -197,6 +197,39 @@ fn every_continuation_is_shielded_in_every_state() {
 }
 
 #[test]
+fn continuations_report_their_lead_s_kind_after_dispatch() {
+    // A lead that ends an escape still owns its continuations: they belong to
+    // the event the lead returned, not to the state before the lead.
+    for (prefix, state_kind) in [
+        (b"\x1b]\x1b".as_slice(), Kind::Osc),
+        (b"\x1bP\x1b".as_slice(), Kind::Dcs),
+        (b"\x1b".as_slice(), Kind::Escape),
+        (b"\x1b(".as_slice(), Kind::Escape),
+        (b"\x1b[".as_slice(), Kind::Csi),
+        (b"\x1b]".as_slice(), Kind::Osc),
+    ] {
+        let mut parser = ControlParser::new();
+        for &byte in prefix {
+            parser.advance(byte);
+        }
+        let lead = parser.advance(0xe6);
+        let Event::Control { kind, .. } = lead else {
+            panic!("{prefix:?}: lead was text");
+        };
+        for continuation in [0x9c, 0xab] {
+            assert_eq!(
+                parser.advance(continuation),
+                ControlParser::control(kind, Action::Continue, false),
+                "{prefix:?} (from {state_kind:?}), {continuation:#04x}"
+            );
+        }
+    }
+    let mut parser = ControlParser::new();
+    assert_eq!(parser.advance(0xc3), Event::Text);
+    assert_eq!(parser.advance(0xa9), Event::Text);
+}
+
+#[test]
 fn every_open_state_recovers_at_the_bound() {
     for state in states().into_iter().filter(|state| *state != State::Ground) {
         for byte in [

@@ -109,8 +109,17 @@ impl ControlParser {
             0xf0..=0xf4 => 3,
             _ => 0,
         };
-        self.utf8_kind = self.kind();
+        let event = self.dispatch(byte);
+        // Continuations share the event their lead returned, which can differ
+        // from the state before it: a lead that ends an escape is an Escape.
+        self.utf8_kind = match event {
+            Event::Text => None,
+            Event::Control { kind, .. } => Some(kind),
+        };
+        event
+    }
 
+    fn dispatch(&mut self, byte: u8) -> Event {
         if byte == 0x1b {
             self.control_bytes = 0;
             let (state, kind, action) = match self.state {
