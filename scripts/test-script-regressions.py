@@ -133,7 +133,7 @@ class ScriptRegressionTests(unittest.TestCase):
                 with patch.object(stress, 'probe_during', return_value=0.1), \
                      patch.object(stress.time, 'sleep'), \
                      patch.object(stress.time, 'monotonic', side_effect=[0, 1, 121]):
-                    with self.assertRaisesRegex(RuntimeError, 'S1.*complet'):
+                    with self.assertRaisesRegex(RuntimeError, 'S1 flood did not complete'):
                         stress.s1_urandom(live)
                 live.ctl.assert_any_call('send_keys', params={'keys': ['ctrl+c']})
 
