@@ -386,7 +386,7 @@ pub fn average_color(rgba: &[u8]) -> Rgb {
     let samples = px.min(4096);
     let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
     for sample in 0..samples {
-        let i = sample * (px - 1) / (samples - 1).max(1);
+        let i = sample_index(sample, px, samples);
         let o = i * 4;
         let a = rgba[o + 3];
         if a != 0 {
@@ -400,6 +400,11 @@ pub fn average_color(rgba: &[u8]) -> Rgb {
         return Rgb::new(128, 128, 128);
     }
     Rgb::new((r / n) as u8, (g / n) as u8, (b / n) as u8)
+}
+
+fn sample_index(sample: usize, pixels: usize, samples: usize) -> usize {
+    // Even Full HD overflows a 32-bit usize before division reduces the index.
+    (sample as u128 * (pixels - 1) as u128 / (samples - 1).max(1) as u128) as usize
 }
 
 /// The colour to draw the glyph sitting under a focused block cursor.
@@ -818,6 +823,25 @@ mod tests {
             resolve_query(257, &theme, &colors),
             Some(Rgb::new(0xab, 0xcd, 0xef))
         );
+    }
+
+    #[test]
+    fn wallpaper_sample_indices_do_not_overflow() {
+        assert_eq!(sample_index(2072, 1920 * 1080, 4096), 1_049_205);
+        let pixels = isize::MAX as usize / 4;
+        assert_eq!(sample_index(4095, pixels, 4096), pixels - 1);
+        assert_eq!(sample_index(0, 1, 1), 0);
+    }
+
+    #[test]
+    fn wallpaper_average_samples_full_hd_without_overflow() {
+        let count = 1920 * 1080;
+        let mut pixels = [255, 0, 0, 255].repeat(count);
+        for sample in 0..4096_u64 {
+            let index = (sample * (count as u64 - 1) / 4095) as usize;
+            pixels[index * 4..index * 4 + 4].copy_from_slice(&[0, 0, 255, 255]);
+        }
+        assert_eq!(average_color(&pixels), Rgb::new(0, 0, 255));
     }
 
     #[test]
