@@ -54,5 +54,23 @@ class NewestRelease(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
 
 
+    def test_require_waits_for_the_run_s_own_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "releases.json")
+            script = os.path.join(HERE, "newest-release.py")
+            # Just published, but the list still shows it as a draft: the
+            # previous release is newest, and promoting it would be wrong.
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump([[release(1, "v5.6.0"), release(2, "v5.7.0", draft=True)]], handle)
+            waiting = subprocess.run([sys.executable, script, "--require", "v5.7.0", path],
+                                     capture_output=True, text=True, check=False)
+            self.assertEqual(waiting.returncode, 3)
+            self.assertEqual(waiting.stdout, "")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump([[release(1, "v5.6.0"), release(2, "v5.7.0")]], handle)
+            listed = subprocess.run([sys.executable, script, "--require", "v5.7.0", path],
+                                    capture_output=True, text=True, check=True)
+            self.assertEqual(listed.stdout.strip(), "2")
+
 if __name__ == "__main__":
     unittest.main()

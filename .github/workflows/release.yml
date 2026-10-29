@@ -834,13 +834,16 @@ jobs:
             return 1
           }
 
+          # A re-run after a failed promotion finds its release already public.
+          # It then only proves the public assets are exactly this run's, and
+          # leaves promotion to the next step; it never uploads over them.
+          already_public=
           existing=$(find_release)
           if [ -n "$existing" ]; then
             release_id=${existing%% *}
             is_draft=${existing##* }
             if [ "$is_draft" != true ]; then
-              echo "::error::release $tag already exists and is public"
-              exit 1
+              already_public=1
             fi
           else
             gh release create "$tag" --verify-tag --draft --generate-notes --title "$tag"
@@ -866,6 +869,9 @@ jobs:
             dist/package-metadata/PKGBUILD
           )
           for attempt in 1 2 3; do
+            if [ -n "$already_public" ]; then
+              break
+            fi
             if gh release upload "$tag" "${files[@]}" --clobber; then
               break
             fi
@@ -898,21 +904,43 @@ jobs:
             sleep 5
           done
           test "$verified" = 1
+          if [ -n "$already_public" ]; then
+            echo "release $tag is already public with exactly these assets"
+            exit 0
+          fi
           # Publish by id for the same reason, so the transition cannot depend
           # on GitHub having associated the tag with a still-draft release.
-          # "latest" is where clients read the update feed, so publishing
-          # leaves it alone; it then goes to the newest published version.
-          # Every run ends that way and checks again after its own update, so
-          # overlapping tags leave latest correct in whatever order they
-          # finish. A lookup that fails fails the run instead of guessing.
+          # "latest", where clients read the update feed, is left to the next
+          # step.
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
             -F draft=false -f make_latest=false >/dev/null
+
+      # Its own step, so a failure here can be re-run on its own: the step
+      # above accepts a release this run already published.
+      - name: Point latest at the newest published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          # Latest goes to the newest published stable release, which must
+          # include this run's own (the list can lag behind the publication).
+          # Each run checks again after its own update, so whichever writes
+          # last also corrects: overlapping tags settle on the newest one in
+          # any order. A lookup that fails fails the step instead of guessing.
           releases_json="$RUNNER_TEMP/releases.json"
           promoted=
-          for attempt in 1 2 3 4 5; do
+          for _ in $(seq 1 10); do
             gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
               > "$releases_json"
-            newest=$(python3 scripts/newest-release.py "$releases_json")
+            status=0
+            newest=$(python3 scripts/newest-release.py --require "$tag" "$releases_json") || status=$?
+            if [ "$status" = 3 ]; then
+              sleep 5
+              continue
+            fi
+            test "$status" = 0
             latest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .id)
             if [ "$latest" = "$newest" ]; then
               promoted=1
