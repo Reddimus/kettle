@@ -38,6 +38,7 @@ use crate::install::{
     ManagedInstall, unique_suffix, validate_archive_path, verify_sha256_bytes,
     zip_unix_mode_is_safe,
 };
+use crate::macos_provenance::{PREVIOUS_PREFIX, STAGED_PREFIX, Transaction};
 use crate::{UPDATE_PUBLIC_KEY, current_target};
 
 /// Signing identity every official build carries.
@@ -91,9 +92,6 @@ fn update_lock_path(bundle: &Path) -> Result<PathBuf, UpdateError> {
     let digest = hex::encode(&Sha256::digest(bundle.as_os_str().as_encoded_bytes())[..8]);
     Ok(directory.join(format!("update-{digest}.lock")))
 }
-
-const STAGED_PREFIX: &str = ".kettle-update-staged-";
-const PREVIOUS_PREFIX: &str = ".kettle-update-previous-";
 
 /// Absent any of these, the archive is not a kettle bundle and extraction fails
 /// before anything is swapped. `CodeResources` is the stapled ticket; without it
@@ -299,8 +297,8 @@ const CLEANUP_LIMITS: kettle_state::TreeRemovalLimits = kettle_state::TreeRemova
 ///
 /// A name is not authority to delete. Anyone who can write the enclosing
 /// directory can rename someone else's tree to look like our leftover, and a
-/// recursive delete would then destroy it using rights they do not have. Only
-/// a directory owned by the effective user qualifies.
+/// recursive delete would then destroy it using rights they do not have.
+/// Ownership is necessary in addition to a private transaction record.
 fn leftover_is_removable(is_dir: bool, owner: u32, euid: u32) -> bool {
     is_dir && owner == euid
 }
@@ -313,9 +311,7 @@ fn leftover_is_removable(is_dir: bool, owner: u32, euid: u32) -> bool {
 /// nothing is running from those bytes, so this is where they go.
 ///
 /// Deliberately cheap: path arithmetic, one lock attempt, and one directory
-/// read. No signature check. Establishing provenance would mean spawning
-/// `codesign` twice on the startup path, and deleting our own scratch
-/// directories does not need it.
+/// read and bounded private transaction reads. No signature check.
 ///
 /// Takes the update lock first, because otherwise two processes starting while
 /// a third is mid-update would delete the staging directory out from under it.
@@ -354,7 +350,7 @@ fn sweep_locked(parent: &Path, lock_path: &Path) {
     if !matches!(lock, Ok(Some(_))) {
         return;
     }
-    sweep_interrupted_updates(parent);
+    sweep_interrupted_updates(parent, &lock_path.with_extension("transactions"));
 }
 
 /// Can this user create entries in `directory`?
@@ -457,18 +453,22 @@ pub(crate) fn locate_bundle_install(
 struct Staging {
     path: PathBuf,
     directory: File,
+    transaction: Transaction,
 }
 
 impl Staging {
     /// Create the staging directory beside `parent` and hold it open.
-    fn create(parent: &Path, id: &str) -> Result<Self, UpdateError> {
+    fn create(parent: &Path, id: &str, records: &Path) -> Result<Self, UpdateError> {
         let path = parent.join(format!("{STAGED_PREFIX}{id}"));
         // 0700 up front rather than a later chmod: there must be no window in
         // which the directory exists and is writable by anyone else.
         let name = c_name(path.file_name().unwrap_or_default())?;
         let parent_fd = open_directory(parent)?;
+        let mut transaction = Transaction::create(records, format!("{STAGED_PREFIX}{id}"))?;
         if unsafe { libc::mkdirat(parent_fd.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
-            return Err(UpdateError::Io(std::io::Error::last_os_error()));
+            let error = std::io::Error::last_os_error();
+            let _ = transaction.remove();
+            return Err(UpdateError::Io(error));
         }
         let directory = open_directory_at(&parent_fd, &name)?;
 
@@ -489,6 +489,7 @@ impl Staging {
         kettle_state::clear_inherited_acl(&directory)?;
 
         require_empty_staging(&directory, &path)?;
+        transaction.record_identity(&directory.metadata()?)?;
 
         // An advisory lock on the directory itself, held for as long as this
         // staging area exists. The sweep tries the same lock before deleting
@@ -499,7 +500,13 @@ impl Staging {
             return Err(UpdateError::Io(std::io::Error::last_os_error()));
         }
 
-        Ok(Self { path, directory })
+        directory.sync_all()?;
+        parent_fd.sync_all()?;
+        Ok(Self {
+            path,
+            directory,
+            transaction,
+        })
     }
 
     /// Where the bundle being staged lives, for tools that need a pathname.
@@ -522,8 +529,12 @@ impl Staging {
         let Ok(parent) = open_directory(parent) else {
             return;
         };
-        let _ =
-            kettle_state::remove_directory_tree_at(&parent, name, &self.directory, CLEANUP_LIMITS);
+        if kettle_state::remove_directory_tree_at(&parent, name, &self.directory, CLEANUP_LIMITS)
+            .and_then(|()| parent.sync_all())
+            .is_ok()
+        {
+            let _ = self.transaction.remove();
+        }
     }
 }
 
@@ -815,53 +826,99 @@ fn stage_verified_bundle(
 /// bundle it launched from, so the displaced copy is kept until a later run can
 /// drop it safely. A crash before the swap leaves a `.kettle-update-staged-`
 /// bundle, which was never live and is simply dropped.
-pub(crate) fn sweep_interrupted_updates(parent: &Path) {
+fn sweep_interrupted_updates(parent: &Path, records: &Path) {
     let Ok(parent_dir) = open_directory(parent) else {
         return;
     };
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return;
-    };
+    let transactions = Transaction::load_all(records);
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.take(4096).flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if (name.starts_with(STAGED_PREFIX) || name.starts_with(PREVIOUS_PREFIX))
+                && !transactions
+                    .iter()
+                    .any(|record| record.names().iter().any(|n| n == name))
+            {
+                warn_unknown_leftover();
+                break;
+            }
+        }
+    }
     // SAFETY: geteuid has no preconditions.
     let euid = unsafe { libc::geteuid() };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(text) = name.to_str() else {
-            continue;
-        };
-        if !text.starts_with(STAGED_PREFIX) && !text.starts_with(PREVIOUS_PREFIX) {
-            continue;
+    for transaction in transactions {
+        let mut pending = false;
+        for name in transaction.names() {
+            // Open the entry relative to the parent descriptor with O_NOFOLLOW,
+            // then decide on what was opened. A symlink planted under the name is
+            // an error here, and a swap after this point cannot change which tree
+            // the removal below walks.
+            let c_entry = c_name(std::ffi::OsStr::new(&name)).expect("validated transaction name");
+            let candidate = match open_directory_at(&parent_dir, &c_entry) {
+                Ok(candidate) => candidate,
+                Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    continue;
+                }
+                Err(_) => {
+                    pending = true;
+                    continue;
+                }
+            };
+            let Ok(metadata) = candidate.metadata() else {
+                pending = true;
+                continue;
+            };
+            if !leftover_is_removable(metadata.is_dir(), metadata.uid(), euid)
+                || !transaction.matches(&name, &metadata)
+            {
+                warn_unknown_leftover();
+                continue;
+            }
+            // An in-flight staging directory holds an advisory lock on itself for
+            // as long as it exists. Asking the directory beats asking a lock file,
+            // because two processes can disagree about where lock files live if
+            // they inherited different environments, and cannot disagree about
+            // this. The lock stays held while the tree is removed.
+            // SAFETY: `candidate` is an open descriptor owned for this iteration.
+            let free =
+                unsafe { libc::flock(candidate.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+            if !free {
+                pending = true;
+                continue;
+            }
+            // Nothing is extracted before the identity write. Without it,
+            // remove only an empty directory: ownership cannot authorize recursion.
+            let limits = if transaction.has_identity() {
+                CLEANUP_LIMITS
+            } else {
+                kettle_state::TreeRemovalLimits {
+                    max_depth: 0,
+                    max_entries: 0,
+                }
+            };
+            if kettle_state::remove_directory_tree_at(
+                &parent_dir,
+                std::ffi::OsStr::new(&name),
+                &candidate,
+                limits,
+            )
+            .is_err()
+            {
+                pending = true;
+            }
         }
-        // Open the entry relative to the parent descriptor with O_NOFOLLOW,
-        // then decide on what was opened. A symlink planted under the name is
-        // an error here, and a swap after this point cannot change which tree
-        // the removal below walks.
-        let Ok(c_entry) = c_name(&name) else {
-            continue;
-        };
-        let Ok(candidate) = open_directory_at(&parent_dir, &c_entry) else {
-            continue;
-        };
-        let Ok(metadata) = candidate.metadata() else {
-            continue;
-        };
-        if !leftover_is_removable(metadata.is_dir(), metadata.uid(), euid) {
-            continue;
+        if !pending && parent_dir.sync_all().is_ok() {
+            let _ = transaction.remove();
         }
-        // An in-flight staging directory holds an advisory lock on itself for
-        // as long as it exists. Asking the directory beats asking a lock file,
-        // because two processes can disagree about where lock files live if
-        // they inherited different environments, and cannot disagree about
-        // this. The lock stays held while the tree is removed.
-        // SAFETY: `candidate` is an open descriptor owned for this iteration.
-        let free =
-            unsafe { libc::flock(candidate.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-        if !free {
-            continue;
-        }
-        let _ =
-            kettle_state::remove_directory_tree_at(&parent_dir, &name, &candidate, CLEANUP_LIMITS);
     }
+}
+
+fn warn_unknown_leftover() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        log::warn!("leaving macOS update leftovers without matching provenance alone")
+    });
 }
 
 fn require_live_bundle_upgrade(
@@ -994,7 +1051,8 @@ fn install_bundle_update_with_download(
     })?;
     let bundle_lock = lock_live_bundle(&parent_directory, live_name)?;
     require_live_bundle_upgrade(install, &update.version, verifier)?;
-    sweep_interrupted_updates(parent);
+    let records = lock_path.with_extension("transactions");
+    sweep_interrupted_updates(parent, &records);
 
     // Held in memory from download through extraction, for the same reason the
     // Linux path does: there is no temporary archive on disk for anyone to
@@ -1003,7 +1061,7 @@ fn install_bundle_update_with_download(
     verify_sha256_bytes(&archive, &asset.sha256)?;
 
     let id = unique_suffix();
-    let staging = Staging::create(parent, &id)?;
+    let staging = Staging::create(parent, &id, &records)?;
     if let Err(error) = stage_verified_bundle(&staging, &archive, verifier) {
         staging.discard();
         return Err(error);
@@ -1062,6 +1120,22 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
+
+    fn create_staging(parent: &Path, id: &str) -> Result<Staging, UpdateError> {
+        Staging::create(parent, id, &parent.join("update.transactions"))
+    }
+
+    fn record_leftover(path: &Path, records: &Path) {
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let id = name
+            .strip_prefix(STAGED_PREFIX)
+            .or_else(|| name.strip_prefix(PREVIOUS_PREFIX))
+            .unwrap();
+        let mut transaction = Transaction::create(records, format!("{STAGED_PREFIX}{id}")).unwrap();
+        transaction
+            .record_identity(&std::fs::metadata(path).unwrap())
+            .unwrap();
+    }
 
     /// Stands in for `codesign` and `spctl`, which cannot vouch for a bundle
     /// nobody notarized. See [`SealVerifier`] for why this seam exists.
@@ -1281,7 +1355,7 @@ mod tests {
     fn extraction_round_trips_a_bundle_and_normalizes_its_modes() {
         let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-extract-");
-        let staging = Staging::create(temp.path(), "1").unwrap();
+        let staging = create_staging(temp.path(), "1").unwrap();
         extract_bundle_into(&staging, &official_zip()).unwrap();
         let bundle = staging.bundle();
 
@@ -1306,7 +1380,7 @@ mod tests {
         files.remove(&format!(
             "{ARCHIVE_ROOT}/Contents/MacOS/kettle-media-worker"
         ));
-        let staging = Staging::create(temp.path(), "pair").unwrap();
+        let staging = create_staging(temp.path(), "pair").unwrap();
         assert!(extract_bundle_into(&staging, &zip_from(&files)).is_err());
     }
 
@@ -1344,7 +1418,7 @@ mod tests {
         let mask = std::env::var(UMASK_CHILD).unwrap();
         unsafe { libc::umask(libc::mode_t::from_str_radix(&mask, 8).unwrap()) };
         let temp = kettle_test_support::private_tempdir("kettle-macos-modes-");
-        let staging = Staging::create(temp.path(), "2").unwrap();
+        let staging = create_staging(temp.path(), "2").unwrap();
         extract_bundle_into(&staging, &official_zip()).unwrap();
 
         assert_eq!(
@@ -1398,7 +1472,8 @@ mod tests {
             "the parent really carries one"
         );
 
-        let staging = Staging::create(root, "acl").unwrap();
+        let state = kettle_test_support::private_tempdir("kettle-macos-acl-state-");
+        let staging = Staging::create(root, "acl", &state.path().join("transactions")).unwrap();
         extract_bundle_into(&staging, &official_zip()).unwrap();
 
         assert_eq!(
@@ -1424,7 +1499,7 @@ mod tests {
         let mut index = 0;
         let mut fresh = || {
             index += 1;
-            Staging::create(temp.path(), &format!("r{index}")).unwrap()
+            create_staging(temp.path(), &format!("r{index}")).unwrap()
         };
 
         // Anything outside the single bundle root, including a sibling the
@@ -1461,7 +1536,7 @@ mod tests {
         let victim = temp.path().join("victim");
         std::fs::write(&victim, b"do not clobber").unwrap();
 
-        let staging = Staging::create(temp.path(), "3").unwrap();
+        let staging = create_staging(temp.path(), "3").unwrap();
         std::fs::create_dir_all(staging.bundle().join("Contents")).unwrap();
         std::os::unix::fs::symlink(&victim, staging.bundle().join("Contents/Info.plist")).unwrap();
 
@@ -1481,7 +1556,7 @@ mod tests {
     fn extraction_refuses_an_archive_with_too_many_entries() {
         let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-entries-");
-        let staging = Staging::create(temp.path(), "4").unwrap();
+        let staging = create_staging(temp.path(), "4").unwrap();
         let mut files = bundle_files();
         for index in 0..=MAX_ARCHIVE_ENTRIES {
             files.insert(
@@ -1508,17 +1583,17 @@ mod tests {
             },
             notarized: false,
         };
-        let staging = Staging::create(temp.path(), "n1").unwrap();
+        let staging = create_staging(temp.path(), "n1").unwrap();
         let error = stage_verified_bundle(&staging, &official_zip(), &unnotarized).unwrap_err();
         assert!(error.to_string().contains("not notarized"), "{error}");
 
         // A correctly signed but foreign bundle is refused before that.
         let foreign = StubSeal::signed_by("com.example.other", "ZZZZZZZZZZ");
-        let staging = Staging::create(temp.path(), "n2").unwrap();
+        let staging = create_staging(temp.path(), "n2").unwrap();
         let error = stage_verified_bundle(&staging, &official_zip(), &foreign).unwrap_err();
         assert!(error.to_string().contains("com.example.other"), "{error}");
 
-        let staging = Staging::create(temp.path(), "n3").unwrap();
+        let staging = create_staging(temp.path(), "n3").unwrap();
         stage_verified_bundle(&staging, &official_zip(), &StubSeal::official()).unwrap();
     }
 
@@ -1553,7 +1628,7 @@ mod tests {
         let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-discard-");
         let root = temp.path();
-        let staging = Staging::create(root, "d1").unwrap();
+        let staging = create_staging(root, "d1").unwrap();
 
         // Someone moves ours aside and leaves their own tree at that path. A
         // recursive delete keyed on the pathname would destroy it for them,
@@ -1573,6 +1648,21 @@ mod tests {
             kettle_state::directory_is_empty(&moved).unwrap(),
             "discard empties the tree it created, wherever it was moved"
         );
+    }
+
+    #[test]
+    fn discarding_staging_retires_its_transaction() {
+        let _serial = serialized();
+        let temp = kettle_test_support::private_tempdir("kettle-macos-retire-");
+        let root = temp.path();
+        let staging = create_staging(root, "discard").unwrap();
+        let path = staging.path.clone();
+        std::fs::write(path.join("partial"), b"staging").unwrap();
+
+        staging.discard();
+
+        assert!(!path.exists());
+        assert!(Transaction::load_all(&root.join("update.transactions")).is_empty());
     }
 
     #[test]
@@ -1609,11 +1699,98 @@ mod tests {
         let target = root.join("Elsewhere");
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("data"), b"keep").unwrap();
+        let records = root.join("update.transactions");
+        let mut transaction = Transaction::create(&records, format!("{STAGED_PREFIX}7-7")).unwrap();
+        transaction
+            .record_identity(&std::fs::metadata(&target).unwrap())
+            .unwrap();
         std::os::unix::fs::symlink(&target, root.join(".kettle-update-staged-7-7")).unwrap();
 
-        sweep_interrupted_updates(root);
+        sweep_interrupted_updates(root, &root.join("update.transactions"));
 
         assert_eq!(std::fs::read(target.join("data")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn the_sweep_preserves_unrecorded_matching_directories() {
+        let _serial = serialized();
+        let temp = kettle_test_support::private_tempdir("kettle-macos-provenance-");
+        let root = temp.path();
+        let executable = seed_bundle(root, "kettle.app");
+        for prefix in [STAGED_PREFIX, PREVIOUS_PREFIX] {
+            let unrelated = root.join(format!("{prefix}unrelated"));
+            std::fs::create_dir(&unrelated).unwrap();
+            std::fs::write(unrelated.join("private"), b"keep").unwrap();
+        }
+
+        with_state_home(&root.join("state"), || sweep_leftovers_beside(&executable));
+
+        for prefix in [STAGED_PREFIX, PREVIOUS_PREFIX] {
+            assert!(
+                root.join(format!("{prefix}unrelated/private")).exists(),
+                "an unrecorded matching directory must survive the sweep"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sweep_preserves_a_replacement_for_a_recorded_directory() {
+        let _serial = serialized();
+        let temp = kettle_test_support::private_tempdir("kettle-macos-replaced-");
+        let root = temp.path();
+        let staging = create_staging(root, "replaced").unwrap();
+        let path = staging.path.clone();
+        let identity = staging.directory.metadata().unwrap();
+        std::fs::rename(&path, root.join("moved")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("private"), b"keep").unwrap();
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), identity.ino());
+        drop(staging);
+
+        sweep_interrupted_updates(root, &root.join("update.transactions"));
+
+        assert_eq!(std::fs::read(path.join("private")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn the_sweep_recovers_crashes_before_directory_creation_and_identity_recording() {
+        let _serial = serialized();
+        let temp = kettle_test_support::private_tempdir("kettle-macos-crash-");
+        let root = temp.path();
+        let records = root.join("update.transactions");
+        Transaction::create(&records, format!("{STAGED_PREFIX}missing")).unwrap();
+        Transaction::create(&records, format!("{STAGED_PREFIX}created")).unwrap();
+        let path = root.join(format!("{STAGED_PREFIX}created"));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        sweep_interrupted_updates(root, &records);
+
+        assert!(
+            !path.exists(),
+            "a recorded creation without identity can be recovered"
+        );
+        assert!(
+            Transaction::load_all(&records).is_empty(),
+            "missing directories retire their records"
+        );
+    }
+
+    #[test]
+    fn a_record_without_identity_cannot_authorize_recursive_removal() {
+        let _serial = serialized();
+        let temp = kettle_test_support::private_tempdir("kettle-macos-pending-");
+        let root = temp.path();
+        let records = root.join("update.transactions");
+        Transaction::create(&records, format!("{STAGED_PREFIX}pending")).unwrap();
+        let path = root.join(format!("{STAGED_PREFIX}pending"));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(path.join("private"), b"keep").unwrap();
+
+        sweep_interrupted_updates(root, &records);
+
+        assert_eq!(std::fs::read(path.join("private")).unwrap(), b"keep");
     }
 
     #[test]
@@ -1623,13 +1800,16 @@ mod tests {
         let root = temp.path();
         for name in [
             ".kettle-update-staged-9-9",
-            ".kettle-update-previous-9-9",
+            ".kettle-update-previous-9-8",
             "kettle.app",
             "Some Other App.app",
         ] {
             std::fs::create_dir_all(root.join(name)).unwrap();
         }
-        sweep_interrupted_updates(root);
+        for name in [".kettle-update-staged-9-9", ".kettle-update-previous-9-8"] {
+            record_leftover(&root.join(name), &root.join("update.transactions"));
+        }
+        sweep_interrupted_updates(root, &root.join("update.transactions"));
 
         assert!(root.join("kettle.app").exists(), "the live bundle survives");
         assert!(
@@ -1637,7 +1817,8 @@ mod tests {
             "the sweep runs in /Applications; it must not touch anyone else's app"
         );
         assert!(!root.join(".kettle-update-staged-9-9").exists());
-        assert!(!root.join(".kettle-update-previous-9-9").exists());
+        assert!(!root.join(".kettle-update-previous-9-8").exists());
+        assert!(Transaction::load_all(&root.join("update.transactions")).is_empty());
     }
 
     /// Serialize this module's tests.
@@ -1676,6 +1857,59 @@ mod tests {
     /// The folder holding the app is moved aside during the download and
     /// another official app restored at its path: the update must not be
     /// exchanged into the moved folder.
+    #[test]
+    fn a_completed_update_keeps_provenance_until_its_displaced_bundle_is_swept() {
+        let _serial = serialized();
+        let temp = kettle_test_support::private_tempdir("kettle-macos-finished-");
+        let root = temp.path();
+        let seal = StubSeal::official();
+        let executable = seed_bundle(root, "kettle.app");
+        let install = locate_bundle_install(&executable, &seal).unwrap();
+        std::fs::write(
+            &install.marker_path,
+            format!(
+                "<plist version=\"1.0\"><dict><key>CFBundleShortVersionString</key>\
+             <string>{}</string></dict></plist>",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .unwrap();
+        let archive = official_zip();
+        let update = AvailableUpdate {
+            version: semver::Version::new(99, 0, 0),
+            tag: "v99.0.0".into(),
+            release_url: "https://example.invalid/release".into(),
+            download_url: None,
+            asset: Some(crate::ManifestAsset {
+                target: current_target().unwrap().into(),
+                name: "kettle-macos-universal.zip".into(),
+                size: archive.len() as u64,
+                sha256: hex::encode(Sha256::digest(&archive)),
+            }),
+            signed_manifest: None,
+        };
+        with_state_home(&root.join("state"), || {
+            let outcome =
+                install_bundle_update_with_download(&update, &install, &seal, || Ok(archive))
+                    .unwrap();
+            assert_eq!(outcome.disposition, InstallDisposition::Applied);
+            let records = update_lock_path(&install.prefix)
+                .unwrap()
+                .with_extension("transactions");
+            let transactions = Transaction::load_all(&records);
+            assert_eq!(transactions.len(), 1);
+            let [staged, previous] = transactions[0].names();
+            assert!(!root.join(staged).exists());
+            assert!(root.join(&previous).join(ARCHIVE_ROOT).exists());
+
+            sweep_leftovers_beside(&executable);
+
+            assert!(!root.join(previous).exists());
+            assert!(Transaction::load_all(&records).is_empty());
+            assert_eq!(std::fs::read(&executable).unwrap(), b"mach-o");
+        });
+    }
+
     #[test]
     fn an_update_refuses_a_parent_replaced_during_the_download() {
         let _serial = serialized();
@@ -1920,6 +2154,12 @@ mod tests {
             let canonical = locate_bundle_install(&executable, &StubSeal::official())
                 .unwrap()
                 .prefix;
+            record_leftover(
+                &leftover,
+                &update_lock_path(&canonical)
+                    .unwrap()
+                    .with_extension("transactions"),
+            );
             // Stand in for an update in flight, holding the lock the updater
             // would hold.
             let held = kettle_state::ExclusiveFileLock::try_acquire(
@@ -1990,6 +2230,13 @@ mod tests {
 
         // From inside the bundle, the sibling leftover goes.
         with_state_home(&root.join("state"), || {
+            let bundle = bundle_of(&executable.canonicalize().unwrap()).unwrap();
+            record_leftover(
+                &leftover,
+                &update_lock_path(&bundle)
+                    .unwrap()
+                    .with_extension("transactions"),
+            );
             sweep_leftovers_beside(&executable);
         });
         assert!(!leftover.exists());
@@ -2005,7 +2252,7 @@ mod tests {
         let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-sweeplock-");
         let root = temp.path();
-        let staging = Staging::create(root, "inflight").unwrap();
+        let staging = create_staging(root, "inflight").unwrap();
         let in_flight = staging.path.clone();
         let lock_path = root.join("update.lock");
 
@@ -2039,7 +2286,7 @@ mod tests {
         let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-swap-");
         let root = temp.path();
-        let staging = Staging::create(root, "s1").unwrap();
+        let staging = create_staging(root, "s1").unwrap();
         let live = root.join("kettle.app");
 
         std::fs::create_dir_all(staging.bundle().join("Contents/MacOS")).unwrap();
@@ -2109,7 +2356,7 @@ mod tests {
         // means the exchange still moves the bytes that were verified.
         let temp = kettle_test_support::private_tempdir("kettle-macos-substitute-");
         let root = temp.path();
-        let staging = Staging::create(root, "s2").unwrap();
+        let staging = create_staging(root, "s2").unwrap();
         std::fs::create_dir_all(staging.bundle()).unwrap();
         std::fs::write(staging.bundle().join("marker"), "verified").unwrap();
 
@@ -2170,12 +2417,12 @@ mod tests {
 
         // One extraction stands in for the installed app, the other is the
         // update being staged beside it.
-        let installed = Staging::create(root, "live-a").unwrap();
+        let installed = create_staging(root, "live-a").unwrap();
         extract_bundle_into(&installed, &archive).unwrap();
         std::fs::rename(installed.bundle(), root.join("kettle.app")).unwrap();
         let live = root.join("kettle.app");
 
-        let staging = Staging::create(root, "live-b").unwrap();
+        let staging = create_staging(root, "live-b").unwrap();
         stage_verified_bundle(&staging, &archive, &AppleSeal).expect(
             "a published archive must satisfy codesign and spctl after plain zip extraction",
         );
