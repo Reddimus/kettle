@@ -4,6 +4,8 @@
 //! and followed by a parent-directory sync on platforms that support it.
 
 mod private;
+#[cfg(unix)]
+mod tree;
 
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -26,6 +28,8 @@ pub use private::{
     open_trusted_file_read_following_leaf, remove_open_private_file, restrict_private_file,
     stage_user_selected_file_new, truncate_private_file, validate_trusted_directory,
 };
+#[cfg(unix)]
+pub use tree::{TreeRemovalLimits, directory_is_empty, remove_directory_tree_at};
 
 /// Maximum on-disk size of the shared remote-command spool.
 ///
