@@ -781,22 +781,29 @@ if ! ARCHIVE_PREFLIGHT=$(
             entries < minimum_entries || total <= 0) {
           exit 1
         }
-        print entries " " total
+        expanded_entries = entries
+        for (directory in needed_directory) {
+          if (!seen[directory]) {
+            expanded_entries++
+          }
+        }
+        print entries " " total " " expanded_entries
       }
     '
 ); then
   echo "kettle install-online.sh: authenticated archive failed the bounded structural preflight." >&2
   exit 1
 fi
-# ARCHIVE_PREFLIGHT is produced only as two validated decimal counters.
+# ARCHIVE_PREFLIGHT contains member, byte and expanded-path counters.
 # shellcheck disable=SC2086
 set -- $ARCHIVE_PREFLIGHT
-if [ "$#" -ne 2 ]; then
+if [ "$#" -ne 3 ]; then
   echo "kettle install-online.sh: archive preflight returned an ambiguous result." >&2
   exit 1
 fi
 PREFLIGHT_ENTRIES=$1
 PREFLIGHT_BYTES=$2
+PREFLIGHT_PATHS=$3
 
 EXTRACT_ROOT="${TMP}/extracted"
 mkdir -m 700 "$EXTRACT_ROOT"
@@ -814,11 +821,11 @@ ACTUAL_BYTES=$(
     awk '{ total += $1 } END { print total + 0 }'
 )
 if [ -n "$SPECIAL_ENTRY" ] ||
-  [ "$ACTUAL_ENTRIES" -gt "$MAX_ARCHIVE_ENTRIES" ] ||
+  [ "$ACTUAL_ENTRIES" -ne "$PREFLIGHT_PATHS" ] ||
   [ "$ACTUAL_BYTES" -ne "$PREFLIGHT_BYTES" ] ||
   [ "$ACTUAL_BYTES" -gt "$MAX_UNPACKED_BYTES" ]; then
   echo "kettle install-online.sh: extracted archive violated its preflight bounds." >&2
-  echo "entries=${ACTUAL_ENTRIES}/${PREFLIGHT_ENTRIES}, bytes=${ACTUAL_BYTES}/${PREFLIGHT_BYTES}" >&2
+  echo "paths=${ACTUAL_ENTRIES}/${PREFLIGHT_PATHS}, members=${PREFLIGHT_ENTRIES}, bytes=${ACTUAL_BYTES}/${PREFLIGHT_BYTES}" >&2
   exit 1
 fi
 
