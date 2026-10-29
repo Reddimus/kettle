@@ -171,6 +171,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Tell Lua plugins `pane_close` for every pane that ends: with its tab, its
   window, or after its shell exits.
 - Keep a torn-off tab's font zoom in its new window.
+- Keep a client's control response when it half-closes its connection after
+  sending a request.
+- Wait to write shared session state until a scan of other running builds has
+  completed, and clean up their stale sockets in every temporary fallback.
+- Keep a replacement control alias when a stale one is pruned at the same
+  time, and prune aliases whose server registration is gone.
+- Refuse a control socket directory that other users can write unless it is
+  sticky, saying how to fix it, and remove only a socket you own when binding.
+- Stop advertising a control server whose process has exited but not yet
+  been reaped.
 
 ## [5.6.0] — 2026-10-28
 
