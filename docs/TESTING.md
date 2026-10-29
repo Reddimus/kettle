@@ -441,6 +441,16 @@ Only Windows executes its ConPTY-specific code.
 Only Unix executes its descriptor and process-group paths.
 A local vendor pass covers only the current platform.
 
+The PTY descriptor regressions run a separate harness process so lowering
+`RLIMIT_NOFILE` cannot affect concurrent tests. They open a non-close-on-exec
+descriptor at 5000 (or the highest usable lower number), lower the soft limit
+below it, and execute a child that verifies `fcntl(F_GETFD)` returns `EBADF`.
+Both normal cleanup and a test-only forced fallback run: Linux's fallback
+enumerates `/proc/self/fd` in the child with raw `getdents64`, while macOS's
+fallback walks to the hard limit capped by the parent-read
+`kern.maxfilesperproc`. Synthetic directory-record tests run on every Unix
+host; the Linux enumeration itself requires the native Linux vendor gate.
+
 `cosmic-text` stays outside the vendor validation workspace.
 The product build and audit cover it; renderer paragraph-separator tests cover
 its patch. Consult the vendor README for its upstream validation notes.

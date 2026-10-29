@@ -337,16 +337,31 @@ the `Restore` and `Disable` variants, so it does not build against an upstream
   descriptors close-on-exec instead of closing them, so std's exec-error
   channel still reports a failed `exec`, and the public
   `unix::close_random_fds`, which closed them, is gone. Linux uses one
-  `close_range(CLOSE_RANGE_CLOEXEC)` call when the kernel accepts it. macOS 11
+  `close_range(3, ~0U, CLOSE_RANGE_CLOEXEC)` call when the kernel accepts it.
+  ENOSYS, EINVAL, or EPERM falls back to opening `/proc/self/fd` in the child
+  and reading it with raw `getdents64` into a fixed stack buffer. Each checked
+  numeric entry is marked close-on-exec except the directory's own descriptor,
+  which is opened close-on-exec and closed after enumeration. Open, read,
+  malformed-record, and descriptor-marking failures fail the spawn rather than
+  accept a partial sweep. There is no parent descriptor snapshot: another
+  thread can open a descriptor between such a snapshot and `fork`. macOS 11
   and later mark the descriptors the kernel lists through
   `proc_pidinfo(PROC_PIDLISTFDS)` into a buffer the parent allocates before
   `fork`; older macOS kernels can omit high descriptors from that list, so
-  they are not asked. Every other case falls back to one `fcntl` per
-  descriptor number below the soft limit, capped at 1,048,576: other Unix
-  systems, Linux when `close_range` is rejected, and macOS when the list is
-  unreadable or fills the buffer. The macOS list keeps pane spawns from paying
-  that loop under the 1,048,576 soft limit that Node-based launchers such as
-  VS Code set.
+  they are not asked. When that list is unreadable or fills its buffer, macOS
+  walks descriptor numbers below the hard limit, capped by
+  `kern.maxfilesperproc` read in the parent before `fork`. An unreadable,
+  unusable, or over-1,048,576 bound fails the spawn instead of silently missing
+  descriptors or hanging. Other Unix systems use the finite hard limit when
+  it is at most 1,048,576; otherwise they retain the capped soft-limit walk.
+  These fallbacks cover descriptors left above a later-lowered soft limit
+  (audit finding v004). The macOS list still avoids the full walk on normal
+  pane spawns. Tests isolate limit changes in a subprocess, leak fd 5000 (or
+  the highest available lower number), lower the soft limit below it, and
+  probe it with `fcntl` in the executed child. A test-only flag captured before
+  `fork` forces the Linux enumeration and macOS walk; synthetic `getdents64`
+  records test unaligned reads, malformed lengths/names, and numeric overflow
+  on every Unix test host.
   On Unix the passwd lookup for the login shell and home directory calls
   `getpwuid_r` with a buffer it owns and checks each field for NULL. Upstream
   calls `getpwuid`, whose buffer the whole process shares, so two panes
