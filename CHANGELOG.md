@@ -25,9 +25,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   limit.
 - Keep two macOS updaters started with different state directories from both
   replacing the app.
-
-### Fixed
-
 - Show Sixel images' HLS palette colors correctly, and refuse a Sixel image
   whose declared size cannot be reserved instead of drawing a smaller one.
 - Keep trailing spaces in `text:` key bindings.
