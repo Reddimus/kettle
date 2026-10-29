@@ -101,7 +101,11 @@ fn remove_contents(
         }
     }
     for name in names {
-        *remaining -= 1;
+        // Children spend the same budget, so it can run out partway through
+        // a listing that fitted when it was read.
+        *remaining = remaining
+            .checked_sub(1)
+            .ok_or_else(|| limit_error("too many entries"))?;
         let listed = stat_at(directory, &name)?;
         if listed.st_mode & libc::S_IFMT != libc::S_IFDIR {
             unlink_at(directory, &name, 0)?;
@@ -350,6 +354,27 @@ mod tests {
             .expect_err("five entries exceed a limit of four");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(tree.is_dir());
+    }
+
+    /// Entries spent inside a subdirectory count against the same budget as
+    /// the siblings still waiting in the parent's listing.
+    #[test]
+    fn stops_at_the_entry_limit_across_nested_directories() {
+        let root = crate::test_tempdir();
+        let tree = root.path().join("tree");
+        for child in ["a", "b"] {
+            fs::create_dir_all(tree.join(child)).unwrap();
+            fs::write(tree.join(child).join("file"), b"x").unwrap();
+        }
+        let parent = open_dir(root.path());
+        let held = open_dir(&tree);
+        let limits = TreeRemovalLimits {
+            max_depth: 8,
+            max_entries: 2,
+        };
+        let error = remove_directory_tree_at(&parent, OsStr::new("tree"), &held, limits)
+            .expect_err("four entries exceed a limit of two");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
