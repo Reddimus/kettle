@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- Check workflows, standalone shell scripts, Python scripts, spelling and
+  local documentation links on every pull request, and find unused dev and
+  build dependencies as well as normal ones.
+- Build release packages, and the tests that admit them, without restoring
+  build caches written by ordinary CI runs.
+- Run weekly advisory coverage, mutation-testing and AddressSanitizer jobs.
+
 ### Fixed
 
 - Keep titles, prompt marks, clipboard writes and notifications working in
@@ -15,6 +24,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - On macOS, remove update leftovers through descriptors held since their
   ownership check, so a tree renamed into their place in the shared
   Applications folder is never deleted.
+- Repair three documentation links to testing sections that had moved.
 
 ## [5.6.0] — 2026-10-28
 

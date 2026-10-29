@@ -28,7 +28,9 @@ just gauntlet
 ```
 
 Before a release or supply-chain change, run `just gauntlet-strict`. It also
-requires locally installed `cargo-deny`, `cargo-audit`, and `cargo-machete`.
+requires locally installed `cargo-deny`, `cargo-audit`, `cargo-shear`, `zizmor`,
+`lychee`, `shellcheck`, `ruff`, and `typos`; `just static-checks` runs the last
+five alone.
 Useful focused commands include `cargo test -p <crate>` and
 `cargo clippy -p <crate> --all-targets -- -D warnings`.
 

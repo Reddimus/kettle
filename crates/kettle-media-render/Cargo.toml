@@ -66,9 +66,10 @@ hayro = { version = "=0.8.0", default-features = false, features = ["embed-fonts
 hayro-interpret = { version = "=0.8.0", default-features = false }
 hayro-syntax = { version = "=0.8.0", default-features = false }
 
-[package.metadata.cargo-machete]
+[package.metadata.cargo-shear]
 # These dependencies constrain the renderer family rather than expose APIs.
-ignored = ["dugong", "dugong-graphlib", "manatee", "roughr-merman", "hayro-interpret", "hayro-syntax"]
+# `roughr` is the library name of the `roughr-merman` package.
+ignored = ["dugong", "dugong-graphlib", "manatee", "roughr", "hayro-interpret", "hayro-syntax"]
 
 [features]
 # The entry point the fuzz targets (fuzz/) call. Never in a shipped build.

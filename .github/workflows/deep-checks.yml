@@ -1,0 +1,130 @@
+# Slow checks that point at work rather than gate merges: line coverage, a
+# weekly slice of mutation testing, and AddressSanitizer over native
+# lifecycle tests. docs/TESTING.md explains how to read each one.
+#
+# Runs weekly and on demand. It also runs when this file changes, with a tiny
+# mutation slice, so a change to the jobs is exercised before it merges.
+name: deep checks
+
+on:
+  schedule:
+    - cron: "0 7 * * 0"
+  workflow_dispatch:
+    inputs:
+      mutants_shard:
+        description: "cargo-mutants shard as k/n; empty picks this week's slice of 26"
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - ".github/workflows/deep-checks.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: coverage (advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - name: Linux deps
+        timeout-minutes: 5
+        run: |
+          scripts/install-ci-linux-deps.sh pkg-config libfontconfig1-dev libfreetype6-dev \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
+      - name: Install just and cargo-llvm-cov
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: just,cargo-llvm-cov@0.9.1
+      - run: just coverage
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: target/coverage
+          retention-days: 30
+
+  mutants:
+    name: mutants (advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Linux deps
+        timeout-minutes: 5
+        run: |
+          scripts/install-ci-linux-deps.sh pkg-config libfontconfig1-dev libfreetype6-dev \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
+      - name: Install just and cargo-mutants
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: just,cargo-mutants@27.1.0
+      # Exit 2 (missed mutants) and 3 (timeouts) are the advisory result;
+      # anything else, such as a failing unmutated baseline, fails the job.
+      - name: Mutation slice
+        shell: bash
+        env:
+          REQUESTED: ${{ inputs.mutants_shard }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "${REQUESTED:-}" ]; then
+            shard=$REQUESTED
+          elif [ "$EVENT" = pull_request ]; then
+            shard=0/400
+          else
+            shard="$(( 10#$(date -u +%V) % 26 ))/26"
+          fi
+          echo "shard $shard"
+          status=0
+          just mutants "$shard" || status=$?
+          case "$status" in
+            0|2|3) ;;
+            *) exit "$status" ;;
+          esac
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: mutants
+          path: target/mutants/mutants.out
+          retention-days: 30
+
+  asan:
+    name: AddressSanitizer (advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The fuzz workflow's pinned nightly, so a result depends on the code.
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: nightly-2026-09-24
+          components: rust-src
+      - name: Linux deps
+        timeout-minutes: 5
+        run: |
+          scripts/install-ci-linux-deps.sh pkg-config libfontconfig1-dev libfreetype6-dev \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
+      - name: Install just
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: just
+      - run: just sanitizer-test

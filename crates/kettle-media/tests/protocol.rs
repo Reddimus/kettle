@@ -1030,7 +1030,7 @@ fn a_pdf_page_says_which_page_it_is() {
 /// as read, within that kind's input cap, and no other kind returns any,
 /// on encode and decode alike.
 #[test]
-fn a_replys_source_goes_with_its_kind() {
+fn a_reply_source_goes_with_its_kind() {
     let with = |kind, source: Option<String>| {
         let mut rendered = common::rendered();
         rendered.exact_source = source;

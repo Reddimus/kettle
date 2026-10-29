@@ -69,9 +69,10 @@ editor/PDF synchronization and preserve macOS's per-destination consent review.
 - `just gauntlet`: checks formatting, locked workspace build/test/Clippy,
   default-feature core Clippy, rustdoc, media test features, and helper fixtures.
   Run before a PR; needs the source-build tools and native libraries.
-- `just gauntlet-strict`: adds vendor tests, deny/audit/machete, the advisory
-  scope guard, tracked-file audit, fuzz guards, Mermaid, and release fixtures.
-  Run before releases or supply-chain changes; install all three Cargo tools.
+- `just gauntlet-strict`: adds vendor tests, deny/audit/shear, the advisory
+  scope guard, the static checks, tracked-file audit, fuzz guards, Mermaid,
+  and release fixtures. Run before releases or supply-chain changes; install
+  the tools listed below.
 - `just gauntlet-full`: runs strict plus `full-native-gates` for this OS.
   Run after packaging, installer, or renderer work and before a release;
   needs release builds, native tools, a GPU adapter, and a graphical session.
@@ -90,8 +91,8 @@ editor/PDF synchronization and preserve macOS's per-destination consent review.
   Run after diagram changes; needs Python, npx, and Chrome/Chromium on Unix.
   Missing rendering tools skip locally unless required mode is enabled.
 
-The strict gate requires `cargo-deny`, `cargo-audit`, and `cargo-machete`.
-Missing tools fail their commands. The audit recipe fetches the advisory database
+The strict gate requires `cargo-deny`, `cargo-audit`, `cargo-shear`, `zizmor`,
+`lychee`, `shellcheck`, `ruff`, and `typos`. Missing tools fail their commands. The audit recipe fetches the advisory database
 into `target/advisory-db`. Supply-chain scans can need network access.
 The Mermaid helper can fetch its CLI through npx.
 Do not assume either gate is offline.
@@ -122,7 +123,16 @@ Use these to isolate a failure or validate the area you changed:
 | `just audit` | RustSec scans of product and vendor graphs | cargo-audit and advisory database access |
 | `just lru-scope` | Reviewed dependency path for the advisory exception | Python, Cargo metadata |
 | `just dbus-scope` | Exact all-target D-Bus graph for maintenance-only exceptions | Python, Cargo metadata |
-| `just machete` | Unused workspace dependencies | cargo-machete |
+| `just shear` | Unused normal, dev and build dependencies; Rust files no module includes | cargo-shear |
+| `just static-checks` | All five checks below, as the static-checks workflow runs them | The five tools below |
+| `just zizmor` | Workflow analysis: injection, persisted credentials, cache poisoning, permissions | zizmor; offline |
+| `just links` | Local Markdown links, images and heading fragments | lychee; offline |
+| `just shell-lint` | Standalone shell scripts and the pre-commit hook at warning severity | ShellCheck |
+| `just python-lint` | Python syntax, undefined names, unused imports and variables (`ruff.toml`) | Ruff |
+| `just typos` | Spelling in code and docs, with the reasoned allowlist in `_typos.toml` | typos |
+| `just coverage` | Advisory line coverage for the limit-heavy crates, under `target/coverage` | cargo-llvm-cov, llvm-tools-preview |
+| `just mutants SHARD` | Advisory mutation testing of one `k/n` slice, under `target/mutants` | cargo-mutants; hours for a full run |
+| `just sanitizer-test` | AddressSanitizer over Unix transport, state-file and PTY watcher tests | Linux x86_64, nightly-2026-09-24 with rust-src |
 
 The live smoke recipes appear once in the [Live UI smokes](#live-ui-smokes)
 table. Choose the row that matches the behavior you changed.
@@ -1022,6 +1032,42 @@ individual dependency resolving successfully does not approve a family upgrade.
 - It checks workflow syntax and embedded shell blocks on Ubuntu.
 - It does not execute every workflow or prove runner-specific behavior.
 
+### Static checks: `static-checks.yml`
+
+[.github/workflows/static-checks.yml](../.github/workflows/static-checks.yml)
+runs on every PR and `main` push, in about a minute on Ubuntu, and compiles
+nothing. `just static-checks` runs the same steps locally.
+
+- zizmor, offline, analyzes workflows for template injection, persisted
+  credentials, cache poisoning and excessive permissions. `.github/zizmor.yml`
+  records the one disabled audit and why.
+- ShellCheck checks standalone `*.sh`/`*.bash` scripts and the pre-commit hook
+  at warning severity; actionlint covers workflow run blocks.
+- typos checks spelling with the reasoned allowlist in `_typos.toml`.
+- Ruff checks Python syntax, undefined names, and unused imports and variables
+  with `ruff.toml`. It does not enforce formatting.
+- lychee checks local Markdown links, images and heading fragments without
+  network access. The tracked-file audit checks link targets but strips
+  fragments.
+
+### Deep checks: `deep-checks.yml`
+
+[.github/workflows/deep-checks.yml](../.github/workflows/deep-checks.yml) runs
+Sundays at 07:00, on manual dispatch, and when the workflow itself changes.
+Its three jobs are advisory: they point at work rather than gate merges.
+
+- `coverage` runs `just coverage` and uploads HTML and LCOV. GPU and decoder
+  tests that skip without their host count as uncovered, so read it for
+  uncovered branches in limits and refusal paths, not for a percentage.
+- `mutants` runs one of 26 weekly `cargo-mutants` slices over kettle-vt,
+  kettle-media, kettle-config, kettle-update and kettle-state; a dispatch can
+  name any `k/n` shard. A surviving mutant is a lead to check, not a failure;
+  a failing unmutated baseline fails the job. A test that kills a mutant does
+  not replace checking that a regression test fails against its original bug.
+- `asan` runs `just sanitizer-test` on Ubuntu x86_64 with the pinned fuzz
+  nightly and an instrumented standard library. System libraries stay
+  uninstrumented.
+
 ### Advisories: `audit.yml`
 
 [.github/workflows/audit.yml](../.github/workflows/audit.yml) runs for PRs and
@@ -1046,7 +1092,7 @@ other warnings still fail. The vendor graph inherits none of these exceptions.
 Read the Cargo audit configuration and guard before changing an exception.
 A changed or resolved dependency path must trigger reassessment and cleanup.
 
-### Dependency policy: `deny.yml` and `machete.yml`
+### Dependency policy: `deny.yml` and `shear.yml`
 
 [.github/workflows/deny.yml](../.github/workflows/deny.yml) runs on PRs and
 `main` pushes touching Cargo manifests/locks, `deny.toml`, or itself.
@@ -1056,13 +1102,16 @@ It also runs Sundays at 06:00.
 - Each checks licenses, sources, and bans against its manifest.
 - Advisory scanning belongs to the audit workflow.
 
-[.github/workflows/machete.yml](../.github/workflows/machete.yml) runs on PRs
-and `main` pushes touching Cargo manifests/locks or itself, plus Sundays at
-06:00.
+[.github/workflows/shear.yml](../.github/workflows/shear.yml) runs on PRs and
+`main` pushes touching Cargo manifests/locks, Rust sources or itself, plus
+Sundays at 06:00. It compiles nothing.
 
-- Job `machete` runs the upstream unused-dependency action on Ubuntu.
-- The weekly run catches source-only removal of a dependency's last use even
-  when a manifest change did not trigger immediate feedback.
+- Job `shear` runs pinned cargo-shear with `--locked --deny-warnings` on Ubuntu.
+- It reports declared normal, dev and build dependencies no code uses, and Rust
+  files no module includes. Reviewed false positives live under each crate's
+  `[package.metadata.cargo-shear]`; a stale entry there also fails.
+- cargo-shear replaced cargo-machete, which missed an unused `kettle-render`
+  dev-dependency.
 
 ### Timed fuzzing: `fuzz.yml`
 
