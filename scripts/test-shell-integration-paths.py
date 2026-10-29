@@ -70,6 +70,14 @@ printf 'PROVIDER_CALLS=%s;BUFFER=<%s>' $KETTLE_CALLS "$KETTLE_BUFFER"
 @unittest.skipUnless(os.name == "posix" and shutil.which("pwsh"), "Unix pwsh required")
 class PowerShellAcceptanceTests(unittest.TestCase):
     def test_incomplete_block_does_not_start_command_during_editing(self):
+        self.check_command_start("")
+
+    def test_strict_mode_still_marks_and_submits_commands(self):
+        # A valid line leaves an empty parse-error array, whose missing
+        # IncompleteInput property strict mode refuses to read.
+        self.check_command_start("Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; ")
+
+    def check_command_start(self, preamble):
         import fcntl
         import pty
         import select
@@ -81,7 +89,7 @@ class PowerShellAcceptanceTests(unittest.TestCase):
         integration = str(MODULE.INTEGRATION / "kettle.ps1").replace("'", "''")
         process = subprocess.Popen(
             [shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-NoExit", "-Command",
-             "Import-Module PSReadLine; "
+             preamble + "Import-Module PSReadLine; "
              "Set-PSReadLineOption -HistorySaveStyle SaveNothing -PredictionSource None; "
              "[Microsoft.PowerShell.PSConsoleReadLine]::ClearHistory(); "
              f". '{integration}'; function global:prompt {{ 'KETTLE_READY> ' }}"],
@@ -125,6 +133,12 @@ class PowerShellAcceptanceTests(unittest.TestCase):
             submitted = drain(10, b"KETTLE_ACCEPTED")
             self.assertIn(b"KETTLE_ACCEPTED", submitted)
             self.assertEqual(submitted.count(MODULE.OSC_C), 1)
+            # A one-line command is complete at once.
+            drain(0.3)
+            os.write(master, b"Write-Output ('KETTLE_' + 'SINGLE')\r")
+            single = drain(10, b"KETTLE_SINGLE")
+            self.assertIn(b"KETTLE_SINGLE", single)
+            self.assertEqual(single.count(MODULE.OSC_C), 1)
         finally:
             process.terminate()
             try:

@@ -1,6 +1,10 @@
 # PowerShell 5.1/7+ integration. Install:
 # kettle.exe --shell-integration powershell >> $PROFILE
 
+# Kettle's code runs without strict mode whatever the profile sets: each
+# function and key handler turns it off for its own scope only.
+& {
+Set-StrictMode -Off
 if (-not $global:__kettle_prompt_installed) {
     $global:__kettle_completion_session = [uint64]0
     $global:__kettle_completion_request = [uint64]0
@@ -13,7 +17,11 @@ if (-not $global:__kettle_prompt_installed) {
 
     function global:prompt {
         # Capture status before a dynamically scoped prompt can overwrite it.
-        $__kettle_state = @($?, $global:LASTEXITCODE)
+        # `$?` first: any statement, Set-StrictMode included, resets it. Strict
+        # mode would then refuse an unset LASTEXITCODE.
+        $__kettle_succeeded = $?
+        Set-StrictMode -Off
+        $__kettle_state = @($__kettle_succeeded, $global:LASTEXITCODE)
         $__kettle_ok = $__kettle_state[0]
 
         # `$?` covers cmdlets; `$LASTEXITCODE` supplies native numeric status.
@@ -73,6 +81,7 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_field([string]$Value, [int]$Limit) {
+        Set-StrictMode -Off
         if ($null -eq $Value) { return '' }
         try {
             # Bound UTF-8 without cutting a surrogate pair or grapheme.
@@ -98,6 +107,7 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_begin_generation {
+        Set-StrictMode -Off
         if (-not $global:__kettle_completion_enabled -or
             $global:__kettle_completion_generation -ge $global:__kettle_completion_counter_max) {
             $global:__kettle_completion_enabled = $false
@@ -110,6 +120,7 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_hide {
+        Set-StrictMode -Off
         if (-not (__kettle_completion_begin_generation)) { return }
         [Console]::Write(
             [char]27 + ']777;kettle-completion;4;clear;' +
@@ -120,11 +131,13 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_clear {
+        Set-StrictMode -Off
         __kettle_completion_reset_cycle
         __kettle_completion_hide
     }
 
     function global:__kettle_completion_emit($Selected, $Operation = 'show') {
+        Set-StrictMode -Off
         $candidates = $global:__kettle_completion_matches
         if ($null -eq $candidates -or $candidates.Count -eq 0) {
             __kettle_completion_clear
@@ -192,6 +205,7 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_capture_result($Result) {
+        Set-StrictMode -Off
         $global:__kettle_completion_result = $null
         $global:__kettle_completion_matches = @()
         $global:__kettle_completion_rows = @()
@@ -241,6 +255,7 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_reset_cycle {
+        Set-StrictMode -Off
         $global:__kettle_completion_result = $null
         $global:__kettle_completion_matches = @()
         $global:__kettle_completion_rows = @()
@@ -254,6 +269,7 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_begin_request {
+        Set-StrictMode -Off
         if (-not $global:__kettle_completion_enabled -or
             [uint64]$global:__kettle_completion_request -ge $global:__kettle_completion_counter_max) {
             # Never reuse an id; the next prompt resets the session.
@@ -266,6 +282,7 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_key_mask {
+        Set-StrictMode -Off
         try {
             $handlers = Get-PSReadLineKeyHandler -Bound
             $tab = $handlers | Where-Object { $_.Key -eq 'Tab' } | Select-Object -First 1
@@ -281,6 +298,7 @@ if (-not $global:__kettle_prompt_installed) {
 
     # Narrow editor boundary used by production and the portable fixture.
     function global:__kettle_completion_editor_state {
+        Set-StrictMode -Off
         $line = $null
         $cursor = 0
         [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
@@ -291,6 +309,7 @@ if (-not $global:__kettle_prompt_installed) {
         [string]$Line,
         [int]$Cursor
     ) {
+        Set-StrictMode -Off
         if ($null -eq $Line -or $Cursor -lt 0 -or $Cursor -gt $Line.Length) {
             return ''
         }
@@ -311,6 +330,7 @@ if (-not $global:__kettle_prompt_installed) {
         [int]$Index,
         [int]$Length
     ) {
+        Set-StrictMode -Off
         if ($null -eq $Line -or $Index -lt 0 -or $Length -lt 0 -or
             $Index -gt $Line.Length -or $Length -gt $Line.Length - $Index -or
             $Length -gt 4096) {
@@ -321,18 +341,22 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_expand([string]$Line, [int]$Cursor) {
+        Set-StrictMode -Off
         return TabExpansion2 -inputScript $Line -cursorColumn $Cursor
     }
 
     function global:__kettle_completion_apply_replacement([int]$Index, [int]$Length, [string]$Text) {
+        Set-StrictMode -Off
         [Microsoft.PowerShell.PSConsoleReadLine]::Replace($Index, $Length, $Text)
     }
 
     function global:__kettle_completion_set_cursor([int]$Position) {
+        Set-StrictMode -Off
         [Microsoft.PowerShell.PSConsoleReadLine]::SetCursorPosition($Position)
     }
 
     function global:__kettle_completion_replacement($Match) {
+        Set-StrictMode -Off
         $text = [string]$Match.CompletionText
         $cursorAdjustment = 0
         if ([string]$Match.ResultType -eq 'ProviderContainer') {
@@ -354,6 +378,7 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_cycle([int]$Direction) {
+        Set-StrictMode -Off
         if (-not (__kettle_completion_begin_request)) { return $true }
         $editor = __kettle_completion_editor_state
         $line = [string]$editor.Line
@@ -430,14 +455,17 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_cycle_next {
+        Set-StrictMode -Off
         __kettle_completion_cycle 1
     }
 
     function global:__kettle_completion_cycle_previous {
+        Set-StrictMode -Off
         __kettle_completion_cycle -1
     }
 
     function global:__kettle_completion_handle_next {
+        Set-StrictMode -Off
         try {
             __kettle_completion_cycle_next | Out-Null
         } catch {
@@ -447,6 +475,7 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_handle_previous {
+        Set-StrictMode -Off
         try {
             __kettle_completion_cycle_previous | Out-Null
         } catch {
@@ -464,6 +493,7 @@ if (-not $global:__kettle_prompt_installed) {
                 Select-Object -First 1
             if ($null -ne $enterHandler -and $enterHandler.Function -eq 'AcceptLine') {
                 Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
+                    Set-StrictMode -Off
                     __kettle_completion_clear
                     $errors = $null
                     [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$null, [ref]$null, [ref]$errors, [ref]0)
@@ -484,11 +514,13 @@ if (-not $global:__kettle_prompt_installed) {
                 $null -ne $tabHandler -and
                 $tabHandler.Function -eq 'TabCompleteNext') {
                 Set-PSReadLineKeyHandler -Key Tab -BriefDescription KettleCompleteNext -Description 'Kettle detached completion' -ScriptBlock {
+                    Set-StrictMode -Off
                     __kettle_completion_handle_next
                 }
                 if ($null -ne $backtabHandler -and
                     $backtabHandler.Function -eq 'TabCompletePrevious') {
                     Set-PSReadLineKeyHandler -Chord Shift+Tab -BriefDescription KettleCompletePrevious -Description 'Kettle detached completion' -ScriptBlock {
+                        Set-StrictMode -Off
                         __kettle_completion_handle_previous
                     }
                 }
@@ -497,4 +529,5 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     $global:__kettle_prompt_installed = $true
+}
 }
