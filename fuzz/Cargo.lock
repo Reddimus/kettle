@@ -1157,6 +1157,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "crossbeam-channel",
+ "flate2",
  "kettle-state",
  "kettle-vt",
  "libc",
