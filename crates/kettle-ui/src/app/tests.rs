@@ -3051,6 +3051,95 @@ fn osc52_selection_uses_the_platform_selection_channel() {
 }
 
 #[test]
+#[cfg(unix)]
+fn output_frame_preserves_publication_after_cached_grid_reads() {
+    let (mux, ids) = title_test_tab_mux(1);
+    let pane = ids[0];
+    let mut ws = WindowState::new(1, mux);
+    let write_url = |ws: &WindowState, url: &str| {
+        let mut term = ws.mux.panes[&pane].term.term.lock().unwrap();
+        for (column, c) in url.chars().enumerate() {
+            term.grid_mut()[kettle_core::Line(0)][kettle_core::Column(column)].c = c;
+        }
+    };
+    write_url(&ws, "https://old.example");
+    super::scan_links(&mut ws);
+    assert_eq!(ws.links[0].uri, "https://old.example");
+    let generation = ws.mux.panes[&pane].term.output_generation();
+    ws.seen_output_gen.insert(pane, generation);
+
+    super::prepare_output_frame(&mut ws, false, |ws| {
+        // Interleave a cached reader after the grid mutation but before the
+        // parser publishes output. The core commit-hook test covers this
+        // boundary in the real parser; here it exercises the real link cache.
+        write_url(ws, "https://new.example");
+        super::scan_links(ws);
+        assert_eq!(ws.links[0].uri, "https://old.example");
+        assert!(
+            ws.mux.panes[&pane]
+                .term
+                .screen_text(0)
+                .unwrap()
+                .text
+                .contains("https://new.example")
+        );
+
+        // A no-text local parser turn drives the real publication helper
+        // after the paused reader, without sending bytes through the child.
+        assert!(ws.mux.panes[&pane].term.apply_local_output(b"\x1b[0m"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while ws.mux.panes[&pane].term.output_generation() == generation {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parser did not publish"
+            );
+            std::thread::yield_now();
+        }
+    });
+    let published = ws.mux.panes[&pane].term.output_generation();
+    assert_ne!(published, generation);
+    let mut snapshot = PaneSnapshot::default();
+    snapshot.capture(&ws.mux.panes[&pane].term.term.lock().unwrap());
+    ws.pane_snapshot_keys = vec![(
+        pane,
+        ws.pending_output_gen[&pane],
+        snapshot.columns,
+        snapshot.screen_lines,
+    )];
+    assert!(!pane_snapshot_keys_match(
+        &ws.pane_snapshot_keys,
+        [(pane, published, snapshot.columns, snapshot.screen_lines)]
+    ));
+    // The normal frame acknowledges late. A publication coalesced into the
+    // wake that scheduled this frame need not have another event queued.
+    ws.mux.panes[&pane].term.acknowledge_output_wake();
+    ws.output_pacer.begin_frame();
+    assert!(apply_output_generation_outcome(
+        FrameOutcome::Presented,
+        &mut ws.seen_output_gen,
+        &mut ws.pending_output_gen,
+    ));
+    assert_ne!(
+        ws.seen_output_gen[&pane], published,
+        "presenting must not consume the invalidation needed by the stale link cache"
+    );
+    ws.output_pacer.presented();
+    super::defer_output_racing_frame(&mut ws);
+    assert!(ws.output_pacer.is_deferred());
+    super::prepare_output_frame(&mut ws, false, super::scan_links);
+    assert_eq!(ws.links[0].uri, "https://new.example");
+    ws.output_pacer.begin_frame();
+    assert!(apply_output_generation_outcome(
+        FrameOutcome::Presented,
+        &mut ws.seen_output_gen,
+        &mut ws.pending_output_gen,
+    ));
+    ws.output_pacer.presented();
+    super::defer_output_racing_frame(&mut ws);
+    assert!(!ws.output_pacer.is_deferred(), "quiet output must settle");
+}
+
+#[test]
 fn hover_generation_candidate_preserves_racing_output_as_pending() {
     let committed = std::collections::HashMap::from([(1, 10), (2, 20)]);
     let cached = [(1, 10, 120, 40)];

@@ -1,3 +1,148 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use alacritty_terminal::index::{Column, Line, Point};
+
+use super::fuzzing::SyncGraphicsHarness;
+use super::{
+    GraphicsActionContext, GraphicsRegistries, PtyGeometry, SyncGraphicsContext,
+    advance_terminal_bytes_with_commit_hook, commit_local_geometry, publish_output_if_ready,
+};
+use crate::event::OutputWakeGate;
+
+#[test]
+fn search_tolerates_grid_commit_before_output_publication() {
+    use crate::{
+        CaseSensitivity, CompiledSearch, SearchBounds, SearchDirection, SearchPoint,
+        SearchScanToken, SearchSpan,
+    };
+
+    const COLUMNS: usize = 16_384;
+    for direction in [SearchDirection::Forward, SearchDirection::Reverse] {
+        let mut harness = SyncGraphicsHarness::new();
+        commit_local_geometry(
+            &harness.term,
+            &harness.geometry,
+            PtyGeometry::new(COLUMNS, 2, 0, 0),
+            Some(alacritty_terminal::term::Config::default()),
+        );
+        harness.feed(&vec![b'a'; COLUMNS]);
+        let generation = AtomicU64::new(7);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wake_count = wakes.clone();
+        let output_wake = OutputWakeGate::new(Arc::new(move || {
+            wake_count.fetch_add(1, Ordering::Relaxed);
+        }));
+        let first = SearchPoint::new(0, 0);
+        let last = SearchPoint::new(0, COLUMNS - 1);
+        let bounds = match direction {
+            SearchDirection::Forward => SearchBounds::new(first, last),
+            SearchDirection::Reverse => SearchBounds::new(last, first),
+        };
+        let mut search = CompiledSearch::compile("a", CaseSensitivity::Always)
+            .unwrap()
+            .unwrap();
+        let old_token = {
+            let term = harness.term.lock().unwrap();
+            let token = SearchScanToken::capture(&term, 1, generation.load(Ordering::Acquire));
+            search.set_scan_token(token);
+            let batch = search.find_in_range(&term, bounds, direction, COLUMNS);
+            assert_eq!(
+                batch.continuation,
+                Some(bounds.start),
+                "{direction:?}: layout={:?}, matches={}, exhausted={}, limited={}",
+                token.layout,
+                batch.matches.len(),
+                batch.exhausted,
+                batch.accuracy_limited
+            );
+            token
+        };
+
+        let SyncGraphicsHarness {
+            term,
+            proxy,
+            processor,
+            extractor,
+            deferred,
+            active_alternate,
+            images,
+            virtuals,
+            anims,
+            relatives,
+            inactive,
+            geometry,
+            ..
+        } = &mut harness;
+        let mut context = SyncGraphicsContext {
+            active_alternate,
+            deferred,
+            registries: GraphicsRegistries {
+                inactive,
+                images,
+                virtuals,
+                anims,
+                relatives,
+            },
+            actions: GraphicsActionContext {
+                inactive,
+                images,
+                virtuals,
+                anims,
+                relatives,
+                geometry,
+                proxy,
+            },
+            extractor,
+        };
+        let mut replacement = b"\r".to_vec();
+        replacement.extend(std::iter::repeat_n(b'b', COLUMNS - 1));
+        replacement.push(b'a');
+        let expected = [SearchSpan::new(last, last)];
+        let mut interleaved = false;
+        advance_terminal_bytes_with_commit_hook(
+            processor,
+            term,
+            &replacement,
+            &mut context,
+            |_| {
+                interleaved = true;
+                // The real commit seam releases the grid lock before either
+                // graphics replay or output generation publication.
+                let sampled = generation.load(Ordering::Acquire);
+                let term = term.lock().unwrap();
+                assert_eq!(sampled, 7);
+                assert_eq!(wakes.load(Ordering::Relaxed), 0);
+                assert_eq!(term.grid()[Point::new(Line(0), Column(0))].c, 'b');
+                let token = SearchScanToken::capture(&term, 1, sampled);
+                assert_eq!(token, old_token, "in-place output preserves layout");
+                search.set_scan_token(token);
+                // Saved regex progress must compare haystacks as well as the
+                // token: otherwise it returns positions from the old 'a' row.
+                let batch = search.find_in_range(&term, bounds, direction, 1);
+                assert_eq!(batch.matches, expected);
+                assert!(!batch.accuracy_limited);
+            },
+        );
+        assert!(interleaved);
+        assert!(publish_output_if_ready(
+            processor,
+            &generation,
+            &output_wake
+        ));
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        let term = term.lock().unwrap();
+        let published = generation.load(Ordering::Acquire);
+        assert_eq!(published, 8);
+        assert!(!old_token.is_current(&term, 1, published));
+        search.set_scan_token(SearchScanToken::capture(&term, 1, published));
+        assert_eq!(
+            search.find_in_range(&term, bounds, direction, 1).matches,
+            expected
+        );
+    }
+}
+
 #[test]
 fn reader_sidechannels_share_the_generation_ordered_output_gate() {
     let source = super::production_source();

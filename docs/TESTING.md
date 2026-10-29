@@ -75,6 +75,29 @@ verifies that the benchmark wrapper reaps a child that ignores SIGTERM on
 timeout, payload completion, and a shutdown signal, preserving exit statuses
 and removing the registry entry and completion marker.
 
+`cargo test -j 2 --locked --offline -p kettle-core
+search_tolerates_grid_commit_before_output_publication` uses the terminal's
+commit hook to run a search after the grid mutex is released and before output
+publication. It retains yielded forward/reverse regex work, rewrites the row
+without changing its layout or generation, checks results against the new
+cells, then verifies that the real publication helper invalidates the old token
+and wakes once. It needs no PTY, GPU, sleeps or scheduler timing.
+`cargo test -j 2 --locked --offline -p kettle-ui
+output_frame_preserves_publication_after_cached_grid_reads` pauses frame
+preparation with new grid text and the old generation, exercises the real link
+cache, then drives the real publication helper with a no-text local parser
+turn. The pre-fix order consumes the invalidation while retaining old links;
+the fixed frame cutoff retains a retry. It also checks snapshot-reuse tags and
+the late-wake/presentation recheck. This Unix fixture needs a local PTY, but no
+GPU or control socket. The UI tests
+`hover_generation_candidate_preserves_racing_output_as_pending`,
+`pane_snapshot_reuse_fails_closed_on_output_layout_or_order_changes`, and
+`stale_presented_output_wakeup_rearms_without_losing_a_race` protect the
+corresponding frame/reuse/wake invalidation rules. See
+[output generation and grid reads](ARCHITECTURE.md#output-generation-and-grid-reads)
+for the reader analysis. Finish with full `kettle-core` and `kettle-ui` tests and
+Clippy for both crates with `--all-targets -- -D warnings`.
+
 ### Main gates
 
 The MCP stdio integration suite exercises Codex guidance, turn-end-only fallback,

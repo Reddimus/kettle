@@ -49,11 +49,6 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   changes existing output. Close with run-aware policy hooks and a frozen
   extractor oracle comparing emitted chunks exactly across existing vectors,
   edge splits and random bytes.
-- **Grid/generation publication ordering.** `publish_output_if_ready` in
-  `crates/kettle-core/src/term.rs` publishes after the grid lock is released;
-  readers can pair a new grid with an old generation. Deferred because review
-  rejected the proposed consequences and fix. Close with a demonstrated reader
-  impact and ordering regression, or an analysis proving the pairing harmless.
 
 ## UX
 

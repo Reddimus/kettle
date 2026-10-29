@@ -2014,6 +2014,57 @@ starve the flush. EOF/disconnect flushes immediately because no terminator can
 still arrive. The parser then bumps the output generation and wakes the UI for
 the now-visible frame after releasing the terminal lock.
 
+### Output generation and grid reads
+
+`Terminal::output_generation` is a cache-invalidation and paint-scheduling
+counter, not an exact grid revision. Parsing can commit several grid chunks
+before `publish_output_if_ready` increments it once and requests an output wake.
+A reader between commit and publication can therefore see new cells with the
+old counter. Publishing under the last grid lock would not make earlier chunks
+in that read atomic, nor make a reader's separate counter and grid reads atomic.
+The reader audit found a lost invalidation at the frame boundary. Previously,
+`redraw` updated the link/search caches, then sampled a newer output generation
+for the candidate frame. A grid commit could precede a cache check while its
+publication followed that check. The cache kept its old result, but presenting
+the later generation made the queued output wake look already painted. With no
+other redraw source, the old links or search highlights could persist. The same
+late cutoff could strand an accessibility update or an output-activity edge.
+Moving only the writer's increment under a grid lock would not close the wider
+race between those separate frame phases.
+
+The frame now uses one generation cutoff before all pane maintenance and grid
+captures. Each fresh snapshot retains that same cutoff; reused snapshots retain
+their original cutoff. After presentation, a second generation check defers
+another paint if publication raced any reader. This also covers publication
+coalesced into an already-delivered wake before the late latch acknowledgement.
+It follows the normal output-paint budget instead of opening an immediate
+repaint loop. The grid itself stays protected by its mutex.
+
+The individual readers behave as follows:
+
+| Reader | Sampling and effect of an unpublished grid commit |
+| --- | --- |
+| Renderer snapshots (`App::redraw`, `PaneSnapshot::capture_with_card_marks`) | Samples the candidate generations before any pane maintenance or grid capture and commits them only for `FrameOutcome::Presented`. New cells captured under an old counter cause another paint after publication. A counter sampled before locking cannot describe cells newer than the captured grid: publication follows the corresponding grid unlock. |
+| Context-menu snapshot reuse (`pane_snapshots_match_current_layout`, `stage_output_generations_for_frame`) | Can reuse old pixels during the interval, but stages the cached generations, including the previously committed background-pane values. The full-frame cutoff leaves publication pending and invalidates reuse; sampling a live counter after reuse would violate this rule. |
+| Damage tracking (`Renderer::build_pane_cells`, grid glyph preparation) | Receives copied cells and compares row text/attributes and layout. It does not read terminal output generations or consume Alacritty damage. The UI's generation gate schedules frames; surface failures retain the prior committed generation. |
+| Search (`App::update_search`, `search_step_match`, `CompiledSearch`) | Updates sample before the grid lock; navigation samples while locked. Existing UI highlights/focus can lag during the interval, then the frame retry observes the published token, clears them and restarts or verifies work. Core regex continuations additionally compare the materialized haystack and bounds, so a same-token in-place rewrite cannot resume offsets into old text. Output-drifted background jobs retain their documented quiet-verification/Results limited policy. |
+| Links (`scan_links`) | Samples the generation before its grid reads. An unchanged key can briefly retain the previous links; a new scan can tag newer links with an old counter. The frame retry observes publication and scans again. Geometry and viewport movement have separate key fields. |
+| Recording and session logging (PTY reader raw tap, `dispatch_output_chunks`) | Consume ordered raw byte queues before grid parsing. Neither uses a grid/generation pair; drain, backpressure and final-output acknowledgement govern delivery. |
+| Control API (`ctl_read_screen`, `screen_text_of`, automation and command-result screen reads) | Copies cells, dimensions, cursor and selection under the grid mutex. No output-generation key is returned or used to suppress a read. Paging checks a content-derived snapshot identifier and rejects changed data between pages. |
+| Accessibility (`accessibility_key`, `publish_accessibility_if_due`, `accessibility_tree`) | Samples the key before `screen_text` locks the grid. An unchanged key can briefly retain the prior tree; the frame retry observes the changed key and schedules another update. The update throttle retains a pending deadline, so throttling cannot consume the final change. |
+| Output activity and scroll-on-output (`App::redraw`, `window_has_new_output`) | Compare the counter with the last observed/painted value. Publication follows mutation and precedes the wake, and the frame cutoff/recheck preserves a retry for delayed activity or scrolling. Hidden panes retain a dirty wake; GPU recovery rebuilds snapshots. |
+
+The required order is grid commit, generation increment, then gated wake.
+A frame must retain the generation sampled before any dependent cache check or
+capture, and recheck after presentation; reused snapshots retain their original
+tag. Sampling a live generation after those reads could mark older state
+current and lose an invalidation. The commit-hook search regression exercises
+matcher tolerance with saved forward and reverse regex work before the real
+publication helper runs. The UI frame regression exercises the lost link-cache
+invalidation and the post-presentation retry under that interleaving.
+
+### Synchronized graphics publication
+
 Graphics controls inside DEC 2026 use the same atomic commit boundary. While
 an update is open, the extractor retains each complete Sixel, Kitty, or iTerm2
 display control string without decoding it. Kitty capability queries and their

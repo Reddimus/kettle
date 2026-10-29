@@ -2822,6 +2822,15 @@ fn publish_output_if_ready(
     if processor.sync_timeout().sync_timeout().is_some() {
         return false;
     }
+    // This is an invalidation counter, not a version paired with the grid.
+    // Frame/cache readers sample it before reading the locked grid (navigation
+    // samples while locked), so an unpublished mutation can only leave them
+    // tagged with an older generation. This increment and wake invalidate that
+    // state again. Frames retain a cutoff from before all grid-dependent cache
+    // checks and captures, then recheck after presenting; snapshot reuse keeps
+    // that same tag. Sampling after cache checks could consume this increment
+    // while keeping stale results. Search also checks saved haystack contents
+    // before resuming work, even when this counter has not advanced yet.
     out_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
     output_wake.request();
     true
@@ -6713,6 +6722,11 @@ impl Terminal {
     /// since?" without draining the event channel (plain text emits no
     /// `TermEvent`). Bumped with `Release` before the wakeup fires; read with
     /// `Acquire`.
+    ///
+    /// This invalidates cached state; it is not an exact grid revision. Sample
+    /// before any dependent cache checks or grid captures, and retain that
+    /// sample with the cache or candidate frame. Recheck after presenting so
+    /// publication coalesced into an earlier wake still gets a retry.
     pub fn output_generation(&self) -> u64 {
         self.out_gen.load(std::sync::atomic::Ordering::Acquire)
     }
