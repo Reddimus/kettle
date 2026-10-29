@@ -36,7 +36,7 @@ license=('MIT')
 # need at runtime. `pkg-config` etc. are *build* deps and not needed
 # here.
 depends=('fontconfig' 'freetype2' 'libxkbcommon' 'libxkbcommon-x11'
-         'libx11' 'libwayland-client' 'libxcb' 'vulkan-icd-loader'
+         'libx11' 'wayland' 'libxcb' 'vulkan-icd-loader'
          'mesa')
 # Kettle runs the user's own ffmpeg and ffprobe (from /usr/bin) inside its
 # media sandbox for videos it cannot read itself; nothing else needs it, and

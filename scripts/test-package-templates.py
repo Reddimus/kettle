@@ -84,6 +84,9 @@ class PackageTemplateTests(unittest.TestCase):
                 formula,
             )
             self.assertIn("pkgver=9.8.7", pkgbuild)
+            depends = pkgbuild.split("depends=(", 1)[1].split(")", 1)[0]
+            self.assertIn("'wayland'", depends, "Arch provides libwayland-client in wayland")
+            self.assertNotIn("'libwayland-client'", depends)
             self.assertIn(hashlib.sha256(linux).hexdigest(), pkgbuild)
             self.assertNotIn("@VERSION@", formula + pkgbuild)
             self.assertIn(
