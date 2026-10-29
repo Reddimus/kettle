@@ -685,8 +685,8 @@ fn filter(runs_programs: bool, me: u32, scoped: bool) -> Vec<sock_filter> {
     // process or thread the owner names, outside the worker's group.
     ops.push(Op::Label("fcntl"));
     ops.push(Op::Load(arg_low(1)));
-    for command in [libc::F_SETOWN, libc::F_SETOWN_EX, libc::F_SETSIG] {
-        ops.push(jeq(command as u32, To::Label("eperm"), To::Next));
+    for command in [libc::F_SETOWN as u32, F_SETOWN_EX, F_SETSIG] {
+        ops.push(jeq(command, To::Label("eperm"), To::Next));
     }
     ops.push(Op::Ret(ALLOW));
     ops.push(Op::Label("allow"));
@@ -699,6 +699,11 @@ fn filter(runs_programs: bool, me: u32, scoped: bool) -> Vec<sock_filter> {
     ops.push(Op::Ret(KILL));
     assemble(&ops).expect("the worker filter's jumps fit")
 }
+
+/// `fcntl` commands from the kernel's `asm-generic/fcntl.h`, the same on
+/// x86_64 and aarch64; the libc crate does not name them on every target.
+const F_SETSIG: u32 = 10;
+const F_SETOWN_EX: u32 = 15;
 
 fn answer_label(answer: u32) -> &'static str {
     if answer == ENOSYS { "enosys" } else { "eperm" }

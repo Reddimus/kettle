@@ -235,7 +235,8 @@ fn attempt(dir: &Path, held: &File) {
             "fcntl_setown",
             fcntl(libc::F_SETOWN, unsafe { libc::getppid() }),
         );
-        report("fcntl_setsig", fcntl(libc::F_SETSIG, libc::SIGUSR1));
+        // F_SETSIG, which the libc crate does not name on every target.
+        report("fcntl_setsig", fcntl(10, libc::SIGUSR1));
     }
     let sibling = dir.join("sibling.bin");
     report(
