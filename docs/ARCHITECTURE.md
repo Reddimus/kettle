@@ -2129,7 +2129,11 @@ as its ownership boundary, and the `kettle exec` command line is also a child
 subreaper: a descendant that left the session with `setsid()` is reparented to
 it when its parent exits, and teardown kills and reaps every such adopted child
 outside Kettle's own session until none remains, while a running command's
-exited adoptees are reaped every 250 ms. Session membership survives reparenting and cannot be
+exited adoptees are reaped every 250 ms. Setup first resets an inherited
+ignored `SIGCHLD`, so the kernel never reaps an adopted child before the sweep
+signals it, and a killed session member counts as exited only once its pidfd
+reports that every thread has; when adoption cannot be set up, teardown is
+reported unverified. Session membership survives reparenting and cannot be
 joined by an unrelated process. Before any numeric group signal or session scan,
 teardown stops the original leader through its pidfd and revalidates its PID plus
 start time; that unreaped anchor prevents the kernel from recycling the

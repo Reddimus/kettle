@@ -98,7 +98,9 @@ Kettle owns the PTY-created process group on macOS and the PTY-created session
 on Linux. A Unix descendant that deliberately calls `setsid()` leaves that
 boundary. On Linux, the `kettle exec` command line is a child subreaper: such a
 descendant is reparented to Kettle when its own parent exits, so a timeout or
-cancellation kills and reaps it too. That ownership is the kernel's, not an
+cancellation kills and reaps it too. Where the kernel refuses a subreaper or
+has no per-thread child lists, such a timeout or cancellation reports 125,
+since an escaped descendant could still be running. That ownership is the kernel's, not an
 inference from ancestry or an open PTY descriptor, so it cannot reach an
 unrelated same-user process. macOS has no equivalent, and the MCP `kettle_run`
 tool runs concurrent commands in one server process, where an adopted process

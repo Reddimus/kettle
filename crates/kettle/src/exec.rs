@@ -2141,20 +2141,31 @@ impl LinuxPidHandle {
         Ok(matches!(stat.state, b'T' | b't' | b'Z' | b'X'))
     }
 
+    /// Whether every thread of the process has exited. The pidfd turns
+    /// readable only then. The main thread's `Z` state proves less: another
+    /// thread can still be running, and can still fork.
     fn exited_or_gone(&self) -> std::io::Result<bool> {
-        let Some(stat) = LinuxProcessStat::read(self.identity.pid)? else {
-            return Ok(true);
+        use std::os::fd::AsRawFd as _;
+
+        let mut poll = libc::pollfd {
+            fd: self.fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
         };
-        if stat.identity != self.identity {
-            return Ok(true);
+        // SAFETY: `poll` is one valid pollfd, and a zero timeout returns at
+        // once.
+        let ready = unsafe { libc::poll(&raw mut poll, 1, 0) };
+        if ready < 0 {
+            return Err(std::io::Error::last_os_error());
         }
-        Ok(matches!(stat.state, b'Z' | b'X' | b'x'))
+        Ok(ready > 0)
     }
 }
 
-/// Set once this process is the reaper of its orphaned descendants.
+/// Whether this process reaps its orphaned descendants, and if not why,
+/// once the command line has tried. Unset in the MCP server, which never does.
 #[cfg(target_os = "linux")]
-static ADOPTS_ORPHANS: AtomicBool = AtomicBool::new(false);
+static ADOPTION: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
 
 /// Make this `kettle exec` process the reaper of its orphaned descendants.
 ///
@@ -2165,12 +2176,43 @@ static ADOPTS_ORPHANS: AtomicBool = AtomicBool::new(false);
 /// per process, so everything adopted here belongs to that command. The MCP
 /// server runs concurrent commands in one process, where an adopted orphan
 /// cannot be attributed to any one of them.
+///
+/// When that cannot be set up, a timeout or cancellation reports its teardown
+/// as unverified, since an escaped descendant could still be running.
 #[cfg(target_os = "linux")]
 fn adopt_orphaned_descendants() {
-    // SAFETY: PR_SET_CHILD_SUBREAPER takes an integer flag and no pointers.
-    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0 {
-        ADOPTS_ORPHANS.store(true, Ordering::Release);
+    let _ = ADOPTION.set(enable_orphan_adoption());
+}
+
+#[cfg(target_os = "linux")]
+fn enable_orphan_adoption() -> Result<(), String> {
+    // An ignored SIGCHLD, or SA_NOCLDWAIT, inherited from the launcher makes
+    // the kernel reap children as they exit, and a reaped child's PID can be
+    // reused before the sweep signals it. The PTY backend resets SIGCHLD in
+    // the command before it runs, so this changes nothing for the command.
+    // SAFETY: an all-zero sigaction is SIG_DFL with an empty mask and no
+    // flags.
+    let mut default: libc::sigaction = unsafe { std::mem::zeroed() };
+    default.sa_sigaction = libc::SIG_DFL;
+    // SAFETY: `default` is a valid sigaction, and the old one is not wanted.
+    if unsafe { libc::sigaction(libc::SIGCHLD, &raw const default, std::ptr::null_mut()) } != 0 {
+        return Err(format!(
+            "cannot reset SIGCHLD: {}",
+            std::io::Error::last_os_error()
+        ));
     }
+    // Adopted children are found in per-thread child lists, which a kernel
+    // built without CONFIG_PROC_CHILDREN does not provide.
+    std::fs::metadata("/proc/thread-self/children")
+        .map_err(|error| format!("cannot read procfs child lists: {error}"))?;
+    // SAFETY: PR_SET_CHILD_SUBREAPER takes an integer flag and no pointers.
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
+        return Err(format!(
+            "cannot become a child subreaper: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 /// Children of this process that came from the command's tree.
@@ -2186,10 +2228,18 @@ fn linux_adopted_children(root: Option<u32>) -> std::io::Result<Vec<libc::pid_t>
     let own_session = unsafe { libc::getsid(0) };
     let mut children = Vec::new();
     for task in std::fs::read_dir("/proc/self/task")? {
-        let list = match std::fs::read_to_string(task?.path().join("children")) {
+        let task = task?.path();
+        let list = match std::fs::read_to_string(task.join("children")) {
             Ok(list) => list,
-            // A thread that exited after the directory was listed.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            // A thread that exited after the directory was listed. A thread
+            // that is still there without a list hides its children.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && matches!(std::fs::symlink_metadata(&task),
+                        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                continue;
+            }
             Err(error) => return Err(error),
         };
         for pid in list.split_ascii_whitespace() {
@@ -2216,7 +2266,7 @@ fn linux_adopted_children(root: Option<u32>) -> std::io::Result<Vec<libc::pid_t>
 /// detaches short-lived helpers does not leave zombies here until it ends.
 #[cfg(target_os = "linux")]
 fn linux_reap_exited_adopted(root: Option<u32>) {
-    if !ADOPTS_ORPHANS.load(Ordering::Acquire) {
+    if !matches!(ADOPTION.get(), Some(Ok(()))) {
         return;
     }
     let Ok(children) = linux_adopted_children(root) else {
@@ -2232,13 +2282,33 @@ fn linux_reap_exited_adopted(root: Option<u32>) {
 /// Kill and reap every descendant adopted during the run, including ones the
 /// kills hand down. Returns whether none remains by `deadline`.
 ///
-/// An unreaped child's PID cannot be reused, so signalling a listed child
-/// reaches only that process. Each child killed passes its own children to
-/// this process as it exits, so rounds continue until a listing is empty.
+/// An unreaped child's PID cannot be reused (SIGCHLD was reset so the kernel
+/// does not reap for us), so signalling a listed child reaches only that
+/// process. Each child killed passes its own children to this process as it
+/// exits, so rounds continue until a listing is empty. Where adoption could
+/// not be set up, an escaped descendant may be running unseen, so the
+/// teardown is not verified.
 #[cfg(target_os = "linux")]
 fn linux_kill_adopted(root: Option<u32>, deadline: Instant) -> bool {
-    if !ADOPTS_ORPHANS.load(Ordering::Acquire) {
-        return true;
+    linux_kill_adopted_as(ADOPTION.get(), root, deadline)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_kill_adopted_as(
+    adoption: Option<&Result<(), String>>,
+    root: Option<u32>,
+    deadline: Instant,
+) -> bool {
+    match adoption {
+        None => return true,
+        Some(Err(reason)) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: cannot stop descendants that left the session: {reason}"
+            );
+            return false;
+        }
+        Some(Ok(())) => {}
     }
     let mut pending: Vec<libc::pid_t> = Vec::new();
     loop {
@@ -7171,5 +7241,55 @@ wait
             libc::SIG_IGN,
             "a committed output failure must leave SIGPIPE ignored"
         );
+    }
+
+    /// A setup that could not make this process a child subreaper leaves
+    /// escaped descendants out of reach, so teardown is not verified.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_adoption_setup_leaves_teardown_unverified() {
+        let failed = Err("the kernel refused".to_string());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(!linux_kill_adopted_as(Some(&failed), None, deadline));
+        // The MCP server never adopts; its teardown is the session's alone.
+        assert!(linux_kill_adopted_as(None, None, deadline));
+    }
+
+    /// A process whose main thread exited is a zombie by its stat line while
+    /// another thread still runs, and could still fork. It has not exited.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_whose_main_thread_exited_is_still_running() {
+        // pthread_exit from Python's main thread ends only that thread; the
+        // other one sleeps on (and then waits forever for the GIL).
+        let script = "import ctypes, threading, time\n\
+                      threading.Thread(target=time.sleep, args=(60,)).start()\n\
+                      ctypes.CDLL(None).pthread_exit(None)\n";
+        let Ok(mut child) = std::process::Command::new("python3")
+            .args(["-c", script])
+            .spawn()
+        else {
+            eprintln!("skipped: python3 is not available");
+            return;
+        };
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let identity = loop {
+            let stat = LinuxProcessStat::read(pid).unwrap().unwrap();
+            if stat.state == b'Z' {
+                break stat.identity;
+            }
+            assert!(Instant::now() < deadline, "the main thread never exited");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let handle = LinuxPidHandle::open(identity).unwrap().unwrap();
+        let running = !handle.exited_or_gone().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            running,
+            "a zombie main thread was taken for the whole process"
+        );
+        assert!(handle.exited_or_gone().unwrap());
     }
 }
