@@ -509,7 +509,8 @@ fn call_tool_inner(
         Ok(call) => call,
         Err(error) => return error_result(&error),
     };
-    let args = call.arguments.unwrap_or_else(|| json!({}));
+    let mut args = call.arguments.unwrap_or_else(|| json!({}));
+    normalize_integer_arguments(&call.name, &mut args);
     if let Err(error) = validate_tool_arguments(&call.name, &args) {
         // Every kettle_show failure keeps its fixed wording and says the
         // model has not seen the media, an unknown argument included.
@@ -532,26 +533,31 @@ fn call_tool_inner(
             "list_panes",
             forwarded_ctl_arguments(&call.name, &args),
             cancelled,
+            fits,
         ),
         "kettle_read_screen" => ctl_call(
             "read_screen",
             forwarded_ctl_arguments(&call.name, &args),
             cancelled,
+            fits,
         ),
         "kettle_read_cells" => ctl_call(
             "read_cells",
             forwarded_ctl_arguments(&call.name, &args),
             cancelled,
+            fits,
         ),
         "kettle_ui_geometry" => ctl_call(
             "ui_geometry",
             forwarded_ctl_arguments(&call.name, &args),
             cancelled,
+            fits,
         ),
         "kettle_screenshot" => ctl_call(
             "screenshot",
             forwarded_ctl_arguments(&call.name, &args),
             cancelled,
+            fits,
         ),
         "kettle_send_text" => {
             let Some(text) = args.get("text").and_then(|t| t.as_str()) else {
@@ -562,6 +568,7 @@ fn call_tool_inner(
                 "send_text",
                 forwarded_ctl_arguments(&call.name, &args),
                 cancelled,
+                fits,
             )
         }
         "kettle_run_command" => {
@@ -573,6 +580,7 @@ fn call_tool_inner(
                 "run_command",
                 forwarded_ctl_arguments(&call.name, &args),
                 cancelled,
+                fits,
             )
         }
         "kettle_send_keys" => {
@@ -586,6 +594,7 @@ fn call_tool_inner(
                 "send_keys",
                 forwarded_ctl_arguments(&call.name, &args),
                 cancelled,
+                fits,
             )
         }
         "kettle_dispatch_ui_key" => {
@@ -599,6 +608,7 @@ fn call_tool_inner(
                 "dispatch_ui_key",
                 forwarded_ctl_arguments(&call.name, &args),
                 cancelled,
+                fits,
             )
         }
         "kettle_send_mouse" => {
@@ -610,6 +620,7 @@ fn call_tool_inner(
                 "send_mouse",
                 forwarded_ctl_arguments(&call.name, &args),
                 cancelled,
+                fits,
             )
         }
         "kettle_resize_window" => {
@@ -624,6 +635,7 @@ fn call_tool_inner(
                 "resize_window",
                 forwarded_ctl_arguments(&call.name, &args),
                 cancelled,
+                fits,
             )
         }
         "kettle_perform_action" => {
@@ -635,6 +647,7 @@ fn call_tool_inner(
                 "perform_action",
                 forwarded_ctl_arguments(&call.name, &args),
                 cancelled,
+                fits,
             )
         }
         "kettle_wait_for" => {
@@ -650,6 +663,7 @@ fn call_tool_inner(
                 "wait_for",
                 forwarded_ctl_arguments(&call.name, &args),
                 cancelled,
+                fits,
             )
         }
         other => error_result(&format!("unknown tool '{other}'")),
@@ -1096,6 +1110,7 @@ fn ctl_call(
     method: &str,
     params: Value,
     cancelled: Option<&std::sync::atomic::AtomicBool>,
+    fits: &dyn Fn(&Value) -> bool,
 ) -> Value {
     let mut client = match Client::discover(None) {
         Ok(c) => c,
@@ -1106,16 +1121,31 @@ fn ctl_call(
         None => client.call(method, params),
     };
     match response {
-        Ok(result) => {
-            let text = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-            let (text, truncated) = cap_tool_text(text);
-            json!({
-                "content": [{ "type": "text", "text": text }],
-                "structuredContent": {"truncated": truncated},
-            })
-        }
+        Ok(result) => ctl_result(method, &result, fits),
         Err(e) => error_result(&format!("{method}: {e}")),
     }
+}
+
+fn ctl_result(method: &str, result: &Value, fits: &dyn Fn(&Value) -> bool) -> Value {
+    for text in [
+        serde_json::to_string_pretty(result),
+        serde_json::to_string(result),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if text.len() > MAX_TOOL_TEXT_BYTES {
+            continue;
+        }
+        let response = json!({"content": [{"type": "text", "text": text}],
+            "structuredContent": {"truncated": false}});
+        if fits(&response) {
+            return response;
+        }
+    }
+    error_result(&format!(
+        "{method}: response is too large; request a smaller limit"
+    ))
 }
 
 fn ctl_discovery_error(error: &impl std::fmt::Display) -> Value {
@@ -1345,6 +1375,42 @@ fn tool_argument_fields(name: &str) -> Option<&'static [(&'static str, ArgKind)]
     })
 }
 
+fn integer_number(value: &Value, signed: bool) -> Option<Value> {
+    if value.as_u64().is_some() || (signed && value.as_i64().is_some()) {
+        return Some(value.clone());
+    }
+    let number = value.as_f64()?;
+    if !number.is_finite() || number.fract() != 0.0 {
+        return None;
+    }
+    if (0.0..18446744073709551616.0).contains(&number) {
+        Some(json!(number as u64))
+    } else if signed && (-9223372036854775808.0..0.0).contains(&number) {
+        Some(json!(number as i64))
+    } else {
+        None
+    }
+}
+
+fn normalize_integer_arguments(name: &str, args: &mut Value) {
+    if let (Some(fields), Some(object)) = (tool_argument_fields(name), args.as_object_mut()) {
+        for (key, value) in object {
+            let signed = match fields
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, kind)| kind)
+            {
+                Some(ArgKind::Unsigned) => false,
+                Some(ArgKind::Integer) => true,
+                _ => continue,
+            };
+            if let Some(number) = integer_number(value, signed) {
+                *value = number;
+            }
+        }
+    }
+}
+
 fn validate_tool_arguments(name: &str, args: &Value) -> Result<(), String> {
     let Some(fields) = tool_argument_fields(name) else {
         return Ok(());
@@ -1359,8 +1425,8 @@ fn validate_tool_arguments(name: &str, args: &Value) -> Result<(), String> {
         let valid = match kind {
             ArgKind::String => value.is_string(),
             ArgKind::Bool => value.is_boolean(),
-            ArgKind::Unsigned => value.as_u64().is_some(),
-            ArgKind::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
+            ArgKind::Unsigned => integer_number(value, false).is_some(),
+            ArgKind::Integer => integer_number(value, true).is_some(),
             ArgKind::Number => value.is_number(),
             ArgKind::Strings => value
                 .as_array()
@@ -1371,7 +1437,9 @@ fn validate_tool_arguments(name: &str, args: &Value) -> Result<(), String> {
         }
         if name == "kettle_run"
             && matches!(key.as_str(), "cols" | "rows")
-            && value.as_u64().is_some_and(|size| size > MAX_RUN_DIMENSION)
+            && integer_number(value, false)
+                .and_then(|number| number.as_u64())
+                .is_some_and(|size| size > MAX_RUN_DIMENSION)
         {
             return Err(format!(
                 "kettle_run 'cols' and 'rows' must not exceed {MAX_RUN_DIMENSION}"
@@ -2344,5 +2412,47 @@ mod tests {
             parse["content"][0]["text"],
             json!(FailureCode::RenderParse.model_message())
         );
+    }
+    #[test]
+    fn control_pages_remain_complete_json() {
+        let cell = json!({"text":"x", "column":1, "line":0,
+            "foreground":[255,255,255], "background":[0,0,0],
+            "attributes":{"bold":false,"italic":false,"underline":false,"inverse":false,"hidden":false,"strikeout":false}});
+        let page = json!({"cells":vec![cell;2048], "next_cursor":"next-page"});
+        assert!(serde_json::to_string_pretty(&page).unwrap().len() > MAX_TOOL_TEXT_BYTES);
+        let result = ctl_result("read_cells", &page, &|result| {
+            crate::mcp::response_fits(&json!(1), false, result)
+        });
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let delivered: Value =
+            serde_json::from_str(text).expect("control pages must remain complete JSON");
+        assert_eq!(delivered["cells"].as_array().unwrap().len(), 2048);
+        assert_eq!(delivered["next_cursor"], "next-page");
+    }
+
+    #[test]
+    fn integral_json_number_spellings_are_accepted_and_forwarded() {
+        for spelling in ["80.0", "8e1"] {
+            let value: Value = serde_json::from_str(spelling).unwrap();
+            let mut args = json!({"pane":value, "limit":value});
+            assert!(
+                validate_tool_arguments("kettle_read_cells", &args).is_ok(),
+                "schema integers must accept {spelling}"
+            );
+            normalize_integer_arguments("kettle_read_cells", &mut args);
+            assert_eq!(
+                forwarded_ctl_arguments("kettle_read_cells", &args),
+                json!({"pane":80,"limit":80})
+            );
+        }
+        for value in [json!(-1), json!(1.5), json!(18446744073709551616.0)] {
+            assert!(validate_tool_arguments("kettle_read_cells", &json!({"pane":value})).is_err());
+        }
+        let mut mouse = json!({"wheel_lines":-2e0});
+        normalize_integer_arguments("kettle_send_mouse", &mut mouse);
+        assert_eq!(mouse["wheel_lines"].as_i64(), Some(-2));
+        let mut run = json!({"cols":80.0,"rows":3e1});
+        normalize_integer_arguments("kettle_run", &mut run);
+        assert_eq!(run, json!({"cols":80,"rows":30}));
     }
 }

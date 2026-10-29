@@ -132,8 +132,12 @@ fn artifact(event: &Value) -> Option<PathBuf> {
         extension.as_str(),
         "svg" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "mmd" | "pdf" | "mp4" | "webm"
     );
-    (visual && (name != "edit_file" || user_facing_metadata(&target) == Some(true)))
-        .then_some(target)
+    (visual
+        && (!matches!(
+            name,
+            "edit_file" | "replace_file_content" | "multi_replace_file_content"
+        ) || user_facing_metadata(&target) == Some(true)))
+    .then_some(target)
 }
 
 /// Native TUI provenance, independent of hook JSON and environment claims.
@@ -618,6 +622,32 @@ mod tests {
                 artifact(&event).is_none(),
                 "metadata links grant no preview"
             );
+        }
+    }
+    #[test]
+    fn legacy_edits_preserve_user_facing_permission() {
+        let root = kettle_test_support::private_tempdir("kettle-agy-legacy-edit-");
+        let path = root.path().join("diagram.svg");
+        std::fs::write(&path, "<svg/>").unwrap();
+        let metadata = root.path().join("diagram.svg.metadata.json");
+        for name in ["replace_file_content", "multi_replace_file_content"] {
+            let event = json!({"artifactDirectoryPath": root.path(),
+                "toolCall": {"name": name, "args": {"TargetFile": path}}});
+            assert!(
+                artifact(&event).is_none(),
+                "{name}: missing metadata grants no preview"
+            );
+            std::fs::write(&metadata, r#"{"userFacing":false}"#).unwrap();
+            assert!(
+                artifact(&event).is_none(),
+                "{name}: private edits stay private"
+            );
+            std::fs::write(&metadata, r#"{"userFacing":true}"#).unwrap();
+            assert_eq!(
+                artifact(&event),
+                Some(std::fs::canonicalize(&path).unwrap())
+            );
+            std::fs::remove_file(&metadata).unwrap();
         }
     }
     #[test]

@@ -8662,6 +8662,9 @@ impl PtyStdin {
                 self.input_state.ambiguous_termios = true;
             })?;
             self.input_state.observe(&bytes[..written], before);
+            if written != 0 {
+                self.pending_eof = None;
+            }
             let (after, _, _) = live_canonical_eof_rules(fd).inspect_err(|_| {
                 self.input_state.ambiguous_termios = true;
             })?;
@@ -8738,6 +8741,8 @@ impl PtyStdin {
             if written == 0 {
                 return Ok(PtyEofProgress::Pending);
             }
+            self.input_state
+                .observe(&pending.sequence[pending.offset..end], pending.rules);
             pending.offset += written;
             if pending.offset < pending.sequence_len {
                 Ok(PtyEofProgress::Pending)

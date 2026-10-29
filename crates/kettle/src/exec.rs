@@ -983,6 +983,20 @@ fn run_exec_engine_with_recording_poll(
     }
     // Core can widen narrow grids; metadata must describe the effective PTY.
     let geometry = PtyGeometry::from_cell_size(opts.cols as usize, opts.rows as usize, 8, 16);
+    if geometry.columns > 4096
+        || geometry.rows > 4096
+        || geometry
+            .columns
+            .checked_mul(geometry.rows)
+            .is_none_or(|cells| cells > 262_144)
+    {
+        return startup_failure(
+            opts.mode,
+            capturing,
+            output,
+            "kettle exec: terminal geometry exceeds the 4096-dimension or 262144-cell limit".into(),
+        );
+    }
     opts.cols = geometry.columns as u16;
     opts.rows = geometry.rows as u16;
 
@@ -1214,7 +1228,19 @@ fn run_exec_engine_with_recording_poll(
             // the raw PTY channel, then apply the explicit abandon contract.
             drain_recording_slice(&orx, &mut recorder);
             finish_recording(&mut recorder, Duration::ZERO);
-            let _ = output.finish(code, started.elapsed(), OutputFinish::AbandonPending);
+            if let Err(error) = output.finish(code, started.elapsed(), OutputFinish::AbandonPending)
+            {
+                commit_output_failure_exit();
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: stdout delivery failed: {error}"
+                );
+                return if contained {
+                    EXIT_OUTPUT_DELIVERY
+                } else {
+                    EXIT_INTERNAL
+                };
+            }
             log::debug!("kettle exec bounded stop teardown finished");
             return code;
         }
@@ -2014,18 +2040,6 @@ impl LinuxProcessIdentity {
     fn read(pid: u32) -> std::io::Result<Option<Self>> {
         Ok(LinuxProcessStat::read(pid)?.map(|stat| stat.identity))
     }
-
-    fn parse(pid: u32, stat: &str) -> Option<Self> {
-        // `comm` is parenthesized and may itself contain spaces or `)`. Split
-        // after its final close-paren; fields below are then 3 onward.
-        let tail = stat.rsplit_once(") ")?.1;
-        let fields = tail.split_ascii_whitespace().collect::<Vec<_>>();
-        Some(Self {
-            pid,
-            session: fields.get(3)?.parse().ok()?,
-            start_time: fields.get(19)?.parse().ok()?,
-        })
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2038,10 +2052,16 @@ struct LinuxProcessStat {
 #[cfg(target_os = "linux")]
 impl LinuxProcessStat {
     fn read(pid: u32) -> std::io::Result<Option<Self>> {
-        Self::from_stat_read(pid, std::fs::read_to_string(format!("/proc/{pid}/stat")))
+        use std::io::Read as _;
+        let bytes = std::fs::File::open(format!("/proc/{pid}/stat")).and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(8193).read_to_end(&mut bytes)?;
+            Ok(bytes)
+        });
+        Self::from_stat_read(pid, bytes)
     }
 
-    fn from_stat_read(pid: u32, result: std::io::Result<String>) -> std::io::Result<Option<Self>> {
+    fn from_stat_read(pid: u32, result: std::io::Result<Vec<u8>>) -> std::io::Result<Option<Self>> {
         let stat = match result {
             Ok(stat) => stat,
             // procfs may return ESRCH if the process exits after open.
@@ -2053,28 +2073,45 @@ impl LinuxProcessStat {
             }
             Err(error) => return Err(error),
         };
-        let tail = stat
-            .rsplit_once(") ")
-            .map(|(_, tail)| tail)
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed /proc stat")
-            })?;
-        let fields = tail.split_ascii_whitespace().collect::<Vec<_>>();
-        let state = fields
-            .first()
-            .and_then(|field| field.as_bytes().first())
-            .copied()
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing process state")
-            })?;
-        let identity = LinuxProcessIdentity::parse(pid, &stat).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "malformed process identity",
-            )
-        })?;
+        let (state, session, start_time) = linux_stat_fields(&stat)?;
+        let identity = LinuxProcessIdentity {
+            pid,
+            session,
+            start_time,
+        };
         Ok(Some(Self { identity, state }))
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_stat_fields(stat: &[u8]) -> std::io::Result<(u8, u32, u64)> {
+    let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed /proc stat");
+    if stat.len() > 8192 {
+        return Err(invalid());
+    }
+    let close = stat
+        .iter()
+        .rposition(|byte| *byte == b')')
+        .ok_or_else(invalid)?;
+    let tail =
+        std::str::from_utf8(stat.get(close + 1..).ok_or_else(invalid)?).map_err(|_| invalid())?;
+    let fields: Vec<_> = tail.split_ascii_whitespace().collect();
+    Ok((
+        *fields
+            .first()
+            .and_then(|field| field.as_bytes().first())
+            .ok_or_else(invalid)?,
+        fields
+            .get(3)
+            .ok_or_else(invalid)?
+            .parse()
+            .map_err(|_| invalid())?,
+        fields
+            .get(19)
+            .ok_or_else(invalid)?
+            .parse()
+            .map_err(|_| invalid())?,
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -3299,15 +3336,21 @@ impl WorkerOutput {
         // pending on this thread never reached the worker, so waiting could
         // not deliver it.
         let finish_queued = dispatch_result.is_ok() && self.pending.is_none();
-        let delivered = finish_queued && self.worker_succeeded_within(grace);
-        (dispatch_result, delivered)
+        if finish_queued {
+            match self.worker_succeeded_within(grace) {
+                Ok(delivered) => (dispatch_result, delivered),
+                Err(error) => (Err(error), false),
+            }
+        } else {
+            (dispatch_result, false)
+        }
     }
 
-    fn worker_succeeded_within(&mut self, limit: Duration) -> bool {
+    fn worker_succeeded_within(&mut self, limit: Duration) -> OutputResult<bool> {
         if self.outcome.is_none() {
             match self.outcome_rx.recv_timeout(limit) {
                 Ok(outcome) => self.outcome = Some(outcome),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => return false,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => return Ok(false),
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     self.outcome = Some(Err(OutputDeliveryError::unexpected(
                         "stdout writer stopped without reporting an outcome",
@@ -3315,7 +3358,7 @@ impl WorkerOutput {
                 }
             }
         }
-        matches!(self.outcome, Some(Ok(())))
+        self.poll_worker_outcome()
     }
 
     fn finish_abandoning_pending(&mut self, code: i32, duration: Duration) -> OutputResult<()> {
@@ -6170,16 +6213,16 @@ mod tests {
         while !linux_process_has_exited(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if !linux_process_has_exited(pid) {
-            // Avoid leaking the fixture if the assertion fails.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
-        assert!(
-            linux_process_has_exited(pid),
-            "background session member {pid} survived timeout"
+        let exited = exited_before_cleanup(
+            || linux_process_has_exited(pid),
+            || {
+                // Avoid leaking the fixture if the assertion fails.
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            },
         );
+        assert!(exited, "background session member {pid} survived timeout");
     }
 
     /// The direct child can exit before the deadline while a background member
@@ -6231,14 +6274,17 @@ wait
         while !linux_process_has_exited(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if !linux_process_has_exited(pid) {
-            // Avoid leaking the fixture if the assertion fails.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
+        let exited = exited_before_cleanup(
+            || linux_process_has_exited(pid),
+            || {
+                // Avoid leaking the fixture if the assertion fails.
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            },
+        );
         assert!(
-            linux_process_has_exited(pid),
+            exited,
             "descriptor-free reparented session member {pid} survived deadline teardown"
         );
     }
@@ -6317,11 +6363,14 @@ wait
         while !linux_process_has_exited(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if !linux_process_has_exited(pid) {
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-        }
+        let exited = exited_before_cleanup(
+            || linux_process_has_exited(pid),
+            || {
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            },
+        );
         assert!(
-            linux_process_has_exited(pid),
+            exited,
             "late output deadline lost the root anchor and left session member {pid} alive"
         );
     }
@@ -6339,8 +6388,8 @@ wait
         let opened = std::fs::File::open(format!("/proc/{pid}/stat"));
         child.kill().unwrap();
         child.wait().unwrap();
-        let mut stat = String::new();
-        let result = opened.unwrap().read_to_string(&mut stat).map(|_| stat);
+        let mut stat = Vec::new();
+        let result = opened.unwrap().read_to_end(&mut stat).map(|_| stat);
         assert_eq!(
             result.as_ref().unwrap_err().raw_os_error(),
             Some(libc::ESRCH)
@@ -6358,7 +6407,7 @@ wait
             assert_eq!(error.raw_os_error(), Some(errno));
         }
         assert_eq!(
-            LinuxProcessStat::from_stat_read(1, Ok("malformed".into()))
+            LinuxProcessStat::from_stat_read(1, Ok(b"malformed".to_vec()))
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::InvalidData,
@@ -6421,11 +6470,16 @@ wait
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_process_identity_parser_and_scan_cap_are_pinned() {
-        let parsed = LinuxProcessIdentity::parse(
+        let parsed = LinuxProcessStat::from_stat_read(
             42,
-            "42 (a worker ) name) S 1 2 77 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 999 20",
+            Ok(
+                b"42 (a worker ) name) S 1 2 77 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 999 20"
+                    .to_vec(),
+            ),
         )
-        .expect("parse proc stat with spaces and a close-paren in comm");
+        .expect("parse proc stat with spaces and a close-paren in comm")
+        .expect("process stat exists")
+        .identity;
         assert_eq!(parsed.pid, 42);
         assert_eq!(parsed.session, 77);
         assert_eq!(parsed.start_time, 999);
@@ -6685,7 +6739,11 @@ wait
     #[test]
     #[allow(clippy::zombie_processes)] // teardown deliberately kills the whole fixture session
     fn linux_active_fork_session_helper() {
-        if !invoked_as_fixture(LINUX_FORK_FIXTURE) {
+        if !active_fork_fixture_allowed(
+            invoked_as_fixture(LINUX_FORK_FIXTURE),
+            std::env::var_os("KETTLE_ACTIVE_FORK_FIXTURE").as_deref()
+                == Some(std::ffi::OsStr::new("1")),
+        ) {
             return;
         }
         use std::os::unix::process::CommandExt as _;
@@ -6711,12 +6769,22 @@ wait
     #[test]
     #[allow(clippy::zombie_processes)] // teardown deliberately kills the whole fixture session
     fn linux_active_fork_session_worker() {
-        if !invoked_as_fixture(LINUX_FORK_WORKER_FIXTURE) {
+        if !active_fork_fixture_allowed(
+            invoked_as_fixture(LINUX_FORK_WORKER_FIXTURE),
+            std::env::var_os("KETTLE_ACTIVE_FORK_FIXTURE").as_deref()
+                == Some(std::ffi::OsStr::new("1")),
+        ) {
             return;
         }
         println!("FORK_PID {}", std::process::id());
         let _ = std::io::stdout().flush();
-        loop {
+        let parent = unsafe { libc::getppid() };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut children = Vec::new();
+        while Instant::now() < deadline
+            && unsafe { libc::getppid() } == parent
+            && children.len() < 256
+        {
             let child = std::process::Command::new("sleep")
                 .arg("30")
                 .stdin(std::process::Stdio::null())
@@ -6725,8 +6793,13 @@ wait
                 .spawn()
                 .expect("spawn active-fork descendant");
             println!("FORK_PID {}", child.id());
+            children.push(child);
             let _ = std::io::stdout().flush();
             std::thread::sleep(Duration::from_millis(2));
+        }
+        for mut child in children {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 
@@ -6743,6 +6816,8 @@ wait
         let helper = std::env::current_exe().expect("resolve the unit-test binary");
         let opts = ExecOpts {
             argv: vec![
+                "/usr/bin/env".into(),
+                "KETTLE_ACTIVE_FORK_FIXTURE=1".into(),
                 helper.to_string_lossy().into_owned(),
                 "--exact".into(),
                 LINUX_FORK_FIXTURE.into(),
@@ -7320,5 +7395,158 @@ wait
             "a zombie main thread was taken for the whole process"
         );
         assert!(handle.exited_or_gone().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_eof_survives_an_intervening_terminal_reply() {
+        let mut opts = opts_for(
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "cat >/dev/null; printf EOF_SEEN".into(),
+            ],
+            None,
+        );
+        opts.timeout = Some(Duration::from_secs(2));
+        let mut bytes = Vec::new();
+        let mut output = DirectOutput::new(OutputMode::Raw, &mut bytes);
+        let code = run_exec_engine_with_recording_poll(
+            opts,
+            &|| None,
+            &mut output,
+            None,
+            false,
+            poll_recording_finish,
+            |mut stdin, replies, gate, events, done| {
+                assert_eq!(stdin.try_write(b"payload").unwrap(), 7);
+                assert_eq!(stdin.try_signal_eof().unwrap(), PtyEofProgress::Pending);
+                assert_eq!(stdin.try_write(b"\x1b[0n").unwrap(), 4);
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while stdin.try_signal_eof().unwrap() == PtyEofProgress::Pending {
+                    assert!(Instant::now() < deadline);
+                }
+                spawn_pty_writer_arbiter(stdin, replies, gate, events, done)
+            },
+        );
+        assert_eq!(
+            code, 0,
+            "child must observe EOF after the reply; output={bytes:?}"
+        );
+        assert!(String::from_utf8_lossy(&bytes).contains("EOF_SEEN"));
+    }
+
+    #[test]
+    fn final_write_grace_preserves_worker_failure() {
+        struct FailsOnFinish;
+        impl Write for FailsOnFinish {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if bytes.windows(b"exit".len()).any(|part| part == b"exit") {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "final write failed",
+                    ))
+                } else {
+                    Ok(bytes.len())
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut output = WorkerOutput::spawn(OutputMode::Json, FailsOnFinish).unwrap();
+        let (result, delivered) =
+            output.queue_final_write(EXIT_TIMEOUT, Duration::ZERO, Duration::from_secs(5));
+        assert!(
+            result.is_err(),
+            "final-write worker error must reach the lifecycle"
+        );
+        assert!(!delivered);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("final write failed")
+        );
+        #[cfg(unix)]
+        for cancel in [false, true] {
+            let cancelled = AtomicBool::new(cancel);
+            let mut opts = long_running_stop_test_opts(Some(Duration::ZERO));
+            opts.mode = OutputMode::Json;
+            let mut output = WorkerOutput::spawn(OutputMode::Json, FailsOnFinish).unwrap();
+            let code = run_exec_engine(opts, &|| None, &mut output, Some(&cancelled), false);
+            if code == EXIT_INTERNAL {
+                eprintln!("skipping final-write lifecycle check: PTY or teardown unavailable");
+                continue;
+            }
+            assert_eq!(
+                code, EXIT_OUTPUT_DELIVERY,
+                "final-write failure must override the stop status"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_stat_accepts_non_utf8_names_before_ascii_fields() {
+        for (pid, session) in [(42, 77), (9999, 1234)] {
+            let mut stat = format!("{pid} (worker ").into_bytes();
+            stat.extend_from_slice(b"\xff ) name) S 1 2 ");
+            stat.extend_from_slice(
+                format!("{session} 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 999 20").as_bytes(),
+            );
+            assert_eq!(
+                linux_stat_fields(&stat).ok(),
+                Some((b'S', session, 999)),
+                "valid non-UTF-8 names must not invalidate owned or unrelated process identities"
+            );
+        }
+    }
+
+    #[test]
+    fn excessive_exec_geometry_is_rejected_before_startup() {
+        for (cols, rows) in [(4097, 1), (1, 4097), (513, 512), (u16::MAX, u16::MAX)] {
+            let mut opts = opts_for(vec!["kettle-no-such-binary-geometry".into()], None);
+            opts.cols = cols;
+            opts.rows = rows;
+            let (code, message) = run_exec_capture(opts);
+            assert_eq!(code, EXIT_INTERNAL);
+            assert!(
+                message.contains("terminal geometry exceeds"),
+                "geometry must be rejected before PTY creation: {message}"
+            );
+        }
+    }
+
+    fn active_fork_fixture_allowed(exact: bool, opt_in: bool) -> bool {
+        exact && opt_in
+    }
+
+    #[test]
+    fn ordinary_exact_selection_does_not_admit_fork_fixtures() {
+        assert!(
+            !active_fork_fixture_allowed(true, false),
+            "ordinary --exact selection must not start fork fixtures"
+        );
+        assert!(!active_fork_fixture_allowed(false, true));
+        assert!(active_fork_fixture_allowed(true, true));
+    }
+
+    fn exited_before_cleanup(exited: impl Fn() -> bool, cleanup: impl FnOnce()) -> bool {
+        let observed = exited();
+        if !observed {
+            cleanup();
+        }
+        observed
+    }
+
+    #[test]
+    fn fallback_cleanup_cannot_hide_a_teardown_failure() {
+        let exited = std::cell::Cell::new(false);
+        let observed = exited_before_cleanup(|| exited.get(), || exited.set(true));
+        assert!(
+            !observed,
+            "fallback cleanup must not count as successful teardown"
+        );
+        assert!(exited.get(), "fallback must still clean up the fixture");
     }
 }

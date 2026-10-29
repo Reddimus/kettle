@@ -945,7 +945,7 @@ fn stdout_burst_then_exit_helper() {
         .expect("stdout-burst byte count")
         .parse()
         .expect("stdout-burst byte count is an integer");
-    std::fs::write(pid_path, std::process::id().to_string())
+    publish_helper_pid_with(std::path::Path::new(&pid_path), std::process::id(), || {})
         .expect("publish stdout-burst helper pid");
 
     // This helper must EXIT while its output is still undelivered; that is the
@@ -1908,10 +1908,21 @@ fn exec_raw_mode_eof_is_explicit_and_does_not_destroy_terminal_replies() {
             break;
         }
     }
-    assert!(
-        out.contains("RAW_MODE_READY"),
-        "raw-mode helper never became ready: {out:?}"
-    );
+    if !out.contains("RAW_MODE_READY") {
+        drop(stdin);
+        let mut err = String::new();
+        child
+            .stderr
+            .take()
+            .expect("piped stderr")
+            .read_to_string(&mut err)
+            .unwrap();
+        let status = child.wait().expect("reap helper before readiness");
+        if !raw_mode_ready(&out, status.code().unwrap_or(-1), &err) {
+            eprintln!("skipping exec_raw_mode_eof_is_explicit: no PTY");
+        }
+        return;
+    }
     drop(stdin);
     let mut stderr = std::io::BufReader::new(child.stderr.take().expect("piped stderr"));
     let mut err = String::new();
@@ -2355,23 +2366,7 @@ fn run_backpressured_exec(
         payload[1] = b'\n';
         let _ = stdin.write_all(&payload);
     });
-    let mut out = String::new();
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut out)
-        .unwrap();
-    let mut err = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut err)
-        .unwrap();
-    let status = child.wait().expect("wait for backpressured exec");
-    writer.join().expect("join blocked-stdin writer");
-    (status.code().unwrap_or(-1), out, err, start.elapsed())
+    collect_backpressured_child(child, writer, start, Duration::from_secs(10))
 }
 
 #[cfg(unix)]
@@ -2706,17 +2701,130 @@ fn exec_record_writes_replayable_asciicast() {
     // Header is asciicast v2.
     let header: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     assert_eq!(header["version"], 2);
-    // At least one output event carries the marker text.
-    let saw_marker = lines.any(|l| {
-        serde_json::from_str::<serde_json::Value>(l)
-            .ok()
-            .filter(|v| v[1] == "o")
-            .map(|v| v[2].as_str().unwrap_or("").contains("recmark-9z"))
-            .unwrap_or(false)
-    });
+    let saw_marker = recording_has_marker(lines, "recmark-9z");
     assert!(
         saw_marker,
         "recording missing the child output; file: {contents:?}"
     );
     let _ = std::fs::remove_file(&path);
+}
+
+fn raw_mode_ready(out: &str, code: i32, err: &str) -> bool {
+    if no_pty(code, err) {
+        return false;
+    }
+    assert!(
+        out.contains("RAW_MODE_READY"),
+        "raw-mode helper never became ready: {out:?}"
+    );
+    true
+}
+
+#[test]
+fn unavailable_pty_is_checked_before_raw_readiness() {
+    assert!(!raw_mode_ready(
+        "",
+        125,
+        "kettle exec: cannot start PTY: unavailable"
+    ));
+}
+
+fn publish_helper_pid_with(
+    path: &std::path::Path,
+    pid: u32,
+    before_write: impl FnOnce(),
+) -> std::io::Result<()> {
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+    before_write();
+    file.write_all(pid.to_string().as_bytes())?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+#[test]
+fn helper_pid_is_visible_only_when_complete() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("helper.pid");
+    publish_helper_pid_with(&path, 123, || {
+        assert!(
+            !path.exists(),
+            "PID publication must not expose an empty file"
+        );
+    })
+    .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "123");
+}
+
+#[cfg(unix)]
+fn collect_backpressured_child(
+    mut child: std::process::Child,
+    writer: std::thread::JoinHandle<()>,
+    start: Instant,
+    limit: Duration,
+) -> (i32, String, String, Duration) {
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        stdout.read_to_string(&mut out).unwrap();
+        out
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut err = String::new();
+        stderr.read_to_string(&mut err).unwrap();
+        err
+    });
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll backpressured exec") {
+            break status;
+        }
+        if start.elapsed() >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("backpressured exec exceeded its independent test watchdog");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let out = stdout_reader.join().expect("join stdout reader");
+    let err = stderr_reader.join().expect("join stderr reader");
+    writer.join().expect("join blocked-stdin writer");
+    (status.code().unwrap_or(-1), out, err, start.elapsed())
+}
+
+#[cfg(unix)]
+#[test]
+fn backpressure_watchdog_does_not_depend_on_stdout_eof() {
+    let child = std::process::Command::new("sleep")
+        .arg("2")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let writer = std::thread::spawn(|| {});
+    let start = Instant::now();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        collect_backpressured_child(child, writer, start, Duration::from_millis(50))
+    }));
+    assert!(
+        outcome.is_err() && start.elapsed() < Duration::from_secs(1),
+        "independent watchdog must stop a child that keeps stdout open"
+    );
+}
+
+fn recording_has_marker<'a>(lines: impl Iterator<Item = &'a str>, marker: &str) -> bool {
+    let output: String = lines
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event[1] == "o")
+        .filter_map(|event| event[2].as_str().map(str::to_owned))
+        .collect();
+    output.contains(marker)
+}
+
+#[test]
+fn recording_markers_can_span_output_events() {
+    let recording = "[0.0,\"o\",\"recmark-\"]\n[0.1,\"i\",\"ignored\"]\n[0.2,\"o\",\"9z\"]\n";
+    assert!(
+        recording_has_marker(recording.lines(), "recmark-9z"),
+        "recording marker must be found across PTY chunks"
+    );
 }

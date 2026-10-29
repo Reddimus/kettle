@@ -1553,9 +1553,10 @@ fn main() -> anyhow::Result<()> {
         // explicit `--config` regular-file precheck, and configs may be UTF-16.
         let mut read_error: Option<String> = None;
         let (cfg, unknown, malformed, ignored) = match &path {
-            Some(p) if p.exists() => match prepare_resolved_config(&cli, p).and_then(|()| {
-                kettle_config::Config::read_from_with_trust(p, resolved_config_trust(&cli))
-            }) {
+            Some(p) if p.try_exists().unwrap_or(true) => match prepare_resolved_config(&cli, p)
+                .and_then(|()| {
+                    kettle_config::Config::read_from_with_trust(p, resolved_config_trust(&cli))
+                }) {
                 Ok(loaded) => {
                     // Sections kettle walked past. Every key inside one can be
                     // spelled correctly and still do nothing, so this is a
@@ -1593,7 +1594,7 @@ fn main() -> anyhow::Result<()> {
         // use in their support flags.
         println!("kettle:  {KETTLE_VERSION}");
         match &path {
-            Some(p) if p.exists() => println!("config:  {}", p.display()),
+            Some(p) if p.try_exists().unwrap_or(true) => println!("config:  {}", p.display()),
             Some(p) => {
                 println!("config:  {} (not found — using defaults)", p.display());
                 // Point a newcomer who sees "using defaults" at the
@@ -2319,11 +2320,13 @@ fn write_default_config(
         };
     }
 
-    match kettle_state::create_private_file_new(path) {
-        Ok(mut file) => {
-            write(&mut file)?;
-            Ok(DefaultConfigWrite::Written)
-        }
+    match kettle_state::atomic_create_new(
+        path,
+        include_bytes!("../../../docs/kettle.example.config"),
+        kettle_state::AtomicWriteOptions::PRIVATE,
+    ) {
+        Ok(true) => Ok(DefaultConfigWrite::Written),
+        Ok(false) => Ok(DefaultConfigWrite::AlreadyPresent),
         // A directory at the config path is also "something is already here,
         // leave it alone". Windows reports it as a permission error, not
         // AlreadyExists, so `create_error` also checks `symlink_metadata`.
@@ -2493,7 +2496,12 @@ fn format_ssh_hosts(hosts: &[(String, String)]) -> Vec<String> {
     if hosts.is_empty() {
         return vec!["(no ssh-host entries configured)".into()];
     }
-    let width = hosts.iter().map(|(n, _)| n.len()).max().unwrap_or(0).max(4);
+    let width = hosts
+        .iter()
+        .map(|(n, _)| n.len())
+        .max()
+        .unwrap_or(0)
+        .clamp(4, 64);
     let mut rows: Vec<(&str, &str)> = hosts
         .iter()
         .map(|(n, t)| (n.as_str(), t.as_str()))
@@ -3093,6 +3101,52 @@ mod tests {
         assert!(
             queue_at < activation_at,
             "the warning must be queued before an Activated outcome can return"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_implicit_default_config_write_can_be_retried() {
+        const CHILD: &str = "KETTLE_DEFAULT_CONFIG_WRITE_FAILURE_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::failed_implicit_default_config_write_can_be_retried",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "write failure fixture: {output:?}");
+            return;
+        }
+        let root = kettle_test_support::private_tempdir("kettle-config-write-failure-");
+        let path = root.path().join("config");
+        let mut original: libc::rlimit = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut original) },
+            0
+        );
+        let limited = libc::rlimit {
+            rlim_cur: 128,
+            rlim_max: original.rlim_max,
+        };
+        let signal = unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limited) }, 0);
+        let failed = write_default_config(&path, kettle_config::ConfigTrust::VerifyDirectory);
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &original) }, 0);
+        unsafe {
+            libc::signal(libc::SIGXFSZ, signal);
+        }
+        assert!(failed.is_err());
+        assert!(
+            !path.exists(),
+            "failed implicit write must leave no partial destination"
+        );
+        assert_eq!(
+            write_default_config(&path, kettle_config::ConfigTrust::VerifyDirectory).unwrap(),
+            super::DefaultConfigWrite::Written
         );
     }
 
@@ -3883,6 +3937,19 @@ mod tests {
                 "embedded example config missing extended key {key:?}"
             );
         }
+    }
+
+    #[test]
+    fn ssh_table_padding_does_not_amplify_long_names() {
+        let mut hosts = vec![("x".repeat(4096), "target".into())];
+        hosts.extend((0..256).map(|_| ("a".into(), "target".into())));
+        let rows = format_ssh_hosts(&hosts);
+        assert_eq!(rows.len(), hosts.len());
+        assert!(
+            rows.iter().map(String::len).sum::<usize>() < 32 * 1024,
+            "SSH padding must have a fixed bound independent of long names"
+        );
+        assert!(rows.iter().any(|row| row.starts_with(&"x".repeat(4096))));
     }
 
     #[test]

@@ -150,12 +150,21 @@ struct WriterProgress {
     /// Incremented after each completed write, so "parked in ONE write" is
     /// distinguishable from "writing steadily".
     completed: AtomicU64,
+    failure: Mutex<Option<String>>,
 }
 
 fn stdout_stall_detector(progress: &WriterProgress, limit: Duration) -> impl FnMut() -> bool + '_ {
     let mut seen = progress.completed.load(Ordering::Relaxed);
     let mut since = Instant::now();
     move || {
+        if progress
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return true;
+        }
         let completed = progress.completed.load(Ordering::Relaxed);
         if completed != seen || !progress.in_write.load(Ordering::Relaxed) {
             // Progress, or nothing in flight: the peer is not the problem.
@@ -246,6 +255,13 @@ pub fn run_mcp_with(
             while let Ok(message) = responses_rx.recv() {
                 writer_progress.in_write.store(true, Ordering::Release);
                 let wrote = write_message(&mut output, &message);
+                if let Err(error) = &wrote {
+                    *writer_progress
+                        .failure
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(error.to_string());
+                }
                 writer_progress.in_write.store(false, Ordering::Release);
                 writer_progress.completed.fetch_add(1, Ordering::Release);
                 if wrote.is_err() {
@@ -392,6 +408,15 @@ pub fn run_mcp_with(
         // upstream notices, and a plain join would hang forever.
         stalled =
             !wait_unless_stdout_stalled(&progress, STDOUT_STALL_LIMIT, || writer.is_finished());
+    }
+    if let Some(error) = progress
+        .failure
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+    {
+        eprintln!("kettle mcp: stdout write failed: {error}");
+        return 1;
     }
     if stalled {
         eprintln!(
@@ -2079,5 +2104,47 @@ mod tests {
             &pending,
         );
         assert!(responses_rx.try_recv().is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn broken_stdout_stops_the_server_with_open_or_closed_stdin() {
+        struct BrokenWriter;
+        impl Write for BrokenWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "test reader closed",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for keep_open in [false, true] {
+            let (reader, mut input) = std::os::unix::net::UnixStream::pair().unwrap();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let code = run_mcp_with(
+                    std::io::BufReader::new(reader),
+                    BrokenWriter,
+                    ToolSelection::Full,
+                );
+                done_tx.send(code).unwrap();
+            });
+            input
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+                .unwrap();
+            if !keep_open {
+                input.shutdown(std::net::Shutdown::Write).unwrap();
+            }
+            let result = done_rx.recv_timeout(Duration::from_secs(2));
+            drop(input);
+            server.join().unwrap();
+            assert_eq!(
+                result.ok(),
+                Some(1),
+                "stdout failure must terminate MCP even with stdin open={keep_open}"
+            );
+        }
     }
 }

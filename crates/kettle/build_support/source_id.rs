@@ -16,6 +16,7 @@ impl Inputs {
             links: Vec::new(),
         };
         inputs.visit(&repo_root.join("crates"), 0);
+        inputs.visit(&repo_root.join("vendor"), 0);
         inputs.files.sort();
         inputs.files.push(repo_root.join("Cargo.toml"));
         inputs.files.push(repo_root.join("Cargo.lock"));
@@ -55,12 +56,13 @@ impl Inputs {
     }
 }
 
-/// Hash all files under `crates/` plus the workspace manifest and lockfile,
+/// Hash all files under `crates/` and `vendor/` plus the workspace manifest and lockfile,
 /// and register their inputs with Cargo.
 pub fn tracked_source_hash(repo_root: &Path) -> u64 {
     let inputs = Inputs::collect(repo_root);
     for path in [
         repo_root.join("crates"),
+        repo_root.join("vendor"),
         repo_root.join("Cargo.toml"),
         repo_root.join("Cargo.lock"),
     ]

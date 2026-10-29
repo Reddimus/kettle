@@ -361,6 +361,9 @@ impl OutputRefusal {
 fn shared(directory: &Path) -> Result<bool, OutputRefusal> {
     use std::os::unix::fs::MetadataExt as _;
     let found = std::fs::metadata(directory).map_err(|_| OutputRefusal::Unwritable)?;
+    if shared_mode(found.uid(), found.mode(), unsafe { libc::geteuid() }) {
+        return Ok(true);
+    }
     if found.mode() & 0o1000 != 0 {
         return Ok(false);
     }
@@ -368,7 +371,12 @@ fn shared(directory: &Path) -> Result<bool, OutputRefusal> {
     if kettle_media_native::acl::grants_write(directory) {
         return Ok(true);
     }
-    Ok(found.mode() & 0o022 != 0)
+    Ok(false)
+}
+
+#[cfg(any(unix, test))]
+fn shared_mode(owner: u32, mode: u32, user: u32) -> bool {
+    (owner != 0 && owner != user) || (mode & 0o1000 == 0 && mode & 0o022 != 0)
 }
 
 /// Windows has no media worker, so no sheet is ever written there.
@@ -390,17 +398,12 @@ fn unpredictable() -> u64 {
 }
 
 /// A new private file in `directory` under a hidden, unpredictable name
-/// beside `name`, made by this call and by nothing else. Created as a
+/// made by this call and by nothing else. Created as a
 /// user-selected export, so on macOS it never inherits an ACL from the
 /// folder that would let another user read the frames.
-fn create_private(
-    directory: &Path,
-    name: &std::ffi::OsStr,
-) -> Result<(PathBuf, std::fs::File), OutputRefusal> {
+fn create_private(directory: &Path) -> Result<(PathBuf, std::fs::File), OutputRefusal> {
     for _ in 0..16 {
-        let mut candidate = std::ffi::OsString::from(".");
-        candidate.push(name);
-        candidate.push(format!(".{:016x}.tmp", unpredictable()));
+        let candidate = format!(".kettle-{:016x}.tmp", unpredictable());
         let path = directory.join(candidate);
         match kettle_state::create_user_selected_file_new(&path) {
             Ok(file) => return Ok((path, file.persist())),
@@ -431,11 +434,11 @@ fn write_out(out: &Path, input: &Path, bytes: &[u8]) -> Result<(), OutputRefusal
             }
         })
         .ok_or(OutputRefusal::Unwritable)?;
-    let name = out.file_name().ok_or(OutputRefusal::Unwritable)?;
+    out.file_name().ok_or(OutputRefusal::Unwritable)?;
     if shared(directory)? {
         return Err(OutputRefusal::Shared);
     }
-    let (temporary, mut file) = create_private(directory, name)?;
+    let (temporary, mut file) = create_private(directory)?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     // Closed first: Windows refuses to rename a file while a handle without
     // delete sharing is open on it, and the private create grants none.
@@ -842,5 +845,31 @@ mod tests {
         chmod(&folder, 0o755);
         assert_eq!(std::fs::read(&lookalike).unwrap(), b"someone's");
         assert_eq!(std::fs::read(&out).unwrap(), b"jpeg");
+    }
+    #[test]
+    fn sticky_output_directory_requires_a_trusted_owner() {
+        assert!(
+            shared_mode(43, 0o1777, 42),
+            "a foreign directory owner can replace staging entries despite sticky mode"
+        );
+        assert!(!shared_mode(0, 0o1777, 42));
+        assert!(!shared_mode(42, 0o1777, 42));
+        assert!(shared_mode(43, 0o755, 42));
+        assert!(shared_mode(42, 0o777, 42));
+    }
+
+    #[test]
+    fn output_filename_near_component_limit_is_supported() {
+        let root = kettle_test_support::private_tempdir("kettle-video-long-output-");
+        let input = root.path().join("clip.webm");
+        std::fs::write(&input, b"video").unwrap();
+        let output = root.path().join(format!("{}.jpg", "x".repeat(236)));
+        assert_eq!(
+            write_out(&output, &input, b"jpeg"),
+            Ok(()),
+            "valid output filename must not be lengthened for staging"
+        );
+        assert_eq!(std::fs::read(output).unwrap(), b"jpeg");
+        assert_eq!(std::fs::read(input).unwrap(), b"video");
     }
 }

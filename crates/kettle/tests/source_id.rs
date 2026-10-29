@@ -119,3 +119,19 @@ fn this_build_embeds_the_hash_it_reports() {
         format!("{} ({hash})", env!("CARGO_PKG_VERSION"))
     );
 }
+
+#[test]
+fn vendored_source_edit_changes_build_identity() {
+    let root = tempfile::tempdir().unwrap();
+    workspace(root.path());
+    let source = root.path().join("vendor/patched/src/lib.rs");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, "pub fn patched() {}\n").unwrap();
+    let before = source_hash(root.path());
+    fs::write(&source, "pub fn patched() { }\n").unwrap();
+    assert_ne!(
+        source_hash(root.path()),
+        before,
+        "vendored source must affect identity"
+    );
+}

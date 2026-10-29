@@ -120,18 +120,18 @@ fn shipped_worker_accepts_movie_bytes_with_another_video_suffix() {
     let path = dir.path().join("movie.avi");
     write_private_fixture(&path, VIDEO_FIXTURE);
     let input = worker_input(&path, &build_identity());
-    let output = run_worker_with(&input);
-    let output = if output.status.code() == Some(WORKER_TIMEOUT_EXIT) {
-        run_worker_with(&input)
-    } else {
-        output
-    };
+    let output = retry_worker_timeout(|| run_worker_with(&input));
     assert!(output.status.success(), "{output:?}");
     let reply = Reply::parse(&output.stdout);
     assert_eq!(reply.size, VIDEO_FIXTURE.len() as u64);
     // The same file checked again has the same fingerprint, which a
     // poster's second check compares.
-    let again = Reply::parse(&run_worker_with(&input).stdout);
+    let again = retry_worker_timeout(|| run_worker_with(&input));
+    assert!(
+        again.status.success(),
+        "fingerprint recheck failed: {again:?}"
+    );
+    let again = Reply::parse(&again.stdout);
     assert_eq!(again.fingerprint, reply.fingerprint);
     assert_ne!(reply.fingerprint, [0; 32]);
 }
@@ -412,4 +412,46 @@ fn shipped_worker_exits_when_its_parent_never_finishes_input() {
         Some(WORKER_TIMEOUT_EXIT),
         "self-deadline exit status"
     );
+}
+
+fn retry_worker_timeout(mut run: impl FnMut() -> std::process::Output) -> std::process::Output {
+    let output = run();
+    if output.status.code() == Some(WORKER_TIMEOUT_EXIT) {
+        run()
+    } else {
+        output
+    }
+}
+
+#[test]
+fn fingerprint_recheck_retries_a_deadline_exit() {
+    let mut attempts = 0;
+    let output = retry_worker_timeout(|| {
+        attempts += 1;
+        let code = if attempts == 1 {
+            WORKER_TIMEOUT_EXIT
+        } else {
+            0
+        };
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt as _;
+            std::process::ExitStatus::from_raw(code << 8)
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt as _;
+            std::process::ExitStatus::from_raw(code as u32)
+        };
+        std::process::Output {
+            status,
+            stdout: vec![],
+            stderr: vec![],
+        }
+    });
+    assert!(
+        output.status.success(),
+        "deadline exit must be retried before parsing a fingerprint reply"
+    );
+    assert_eq!(attempts, 2);
 }

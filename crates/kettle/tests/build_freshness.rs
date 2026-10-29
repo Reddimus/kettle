@@ -113,12 +113,18 @@ fn source_libraries_rebuild_only_when_inputs_change() {
         "[workspace]\nresolver = \"3\"\nmembers = [\"crates/*\"]\n",
     )
     .unwrap();
+    let patched = root.join("vendor/patched/src/lib.rs");
+    fs::create_dir_all(patched.parent().unwrap()).unwrap();
+    fs::write(&patched, "pub fn patched() {}\n").unwrap();
     let first = build(&root);
     first.libraries_are_fresh(false);
     let mut hash = first.hash;
     unchanged(&root, &hash);
 
     fs::write(root.join("README.md"), "not a protocol input\n").unwrap();
+    unchanged(&root, &hash);
+    fs::write(&patched, "pub fn patched() { }\n").unwrap();
+    changed(&root, &mut hash);
     unchanged(&root, &hash);
     fs::write(
         root.join("crates/kettle-update/src/lib.rs"),
