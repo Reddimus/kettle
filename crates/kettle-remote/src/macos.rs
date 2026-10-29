@@ -250,6 +250,20 @@ impl ProcessTree for MacProcessTree {
         self.entries.get(&pid)?.argv.clone()
     }
 
+    fn executable_of(&self, pid: u32) -> Option<String> {
+        self.entries.get(&pid)?;
+        let pid = libc::c_int::try_from(pid).ok()?;
+        let mut path = [0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: path is writable for exactly the size supplied to libproc.
+        let written =
+            unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+        if written <= 0 {
+            return None;
+        }
+        let end = path.iter().position(|&byte| byte == 0)?;
+        std::str::from_utf8(&path[..end]).ok().map(String::from)
+    }
+
     /// Read on demand, like the Linux tree, so only the shell a caller asks
     /// about pays for it.
     fn cwd_of(&self, pid: u32) -> Option<String> {

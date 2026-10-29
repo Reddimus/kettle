@@ -573,14 +573,21 @@ impl ImageItem {
         };
         let width = self.image.width as f32;
         let height = self.image.height as f32;
-        let inset_x = source.width.min(1.0) / 2.0;
-        let inset_y = source.height.min(1.0) / 2.0;
-        [
-            (source.x + inset_x) / width,
-            (source.y + inset_y) / height,
-            (source.x + source.width - inset_x) / width,
-            (source.y + source.height - inset_y) / height,
-        ]
+        let axis_clamp = |start: f32, extent: f32, image_extent: f32| {
+            // Fractional tiles share texels with adjacent cells. Their filtering
+            // must cross tile edges, while integer crops exclude outside texels.
+            if start.fract() != 0.0 || extent.fract() != 0.0 {
+                [0.5 / image_extent, (image_extent - 0.5) / image_extent]
+            } else {
+                [
+                    (start + 0.5) / image_extent,
+                    (start + extent - 0.5) / image_extent,
+                ]
+            }
+        };
+        let [min_x, max_x] = axis_clamp(source.x, source.width, width);
+        let [min_y, max_y] = axis_clamp(source.y, source.height, height);
+        [min_x, min_y, max_x, max_y]
     }
 
     pub(crate) fn full(x: f32, y: f32, width: f32, height: f32, image: ImageData) -> Self {
@@ -1590,6 +1597,65 @@ mod aba_guard_tests {
     }
 
     #[test]
+    fn fractional_tiles_preserve_continuous_contrasting_samples() {
+        // Compare four placeholder cells to one stretched black/white image.
+        let image = ImageData::new(2, 1, vec![0, 0, 0, 255, 255, 255, 255, 255]).unwrap();
+        for vertical in [false, true] {
+            let image = if vertical {
+                ImageData::new(1, 2, image.rgba.to_vec()).unwrap()
+            } else {
+                image.clone()
+            };
+            for cell in 0..4 {
+                let offset = cell as f32 * 0.5;
+                let source = if vertical {
+                    ImageSourceRect {
+                        x: 0.0,
+                        y: offset,
+                        width: 1.0,
+                        height: 0.5,
+                    }
+                } else {
+                    ImageSourceRect {
+                        x: offset,
+                        y: 0.0,
+                        width: 0.5,
+                        height: 1.0,
+                    }
+                };
+                let item = super::ImageItem::placement(
+                    [0.0, 0.0, 4.0, 4.0],
+                    image.clone(),
+                    Some(source),
+                    None,
+                    [0.0, 0.0, 4.0, 4.0],
+                );
+                let instance = item.instance().unwrap();
+                let axis = usize::from(vertical);
+                let mut samples = Vec::new();
+                for pixel in 0..4 {
+                    let fraction = (pixel as f32 + 0.5) / 4.0;
+                    let uv = (instance.uv_origin[axis] + fraction * instance.uv_size[axis])
+                        .clamp(instance.uv_clamp[axis], instance.uv_clamp[axis + 2]);
+                    // The shader's linear interpolation of the two opaque texels.
+                    let weight = (uv * 2.0 - 0.5).clamp(0.0, 1.0);
+                    let sample =
+                        image.rgba[0] as f32 * (1.0 - weight) + image.rgba[4] as f32 * weight;
+                    let expected = ((cell as f32 + fraction) * 0.5 - 0.5).clamp(0.0, 1.0) * 255.0;
+                    assert!(
+                        (sample - expected).abs() < 0.001,
+                        "cell {cell}, pixel {pixel}: {sample} != {expected}"
+                    );
+                    samples.push(sample);
+                }
+                if cell == 1 || cell == 2 {
+                    assert!(samples.windows(2).all(|pair| pair[0] < pair[1]));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn fractional_source_rectangles_reach_texture_coordinates() {
         let image = ImageData::new(1, 1, vec![1, 2, 3, 255]).unwrap();
         for (x, y) in [(0.0, 0.0), (0.5, 0.0), (0.0, 0.5), (0.5, 0.5)] {
@@ -1611,7 +1677,7 @@ mod aba_guard_tests {
                 [0.0, 0.0, 8.0, 16.0],
             );
             let instance = item.instance().expect("fractional tile");
-            assert_eq!(instance.uv_clamp, [x + 0.25, y + 0.25, x + 0.25, y + 0.25]);
+            assert_eq!(instance.uv_clamp, [0.5; 4]);
         }
         for source in [
             ImageSourceRect {

@@ -17522,6 +17522,8 @@ fn remote_reconnect_passes_literal_arguments_to_client() {
     use super::{Config, PtyGeometry};
     let cfg = Config {
         shell: Some("kettle-nonexistent-shell".into()),
+        login_shell: true,
+        shell_integration: true,
         ..Config::default()
     };
     let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
@@ -17548,6 +17550,49 @@ fn remote_reconnect_passes_literal_arguments_to_client() {
         },
     )
     .unwrap();
+    let target = mux.active_focus().unwrap();
+    assert_eq!(&mux.panes[&target].argv[1..], args);
+    assert!(wait_for_pane_screen(&mux, target, |text, _| text
+        .contains("RECONNECT_ARGV_PRESERVED")));
+    mux.kill_children();
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_reconnect_uses_detected_client_outside_kettle_path() {
+    use super::{Config, PtyGeometry};
+    let cfg = Config {
+        shell: Some("kettle-nonexistent-shell".into()),
+        login_shell: true,
+        shell_integration: true,
+        ..Config::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("podman");
+    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &executable).unwrap();
+    assert!(
+        !std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .any(|path| path == dir.path())
+    );
+    let argv = [executable.to_str().unwrap(), "exec", "-it", "web", "sh"].map(String::from);
+    let ctx = kettle_remote::detect_container(&argv).unwrap();
+    let mut command = kettle_remote::clone_session_command(&ctx).unwrap();
+    assert_eq!(command.program, executable.to_str().unwrap());
+    let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
+    let mut mux = Mux::new();
+    let args = [
+        "--exact",
+        "app::tests::remote_reconnect_argv_child",
+        "--nocapture",
+        "--skip",
+        "kettle-reconnect-argv-probe",
+        "--skip",
+        "a'\" b % ^ $ !",
+    ]
+    .map(String::from)
+    .to_vec();
+    command.args = args.clone();
+    super::reconnect_remote_session(&mut mux, &cfg, geometry, Arc::new(|| {}), command).unwrap();
     let target = mux.active_focus().unwrap();
     assert_eq!(&mux.panes[&target].argv[1..], args);
     assert!(wait_for_pane_screen(&mux, target, |text, _| text

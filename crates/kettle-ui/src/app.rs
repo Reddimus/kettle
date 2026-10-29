@@ -10198,7 +10198,20 @@ fn reconnect_remote_session(
     let argv = std::iter::once(command.program)
         .chain(command.args)
         .collect();
-    mux.split_with_geometry(Dir::Horizontal, false, cfg, geometry, waker, argv, None)?;
+    let client_cfg = Config {
+        login_shell: false,
+        shell_integration: false,
+        ..cfg.clone()
+    };
+    mux.split_with_geometry(
+        Dir::Horizontal,
+        false,
+        &client_cfg,
+        geometry,
+        waker,
+        argv,
+        None,
+    )?;
     Ok(())
 }
 

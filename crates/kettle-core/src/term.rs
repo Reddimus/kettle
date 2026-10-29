@@ -9391,6 +9391,7 @@ fn apply_animation_snapshot(
             let started = match animations.get(&id) {
                 Some(previous)
                     if previous.state.running == state.running
+                        && previous.state.selection_serial == state.selection_serial
                         && (!state.running || previous.state.current == state.current) =>
                 {
                     previous.started

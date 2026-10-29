@@ -291,6 +291,9 @@ pub struct Frame {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnimationState {
     pub current: u32,
+    /// Changes on every valid explicit frame selection, including repeated c=.
+    /// Snapshot consumers use it to rebase playback without resetting on gap updates.
+    pub selection_serial: u64,
     /// `false` = stopped (`s=1`); `true` = running (`s=2|3`).
     pub running: bool,
     /// `s=2`: wait for more frames at the end instead of looping.
@@ -307,6 +310,7 @@ impl Default for AnimationState {
     fn default() -> Self {
         AnimationState {
             current: 1,
+            selection_serial: 0,
             running: false,
             loading: false,
             loops: 0,
@@ -1319,6 +1323,7 @@ impl KittyState {
             let st = self.anim.entry(id).or_default();
             if let Some(c) = dim("c").filter(|&frame| frame != 0 && frame <= last) {
                 st.current = c;
+                st.selection_serial = st.selection_serial.wrapping_add(1);
             }
             match kv.get("s").and_then(|v| v.parse::<u32>().ok()) {
                 Some(1) => {

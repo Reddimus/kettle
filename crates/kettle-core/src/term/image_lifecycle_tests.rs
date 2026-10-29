@@ -2148,3 +2148,45 @@ fn selected_frame_playback_rebases_the_core_clock() {
         );
     }
 }
+
+#[test]
+fn repeated_frame_selection_rebases_playback_without_resetting_gap_updates() {
+    for synchronized in [false, true] {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b_Ga=T,i=7,f=32,s=1,v=1;AQID/w==\x1b\\");
+        harness.feed(b"\x1b_Ga=f,i=7,f=32,s=1,v=1,z=100;CAkK/w==\x1b\\");
+        harness.feed(b"\x1b_Ga=f,i=7,f=32,s=1,v=1,z=100;BQYH/w==\x1b\\");
+        harness.feed(b"\x1b_Ga=a,i=7,r=1,z=100,c=1,s=3\x1b\\");
+        let old_start = std::time::Instant::now() - std::time::Duration::from_millis(150);
+        {
+            let mut animations = harness.anims.lock().unwrap();
+            let animation = animations.get_mut(&7).unwrap();
+            animation.started = old_start;
+            assert_eq!(animation.current().unwrap().rgba[0], 8);
+            assert_eq!(animation.state.current, 1);
+        }
+        if synchronized {
+            harness.feed(b"\x1b[?2026h");
+        }
+        harness.feed(b"\x1b_Ga=a,i=7,c=1\x1b\\");
+        if synchronized {
+            assert_eq!(harness.anims.lock().unwrap()[&7].started, old_start);
+            harness.feed(b"\x1b[?2026l");
+        }
+        let rebased = {
+            let animations = harness.anims.lock().unwrap();
+            let animation = &animations[&7];
+            assert!(
+                animation.started > old_start,
+                "repeated selection resets playback"
+            );
+            assert_eq!(animation.current().unwrap().rgba[0], 1);
+            animation.started
+        };
+        harness.feed(b"\x1b_Ga=a,i=7,r=2,z=200\x1b\\");
+        assert_eq!(harness.anims.lock().unwrap()[&7].started, rebased);
+        harness.feed(b"\x1b_Ga=a,i=7,c=0\x1b\\");
+        harness.feed(b"\x1b_Ga=a,i=7,c=4\x1b\\");
+        assert_eq!(harness.anims.lock().unwrap()[&7].started, rebased);
+    }
+}

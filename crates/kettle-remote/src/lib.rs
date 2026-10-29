@@ -63,6 +63,9 @@ pub enum RemoteContext {
 /// instead, which suppresses the Reconnect entry entirely.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SshOptions {
+    /// Absolute executable path captured from argv or the process snapshot.
+    /// Retained because shell startup may supply a PATH Kettle does not have.
+    pub executable: Option<String>,
     /// `-p PORT` (or the joined `-pPORT`): the port the session connected to.
     pub port: Option<String>,
     /// `-J DESTINATION`: the ProxyJump chain the session tunnelled through. A
@@ -92,6 +95,9 @@ pub struct SshOptions {
 /// api` are two different pods.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContainerOptions {
+    /// Absolute executable path captured from argv or the process snapshot.
+    /// Retained because shell startup may supply a PATH Kettle does not have.
+    pub executable: Option<String>,
     /// Which named connection the client used: Docker `--context`/`-c`,
     /// Podman `--connection`/`-c`, kubectl `--context`.
     pub context: Option<String>,
@@ -151,7 +157,7 @@ impl ContainerRuntime {
 ///   walks behind [`RemoteScanner::refresh_roots`].
 /// - `tests::MockProcessTree`, the test fixture.
 ///
-/// The trait is intentionally minimal: four read-only methods +
+/// The trait is intentionally minimal: five read-only methods +
 /// one `refresh`, all `u32`-pid typed (no `sysinfo::Pid` leak).
 pub trait ProcessTree {
     /// Refresh the snapshot. The BFS calls this once at the top of
@@ -167,6 +173,10 @@ pub trait ProcessTree {
     /// argv is exotic and the detectors only read `argv[0]` and flags, which
     /// are ASCII in practice.
     fn argv_of(&self, pid: u32) -> Option<Vec<String>>;
+    /// The process's executable path, independent of argv[0] and Kettle's PATH.
+    fn executable_of(&self, _pid: u32) -> Option<String> {
+        None
+    }
     /// The working directory of `pid` (lossy UTF-8), or `None` if
     /// unknown. Default `None` so an external impl that can't report a cwd
     /// degrades gracefully (shell-detection just inherits no cwd); the sysinfo
@@ -182,9 +192,10 @@ pub trait ProcessTree {
 
 fn process_tree_refresh_kind() -> sysinfo::ProcessRefreshKind {
     // Newer sysinfo defaults include Linux threads. This snapshot needs
-    // process parents, argv and cwd, so task enumeration adds no useful data.
+    // process parents, executable paths, argv and cwd, so tasks add no useful data.
     sysinfo::ProcessRefreshKind::nothing()
         .without_tasks()
+        .with_exe(sysinfo::UpdateKind::Always)
         .with_cmd(sysinfo::UpdateKind::Always)
         .with_cwd(sysinfo::UpdateKind::Always)
 }
@@ -198,6 +209,7 @@ mod process_refresh_policy_tests {
         assert!(!refresh.cpu());
         assert!(!refresh.memory());
         assert_eq!(refresh.cmd(), sysinfo::UpdateKind::Always);
+        assert_eq!(refresh.exe(), sysinfo::UpdateKind::Always);
         assert_eq!(refresh.cwd(), sysinfo::UpdateKind::Always);
     }
 }
@@ -205,7 +217,7 @@ mod process_refresh_policy_tests {
 /// The cross-platform `ProcessTree` impl. Wraps sysinfo's
 /// process refresh + `processes()` map behind the trait's u32-pid API.
 ///
-/// Refreshes only argv and cwd (not memory / disk / network) for all PIDs
+/// Refreshes only executable paths, argv and cwd (not memory / disk / network) for all PIDs
 /// and drops processes that exited. sysinfo's internal cache makes this
 /// cheap on the second + later calls (~hundreds of µs on a typical
 /// 200-process machine).
@@ -237,6 +249,13 @@ impl ProcessTree for sysinfo::System {
                 .map(|s| s.to_string_lossy().into_owned())
                 .collect()
         })
+    }
+
+    fn executable_of(&self, pid: u32) -> Option<String> {
+        self.process(sysinfo::Pid::from_u32(pid))?
+            .exe()?
+            .to_str()
+            .map(String::from)
     }
 
     fn cwd_of(&self, pid: u32) -> Option<String> {
@@ -1283,6 +1302,14 @@ impl ProcessTree for LinuxProcessTree {
         self.entries.get(&pid)?.argv.clone()
     }
 
+    fn executable_of(&self, pid: u32) -> Option<String> {
+        self.entries.get(&pid)?;
+        std::fs::read_link(self.proc_root.join(pid.to_string()).join("exe"))
+            .ok()?
+            .to_str()
+            .map(String::from)
+    }
+
     fn cwd_of(&self, pid: u32) -> Option<String> {
         self.entries.get(&pid)?;
         std::fs::read_link(self.proc_root.join(pid.to_string()).join("cwd"))
@@ -1380,13 +1407,21 @@ fn detect_root_in_index_with_scratch<T: ProcessTree + ?Sized>(
         queue.push_back(child_pid);
     }
     while let Some(pid) = queue.pop_front() {
-        if let Some(argv) = tree.argv_of(pid) {
-            if let Some(ctx) = detect_ssh(&argv) {
-                return Some(ctx);
+        if let Some(argv) = tree.argv_of(pid)
+            && let Some(mut ctx) = detect_ssh(&argv).or_else(|| detect_container(&argv))
+        {
+            // sshpass is a wrapper; its executable is not the SSH client.
+            if argv0_basename(&argv[0]) != "sshpass"
+                && let Some(executable) = tree.executable_of(pid)
+            {
+                match &mut ctx {
+                    RemoteContext::Ssh { options, .. } => options.executable = Some(executable),
+                    RemoteContext::Container { options, .. } => {
+                        options.executable = Some(executable)
+                    }
+                }
             }
-            if let Some(ctx) = detect_container(&argv) {
-                return Some(ctx);
-            }
+            return Some(ctx);
         }
         if let Some(grand) = children_by_parent.get(&pid) {
             for &gpid in grand {
@@ -1925,7 +1960,7 @@ fn field_is_safe(s: &str, extra: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
 }
 
-/// Longest argv-derived field retained for reconnecting a detected session.
+/// Longest endpoint field retained from a detected session's argv.
 const MAX_FIELD_LEN: usize = 512;
 
 /// SSH host: DNS labels (`a-z0-9.-`), IPv6 literals (`:`, optional `[ ]`
@@ -2229,6 +2264,7 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     {
         return None;
     }
+    options.executable = absolute_client_executable(&argv[inner_start - 1]);
     Some(RemoteContext::Ssh {
         host,
         user,
@@ -2508,6 +2544,7 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
     if !field_is_safe(&container, CONTAINER_EXTRA) {
         return None;
     }
+    parse.options.executable = absolute_client_executable(&argv[0]);
     Some(RemoteContext::Container {
         runtime,
         container,
@@ -2878,7 +2915,7 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<SessionCommand> {
                 return None;
             }
             let mut cmd = SessionCommand {
-                program: "ssh".into(),
+                program: session_executable(options.executable.as_deref(), "ssh")?,
                 args: Vec::new(),
             };
             // Fixed order (config, identity, jump, port) so the emitted line is
@@ -2919,7 +2956,7 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<SessionCommand> {
                 ContainerRuntime::Lxc => "lxc-attach",
             };
             let mut cmd = SessionCommand {
-                program: program.into(),
+                program: session_executable(options.executable.as_deref(), program)?,
                 args: Vec::new(),
             };
             // Each runtime spells the same concept differently, so re-emit the
@@ -2985,6 +3022,24 @@ fn connection_path_is_absolute_on(path: &str, windows: bool) -> bool {
             && bytes[0].is_ascii_alphabetic()
             && bytes[1] == b':'
             && matches!(bytes[2], b'/' | b'\\'))
+}
+
+fn absolute_client_executable(program: &str) -> Option<String> {
+    connection_path_is_absolute(program).then(|| program.to_owned())
+}
+
+fn session_executable(executable: Option<&str>, fallback: &str) -> Option<String> {
+    match executable {
+        Some(path)
+            if path.len() <= 4096
+                && !has_control_char(path)
+                && connection_path_is_absolute(path) =>
+        {
+            Some(path.to_owned())
+        }
+        Some(_) => None,
+        None => Some(fallback.to_owned()),
+    }
 }
 
 fn push_session_option(cmd: &mut SessionCommand, flag: &str, value: &str) -> Option<()> {
@@ -3778,6 +3833,47 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_preserves_absolute_client_executable() {
+        let argv = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let programs = if cfg!(windows) {
+            [
+                r"C:\custom\podman",
+                r"C:\custom tools\docker",
+                r"C:\custom\kubectl",
+                r"C:\custom\lxc-attach",
+            ]
+        } else {
+            [
+                "/opt/homebrew/bin/podman",
+                "/custom tools/docker",
+                "/custom/kubectl",
+                "/custom/lxc-attach",
+            ]
+        };
+        for program in programs {
+            let args = if program.ends_with("lxc-attach") {
+                argv(&[program, "-n", "web"])
+            } else {
+                argv(&[program, "exec", "-it", "web", "sh"])
+            };
+            let context = detect_container(&args).unwrap();
+            assert_eq!(clone_session_command(&context).unwrap().program, program);
+        }
+        let ssh = if cfg!(windows) {
+            r"C:\custom\ssh"
+        } else {
+            "/custom/ssh"
+        };
+        for args in [
+            argv(&[ssh, "box"]),
+            argv(&["sshpass", "-p", "secret", ssh, "box"]),
+        ] {
+            let context = detect_ssh(&args).unwrap();
+            assert_eq!(clone_session_command(&context).unwrap().program, ssh);
+        }
+    }
+
+    #[test]
     fn reconnect_arguments_preserve_shell_metacharacters() {
         let value = "a'\" b % ^ $ !";
         let command = clone_session_command(&RemoteContext::Ssh {
@@ -3901,7 +3997,14 @@ mod tests {
         // Absolute path.
         assert_eq!(
             detect_container(&argv(&["/usr/bin/docker", "exec", "foo"])),
-            Some(container_ctx(ContainerRuntime::Docker, "foo"))
+            Some(RemoteContext::Container {
+                runtime: ContainerRuntime::Docker,
+                container: "foo".into(),
+                options: ContainerOptions {
+                    executable: absolute_client_executable("/usr/bin/docker"),
+                    ..Default::default()
+                },
+            })
         );
         // Non-container argv → None.
         assert!(detect_container(&argv(&["docker", "ps"])).is_none());
@@ -4069,7 +4172,14 @@ mod tests {
         // Absolute-path argv[0].
         assert_eq!(
             detect_ssh(&argv(&["/usr/bin/ssh", "box"])),
-            Some(ssh_ctx("box", None))
+            Some(RemoteContext::Ssh {
+                host: "box".into(),
+                user: None,
+                options: SshOptions {
+                    executable: absolute_client_executable("/usr/bin/ssh"),
+                    ..Default::default()
+                },
+            })
         );
         // Non-SSH argv → None.
         assert!(detect_ssh(&argv(&["vim", "ssh.txt"])).is_none());
@@ -4084,39 +4194,48 @@ mod tests {
     /// keeping `.exe` would leave the whole remote feature dead on Windows 11.
     #[test]
     fn detect_recognizes_windows_argv0_shape() {
+        let without_executable = |ctx: Option<RemoteContext>| {
+            ctx.map(|mut ctx| {
+                match &mut ctx {
+                    RemoteContext::Ssh { options, .. } => options.executable = None,
+                    RemoteContext::Container { options, .. } => options.executable = None,
+                }
+                ctx
+            })
+        };
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         // Windows OpenSSH: backslash path + .exe (+ a capitalized .EXE variant).
         assert_eq!(
-            detect_ssh(&argv(&[
+            without_executable(detect_ssh(&argv(&[
                 r"C:\Windows\System32\OpenSSH\ssh.exe",
                 "alice@host"
-            ])),
+            ]))),
             Some(ssh_ctx("host", Some("alice")))
         );
         assert_eq!(
-            detect_ssh(&argv(&["ssh.EXE", "box"])),
+            without_executable(detect_ssh(&argv(&["ssh.EXE", "box"]))),
             Some(ssh_ctx("box", None))
         );
         // Docker Desktop on Windows: backslash path + .exe.
         assert_eq!(
-            detect_container(&argv(&[
+            without_executable(detect_container(&argv(&[
                 r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
                 "exec",
                 "-it",
                 "alpine",
                 "sh"
-            ])),
+            ]))),
             Some(container_ctx(ContainerRuntime::Docker, "alpine"))
         );
         // sshpass wrapping a Windows-path ssh.exe still finds the inner ssh.
         assert_eq!(
-            detect_ssh(&argv(&[
+            without_executable(detect_ssh(&argv(&[
                 "sshpass",
                 "-p",
                 "secret",
                 r"C:\OpenSSH\ssh.exe",
                 "carol@h"
-            ])),
+            ]))),
             Some(ssh_ctx("h", Some("carol")))
         );
     }
@@ -5647,6 +5766,7 @@ mod tests {
     }
 
     struct MockProc {
+        executable: Option<String>,
         parent: Option<u32>,
         argv: Vec<String>,
         cwd: Option<String>,
@@ -5663,6 +5783,7 @@ mod tests {
             self.procs.insert(
                 pid,
                 MockProc {
+                    executable: None,
                     parent,
                     argv: argv.iter().map(|s| (*s).to_string()).collect(),
                     cwd: None,
@@ -5676,6 +5797,7 @@ mod tests {
             self.procs.insert(
                 pid,
                 MockProc {
+                    executable: None,
                     parent,
                     argv: argv.iter().map(|s| (*s).to_string()).collect(),
                     cwd: Some(cwd.to_string()),
@@ -5697,6 +5819,10 @@ mod tests {
             self.procs.get(&pid).map(|p| p.argv.clone())
         }
 
+        fn executable_of(&self, pid: u32) -> Option<String> {
+            self.procs.get(&pid)?.executable.clone()
+        }
+
         fn cwd_of(&self, pid: u32) -> Option<String> {
             self.procs.get(&pid).and_then(|p| p.cwd.clone())
         }
@@ -5704,6 +5830,75 @@ mod tests {
         fn all_pids(&self) -> Vec<u32> {
             self.procs.keys().copied().collect()
         }
+    }
+
+    #[test]
+    fn reconnect_resolves_bare_argv_from_process_executable() {
+        let root = if cfg!(windows) {
+            r"C:\shell tools"
+        } else {
+            "/shell tools"
+        };
+        for args in [
+            vec!["ssh", "box"],
+            vec!["docker", "exec", "-it", "web", "sh"],
+            vec!["podman", "exec", "-it", "web", "sh"],
+            vec!["kubectl", "exec", "-it", "web", "--", "sh"],
+            vec!["lxc-attach", "-n", "web"],
+        ] {
+            let mut tree = MockProcessTree::new();
+            tree.add(100, None, &["sh"]);
+            tree.add(101, Some(100), &args);
+            // A versioned executable may have a different basename from argv[0].
+            let executable = format!("{root}/{}-client", args[0]);
+            tree.procs.get_mut(&101).unwrap().executable = Some(executable.clone());
+            let ctx = detect_in_tree(100, &mut tree).unwrap();
+            assert_eq!(clone_session_command(&ctx).unwrap().program, executable);
+        }
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["sshpass", "-p", "secret", "ssh", "box"]);
+        tree.procs.get_mut(&100).unwrap().executable = Some(format!("{root}/sshpass"));
+        let ctx = detect_in_tree(100, &mut tree).unwrap();
+        assert_eq!(clone_session_command(&ctx).unwrap().program, "ssh");
+    }
+
+    #[test]
+    fn reconnect_rejects_invalid_executable_paths() {
+        for path in [
+            "relative/podman".to_owned(),
+            "/custom/\npodman".to_owned(),
+            format!("/{}", "x".repeat(4096)),
+        ] {
+            let mut ctx = container_ctx(ContainerRuntime::Podman, "web");
+            let RemoteContext::Container { options, .. } = &mut ctx else {
+                unreachable!()
+            };
+            options.executable = Some(path);
+            assert!(clone_session_command(&ctx).is_none());
+        }
+    }
+
+    #[test]
+    fn reconnect_native_process_executable_matches_current_process() {
+        let pid = std::process::id();
+        let expected = std::env::current_exe().unwrap().canonicalize().unwrap();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let mut tree = super::RootedProcessTree::default();
+            assert!(tree.refresh_roots_within(&[pid], std::time::Duration::from_secs(5)));
+            let executable = tree.executable_of(pid).expect("native executable path");
+            assert_eq!(
+                std::path::Path::new(&executable).canonicalize().unwrap(),
+                expected
+            );
+        }
+        let mut sys = sysinfo::System::new();
+        ProcessTree::refresh(&mut sys);
+        let executable = sys.executable_of(pid).expect("sysinfo executable path");
+        assert_eq!(
+            std::path::Path::new(&executable).canonicalize().unwrap(),
+            expected
+        );
     }
 
     /// Drift guard: `pwsh → wsl.exe` (open PowerShell, type `wsl`, split)
