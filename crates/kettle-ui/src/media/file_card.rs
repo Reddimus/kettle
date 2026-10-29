@@ -77,6 +77,7 @@ pub(crate) struct FactsQuery {
     pub generation: u64,
     pub source: kettle_media::Source,
     pub why: FileWhy,
+    pub reply: Option<Box<(super::Origin, kettle_ctl::show::ShowResult)>>,
 }
 
 pub(crate) struct FactsAnswer {
@@ -100,7 +101,10 @@ impl FactsLane {
             .name("kettle-file-facts".into())
             .spawn(move || {
                 for query in jobs {
-                    let identity = source(&query);
+                    let identity =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source(&query)))
+                            .ok()
+                            .flatten();
                     if finished.send(FactsAnswer { query, identity }).is_err() {
                         break;
                     }
@@ -111,8 +115,11 @@ impl FactsLane {
         Some(Self { work, done })
     }
 
-    pub(crate) fn request(&self, query: FactsQuery) {
-        let _ = self.work.try_send(query);
+    pub(crate) fn request(&self, query: FactsQuery) -> Option<FactsQuery> {
+        self.work
+            .try_send(query)
+            .err()
+            .map(crossbeam_channel::TrySendError::into_inner)
     }
 
     pub(crate) fn try_recv(&self) -> Option<FactsAnswer> {
@@ -247,13 +254,14 @@ mod tests {
                 std::sync::Arc::new(|| {}),
             )
             .unwrap();
-            lane.request(FactsQuery {
+            let _ = lane.request(FactsQuery {
                 window: 1,
                 pane: 2,
                 item: 3,
                 generation: 4,
                 source: kettle_media::Source::Bytes(Vec::new()),
                 why: FileWhy::Unsupported,
+                reply: None,
             });
             returned.send(lane).ok();
         });
@@ -280,6 +288,33 @@ mod tests {
             ),
             "file checking"
         );
+    }
+
+    #[test]
+    fn panicking_facts_source_completes_with_failure() {
+        let (wake, woke) = std::sync::mpsc::channel();
+        let lane = FactsLane::start(
+            |_| panic!("metadata source failed"),
+            std::sync::Arc::new(move || {
+                let _ = wake.send(());
+            }),
+        )
+        .unwrap();
+        assert!(
+            lane.request(FactsQuery {
+                window: 1,
+                pane: 2,
+                item: 3,
+                generation: 4,
+                source: kettle_media::Source::Bytes(Vec::new()),
+                why: FileWhy::Unsupported,
+                reply: None,
+            })
+            .is_none()
+        );
+        woke.recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(lane.try_recv().unwrap().identity.is_none());
     }
 
     /// A poster an account had no room for is drawn again once it has room,

@@ -2518,6 +2518,12 @@ fn media_item_detail(
     if matches!(item.kind, crate::media::ItemKind::CheckingFile(_)) {
         return format!("{kind} {}", tr.text(kettle_i18n::Text::InlineCardPending));
     }
+    if item.kind == crate::media::ItemKind::FailedFile {
+        return format!(
+            "{kind} {}",
+            tr.text(kettle_i18n::Text::MediaLaneNoticePreviewFailed)
+        );
+    }
     if let Some(facts) = item.kind.file() {
         return format!("{kind} · {}", kettle_ctl::show::size_label(facts.bytes));
     }
@@ -9917,6 +9923,8 @@ pub struct App {
     /// is read.
     restore_source: Option<std::path::PathBuf>,
     restore_identity: Option<crate::session::SnapshotIdentity>,
+    /// An unread restore snapshot must survive automatic saves for this launch.
+    session_load_failed: bool,
     session_writer: crate::session::SessionWriter,
     /// All per-window state, keyed by the
     /// window's stable sequence number (`WindowState::seq`, 1-based, never
@@ -11330,6 +11338,7 @@ impl App {
             wayland_file_drops: std::collections::BTreeMap::new(),
             restore_source: None,
             restore_identity: None,
+            session_load_failed: false,
             session_writer: crate::session::SessionWriter::new()?,
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override

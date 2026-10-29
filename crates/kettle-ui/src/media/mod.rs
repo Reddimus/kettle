@@ -330,12 +330,17 @@ pub(crate) struct MediaService {
 }
 
 impl MediaService {
+    #[cfg(test)]
+    pub(crate) fn set_facts_lane(&mut self, lane: FactsLane) {
+        self.facts = Some(lane);
+    }
+
     pub(crate) fn request_facts(
         &mut self,
         query: FactsQuery,
         client: Option<&Arc<WorkerClient>>,
         wake: Arc<dyn Fn() + Send + Sync>,
-    ) {
+    ) -> Result<(), Box<FactsQuery>> {
         if self.facts.is_none()
             && let Some(client) = client
         {
@@ -355,9 +360,11 @@ impl MediaService {
                 wake,
             );
         }
-        if let Some(facts) = &self.facts {
-            facts.request(query);
-        }
+        let rejected = match &self.facts {
+            Some(facts) => facts.request(query),
+            None => Some(query),
+        };
+        rejected.map_or(Ok(()), |query| Err(Box::new(query)))
     }
 
     pub(crate) fn take_facts(&self) -> Option<FactsAnswer> {

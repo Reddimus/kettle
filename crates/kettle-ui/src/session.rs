@@ -303,9 +303,11 @@ impl Session {
         })
     }
 
-    pub(crate) fn load_with_identity() -> Option<(Session, SnapshotIdentity)> {
-        let p = Self::path()?;
-        load_snapshot(&p)
+    pub(crate) fn load_with_identity() -> std::io::Result<Option<(Session, SnapshotIdentity)>> {
+        let Some(p) = Self::path() else {
+            return Ok(None);
+        };
+        load_snapshot_result(&p)
     }
 
     /// Load from the named-layout path instead of the default
@@ -313,9 +315,13 @@ impl Session {
     /// <NAME>`. Returns `None` if the layout file doesn't exist yet —
     /// kettle just starts with a default first tab, exactly the same
     /// shape as a fresh install would.
-    pub(crate) fn load_layout_with_identity(name: &str) -> Option<(Session, SnapshotIdentity)> {
-        let p = Self::path_for_layout(name)?;
-        load_snapshot(&p)
+    pub(crate) fn load_layout_with_identity(
+        name: &str,
+    ) -> std::io::Result<Option<(Session, SnapshotIdentity)>> {
+        let Some(p) = Self::path_for_layout(name) else {
+            return Ok(None);
+        };
+        load_snapshot_result(&p)
     }
 
     /// Load a one-shot tab-handoff JSON file (`--tab-handoff`) written by an
@@ -762,9 +768,9 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
     Ok(())
 }
 
-/// Read and parse a session file at `path`. A read error (no file, HOME
-/// changed) is the expected first-launch case and returns `None` silently;
-/// a JSON parse error is a real signal — kettle was killed mid-write, the
+/// Read and parse a one-shot handoff or test snapshot at `path`. Read errors
+/// return `None`; startup uses `load_snapshot_result` to preserve those errors.
+/// A JSON parse error is a real signal — kettle was killed mid-write, the
 /// disk filled up, the file got hand-edited badly — so we log a warning
 /// AND rename the broken file to `<path>.broken.<unix-seconds>` so the
 /// next launch starts fresh while the user keeps a forensic artifact.
@@ -785,38 +791,52 @@ pub(crate) fn load_from_path(p: &std::path::Path) -> Option<Session> {
 }
 
 pub(crate) fn load_snapshot(p: &std::path::Path) -> Option<(Session, SnapshotIdentity)> {
-    if !std::fs::symlink_metadata(p).ok()?.file_type().is_file() {
-        return None;
+    load_snapshot_result(p).ok().flatten()
+}
+
+/// Missing snapshots allow a fresh start; unread snapshots must block autosaving.
+pub(crate) fn load_snapshot_result(
+    p: &std::path::Path,
+) -> std::io::Result<Option<(Session, SnapshotIdentity)>> {
+    match std::fs::symlink_metadata(p) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "session is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
     }
-    let _lock = session_lock(p).ok()?;
-    let (file, size) = open_session_file(p).ok()?;
-    let identity = SnapshotIdentity::of(&file).ok()?;
+    let _lock = session_lock(p)?;
+    let (file, size) = open_session_file(p)?;
+    let identity = SnapshotIdentity::of(&file)?;
     if size > MAX_SESSION_BYTES {
-        stash_oversize_session(p, &identity, size, MAX_SESSION_BYTES);
-        return None;
+        stash_oversize_session(p, &identity, size, MAX_SESSION_BYTES)?;
+        return Ok(None);
     }
     let mut bytes = Vec::with_capacity(size as usize);
-    file.take(MAX_SESSION_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    file.take(MAX_SESSION_BYTES + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_SESSION_BYTES {
-        stash_oversize_session(p, &identity, bytes.len() as u64, MAX_SESSION_BYTES);
-        return None;
+        stash_oversize_session(p, &identity, bytes.len() as u64, MAX_SESSION_BYTES)?;
+        return Ok(None);
     }
     match serde_json::from_slice(&bytes) {
-        Ok(s) => Some((s, identity)),
+        Ok(s) => Ok(Some((s, identity))),
         Err(e) => {
             // Outside the log call: a disabled level skips its arguments.
             let backup = stash_session_file_locked(p, "broken", &identity);
             log::warn!(
                 "session file {} is corrupted ({e}); {}",
                 p.display(),
-                match backup {
+                match &backup {
                     Ok(dst) => format!("backed up to {}", dst.display()),
-                    Err(_) => "could not rename — kettle will overwrite on the next save".into(),
+                    Err(_) => "could not rename; automatic saving is disabled".into(),
                 }
             );
-            None
+            backup?;
+            Ok(None)
         }
     }
 }
@@ -1014,7 +1034,7 @@ fn stash_oversize_session(
     identity: &SnapshotIdentity,
     size: u64,
     limit: u64,
-) {
+) -> std::io::Result<()> {
     log::warn!(
         "session file {} is {size} bytes (cap {limit}); \
          refusing to load and renaming to .toobig",
@@ -1022,9 +1042,7 @@ fn stash_oversize_session(
     );
     // Stash for forensics like the parse-error branch above; future launches
     // start fresh rather than repeatedly encountering the oversized file.
-    if let Err(error) = stash_session_file_locked(path, "toobig", identity) {
-        log::warn!("could not move {} aside: {error}", path.display());
-    }
+    stash_session_file_locked(path, "toobig", identity).map(|_| ())
 }
 
 #[cfg(test)]
@@ -1746,6 +1764,23 @@ mod tests {
                 .filter_map(Result::ok)
                 .any(|entry| entry.file_name().to_string_lossy().contains(".unrestored."))
         );
+    }
+
+    #[test]
+    fn review_session_lock_timeout_is_a_load_error() {
+        let directory = private_tempdir();
+        let path = directory.path().join("layout.json");
+        save_to_path(&Session::default(), &path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let lock = session_lock(&path).unwrap();
+        let result = load_snapshot_result(&path);
+        assert!(
+            result.is_err(),
+            "lock timeout must not look like a missing layout"
+        );
+        assert_eq!(result.err().unwrap().kind(), std::io::ErrorKind::TimedOut);
+        drop(lock);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

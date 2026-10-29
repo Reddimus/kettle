@@ -18,6 +18,7 @@ pub(crate) enum ItemKind {
     Media(MediaKind),
     File(FileFacts),
     CheckingFile(super::FileWhy),
+    FailedFile,
 }
 
 impl From<MediaKind> for ItemKind {
@@ -31,7 +32,7 @@ impl ItemKind {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Media(kind) => kind.as_str(),
-            Self::File(_) | Self::CheckingFile(_) => kettle_ctl::show::FILE_KIND,
+            Self::File(_) | Self::CheckingFile(_) | Self::FailedFile => kettle_ctl::show::FILE_KIND,
         }
     }
 
@@ -39,14 +40,14 @@ impl ItemKind {
     pub(crate) fn media(self) -> Option<MediaKind> {
         match self {
             Self::Media(kind) => Some(kind),
-            Self::File(_) | Self::CheckingFile(_) => None,
+            Self::File(_) | Self::CheckingFile(_) | Self::FailedFile => None,
         }
     }
 
     /// The file, if the item is a file shown as itself.
     pub(crate) fn file(self) -> Option<FileFacts> {
         match self {
-            Self::Media(_) | Self::CheckingFile(_) => None,
+            Self::Media(_) | Self::CheckingFile(_) | Self::FailedFile => None,
             Self::File(facts) => Some(facts),
         }
     }
@@ -251,6 +252,14 @@ impl ShelfItem {
             why,
         });
         self.source.digest.path_identity = Some(identity);
+        true
+    }
+
+    pub(crate) fn fail_file_facts(&mut self, generation: u64, why: super::FileWhy) -> bool {
+        if self.generation != generation || self.kind != ItemKind::CheckingFile(why) {
+            return false;
+        }
+        self.kind = ItemKind::FailedFile;
         true
     }
 

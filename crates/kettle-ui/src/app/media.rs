@@ -426,7 +426,7 @@ impl App {
     pub(super) fn media_tick(&mut self, ws: &mut WindowState) {
         self.retire_cards(ws);
         self.tell_preview_failures(ws);
-        if self.media.is_idle() {
+        if !media_tick_ready(&mut self.media, ws, &mut self.windows) {
             return;
         }
         let live: std::collections::HashSet<u64> = self
@@ -443,34 +443,6 @@ impl App {
         self.media.retain_panes(|pane| live.contains(&pane));
         while let Some(finished) = self.media.take_finished() {
             self.finish_show(ws, finished);
-        }
-        while let Some(answer) = self.media.take_facts() {
-            let query = answer.query;
-            let Some(identity) = answer.identity else {
-                continue;
-            };
-            let owner = self
-                .all_windows(ws)
-                .find(|window| {
-                    window.seq == query.window && window.mux.panes.contains_key(&query.pane)
-                })
-                .or_else(|| {
-                    self.all_windows(ws)
-                        .find(|window| window.mux.panes.contains_key(&query.pane))
-                })
-                .map(|window| window.seq);
-            let Some(window) = owner.and_then(|seq| self.window_by_seq(ws, seq)) else {
-                continue;
-            };
-            let accepted = window
-                .mux
-                .panes
-                .get_mut(&query.pane)
-                .and_then(|pane| pane.media_shelf.get_mut(query.item))
-                .is_some_and(|item| item.accept_file_facts(query.generation, query.why, identity));
-            if accepted && let Some(handle) = &window.window {
-                handle.request_redraw();
-            }
         }
         let proxy = self.proxy.clone();
         self.media.pump(self.startup.media.as_ref(), move || {
@@ -1579,7 +1551,7 @@ impl App {
         if let Some(handle) = &window.window {
             handle.request_redraw();
         }
-        if let crate::media::ItemKind::CheckingFile(why) = kind
+        let mut facts_query = if let crate::media::ItemKind::CheckingFile(why) = kind
             && let Some(item) = self
                 .window_by_seq(ws, seq)
                 .and_then(|window| window.mux.panes.get(&route.pane))
@@ -1589,31 +1561,29 @@ impl App {
                 authorization,
             } = &item.source.spec.input
         {
-            let query = crate::media::FactsQuery {
+            Some(crate::media::FactsQuery {
                 window: seq,
                 pane: route.pane,
                 item: item.id,
                 generation: item.generation,
                 why,
+                reply: None,
                 source: kettle_media::Source::Path {
                     path: path.clone(),
                     authorization: authorization.clone(),
                 },
-            };
-            let proxy = self.proxy.clone();
-            self.media.request_facts(
-                query,
-                self.startup.media.as_ref(),
-                std::sync::Arc::new(move || {
-                    let _ = proxy.send_event(UserEvent::MediaRendered);
-                }),
-            );
-        }
+            })
+        } else {
+            None
+        };
         let origin = match origin {
             crate::media::Requester::Ctl(origin) => origin,
             // What the user asked to preview opens in its pane's lane, from
             // that pane's window's next pass of the event loop.
             crate::media::Requester::User => {
+                if let Some(query) = facts_query.take() {
+                    self.submit_facts(ws, query);
+                }
                 if self.previews_ready.len() < MAX_PREVIEWS_READY {
                     self.previews_ready.push((seq, route.pane, published.id));
                 }
@@ -1631,6 +1601,10 @@ impl App {
                 (width, height),
                 &warnings,
             ),
+            crate::media::ItemKind::FailedFile => {
+                origin.refuse(kettle_media::FailureCode::WorkerUnavailable);
+                return;
+            }
             crate::media::ItemKind::CheckingFile(_) => {
                 let mut result = kettle_ctl::show::ShowResult::new(
                     target,
@@ -1653,11 +1627,32 @@ impl App {
         result.inline_refused = inline_refused;
         result.page = page.map(kettle_ctl::show::ShowPage::from);
         result.video = video.map(kettle_ctl::show::ShowVideo::from);
-        let id = origin.request_id;
-        origin.answer(kettle_ctl::protocol::Response::ok(
-            id,
-            serde_json::to_value(result).unwrap_or_default(),
-        ));
+        if let Some(mut query) = facts_query {
+            prepare_file_reply(&mut query, origin, result);
+            self.submit_facts(ws, query);
+        } else {
+            answer_show(origin, result);
+        }
+    }
+
+    fn submit_facts(&mut self, ws: &mut WindowState, query: crate::media::FactsQuery) {
+        let proxy = self.proxy.clone();
+        if let Err(query) = self.media.request_facts(
+            query,
+            self.startup.media.as_ref(),
+            std::sync::Arc::new(move || {
+                let _ = proxy.send_event(UserEvent::MediaRendered);
+            }),
+        ) {
+            finish_file_facts(
+                crate::media::FactsAnswer {
+                    query: *query,
+                    identity: None,
+                },
+                ws,
+                &mut self.windows,
+            );
+        }
     }
 
     /// Release the pixels of the least recently viewed shelf item in any
@@ -1739,4 +1734,89 @@ pub(super) fn cli_card_owner(
     _: Option<crate::ctl_server::CliTerminal>,
 ) -> Result<kettle_ctl::process::ProcessIdentity, kettle_ctl::show::InlineRefusal> {
     Err(kettle_ctl::show::InlineRefusal::Unsupported)
+}
+
+/// Facts complete independently of the render queue, including while it is idle.
+pub(super) fn media_tick_ready(
+    media: &mut crate::media::MediaService,
+    ws: &mut WindowState,
+    windows: &mut std::collections::BTreeMap<u64, WindowState>,
+) -> bool {
+    while let Some(answer) = media.take_facts() {
+        finish_file_facts(answer, ws, windows);
+    }
+    !media.is_idle()
+}
+
+fn finish_file_facts(
+    answer: crate::media::FactsAnswer,
+    ws: &mut WindowState,
+    windows: &mut std::collections::BTreeMap<u64, WindowState>,
+) {
+    let query = answer.query;
+    let owner = std::iter::once(&*ws)
+        .chain(windows.values())
+        .find(|window| window.seq == query.window && window.mux.panes.contains_key(&query.pane))
+        .or_else(|| {
+            std::iter::once(&*ws)
+                .chain(windows.values())
+                .find(|window| window.mux.panes.contains_key(&query.pane))
+        })
+        .map(|window| window.seq);
+    let window = owner.and_then(|seq| {
+        if ws.seq == seq {
+            Some(&mut *ws)
+        } else {
+            windows.get_mut(&seq)
+        }
+    });
+    let mut failure = kettle_media::FailureCode::NotInKettlePane;
+    let accepted = if let Some(window) = window {
+        failure = kettle_media::FailureCode::Changed;
+        let accepted = window
+            .mux
+            .panes
+            .get_mut(&query.pane)
+            .and_then(|pane| pane.media_shelf.get_mut(query.item))
+            .is_some_and(|item| match answer.identity {
+                Some(identity) => item.accept_file_facts(query.generation, query.why, identity),
+                None => item.fail_file_facts(query.generation, query.why),
+            });
+        if accepted && let Some(handle) = &window.window {
+            handle.request_redraw();
+        }
+        accepted
+    } else {
+        false
+    };
+    if let Some(reply) = query.reply {
+        let (origin, mut result) = *reply;
+        if !accepted {
+            origin.refuse(failure);
+        } else if let Some(identity) = answer.identity {
+            result.file = Some(kettle_ctl::show::ShowFile {
+                bytes: identity.size,
+                reason: query.why.as_str().into(),
+            });
+            answer_show(origin, result);
+        } else {
+            origin.refuse(kettle_media::FailureCode::WorkerUnavailable);
+        }
+    }
+}
+
+fn answer_show(origin: crate::media::Origin, result: kettle_ctl::show::ShowResult) {
+    let id = origin.request_id;
+    origin.answer(kettle_ctl::protocol::Response::ok(
+        id,
+        serde_json::to_value(result).unwrap_or_default(),
+    ));
+}
+
+pub(super) fn prepare_file_reply(
+    query: &mut crate::media::FactsQuery,
+    origin: crate::media::Origin,
+    result: kettle_ctl::show::ShowResult,
+) {
+    query.reply = Some(Box::new((origin, result)));
 }

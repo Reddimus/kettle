@@ -19905,3 +19905,264 @@ fn deferred_key_releases_survive_coalesced_presses_and_pane_migration() {
         "one coalesced input must authorize both saved releases in the new window"
     );
 }
+
+fn review_file_facts_fixture(
+    identity: Option<kettle_media::PathIdentity>,
+) -> (
+    crate::media::MediaService,
+    WindowState,
+    u64,
+    crate::media::FactsQuery,
+    std::sync::mpsc::Receiver<()>,
+) {
+    let (mux, pane, _) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    let item = crate::media::ShelfItem::checking_file(
+        73,
+        None,
+        "unknown.bin".into(),
+        crate::media::Provenance::User,
+        crate::media::FileWhy::Unsupported,
+        crate::media::ItemSource::sample(b"unknown"),
+    );
+    ws.mux
+        .panes
+        .get_mut(&pane)
+        .unwrap()
+        .media_shelf
+        .publish(item, None, &[]);
+    let query = crate::media::FactsQuery {
+        window: 1,
+        pane,
+        item: 73,
+        generation: 0,
+        why: crate::media::FileWhy::Unsupported,
+        source: kettle_media::Source::Bytes(Vec::new()),
+        reply: None,
+    };
+    let (wake, woke) = std::sync::mpsc::channel();
+    let lane = crate::media::FactsLane::start(
+        move |_| identity,
+        Arc::new(move || {
+            let _ = wake.send(());
+        }),
+    )
+    .unwrap();
+    let mut media = crate::media::MediaService::default();
+    media.set_facts_lane(lane);
+    (media, ws, pane, query, woke)
+}
+
+fn review_file_identity() -> kettle_media::PathIdentity {
+    kettle_media::PathIdentity {
+        dev: 1,
+        ino: 2,
+        size: 12345,
+        mtime_seconds: 3,
+        mtime_nanos: 4,
+    }
+}
+
+#[test]
+fn review_idle_media_tick_consumes_late_file_facts() {
+    let (mut media, mut ws, pane, query, woke) =
+        review_file_facts_fixture(Some(review_file_identity()));
+    let _ = media.request_facts(query, None, Arc::new(|| {}));
+    woke.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(media.is_idle(), "rendering has already finished");
+    assert!(!super::media::media_tick_ready(
+        &mut media,
+        &mut ws,
+        &mut Default::default()
+    ));
+    let facts = ws.mux.panes[&pane]
+        .media_shelf
+        .get(73)
+        .unwrap()
+        .kind
+        .file()
+        .expect("late metadata must complete the placeholder");
+    assert_eq!(facts.bytes, 12345);
+}
+
+#[test]
+fn review_file_show_reply_waits_for_metadata() {
+    let (mut media, mut ws, pane, mut query, woke) =
+        review_file_facts_fixture(Some(review_file_identity()));
+    let (reply, received) = crossbeam_channel::bounded(1);
+    let origin = crate::media::Origin {
+        conn_id: 1,
+        request_id: 91,
+        reply,
+    };
+    let mut result = kettle_ctl::show::ShowResult::new(
+        (pane, true, 1),
+        73,
+        kettle_media::MediaKind::Raster,
+        (0, 0),
+        &[],
+    );
+    result.kind = kettle_ctl::show::FILE_KIND.into();
+    super::media::prepare_file_reply(&mut query, origin, result);
+    assert!(
+        received.is_empty(),
+        "show must await its file metadata while the placeholder is visible"
+    );
+    let _ = media.request_facts(query, None, Arc::new(|| {}));
+    woke.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    super::media::media_tick_ready(&mut media, &mut ws, &mut Default::default());
+    let response = received
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(response.id, 91);
+    let result: kettle_ctl::show::ShowResult = serde_json::from_value(response.result).unwrap();
+    assert_eq!(result.file.as_ref().unwrap().bytes, 12345);
+    assert_eq!(result.file.as_ref().unwrap().reason, "unsupported_media");
+    assert_eq!(result.summary(), "file 12 kB, a kind Kettle does not draw");
+    assert_eq!(result.kind, "file");
+}
+
+#[test]
+fn review_failed_file_facts_finish_the_placeholder() {
+    let (mut media, mut ws, pane, query, woke) = review_file_facts_fixture(None);
+    let _ = media.request_facts(query, None, Arc::new(|| {}));
+    woke.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    super::media::media_tick_ready(&mut media, &mut ws, &mut Default::default());
+    let item = ws.mux.panes[&pane].media_shelf.get(73).unwrap();
+    assert!(
+        !matches!(item.kind, crate::media::ItemKind::CheckingFile(_)),
+        "failed metadata must stop checking"
+    );
+    assert!(
+        item.kind.file().is_none(),
+        "failure must not invent a file identity or size"
+    );
+}
+
+#[test]
+fn review_missing_facts_worker_completes_with_failure() {
+    let (_, _, _, query, _) = review_file_facts_fixture(None);
+    let mut media = crate::media::MediaService::default();
+    assert!(
+        media.request_facts(query, None, Arc::new(|| {})).is_err(),
+        "an unavailable worker must return its request for failure completion"
+    );
+}
+
+#[test]
+fn review_unread_startup_snapshot_disables_saving() {
+    let mut failed = false;
+    let snapshot = super::sessions::loaded_startup_snapshot(
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "held layout lock",
+        )),
+        &mut failed,
+    );
+    assert!(snapshot.is_none());
+    assert!(failed, "an unread snapshot must disable automatic saving");
+    let source: String = include_str!("sessions.rs").split_whitespace().collect();
+    assert!(
+        source
+            .contains("fnsave_session(&self,ws:&WindowState){ifself.session_load_failed{return;}"),
+        "automatic saves must stop before taking a default snapshot"
+    );
+    // Both named layouts and the default restored session need this guard.
+    for layout in [Some("dev"), None] {
+        let target = if failed {
+            super::SessionWriteTarget::Skip
+        } else {
+            super::session_write_target(layout, true, true, false)
+        };
+        assert_eq!(target, super::SessionWriteTarget::Skip);
+    }
+}
+
+#[test]
+fn review_full_facts_queue_returns_the_request_for_failure_completion() {
+    let (entered, started) = std::sync::mpsc::channel();
+    let (release, waiting) = std::sync::mpsc::channel::<()>();
+    let lane = crate::media::FactsLane::start(
+        move |_| {
+            let _ = entered.send(());
+            let _ = waiting.recv();
+            None
+        },
+        Arc::new(|| {}),
+    )
+    .unwrap();
+    let mut media = crate::media::MediaService::default();
+    media.set_facts_lane(lane);
+    let query = || crate::media::FactsQuery {
+        window: 1,
+        pane: 2,
+        item: 3,
+        generation: 0,
+        source: kettle_media::Source::Bytes(Vec::new()),
+        why: crate::media::FileWhy::Unsupported,
+        reply: None,
+    };
+    assert!(media.request_facts(query(), None, Arc::new(|| {})).is_ok());
+    started
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..32 {
+        assert!(media.request_facts(query(), None, Arc::new(|| {})).is_ok());
+    }
+    let rejected = media.request_facts(query(), None, Arc::new(|| {}));
+    drop(release);
+    assert!(
+        rejected.is_err(),
+        "a saturated lane must not silently lose a placeholder or reply"
+    );
+}
+
+#[test]
+fn failed_facts_refuse_the_pending_show_reply() {
+    let (mut media, mut ws, pane, mut query, woke) = review_file_facts_fixture(None);
+    let (reply, received) = crossbeam_channel::bounded(1);
+    let origin = crate::media::Origin {
+        conn_id: 1,
+        request_id: 92,
+        reply,
+    };
+    let result = kettle_ctl::show::ShowResult::file((pane, true, 1), 73, 0, "unsupported_media");
+    super::media::prepare_file_reply(&mut query, origin, result);
+    assert!(received.is_empty());
+    assert!(media.request_facts(query, None, Arc::new(|| {})).is_ok());
+    woke.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    super::media::media_tick_ready(&mut media, &mut ws, &mut Default::default());
+    let response = received
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(!response.ok);
+    assert_eq!(response.id, 92);
+    assert_eq!(
+        ws.mux.panes[&pane].media_shelf.get(73).unwrap().kind,
+        crate::media::ItemKind::FailedFile
+    );
+}
+
+#[test]
+fn failed_facts_from_an_old_generation_leave_the_new_placeholder_alone() {
+    let (mut media, mut ws, pane, query, woke) = review_file_facts_fixture(None);
+    ws.mux
+        .panes
+        .get_mut(&pane)
+        .unwrap()
+        .media_shelf
+        .get_mut(73)
+        .unwrap()
+        .generation = 1;
+    assert!(media.request_facts(query, None, Arc::new(|| {})).is_ok());
+    woke.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    super::media::media_tick_ready(&mut media, &mut ws, &mut Default::default());
+    let item = ws.mux.panes[&pane].media_shelf.get(73).unwrap();
+    assert!(matches!(item.kind, crate::media::ItemKind::CheckingFile(_)));
+    assert_eq!(item.generation, 1);
+}

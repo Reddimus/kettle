@@ -127,6 +127,9 @@ impl App {
     }
 
     pub(super) fn save_session(&self, ws: &WindowState) {
+        if self.session_load_failed {
+            return;
+        }
         let target = session_write_target(
             self.startup.layout.as_deref(),
             self.named_layout_writable,
@@ -247,7 +250,10 @@ impl App {
             crate::session::Session::load_tab_handoff(path)
         } else if let Some(name) = self.startup.layout.as_deref() {
             self.restore_source = crate::session::Session::path_for_layout(name);
-            let (session, identity) = crate::session::Session::load_layout_with_identity(name)?;
+            let (session, identity) = loaded_startup_snapshot(
+                crate::session::Session::load_layout_with_identity(name),
+                &mut self.session_load_failed,
+            )?;
             self.restore_identity = Some(identity);
             Some(session)
         } else if should_restore_session(
@@ -256,10 +262,27 @@ impl App {
             self.other_builds.running(),
         ) {
             self.restore_source = crate::session::Session::path();
-            let (session, identity) = crate::session::Session::load_with_identity()?;
+            let (session, identity) = loaded_startup_snapshot(
+                crate::session::Session::load_with_identity(),
+                &mut self.session_load_failed,
+            )?;
             self.restore_identity = Some(identity);
             Some(session)
         } else {
+            None
+        }
+    }
+}
+
+pub(super) fn loaded_startup_snapshot(
+    result: std::io::Result<Option<(crate::session::Session, crate::session::SnapshotIdentity)>>,
+    load_failed: &mut bool,
+) -> Option<(crate::session::Session, crate::session::SnapshotIdentity)> {
+    match result {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            *load_failed = true;
+            log::warn!("could not load session: {error}; automatic saving is disabled");
             None
         }
     }

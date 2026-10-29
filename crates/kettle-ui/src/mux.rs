@@ -5127,10 +5127,35 @@ fn windows_path_for_wsl(
     None
 }
 
+#[cfg(any(windows, test))]
+struct WslMountVerification {
+    source: std::fs::File,
+    mounted: std::path::PathBuf,
+}
+
+#[cfg(any(windows, test))]
+impl WslMountVerification {
+    fn verify(source: &std::path::Path, mounted: &std::path::Path) -> Option<Self> {
+        let source = std::fs::File::open(source).ok()?;
+        kettle_state::path_matches_file(&source, mounted)
+            .ok()?
+            .then(|| Self {
+                source,
+                mounted: mounted.to_owned(),
+            })
+    }
+
+    fn is_current(&self, source: &std::path::Path) -> bool {
+        kettle_state::path_matches_file(&self.source, source).unwrap_or(false)
+            && kettle_state::path_matches_file(&self.source, &self.mounted).unwrap_or(false)
+    }
+}
+
 #[cfg(windows)]
 fn wsl_mount_verified(target: Option<&str>, source: &std::path::Path, candidate: &str) -> bool {
     type Key = (String, std::path::PathBuf, String);
-    type Cache = std::collections::VecDeque<(Key, bool, std::time::Instant)>;
+    type Cache =
+        std::collections::VecDeque<(Key, Option<Arc<WslMountVerification>>, std::time::Instant)>;
     static CACHE: std::sync::OnceLock<Arc<std::sync::Mutex<Cache>>> = std::sync::OnceLock::new();
     static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let Some(target) = target else { return false };
@@ -5144,39 +5169,55 @@ fn wsl_mount_verified(target: Option<&str>, source: &std::path::Path, candidate:
     }
     let key = (target.to_owned(), source.to_owned(), candidate.to_owned());
     let cache = CACHE.get_or_init(Default::default);
-    if let Ok(cache) = cache.lock()
-        && let Some((_, verified, _)) = cache.iter().find(|(saved, _, at)| {
-            saved == &key && at.elapsed() < std::time::Duration::from_secs(5)
-        })
-    {
-        return *verified;
+    let cached = cache.lock().ok().and_then(|cache| {
+        cache
+            .iter()
+            .find(|(saved, _, at)| {
+                saved == &key && at.elapsed() < std::time::Duration::from_secs(5)
+            })
+            .map(|(_, verified, _)| verified.clone())
+    });
+    if matches!(cached, Some(None)) {
+        return false;
     }
-    // A stalled UNC lookup holds at most this one helper, never the UI.
+    // Even a cached success must recheck both names. Keep UNC lookups on one
+    // helper: a stalled share cannot hold the UI or accumulate checking threads.
     if CHECKING.swap(true, Ordering::AcqRel) {
         return false;
     }
     let cache = cache.clone();
+    let (ready, answer) = std::sync::mpsc::sync_channel(1);
     if std::thread::Builder::new()
         .name("kettle-wsl-mount".into())
         .spawn(move || {
-            let mounted = format!("\\\\wsl.localhost\\{}{}", key.0, key.2.replace('/', "\\"));
-            let verified = std::fs::File::open(&key.1).ok().is_some_and(|source| {
-                kettle_state::path_matches_file(&source, std::path::Path::new(&mounted))
-                    .unwrap_or(false)
-            });
+            let verified = match cached {
+                Some(Some(verified)) => verified.is_current(&key.1).then_some(verified),
+                _ => {
+                    let mounted =
+                        format!("\\\\wsl.localhost\\{}{}", key.0, key.2.replace('/', "\\"));
+                    WslMountVerification::verify(&key.1, std::path::Path::new(&mounted))
+                        .map(Arc::new)
+                }
+            };
+            let current = verified.is_some();
             if let Ok(mut cache) = cache.lock() {
+                cache.retain(|(saved, _, _)| saved != &key);
                 if cache.len() >= 32 {
                     cache.pop_front();
                 }
                 cache.push_back((key, verified, std::time::Instant::now()));
             }
             CHECKING.store(false, Ordering::Release);
+            let _ = ready.try_send(current);
         })
         .is_err()
     {
         CHECKING.store(false, Ordering::Release);
+        return false;
     }
-    false
+    answer
+        .recv_timeout(std::time::Duration::from_millis(5))
+        .unwrap_or(false)
 }
 
 #[cfg(not(windows))]
@@ -8422,6 +8463,39 @@ mod node_tests {
     }
 
     #[test]
+    fn review_wsl_cached_verification_rejects_replaced_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let mounted = dir.path().join("mounted");
+        std::fs::write(&source, b"old inode").unwrap();
+        std::fs::hard_link(&source, &mounted).unwrap();
+        let verified = WslMountVerification::verify(&source, &mounted).unwrap();
+        assert!(verified.is_current(&source));
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"new inode").unwrap();
+        std::fs::rename(&replacement, &source).unwrap();
+        assert!(
+            !verified.is_current(&source),
+            "a file bind mount still refers to the old inode"
+        );
+    }
+
+    #[test]
+    fn wsl_cached_verification_rejects_replaced_mount() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let mounted = dir.path().join("mounted");
+        std::fs::write(&source, b"source inode").unwrap();
+        std::fs::hard_link(&source, &mounted).unwrap();
+        let verified = WslMountVerification::verify(&source, &mounted).unwrap();
+        assert!(verified.is_current(&source));
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"another inode").unwrap();
+        std::fs::rename(&replacement, &mounted).unwrap();
+        assert!(!verified.is_current(&source));
+    }
+
+    #[test]
     fn windows_path_to_wsl_translates_drive_and_unc() {
         use std::path::Path;
         assert_eq!(
@@ -9750,7 +9824,7 @@ mod node_tests {
                 geometry: None,
             }],
         };
-        let directory = tempfile::tempdir().unwrap();
+        let directory = kettle_test_support::private_tempdir("kettle-split-depth-");
         let path = directory.path().join("session.json");
         crate::session::save_to_path(&session, &path).unwrap();
         assert!(
