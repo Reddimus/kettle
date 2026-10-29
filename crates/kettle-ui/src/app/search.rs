@@ -17,7 +17,7 @@ impl App {
         kettle_render::search_bar_geometry(
             width as f32,
             height as f32,
-            renderer.cell_w,
+            renderer.overlay_text_cell_width(),
             renderer.cell_h,
             &self.ui_text,
         )
@@ -1587,11 +1587,15 @@ impl App {
         let geometry = kettle_render::search_bar_geometry(
             width as f32,
             height as f32,
-            renderer.cell_w,
+            renderer.overlay_text_cell_width(),
             renderer.cell_h,
             &self.ui_text,
         );
-        let columns = kettle_render::search_bar_columns(geometry.editor.2, renderer.cell_w).max(1);
+        let columns = kettle_render::search_bar_columns(
+            geometry.editor.2,
+            renderer.overlay_text_cell_width(),
+        )
+        .max(1);
         ws.search
             .editor
             .ensure_cursor_visible(columns.saturating_sub(2));
@@ -1609,7 +1613,7 @@ impl App {
         Some(kettle_render::search_bar_geometry(
             width as f32,
             height as f32,
-            renderer.cell_w,
+            renderer.overlay_text_cell_width(),
             renderer.cell_h,
             &self.ui_text,
         ))
@@ -1680,7 +1684,10 @@ impl App {
         x: f32,
         geometry: kettle_render::SearchBarGeometry,
     ) -> crate::search_input::QueryPoint {
-        let cell_width = ws.renderer.as_ref().map_or(8.0, |renderer| renderer.cell_w);
+        let cell_width = ws
+            .renderer
+            .as_ref()
+            .map_or(8.0, |renderer| renderer.overlay_text_cell_width());
         let by_cells =
             crate::search_input::QueryPoint::Column(crate::search_input::pointer_query_column(
                 ws.search.editor.horizontal_scroll(),
@@ -1706,7 +1713,10 @@ impl App {
         x: f32,
         geometry: kettle_render::SearchBarGeometry,
     ) -> crate::search_input::QueryPoint {
-        let cell_width = ws.renderer.as_ref().map_or(8.0, |renderer| renderer.cell_w);
+        let cell_width = ws
+            .renderer
+            .as_ref()
+            .map_or(8.0, |renderer| renderer.overlay_text_cell_width());
         let by_cells =
             crate::search_input::QueryPoint::Column(crate::search_input::pointer_query_column(
                 ws.search.editor.horizontal_scroll(),
@@ -1741,8 +1751,9 @@ impl App {
         // from the left edge would pick the wrong end; it always maps through
         // the painted glyphs, the nearest of which is the right end to take.
         renderer.search_editor_rtl()
-            || (x >= geometry.editor.0 + renderer.cell_w * 0.5
-                && x <= geometry.editor.0 + geometry.editor.2 - renderer.cell_w * 0.5)
+            || (x >= geometry.editor.0 + renderer.overlay_text_cell_width() * 0.5
+                && x <= geometry.editor.0 + geometry.editor.2
+                    - renderer.overlay_text_cell_width() * 0.5)
     }
 
     /// End a button press: activate the button if the pointer is still over

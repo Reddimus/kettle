@@ -935,3 +935,79 @@ fn a_spanish_bar_shows_its_words_whole() {
         assert!(super::display_width(status.label(&tr)) <= status_columns);
     }
 }
+
+#[test]
+fn ligature_carets_and_selection_follow_grapheme_boundaries() {
+    use super::{SearchEditorCluster, cluster_spans, cluster_stops, grapheme_clusters};
+    let clusters = grapheme_clusters(
+        "ffi",
+        vec![SearchEditorCluster {
+            start: 0,
+            end: 3,
+            left: 0.0,
+            right: 30.0,
+            rtl: false,
+        }],
+    );
+    assert_eq!(
+        cluster_stops(&clusters),
+        [(0, 0.0), (1, 10.0), (2, 20.0), (3, 30.0)],
+        "ligature omitted an editable grapheme boundary"
+    );
+    assert_eq!(cluster_spans(&clusters, 1, 2), [(10.0, 20.0)]);
+    let arabic = grapheme_clusters(
+        "\u{644}\u{627}",
+        vec![SearchEditorCluster {
+            start: 0,
+            end: 4,
+            left: 10.0,
+            right: 30.0,
+            rtl: true,
+        }],
+    );
+    assert_eq!(cluster_stops(&arabic), [(0, 30.0), (2, 20.0), (4, 10.0)]);
+    assert_eq!(cluster_spans(&arabic, 0, 2), [(20.0, 30.0)]);
+    let accent = grapheme_clusters(
+        "e\u{301}",
+        vec![SearchEditorCluster {
+            start: 0,
+            end: 3,
+            left: 0.0,
+            right: 10.0,
+            rtl: false,
+        }],
+    );
+    assert_eq!(cluster_stops(&accent), [(0, 0.0), (3, 10.0)]);
+}
+
+#[test]
+fn search_controls_use_natural_chrome_advance() {
+    let source = super::production_source();
+    let paint = source
+        .split("&& let Some(search) = overlay.search.as_ref()")
+        .nth(1)
+        .unwrap()
+        .split("let geometry = search_bar_geometry")
+        .next()
+        .unwrap();
+    let input = include_str!("../../kettle-ui/src/app/search.rs");
+    assert!(
+        paint.contains("self.overlay_text_cell_width()") && !input.contains("renderer.cell_w"),
+        "search paint and input still measure narrowed terminal cells"
+    );
+    let search = SearchOverlay {
+        wrap: false,
+        ..SearchOverlay::default()
+    };
+    let geometry = search_bar_geometry(2400.0, 800.0, 8.0, 16.0, &search.tr);
+    let segments = search_bar_segments(&search, geometry, 8.0);
+    let wrap = segments
+        .iter()
+        .find(|segment| segment.control == Some(SearchControl::Wrap))
+        .unwrap();
+    assert!(
+        wrap.text.contains("Off"),
+        "Wrap state was clipped: {}",
+        wrap.text
+    );
+}

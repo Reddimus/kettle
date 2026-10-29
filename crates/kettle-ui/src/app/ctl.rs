@@ -1085,7 +1085,10 @@ impl App {
             let geometry = kettle_render::search_bar_geometry(
                 surface.0 as f32,
                 surface.1 as f32,
-                cell_w,
+                target
+                    .renderer
+                    .as_ref()
+                    .map_or(8.0, |renderer| renderer.overlay_text_cell_width()),
                 cell_h,
                 &self.ui_text,
             );

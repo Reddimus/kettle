@@ -140,3 +140,41 @@ fn dotted_dashed_and_undercurl_are_all_pairwise_distinct_shapes() {
         );
     }
 }
+
+#[test]
+fn concealed_cells_emit_no_foreground_decorations() {
+    for underline in [
+        Flags::UNDERLINE,
+        Flags::DOUBLE_UNDERLINE,
+        Flags::UNDERCURL,
+        Flags::DOTTED_UNDERLINE,
+        Flags::DASHED_UNDERLINE,
+    ] {
+        for line_color in [COLOR, Rgb::new(10, 240, 30)] {
+            let mut visible = Vec::new();
+            super::push_cell_decorations(
+                &mut visible,
+                (X, Y, CW, CH),
+                0,
+                underline | Flags::STRIKEOUT,
+                COLOR,
+                line_color,
+            );
+            assert!(!visible.is_empty());
+            let mut hidden = Vec::new();
+            super::push_cell_decorations(
+                &mut hidden,
+                (X, Y, CW, CH),
+                0,
+                underline | Flags::STRIKEOUT | Flags::HIDDEN,
+                COLOR,
+                line_color,
+            );
+            assert!(
+                hidden.is_empty(),
+                "concealed cell emitted {} foreground quads",
+                hidden.len()
+            );
+        }
+    }
+}

@@ -40,3 +40,24 @@ fn demo_meters_round_and_bound_unavailable_or_extreme_values() {
         );
     }
 }
+
+#[test]
+fn narrow_screenshot_rows_remain_unwrapped_grid_rows() {
+    use super::*;
+    let mut fonts = FontSystem::new();
+    load_bundled_font(&mut fonts, kettle_config::font::REGULAR);
+    let mut buffer = screenshot_text_buffer(&mut fonts, Metrics::new(14.0, 18.0), (80.0, 400.0));
+    buffer.set_text(
+        "demo@kettle:~/projects/demo$ cargo test\nsecond row",
+        &Attrs::new().family(Family::Name(kettle_config::font::FAMILY)),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut fonts, false);
+    let lines: Vec<_> = buffer.layout_runs().map(|run| run.line_i).collect();
+    assert_eq!(
+        lines,
+        [0, 1],
+        "narrow screenshot soft-wrapped terminal rows"
+    );
+}

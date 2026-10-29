@@ -65,7 +65,8 @@ impl App {
         &self,
         ws: &WindowState,
     ) -> Option<kettle_render::UpdateToastGeometry> {
-        let surface = ws.renderer.as_ref()?.surface_size();
+        let renderer = ws.renderer.as_ref()?;
+        let surface = renderer.surface_size();
         let scale = ws.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
         let details = self.ui_text.text(kettle_i18n::Text::UpdateToastDetails);
         let notice = self
@@ -78,7 +79,10 @@ impl App {
             (surface.0 as f32, surface.1 as f32),
             self.area(ws).1,
             scale,
-            Self::cell_size(ws)?,
+            (
+                renderer.overlay_text_cell_width(),
+                renderer.overlay_text_line_height(),
+            ),
             details.width(),
             &self.update_toast_message(&notice),
         )

@@ -407,9 +407,13 @@ pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
                 return None;
             }
         },
-        Some(ImageFormat::Png) => match image::codecs::png::PngDecoder::new(inner) {
-            Ok(d) if decoder_dimensions_fit(d.dimensions()) => {
+        Some(ImageFormat::Png) => match background_png_decoder(inner) {
+            Ok(mut d) if decoder_dimensions_fit(d.dimensions()) => {
                 let bytes = decoder_frame_bytes(d.dimensions())?;
+                // Two canvases, a potentially 16-bit raw frame, and RGBA conversion.
+                let mut scratch = image::Limits::default();
+                scratch.max_alloc = Some(bytes.checked_mul(5)?);
+                d.set_limits(scratch).ok()?;
                 match d.is_apng() {
                     Ok(true) => match d.apng() {
                         Ok(a) => (a.into_frames(), bytes),
@@ -419,7 +423,10 @@ pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
                         }
                     },
                     // Plain (non-animated) PNG → still.
-                    _ => return single_frame(path),
+                    _ => {
+                        drop(d);
+                        return single_frame(path);
+                    }
                 }
             }
             Ok(d) => {
@@ -530,6 +537,16 @@ pub fn decode_bg_image_frames_with_blur(path: &str, blur_radius: u32) -> Option<
     Some(frames)
 }
 
+fn background_png_decoder<R: std::io::BufRead + std::io::Seek>(
+    reader: R,
+) -> image::ImageResult<image::codecs::png::PngDecoder<R>> {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_BG_IMAGE_DIM);
+    limits.max_image_height = Some(MAX_BG_IMAGE_DIM);
+    limits.max_alloc = Some(MAX_BG_IMAGE_BYTES);
+    image::codecs::png::PngDecoder::with_limits(reader, limits)
+}
+
 fn decoder_dimensions_fit((width, height): (u32, u32)) -> bool {
     decoder_frame_bytes((width, height)).is_some()
 }
@@ -547,6 +564,23 @@ fn decoder_frame_bytes((width, height): (u32, u32)) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn png_metadata_respects_wallpaper_budget() {
+        use image::ImageDecoder;
+        let data = include_bytes!("../tests/fixtures/oversized-profile.png");
+        match background_png_decoder(std::io::Cursor::new(data)) {
+            Ok(mut decoder) => {
+                assert_eq!(decoder.dimensions(), (1, 1));
+                assert!(
+                    decoder.icc_profile().unwrap().is_none(),
+                    "oversized ICC profile was allocated"
+                );
+            }
+            Err(image::ImageError::Limits(_)) => {}
+            Err(error) => panic!("unexpected PNG fixture error: {error}"),
+        }
+    }
 
     #[test]
     fn decoded_frame_envelope_accepts_limit_and_rejects_one_past() {

@@ -606,8 +606,8 @@ fn vs(
 }
 
 // sRGB → linear, matching `quad.rs` / glyphon's `srgb_to_linear`. The render
-// target is an sRGB surface that re-encodes the fragment output, so mask glyph
-// colors must be decoded here to land on their intended theme color (identical
+// target re-encodes the fragment output when it is sRGB, so mask glyph
+// colors are decoded only for that target to land on their theme color (identical
 // to glyphon's Accurate ColorMode, which decodes in its vertex stage).
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let lo = c / 12.92;
@@ -630,6 +630,38 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(lin, in.color.a * cov);
 }
 "#;
+
+fn glyph_shader_source(format: wgpu::TextureFormat) -> String {
+    if format.is_srgb() {
+        SHADER.to_string()
+    } else {
+        SHADER.replace(
+            "let lin = srgb_to_linear(in.color.rgb);",
+            "let lin = in.color.rgb;",
+        )
+    }
+}
+
+#[cfg(test)]
+mod target_color_tests {
+    #[test]
+    fn mask_shader_preserves_non_srgb_foregrounds() {
+        let shader = super::glyph_shader_source(wgpu::TextureFormat::Rgba8Unorm);
+        let mask = shader.split("let cov =").nth(1).unwrap();
+        assert!(
+            !mask.contains("srgb_to_linear(in.color.rgb)"),
+            "non-sRGB target decodes foreground without a hardware encode"
+        );
+        let shader = super::glyph_shader_source(wgpu::TextureFormat::Rgba8UnormSrgb);
+        assert!(
+            shader
+                .split("let cov =")
+                .nth(1)
+                .unwrap()
+                .contains("srgb_to_linear(in.color.rgb)")
+        );
+    }
+}
 
 /// The instanced glyph renderer: two atlases (color + mask), one pipeline, a
 /// per-`CacheKey` slot cache, and a growable instance buffer.
@@ -678,7 +710,7 @@ impl GlyphPipeline {
     ) -> Option<Self> {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("kettle-glyph"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(glyph_shader_source(format).into()),
         });
         // glyphon's color atlas is sRGB only when the target is sRGB (Accurate
         // ColorMode); mirror that so a straight sample decodes correctly.

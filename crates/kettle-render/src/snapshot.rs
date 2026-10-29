@@ -33,12 +33,9 @@ use kettle_core::EventProxy;
 use crate::card_marks::CardMarks;
 use crate::inline_cards::MAX_CARD_ROWS;
 
-/// Max combining (zero-width) marks stored inline per [`SnapCell`]. A cell with
-/// more than this many marks (pathological) has the excess dropped at capture —
-/// the rendered base grapheme stays correct, only an extra accent beyond the
-/// fourth is lost. Inline storage keeps `SnapCell: Copy` and the snapshot's
-/// zero-allocation pooling (no per-cell `Vec`).
-const MAX_ZEROWIDTH: usize = 4;
+/// Ordinary glyphs retain the terminal grid's bounded combining sequence.
+const MAX_ZEROWIDTH: usize = alacritty_terminal::term::cell::MAX_ZEROWIDTH_PER_CELL;
+const MAX_INLINE_CARD_MARKS: usize = 4;
 
 /// One viewport cell, captured verbatim from the grid's `display_iter`
 /// (including wide-char spacers — the renderer's wide-cursor logic depends
@@ -63,7 +60,7 @@ pub struct SnapCell {
     /// stripped base char. Stored inline (see [`MAX_ZEROWIDTH`]); read via
     /// [`SnapCell::zerowidth`], mirroring the grid `Cell::zerowidth`.
     zerowidth: [char; MAX_ZEROWIDTH],
-    // MAX_ZEROWIDTH + 1 records overflow without adding storage to SnapCell.
+    // A fifth placeholder mark records ownership by the card/fallback pass.
     zerowidth_len: u8,
 }
 
@@ -72,12 +69,17 @@ impl SnapCell {
         let mut zerowidth = ['\0'; MAX_ZEROWIDTH];
         let mut zerowidth_len = 0u8;
         if let Some(marks) = cell.zerowidth() {
-            for &mark in marks.iter().take(MAX_ZEROWIDTH) {
+            let limit = if cell.c == '\u{10eeee}' {
+                MAX_INLINE_CARD_MARKS
+            } else {
+                MAX_ZEROWIDTH
+            };
+            for &mark in marks.iter().take(limit) {
                 zerowidth[zerowidth_len as usize] = mark;
                 zerowidth_len += 1;
             }
-            if marks.len() > MAX_ZEROWIDTH {
-                zerowidth_len = (MAX_ZEROWIDTH + 1) as u8;
+            if marks.len() > limit {
+                zerowidth_len = (limit + 1) as u8;
             }
         }
         Self {
@@ -107,13 +109,18 @@ impl SnapCell {
     /// present.
     #[inline]
     pub fn zerowidth(&self) -> &[char] {
-        &self.zerowidth[..usize::from(self.zerowidth_len).min(MAX_ZEROWIDTH)]
+        let limit = if self.c == '\u{10eeee}' {
+            MAX_INLINE_CARD_MARKS
+        } else {
+            MAX_ZEROWIDTH
+        };
+        &self.zerowidth[..usize::from(self.zerowidth_len).min(limit)]
     }
 
     /// Long placeholder clusters belong to the card/fallback pass, even when
     /// no active registration requires collecting their complete identity.
     pub fn is_card_placeholder(&self) -> bool {
-        self.c == '\u{10eeee}' && usize::from(self.zerowidth_len) > MAX_ZEROWIDTH
+        self.c == '\u{10eeee}' && usize::from(self.zerowidth_len) > MAX_INLINE_CARD_MARKS
     }
 }
 
@@ -318,6 +325,28 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_preserves_the_complete_england_flag_tag_sequence() {
+        let sequence = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}";
+        let (mut term, mut proc) = test_term(8, 2);
+        proc.advance(&mut term, sequence.as_bytes());
+        let mut snap = PaneSnapshot::default();
+        snap.capture(&term);
+        let flag = snap
+            .cells
+            .iter()
+            .find(|cell| cell.line == 0 && cell.col == 0)
+            .unwrap();
+        let captured: String = std::iter::once(flag.c)
+            .chain(flag.zerowidth().iter().copied())
+            .collect();
+        assert_eq!(
+            captured, sequence,
+            "snapshot truncated valid emoji tag components"
+        );
+        assert!(!flag.is_card_placeholder());
+    }
+
+    #[test]
     fn snapcell_zerowidth_roundtrips_combining_marks() {
         // Feed a base 'e' immediately followed by COMBINING ACUTE ACCENT
         // (U+0301): the alacritty engine attaches the accent as a zero-width
@@ -493,7 +522,13 @@ mod tests {
             "four-mark Kitty cells retain existing semantics"
         );
         assert_eq!(row[0].zerowidth().len(), 4);
-        assert_eq!(row[1].zerowidth().len(), 4);
+        assert_eq!(
+            row[1].zerowidth(),
+            &[
+                '\u{0305}', '\u{030d}', '\u{030e}', '\u{0310}', '\u{0312}', '\u{033d}', '\u{033e}',
+                '\u{033f}'
+            ]
+        );
         assert_eq!(row[2].zerowidth().len(), 4);
     }
 }
