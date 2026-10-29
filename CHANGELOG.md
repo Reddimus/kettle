@@ -35,6 +35,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   instead of showing its payload as text.
 - Update dependencies within their existing version requirements, including
   wgpu 30.0.1 and notify 8.2.1.
+- Decode kitty and iTerm2 images in stages, cutting the peak memory of a
+  maximum-size transmission from about 392 MiB to 168 MiB, and hold each
+  terminal to a 192 MiB transient decode ceiling so one pane's images
+  cannot make another pane's fail.
 
 ### Fixed
 
