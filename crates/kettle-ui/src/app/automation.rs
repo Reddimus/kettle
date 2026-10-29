@@ -302,7 +302,9 @@ impl App {
     /// Every close_tab call site should call this so plugins
     /// listening for tab_close see every close regardless of
     /// trigger source.
-    pub(super) fn fire_tab_close_event(&mut self, ws: &WindowState, closing_idx: usize) {
+    pub(super) fn fire_tab_close_event(&mut self, ws: &mut WindowState, closing_idx: usize) {
+        // Its panes go first: `pane_close` reaches every pane that ends.
+        self.fire_closed_pane_events(ws);
         if let Some(rec) = self.recorder.as_mut() {
             rec.record_marker("kettle:tab_close");
         }
@@ -316,6 +318,15 @@ impl App {
     /// trigger source (keybind, confirm dialog, menu).
     pub(super) fn fire_pane_close_event(&mut self, ws: &WindowState, pane_id: u64) {
         self.fire_lua_event(ws, crate::LuaEvent::PaneClose(pane_id), "pane_close hook");
+    }
+
+    /// Fire `pane_close` for the panes the mux destroyed itself: a closed
+    /// tab's, and ones reaped after their shell exited. Plugins that keep
+    /// per-pane state rely on seeing every pane end.
+    pub(super) fn fire_closed_pane_events(&mut self, ws: &mut WindowState) {
+        for pane_id in ws.mux.take_closed_panes() {
+            self.fire_pane_close_event(ws, pane_id);
+        }
     }
 
     pub(super) fn sync_lua_active_theme(&self) {

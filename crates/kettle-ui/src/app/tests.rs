@@ -7631,6 +7631,82 @@ fn split_divider_drag_is_wired() {
     );
 }
 
+/// Plugins keep per-pane state until `pane_close`, so every pane the mux
+/// destroys itself is reported for one, exactly once.
+#[test]
+fn reaped_and_tab_closed_panes_are_reported_for_pane_close() {
+    let (mut mux, target, sibling) = title_test_split_mux();
+    assert!(mux.take_closed_panes().is_empty());
+    mux.panes.get_mut(&target).unwrap().closed = true;
+    assert!(!mux.reap().mux_empty);
+    assert_eq!(mux.take_closed_panes(), [target]);
+    assert!(
+        mux.take_closed_panes().is_empty(),
+        "each pane is reported once"
+    );
+    assert!(mux.close_tab(), "closing the only tab empties the mux");
+    assert_eq!(mux.take_closed_panes(), [sibling]);
+}
+
+/// The App announces those panes wherever they go: after both reaps,
+/// before every `tab_close`, and for all panes when a window closes.
+#[test]
+fn every_pane_teardown_fires_pane_close() {
+    let src = production_source();
+    for after_reap in src.split("let reaped = ws.mux.reap();").skip(1) {
+        let flat: String = after_reap.split_whitespace().collect();
+        assert!(
+            flat.starts_with(
+                "ifreaped.layout_changed{ws.dragging_split=None;}self.fire_closed_pane_events(ws);"
+            ),
+            "a reap must announce the panes it removed"
+        );
+    }
+    let tab_close = include_str!("automation.rs")
+        .split("fn fire_tab_close_event(")
+        .nth(1)
+        .unwrap()
+        .split("\n    }")
+        .next()
+        .unwrap();
+    assert!(tab_close.contains("self.fire_closed_pane_events(ws);"));
+    let window_close = include_str!("windowing.rs")
+        .split("fn close_window_now(")
+        .nth(1)
+        .unwrap()
+        .split("ws.mux.close_window();")
+        .next()
+        .unwrap();
+    assert!(window_close.contains("self.fire_pane_close_event(ws, pane_id);"));
+}
+
+/// A torn-off window keeps the source window's font zoom: the drag anchor
+/// is placed with the source's tab- and status-bar metrics, so a window
+/// opened at the configured size put the pointer off its tab strip.
+#[test]
+fn torn_off_windows_keep_the_source_font_size() {
+    let app = include_str!("../app.rs");
+    let windowing = include_str!("windowing.rs");
+    let carries = "font_size: ws.renderer.as_ref().map(|r| r.font_size()),";
+    assert_eq!(
+        app.matches(carries).count() + windowing.matches(carries).count(),
+        3,
+        "every non-Wayland tear-off passes its font size"
+    );
+    assert!(windowing.contains("let font_size = ws.renderer.as_ref().map(|r| r.font_size());"));
+    let open = windowing
+        .split("pub(super) fn open_window(")
+        .nth(1)
+        .unwrap()
+        .split("let area = self.area(&ws);")
+        .next()
+        .unwrap();
+    assert!(
+        open.contains("renderer.set_font_size(*font_size);"),
+        "the font size applies before the grid is sized"
+    );
+}
+
 #[test]
 fn pane_reaping_cancels_divider_drags() {
     let src = production_source();

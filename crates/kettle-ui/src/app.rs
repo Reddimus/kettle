@@ -13845,6 +13845,7 @@ impl App {
             if reaped.layout_changed {
                 ws.dragging_split = None;
             }
+            self.fire_closed_pane_events(ws);
             // `clear_stale_title_edit` mutates `ws.editing_title`, so it is
             // evaluated into a binding rather than placed on the right of the
             // `||` where a reaped layout would short-circuit past it and
@@ -16377,6 +16378,7 @@ impl App {
                         WindowOpen::AdoptTab {
                             tab: dt,
                             source_color: self.tear_off_source_color(ws),
+                            font_size: ws.renderer.as_ref().map(|r| r.font_size()),
                             paste: Box::new(paste),
                         },
                         None,
@@ -19068,6 +19070,10 @@ enum WindowOpen {
     AdoptTab {
         tab: crate::mux::DetachedTab,
         source_color: Option<kettle_config::Rgb>,
+        /// The source window's runtime font size, so the torn-off window
+        /// draws its tab and status bars at the size the drag anchor was
+        /// measured with.
+        font_size: Option<f32>,
         /// The moved tab's paste receipt and pending video preview.
         paste: Box<crate::window_state::MovedPasteState>,
     },
@@ -21426,6 +21432,7 @@ impl App {
                                     WindowOpen::AdoptTab {
                                         tab: dt,
                                         source_color: self.tear_off_source_color(ws),
+                                        font_size: ws.renderer.as_ref().map(|r| r.font_size()),
                                         paste: Box::new(paste),
                                     },
                                     pos,
@@ -22262,6 +22269,7 @@ impl App {
         if reaped.layout_changed {
             ws.dragging_split = None;
         }
+        self.fire_closed_pane_events(ws);
         // Binding, not an inline call on the right of `||`: see the matching
         // reap in `redraw`.
         let stale_title = clear_stale_title_edit(&ws.mux, &mut ws.editing_title);

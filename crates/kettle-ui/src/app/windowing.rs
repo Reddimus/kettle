@@ -23,6 +23,14 @@ impl App {
         // tail. `DropPanes` is why the clearing lives here rather than at the
         // call sites — the order is the point.
         self.flush_recorder_output(ws);
+        // Every pane ends with its window, whether or not the mux is kept for
+        // the saved session; plugins see each one go.
+        self.fire_closed_pane_events(ws);
+        let mut remaining: Vec<u64> = ws.mux.panes.keys().copied().collect();
+        remaining.sort_unstable();
+        for pane_id in remaining {
+            self.fire_pane_close_event(ws, pane_id);
+        }
         // The recorder spans the whole session, so finish it only when the LAST
         // window goes (this one is checked out of the map, so empty == last).
         if self.windows.is_empty()
@@ -392,6 +400,16 @@ impl App {
             crate::native_fullscreen::NativeFullscreen::install(window, seq, self.proxy.clone())
         });
         ws.native_material = Some(native_material);
+        // A torn-off tab keeps its window's font zoom, before the grid is
+        // sized: the drag anchor was measured with those metrics.
+        if let WindowOpen::AdoptTab {
+            font_size: Some(font_size),
+            ..
+        } = &open
+            && let Some(renderer) = ws.renderer.as_mut()
+        {
+            renderer.set_font_size(*font_size);
+        }
         self.sync_output_frame_budget(&mut ws, true);
         let area = self.area(&ws);
         let (cols, rows) = self.grid_of(&ws, area);
@@ -676,6 +694,7 @@ impl App {
                 WindowOpen::AdoptTab {
                     tab: dt,
                     source_color: self.tear_off_source_color(ws),
+                    font_size: ws.renderer.as_ref().map(|r| r.font_size()),
                     paste: Box::new(paste),
                 },
                 pos,
@@ -1608,12 +1627,14 @@ impl App {
         self.release_focus_report_to(ws, &dt);
         let paste = ws.take_moved_paste_state(&dt.tab, std::time::Instant::now());
         let color = self.tear_off_source_color(ws);
+        let font_size = ws.renderer.as_ref().map(|r| r.font_size());
         match self
             .open_window(
                 event_loop,
                 WindowOpen::AdoptTab {
                     tab: dt,
                     source_color: color,
+                    font_size,
                     paste: Box::new(paste),
                 },
                 None,
