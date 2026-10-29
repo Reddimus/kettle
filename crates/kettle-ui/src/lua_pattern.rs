@@ -23,6 +23,8 @@
 // SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 use mlua::{Function, Lua, MultiValue, Result, Value, ffi};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 // Enough for linear scans of MiB-sized strings, while stopping exponential
 // backtracking well before the instruction watchdog could otherwise help.
@@ -36,15 +38,41 @@ fn error(message: impl Into<String>) -> mlua::Error {
     mlua::Error::RuntimeError(message.into())
 }
 
-struct Budget(usize);
+pub(super) struct Budget {
+    remaining: AtomicUsize,
+    tripped: Arc<AtomicBool>,
+}
 
 impl Budget {
-    fn step(&mut self) -> Result<()> {
-        if self.0 == 0 {
+    pub(super) fn new(tripped: Arc<AtomicBool>) -> Self {
+        Self {
+            remaining: AtomicUsize::new(MAX_PATTERN_STEPS),
+            tripped,
+        }
+    }
+
+    pub(super) fn reset(&self) {
+        self.remaining.store(MAX_PATTERN_STEPS, Ordering::Relaxed);
+    }
+
+    fn charge(&self, steps: usize) -> Result<()> {
+        if self.tripped.load(Ordering::Relaxed)
+            || self
+                .remaining
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                    left.checked_sub(steps)
+                })
+                .is_err()
+        {
+            self.remaining.store(0, Ordering::Relaxed);
+            self.tripped.store(true, Ordering::Relaxed);
             return Err(error("pattern too complex"));
         }
-        self.0 -= 1;
         Ok(())
+    }
+
+    fn step(&self) -> Result<()> {
+        self.charge(1)
     }
 }
 
@@ -59,11 +87,11 @@ struct Matcher<'a> {
     pattern: &'a [u8],
     captures: [Capture; MAX_CAPTURES],
     level: usize,
-    budget: &'a mut Budget,
+    budget: &'a Budget,
 }
 
 impl<'a> Matcher<'a> {
-    fn new(subject: &'a [u8], pattern: &'a [u8], budget: &'a mut Budget) -> Self {
+    fn new(subject: &'a [u8], pattern: &'a [u8], budget: &'a Budget) -> Self {
         Self {
             subject,
             pattern,
@@ -458,7 +486,7 @@ fn response(lua: &Lua, result: Result<Outcome>) -> Result<MultiValue> {
     }
 }
 
-fn find(lua: &Lua, args: MultiValue, is_find: bool) -> Result<MultiValue> {
+fn find(lua: &Lua, args: MultiValue, is_find: bool, budget: &Budget) -> Result<MultiValue> {
     let args = Arguments { values: args };
     let subject = args.string(lua, 1)?;
     let pattern = args.string(lua, 2)?;
@@ -469,12 +497,21 @@ fn find(lua: &Lua, args: MultiValue, is_find: bool) -> Result<MultiValue> {
     if init > subject.len() {
         return Ok(none());
     }
-    let mut budget = Budget(MAX_PATTERN_STEPS);
     let plain = args
         .values
         .get(3)
         .is_some_and(|v| !matches!(v, Value::Nil | Value::Boolean(false)));
-    if is_find && (plain || !pattern.iter().any(|b| b"^$*+?.([%-".contains(b))) {
+    let mut special = false;
+    if is_find && !plain {
+        for byte in pattern.iter() {
+            budget.step()?;
+            if b"^$*+?.([%-".contains(byte) {
+                special = true;
+                break;
+            }
+        }
+    }
+    if is_find && (plain || !special) {
         if pattern.len() > subject.len() - init {
             return Ok(none());
         }
@@ -498,7 +535,7 @@ fn find(lua: &Lua, args: MultiValue, is_find: bool) -> Result<MultiValue> {
         return Ok(none());
     }
     let anchor = pattern.first() == Some(&b'^');
-    let mut matcher = Matcher::new(&subject, &pattern, &mut budget);
+    let mut matcher = Matcher::new(&subject, &pattern, budget);
     for start in init..=subject.len() {
         matcher.level = 0;
         if let Some(end) = matcher.matches(start, usize::from(anchor), 0)? {
@@ -516,19 +553,18 @@ fn find(lua: &Lua, args: MultiValue, is_find: bool) -> Result<MultiValue> {
     Ok(none())
 }
 
-fn gmatch(lua: &Lua, args: MultiValue) -> Result<MultiValue> {
+fn gmatch(lua: &Lua, args: MultiValue, budget: Arc<Budget>) -> Result<MultiValue> {
     let args = Arguments { values: args };
     let subject = args.string(lua, 1)?;
     let pattern = args.string(lua, 2)?;
     let mut start = initial(args.integer(lua, 3, 1)?, subject.as_bytes().len())
         .min(subject.as_bytes().len() + 1);
     let mut lastmatch = None;
-    let mut budget = Budget(MAX_PATTERN_STEPS);
     let iterator = lua.create_function_mut(move |lua, _: MultiValue| {
         let result = (|| {
             let subject = subject.as_bytes();
             let pattern = pattern.as_bytes();
-            let mut matcher = Matcher::new(&subject, &pattern, &mut budget);
+            let mut matcher = Matcher::new(&subject, &pattern, &budget);
             let scan_start = start;
             for src in scan_start..=subject.len() {
                 matcher.level = 0;
@@ -553,6 +589,7 @@ fn gmatch(lua: &Lua, args: MultiValue) -> Result<MultiValue> {
 
 struct Output<'a> {
     lua: &'a Lua,
+    budget: &'a Budget,
     chunks: mlua::Table,
     count: usize,
 }
@@ -560,6 +597,7 @@ struct Output<'a> {
 impl Output<'_> {
     fn append(&mut self, bytes: &[u8]) -> Result<()> {
         if !bytes.is_empty() {
+            self.budget.charge(bytes.len())?;
             self.count += 1;
             self.chunks
                 .raw_set(self.count, self.lua.create_string(bytes)?)?;
@@ -579,14 +617,19 @@ fn add_string(
     let replacement = replacement.as_bytes();
     let mut offset = 0;
     while offset < replacement.len() {
-        let next = replacement[offset..]
-            .iter()
-            .position(|&c| c == b'%')
-            .map_or(replacement.len(), |i| offset + i);
+        let mut next = offset;
+        while next < replacement.len() {
+            matcher.budget.step()?;
+            if replacement[next] == b'%' {
+                break;
+            }
+            next += 1;
+        }
         output.append(&replacement[offset..next])?;
         if next == replacement.len() {
             break;
         }
+        matcher.budget.step()?;
         match replacement.get(next + 1).copied() {
             Some(b'%') => output.append(b"%")?,
             Some(b'0') => output.append(&matcher.subject[start..end])?,
@@ -611,6 +654,7 @@ fn gsub(
     protected: &Function,
     index: &Function,
     concat: &Function,
+    budget: &Budget,
 ) -> Result<Outcome> {
     let args = Arguments { values: args };
     let subject = args.string(lua, 1)?;
@@ -638,11 +682,11 @@ fn gsub(
         None
     };
     let anchor = pattern.first() == Some(&b'^');
-    let mut budget = Budget(MAX_PATTERN_STEPS);
-    let mut matcher = Matcher::new(&bytes, &pattern, &mut budget);
+    let mut matcher = Matcher::new(&bytes, &pattern, budget);
     // Keep intermediate replacements in Lua's allocator, including nested gsub.
     let mut output = Output {
         lua,
+        budget,
         chunks: lua.create_table()?,
         count: 0,
     };
@@ -782,23 +826,27 @@ fn wrap(lua: &Lua, worker: Function, api: Api) -> Result<Function> {
     }
 }
 
-pub(super) fn install(lua: &Lua) -> Result<()> {
+pub(super) fn install(lua: &Lua, budget: Arc<Budget>) -> Result<()> {
     let strings: mlua::Table = lua.globals().get("string")?;
     for (name, is_find) in [("find", true), ("match", false)] {
+        let budget = budget.clone();
         let function = lua.create_function(move |lua, args: MultiValue| {
-            response(lua, find(lua, args, is_find).map(Outcome::Values))
+            response(lua, find(lua, args, is_find, &budget).map(Outcome::Values))
         })?;
         strings.set(name, wrap(lua, function, Api::Search)?)?;
     }
-    let function = lua.create_function(move |lua, args: MultiValue| {
-        response(lua, gmatch(lua, args).map(Outcome::Values))
-    })?;
+    let function = {
+        let budget = budget.clone();
+        lua.create_function(move |lua, args: MultiValue| {
+            response(lua, gmatch(lua, args, budget.clone()).map(Outcome::Values))
+        })?
+    };
     strings.set("gmatch", wrap(lua, function, Api::Search)?)?;
     let protected: Function = lua.globals().get("pcall")?;
     let index: Function = lua.load("return function(t, k) return t[k] end").eval()?;
     let concat: Function = lua.globals().get::<mlua::Table>("table")?.get("concat")?;
     let function = lua.create_function(move |lua, args: MultiValue| {
-        response(lua, gsub(lua, args, &protected, &index, &concat))
+        response(lua, gsub(lua, args, &protected, &index, &concat, &budget))
     })?;
     strings.set("gsub", wrap(lua, function, Api::Substitute)?)?;
     // Lua's string metatable __index is this same table, covering s:match(p).
@@ -863,6 +911,7 @@ mod tests {
         replacement: &str,
         n: Option<i64>,
     ) {
+        bounded.app_data_ref::<Arc<Budget>>().unwrap().reset();
         let run = |lua: &Lua| -> Vec<u8> {
             let driver: Function = lua.named_registry_value("driver").unwrap();
             driver
@@ -894,7 +943,9 @@ mod tests {
         let native = Lua::new();
         let bounded = Lua::new();
         bounded.set_memory_limit(256 << 20).unwrap();
-        install(&bounded).unwrap();
+        let budget = Arc::new(Budget::new(Arc::new(AtomicBool::new(false))));
+        bounded.set_app_data(budget.clone());
+        install(&bounded, budget).unwrap();
         for lua in [&native, &bounded] {
             lua.set_named_registry_value(
                 "driver",

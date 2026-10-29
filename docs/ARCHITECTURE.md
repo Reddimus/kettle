@@ -3488,6 +3488,14 @@ Limit native Lua URL-pattern matching to a conservative work estimate of
 interrupt `string.match`. Skip malformed or over-budget patterns and continue
 considering later handlers.
 
+In safe and restricted VMs, the four public string pattern APIs use a shared
+20,000,000-step budget for each top-level invocation or callback. The engine
+resets it alongside the instruction watchdog, including for iterators retained
+across callbacks. Matching, replacement scanning, and expanded output bytes
+consume this budget. Exhaustion sets the watchdog's out-of-band flag, so
+protected calls cannot hide it and runaway event callbacks are retired.
+Trusted VMs retain Lua's native string functions.
+
 ### Settings overlay + interactive keybind editor
 
 A keyboard-navigable, non-technical-friendly preferences panel — the overlay

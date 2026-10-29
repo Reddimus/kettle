@@ -71,10 +71,11 @@ and returns:
 | Menu rows | 256, labels up to 1 KiB |
 | URL handlers | 256, names up to 256 bytes, patterns up to 4 KiB |
 | Pattern matching for one URL | about 2 million steps across all handlers |
-| `string.find`, `match`, `gmatch`, `gsub` in safe/restricted modes | 20 million matcher steps per call (shared across iterations) |
+| `string.find`, `match`, `gmatch`, `gsub` in safe/restricted modes | 20 million work steps per callback or top-level invocation, shared across calls, iterations, replacement scans, and expanded bytes |
 | Lua memory | 256 MiB |
 
-A callback that runs for about 128 million Lua instructions is stopped.
+A callback that runs for about 128 million Lua instructions or exhausts its
+pattern work budget is stopped, including inside protected calls.
 An event callback stopped that way is removed until Kettle restarts; one
 that raises an error is logged and kept.
 

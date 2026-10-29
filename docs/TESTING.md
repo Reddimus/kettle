@@ -29,6 +29,14 @@ Replace `<crate>` with the package you changed. Format only that crate while
 iterating. The workspace check catches formatting drift elsewhere.
 A focused test helps during development, but does not replace the gate.
 
+The `kettle-ui` tests selected by `sandbox_pattern_` cover safe and restricted
+Lua pattern budgets: empty replacement expansions, expanded output bytes,
+separate calls and iterators, protected calls, callback retirement, and budget
+resets. `lua_pattern::tests::differential_lua54_patterns` compares ordinary
+matching and replacement behavior against native Lua. For an offline run, use
+`cargo test -j 2 --locked --offline -p kettle-ui sandbox_pattern_`, followed by
+`cargo test -j 2 --locked --offline -p kettle-ui` for the full crate suite.
+
 ### Main gates
 
 The MCP stdio integration suite exercises Codex guidance, turn-end-only fallback,

@@ -348,6 +348,7 @@ pub struct LuaEngine {
     /// Separate from the raised error because user Lua can `pcall` around its
     /// own runaway and report success; this flag cannot be reached from Lua.
     budget_tripped: Arc<AtomicBool>,
+    pattern_budget: Arc<crate::lua_pattern::Budget>,
 }
 
 impl LuaEngine {
@@ -540,8 +541,11 @@ impl LuaEngine {
         // function whose native work is unrelated to the admitted pattern.
         let matcher: mlua::Function = lua.globals().get::<mlua::Table>("string")?.get("match")?;
         lua.set_named_registry_value("kettle_url_match", matcher)?;
+        let hook_fires = Arc::new(AtomicU64::new(0));
+        let budget_tripped = Arc::new(AtomicBool::new(false));
+        let pattern_budget = Arc::new(crate::lua_pattern::Budget::new(budget_tripped.clone()));
         if !matches!(sandbox, LuaSandbox::Trusted) {
-            crate::lua_pattern::install(&lua)?;
+            crate::lua_pattern::install(&lua, pattern_budget.clone())?;
         }
         // Install the instruction-budget watchdog. The hook
         // fires every `HOOK_INSTRUCTION_INTERVAL` VM instructions; when a single
@@ -551,8 +555,6 @@ impl LuaEngine {
         // is unreachable), and the hook is set from the Rust side here. It is
         // the global hook: mlua removes a thread hook from any coroutine it
         // did not create, so a loop inside `coroutine.wrap` ran unbounded.
-        let hook_fires = Arc::new(AtomicU64::new(0));
-        let budget_tripped = Arc::new(AtomicBool::new(false));
         {
             let fires = hook_fires.clone();
             let tripped = budget_tripped.clone();
@@ -560,7 +562,7 @@ impl LuaEngine {
                 mlua::HookTriggers::new().every_nth_instruction(HOOK_INSTRUCTION_INTERVAL),
                 move |_lua, _debug| {
                     let n = fires.fetch_add(1, Ordering::Relaxed) + 1;
-                    if n > max_fires {
+                    if n > max_fires || tripped.load(Ordering::Relaxed) {
                         // Record the abort out of band as well as raising it.
                         // The error alone is not enough to act on: user Lua can
                         // `pcall` around its own runaway and swallow it, which
@@ -950,10 +952,11 @@ impl LuaEngine {
             active_theme,
             hook_fires,
             budget_tripped,
+            pattern_budget,
         })
     }
 
-    /// Reset the instruction budget at the start of a
+    /// Reset the instruction and pattern budgets at the start of a
     /// top-level Lua invocation, so each call gets the full budget rather than
     /// sharing one cumulative counter across the session (which would
     /// eventually false-trip a long-lived plugin). Called by every public entry
@@ -961,6 +964,7 @@ impl LuaEngine {
     fn arm_budget(&self) {
         self.hook_fires.store(0, Ordering::Relaxed);
         self.budget_tripped.store(false, Ordering::Relaxed);
+        self.pattern_budget.reset();
     }
 
     /// Did the watchdog abort the call that just finished? Consumes the flag.
@@ -1472,6 +1476,172 @@ mod tests {
                     "{err:#}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn sandbox_pattern_empty_replacement_expansion_is_step_bounded() {
+        for sandbox in [
+            kettle_config::LuaSandbox::Safe,
+            kettle_config::LuaSandbox::Restricted,
+        ] {
+            let eng = LuaEngine::new_with_sandbox("Default", sandbox).unwrap();
+            for pattern in ["b?", "(b?)"] {
+                let replacement = if pattern == "b?" { "%0" } else { "%1" };
+                let err = eng
+                    .eval_str(&format!(
+                        "return string.gsub(string.rep('a', 32), '{pattern}', string.rep('{replacement}', 1000000))"
+                    ))
+                    .expect_err("scanning empty replacements must consume the work budget");
+                assert!(
+                    format!("{err:#}").contains("pattern too complex"),
+                    "{err:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_pattern_replacement_bytes_are_step_bounded() {
+        for sandbox in [
+            kettle_config::LuaSandbox::Safe,
+            kettle_config::LuaSandbox::Restricted,
+        ] {
+            let eng = LuaEngine::new_with_sandbox("Default", sandbox).unwrap();
+            for replacement in [
+                "string.rep('%0', 32)",
+                "string.rep('%1', 32)",
+                "function(s) return string.rep(s, 32) end",
+            ] {
+                let err = eng
+                    .eval_str(&format!(
+                        "local s = string.gsub(string.rep('a', 1 << 20), '(a+)', {replacement}); return #s"
+                    ))
+                    .expect_err("expanded replacement bytes must consume the work budget");
+                assert!(
+                    format!("{err:#}").contains("pattern too complex"),
+                    "{err:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_pattern_separate_calls_share_the_callback_budget() {
+        for sandbox in [
+            kettle_config::LuaSandbox::Safe,
+            kettle_config::LuaSandbox::Restricted,
+        ] {
+            let eng = LuaEngine::new_with_sandbox("Default", sandbox).unwrap();
+            for call in [
+                "string.match(s, 'a+')",
+                "string.find(s, s, 1, true)",
+                "string.find('', s)",
+                "string.gmatch(s, 'a+')()",
+                "string.gsub(s, 'a+', '')",
+                "string.gsub('x', '.', function() return string.match(s, 'a+') end)",
+                "string.gsub('x', '.', setmetatable({}, {__index = function() return string.match(s, 'a+') end}))",
+            ] {
+                let err = eng
+                    .eval_str(&format!(
+                        "local s = string.rep('a', 1 << 20); for i = 1, 24 do {call} end"
+                    ))
+                    .expect_err("separate pattern calls must share one callback budget");
+                assert!(
+                    format!("{err:#}").contains("pattern too complex"),
+                    "{err:#}"
+                );
+                assert!(
+                    eng.budget_was_exhausted(),
+                    "pattern exhaustion must trip the watchdog"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_pattern_exhaustion_survives_protected_calls() {
+        for sandbox in [
+            kettle_config::LuaSandbox::Safe,
+            kettle_config::LuaSandbox::Restricted,
+        ] {
+            let eng = LuaEngine::new_with_sandbox("Default", sandbox).unwrap();
+            for protected in [
+                "pcall(run)",
+                "xpcall(run, function(e) return e end)",
+                "coroutine.resume(coroutine.create(run))",
+                "pcall(function() pcall(run) end)",
+                "pcall(string.gsub, 'x', '.', function() pcall(run); return '' end)",
+            ] {
+                let err = eng
+                    .eval_str(&format!(
+                        "local function run() string.match(string.rep('a', 100), string.rep('a*', 24) .. 'b') end; {protected}; return 'swallowed'"
+                    ))
+                    .expect_err("protected calls must not hide pattern exhaustion");
+                assert!(format!("{err:#}").contains("budget"), "{err:#}");
+                assert!(eng.budget_was_exhausted());
+                assert_eq!(
+                    eng.eval_str("return string.match('ok', '.*')").unwrap(),
+                    "ok"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_pattern_exhaustion_retires_only_the_runaway_callback() {
+        for sandbox in [
+            kettle_config::LuaSandbox::Safe,
+            kettle_config::LuaSandbox::Restricted,
+        ] {
+            let eng = LuaEngine::new_with_sandbox("Default", sandbox).unwrap();
+            eng.eval_str(
+                "bad_runs, good_runs = 0, 0
+                 kettle.on('bell', function()
+                     bad_runs = bad_runs + 1
+                     local s, p = string.rep('a', 100), string.rep('a*', 24) .. 'b'
+                     for i = 1, 3 do pcall(string.match, s, p) end
+                 end)
+                 for i = 1, 2 do
+                     kettle.on('bell', function()
+                         local s = string.rep('a', 1 << 20)
+                         for j = 1, 12 do string.match(s, 'a+') end
+                         good_runs = good_runs + 1
+                     end)
+                 end",
+            )
+            .unwrap();
+            eng.fire_event(&LuaEvent::Bell(1));
+            eng.fire_event(&LuaEvent::Bell(2));
+            assert_eq!(eng.eval_str("return bad_runs").unwrap(), "1");
+            assert_eq!(eng.eval_str("return good_runs").unwrap(), "4");
+            assert!(matches!(
+                eng.drain_commands().as_slice(),
+                [LuaCommand::CallbackStopped { event, dropped: 1 }] if event == "bell"
+            ));
+        }
+    }
+
+    #[test]
+    fn sandbox_pattern_saved_iterator_budget_resets_per_callback() {
+        for sandbox in [
+            kettle_config::LuaSandbox::Safe,
+            kettle_config::LuaSandbox::Restricted,
+        ] {
+            let eng = LuaEngine::new_with_sandbox("Default", sandbox).unwrap();
+            eng.eval_str(
+                "local it = string.gmatch(string.rep(string.rep('a', 1 << 20) .. 'b', 24), 'a+')
+                 good_runs = 0
+                 kettle.on('bell', function()
+                     for i = 1, 12 do assert(#it() == 1 << 20) end
+                     good_runs = good_runs + 1
+                 end)",
+            )
+            .unwrap();
+            eng.fire_event(&LuaEvent::Bell(1));
+            eng.fire_event(&LuaEvent::Bell(2));
+            assert_eq!(eng.eval_str("return good_runs").unwrap(), "2");
+            assert!(eng.drain_commands().is_empty());
         }
     }
 
