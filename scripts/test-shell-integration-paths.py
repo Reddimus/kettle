@@ -47,9 +47,10 @@ function __kettle_completion_rows
     set -g KETTLE_CALLS (math $KETTLE_CALLS + 1)
     printf 'hello\tfirst\nhelp\tsecond\n'
 end
-__kettle_completion_cycle 1
+set -l step 1
+__kettle_completion_cycle $step
 set -g KETTLE_BUFFER 'echo x he'
-__kettle_completion_cycle 1
+__kettle_completion_cycle $step
 printf 'PROVIDER_CALLS=%s;BUFFER=<%s>' $KETTLE_CALLS "$KETTLE_BUFFER"
 ''', str(MODULE.INTEGRATION / "kettle.fish"),
             ],
