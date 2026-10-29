@@ -676,7 +676,11 @@ fn write_with_styles(document: &Document<'_>, generated: bool) -> Result<String,
         }
         elements += 1;
         if node.tag_name().name() == "style" {
-            sheets.extend(node.children().filter_map(|child| child.text()));
+            sheets.extend(
+                node.children()
+                    .filter(Node::is_text)
+                    .filter_map(|child| child.text()),
+            );
         } else {
             pending.extend(node.children().filter(Node::is_element).rev());
         }
@@ -920,6 +924,33 @@ mod tests {
         assert!(!out.contains("data:"), "{out}");
         assert!(out.contains(r##"fill="url(#g)""##), "{out}");
         assert!(!out.contains("other.svg"), "{out}");
+    }
+
+    #[test]
+    fn font_shorthand_resets_local_and_inherited_kerning() {
+        for body in [
+            r#"<text style="font-kerning:none;font:32px serif">AV</text>"#,
+            r#"<g style="font-kerning:none"><text style="font:32px serif">AV</text></g>"#,
+        ] {
+            let out = clean(&format!("{OPEN}{body}</svg>")).unwrap();
+            let doc = parse(&out).unwrap();
+            let text = doc.descendants().find(|n| n.has_tag_name("text")).unwrap();
+            assert_eq!(text.attribute("style"), Some("font-kerning:auto"), "{out}");
+        }
+    }
+
+    #[test]
+    fn stylesheet_xml_comments_are_inert() {
+        for comment in ["editor note", "rect { fill: red }"] {
+            let out = clean(&format!(
+                "{OPEN}<style><!--{comment}--></style><rect width='1' height='1'/></svg>"
+            ))
+            .unwrap();
+            assert!(
+                !out.contains("fill=\"red\""),
+                "comment applied a rule: {out}"
+            );
+        }
     }
 
     #[test]

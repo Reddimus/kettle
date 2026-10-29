@@ -263,6 +263,11 @@ fn gif(bytes: &[u8]) -> Result<(), FailureCode> {
                     return Ok(());
                 };
                 within_caps((width.into(), height.into()))?;
+                if u16_le(bytes, 6).is_some_and(|screen| width > screen)
+                    || u16_le(bytes, 8).is_some_and(|screen| height > screen)
+                {
+                    return Err(FailureCode::RenderParse);
+                }
                 sub_blocks(bytes, at + 10 + color_table(flags[0]) + 1)
             }
             // The trailer, or a block the decoder refuses.

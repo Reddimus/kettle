@@ -56,6 +56,8 @@ pub(crate) fn frames(
     };
     // The timeline: each frame's delay.
     let mut delays = Vec::new();
+    let mut starts = Vec::new();
+    let mut elapsed_ms = 0.0f64;
     let mut timeline = open(format, bytes)?;
     while let Some(frame) = next(&mut timeline)? {
         spend(deadline)?;
@@ -63,16 +65,17 @@ pub(crate) fn frames(
             return Err(FailureCode::RenderResource);
         }
         let (numer, denom) = frame.delay().numer_denom_ms();
-        let ms = if denom == 0 {
-            0
+        let (numer, denom) = (u64::from(numer), u64::from(denom));
+        let delay = if format == ImageFormat::Gif && numer < 20 * denom {
+            (GIF_SHORT_DELAY_MS, 1)
+        } else if numer == 0 || denom == 0 {
+            (ZERO_DELAY_MS, 1)
         } else {
-            u64::from(numer) / u64::from(denom)
+            (numer, denom)
         };
-        delays.push(match (format, ms) {
-            (ImageFormat::Gif, ms) if ms < 20 => GIF_SHORT_DELAY_MS,
-            (_, 0) => ZERO_DELAY_MS,
-            (_, ms) => ms,
-        });
+        starts.push(elapsed_ms.round() as u64);
+        elapsed_ms += delay.0 as f64 / delay.1 as f64;
+        delays.push(delay);
     }
     if delays.is_empty() {
         return Err(FailureCode::RenderParse);
@@ -81,16 +84,8 @@ pub(crate) fn frames(
     let duration_ms = if delays.len() == 1 {
         0
     } else {
-        delays.iter().sum()
+        elapsed_ms.round() as u64
     };
-    let starts: Vec<u64> = delays
-        .iter()
-        .scan(0u64, |at, delay| {
-            let start = *at;
-            *at += delay;
-            Some(start)
-        })
-        .collect();
     let times = sample_times(duration_ms, stills);
     // The frame showing at each time: the last whose start is not after it.
     let shown: Vec<usize> = times
@@ -131,7 +126,9 @@ pub(crate) fn frames(
             })
         })
         .collect::<Result<Vec<_>, FailureCode>>()?;
-    let even = delays.iter().all(|&delay| delay == delays[0]);
+    let even = delays
+        .iter()
+        .all(|&(num, den)| num * delays[0].1 == delays[0].0 * den);
     let info = VideoInfo {
         duration_ms,
         width,
@@ -139,9 +136,9 @@ pub(crate) fn frames(
         rotation: 0,
         codec,
         fps_milli: (even && delays.len() > 1)
-            .then(|| u32::try_from(1_000_000 / delays[0]).ok())
+            .then(|| u32::try_from(1_000_000 * delays[0].1 / delays[0].0).ok())
             .flatten()
-            .filter(|&fps| fps > 0),
+            .filter(|&fps| fps > 0 && fps <= kettle_media::MAX_VIDEO_FPS_MILLI),
         has_audio: false,
         container: None,
     };
@@ -261,6 +258,42 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn gif_subframes_cannot_exceed_the_budgeted_screen() {
+        let mut bytes = gif(&[(RED, 100), (GREEN, 100)]);
+        bytes[6..10].copy_from_slice(&[1, 0, 1, 0]);
+        assert_eq!(
+            frames(&bytes, &sheet(2), later()).unwrap_err(),
+            FailureCode::RenderParse
+        );
+    }
+
+    #[test]
+    fn apng_fractional_delays_keep_their_duration_and_rate() {
+        let fractional = |num, den, count| {
+            let mut out = Vec::new();
+            {
+                let mut encoder = png::Encoder::new(&mut out, 1, 1);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_animated(count, 0).unwrap();
+                let mut writer = encoder.write_header().unwrap();
+                for _ in 0..count {
+                    writer.set_frame_delay(num, den).unwrap();
+                    writer.write_image_data(&RED).unwrap();
+                }
+            }
+            out
+        };
+        let (info, stills, _) = frames(&fractional(1, 60, 60), &sheet(3), later()).unwrap();
+        assert_eq!(info.duration_ms, 1000);
+        assert_eq!(info.fps_milli, Some(60_000));
+        assert_eq!(stills[1].sample.actual_ms, 500);
+        let (info, _, _) = frames(&fractional(1, 2000, 4), &sheet(2), later()).unwrap();
+        assert_eq!(info.duration_ms, 2);
+        assert_eq!(info.fps_milli, None);
+        info.validate().unwrap();
     }
 
     fn apng(frames: &[([u8; 4], u16)]) -> Vec<u8> {

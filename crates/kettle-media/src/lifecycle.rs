@@ -461,7 +461,7 @@ impl<'a> Running<'a> {
     }
 
     /// Paired workers share one footprint budget, sampled on each worker's schedule.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn with_memory(mut self, memory: [Arc<AtomicU64>; 2]) -> Self {
         self.memory = Some(memory);
         self

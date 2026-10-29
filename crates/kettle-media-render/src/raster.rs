@@ -103,7 +103,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<RgbaImage, FailureCode> {
     limits.max_alloc = u64::try_from(MAX_DECODED_BYTES).ok();
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     reader.limits(limits);
-    let decoder = reader.into_decoder().map_err(decode_failure)?;
+    let mut decoder = reader.into_decoder().map_err(decode_failure)?;
     let (width, height) = decoder.dimensions();
     // The RGBA the result will need, and the decoder's own native size (a
     // 16-bit image needs more), both within the cap before decoding.
@@ -112,7 +112,9 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<RgbaImage, FailureCode> {
     if decoder.total_bytes() > u64::try_from(MAX_DECODED_BYTES).unwrap_or(u64::MAX) {
         return Err(FailureCode::RenderResource);
     }
-    let image = DynamicImage::from_decoder(decoder).map_err(decode_failure)?;
+    let orientation = decoder.orientation().map_err(decode_failure)?;
+    let mut image = DynamicImage::from_decoder(decoder).map_err(decode_failure)?;
+    image.apply_orientation(orientation);
     Ok(image.into_rgba8())
 }
 

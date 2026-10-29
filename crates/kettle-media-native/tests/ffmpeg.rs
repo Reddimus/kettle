@@ -1501,3 +1501,37 @@ fn real_ffmpeg_clips_codec_padding_to_the_opened_duration() {
         );
     }
 }
+
+#[test]
+fn an_end_seek_keeps_a_long_final_frame() {
+    let description: Vec<_> = DESCRIPTION
+        .iter()
+        .map(|&line| match line {
+            "streams.stream.0.avg_frame_rate=\"10/1\"" => {
+                "streams.stream.0.avg_frame_rate=\"11/4\""
+            }
+            "streams.stream.0.duration=\"1.000000\"" => "streams.stream.0.duration=\"4.000000\"",
+            "format.duration=\"1.000000\"" => "format.duration=\"4.000000\"",
+            _ => line,
+        })
+        .collect();
+    let fake = Fake::new(
+        &description,
+        &[
+            "0,K__", "100,___", "200,___", "300,___", "400,___", "500,K__", "600,___", "700,___",
+            "800,___", "900,___", "1000,___",
+        ],
+        GOOD,
+    );
+    let clip = Clip::mp4();
+    let mut playback = play(&fake.decoder(), &clip, (40, 30), 3999, 30_000).unwrap();
+    assert_eq!(
+        playback.opened.start_ms, 1000,
+        "seek must not discard the final picture"
+    );
+    assert_eq!(frames_of(&mut playback).unwrap().len(), 1);
+    assert_eq!(
+        arg_after(&fake.calls("ffmpeg").pop().unwrap(), "-ss"),
+        Some("1.000000")
+    );
+}

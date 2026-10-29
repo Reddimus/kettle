@@ -80,7 +80,10 @@ impl<R: BufRead> Metadata<R> {
             let index: usize = index.parse().map_err(|_| ())?;
             let (num, den) = super::ratio(value).ok_or(())?;
             let slot = self.time_bases.get_mut(index).ok_or(())?;
-            if slot.replace((num, den)).is_some() || (index == 1 && (num, den) != (1, 48000)) {
+            if slot.replace((num, den)).is_some()
+                || (index == 1 && (num, den) != (1, 48000))
+                || (index == 0 && u128::from(num) > u128::from(den) * 1000)
+            {
                 return Err(());
             }
         }
@@ -137,8 +140,13 @@ impl<R: BufRead> Metadata<R> {
         };
         let at_us = timestamp(pts)?;
         let end_us = timestamp(pts.checked_add(duration).ok_or(())?)?;
+        let allowance = if stream == 0 {
+            (num * 1_000_000).div_ceil(den)
+        } else {
+            1_000_000
+        };
         if at_us > self.end_us
-            || end_us > self.end_us.saturating_add(1_000_000)
+            || end_us > self.end_us.saturating_add(allowance)
             || self.next_us[stream].is_some_and(|next| at_us < next)
         {
             return Err(());
@@ -158,6 +166,21 @@ mod tests {
     use super::*;
 
     const HEAD: &str = "#software: Lavf63.1.102\n#tb 0: 1/25\n#media_type 0: video\n#codec_id 0: rawvideo\n#dimensions 0: 64x48\n#sar 0: 1/1\n#tb 1: 1/48000\n#media_type 1: audio\n#codec_id 1: pcm_f32le\n#sample_rate 1: 48000\n#channel_layout_name 1: stereo\n";
+
+    #[test]
+    fn a_low_rate_final_packet_may_span_the_end() {
+        let head = HEAD.replace("1/25", "2/1");
+        let text = format!("{head}0, 4, 4, 1, 12288, 0x00000000\n");
+        let mut metadata = Metadata::new(text.as_bytes(), 12288, 0, 8500);
+        assert_eq!(
+            metadata.next(),
+            Ok(Some(Packet {
+                stream: 0,
+                at_us: 8_000_000,
+                bytes: 12288
+            }))
+        );
+    }
 
     #[test]
     fn video_and_audio_keep_their_common_timeline() {

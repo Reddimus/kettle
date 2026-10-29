@@ -367,6 +367,24 @@ fn isolate<'a>(
                 budget.charge(size.0, size.1)?;
                 budget.charge(size.0, size.1)?;
             }
+            // These outputs live beside their input; tiles and shadows also
+            // copy an intermediate surface.
+            if matches!(
+                primitive.kind(),
+                usvg::filter::Kind::Offset(_)
+                    | usvg::filter::Kind::DiffuseLighting(_)
+                    | usvg::filter::Kind::SpecularLighting(_)
+                    | usvg::filter::Kind::Tile(_)
+                    | usvg::filter::Kind::DropShadow(_)
+            ) {
+                budget.charge(size.0, size.1)?;
+                if matches!(
+                    primitive.kind(),
+                    usvg::filter::Kind::Tile(_) | usvg::filter::Kind::DropShadow(_)
+                ) {
+                    budget.charge(size.0, size.1)?;
+                }
+            }
             if let usvg::filter::Kind::Merge(merge) = primitive.kind() {
                 // Each input can copy a whole source layer or convert a
                 // shared result, and each is composited across that area.
@@ -503,6 +521,34 @@ mod tests {
                 "{input}"
             );
             assert!(admit(&merged(4), transform, 512, 512).is_ok(), "{input}");
+        }
+    }
+
+    #[test]
+    fn offset_source_copies_consume_area_beside_results() {
+        for primitive in [
+            r#"<feOffset in="SourceGraphic" dx="1"/>"#,
+            r#"<feDiffuseLighting in="SourceGraphic"><feDistantLight/></feDiffuseLighting>"#,
+            r#"<feSpecularLighting in="SourceGraphic"><feDistantLight/></feSpecularLighting>"#,
+            r#"<feTile in="SourceGraphic"/>"#,
+            r#"<feDropShadow in="SourceGraphic" dx="1"/>"#,
+        ] {
+            let filtered = |count| {
+                tree(&format!(
+                    r#"<filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">{}</filter><rect width="64" height="64" filter="url(#f)"/>"#,
+                    primitive.repeat(count)
+                ))
+            };
+            let transform = Transform::from_scale(16.0, 16.0);
+            assert_eq!(
+                admit(&filtered(3), transform, 1024, 1024),
+                Err(FailureCode::RenderResource),
+                "{primitive}"
+            );
+            assert!(
+                admit(&filtered(1), transform, 1024, 1024).is_ok(),
+                "{primitive}"
+            );
         }
     }
 

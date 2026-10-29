@@ -11,10 +11,10 @@
 //! is disposed, immediately, before the state its callback writes is
 //! freed, so no callback can outlive it.
 
+use crate::audio_buffers::Buffer;
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use kettle_media::audio::{CHANNELS, SAMPLE_RATE};
@@ -59,7 +59,7 @@ pub struct Unavailable;
 /// What the queue's callback writes: which buffers it has given back.
 struct Freed {
     buffers: [AudioQueueBufferRef; BUFFERS],
-    free: [AtomicBool; BUFFERS],
+    free: [Buffer; BUFFERS],
 }
 
 /// One session's sound output.
@@ -89,7 +89,7 @@ unsafe extern "C-unwind" fn given_back(
     // the queue; only its atomics are written.
     let freed = unsafe { &*user.cast::<Freed>() };
     if let Some(index) = freed.buffers.iter().position(|ours| *ours == buffer) {
-        freed.free[index].store(true, Ordering::Release);
+        freed.free[index].release();
     }
 }
 
@@ -111,7 +111,7 @@ impl Output {
         };
         let mut freed = Box::new(Freed {
             buffers: [std::ptr::null_mut(); BUFFERS],
-            free: [const { AtomicBool::new(true) }; BUFFERS],
+            free: [const { Buffer::new() }; BUFFERS],
         });
         let mut queue: AudioQueueRef = std::ptr::null_mut();
         // SAFETY: the format and the out pointer are valid for the call; the
@@ -162,10 +162,7 @@ impl Output {
 
     /// A buffer the queue has given back, now taken to be filled.
     pub fn take_free(&self) -> Option<usize> {
-        self.freed.free.iter().position(|free| {
-            free.compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        })
+        self.freed.free.iter().position(Buffer::take)
     }
 
     /// Fill buffer `index`, taken with [`Self::take_free`], with `samples`
@@ -175,6 +172,9 @@ impl Output {
         let buffer = *self.freed.buffers.get(index).ok_or(Unavailable)?;
         let frames = samples.len() / CHANNELS;
         if frames == 0 || frames > BUFFER_FRAMES || !samples.len().is_multiple_of(CHANNELS) {
+            return Err(Unavailable);
+        }
+        if !self.freed.free[index].enqueue() {
             return Err(Unavailable);
         }
         let bytes = size_of_val(samples);
@@ -192,7 +192,7 @@ impl Output {
         // SAFETY: as above; linear PCM needs no packet descriptions.
         let status = unsafe { AudioQueueEnqueueBuffer(self.queue, buffer, 0, std::ptr::null()) };
         if status != 0 {
-            self.freed.free[index].store(true, Ordering::Release);
+            self.freed.free[index].release();
             return Err(Unavailable);
         }
         Ok(())

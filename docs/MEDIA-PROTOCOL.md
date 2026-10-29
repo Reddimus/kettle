@@ -805,7 +805,9 @@ memory watch bound it; a corpus of public test documents renders page 1 well
 inside them, and the one that would not is killed at the deadline. A document
 opens when its user password is empty; another encrypted one is
 `UnsupportedMedia`, a broken one `RenderParse`, and a page past the last
-`IndexOutOfRange`. A font the document does not embed is drawn with the
+`IndexOutOfRange`, whose shared message covers pages and diagram indices:
+"The requested page or diagram index is outside this file's range."
+A font the document does not embed is drawn with the
 standard fonts compiled in, never one read from the system; a font hayro cannot
 use is reported as `MissingGlyphs`.
 

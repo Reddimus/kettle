@@ -11,7 +11,8 @@ mod digest;
 pub mod fuzzing;
 mod lifecycle;
 pub mod pcm;
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod pcm_client;
 pub mod session;
 pub mod video;
@@ -1372,7 +1373,9 @@ impl FailureCode {
             Self::FileNotRegular => "Media must be a regular file.",
             Self::FileTooLarge => "Media file exceeds the permitted size.",
             Self::Changed => "Media changed while being read. The user can Reload.",
-            Self::IndexOutOfRange => "The requested diagram index is outside this file's gallery.",
+            Self::IndexOutOfRange => {
+                "The requested page or diagram index is outside this file's range."
+            }
             Self::UnsupportedMedia => {
                 "This media type is not supported. Keep the text/path version."
             }

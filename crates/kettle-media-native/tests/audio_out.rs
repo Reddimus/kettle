@@ -182,4 +182,9 @@ fn a_buffer_is_filled_only_within_its_size() {
     }
     assert_eq!(output.enqueue(BUFFERS, &[0.0; CHANNELS]), Err(Unavailable));
     output.enqueue(index, &[0.0; CHANNELS]).unwrap();
+    assert_eq!(output.enqueue(index, &[0.0; CHANNELS]), Err(Unavailable));
+    assert_eq!(
+        output.enqueue((index + 1) % BUFFERS, &[0.0; CHANNELS]),
+        Err(Unavailable)
+    );
 }

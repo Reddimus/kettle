@@ -752,13 +752,9 @@ fn a_real_decoder_crosses_the_boundary() {
     };
     let video = rendered.video.unwrap();
     assert_eq!(video.info.codec, kettle_media::VideoCodec::Vp8);
-    assert_eq!(
-        video
-            .samples
-            .iter()
-            .map(|sample| sample.actual_ms)
-            .collect::<Vec<_>>(),
-        [600, 2000, 3300]
+    assert!(
+        real_fixture_samples_valid(&video.samples, video.tolerance_ms),
+        "{video:?}"
     );
 }
 
@@ -2791,4 +2787,50 @@ fn linux_pcm_only_broker_plays_pauses_and_closes() {
     assert_eq!(exit_code(child, Duration::from_secs(3)), 0);
     drop(heard);
     reader.join().unwrap();
+}
+
+fn real_fixture_samples_valid(samples: &[kettle_media::StillSample], tolerance_ms: u32) -> bool {
+    samples.len() == 3
+        && samples
+            .iter()
+            .zip([(666, 600, 600), (2000, 2000, 1500), (3333, 3300, 3000)])
+            .all(|(sample, (requested, shown, keyframe))| {
+                sample.requested_ms == requested
+                    && (sample.actual_ms == shown || sample.actual_ms == keyframe)
+            })
+        && u64::from(tolerance_ms)
+            == samples
+                .iter()
+                .map(|sample| sample.requested_ms.abs_diff(sample.actual_ms))
+                .max()
+                .unwrap_or(0)
+}
+
+#[test]
+fn real_fixture_assertions_accept_only_the_supported_keyframe_fallback() {
+    use kettle_media::StillSample;
+    let mut samples = vec![
+        StillSample {
+            requested_ms: 666,
+            actual_ms: 600,
+        },
+        StillSample {
+            requested_ms: 2000,
+            actual_ms: 1500,
+        },
+        StillSample {
+            requested_ms: 3333,
+            actual_ms: 3000,
+        },
+    ];
+    assert!(
+        real_fixture_samples_valid(&samples, 500),
+        "preceding keyframes are valid under a tight deadline"
+    );
+    samples[1].actual_ms = 1400;
+    assert!(!real_fixture_samples_valid(&samples, 600));
+    samples[1].actual_ms = 1500;
+    assert!(!real_fixture_samples_valid(&samples, 499));
+    samples[0].requested_ms = 667;
+    assert!(!real_fixture_samples_valid(&samples, 500));
 }

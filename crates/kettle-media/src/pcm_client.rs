@@ -18,11 +18,22 @@ type FeedbackSink = Box<dyn Fn(Feedback) + Send>;
 struct Queue {
     flow: Flow,
     blocks: VecDeque<Message>,
+    dispatched: u64,
     play: Option<PlayCommand>,
     mute: Option<PlayCommand>,
     heartbeat: bool,
     closed: bool,
 }
+impl Queue {
+    fn dispatch(&mut self) -> Option<Message> {
+        let message = self.blocks.pop_front();
+        if matches!(&message, Some(Message::Block(_))) {
+            self.dispatched += 1;
+        }
+        message
+    }
+}
+
 struct State {
     queue: Mutex<Queue>,
     changed: Condvar,
@@ -35,6 +46,10 @@ pub(crate) struct Control(Arc<State>);
 impl Control {
     pub(crate) fn offer(&self, message: Message) -> bool {
         let mut queue = self.0.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        let limit = pcm::WINDOW as usize + usize::from(matches!(&message, Message::End { .. }));
+        if !queue.closed && queue.blocks.len() >= limit {
+            return false;
+        }
         let accepted = match &message {
             Message::Block(block) => queue.flow.offer(block),
             Message::End {
@@ -62,13 +77,8 @@ impl Control {
             failed: false,
             ..feedback
         };
-        self.0
-            .queue
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .flow
-            .credit(credit)
-            .is_ok()
+        let mut queue = self.0.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        feedback.consumed <= queue.dispatched && queue.flow.credit(credit).is_ok()
     }
 
     pub(crate) fn command(&self, command: PlayCommand) {
@@ -158,6 +168,7 @@ impl Broker {
             queue: Mutex::new(Queue {
                 flow,
                 blocks: VecDeque::new(),
+                dispatched: 0,
                 play: None,
                 mute: None,
                 heartbeat: false,
@@ -322,7 +333,7 @@ fn write(
             queue.mute.take(),
             std::mem::take(&mut queue.heartbeat).then_some(PlayCommand::Heartbeat),
         ];
-        let message = queue.blocks.pop_front();
+        let message = queue.dispatch();
         drop(queue);
         if closed {
             if let Ok(bytes) = wire::encode(
@@ -374,6 +385,7 @@ mod tests {
                 })
                 .unwrap(),
                 blocks: VecDeque::new(),
+                dispatched: 0,
                 play: None,
                 mute: None,
                 heartbeat: false,
@@ -415,6 +427,58 @@ mod tests {
         assert_eq!(stale.played_frame, None);
         assert_eq!(stale.consumed, 0);
     }
+    #[test]
+    fn broker_cannot_credit_blocks_waiting_for_the_writer() {
+        let control = control();
+        for n in 0..pcm::WINDOW {
+            assert!(control.offer(block(n)));
+        }
+        assert!(
+            !control.credit(Feedback {
+                consumed: pcm::WINDOW,
+                played_frame: None,
+                ..feedback()
+            }),
+            "queued PCM has not been dispatched"
+        );
+        assert!(control.0.queue.lock().unwrap().dispatch().is_some());
+        assert!(control.credit(Feedback {
+            consumed: 1,
+            played_frame: None,
+            ..feedback()
+        }));
+        assert!(!control.credit(Feedback {
+            consumed: 2,
+            played_frame: None,
+            ..feedback()
+        }));
+    }
+
+    #[test]
+    fn relay_queue_is_bounded_independently_of_flow_credit() {
+        let control = control();
+        for n in 0..pcm::WINDOW {
+            assert!(control.offer(block(n)));
+        }
+        control
+            .0
+            .queue
+            .lock()
+            .unwrap()
+            .flow
+            .credit(Feedback {
+                consumed: pcm::WINDOW,
+                played_frame: None,
+                ..feedback()
+            })
+            .unwrap();
+        assert!(
+            !control.offer(block(pcm::WINDOW)),
+            "broker credit cannot grow a stalled relay queue"
+        );
+        assert_eq!(control.0.queue.lock().unwrap().flow.offered(), pcm::WINDOW);
+    }
+
     #[test]
     fn relay_rejects_excess_credit_old_generations_and_repeated_eof() {
         let control = control();

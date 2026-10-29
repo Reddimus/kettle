@@ -371,6 +371,9 @@ fn past_its_deadline(dir: &Path, held: &File) {
         &mut |_| unreachable!("the decoder never describes the video"),
         started + std::time::Duration::from_millis(300),
     );
+    // SAFETY: signal zero only queries permission to target this process.
+    let can_reap = unsafe { libc::kill(libc::getpid(), 0) } == 0;
+    println!("probe:can_reap={can_reap}");
     println!("probe:deadline_result={:?}", result.err());
     println!("probe:deadline_ms={}", started.elapsed().as_millis());
 }
@@ -644,7 +647,7 @@ fn a_decoder_past_its_deadline_does_not_hold_the_job() {
     );
     assert_eq!(
         result.get("deadline_result").map(String::as_str),
-        Some("Some(RenderTimeout)"),
+        Some(deadline_failure(result["can_reap"] == "true")),
         "{result:?}"
     );
     let elapsed: u64 = result["deadline_ms"].parse().unwrap();
@@ -652,4 +655,18 @@ fn a_decoder_past_its_deadline_does_not_hold_the_job() {
         elapsed < 2_000,
         "answered after {elapsed} ms: it waited for the decoder"
     );
+}
+
+fn deadline_failure(can_reap: bool) -> &'static str {
+    if can_reap {
+        "Some(RenderTimeout)"
+    } else {
+        "Some(RenderResource)"
+    }
+}
+
+#[test]
+fn deadline_failure_accounts_for_a_denied_child_kill() {
+    assert_eq!(deadline_failure(false), "Some(RenderResource)");
+    assert_eq!(deadline_failure(true), "Some(RenderTimeout)");
 }

@@ -171,13 +171,18 @@ pub(crate) fn measure_shape_with_whitespace(
     let mut family = String::new();
     escape_xml(style.family, &mut family);
     let mut escaped = String::with_capacity(text.len());
-    escape_xml(text, &mut escaped);
     // usvg drops text with no outlines. A visible suffix retains native space
     // shaping; subtract its advance below without estimating font metrics.
     let space_probe = matches!(
         shape,
         TextShape::Raw | TextShape::RawMiddle | TextShape::RawHanging | TextShape::Tspan
     ) && text.chars().all(char::is_whitespace);
+    let probe_text = if space_probe && matches!(whitespace, TextWhitespace::SvgDefault) {
+        text.trim_end_matches([' ', '\t', '\n', '\r'])
+    } else {
+        text
+    };
+    escape_xml(probe_text, &mut escaped);
     if space_probe {
         escaped.push('M');
     }
@@ -574,6 +579,25 @@ mod tests {
         .unwrap();
         assert!(nbsp.advance > 0.0);
         assert!(nbsp.ink.is_none());
+    }
+
+    #[test]
+    fn default_whitespace_probes_trim_spaces_after_nbsp() {
+        let fonts = super::super::fonts::for_mermaid_job(&[]).unwrap();
+        let selected = style(&fonts);
+        let advance = |text| {
+            measure_shape_with_whitespace(
+                text,
+                &selected,
+                TextShape::Tspan,
+                TextWhitespace::SvgDefault,
+                &fonts,
+            )
+            .unwrap()
+            .unwrap()
+            .advance
+        };
+        assert_eq!(advance("\u{a0} "), advance("\u{a0}"));
     }
 
     #[test]
