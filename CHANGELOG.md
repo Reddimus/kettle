@@ -203,6 +203,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Bound the Linux audio relay's queue before admitting blocks.
 - Keep the Linux media sandbox from reading or changing other processes'
   resource limits or aiming I/O signals at them.
+- Bound the control inbox and each UI drain, so a flood of control requests
+  cannot stall the window.
+- Keep runtime incident logs within their size cap after a write failure, and
+  record exit incidents without raw error text.
+- Send application-keypad sequences for Num Lock-off numpad navigation, use
+  the layout's character for shifted keys, and keep wheel scrolling smooth
+  in both directions.
+- Name new SSH tabs from their destination, quote curly single quotes for
+  PowerShell, and reopen closed WSL tabs in their directory.
+- Repair read-only owned directories during cleanup through held
+  descriptors.
+- Keep every selected cell in split preview lanes.
+- Keep the caret on character boundaries after edits, and collapse a
+  selection with plain Left or Right.
+- Refuse a session save larger than the limit instead of replacing the file.
+- Keep Settings numbers within what the config accepts, and show pinned
+  devices consistently.
+- Clear a failed update's installing state and refresh update status when an
+  install finishes; count artifact download errors as request errors.
+- Dismiss a paste receipt and a pending preview independently.
+- Stop a Lua plugin's runaway `string.find`, `match`, `gmatch` or `gsub` in
+  the safe and restricted sandboxes, which could freeze the window; the
+  instruction limit now covers pattern matching too.
+- Refuse `io.tmpfile` in the safe and restricted sandboxes, as `io.open`
+  already is.
+- Give each URL handler callback its own instruction budget.
+- Make `kettle-console` reject invalid options and show help or errors
+  before returning, exactly as `kettle` does.
+- Include config-file recording settings when deciding whether a launch can
+  reuse a running window, so a launch never joins a window recording
+  differently.
+- On Unix, export video frames through the output directory checked at the
+  start, so a directory swapped meanwhile cannot redirect the file.
 
 ## [5.6.0] — 2026-10-28
 
