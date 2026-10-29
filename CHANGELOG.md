@@ -73,6 +73,33 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   past its kill, not only the most recent one.
 - Trust a sticky temporary directory for video frame export only when you or
   root own it, and keep staging names short whatever the output name.
+- Notice a shell's exit even while it keeps output readable, and kill and
+  reap shell probes that time out, with their output capped.
+- Keep images anchored when a top-anchored scroll region moves them into
+  history over several batches.
+- Read legacy Escape-prefixed keys as one key, and keep Alt-Tab from
+  consuming a completion request.
+- Delete kitty images by relative z-index correctly, and allow replacing a
+  placement whose chain passes through the placement it retires.
+- Keep trailing dot components in file links, strip `(line)` and
+  `(line,col)` suffixes, and recognize expanded Windows home directories.
+- Revalidate a recording path after taking its lock.
+- Bound the regex work in each forward-search step and keep its progress
+  across steps.
+- Recognize grouped short options containing `-f`, and `<` or `>` right after
+  them, in the zsh startup guard.
+- Keep `ESC \` ending a message after a repeated ESC, and report working
+  directories verbatim on Unix.
+- Grow kitty upload buffers geometrically within their bound and charge the
+  memory they actually allocate.
+- Hold the staging lock until a state file is published, so cleanup cannot
+  remove a file mid-publication.
+- Refuse a Kettle state directory component that is another user's directory
+  or symlink, while following the user's own symlinks.
+- Run container reconnects with `/bin/sh` inside the container, and offer no
+  reconnect when it cannot reproduce the session (Docker TLS options,
+  relative or drive-relative SSH identity and config paths, `-S` and
+  `ControlPath`).
 
 ## [5.6.0] — 2026-10-28
 
