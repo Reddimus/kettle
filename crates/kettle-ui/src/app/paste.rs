@@ -862,28 +862,50 @@ impl App {
             );
             return;
         }
-        let mut preview = crate::mux::format_paths_for_paste(&argv, &paths);
+        let mut preview = match crate::mux::format_paths_for_paste(&argv, &paths) {
+            Ok(preview) => preview,
+            Err(error) => {
+                self.pasted_images.discard_previews_for_paths(&paths);
+                self.report_input_result(error);
+                return;
+            }
+        };
         if trailing_space {
             preview.push(' ');
         }
-        let within_limit = if ws.mux.is_broadcast_on() {
-            ws.mux
-                .broadcast_paste_paths_within_limit(&paths, trailing_space, LOCAL_PASTE_MAX)
-                && (!Mux::scope_crosses_windows(&ws.mux.broadcast)
-                    || self.windows.values().all(|other| {
-                        other.mux.broadcast_paste_paths_foreign_within_limit(
-                            &ws.mux.broadcast,
-                            &paths,
-                            trailing_space,
-                            LOCAL_PASTE_MAX,
-                        )
-                    }))
-        } else {
-            local_paste_within_limit(&preview)
+        let checked = (|| {
+            if !ws.mux.is_broadcast_on() {
+                return Ok(local_paste_within_limit(&preview));
+            }
+            if !ws.mux.broadcast_paste_paths_within_limit(
+                &paths,
+                trailing_space,
+                LOCAL_PASTE_MAX,
+            )? {
+                return Ok(false);
+            }
+            if Mux::scope_crosses_windows(&ws.mux.broadcast) {
+                for other in self.windows.values() {
+                    if !other.mux.broadcast_paste_paths_foreign_within_limit(
+                        &ws.mux.broadcast,
+                        &paths,
+                        trailing_space,
+                        LOCAL_PASTE_MAX,
+                    )? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(true)
+        })();
+        let rejection = match checked {
+            Ok(true) => None,
+            Ok(false) => Some(PaneInputResult::Oversize),
+            Err(error) => Some(error),
         };
-        if !within_limit {
+        if let Some(error) = rejection {
             self.pasted_images.discard_previews_for_paths(&paths);
-            self.report_input_result(PaneInputResult::Oversize);
+            self.report_input_result(error);
             return;
         }
 

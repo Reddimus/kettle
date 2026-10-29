@@ -201,6 +201,7 @@ pub enum PaneInputResult {
     ReadOnly,
     Backpressured,
     Oversize,
+    PathNotTyped,
     Failed,
 }
 
@@ -219,9 +220,10 @@ impl PaneInputResult {
     /// happened to any of its targets. `pub(crate)` because a cross-window
     /// broadcast merges results from several muxes in `App`.
     pub(crate) fn merge(self, other: Self) -> Self {
-        use PaneInputResult::{Backpressured, Failed, Oversize, Queued, ReadOnly};
+        use PaneInputResult::{Backpressured, Failed, Oversize, PathNotTyped, Queued, ReadOnly};
         match (self, other) {
             (Failed, _) | (_, Failed) => Failed,
+            (PathNotTyped, _) | (_, PathNotTyped) => PathNotTyped,
             (Oversize, _) | (_, Oversize) => Oversize,
             (Backpressured, _) | (_, Backpressured) => Backpressured,
             (ReadOnly, _) | (_, ReadOnly) => ReadOnly,
@@ -263,6 +265,13 @@ impl PaneInputDelivery {
             accepted: false,
             receipt_accepted: false,
             pending_accepted: false,
+        }
+    }
+
+    pub(crate) fn rejected(result: PaneInputResult) -> Self {
+        Self {
+            result,
+            ..Self::new()
         }
     }
 
@@ -674,7 +683,8 @@ impl PtyInputQueue {
                     log::warn!("dropping terminal replies: the program is not reading its input");
                 }
             }
-            PaneInputResult::ReadOnly | PaneInputResult::Failed => {}
+            PaneInputResult::ReadOnly | PaneInputResult::PathNotTyped | PaneInputResult::Failed => {
+            }
         }
         result
     }
@@ -4490,7 +4500,7 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-    ) -> bool {
+    ) -> Result<bool, PaneInputResult> {
         self.paste_paths_within_limit(
             self.broadcast_target_ids(),
             paths,
@@ -4517,7 +4527,7 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-    ) -> bool {
+    ) -> Result<bool, PaneInputResult> {
         self.paste_paths_within_limit(
             self.foreign_target_ids(scope),
             paths,
@@ -4600,7 +4610,10 @@ impl Mux {
         let targets = ids
             .iter()
             .filter_map(|id| self.panes.get(id).map(|pane| (*id, pane.argv.as_slice())));
-        let formatted = format_paths_for_targets(targets, paths, trailing_space);
+        let formatted = match format_paths_for_targets(targets, paths, trailing_space) {
+            Ok(formatted) => formatted,
+            Err(error) => return PaneInputDelivery::rejected(error),
+        };
         if formatted.iter().any(|(id, text)| {
             self.panes.get(id).is_some_and(|pane| {
                 !pane.read_only && !pane.pty_input_failed() && text.len() > max_text_bytes
@@ -4647,17 +4660,17 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-    ) -> bool {
+    ) -> Result<bool, PaneInputResult> {
         let targets = ids
             .iter()
             .filter_map(|id| self.panes.get(id).map(|pane| (*id, pane.argv.as_slice())));
-        format_paths_for_targets(targets, paths, trailing_space)
+        Ok(format_paths_for_targets(targets, paths, trailing_space)?
             .iter()
             .all(|(id, text)| {
                 self.panes.get(id).is_none_or(|pane| {
                     pane.read_only || pane.pty_input_failed() || text.len() <= max_text_bytes
                 })
-            })
+            }))
     }
 
     pub fn tab_titles(&self) -> Vec<String> {
@@ -5373,7 +5386,10 @@ pub(crate) fn path_types_exactly(argv: &[String], path: &std::path::Path) -> boo
 /// to feed the focused pane: translate to the pane's WSL path when it runs
 /// WSL, quote each for the pane's shell family, and space-join multiple paths.
 /// Pure so the whole rule is unit-tested.
-pub(crate) fn format_paths_for_paste(argv: &[String], paths: &[std::path::PathBuf]) -> String {
+pub(crate) fn format_paths_for_paste(
+    argv: &[String],
+    paths: &[std::path::PathBuf],
+) -> Result<String, PaneInputResult> {
     let wsl = argv_is_wsl(argv);
     let kind = shell_kind_for_argv(argv);
     let translated: Option<Vec<_>> = paths
@@ -5391,22 +5407,24 @@ pub(crate) fn format_paths_for_paste(argv: &[String], paths: &[std::path::PathBu
             Some(quote_path_for(kind, &text))
         })
         .collect();
-    translated.map(|paths| paths.join(" ")).unwrap_or_default()
+    translated
+        .map(|paths| paths.join(" "))
+        .ok_or(PaneInputResult::PathNotTyped)
 }
 
 pub(crate) fn format_paths_for_targets<'a>(
     targets: impl IntoIterator<Item = (u64, &'a [String])>,
     paths: &[std::path::PathBuf],
     trailing_space: bool,
-) -> Vec<(u64, String)> {
+) -> Result<Vec<(u64, String)>, PaneInputResult> {
     targets
         .into_iter()
         .map(|(id, argv)| {
-            let mut text = format_paths_for_paste(argv, paths);
+            let mut text = format_paths_for_paste(argv, paths)?;
             if trailing_space {
                 text.push(' ');
             }
-            (id, text)
+            Ok((id, text))
         })
         .collect()
 }
@@ -8534,7 +8552,7 @@ mod node_tests {
             "the pane must accept its own distribution"
         );
         assert_eq!(
-            format_paths_for_paste(&argv, &[path]),
+            format_paths_for_paste(&argv, &[path]).unwrap(),
             "'/home/me/report.pdf'"
         );
         let foreign = std::path::Path::new(r"\\wsl.localhost\Debian\home\me\report.pdf");
@@ -8689,12 +8707,14 @@ mod node_tests {
         let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         // WSL pane: Windows path → /mnt/c and POSIX-quoted.
         assert_eq!(
-            format_paths_for_paste(&s(&["wsl.exe"]), &[PathBuf::from(r"C:\Users\me\clip.mp4")]),
+            format_paths_for_paste(&s(&["wsl.exe"]), &[PathBuf::from(r"C:\Users\me\clip.mp4")])
+                .unwrap(),
             "'/mnt/c/Users/me/clip.mp4'"
         );
         // Native PowerShell pane: no translation, PowerShell quoting.
         assert_eq!(
-            format_paths_for_paste(&s(&["pwsh.exe"]), &[PathBuf::from(r"C:\Users\me\clip.mp4")]),
+            format_paths_for_paste(&s(&["pwsh.exe"]), &[PathBuf::from(r"C:\Users\me\clip.mp4")])
+                .unwrap(),
             "'C:\\Users\\me\\clip.mp4'"
         );
         // Multiple paths (CF_HDROP multi-select) → space-joined.
@@ -8702,7 +8722,8 @@ mod node_tests {
             format_paths_for_paste(
                 &s(&["bash"]),
                 &[PathBuf::from("/a/one.txt"), PathBuf::from("/a/two.txt")]
-            ),
+            )
+            .unwrap(),
             "'/a/one.txt' '/a/two.txt'"
         );
     }
@@ -8717,7 +8738,8 @@ mod node_tests {
             [(10, powershell.as_slice()), (20, wsl.as_slice())],
             &[PathBuf::from(r"C:\Users\me\a b.txt")],
             true,
-        );
+        )
+        .unwrap();
         assert_eq!(
             formatted,
             [

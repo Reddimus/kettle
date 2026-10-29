@@ -4360,7 +4360,10 @@ fn paste_paths_into_target(
     trailing_space: bool,
 ) -> Option<PaneInputDelivery> {
     let pane = mux.panes.get_mut(&target?)?;
-    let mut text = crate::mux::format_paths_for_paste(&pane.argv, paths);
+    let mut text = match crate::mux::format_paths_for_paste(&pane.argv, paths) {
+        Ok(text) => text,
+        Err(error) => return Some(PaneInputDelivery::rejected(error)),
+    };
     if trailing_space {
         text.push(' ');
     }
@@ -9849,6 +9852,9 @@ fn input_rejection_message(result: PaneInputResult) -> Option<&'static str> {
         PaneInputResult::Oversize => Some(
             "Input exceeded Kettle's per-message safety limit and was not delivered. If broadcast mode is active, verify the other panes before retrying.",
         ),
+        PaneInputResult::PathNotTyped => {
+            Some("A file name cannot be typed exactly into the target shell; pasted nothing.")
+        }
         PaneInputResult::Failed => {
             Some("The pane's input transport failed. Kettle will close the failed pane.")
         }
@@ -9866,6 +9872,7 @@ fn input_rejection_text(
     Some(tr.text(match result {
         PaneInputResult::Backpressured => Text::NotifyBodyInputBackpressured,
         PaneInputResult::Oversize => Text::NotifyBodyInputOversize,
+        PaneInputResult::PathNotTyped => Text::NotifyBodyPathNotTyped,
         _ => Text::NotifyBodyInputFailed,
     }))
 }
@@ -9896,6 +9903,10 @@ fn ctl_input_error(result: PaneInputResult) -> Option<(&'static str, &'static st
         PaneInputResult::Oversize => Some((
             ec::BAD_PARAMS,
             "input exceeds the per-message safety limit; no bytes were sent",
+        )),
+        PaneInputResult::PathNotTyped => Some((
+            ec::BAD_PARAMS,
+            "file path cannot be typed exactly; no bytes were sent",
         )),
         PaneInputResult::Failed => Some((
             ec::INTERNAL,

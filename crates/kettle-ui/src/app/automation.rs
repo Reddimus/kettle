@@ -222,7 +222,9 @@ impl App {
                         self.lua_command_retry.backpressured(now);
                         return self.lua_command_retry.remaining(now);
                     }
-                    PaneInputResult::Oversize | PaneInputResult::Failed => {
+                    PaneInputResult::Oversize
+                    | PaneInputResult::PathNotTyped
+                    | PaneInputResult::Failed => {
                         self.pending_lua_commands.pop_front();
                         self.lua_command_retry.progressed();
                         self.report_input_result(result);
@@ -545,7 +547,9 @@ impl App {
                         self.remote_command_retry.backpressured(now);
                         return self.remote_command_retry.remaining(now);
                     }
-                    PaneInputResult::Oversize | PaneInputResult::Failed => {
+                    PaneInputResult::Oversize
+                    | PaneInputResult::PathNotTyped
+                    | PaneInputResult::Failed => {
                         self.pending_remote_commands.pop_front();
                         self.remote_command_retry.progressed();
                         self.report_input_result(result);

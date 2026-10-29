@@ -426,7 +426,13 @@ impl App {
     pub(super) fn media_tick(&mut self, ws: &mut WindowState) {
         self.retire_cards(ws);
         self.tell_preview_failures(ws);
-        if !media_tick_ready(&mut self.media, ws, &mut self.windows) {
+        if !media_tick_ready(
+            &mut self.media,
+            ws,
+            &mut self.windows,
+            #[cfg(target_os = "linux")]
+            &mut self.agent_launches,
+        ) {
             return;
         }
         let live: std::collections::HashSet<u64> = self
@@ -1292,7 +1298,7 @@ impl App {
         use kettle_media::client::RenderError;
         let crate::media::Finished { push, result } = finished;
         let tr = self.ui_text;
-        let (origin, route, draft, spec) = push.into_parts();
+        let (origin, route, draft, spec, control) = push.into_parts();
         if let crate::media::Requester::Lane(render) = origin {
             return self.finish_lane_render(ws, render, spec, result);
         }
@@ -1333,7 +1339,7 @@ impl App {
                 );
                 return self.publish_show(
                     ws,
-                    (origin, route),
+                    (origin, route, control),
                     item,
                     (inline, inline_refused),
                     None,
@@ -1404,7 +1410,13 @@ impl App {
         );
         item.layout = Some(layout);
         item.video = video;
-        self.publish_show(ws, (origin, route), item, (inline, inline_refused), page);
+        self.publish_show(
+            ws,
+            (origin, route, control),
+            item,
+            (inline, inline_refused),
+            page,
+        );
     }
 
     /// Put `item`, made for a `show` or a user's preview by `origin` for
@@ -1414,7 +1426,11 @@ impl App {
     fn publish_show(
         &mut self,
         ws: &mut WindowState,
-        (origin, route): (crate::media::Requester, crate::media::Route),
+        (origin, route, control): (
+            crate::media::Requester,
+            crate::media::Route,
+            kettle_media::client::RenderControl,
+        ),
         item: crate::media::ShelfItem,
         (inline, mut inline_refused): (
             Option<crate::media::InlineDraft>,
@@ -1536,27 +1552,14 @@ impl App {
         let (delivery, pending_inline) = if cli {
             (delivery, pending_inline)
         } else {
-            let permit = native_pickup
-                .filter(|_| delivery.is_some() || pending_inline.is_some())
-                .and_then(|(grant, root)| {
+            publish_pickup(delivery, pending_inline, || {
+                native_pickup.and_then(|(grant, root)| {
                     self.agent_launches
                         .issue(grant, root, std::time::Instant::now(), |bytes| {
                             getrandom::fill(bytes).is_ok()
                         })
-                });
-            match permit {
-                Some(permit) => (
-                    delivery.map(|mut delivery| {
-                        delivery.permit = Some(permit);
-                        delivery
-                    }),
-                    pending_inline.map(|mut pending| {
-                        pending.permit = Some(permit);
-                        pending
-                    }),
-                ),
-                None => (None, None),
-            }
+                })
+            })
         };
         let seq = window.seq;
         if let Some(handle) = &window.window {
@@ -1577,6 +1580,7 @@ impl App {
                 pane: route.pane,
                 item: item.id,
                 generation: item.generation,
+                control,
                 why,
                 reply: None,
                 source: kettle_media::Source::Path {
@@ -1666,6 +1670,8 @@ impl App {
                 ws,
                 &mut self.windows,
                 &mut self.media.cards,
+                #[cfg(target_os = "linux")]
+                &mut self.agent_launches,
             );
         }
     }
@@ -1774,16 +1780,7 @@ pub(super) fn prepare_card(
     kettle_ctl::show::InlineRefusal,
 > {
     if matches!(kind, crate::media::ItemKind::CheckingFile(_)) {
-        return Ok((
-            None,
-            Some(crate::media::FileInline {
-                draft,
-                cell,
-                grid,
-                column,
-                permit: None,
-            }),
-        ));
+        return Ok((None, Some(crate::media::FileInline { draft })));
     }
     register_card(
         cards,
@@ -1803,9 +1800,17 @@ pub(super) fn media_tick_ready(
     media: &mut crate::media::MediaService,
     ws: &mut WindowState,
     windows: &mut std::collections::BTreeMap<u64, WindowState>,
+    #[cfg(target_os = "linux")] launches: &mut kettle_ctl::agent_launch::LaunchScopes,
 ) -> bool {
     while let Some(answer) = media.take_facts() {
-        finish_file_facts(answer, ws, windows, &mut media.cards);
+        finish_file_facts(
+            answer,
+            ws,
+            windows,
+            &mut media.cards,
+            #[cfg(target_os = "linux")]
+            launches,
+        );
     }
     !media.is_idle()
 }
@@ -1815,8 +1820,11 @@ fn finish_file_facts(
     ws: &mut WindowState,
     windows: &mut std::collections::BTreeMap<u64, WindowState>,
     cards: &mut crate::media::CardLedger,
+    #[cfg(target_os = "linux")] launches: &mut kettle_ctl::agent_launch::LaunchScopes,
 ) {
     let query = answer.query;
+    let interrupted = query.failure(std::time::Instant::now());
+    let identity = answer.identity.filter(|_| interrupted.is_none());
     let owner = std::iter::once(&*ws)
         .chain(windows.values())
         .find(|window| window.seq == query.window && window.mux.panes.contains_key(&query.pane))
@@ -1841,7 +1849,7 @@ fn finish_file_facts(
             .panes
             .get_mut(&query.pane)
             .and_then(|pane| pane.media_shelf.get_mut(query.item))
-            .is_some_and(|item| match answer.identity {
+            .is_some_and(|item| match identity {
                 Some(identity) => item.accept_file_facts(query.generation, query.why, identity),
                 None => item.fail_file_facts(query.generation, query.why),
             });
@@ -1860,12 +1868,16 @@ fn finish_file_facts(
         } = *reply;
         if !accepted {
             origin.refuse(failure);
-        } else if let Some(identity) = answer.identity {
+        } else if let Some(identity) = identity {
             result.file = Some(kettle_ctl::show::ShowFile {
                 bytes: identity.size,
                 reason: query.why.as_str().into(),
             });
             if let (Some(inline), Some(window)) = (inline, window) {
+                let cell = window
+                    .renderer
+                    .as_ref()
+                    .map(|renderer| (renderer.cell_w, renderer.cell_h));
                 let pane = window
                     .mux
                     .panes
@@ -1884,24 +1896,53 @@ fn finish_file_facts(
                 {
                     let kind = item.kind;
                     let cli = inline.draft.harness == kettle_render::CardHarness::Cli;
-                    match register_card(
-                        cards,
-                        (
-                            query.pane,
-                            &mut pane.inline_cards,
-                            inline.grid,
-                            inline.column,
-                        ),
-                        inline.cell,
-                        (query.item, query.generation),
-                        (kind, None, None),
-                        &image,
-                        inline.draft,
-                        std::time::Instant::now(),
-                    ) {
-                        Ok(mut delivery) => {
-                            delivery.permit = inline.permit;
-                            result.inline = Some(delivery);
+                    let geometry = pane.term.term.lock().ok().map(|term| {
+                        let grid = term.grid();
+                        let dimensions = (grid.columns(), grid.screen_lines());
+                        let pixels = pane.term.pty_pixel_size();
+                        let cell = cell.unwrap_or((
+                            f32::from(pixels.0) / dimensions.0.max(1) as f32,
+                            f32::from(pixels.1) / dimensions.1.max(1) as f32,
+                        ));
+                        (dimensions, grid.cursor.point.column.0, cell)
+                    });
+                    #[cfg(target_os = "linux")]
+                    let native_pickup = inline.draft.launch.clone().zip(pane.caller_root);
+                    let registration = geometry
+                        .ok_or(kettle_ctl::show::InlineRefusal::TooSmall)
+                        .and_then(|(grid, column, cell)| {
+                            register_card(
+                                cards,
+                                (query.pane, &mut pane.inline_cards, grid, column),
+                                cell,
+                                (query.item, query.generation),
+                                (kind, None, None),
+                                &image,
+                                inline.draft,
+                                std::time::Instant::now(),
+                            )
+                        });
+                    match registration {
+                        Ok(delivery) => {
+                            #[cfg(target_os = "linux")]
+                            let delivery = if cli {
+                                Some(delivery)
+                            } else {
+                                publish_pickup(Some(delivery), None, || {
+                                    native_pickup.and_then(|(grant, root)| {
+                                        launches.issue(
+                                            grant,
+                                            root,
+                                            std::time::Instant::now(),
+                                            |bytes| getrandom::fill(bytes).is_ok(),
+                                        )
+                                    })
+                                })
+                                .0
+                            };
+                            #[cfg(not(target_os = "linux"))]
+                            let delivery = Some(delivery);
+                            result.inline = delivery;
                         }
                         Err(refusal) if cli => result.inline_refused = Some(refusal),
                         Err(_) => {}
@@ -1910,7 +1951,7 @@ fn finish_file_facts(
             }
             answer_show(origin, result);
         } else {
-            origin.refuse(kettle_media::FailureCode::WorkerUnavailable);
+            origin.refuse(interrupted.unwrap_or(kettle_media::FailureCode::WorkerUnavailable));
         }
     }
 }
@@ -1933,4 +1974,23 @@ pub(super) fn prepare_file_reply(
         result,
         inline: None,
     }));
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn publish_pickup(
+    delivery: Option<kettle_ctl::show::InlineDelivery>,
+    pending: Option<crate::media::FileInline>,
+    issue: impl FnOnce() -> Option<kettle_ctl::agent_launch::PickupPermit>,
+) -> (
+    Option<kettle_ctl::show::InlineDelivery>,
+    Option<crate::media::FileInline>,
+) {
+    if pending.is_some() {
+        return (delivery, pending);
+    }
+    let delivery = delivery.and_then(|mut delivery| {
+        delivery.permit = Some(issue()?);
+        Some(delivery)
+    });
+    (delivery, None)
 }

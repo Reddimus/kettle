@@ -238,8 +238,14 @@ impl Push {
 
     /// Who waits for it, where it goes, what its item will say, and the
     /// job that rendered it.
-    pub(crate) fn into_parts(self) -> (Requester, Route, Draft, JobSpec) {
-        (self.requester, self.route, self.draft, self.spec)
+    pub(crate) fn into_parts(self) -> (Requester, Route, Draft, JobSpec, RenderControl) {
+        (
+            self.requester,
+            self.route,
+            self.draft,
+            self.spec,
+            self.control,
+        )
     }
 }
 
@@ -351,24 +357,20 @@ impl MediaService {
                         generation: query.generation,
                         source: query.source.clone(),
                     };
-                    let control = RenderControl::with_deadline(
-                        Instant::now() + std::time::Duration::from_secs(6),
-                    )
-                    .limit_reply(64);
-                    client.file_facts(&request, &control).ok()?.identity
+                    client.file_facts(&request, &query.control).ok()?.identity
                 },
                 wake,
             );
         }
-        let rejected = match &self.facts {
+        let rejected = match &mut self.facts {
             Some(facts) => facts.request(query),
             None => Some(query),
         };
         rejected.map_or(Ok(()), |query| Err(Box::new(query)))
     }
 
-    pub(crate) fn take_facts(&self) -> Option<FactsAnswer> {
-        self.facts.as_ref()?.try_recv()
+    pub(crate) fn take_facts(&mut self) -> Option<FactsAnswer> {
+        self.facts.as_mut()?.try_recv()
     }
 
     /// A fresh item id.
@@ -529,9 +531,13 @@ impl MediaService {
         });
     }
 
-    /// When a waiting push next expires, if one is waiting.
+    /// When a waiting push or pending file-facts request next expires.
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
-        self.queue.next_deadline()
+        self.queue
+            .next_deadline()
+            .into_iter()
+            .chain(self.facts.as_ref().and_then(FactsLane::next_deadline))
+            .min()
     }
 
     /// Nothing waits or renders.

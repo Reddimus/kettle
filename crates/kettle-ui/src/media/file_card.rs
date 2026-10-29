@@ -75,6 +75,7 @@ pub(crate) struct FactsQuery {
     pub pane: u64,
     pub item: u64,
     pub generation: u64,
+    pub control: kettle_media::client::RenderControl,
     pub source: kettle_media::Source,
     pub why: FileWhy,
     pub reply: Option<Box<FileReply>>,
@@ -88,10 +89,6 @@ pub(crate) struct FileReply {
 
 pub(crate) struct FileInline {
     pub draft: super::InlineDraft,
-    pub cell: (f32, f32),
-    pub grid: (usize, usize),
-    pub column: usize,
-    pub permit: Option<kettle_ctl::agent_launch::PickupPermit>,
 }
 
 pub(crate) struct FactsAnswer {
@@ -99,9 +96,29 @@ pub(crate) struct FactsAnswer {
     pub identity: Option<PathIdentity>,
 }
 
+const MAX_WAITING_FACTS: usize = 32;
+
 pub(crate) struct FactsLane {
-    work: crossbeam_channel::Sender<FactsQuery>,
-    done: crossbeam_channel::Receiver<FactsAnswer>,
+    work: crossbeam_channel::Sender<(u64, FactsQuery)>,
+    done: crossbeam_channel::Receiver<(u64, Option<PathIdentity>)>,
+    pending: std::collections::BTreeMap<u64, FactsQuery>,
+    last_id: u64,
+}
+
+impl FactsQuery {
+    pub(crate) fn failure(&self, now: std::time::Instant) -> Option<FailureCode> {
+        if self.control.is_cancelled() {
+            Some(FailureCode::NotInKettlePane)
+        } else if self
+            .control
+            .deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            Some(FailureCode::RenderTimeout)
+        } else {
+            None
+        }
+    }
 }
 
 impl FactsLane {
@@ -109,35 +126,86 @@ impl FactsLane {
         source: impl Fn(&FactsQuery) -> Option<PathIdentity> + Send + 'static,
         wake: std::sync::Arc<dyn Fn() + Send + Sync>,
     ) -> Option<Self> {
-        let (work, jobs) = crossbeam_channel::bounded::<FactsQuery>(32);
-        let (finished, done) = crossbeam_channel::bounded(32);
+        let (work, jobs) = crossbeam_channel::bounded::<(u64, FactsQuery)>(MAX_WAITING_FACTS);
+        let (finished, done) = crossbeam_channel::bounded(MAX_WAITING_FACTS);
         std::thread::Builder::new()
             .name("kettle-file-facts".into())
             .spawn(move || {
-                for query in jobs {
-                    let identity =
+                for (id, query) in jobs {
+                    let identity = if query.failure(std::time::Instant::now()).is_none() {
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source(&query)))
                             .ok()
-                            .flatten();
-                    if finished.send(FactsAnswer { query, identity }).is_err() {
+                            .flatten()
+                    } else {
+                        None
+                    };
+                    if finished.send((id, identity)).is_err() {
                         break;
                     }
                     wake();
                 }
             })
             .ok()?;
-        Some(Self { work, done })
+        Some(Self {
+            work,
+            done,
+            pending: Default::default(),
+            last_id: 0,
+        })
     }
 
-    pub(crate) fn request(&self, query: FactsQuery) -> Option<FactsQuery> {
-        self.work
-            .try_send(query)
-            .err()
-            .map(crossbeam_channel::TrySendError::into_inner)
+    pub(crate) fn request(&mut self, query: FactsQuery) -> Option<FactsQuery> {
+        // Keep the reply on the UI thread so a blocked worker cannot delay expiry.
+        let Some(id) = self
+            .last_id
+            .checked_add(1)
+            .filter(|_| self.pending.len() <= MAX_WAITING_FACTS)
+        else {
+            return Some(query);
+        };
+        let job = FactsQuery {
+            window: query.window,
+            pane: query.pane,
+            item: query.item,
+            generation: query.generation,
+            control: query.control.clone(),
+            source: query.source.clone(),
+            why: query.why,
+            reply: None,
+        };
+        if self.work.try_send((id, job)).is_err() {
+            return Some(query);
+        }
+        self.last_id = id;
+        self.pending.insert(id, query);
+        None
     }
 
-    pub(crate) fn try_recv(&self) -> Option<FactsAnswer> {
-        self.done.try_recv().ok()
+    pub(crate) fn next_deadline(&self) -> Option<std::time::Instant> {
+        self.pending
+            .values()
+            .filter_map(|query| query.control.deadline())
+            .min()
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Option<FactsAnswer> {
+        let now = std::time::Instant::now();
+        if let Some(id) = self
+            .pending
+            .iter()
+            .find_map(|(&id, query)| query.failure(now).map(|_| id))
+        {
+            return Some(FactsAnswer {
+                query: self.pending.remove(&id)?,
+                identity: None,
+            });
+        }
+        while let Ok((id, identity)) = self.done.try_recv() {
+            if let Some(query) = self.pending.remove(&id) {
+                return Some(FactsAnswer { query, identity });
+            }
+        }
+        None
     }
 }
 
@@ -259,7 +327,7 @@ mod tests {
         let (release, waiting) = std::sync::mpsc::channel();
         let (returned, received) = std::sync::mpsc::channel();
         let ui = std::thread::spawn(move || {
-            let lane = FactsLane::start(
+            let mut lane = FactsLane::start(
                 move |_| {
                     entered.send(()).unwrap();
                     let _ = waiting.recv();
@@ -273,6 +341,7 @@ mod tests {
                 pane: 2,
                 item: 3,
                 generation: 4,
+                control: Default::default(),
                 source: kettle_media::Source::Bytes(Vec::new()),
                 why: FileWhy::Unsupported,
                 reply: None,
@@ -307,7 +376,7 @@ mod tests {
     #[test]
     fn panicking_facts_source_completes_with_failure() {
         let (wake, woke) = std::sync::mpsc::channel();
-        let lane = FactsLane::start(
+        let mut lane = FactsLane::start(
             |_| panic!("metadata source failed"),
             std::sync::Arc::new(move || {
                 let _ = wake.send(());
@@ -320,6 +389,7 @@ mod tests {
                 pane: 2,
                 item: 3,
                 generation: 4,
+                control: Default::default(),
                 source: kettle_media::Source::Bytes(Vec::new()),
                 why: FileWhy::Unsupported,
                 reply: None,

@@ -846,6 +846,15 @@ and shared by every file card); `card_caption` says `file` and its size
 picture, only why (its status line), and offers no canvas, zoom or copy;
 its `↗` is `Outside::Reveal`.
 
+The file-facts lane retains pending replies on the UI thread and sends the
+worker a copy of the request with the original `RenderControl`. Its absolute
+deadline includes the facts queue and the shared worker slot. Pending facts
+contribute to the event-loop wake deadline; expired replies fail immediately,
+and later worker completions are discarded. A waiting inline card retains only
+its draft and launch witness. Completion reads the pane's current grid, cursor
+column and cell size, builds the caption and card, and issues any native pickup
+permit immediately before answering.
+
 `media::external::reveal` shows such a file in its folder. `RevealTarget`
 takes its path and identity from the item, and `hand_over` reopens the path
 and requires a regular file with the same device and inode before anything

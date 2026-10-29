@@ -821,6 +821,20 @@ Prerequisites beyond the desktop are included in the proof column.
 | Centered media viewer | - | Worker-backed viewer routing and live pixels through native X11 input | Linux X11 |
 | Centered confirmations | `just confirmation-smoke` | Two-pane close, safe Cancel, pointer/Space release, scrolling, retained Settings, visible text, and input isolation | Linux X11 |
 
+The portable `kettle-ui` regressions below exercise queued facts expiry behind a
+blocked check, card placement after a pane narrows during the wait, pickup
+issuance after a wait longer than its lifetime, and failed WSL translation at
+delivery. Each failed before its corresponding fix. Run them without a desktop:
+
+```sh
+cargo test -j 2 --locked --offline -p kettle-ui regression_waiting_file_facts_expire_while_another_check_is_stalled
+cargo test -j 2 --locked --offline -p kettle-ui regression_waiting_file_card_uses_current_pane_geometry
+cargo test -j 2 --locked --offline -p kettle-ui regression_file_pickup_lifetime_starts_at_publication
+cargo test -j 2 --locked --offline -p kettle-ui regression_failed_wsl_translation_does_not_deliver_a_space
+```
+
+These fixtures do not replace native Linux pickup or Windows WSL mount checks.
+
 S9 checks held pixels for good media, refusals for broken inputs, and metadata-only
 cards for unsupported or oversized files. The worker and its parent directory
 must not allow group or other writes; stage a private executable copy if the

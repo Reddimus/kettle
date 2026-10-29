@@ -1269,7 +1269,7 @@ fn videos_keep_what_they_are() {
         "let video = rendered.video.as_ref().map(|video| video.info);",
         "item.layout = Some(layout); item.video = video;",
         ".with_pages(page);",
-        "self.publish_show(ws, (origin, route), item, (inline, inline_refused), page);",
+        "self.publish_show( ws, (origin, route, control), item, (inline, inline_refused), page, );",
     ] {
         assert!(finish.contains(needle), "finish_show: {needle}");
     }
@@ -2366,8 +2366,8 @@ fn an_undrawable_file_goes_on_the_shelf_as_itself() {
         "let why = crate::media::FileWhy::of_job(&spec.kind, failure);",
         "let Some(why) = why.filter(|_| matches!(spec.input, crate::media::SourceInput::Path { .. })) else { return notify_preview_failure(tr, origin.refuse(failure)); };",
         "let item = crate::media::ShelfItem::checking_file( self.media.next_item(), key, title, provenance, why, crate::media::ItemSource::checking_file(spec), );",
-        "return self.publish_show( ws, (origin, route), item, (inline, inline_refused), None, );",
-        "self.publish_show(ws, (origin, route), item, (inline, inline_refused), page);",
+        "return self.publish_show( ws, (origin, route, control), item, (inline, inline_refused), None, );",
+        "self.publish_show( ws, (origin, route, control), item, (inline, inline_refused), page, );",
     ];
     let at: Vec<_> = steps
         .iter()
