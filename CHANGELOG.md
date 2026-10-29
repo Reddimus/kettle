@@ -33,6 +33,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Exec now counts UTF-8 continuation bytes and escape-prefix bytes toward its
   64 KiB recovery bound, and a fresh ESC at the bound starts a new sequence
   instead of showing its payload as text.
+- Update dependencies within their existing version requirements, including
+  wgpu 30.0.1 and notify 8.2.1.
 
 ### Fixed
 
