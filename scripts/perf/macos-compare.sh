@@ -488,8 +488,9 @@ def main() -> int:
                 value = marker.read_text(encoding="utf-8", errors="replace").strip()
                 if value.isdigit():
                     return int(value)
-                print(f"{app_name} produced an invalid completion marker: {value!r}", file=sys.stderr)
-                return 1
+                if value:
+                    print(f"{app_name} produced an invalid completion marker: {value!r}", file=sys.stderr)
+                    return 1
             time.sleep(0.05)
         print(f"{app_name} payload timed out after {args.timeout:g}s", file=sys.stderr)
         return 124

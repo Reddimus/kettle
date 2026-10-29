@@ -19,6 +19,53 @@ LAUNCHER = ROOT / "scripts" / "vm" / "run-ubuntu-arm.sh"
 
 @unittest.skipIf(os.name == "nt", "the launcher targets QEMU/HVF on macOS")
 class VmLauncherTests(unittest.TestCase):
+    def fixture(self, root):
+        vm = root / 'vm'
+        vm.mkdir()
+        for name in ('ubuntu-arm.qcow2', 'efi_vars.fd'):
+            (vm / name).write_bytes(b'fixture')
+        code = root / 'code.fd'
+        code.write_bytes(b'fixture')
+        fake_bin = root / 'bin'
+        fake_bin.mkdir()
+        qemu = fake_bin / 'qemu-system-aarch64'
+        qemu.write_text('#!/bin/sh\nexit 0\n')
+        qemu.chmod(0o755)
+        return {**os.environ, 'KETTLE_VM_DIR': str(vm), 'KETTLE_VM_EFI_CODE': str(code),
+                'PATH': str(fake_bin) + os.pathsep + os.environ['PATH']}
+
+    def test_socket_inspection_errors_preserve_the_socket(self):
+        for status, diagnostic in ((1, 'inspection failed'), (3, ''), (127, '')):
+            with self.subTest(status=status), tempfile.TemporaryDirectory(dir='/tmp', prefix='kvm-') as raw:
+                root = Path(raw)
+                env = self.fixture(root)
+                lsof = root / 'bin' / 'lsof'
+                lsof.write_text(f'#!/bin/sh\necho "{diagnostic}" >&2\nexit {status}\n')
+                lsof.chmod(0o755)
+                path = root / 'vm' / 'qemu-guest-agent.sock'
+                path.touch()
+                # The sandbox forbids AF_UNIX bind; only replace the type query.
+                shell_env = root / 'bash-env'
+                shell_env.write_text('function [ { if [[ "$1" == -S ]]; then return 0; fi; builtin [ "$@"; }\n')
+                env['BASH_ENV'] = str(shell_env)
+                result = subprocess.run(['bash', str(LAUNCHER)], env=env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0, 'inspection failure was treated as an inactive socket')
+                self.assertTrue(path.exists(), 'inspection failure unlinked the socket')
+
+    def test_failed_firmware_copy_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            env = self.fixture(root)
+            variables = root / 'vm' / 'efi_vars.fd'
+            variables.unlink()
+            copier = root / 'bin' / 'cp'
+            copier.write_text('#!/bin/sh\nprintf partial > "$2"\nexit 1\n')
+            copier.chmod(0o755)
+            result = subprocess.run(['bash', str(LAUNCHER)], env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(variables.exists(), 'failed copy published reusable partial firmware')
+            self.assertEqual(list((root / 'vm').glob('efi_vars.fd.*')), [])
+
     def test_ssh_forward_binds_only_to_loopback(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

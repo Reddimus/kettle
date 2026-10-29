@@ -65,8 +65,10 @@ def spot_rows(results, require_typing=True):
                             candidates.append(value)
                             if timestamp > 3000:
                                 break
-                    if candidates and not any(abs(v - row['done3_mib']) <= .11 for v in candidates):
+                    if not candidates or not any(abs(v - row['done3_mib']) <= .11 for v in candidates):
                         raise ValueError('flood designated sample mismatch')
+                else:
+                    raise ValueError('flood designated sample evidence missing')
                 checked.add('flood-memory.done3_mib')
         for name, runs in rows.get('latency', {}).items():
             for row in runs:

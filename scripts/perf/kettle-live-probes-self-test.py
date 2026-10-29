@@ -6,6 +6,9 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
+import subprocess
+from unittest.mock import Mock
 from unittest.mock import patch
 
 
@@ -15,6 +18,22 @@ if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot load {SCRIPT}")
 PROBES = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PROBES)
+
+
+class StartupTests(unittest.TestCase):
+    def test_readiness_failure_reaps_kettle(self):
+        with tempfile.TemporaryDirectory() as raw:
+            live = PROBES.LiveKettle(Path('kettle'), Path('config'), Path(raw) / 'log')
+            child = Mock()
+            child.poll.return_value = None
+            for error in (subprocess.TimeoutExpired('ctl', 2), SystemExit('not ready')):
+                child.reset_mock()
+                with self.subTest(error=type(error).__name__), patch.object(PROBES.subprocess, 'Popen', return_value=child), \
+                        patch.object(live, 'ctl', side_effect=error):
+                    with self.assertRaises(type(error)):
+                        live.__enter__()
+                    child.terminate.assert_called_once()
+                    child.wait.assert_called_once_with(timeout=5)
 
 
 class FakeLive:

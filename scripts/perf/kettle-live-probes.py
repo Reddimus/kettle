@@ -53,31 +53,34 @@ class LiveKettle:
         self.proc: Optional[subprocess.Popen[bytes]] = None
 
     def __enter__(self) -> "LiveKettle":
-        log_f = self.log.open("wb")
-        self.proc = subprocess.Popen(
-            [
-                str(self.kettle),
-                "--config",
-                str(self.config),
-                "--agent-server",
-                "full",
-            ],
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-        )
-        log_f.close()
-        deadline = time.monotonic() + 25.0
-        while time.monotonic() < deadline:
-            if self.proc.poll() is not None:
-                raise SystemExit(
-                    "kettle-live-probes: kettle exited before control server was ready\n"
-                    + self.log.read_text(errors="replace")
+        try:
+            with self.log.open("wb") as log_f:
+                self.proc = subprocess.Popen(
+                    [
+                        str(self.kettle),
+                        "--config",
+                        str(self.config),
+                        "--agent-server",
+                        "full",
+                    ],
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
                 )
-            probe = self.ctl("list_panes", raw=True, allow_fail=True, timeout=2.0)
-            if probe.returncode == 0:
-                return self
-            time.sleep(0.1)
-        raise SystemExit("kettle-live-probes: timed out waiting for control server")
+            deadline = time.monotonic() + 25.0
+            while time.monotonic() < deadline:
+                if self.proc.poll() is not None:
+                    raise SystemExit(
+                        "kettle-live-probes: kettle exited before control server was ready\n"
+                        + self.log.read_text(errors="replace")
+                    )
+                probe = self.ctl("list_panes", raw=True, allow_fail=True, timeout=2.0)
+                if probe.returncode == 0:
+                    return self
+                time.sleep(0.1)
+            raise SystemExit("kettle-live-probes: timed out waiting for control server")
+        except BaseException:
+            self.__exit__()
+            raise
 
     def __exit__(self, *_exc: object) -> None:
         if self.proc is not None and self.proc.poll() is None:
