@@ -287,31 +287,22 @@ fn enclosing_bundle(executable: &Path) -> BundleShape {
     BundleShape::Bundle(bundle.to_path_buf())
 }
 
-/// Delete one leftover, having already established that it is a directory we
-/// own and that nothing holds it.
+/// Bounds for deleting a staging or displaced bundle tree. A kettle.app holds a
+/// few dozen entries; these leave two orders of magnitude of headroom while
+/// still stopping a walk of something that is plainly not one of ours.
+const CLEANUP_LIMITS: kettle_state::TreeRemovalLimits = kettle_state::TreeRemovalLimits {
+    max_depth: 32,
+    max_entries: 20_000,
+};
+
+/// May the sweep delete a leftover with this type and owner?
 ///
-/// Renames it to a name that did not exist a moment ago before removing it,
-/// then confirms it is still the same inode. `remove_dir_all` resolves its
-/// first component by pathname, and this runs in a directory other people can
-/// write, so deleting in place would leave a window for a substitution.
-fn remove_leftover(path: &Path, expected: &std::fs::Metadata) {
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    let doomed = parent.join(format!("{STAGED_PREFIX}{}-sweep", unique_suffix()));
-    if std::fs::rename(path, &doomed).is_err() {
-        return;
-    }
-    match std::fs::symlink_metadata(&doomed) {
-        Ok(metadata)
-            if metadata.is_dir()
-                && metadata.ino() == expected.ino()
-                && metadata.dev() == expected.dev() =>
-        {
-            let _ = std::fs::remove_dir_all(&doomed);
-        }
-        _ => {}
-    }
+/// A name is not authority to delete. Anyone who can write the enclosing
+/// directory can rename someone else's tree to look like our leftover, and a
+/// recursive delete would then destroy it using rights they do not have. Only
+/// a directory owned by the effective user qualifies.
+fn leftover_is_removable(is_dir: bool, owner: u32, euid: u32) -> bool {
+    is_dir && owner == euid
 }
 
 /// Drop update leftovers sitting beside a bundle, if this executable is in one.
@@ -497,18 +488,7 @@ impl Staging {
         // by whoever it names.
         kettle_state::clear_inherited_acl(&directory)?;
 
-        // Clearing the root only governs children created afterwards: Darwin
-        // applies an ACL when a file is made and never revisits it. Between
-        // `mkdirat` above and the clear, an inheritable ACE could have let
-        // somebody else create a child that keeps its own grant. So require the
-        // directory to be empty at this point. If it is, every later child
-        // inherits from an ACL-free parent and there is nothing to race.
-        if std::fs::read_dir(&path)?.next().is_some() {
-            return Err(UpdateError::UnsafeArchive(format!(
-                "{} was not empty immediately after being created",
-                path.display()
-            )));
-        }
+        require_empty_staging(&directory, &path)?;
 
         // An advisory lock on the directory itself, held for as long as this
         // staging area exists. The sweep tries the same lock before deleting
@@ -527,49 +507,43 @@ impl Staging {
         self.path.join(ARCHIVE_ROOT)
     }
 
-    /// Remove the staging tree, but only if that path is still ours.
+    /// Remove the staging tree through the descriptor held since creation.
     ///
     /// A recursive delete keyed on a pathname is a weapon. If someone renamed
     /// our directory aside and left something else under the name, deleting it
     /// would destroy their file on their behalf, using rights they do not have.
-    /// Compare against the descriptor taken at creation and walk away if it no
-    /// longer matches.
+    /// The contents are removed through `self.directory`, which is the tree we
+    /// made wherever it now sits, and the name itself is removed only while it
+    /// still refers to that tree.
     fn discard(self) {
-        let Ok(held) = self.directory.metadata() else {
+        let (Some(parent), Some(name)) = (self.path.parent(), self.path.file_name()) else {
             return;
         };
-        let same = |metadata: &std::fs::Metadata| {
-            metadata.is_dir() && metadata.ino() == held.ino() && metadata.dev() == held.dev()
-        };
-        // Look before touching. If someone has already moved our directory
-        // aside and left their own under the name, this is where we notice, and
-        // we walk away without so much as renaming it.
-        match std::fs::symlink_metadata(&self.path) {
-            Ok(metadata) if same(&metadata) => {}
-            _ => return,
-        }
-        // Then move it aside under a name that did not exist a moment ago.
-        // `remove_dir_all` resolves its first component by pathname, so
-        // deleting `self.path` in place would leave a window for a
-        // substitution. Re-check after the rename, because the check above and
-        // the rename are still two operations.
-        let Some(parent) = self.path.parent() else {
+        let Ok(parent) = open_directory(parent) else {
             return;
         };
-        let doomed = parent.join(format!("{STAGED_PREFIX}{}-discard", unique_suffix()));
-        if std::fs::rename(&self.path, &doomed).is_err() {
-            return;
-        }
-        match std::fs::symlink_metadata(&doomed) {
-            Ok(metadata) if same(&metadata) => {
-                let _ = std::fs::remove_dir_all(&doomed);
-            }
-            // Something else is now at that name. Leave it where it is: moving
-            // it was already more than we should have done, and deleting it
-            // would be worse.
-            _ => {}
-        }
+        let _ =
+            kettle_state::remove_directory_tree_at(&parent, name, &self.directory, CLEANUP_LIMITS);
     }
+}
+
+/// Refuse a staging directory that already has entries.
+///
+/// Clearing an inherited ACL only governs children created afterwards: Darwin
+/// applies an ACL when a file is made and never revisits it. Between `mkdirat`
+/// and the clear, an inheritable ACE could have let somebody else create a
+/// child that keeps its own grant. An empty directory at this point means every
+/// later child inherits from an ACL-free parent and there is nothing to race.
+/// Read through the descriptor, not the pathname, so the answer is about the
+/// directory we hold.
+fn require_empty_staging(directory: &File, path: &Path) -> Result<(), UpdateError> {
+    if kettle_state::directory_is_empty(directory)? {
+        return Ok(());
+    }
+    Err(UpdateError::UnsafeArchive(format!(
+        "{} was not empty immediately after being created",
+        path.display()
+    )))
 }
 
 /// Is this open directory the private one we just created?
@@ -842,49 +816,51 @@ fn stage_verified_bundle(
 /// drop it safely. A crash before the swap leaves a `.kettle-update-staged-`
 /// bundle, which was never live and is simply dropped.
 pub(crate) fn sweep_interrupted_updates(parent: &Path) {
+    let Ok(parent_dir) = open_directory(parent) else {
+        return;
+    };
     let Ok(entries) = std::fs::read_dir(parent) else {
         return;
     };
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(name) = name.to_str() else {
+        let Some(text) = name.to_str() else {
             continue;
         };
-        if !name.starts_with(STAGED_PREFIX) && !name.starts_with(PREVIOUS_PREFIX) {
+        if !text.starts_with(STAGED_PREFIX) && !text.starts_with(PREVIOUS_PREFIX) {
             continue;
         }
-        // A name is not authority to delete. Anyone who can write this
-        // directory can rename someone else's tree to look like our leftover,
-        // and a recursive delete would then destroy it using rights the
-        // attacker does not have. The ownership test is the half that carries
-        // weight here; `remove_dir_all` already refuses to traverse a symlink,
-        // so `symlink_metadata` is belt-and-braces rather than the guard.
-        //
-        // The foreign-owner branch has no automated coverage: reaching it needs
-        // a file owned by a second uid, which a test cannot create. Recorded in
-        // docs/AUDIT-DEFERRED.md rather than covered by a test that would pass
-        // either way.
-        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+        // Open the entry relative to the parent descriptor with O_NOFOLLOW,
+        // then decide on what was opened. A symlink planted under the name is
+        // an error here, and a swap after this point cannot change which tree
+        // the removal below walks.
+        let Ok(c_entry) = c_name(&name) else {
             continue;
         };
-        if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        let Ok(candidate) = open_directory_at(&parent_dir, &c_entry) else {
+            continue;
+        };
+        let Ok(metadata) = candidate.metadata() else {
+            continue;
+        };
+        if !leftover_is_removable(metadata.is_dir(), metadata.uid(), euid) {
             continue;
         }
         // An in-flight staging directory holds an advisory lock on itself for
         // as long as it exists. Asking the directory beats asking a lock file,
         // because two processes can disagree about where lock files live if
         // they inherited different environments, and cannot disagree about
-        // this.
-        let Ok(candidate) = open_directory(&entry.path()) else {
-            continue;
-        };
+        // this. The lock stays held while the tree is removed.
+        // SAFETY: `candidate` is an open descriptor owned for this iteration.
         let free =
             unsafe { libc::flock(candidate.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
         if !free {
             continue;
         }
-        drop(candidate);
-        remove_leftover(&entry.path(), &metadata);
+        let _ =
+            kettle_state::remove_directory_tree_at(&parent_dir, &name, &candidate, CLEANUP_LIMITS);
     }
 }
 
@@ -1543,6 +1519,52 @@ mod tests {
             planted.join("theirs").exists(),
             "discard must leave a tree that is no longer the one it created"
         );
+        let moved = open_directory(&root.join("moved")).unwrap();
+        assert!(
+            kettle_state::directory_is_empty(&moved).unwrap(),
+            "discard empties the tree it created, wherever it was moved"
+        );
+    }
+
+    #[test]
+    fn only_a_directory_owned_by_this_user_is_a_removable_leftover() {
+        assert!(leftover_is_removable(true, 501, 501));
+        assert!(
+            !leftover_is_removable(true, 502, 501),
+            "another user's tree renamed to look like ours is not ours to delete"
+        );
+        assert!(!leftover_is_removable(false, 501, 501));
+    }
+
+    #[test]
+    fn staging_with_an_entry_at_creation_is_refused() {
+        let temp = kettle_test_support::private_tempdir("kettle-macos-empty-");
+        let root = temp.path();
+        let path = root.join("staging");
+        std::fs::create_dir(&path).unwrap();
+        let directory = open_directory(&path).unwrap();
+        require_empty_staging(&directory, &path).unwrap();
+
+        std::fs::write(path.join("planted"), b"kept its own ACL").unwrap();
+        assert!(matches!(
+            require_empty_staging(&directory, &path),
+            Err(UpdateError::UnsafeArchive(_))
+        ));
+    }
+
+    #[test]
+    fn the_sweep_does_not_follow_a_leftover_named_symlink() {
+        let _serial = serialized();
+        let temp = kettle_test_support::private_tempdir("kettle-macos-sweeplink-");
+        let root = temp.path();
+        let target = root.join("Elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("data"), b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, root.join(".kettle-update-staged-7-7")).unwrap();
+
+        sweep_interrupted_updates(root);
+
+        assert_eq!(std::fs::read(target.join("data")).unwrap(), b"keep");
     }
 
     #[test]
