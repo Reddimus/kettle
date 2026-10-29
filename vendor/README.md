@@ -349,8 +349,9 @@ the `Restore` and `Disable` variants, so it does not build against an upstream
   `proc_pidinfo(PROC_PIDLISTFDS)` into a buffer the parent allocates before
   `fork`; older macOS kernels can omit high descriptors from that list, so
   they are not asked. When that list is unreadable or fills its buffer, macOS
-  walks descriptor numbers below the hard limit, capped by
-  `kern.maxfilesperproc` read in the parent before `fork`. An unreadable,
+  walks descriptor numbers below `kern.maxfilesperproc`, read in the parent
+  before `fork`, independently of either process limit: lowering the hard
+  limit does not close descriptors already open above it. An unreadable,
   unusable, or over-1,048,576 bound fails the spawn instead of silently missing
   descriptors or hanging. Other Unix systems use the finite hard limit when
   it is at most 1,048,576; otherwise they retain the capped soft-limit walk.
