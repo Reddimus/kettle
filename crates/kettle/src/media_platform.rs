@@ -632,7 +632,10 @@ fn exit_of(status: std::process::ExitStatus) -> WorkerExit {
 
 /// A regular executable file, not a link, owned by this user or root, with
 /// neither it nor its directory writable by anyone else, by mode or (on macOS)
-/// by ACL, and no set-id bits.
+/// by ACL, and no set-id bits. Every directory above it is held to the policy
+/// the external decoders are trusted by, which lets macOS's admin group write
+/// as root does: `/Applications` is `drwxrwxr-x root:admin`, and the private
+/// state directory policy would refuse every standard install.
 #[cfg(unix)]
 fn inspect(path: &Path) -> Result<FileIdentity, UnavailableCause> {
     use std::os::unix::fs::MetadataExt as _;
@@ -644,9 +647,7 @@ fn inspect(path: &Path) -> Result<FileIdentity, UnavailableCause> {
         }
         Err(_) => return Err(UnavailableCause::UnsafeWorkerFile),
     };
-    let parent = path.parent().ok_or(UnavailableCause::UnsafeWorkerFile)?;
-    kettle_state::validate_trusted_directory(parent)
-        .map_err(|_| UnavailableCause::UnsafeWorkerFile)?;
+    kettle_media_native::tools::trust(path).map_err(|_| UnavailableCause::UnsafeWorkerFile)?;
     let directory = path
         .parent()
         .and_then(|directory| std::fs::metadata(directory).ok())
@@ -1026,6 +1027,36 @@ mod tests {
                 Err(UnavailableCause::UnsafeWorkerFile),
                 "writable ancestor must make the installation untrusted"
             );
+        }
+
+        /// A worker under a directory only the admin group may also write,
+        /// as one in `/Applications` is, is trusted.
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn an_admin_writable_ancestor_like_applications_is_trusted() {
+            use std::os::unix::ffi::OsStrExt as _;
+            let root = kettle_test_support::private_tempdir("kettle-worker-applications-");
+            let applications = root.path().join("Applications");
+            let bin = applications.join("kettle.app/Contents/MacOS");
+            std::fs::create_dir_all(&bin).unwrap();
+            let name = std::ffi::CString::new(applications.as_os_str().as_bytes()).unwrap();
+            // SAFETY: `name` is NUL-terminated; uid -1 leaves the owner as is.
+            if unsafe { libc::chown(name.as_ptr(), u32::MAX, 80) } != 0 {
+                eprintln!("skipped: this user cannot give a directory to the admin group");
+                return;
+            }
+            chmod(&applications, 0o775);
+            let worker = bin.join(WORKER_NAME);
+            std::fs::write(&worker, "worker").unwrap();
+            chmod(&worker, 0o755);
+            assert!(inspect(&worker).is_ok(), "{:?}", inspect(&worker));
+            // Any other group with write access is not trusted.
+            // SAFETY: as above; gid 20 is `staff`, which is not root.
+            if unsafe { libc::chown(name.as_ptr(), u32::MAX, 20) } != 0 {
+                return;
+            }
+            chmod(&applications, 0o775);
+            assert_eq!(inspect(&worker), Err(UnavailableCause::UnsafeWorkerFile));
         }
 
         #[test]
