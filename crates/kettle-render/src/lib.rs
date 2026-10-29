@@ -1693,6 +1693,36 @@ fn completion_selection_surface(theme_selection: Rgb, panel_bg: Rgb, accent: Rgb
     color::with_min_contrast(accent, panel_bg, COMPLETION_SELECTION_SEPARATION)
 }
 
+fn push_ime_preedit_quads(
+    quads: &mut Vec<QuadInstance>,
+    preedit: &ImePreedit,
+    pane: Rect4,
+    origin: (f32, f32),
+    cell: (f32, f32),
+    background: Rgb,
+    underline: Rgb,
+) {
+    let cells = unicode_width::UnicodeWidthStr::width(preedit.text.as_str()).max(1);
+    let x = origin.0 + preedit.col as f32 * cell.0;
+    let y = origin.1 + preedit.row as f32 * cell.1;
+    for (top, height, color) in [(y, cell.1, background), (y + cell.1 - 2.0, 2.0, underline)] {
+        let left = x.max(pane.0);
+        let top_clipped = top.max(pane.1);
+        let right = (x + cells as f32 * cell.0).min(pane.0 + pane.2);
+        let bottom = (top + height).min(pane.1 + pane.3);
+        if right > left && bottom > top_clipped {
+            quads.push(rect(
+                left,
+                top_clipped,
+                right - left,
+                bottom - top_clipped,
+                color,
+                1.0,
+            ));
+        }
+    }
+}
+
 /// Byte range of the emphasis token inside an already-fitted label.
 ///
 /// Kettle never filters, ranks, quotes, or inserts from the token: this is the
@@ -1762,10 +1792,57 @@ fn rects_overlap(a: Rect4, b: Rect4) -> bool {
     a.0 < b.0 + b.2 && a.0 + a.2 > b.0 && a.1 < b.1 + b.3 && a.1 + a.3 > b.1
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NotificationGeometry {
+    pub toast: Option<UpdateToastGeometry>,
+    pub receipt: Option<MediaPasteReceiptGeometry>,
+}
+
+pub fn notification_geometry(
+    toast: Option<UpdateToastGeometry>,
+    receipt: Option<&MediaPasteReceiptOverlay>,
+    completion: Option<&CompletionOverlay>,
+    cell: (f32, f32),
+    text_cell_width: f32,
+    text_line_height: f32,
+) -> NotificationGeometry {
+    NotificationGeometry {
+        toast,
+        receipt: receipt.and_then(|receipt| {
+            media_paste_receipt_geometry_avoiding(
+                receipt,
+                completion,
+                toast.map(|g| g.rect),
+                cell,
+                text_cell_width,
+                text_line_height,
+            )
+        }),
+    }
+}
+
 /// Place the receipt inside its terminal grid without covering completion UI.
 pub fn media_paste_receipt_geometry(
     receipt: &MediaPasteReceiptOverlay,
     completion: Option<&CompletionOverlay>,
+    cell: (f32, f32),
+    text_cell_width: f32,
+    text_line_height: f32,
+) -> Option<MediaPasteReceiptGeometry> {
+    media_paste_receipt_geometry_avoiding(
+        receipt,
+        completion,
+        None,
+        cell,
+        text_cell_width,
+        text_line_height,
+    )
+}
+
+fn media_paste_receipt_geometry_avoiding(
+    receipt: &MediaPasteReceiptOverlay,
+    completion: Option<&CompletionOverlay>,
+    toast: Option<Rect4>,
     cell: (f32, f32),
     text_cell_width: f32,
     text_line_height: f32,
@@ -1800,11 +1877,17 @@ pub fn media_paste_receipt_geometry(
         } else {
             left + inset_x
         };
-        if top_lane {
+        let mut rect = if top_lane {
             (x, top + inset_y, card_w, card_h)
         } else {
             (x, bottom - inset_y - card_h, card_w, card_h)
+        };
+        if let Some(toast) = toast
+            && rects_overlap(rect, toast)
+        {
+            rect.1 = toast.1 + toast.3 + inset_y;
         }
+        rect
     };
     let expanded_w = (cw * 42.0).min(width - inset_x * 2.0);
     let pad = (cw * 0.75).round().max(6.0);
@@ -1844,6 +1927,9 @@ pub fn media_paste_receipt_geometry(
             };
             (!expanded || !receipt.remote || final_detail_w >= text_cell_width * min_detail_columns)
                 && completion_rect.is_none_or(|other| !rects_overlap(*candidate, other))
+                && candidate.1 >= top + inset_y
+                && candidate.1 + card_h <= bottom - inset_y
+                && toast.is_none_or(|other| !rects_overlap(*candidate, other))
         })
     };
 
@@ -2803,6 +2889,9 @@ pub struct Renderer {
     update_toast_text: [String; 3],
     /// Input-method preedit buffer and equality gate.
     ime_buffer: TextBuffer,
+    ime_quads: QuadPipeline,
+    ime_text_renderer: TextRenderer,
+    ime_prepared: bool,
     ime_text: String,
     /// Pooled scratch for the per-frame cell/UI quad list, so
     /// `render_frame_with_status` does not allocate a fresh `Vec` of
@@ -4365,7 +4454,7 @@ impl Renderer {
         // and a comparator benchmark can only report the total. Splitting it
         // three ways says WHICH part to attack.
         let t_start = std::time::Instant::now();
-        let (instance, surface, adapter) = resolve_window_adapter(
+        let (instance, surface, adapters) = resolve_window_adapter(
             window,
             display_handle.as_ref(),
             cfg,
@@ -4380,18 +4469,18 @@ impl Renderer {
         // present a larger surface. Request the adapter's real 2D limit up
         // front so later high-DPI or multi-display resizes can configure the
         // swapchain at the window's actual physical dimensions.
-        let required_limits = live_device_limits(adapter.limits());
-        // On shared memory the renderer writes per-frame instances through
-        // mapped buffers, which needs a feature; elsewhere this is empty.
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("kettle-device"),
-                required_features: upload::mapped_upload_features(&adapter),
-                required_limits,
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| anyhow!("failed to create device: {e:?}"))?;
+        let (adapter, (device, queue)) = try_adapter_candidates(adapters, |adapter| async move {
+            adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("kettle-device"),
+                    required_features: upload::mapped_upload_features(&adapter),
+                    required_limits: live_device_limits(adapter.limits()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| anyhow!("failed to create device: {e:?}"))
+        })
+        .await?;
         // Turn a GPU driver reset (TDR) / VRAM exhaustion into a logged,
         // observable event instead of wgpu's default panic, which `panic=abort`
         // makes a hard crash. Installed once on the shared device.
@@ -4685,6 +4774,9 @@ impl Renderer {
         let text_decorations = shared.quads.blend(&device);
         let overlay_quads = shared.quads.blend(&device);
         let menu_quads = shared.quads.blend(&device);
+        let ime_quads = shared.quads.blend(&device);
+        let ime_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let rounded_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
@@ -4793,6 +4885,9 @@ impl Renderer {
             update_toast_buffers,
             update_toast_text: std::array::from_fn(|_| String::new()),
             ime_buffer,
+            ime_quads,
+            ime_text_renderer,
+            ime_prepared: false,
             ime_text: String::new(),
             pane_titlebar_buffers: Vec::new(),
             tab_buffers: Vec::new(),
@@ -5727,6 +5822,7 @@ impl Renderer {
         // so the allocation is trivial; high-water pooling is reserved for the
         // large per-cell `quads` / `spans` buffers, where it pays off.
         use kettle_config::BackgroundType;
+        let mut ime_q: Vec<QuadInstance> = Vec::with_capacity(2);
         let mut menu_q: Vec<QuadInstance> = Vec::with_capacity(64);
         let mut pane_dim = Vec::with_capacity(panes.len());
         let mut decorations = Vec::new();
@@ -6523,29 +6619,19 @@ impl Renderer {
                         ));
                     }
                 }
-                if let Some(preedit) = &overlay.ime_preedit {
-                    let cells = unicode_width::UnicodeWidthStr::width(preedit.text.as_str()).max(1);
-                    let x = grid_origin.0 + preedit.col as f32 * cw;
-                    let y = grid_origin.1 + preedit.row as f32 * ch;
-                    quads.push(rect(
-                        x,
-                        y,
-                        cells as f32 * cw,
-                        ch,
-                        theme.selection_background,
-                        0.96,
-                    ));
-                    // A persistent underline distinguishes composition from
-                    // selected terminal text and survives high-contrast themes.
-                    quads.push(rect(
-                        x,
-                        y + ch - 2.0,
-                        cells as f32 * cw,
-                        2.0,
-                        cfg.search_background.unwrap_or(theme.palette[3]),
-                        1.0,
-                    ));
-                }
+            }
+            if pv.focused
+                && let Some(preedit) = &overlay.ime_preedit
+            {
+                push_ime_preedit_quads(
+                    &mut ime_q,
+                    preedit,
+                    pv.terminal,
+                    grid_origin,
+                    (cw, ch),
+                    theme.selection_background,
+                    cfg.search_background.unwrap_or(theme.palette[3]),
+                );
             }
 
             if !pv.focused && panes.len() > 1 {
@@ -7645,15 +7731,17 @@ impl Renderer {
             }
         }
 
+        let notifications = notification_geometry(
+            overlay.update_toast.as_ref().map(|toast| toast.geometry),
+            overlay.media_paste_receipt.as_ref(),
+            overlay.completion.as_ref(),
+            (cw, ch),
+            self.overlay_text_cell_width(),
+            self.overlay_text_line_height(),
+        );
         if overlay.confirm_dialog.is_none()
             && let Some(receipt) = &overlay.media_paste_receipt
-            && let Some(geometry) = media_paste_receipt_geometry(
-                receipt,
-                overlay.completion.as_ref(),
-                (cw, ch),
-                self.overlay_text_cell_width(),
-                self.metrics.line_height,
-            )
+            && let Some(geometry) = notifications.receipt
         {
             let (title, detail) =
                 media_paste_receipt_text(receipt, &geometry, self.overlay_text_cell_width());
@@ -7809,9 +7897,12 @@ impl Renderer {
         // render pass.
         // Pre-size for the menu / settings-overlay rows it collects.
         let mut menu_areas: Vec<TextArea> = Vec::with_capacity(48);
-        if let Some(toast) = &overlay.update_toast {
+        let mut ime_areas: Vec<TextArea> = Vec::with_capacity(1);
+        if let Some(toast) = &overlay.update_toast
+            && let Some(geometry) = notifications.toast
+        {
             let text_line_height = self.overlay_text_line_height();
-            let (x, y, w, h) = toast.geometry.rect;
+            let (x, y, w, h) = geometry.rect;
             let alpha = toast.opacity.clamp(0.0, 1.0);
             let background = theme.palette[0];
             let foreground = self.chrome_colors.text(theme.foreground, background);
@@ -7821,9 +7912,9 @@ impl Renderer {
             menu_q.push(rect(x, y, w, 1.0, accent, alpha));
             if let Some(index) = toast.focused.filter(|i| *i == 1 || *i == 2) {
                 let (bx, by, bw, bh) = if index == 1 {
-                    toast.geometry.details
+                    geometry.details
                 } else {
-                    toast.geometry.close
+                    geometry.close
                 };
                 for (x, y, w, h) in [
                     (bx, by, bw, 2.0),
@@ -7835,13 +7926,9 @@ impl Renderer {
                 }
             }
 
-            for (i, area) in [
-                toast.geometry.message,
-                toast.geometry.details,
-                toast.geometry.close,
-            ]
-            .into_iter()
-            .enumerate()
+            for (i, area) in [geometry.message, geometry.details, geometry.close]
+                .into_iter()
+                .enumerate()
             {
                 let (ax, ay, aw, ah) = area;
                 menu_areas.push(TextArea {
@@ -7910,13 +7997,7 @@ impl Renderer {
         }
         if overlay.confirm_dialog.is_none()
             && let Some(receipt) = &overlay.media_paste_receipt
-            && let Some(geometry) = media_paste_receipt_geometry(
-                receipt,
-                overlay.completion.as_ref(),
-                (cw, ch),
-                self.overlay_text_cell_width(),
-                self.metrics.line_height,
-            )
+            && let Some(geometry) = notifications.receipt
         {
             let accent = self.ui_accent(cfg, theme);
             let palette = self.chrome_colors.completion(theme, accent);
@@ -8788,7 +8869,7 @@ impl Renderer {
                 });
             }
             if let Some(preedit) = &overlay.ime_preedit {
-                areas.push(TextArea {
+                ime_areas.push(TextArea {
                     buffer: &self.ime_buffer,
                     left: focus_grid_origin.0 + preedit.col as f32 * cw,
                     top: focus_grid_origin.1 + preedit.row as f32 * ch,
@@ -9239,6 +9320,7 @@ impl Renderer {
             self.update_toast_text.hash(&mut h);
             self.ime_text.hash(&mut h);
             prepared_text_areas_damage_key(&areas).hash(&mut h);
+            prepared_text_areas_damage_key(&ime_areas).hash(&mut h);
             // Completion buffers are retained while the card is static. Hash
             // both their geometry and their shaped source strings: glyphon
             // keeps each buffer at the same address when a same-size candidate
@@ -9355,6 +9437,21 @@ impl Renderer {
                 areas,
                 &mut self.swash,
             )?;
+            if !ime_areas.is_empty() || self.ime_prepared {
+                self.chrome_prepares += 1;
+                self.text_prepares += 1;
+                let has_preedit = !ime_areas.is_empty();
+                self.ime_text_renderer.prepare(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    ime_areas,
+                    &mut self.swash,
+                )?;
+                self.ime_prepared = has_preedit;
+            }
             // Second TextRenderer prepare, for the menu pass (context menu,
             // settings, completion, and other top-layer text). Empty
             // `menu_areas` is fine; glyphon's prepare handles a zero-area
@@ -9523,6 +9620,8 @@ impl Renderer {
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_dim);
         self.text_decorations
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &decorations);
+        self.ime_quads
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &ime_q);
         self.pane_outlines
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_outlines);
         // Return the scratch to the pool (keeps its capacity for next
@@ -9862,6 +9961,7 @@ impl Renderer {
             self.quads.upload_counts(),
             self.pane_dimming.upload_counts(),
             self.text_decorations.upload_counts(),
+            self.ime_quads.upload_counts(),
             self.pane_outlines.upload_counts(),
             self.overlay_quads.upload_counts(),
             self.menu_quads.upload_counts(),
@@ -10003,7 +10103,7 @@ impl Renderer {
         }
         // The blink's off phase skips the cursor's quads; the same instances
         // stay uploaded, and the blend order of everything else is unchanged.
-        let hidden_cursor = if cursor_on {
+        let hidden_cursor = if cursor_on && !self.ime_prepared {
             None
         } else {
             self.cursor_quad_range.clone()
@@ -10039,17 +10139,30 @@ impl Renderer {
             .render(&self.atlas, &self.viewport, &mut pass)?;
         self.card_cursors.draw_hiding(
             &mut pass,
-            if cursor_on {
+            if cursor_on && !self.ime_prepared {
                 None
             } else {
                 self.card_cursor_quad_range.clone()
             },
         );
+        // The preedit is its own layer above the terminal and card text,
+        // and the cursor draws again above it.
+        self.ime_quads.draw(&mut pass);
+        self.ime_text_renderer
+            .render(&self.atlas, &self.viewport, &mut pass)?;
+        if cursor_on && self.ime_prepared {
+            if let Some(range) = self.cursor_quad_range.clone() {
+                self.quads.draw_range(&mut pass, range);
+            }
+            if let Some(range) = self.card_cursor_quad_range.clone() {
+                self.card_cursors.draw_range(&mut pass, range);
+            }
+        }
         // The focused solid-block cursor's inverted glyph sits on its block
         // quad and the normal glyph, but below every overlay and chrome layer:
         // an opaque menu or receipt must cover all of the terminal cursor. The
         // off phase shows the glyph beneath in its normal colour instead.
-        if cursor_on && self.pending_cursor_glyph.is_some() {
+        if cursor_on && self.pending_cursor_glyph.is_some() && !self.ime_prepared {
             self.cursor_glyph_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
         }
@@ -11648,10 +11761,8 @@ pub struct GpuAdapterInfo {
     pub backend: &'static str,
 }
 
-/// Backend-aware identity of a live adapter. Recovery must distinguish two
-/// backends exposing the same physical GPU: after a driver failure, retrying
-/// the exact `(vendor, device, backend)` is different from rebuilding that GPU
-/// through an alternate backend.
+/// Backend-aware model key. wgpu exposes no physical-device identifier, so
+/// several enumerated adapters can share this key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GpuAdapterKey {
     vendor: u32,
@@ -11668,9 +11779,66 @@ impl GpuAdapterKey {
         }
     }
 
-    fn same_physical(self, info: &wgpu::AdapterInfo) -> bool {
+    fn same_model(self, info: &wgpu::AdapterInfo) -> bool {
         self.vendor == info.vendor && self.device == info.device
     }
+}
+
+const MAX_RECOVERY_ADAPTER_ATTEMPTS: usize = 8;
+
+fn ambiguous_adapter_model(keys: &[GpuAdapterKey], failed: GpuAdapterKey) -> bool {
+    keys.iter()
+        .filter(|key| key.vendor == failed.vendor && key.device == failed.device)
+        .count()
+        > 1
+}
+
+fn recovery_candidate_indices(
+    keys: &[GpuAdapterKey],
+    escalation: AdapterEscalation,
+    avoid: Option<GpuAdapterKey>,
+    preferred: Option<GpuAdapterKey>,
+) -> Vec<usize> {
+    let same_model =
+        |a: GpuAdapterKey, b: GpuAdapterKey| a.vendor == b.vendor && a.device == b.device;
+    let ambiguous = avoid.is_some_and(|failed| ambiguous_adapter_model(keys, failed));
+    keys.iter()
+        .enumerate()
+        .filter_map(|(i, &key)| {
+            let eligible = match escalation {
+                AdapterEscalation::AlternateBackend => avoid.is_some_and(|failed| {
+                    same_model(failed, key) && (ambiguous || key.backend != failed.backend)
+                }),
+                AdapterEscalation::SurfacePreferred => {
+                    preferred.is_some_and(|p| same_model(p, key))
+                        && avoid.is_none_or(|failed| ambiguous || !same_model(failed, key))
+                }
+                AdapterEscalation::AnyHardware => {
+                    avoid.is_none_or(|failed| ambiguous || !same_model(failed, key))
+                }
+                _ => false,
+            };
+            eligible.then_some(i)
+        })
+        .collect()
+}
+
+async fn try_adapter_candidates<T: Clone, D, F, Fut>(
+    candidates: Vec<T>,
+    mut request: F,
+) -> Result<(T, D)>
+where
+    F: FnMut(T) -> Fut,
+    Fut: std::future::Future<Output = Result<D>>,
+{
+    let mut failure = anyhow!("no eligible GPU adapter");
+    for candidate in candidates.into_iter().take(MAX_RECOVERY_ADAPTER_ATTEMPTS) {
+        match request(candidate.clone()).await {
+            Ok(device) => return Ok((candidate, device)),
+            Err(error) => failure = error,
+        }
+    }
+    Err(failure)
 }
 
 fn device_kind_str(t: wgpu::DeviceType) -> &'static str {
@@ -11870,8 +12038,8 @@ fn should_query_preferred_adapter(escalation: AdapterEscalation, force_software:
         )
 }
 
-fn same_physical(a: &wgpu::AdapterInfo, b: GpuAdapterKey) -> bool {
-    b.same_physical(a)
+fn same_model(a: &wgpu::AdapterInfo, b: GpuAdapterKey) -> bool {
+    b.same_model(a)
 }
 
 fn stable_adapter_cmp(a: &wgpu::AdapterInfo, b: &wgpu::AdapterInfo) -> std::cmp::Ordering {
@@ -11958,8 +12126,8 @@ fn take_best(
     adapters.sort_by(|a, b| {
         let a = a.get_info();
         let b = b.get_info();
-        let a_preferred = preferred.is_some_and(|p| same_physical(&a, p));
-        let b_preferred = preferred.is_some_and(|p| same_physical(&b, p));
+        let a_preferred = preferred.is_some_and(|p| same_model(&a, p));
+        let b_preferred = preferred.is_some_and(|p| same_model(&b, p));
         adapter_priority_for(
             host_backend_platform(),
             a.backend,
@@ -12164,7 +12332,7 @@ async fn resolve_window_adapter<W>(
     escalation: AdapterEscalation,
     avoid: Option<GpuAdapterKey>,
     context: &str,
-) -> Result<(wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter)>
+) -> Result<(wgpu::Instance, wgpu::Surface<'static>, Vec<wgpu::Adapter>)>
 where
     W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
 {
@@ -12192,7 +12360,7 @@ where
                     }
                     Ok(adapter) => {
                         log_direct_adapter_choice(context, cfg, &adapter.get_info());
-                        return Ok((instance, surface, adapter));
+                        return Ok((instance, surface, vec![adapter]));
                     }
                     Err(error) => {
                         failures.push(format!("{}: {error}", backend_str(backend)));
@@ -12217,7 +12385,7 @@ where
     let instance = gpu_instance_for_live_display(display_handle, wgpu::Backends::all());
     let surface = instance.create_surface(window)?;
     let adapter =
-        resolve_adapter(&instance, Some(&surface), cfg, escalation, avoid, context).await?;
+        resolve_adapters(&instance, Some(&surface), cfg, escalation, avoid, context).await?;
     Ok((instance, surface, adapter))
 }
 
@@ -12263,7 +12431,7 @@ async fn resolve_headless_adapter(
     }
 
     let instance = gpu_instance();
-    let adapter = resolve_adapter(
+    let adapters = resolve_adapters(
         &instance,
         None,
         cfg,
@@ -12272,6 +12440,10 @@ async fn resolve_headless_adapter(
         context,
     )
     .await?;
+    let adapter = adapters
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("{context}: no eligible GPU adapter"))?;
     Ok((instance, adapter))
 }
 
@@ -12281,14 +12453,14 @@ async fn resolve_headless_adapter(
 /// observable and falls back to native order rather than making Kettle fail to
 /// start. Initial startup can fall back to software; recovery advances through
 /// explicit stages so a failed backend is not silently retried forever.
-async fn resolve_adapter(
+async fn resolve_adapters(
     instance: &wgpu::Instance,
     surface: Option<&wgpu::Surface<'_>>,
     cfg: &Config,
     escalation: AdapterEscalation,
     avoid: Option<GpuAdapterKey>,
     context: &str,
-) -> Result<wgpu::Adapter> {
+) -> Result<Vec<wgpu::Adapter>> {
     let requested = configured_backend(cfg.gpu_backend);
     let force_software = cfg.gpu_force_software || escalation == AdapterEscalation::ForceSoftware;
     let preferred = if should_query_preferred_adapter(escalation, force_software) {
@@ -12315,7 +12487,7 @@ async fn resolve_adapter(
                 device_kind_str(info.device_type),
                 backend_str(info.backend)
             );
-            return Ok(chosen);
+            return Ok(vec![chosen]);
         }
         log::warn!(
             "{context}: pinned GPU (vendor={:#06x} device={:#06x} name={:?}) not found among \
@@ -12343,7 +12515,8 @@ async fn resolve_adapter(
             requested,
             context,
         )
-        .await;
+        .await
+        .map(|adapter| vec![adapter]);
     }
 
     candidates.retain(|adapter| adapter.get_info().device_type != wgpu::DeviceType::Cpu);
@@ -12364,77 +12537,39 @@ async fn resolve_adapter(
             requested,
             context,
         )
-        .await;
+        .await
+        .map(|adapter| vec![adapter]);
     }
 
-    if escalation == AdapterEscalation::AlternateBackend {
-        let Some(avoid) = avoid else {
-            return Err(anyhow!(
-                "{context}: alternate-backend recovery has no failed adapter identity"
-            ));
-        };
-        let alternate: Vec<_> = candidates
-            .into_iter()
-            .filter(|adapter| {
-                let info = adapter.get_info();
-                avoid.same_physical(&info) && info.backend != avoid.backend
-            })
+    if matches!(
+        escalation,
+        AdapterEscalation::AlternateBackend
+            | AdapterEscalation::SurfacePreferred
+            | AdapterEscalation::AnyHardware
+    ) {
+        let keys: Vec<_> = candidates
+            .iter()
+            .map(|a| GpuAdapterKey::from_info(&a.get_info()))
             .collect();
-        let chosen = take_best(alternate, cfg, preferred).ok_or_else(|| {
-            anyhow!("{context}: no alternate backend is available for the failed physical GPU")
-        })?;
-        let info = chosen.get_info();
-        log::warn!(
-            "{context}: recovery selected alternate backend {} on {}",
-            backend_str(info.backend),
-            info.name
-        );
-        return Ok(chosen);
-    }
-
-    if escalation == AdapterEscalation::SurfacePreferred {
-        let Some(preferred) = preferred else {
-            return Err(anyhow!(
-                "{context}: platform did not report a surface-preferred hardware adapter"
-            ));
-        };
-        let surface_preferred: Vec<_> = candidates
-            .into_iter()
-            .filter(|adapter| {
-                let info = adapter.get_info();
-                preferred.same_physical(&info)
-                    && avoid.is_none_or(|failed| !failed.same_physical(&info))
-            })
-            .collect();
-        let chosen = take_best(surface_preferred, cfg, Some(preferred)).ok_or_else(|| {
-            anyhow!("{context}: no non-failed backend is available on the surface-preferred GPU")
-        })?;
-        let info = chosen.get_info();
-        log::warn!(
-            "{context}: recovery selected surface-preferred GPU {} ({})",
-            info.name,
-            backend_str(info.backend)
-        );
-        return Ok(chosen);
-    }
-
-    if escalation == AdapterEscalation::AnyHardware {
-        let other: Vec<_> = candidates
-            .into_iter()
-            .filter(|adapter| {
-                let info = adapter.get_info();
-                avoid.is_none_or(|failed| !failed.same_physical(&info))
-            })
-            .collect();
-        let chosen = take_best(other, cfg, preferred)
-            .ok_or_else(|| anyhow!("{context}: no alternate physical hardware GPU is available"))?;
-        let info = chosen.get_info();
-        log::warn!(
-            "{context}: recovery selected alternate physical GPU {} ({})",
-            info.name,
-            backend_str(info.backend)
-        );
-        return Ok(chosen);
+        let indices = recovery_candidate_indices(&keys, escalation, avoid, preferred);
+        let eligible: Vec<_> = indices.into_iter().map(|i| candidates[i].clone()).collect();
+        // Model IDs cannot tell two boards apart, or prove that different
+        // backends refer to the same board. Try ambiguous matches in the
+        // driver's enumeration order, with a bounded number of device requests.
+        if avoid.is_some_and(|failed| ambiguous_adapter_model(&keys, failed)) {
+            let eligible: Vec<_> = eligible
+                .into_iter()
+                .take(MAX_RECOVERY_ADAPTER_ATTEMPTS)
+                .collect();
+            if !eligible.is_empty() {
+                return Ok(eligible);
+            }
+        } else if let Some(chosen) = take_best(eligible, cfg, preferred) {
+            return Ok(vec![chosen]);
+        }
+        return Err(anyhow!(
+            "{context}: no eligible hardware GPU recovery candidate"
+        ));
     }
 
     let candidates = apply_backend_policy(candidates, requested, context);
@@ -12446,7 +12581,7 @@ async fn resolve_adapter(
             device_kind_str(info.device_type),
             backend_str(info.backend)
         );
-        return Ok(chosen);
+        return Ok(vec![chosen]);
     }
 
     log::warn!(
@@ -12463,6 +12598,7 @@ async fn resolve_adapter(
         context,
     )
     .await
+    .map(|adapter| vec![adapter])
 }
 
 /// Number of header display-lines before the field rows in the

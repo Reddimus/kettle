@@ -1132,3 +1132,108 @@ fn bottom_remote_receipt_keeps_the_complete_safety_warning() {
         assert!(geometry.detail_rect.unwrap().2 >= 8.0 * super::remote_warning_columns(&card.tr));
     }
 }
+
+#[test]
+fn toast_and_receipt_geometry_stacks_without_overlap_and_shares_hits() {
+    let mut receipt = receipt(true);
+    receipt.pane_rect = (0.0, 0.0, 800.0, 600.0);
+    receipt.grid_rect = (8.0, 8.0, 784.0, 584.0);
+    let toast =
+        super::update_toast_geometry((800.0, 600.0), 0.0, 1.0, CELL, 8, "An update is available")
+            .unwrap();
+    let original = media_paste_receipt_geometry(&receipt, None, CELL, CELL.0, CELL.1).unwrap();
+    assert!(
+        super::rects_overlap(toast.rect, original.rect),
+        "fixture must begin with overlapping notifications"
+    );
+    let geometry =
+        super::notification_geometry(Some(toast), Some(&receipt), None, CELL, CELL.0, CELL.1);
+    let toast = geometry.toast.unwrap();
+    let card = geometry.receipt.unwrap();
+    assert!(
+        !super::rects_overlap(toast.rect, card.rect),
+        "toast and receipt must never share painted pixels"
+    );
+    assert!(card.rect.1 >= toast.rect.1 + toast.rect.3);
+    assert!(card.rect.1 + card.rect.3 <= 600.0);
+    let dismiss = card.dismiss_rect;
+    assert_eq!(
+        card.hit_test(dismiss.0 + dismiss.2 / 2.0, dismiss.1 + dismiss.3 / 2.0),
+        Some(MediaPasteReceiptHit::Dismiss)
+    );
+    assert_eq!(
+        card.hit_test(
+            toast.rect.0 + toast.rect.2 / 2.0,
+            toast.rect.1 + toast.rect.3 / 2.0
+        ),
+        None
+    );
+}
+
+#[test]
+fn notification_geometry_preserves_unobstructed_placement_and_hides_when_full() {
+    for expanded in [false, true] {
+        for prefer_top in [false, true] {
+            for (width, height) in [(800.0, 600.0), (360.0, 240.0), (800.0, 100.0)] {
+                let mut receipt = receipt(expanded);
+                receipt.prefer_top = prefer_top;
+                receipt.pane_rect = (0.0, 0.0, width, height);
+                receipt.grid_rect = (8.0, 8.0, width - 16.0, height - 16.0);
+                let old = media_paste_receipt_geometry(&receipt, None, CELL, CELL.0, CELL.1);
+                let clear =
+                    super::notification_geometry(None, Some(&receipt), None, CELL, CELL.0, CELL.1);
+                assert_eq!(clear.receipt, old);
+                let toast = super::update_toast_geometry(
+                    (width, height),
+                    0.0,
+                    1.0,
+                    CELL,
+                    8,
+                    "Update available",
+                )
+                .unwrap();
+                let joint = super::notification_geometry(
+                    Some(toast),
+                    Some(&receipt),
+                    None,
+                    CELL,
+                    CELL.0,
+                    CELL.1,
+                );
+                if let Some(card) = joint.receipt {
+                    assert!(!super::rects_overlap(toast.rect, card.rect));
+                    assert!(card.rect.0 >= 0.0 && card.rect.1 >= 0.0);
+                    assert!(card.rect.0 + card.rect.2 <= width);
+                    assert!(card.rect.1 + card.rect.3 <= height);
+                }
+            }
+        }
+    }
+    let receipt = receipt(true);
+    let covering = super::UpdateToastGeometry {
+        rect: receipt.pane_rect,
+        message: receipt.pane_rect,
+        details: receipt.pane_rect,
+        close: receipt.pane_rect,
+    };
+    assert!(
+        super::notification_geometry(Some(covering), Some(&receipt), None, CELL, CELL.0, CELL.1)
+            .receipt
+            .is_none()
+    );
+    let src = production_source();
+    assert!(src.contains("let notifications = notification_geometry("));
+    assert_eq!(
+        src.matches("&& let Some(geometry) = notifications.receipt")
+            .count(),
+        2,
+        "receipt shaping and painting must use the same placement"
+    );
+    for ui in [
+        include_str!("../../kettle-ui/src/app/paste.rs"),
+        include_str!("../../kettle-ui/src/app/accessibility.rs"),
+    ] {
+        assert!(!ui.contains("kettle_render::media_paste_receipt_geometry("));
+        assert!(ui.contains("kettle_render::notification_geometry("));
+    }
+}

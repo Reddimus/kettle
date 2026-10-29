@@ -945,6 +945,13 @@ impl Renderer {
     /// Whether an image or a pane outline can paint inside `near`. Their
     /// shading is interpolated, so it does not crop exactly.
     fn inexact_draws_touch(&self, near: PixelBox) -> bool {
+        if self.ime_prepared
+            && self.ime_quads.uploaded().is_none_or(|mut quads| {
+                quads.any(|quad| PixelBox::bounding(quad.pos, quad.size).intersects(near))
+            })
+        {
+            return true;
+        }
         let any_rect_touches = |rects: Option<Vec<[f32; 4]>>| {
             rects.is_none_or(|rects| {
                 rects.iter().any(|rect| {
@@ -984,6 +991,7 @@ impl Renderer {
                 &self.card_cursors,
                 &self.card_decoration,
                 &self.overlay_quads,
+                &self.ime_quads,
                 &self.menu_quads,
             ]
             .into_iter()

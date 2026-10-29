@@ -495,12 +495,19 @@ impl QuadPipeline {
         pass: &mut wgpu::RenderPass<'_>,
         hidden: Option<std::ops::Range<u32>>,
     ) {
+        self.draw_ranges(pass, &visible_instance_ranges(self.count, hidden));
+    }
+
+    pub fn draw_range(&self, pass: &mut wgpu::RenderPass<'_>, range: std::ops::Range<u32>) {
+        self.draw_ranges(pass, &[range]);
+    }
+
+    fn draw_ranges(&self, pass: &mut wgpu::RenderPass<'_>, ranges: &[std::ops::Range<u32>]) {
         if self.count == 0 {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        let ranges = visible_instance_ranges(self.count, hidden);
         let mut offset = 0;
         for batch in &self.batches {
             let end = offset + batch.len as u32;
@@ -512,7 +519,7 @@ impl QuadPipeline {
                 None => &batch.instances,
             };
             pass.set_vertex_buffer(0, instances.slice(..));
-            for range in &ranges {
+            for range in ranges {
                 let start = range.start.max(offset);
                 let stop = range.end.min(end);
                 if start < stop {

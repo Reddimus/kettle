@@ -36,3 +36,73 @@ fn clone_retains_live_overrides_and_screenshot_completion() {
         .unwrap();
     assert_eq!(finished.recv().unwrap(), Ok(expected_path));
 }
+
+#[test]
+fn recovery_tries_same_model_adapters_in_enumeration_order() {
+    use super::{AdapterEscalation::*, GpuAdapterKey, recovery_candidate_indices};
+    let failed = GpuAdapterKey {
+        vendor: 0x10de,
+        device: 0x1234,
+        backend: wgpu::Backend::Vulkan,
+    };
+    let keys = [failed, failed];
+    for stage in [AlternateBackend, SurfacePreferred, AnyHardware] {
+        assert_eq!(
+            recovery_candidate_indices(&keys, stage, Some(failed), Some(failed)),
+            vec![0, 1],
+            "recovery must try both ambiguous same-model adapters before fallback at {stage:?}"
+        );
+    }
+}
+
+#[test]
+fn recovery_keeps_unique_model_excluded_and_bounds_device_attempts() {
+    use super::{
+        AdapterEscalation::*, GpuAdapterKey, MAX_RECOVERY_ADAPTER_ATTEMPTS,
+        recovery_candidate_indices, try_adapter_candidates,
+    };
+    let failed = GpuAdapterKey {
+        vendor: 1,
+        device: 2,
+        backend: wgpu::Backend::Vulkan,
+    };
+    let other = GpuAdapterKey {
+        device: 3,
+        ..failed
+    };
+    assert_eq!(
+        recovery_candidate_indices(&[failed, other], AnyHardware, Some(failed), None),
+        vec![1]
+    );
+    assert!(
+        recovery_candidate_indices(
+            &[failed, other],
+            SurfacePreferred,
+            Some(failed),
+            Some(failed)
+        )
+        .is_empty()
+    );
+    let calls = std::cell::RefCell::new(Vec::new());
+    let chosen = pollster::block_on(try_adapter_candidates(vec![0, 1, 2], |index| {
+        calls.borrow_mut().push(index);
+        std::future::ready(if index == 1 {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("failed"))
+        })
+    }))
+    .unwrap();
+    assert_eq!(chosen.0, 1);
+    assert_eq!(*calls.borrow(), vec![0, 1]);
+    calls.borrow_mut().clear();
+    let result = pollster::block_on(try_adapter_candidates((0..20).collect(), |index| {
+        calls.borrow_mut().push(index);
+        std::future::ready(Err::<(), _>(anyhow::anyhow!("failed")))
+    }));
+    assert!(result.is_err());
+    assert_eq!(
+        *calls.borrow(),
+        (0..MAX_RECOVERY_ADAPTER_ATTEMPTS).collect::<Vec<_>>()
+    );
+}

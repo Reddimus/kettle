@@ -8,13 +8,15 @@ impl App {
         ws: &WindowState,
     ) -> Option<kettle_render::MediaPasteReceiptGeometry> {
         let (receipt, completion) = self.media_paste_receipt_projection(ws)?;
-        kettle_render::media_paste_receipt_geometry(
-            &receipt,
+        kettle_render::notification_geometry(
+            self.update_toast_projection(ws).map(|toast| toast.geometry),
+            Some(&receipt),
             completion.as_ref(),
             self.menu_cell(ws),
             self.overlay_text_cell_width(ws),
             self.overlay_text_line_height(ws),
         )
+        .receipt
     }
 
     pub(super) fn media_paste_receipt_hovered(&self, ws: &WindowState) -> bool {
@@ -62,13 +64,16 @@ impl App {
         {
             return false;
         }
-        let Some(geometry) = kettle_render::media_paste_receipt_geometry(
-            &receipt,
+        let Some(geometry) = kettle_render::notification_geometry(
+            self.update_toast_projection(ws).map(|toast| toast.geometry),
+            Some(&receipt),
             completion.as_ref(),
             self.menu_cell(ws),
             self.overlay_text_cell_width(ws),
             self.overlay_text_line_height(ws),
-        ) else {
+        )
+        .receipt
+        else {
             return false;
         };
         let Some(hit) = geometry.hit_test(x, y) else {

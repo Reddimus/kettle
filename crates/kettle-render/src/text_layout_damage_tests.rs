@@ -86,3 +86,54 @@ fn pane_rect_shift_invalidates_layout_key() {
         "a terminal carved inside an unmoved pane must invalidate the key"
     );
 }
+
+#[test]
+fn ime_preedit_layer_covers_terminal_text_before_cursor() {
+    let src = super::production_source();
+    let scene = src
+        .split("fn encode_scene_pass(")
+        .nth(1)
+        .unwrap()
+        .split("fn create_screenshot_target(")
+        .next()
+        .unwrap();
+    let terminal = scene.find("self.text_renderer").unwrap();
+    let background = scene.find("self.ime_quads.draw(&mut pass)");
+    assert!(
+        background.is_some_and(|index| index > terminal),
+        "IME background must be drawn after terminal glyphs so existing command text cannot bleed through"
+    );
+    let background = background.unwrap();
+    let preedit = scene
+        .find("self.ime_text_renderer")
+        .expect("separate preedit text layer");
+    let cursor = scene.find("self.cursor_glyph_renderer").unwrap();
+    assert!(background < preedit && preedit < cursor);
+}
+
+#[test]
+fn ime_preedit_background_is_opaque_and_clipped_to_its_pane() {
+    use super::*;
+    let mut quads = Vec::new();
+    push_ime_preedit_quads(
+        &mut quads,
+        &ImePreedit {
+            text: "composition".into(),
+            row: 1,
+            col: 3,
+        },
+        (10.0, 20.0, 50.0, 30.0),
+        (10.0, 20.0),
+        (8.0, 16.0),
+        Rgb::new(10, 20, 30),
+        Rgb::new(40, 50, 60),
+    );
+    assert_eq!(quads[0].pos, [34.0, 36.0]);
+    assert_eq!(quads[0].size, [26.0, 14.0]);
+    for quad in quads {
+        assert_eq!(quad.color[3], 1.0);
+        assert!(quad.pos[0] >= 10.0 && quad.pos[1] >= 20.0);
+        assert!(quad.pos[0] + quad.size[0] <= 60.0);
+        assert!(quad.pos[1] + quad.size[1] <= 50.0);
+    }
+}

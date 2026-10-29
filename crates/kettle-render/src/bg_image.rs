@@ -282,7 +282,16 @@ pub fn decode_bg_image(path: &str) -> Option<BgImage> {
             return None;
         }
     };
-    let mut reader = reader;
+    let mut reader = if reader.format() == Some(image::ImageFormat::WebP) {
+        let mut inner = reader.into_inner();
+        if let Err(e) = validate_webp_headers(&mut inner) {
+            log::warn!("background-image webp {}: {e}", p.display());
+            return None;
+        }
+        image::ImageReader::with_format(inner, image::ImageFormat::WebP)
+    } else {
+        reader
+    };
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_BG_IMAGE_DIM);
     limits.max_image_height = Some(MAX_BG_IMAGE_DIM);
@@ -391,7 +400,7 @@ pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
                 return None;
             }
         },
-        Some(ImageFormat::WebP) => match image::codecs::webp::WebPDecoder::new(inner) {
+        Some(ImageFormat::WebP) => match background_webp_decoder(inner) {
             Ok(d) if d.has_animation() && decoder_dimensions_fit(d.dimensions()) => {
                 let bytes = decoder_frame_bytes(d.dimensions())?;
                 (d.into_frames(), bytes)
@@ -537,6 +546,159 @@ pub fn decode_bg_image_frames_with_blur(path: &str, blur_radius: u32) -> Option<
     Some(frames)
 }
 
+fn validate_webp_headers<R: std::io::Read + std::io::Seek>(reader: &mut R) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind, SeekFrom};
+    let invalid = || {
+        Error::new(
+            ErrorKind::InvalidData,
+            "invalid or oversized WebP frame header",
+        )
+    };
+    let end = reader.seek(SeekFrom::End(0))?;
+    reader.rewind()?;
+    let mut header = [0; 12];
+    reader.read_exact(&mut header)?;
+    if &header[..4] != b"RIFF"
+        || &header[8..] != b"WEBP"
+        || u64::from(u32::from_le_bytes(header[4..8].try_into().unwrap())) + 8 != end
+    {
+        return Err(invalid());
+    }
+    let mut parser = WebpHeaders {
+        reader,
+        chunks_left: 4096,
+    };
+    let (tag, start, size, _) = parser.chunk(12, end).ok_or_else(invalid)?;
+    let canvas = parser.dimensions(tag, start, size).ok_or_else(invalid)?;
+    if !decoder_dimensions_fit(canvas) {
+        return Err(invalid());
+    }
+    parser.walk(12, end, canvas, None).ok_or_else(invalid)?;
+    parser.reader.rewind()
+}
+
+struct WebpHeaders<'a, R> {
+    reader: &'a mut R,
+    chunks_left: usize,
+}
+
+impl<R: std::io::Read + std::io::Seek> WebpHeaders<'_, R> {
+    fn read<const N: usize>(&mut self, at: u64) -> Option<[u8; N]> {
+        self.reader.seek(std::io::SeekFrom::Start(at)).ok()?;
+        let mut bytes = [0; N];
+        self.reader.read_exact(&mut bytes).ok()?;
+        Some(bytes)
+    }
+
+    fn chunk(&mut self, at: u64, end: u64) -> Option<([u8; 4], u64, u64, u64)> {
+        self.chunks_left = self.chunks_left.checked_sub(1)?;
+        let start = at.checked_add(8).filter(|&start| start <= end)?;
+        let header = self.read::<8>(at)?;
+        let size = u64::from(u32::from_le_bytes(header[4..].try_into().ok()?));
+        let next = start.checked_add(size)?.checked_add(size % 2)?;
+        (next <= end).then_some((header[..4].try_into().ok()?, start, size, next))
+    }
+
+    fn dimensions(&mut self, tag: [u8; 4], start: u64, size: u64) -> Option<(u32, u32)> {
+        match &tag {
+            b"VP8 " if size >= 10 => {
+                let h = self.read::<10>(start)?;
+                if h[0] & 1 != 0 || h[3..6] != [0x9d, 1, 0x2a] {
+                    return None;
+                }
+                Some((
+                    u32::from(u16::from_le_bytes([h[6], h[7]]) & 0x3fff),
+                    u32::from(u16::from_le_bytes([h[8], h[9]]) & 0x3fff),
+                ))
+            }
+            b"VP8L" if size >= 5 => {
+                let h = self.read::<5>(start)?;
+                let bits = u32::from_le_bytes(h[1..].try_into().ok()?);
+                if h[0] != 0x2f || bits >> 29 != 0 {
+                    return None;
+                }
+                Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+            }
+            b"VP8X" if size == 10 => {
+                let h = self.read::<10>(start)?;
+                Some((webp_u24(&h[4..7]) + 1, webp_u24(&h[7..10]) + 1))
+            }
+            _ => None,
+        }
+    }
+
+    fn walk(
+        &mut self,
+        mut at: u64,
+        end: u64,
+        canvas: (u32, u32),
+        frame: Option<(u32, u32)>,
+    ) -> Option<()> {
+        let mut alpha = false;
+        let mut image = false;
+        while at < end {
+            let (tag, start, size, next) = self.chunk(at, end)?;
+            // ALPH has no stored dimensions; it inherits the enclosing frame's.
+            // The decoder treats its next chunk as VP8 even if the tag differs.
+            if frame.is_some() && (image || (alpha && &tag != b"VP8 ")) {
+                return None;
+            }
+            match &tag {
+                b"VP8X" if at == 12 && frame.is_none() => {}
+                b"VP8 " | b"VP8L" => {
+                    let dims = self.dimensions(tag, start, size)?;
+                    if !decoder_dimensions_fit(dims) || dims != frame.unwrap_or(canvas) {
+                        return None;
+                    }
+                    image = true;
+                }
+                b"ALPH" => {
+                    let dims = frame.unwrap_or(canvas);
+                    let h = (size >= 1).then(|| self.read::<1>(start)).flatten()?[0];
+                    if !decoder_dimensions_fit(dims)
+                        || h & 0xc0 != 0
+                        || h & 3 > 1
+                        || (h >> 4) & 3 > 1
+                    {
+                        return None;
+                    }
+                    if h & 3 == 0 && size - 1 < u64::from(dims.0) * u64::from(dims.1) {
+                        return None;
+                    }
+                    alpha = true;
+                }
+                b"ANMF" if frame.is_none() && size >= 16 => {
+                    let h = self.read::<16>(start)?;
+                    let dims = (webp_u24(&h[6..9]) + 1, webp_u24(&h[9..12]) + 1);
+                    if !decoder_dimensions_fit(dims)
+                        || webp_u24(&h[..3]) * 2 + dims.0 > canvas.0
+                        || webp_u24(&h[3..6]) * 2 + dims.1 > canvas.1
+                    {
+                        return None;
+                    }
+                    self.walk(start + 16, start + size, canvas, Some(dims))?;
+                }
+                b"ANMF" | b"VP8X" => return None,
+                _ if frame.is_some() => return None,
+                _ => {}
+            }
+            at = next;
+        }
+        (frame.is_none() || image).then_some(())
+    }
+}
+
+fn webp_u24(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0])
+}
+
+fn background_webp_decoder<R: std::io::BufRead + std::io::Seek>(
+    mut reader: R,
+) -> image::ImageResult<image::codecs::webp::WebPDecoder<R>> {
+    validate_webp_headers(&mut reader)?;
+    image::codecs::webp::WebPDecoder::new(reader)
+}
+
 fn background_png_decoder<R: std::io::BufRead + std::io::Seek>(
     reader: R,
 ) -> image::ImageResult<image::codecs::png::PngDecoder<R>> {
@@ -564,6 +726,122 @@ fn decoder_frame_bytes((width, height): (u32, u32)) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn webp_chunk(tag: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut chunk = tag.to_vec();
+        chunk.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        chunk.extend_from_slice(data);
+        if !data.len().is_multiple_of(2) {
+            chunk.push(0);
+        }
+        chunk
+    }
+
+    fn animated_webp_header(frame: &[u8]) -> Vec<u8> {
+        let mut body = b"WEBP".to_vec();
+        body.extend(webp_chunk(b"VP8X", &[2, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        body.extend(webp_chunk(b"ANIM", &[0; 6]));
+        let mut anmf = vec![0; 16];
+        anmf.extend_from_slice(frame);
+        body.extend(webp_chunk(b"ANMF", &anmf));
+        let mut file = b"RIFF".to_vec();
+        file.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        file.extend(body);
+        file
+    }
+
+    #[test]
+    fn webp_rejects_oversized_nested_header_before_decode() {
+        let vp8 = webp_chunk(
+            b"VP8 ",
+            &[0x10, 0, 0, 0x9d, 1, 0x2a, 0xff, 0x3f, 0xff, 0x3f],
+        );
+        let file = animated_webp_header(&vp8);
+        assert!(
+            background_webp_decoder(std::io::Cursor::new(file)).is_err(),
+            "tiny WebP canvas must reject oversized VP8 header before decoding any frame"
+        );
+    }
+
+    #[test]
+    fn webp_preflight_checks_all_frames_sizes_and_chunk_budget() {
+        let vp8 = webp_chunk(b"VP8 ", &[0x10, 0, 0, 0x9d, 1, 0x2a, 1, 0, 1, 0]);
+        let valid = animated_webp_header(&vp8);
+        assert!(validate_webp_headers(&mut std::io::Cursor::new(&valid)).is_ok());
+        for bits in [1_u32, 16382 | (16382 << 14)] {
+            let mut header = vec![0x2f];
+            header.extend_from_slice(&bits.to_le_bytes());
+            let file = animated_webp_header(&webp_chunk(b"VP8L", &header));
+            assert!(validate_webp_headers(&mut std::io::Cursor::new(file)).is_err());
+        }
+        let mut alpha_vp8 = webp_chunk(b"ALPH", &[0, 255]);
+        alpha_vp8.extend(webp_chunk(
+            b"VP8 ",
+            &[0x10, 0, 0, 0x9d, 1, 0x2a, 2, 0, 1, 0],
+        ));
+        assert!(
+            background_webp_decoder(std::io::Cursor::new(animated_webp_header(&alpha_vp8)))
+                .is_err()
+        );
+        let mut later_oversized = valid.clone();
+        let mut anmf = vec![0; 16];
+        anmf.extend(webp_chunk(
+            b"VP8 ",
+            &[0x10, 0, 0, 0x9d, 1, 0x2a, 0xff, 0x3f, 0xff, 0x3f],
+        ));
+        later_oversized.extend(webp_chunk(b"ANMF", &anmf));
+        let size = (later_oversized.len() - 8) as u32;
+        later_oversized[4..8].copy_from_slice(&size.to_le_bytes());
+        assert!(background_webp_decoder(std::io::Cursor::new(later_oversized)).is_err());
+        let mut alpha_wrong_tag = webp_chunk(b"ALPH", &[0, 255]);
+        alpha_wrong_tag.extend(webp_chunk(
+            b"JUNK",
+            &[0x10, 0, 0, 0x9d, 1, 0x2a, 0xff, 0x3f, 0xff, 0x3f],
+        ));
+        assert!(
+            background_webp_decoder(std::io::Cursor::new(animated_webp_header(&alpha_wrong_tag)))
+                .is_err()
+        );
+        let mut oversized_anmf = valid.clone();
+        oversized_anmf[58] = 1;
+        assert!(background_webp_decoder(std::io::Cursor::new(oversized_anmf)).is_err());
+        let mut truncated = valid.clone();
+        truncated.pop();
+        assert!(validate_webp_headers(&mut std::io::Cursor::new(truncated)).is_err());
+        let mut too_many = valid;
+        for _ in 0..4096 {
+            too_many.extend(webp_chunk(b"JUNK", &[]));
+        }
+        let size = (too_many.len() - 8) as u32;
+        too_many[4..8].copy_from_slice(&size.to_le_bytes());
+        assert!(validate_webp_headers(&mut std::io::Cursor::new(too_many)).is_err());
+    }
+
+    #[test]
+    fn webp_preflight_preserves_still_decode_and_rejects_bad_animation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("background.webp");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([6, 7, 8, 255]))
+            .save(&path)
+            .unwrap();
+        assert_eq!(
+            decode_bg_image(path.to_str().unwrap()).unwrap().rgba,
+            [6, 7, 8, 255].repeat(6)
+        );
+        assert_eq!(
+            decode_bg_image_frames(path.to_str().unwrap())
+                .unwrap()
+                .len(),
+            1
+        );
+        let vp8 = webp_chunk(
+            b"VP8 ",
+            &[0x10, 0, 0, 0x9d, 1, 0x2a, 0xff, 0x3f, 0xff, 0x3f],
+        );
+        std::fs::write(&path, animated_webp_header(&vp8)).unwrap();
+        assert!(decode_bg_image(path.to_str().unwrap()).is_none());
+        assert!(decode_bg_image_frames(path.to_str().unwrap()).is_none());
+    }
 
     #[test]
     fn png_metadata_respects_wallpaper_budget() {

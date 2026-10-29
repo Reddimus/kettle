@@ -3835,3 +3835,59 @@ fn regression_inactive_images_cards_and_preview_lanes_dim() {
     }
     assert!(failures.is_empty(), "{}", failures.join("; "));
 }
+
+#[test]
+fn ime_preedit_screenshot_hides_existing_glyphs_and_retains_cursor() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    cfg.padding_x = 8.0;
+    cfg.padding_y = 8.0;
+    let first = snapshot_of(20, 4, b"WWWW\r");
+    let second = snapshot_of(20, 4, b"iiii\r");
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        cfg.text_renderer = mode;
+        for cursor in [false, true] {
+            let mut overlay = focused(cursor);
+            overlay.ime_preedit = Some(ImePreedit {
+                text: "abcd".into(),
+                row: 0,
+                col: 0,
+            });
+            let a = capture(&mut renderer, &cfg, &[pane(&first, 320, 120)], &overlay);
+            let b = capture(&mut renderer, &cfg, &[pane(&second, 320, 120)], &overlay);
+            let x0 = cfg.padding_x.ceil() as u32;
+            let y0 = cfg.padding_y.ceil() as u32;
+            let x1 = (cfg.padding_x + 4.0 * renderer.cell_w).floor() as u32;
+            let y1 = (cfg.padding_y + renderer.cell_h).floor() as u32;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    assert_eq!(
+                        a.get_pixel(x, y),
+                        b.get_pixel(x, y),
+                        "underlying text leaked through IME at {x},{y} in {mode:?}"
+                    );
+                }
+            }
+            assert!(
+                distinct_colors(
+                    &b,
+                    [x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32]
+                ) > 2,
+                "screenshot must include composition text"
+            );
+            if cursor {
+                assert!(
+                    cursor_pixels(&b, &cfg, &second) > 0,
+                    "cursor must remain visible over preedit"
+                );
+            }
+            overlay.ime_preedit = None;
+            let closed = capture(&mut renderer, &cfg, &[pane(&second, 320, 120)], &overlay);
+            assert_ne!(b, closed, "closing composition must repaint its row");
+            assert!(!renderer.ime_prepared);
+        }
+    }
+}

@@ -1135,7 +1135,7 @@ fn windows_stale_auto_pin_preserves_dx12_platform_preference() {
             eprintln!("DX12 adapter unavailable on this Windows host; skipped");
             return;
         };
-        let chosen = resolve_adapter(
+        let chosen = resolve_adapters(
             &instance,
             None,
             &cfg,
@@ -1145,8 +1145,9 @@ fn windows_stale_auto_pin_preserves_dx12_platform_preference() {
         )
         .await
         .expect("stale pin must fall back to the Auto power policy");
+        assert_eq!(chosen.len(), 1, "startup must select exactly one adapter");
         assert_eq!(
-            GpuAdapterKey::from_info(&chosen.get_info()),
+            GpuAdapterKey::from_info(&chosen[0].get_info()),
             expected,
             "stale Auto pin fallback must preserve wgpu's physical adapter"
         );

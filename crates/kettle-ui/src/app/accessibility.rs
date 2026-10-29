@@ -540,13 +540,15 @@ impl App {
             nodes.push((ACCESSIBILITY_COMPLETION_CONTAINER_ID, list));
         }
         if let Some(receipt) = overlay.media_paste_receipt.as_ref()
-            && let Some(geometry) = kettle_render::media_paste_receipt_geometry(
-                receipt,
+            && let Some(geometry) = kettle_render::notification_geometry(
+                overlay.update_toast.as_ref().map(|toast| toast.geometry),
+                Some(receipt),
                 overlay.completion.as_ref(),
                 self.menu_cell(ws),
                 self.overlay_text_cell_width(ws),
                 self.overlay_text_line_height(ws),
             )
+            .receipt
         {
             let label =
                 media_receipt_accessibility_label(&receipt.kind, receipt.remote, &receipt.tr);
@@ -822,13 +824,16 @@ impl App {
             }
             receipt.remote.hash(&mut hasher);
             receipt.expanded.hash(&mut hasher);
-            if let Some(geometry) = kettle_render::media_paste_receipt_geometry(
-                receipt,
+            if let Some(geometry) = kettle_render::notification_geometry(
+                overlay.update_toast.as_ref().map(|toast| toast.geometry),
+                Some(receipt),
                 overlay.completion.as_ref(),
                 self.menu_cell(ws),
                 self.overlay_text_cell_width(ws),
                 self.overlay_text_line_height(ws),
-            ) {
+            )
+            .receipt
+            {
                 for component in [
                     geometry.rect.0,
                     geometry.rect.1,
