@@ -6555,7 +6555,7 @@ int main(int argc, char **argv) { return payload_main(argc,argv); }
             def probe(*args):(work/'latency.json').write_text(_json.dumps(p))
             @contextlib.contextmanager
             def verified(*args):yield a
-            with patch.object(standing.hc,'start_observer') as start,patch.object(standing,'run_latency_probe',side_effect=probe),\
+            with patch.object(standing.hc,'start_observer'),patch.object(standing,'run_latency_probe',side_effect=probe),\
                  patch.object(standing,'verified_probe_use',verified),patch.object(standing,'wait_for_text',return_value=True),\
                  patch.object(standing.time,'sleep'),patch.object(standing,'read_keyblock_log',return_value={i:(1,1_000_000_000,1_000_000_000) for i in range(1,29)}):
                 row=runner.latency('floor-layer',dict(keys=2,warmup=20,censor_ms=500,inject='hid'),7,work/'keep.json')
