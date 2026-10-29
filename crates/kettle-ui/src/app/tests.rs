@@ -14560,7 +14560,7 @@ fn tear_off_flow_stays_wired() {
     //    the grab offset (open_window's size override).
     assert!(
         src.contains(
-            "WindowOpen::AdoptTab {\n                    tab: dt,\n                    source_color: self.tear_off_source_color(ws),\n                    paste: Box::new(paste),\n                },\n                pos,\n                Some(size),"
+            "WindowOpen::AdoptTab {\n                    tab: dt,\n                    source_color: self.tear_off_source_color(ws),\n                    font_size: ws.renderer.as_ref().map(|r| r.font_size()),\n                    paste: Box::new(paste),\n                },\n                pos,\n                Some(size),"
         ),
         "the tear must open the torn window at the grab position and source size"
     );
