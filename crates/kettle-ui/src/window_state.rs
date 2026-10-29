@@ -1341,6 +1341,11 @@ pub(crate) struct MovedPasteState {
 }
 
 impl WindowState {
+    pub(crate) fn install_preview_overlay(&mut self, overlay: crate::media::Overlay) {
+        self.dragging_split = None;
+        self.preview_overlay = Some(overlay);
+    }
+
     /// Point `cursor` back at the physical pointer before a native button or
     /// wheel acts there: a control client's move may have left it elsewhere.
     pub(crate) fn resume_native_pointer(&mut self) {

@@ -54,6 +54,16 @@ fn path_re() -> &'static Regex {
     })
 }
 
+fn diagnostic_prefix_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^:[ \t]+(?:fatal[ \t]+error|error|warning|note|message|info|remark)(?:[ \t:]|$)",
+        )
+        .unwrap()
+    })
+}
+
 /// The path matches in one row's text that can become links, as (start byte,
 /// end byte before trimming, text): trimmed of trailing punctuation, and not
 /// starting inside a longer token. `/bar.png` in `foo(1)/bar.png` would name an unrelated file.
@@ -69,11 +79,18 @@ fn path_candidates(text: &str) -> impl Iterator<Item = (usize, usize, &str)> {
                 .unwrap_or("");
             !previous.is_empty() && !previous.contains(['/', '\\'])
         });
-        let path_end = m.start() + strip_location_suffix(matched).len();
+        let filename = strip_location_suffix(matched);
+        let path_end = m.start() + filename.len();
+        let rest = &text[path_end..];
+        // A numeric parenthesized suffix can end a filename in grep output,
+        // too. Keep rejecting ambiguous colon-bearing names and quoted pieces.
+        let grep_separator = strip_parenthesized_location(filename) != filename
+            && rest.starts_with(':')
+            && before.is_none_or(|c| !"\"'`*".contains(c));
         (!matched.is_empty()
             && !after_host
             && crate::hints::path_may_start_after(before)
-            && crate::hints::match_has_end(before, &text[path_end..])
+            && (grep_separator || crate::hints::match_has_end(before, rest))
             && crate::hints::path_reaches_quote(text, &runs, m.start(), m.end()))
         .then_some((m.start(), m.end(), matched))
     })
@@ -241,9 +258,9 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
             if fragment(start, end) {
                 continue;
             }
-            // Compiler locations have a diagnostic separator after the closing parenthesis.
-            // Without it, numeric parentheses belong to the filename, including inside quotes.
-            let path = if text[end..].starts_with(':') {
+            // A colon alone also occurs in file, grep, cat and ls output.
+            // Only a compiler diagnostic keyword identifies a numeric location.
+            let path = if diagnostic_prefix_re().is_match(&text[start + matched.len()..]) {
                 strip_parenthesized_location(matched)
             } else {
                 matched
@@ -945,9 +962,41 @@ mod tests {
     }
 
     #[test]
+    fn numeric_parentheses_before_non_diagnostic_colons_are_literal() {
+        for (text, uri) in [
+            (
+                "cat: /tmp/report(2024): No such file or directory",
+                "file:///tmp/report%282024%29",
+            ),
+            ("/tmp/report(1): ASCII text", "file:///tmp/report%281%29"),
+            ("./build(2):", "file:///work/build%282%29"),
+            ("/tmp/a(2024):text", "file:///tmp/a%282024%29"),
+            ("/tmp/a(1,2): text", "file:///tmp/a%281%2C2%29"),
+            ("/tmp/a(1): errorless", "file:///tmp/a%281%29"),
+            ("/tmp/a(1): fatal errors", "file:///tmp/a%281%29"),
+            ("/tmp/a(1),: error", "file:///tmp/a%281%29"),
+            ("/tmp/a(1):error", "file:///tmp/a%281%29"),
+            ("\"/tmp/a(1,2)\": warning C2065", "file:///tmp/a%281%2C2%29"),
+        ] {
+            let term = term_with(100, &[text], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{text}");
+            assert_eq!(found[0].uri, uri, "{text}");
+        }
+    }
+
+    #[test]
     fn parenthesized_diagnostic_locations_are_not_filename_components() {
-        for suffix in ["(12)", "(12,5)"] {
-            let text = format!("src/main.cpp{suffix}: error C2143");
+        for (suffix, diagnostic) in [
+            ("(12)", "error C2143"),
+            ("(12,5)", "warning C2065: unknown identifier"),
+            ("(12)", "NOTE: declared here"),
+            ("(12,5)", "FaTaL ErRoR C1083: cannot open file"),
+            ("(12)", "message: see declaration"),
+            ("(12,5)", "INFO: building"),
+            ("(12)", "remark #123: optimized"),
+        ] {
+            let text = format!("src/main.cpp{suffix}: {diagnostic}");
             let term = term_with(80, &[&text], &[]);
             let found = links_with_cwd(&term, Some("/work"));
             assert_eq!(found.len(), 1);

@@ -18416,3 +18416,35 @@ fn review_modals_and_early_releases_end_divider_drags() {
                 .unwrap()
     );
 }
+
+#[test]
+fn installing_a_preview_overlay_ends_a_divider_drag() {
+    let mut ws = WindowState::new(1, Mux::new());
+    ws.dragging_split = Some(SplitDrag {
+        path: Vec::new(),
+        dir: Dir::Horizontal,
+    });
+    ws.install_preview_overlay(crate::media::Overlay {
+        pane: 7,
+        origin: Some(3),
+        control: None,
+        theater: false,
+        fullscreen: false,
+    });
+    assert!(ws.dragging_split.is_none());
+    let overlay = ws.preview_overlay.unwrap();
+    assert_eq!(overlay.pane, 7);
+    assert_eq!(overlay.origin, Some(3));
+}
+
+#[test]
+fn ready_preview_overlay_ends_divider_drags() {
+    let src = production_source();
+    let ready = finding_body(&src, "open_ready_previews");
+    assert!(ready.contains("self.show_media_item(ws, pane, item)"));
+    let show = finding_body(&src, "show_media_item");
+    assert!(
+        show.contains("ws.install_preview_overlay("),
+        "an asynchronous preview must use the shared overlay transition"
+    );
+}

@@ -94,7 +94,7 @@ impl App {
         };
         let resized = if overlay {
             if ws.preview_overlay.is_none() {
-                ws.preview_overlay = Some(crate::media::Overlay {
+                ws.install_preview_overlay(crate::media::Overlay {
                     pane,
                     origin: ws.mux.active_focus(),
                     control: None,

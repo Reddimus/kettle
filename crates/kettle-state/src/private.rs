@@ -10,7 +10,7 @@ type CreatedFilePublish = Box<
 >;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CreatedFilePublication {
+pub(super) enum CreatedFilePublication {
     /// Publication added a second name; the staging name still needs removal.
     Linked,
     /// Publication moved the staging name; its cleanup capability must be
@@ -1324,7 +1324,7 @@ pub(super) fn publish_staged_create(
     staged: &File,
     source: &Path,
     destination: &Path,
-) -> io::Result<()> {
+) -> io::Result<CreatedFilePublication> {
     guard.link_open_file_new(staged, source, destination)
 }
 
@@ -1397,7 +1397,7 @@ pub(super) fn publish_staged_create(
     staged: &File,
     source: &Path,
     destination: &Path,
-) -> io::Result<()> {
+) -> io::Result<CreatedFilePublication> {
     guard.link_open_file_new(staged, source, destination)
 }
 
@@ -1483,8 +1483,8 @@ pub(super) fn publish_staged_create(
     _staged: &File,
     source: &Path,
     destination: &Path,
-) -> io::Result<()> {
-    std::fs::hard_link(source, destination)
+) -> io::Result<CreatedFilePublication> {
+    std::fs::hard_link(source, destination).map(|()| CreatedFilePublication::Linked)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2299,7 +2299,7 @@ pub(crate) mod unix {
             staged: &File,
             source: &Path,
             destination: &Path,
-        ) -> io::Result<()> {
+        ) -> io::Result<CreatedFilePublication> {
             self.link_open_file_new_with_mode(staged, source, destination, HardLinkMode::Native)
         }
 
@@ -2309,7 +2309,7 @@ pub(crate) mod unix {
             source: &Path,
             destination: &Path,
             hard_link_mode: HardLinkMode,
-        ) -> io::Result<()> {
+        ) -> io::Result<CreatedFilePublication> {
             let source = self.validate_path(source)?;
             let destination = self.validate_path(destination)?;
             self.verify()?;
@@ -2355,7 +2355,6 @@ pub(crate) mod unix {
                 },
                 || rename_no_replace_at(self.directory(), &source, self.directory(), &destination),
             )
-            .map(|_| ())
         }
 
         pub(super) fn sync(&self) -> io::Result<()> {
@@ -4216,63 +4215,7 @@ mod windows {
                         "injected hard-link rejection",
                     )),
                 },
-                || {
-                    let destination_name = &destination_path[..destination_path.len() - 1];
-                    let name_bytes = destination_name
-                        .len()
-                        .checked_mul(std::mem::size_of::<u16>())
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "export destination is too long",
-                            )
-                        })?;
-                    let total_bytes = std::mem::size_of::<FILE_RENAME_INFO>()
-                        .checked_add(name_bytes)
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "export destination is too long",
-                            )
-                        })?;
-                    let words = total_bytes.div_ceil(std::mem::size_of::<u64>());
-                    let mut storage = vec![0_u64; words];
-                    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-                    unsafe {
-                        (*info).Anonymous.ReplaceIfExists = false;
-                        (*info).RootDirectory = std::ptr::null_mut();
-                        (*info).FileNameLength = u32::try_from(name_bytes).map_err(|_| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "export destination is too long",
-                            )
-                        })?;
-                        std::ptr::copy_nonoverlapping(
-                            destination_name.as_ptr(),
-                            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
-                            destination_name.len(),
-                        );
-                    }
-                    let buffer_len = u32::try_from(total_bytes).map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "export destination is too long",
-                        )
-                    })?;
-                    if unsafe {
-                        SetFileInformationByHandle(
-                            file.as_raw_handle() as HANDLE,
-                            FileRenameInfo,
-                            info.cast(),
-                            buffer_len,
-                        )
-                    } != 0
-                    {
-                        Ok(())
-                    } else {
-                        Err(io::Error::last_os_error())
-                    }
-                },
+                || rename_open_file_new(file, &destination_path[..destination_path.len() - 1]),
             )?;
             let post_publish = (|| {
                 let published = inspect.open(&stable_destination)?;
@@ -5139,6 +5082,54 @@ mod windows {
         )
     }
 
+    fn rename_open_file_new(file: &File, destination_name: &[u16]) -> io::Result<()> {
+        let name_bytes = destination_name
+            .len()
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "destination is too long")
+            })?;
+        let total_bytes = std::mem::size_of::<FILE_RENAME_INFO>()
+            .checked_add(name_bytes)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "destination is too long")
+            })?;
+        let words = total_bytes.div_ceil(std::mem::size_of::<u64>());
+        let mut storage = vec![0_u64; words];
+        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        // SAFETY: the aligned buffer holds the header and all trailing UTF-16
+        // code units. The caller provides a stable, non-NUL destination path.
+        unsafe {
+            (*info).Anonymous.ReplaceIfExists = false;
+            (*info).RootDirectory = std::ptr::null_mut();
+            (*info).FileNameLength = u32::try_from(name_bytes).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "destination is too long")
+            })?;
+            std::ptr::copy_nonoverlapping(
+                destination_name.as_ptr(),
+                std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+                destination_name.len(),
+            );
+        }
+        let buffer_len = u32::try_from(total_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "destination is too long"))?;
+        // SAFETY: the creation handle has DELETE access and `info` remains
+        // valid for the duration of this synchronous no-replace rename.
+        if unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle() as HANDLE,
+                FileRenameInfo,
+                info.cast(),
+                buffer_len,
+            )
+        } != 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
     pub(crate) struct PrivateParentGuard {
         path: PathBuf,
         identity: FileIdentity,
@@ -5282,9 +5273,20 @@ mod windows {
             staged: &File,
             source: &Path,
             destination: &Path,
-        ) -> io::Result<()> {
+        ) -> io::Result<CreatedFilePublication> {
+            self.link_open_file_new_with_mode(staged, source, destination, HardLinkMode::Native)
+        }
+
+        pub(super) fn link_open_file_new_with_mode(
+            &self,
+            staged: &File,
+            source: &Path,
+            destination: &Path,
+            hard_link_mode: HardLinkMode,
+        ) -> io::Result<CreatedFilePublication> {
             let source = std::ffi::OsString::from_wide(&self.stable_path(source)?);
-            let destination = std::ffi::OsString::from_wide(&self.stable_path(destination)?);
+            let destination_name = self.stable_path(destination)?;
+            let destination = std::ffi::OsString::from_wide(&destination_name);
             self.verify()?;
 
             let mut options = std::fs::OpenOptions::new();
@@ -5300,7 +5302,17 @@ mod windows {
                     "staged path no longer refers to the open private file",
                 ));
             }
-            std::fs::hard_link(source, destination)
+            publish_with_atomic_fallback(
+                || match hard_link_mode {
+                    HardLinkMode::Native => std::fs::hard_link(source, destination),
+                    #[cfg(test)]
+                    HardLinkMode::ForceUnsupported => Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "injected hard-link rejection",
+                    )),
+                },
+                || rename_open_file_new(staged, &destination_name),
+            )
         }
 
         pub(super) fn reap_matching_children<F>(
@@ -6132,6 +6144,76 @@ mod tests {
             !rename_called.get(),
             "a racing destination must never reach a rename fallback"
         );
+    }
+
+    #[test]
+    fn atomic_publication_falls_back_for_every_non_collision_link_error() {
+        for kind in [
+            io::ErrorKind::Unsupported,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::Other,
+        ] {
+            assert_eq!(
+                publish_with_atomic_fallback(|| Err(io::Error::from(kind)), || Ok(())).unwrap(),
+                CreatedFilePublication::Renamed
+            );
+            let error = publish_with_atomic_fallback(
+                || Err(io::Error::from(kind)),
+                || Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        }
+        assert_eq!(
+            publish_with_atomic_fallback(|| Ok(()), || panic!("a successful link needs no rename"))
+                .unwrap(),
+            CreatedFilePublication::Linked
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_create_new_windows_rename_fallback_keeps_the_destination() {
+        let root = crate::test_tempdir();
+        let destination = root.path().join("default.config");
+        let publish = |guard: &PrivateParentGuard, staged: &File, source: &Path, target: &Path| {
+            guard.link_open_file_new_with_mode(
+                staged,
+                source,
+                target,
+                HardLinkMode::ForceUnsupported,
+            )
+        };
+        assert!(
+            crate::atomic_create_new_with_publish(
+                &destination,
+                b"complete config",
+                crate::AtomicWriteOptions::PRIVATE,
+                publish,
+            )
+            .unwrap()
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete config");
+        let file = open_existing_private_file(&destination).unwrap();
+        assert!(has_current_user_only_dacl(&file).unwrap());
+        drop(file);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+
+        let racing = root.path().join("racing.config");
+        assert!(
+            !crate::atomic_create_new_with_publish(
+                &racing,
+                b"ours",
+                crate::AtomicWriteOptions::PRIVATE,
+                |guard, staged, source, target| {
+                    std::fs::write(target, b"winner")?;
+                    publish(guard, staged, source, target)
+                },
+            )
+            .unwrap()
+        );
+        assert_eq!(std::fs::read(&racing).unwrap(), b"winner");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
     }
 
     #[cfg(any(unix, windows))]

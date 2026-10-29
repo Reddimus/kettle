@@ -225,6 +225,20 @@ pub fn atomic_create_new(
     bytes: &[u8],
     options: AtomicWriteOptions,
 ) -> io::Result<bool> {
+    atomic_create_new_with_publish(destination, bytes, options, private::publish_staged_create)
+}
+
+fn atomic_create_new_with_publish(
+    destination: &Path,
+    bytes: &[u8],
+    options: AtomicWriteOptions,
+    publish: impl FnOnce(
+        &private::PrivateParentGuard,
+        &File,
+        &Path,
+        &Path,
+    ) -> io::Result<private::CreatedFilePublication>,
+) -> io::Result<bool> {
     let parent = destination.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -275,8 +289,8 @@ pub fn atomic_create_new(
         private::discard_created_private_file(staged, &staged_path);
         return Err(error);
     }
-    match private::publish_staged_create(&parent_guard, &staged, &staged_path, destination) {
-        Ok(()) => {}
+    let publication = match publish(&parent_guard, &staged, &staged_path, destination) {
+        Ok(publication) => publication,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             private::discard_created_private_file(staged, &staged_path);
             return Ok(false);
@@ -285,25 +299,23 @@ pub fn atomic_create_new(
             private::discard_created_private_file(staged, &staged_path);
             return Err(error);
         }
-    }
-    let same_file = match private::same_file_identity(&staged, destination) {
-        Ok(same_file) => same_file,
-        Err(error) => {
-            private::discard_created_private_file(staged, &staged_path);
-            return Err(error);
-        }
     };
-    if !same_file {
-        private::discard_created_private_file(staged, &staged_path);
+    let same_file = private::same_file_identity(&staged, destination);
+    match publication {
+        private::CreatedFilePublication::Linked => {
+            private::discard_created_private_file(staged, &staged_path);
+        }
+        // A rename moved this handle to the destination. In particular, Windows
+        // handle-based deletion would now discard the published file itself,
+        // even if the post-publication identity check failed.
+        private::CreatedFilePublication::Renamed => drop(staged),
+    }
+    if !same_file? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "created destination does not refer to the staged private file",
         ));
     }
-    // `destination` now owns the synced staged content.
-    // Remove only the exact still-open staged object; neither platform falls
-    // back to deleting a possibly swapped path.
-    private::discard_created_private_file(staged, &staged_path);
     private::sync_guarded_parent(&parent_guard)?;
     Ok(true)
 }
@@ -1399,6 +1411,26 @@ mod tests {
         assert!(atomic_create_new(&path, b"first", AtomicWriteOptions::PRIVATE).unwrap());
         assert!(!atomic_create_new(&path, b"second", AtomicWriteOptions::PRIVATE).unwrap());
         assert_eq!(fs::read(path).unwrap(), b"first");
+    }
+
+    #[test]
+    fn atomic_create_new_keeps_renamed_content_without_a_staging_name() {
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("default.config");
+        assert!(
+            atomic_create_new_with_publish(
+                &path,
+                b"complete config",
+                AtomicWriteOptions::PRIVATE,
+                |_guard, _staged, source, destination| {
+                    fs::rename(source, destination)?;
+                    Ok(private::CreatedFilePublication::Renamed)
+                },
+            )
+            .unwrap()
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"complete config");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
