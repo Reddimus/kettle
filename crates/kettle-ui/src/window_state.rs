@@ -471,8 +471,8 @@ pub(crate) struct ImePreeditSession {
     /// its Commit could still arrive. Modal sessions stop guarding after the
     /// next focus move; terminal sessions guard until Commit or cancellation.
     pub(crate) ended: Option<u64>,
-    /// An empty preedit may precede Commit; the next nonempty preedit starts
-    /// a new composition if the old one was cancelled after focus moved.
+    /// An empty preedit may precede Commit; the next preedit starts fresh
+    /// input if the old composition was cancelled after focus moved.
     pub(crate) empty_after_focus: bool,
 }
 

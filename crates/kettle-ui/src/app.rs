@@ -18373,7 +18373,7 @@ fn update_ime_preedit(
         )
         && (session.owner != owner || session.generation != generation)
     {
-        if text.is_empty() {
+        if text.is_empty() && !session.empty_after_focus {
             session.empty_after_focus = true;
             ws.ime_preedit = None;
             return true;
@@ -18382,6 +18382,9 @@ fn update_ime_preedit(
             ws.ime_preedit = None;
             return true;
         }
+        // The first empty Preedit may lead into the old Commit. A later
+        // Preedit starts fresh input, including Wayland's empty one before
+        // a commit-only input, so the cancelled owner no longer guards it.
         ws.ime_preedit_owner = None;
     }
     let next = normalized_ime_preedit(text, selection);

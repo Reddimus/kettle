@@ -17564,6 +17564,42 @@ fn cancelled_pane_composition_allows_new_preedit_after_focus_moves() {
 }
 
 #[test]
+fn cancelled_pane_composition_allows_fresh_commit_only_input() {
+    let (mux, first, second) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    assert!(ws.mux.focus_pane(first));
+    super::update_ime_preedit(&mut ws, "old".into(), None);
+    assert!(ws.mux.focus_pane(second));
+    super::end_modal_composition(&mut ws);
+    // Cancellation ends the old preedit without sending a Commit.
+    super::update_ime_preedit(&mut ws, String::new(), None);
+    // Wayland sends an empty Preedit before even a commit-only input.
+    super::update_ime_preedit(&mut ws, String::new(), None);
+    assert!(
+        super::take_ime_commit(&mut ws),
+        "fresh commit-only input after cancellation must be accepted"
+    );
+    assert!(ws.ime_preedit_owner.is_none());
+}
+
+#[test]
+fn empty_pane_preedit_still_rejects_late_commit_after_focus_moves() {
+    let (mux, first, second) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    assert!(ws.mux.focus_pane(first));
+    super::update_ime_preedit(&mut ws, "old".into(), None);
+    assert!(ws.mux.focus_pane(second));
+    super::end_modal_composition(&mut ws);
+    super::update_ime_preedit(&mut ws, String::new(), None);
+    assert!(
+        !super::take_ime_commit(&mut ws),
+        "an empty Preedit immediately followed by Commit still belongs to the old pane"
+    );
+    super::update_ime_preedit(&mut ws, String::new(), None);
+    assert!(super::take_ime_commit(&mut ws));
+}
+
+#[test]
 fn launch_recorder_precedes_restored_sibling_windows() {
     let src = production_source();
     let startup = src
