@@ -427,8 +427,9 @@ impl CtlStream {
     }
 
     /// Has the peer hung up? Non-destructive and non-blocking (a zero-byte
-    /// peek). Lets `wait_for`'s poll loop notice a vanished client instead of
-    /// pinning one of the MAX_CONNECTIONS slots, and hammering the UI thread
+    /// send on Unix, a peek on Windows). Lets `wait_for`'s poll loop notice a
+    /// vanished client instead of pinning one of the MAX_CONNECTIONS slots,
+    /// and hammering the UI thread
     /// with probes, for up to the full timeout. This does NOT violate the
     /// one-thread sequential read→write rule: the caller IS the connection
     /// thread, with no other I/O outstanding on the handle. Errs toward "alive"
@@ -438,48 +439,25 @@ impl CtlStream {
             #[cfg(unix)]
             CtlStream::Unix(s) => {
                 use std::os::unix::io::AsRawFd;
-                let mut poll = libc::pollfd {
-                    fd: s.stream.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                let hangup = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
-                #[cfg(any(target_os = "linux", target_os = "android"))]
-                let hangup = {
-                    poll.events |= libc::POLLRDHUP;
-                    hangup | libc::POLLRDHUP
-                };
-                // HUP is independent of readability, including unread frames.
-                // SAFETY: poll points to one initialized entry with a live fd.
-                if unsafe { libc::poll(&mut poll, 1, 0) } > 0 && poll.revents & hangup != 0 {
-                    return true;
-                }
-                let mut probe = [0u8; 1];
-                // recv with MSG_PEEK|MSG_DONTWAIT (UnixStream::peek is still
-                // unstable on the MSRV): 0 = orderly EOF (dead); >0 = request
-                // bytes pending (alive); EWOULDBLOCK/EINTR = idle (alive);
-                // anything else = reset (dead). Never consumes, never blocks.
-                // SAFETY: the fd is valid for the stream's lifetime; the
-                // buffer outlives the call.
+                // Receive EOF (and macOS POLLHUP) can mean shutdown(Write).
+                // A zero-byte send probes the response direction without
+                // consuming requests, adding wire bytes, or raising SIGPIPE.
+                // SAFETY: the fd is live, and a zero length needs no buffer.
                 let n = unsafe {
-                    libc::recv(
+                    libc::send(
                         s.stream.as_raw_fd(),
-                        probe.as_mut_ptr() as *mut libc::c_void,
-                        1,
-                        libc::MSG_PEEK | libc::MSG_DONTWAIT,
+                        std::ptr::null(),
+                        0,
+                        libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
                     )
                 };
-                match n {
-                    0 => true,
-                    n if n > 0 => false,
-                    _ => {
-                        let e = io::Error::last_os_error();
-                        !matches!(
-                            e.kind(),
-                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                        )
-                    }
+                if n >= 0 {
+                    return false;
                 }
+                !matches!(
+                    io::Error::last_os_error().kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                )
             }
             #[cfg(windows)]
             CtlStream::Windows(stream) => {
@@ -1180,30 +1158,56 @@ mod windows_security {
 #[cfg(unix)]
 mod imp {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::ffi::CString;
+    use std::fs::File;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt};
     use std::os::unix::net::UnixListener;
 
     /// A server listener bound to `endpoint` (a socket path on Unix).
     pub struct CtlListener {
         inner: UnixListener,
-        path: std::path::PathBuf,
+        directory: File,
+        name: CString,
     }
 
     impl CtlListener {
         pub fn bind(endpoint: &str) -> io::Result<Self> {
-            // Clear a stale socket file from a previous (dead) instance.
-            let _ = std::fs::remove_file(endpoint);
-            if let Some(parent) = std::path::Path::new(endpoint).parent() {
-                // Fail closed rather than binding inside a directory another
-                // local user pre-created: the length-overflow fallback path is
-                // fully predictable from the uid, so it can be squatted.
-                crate::ensure_owned_dir(parent)?;
+            let path = std::path::Path::new(endpoint);
+            let parent = path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let name = path.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "socket path has no filename")
+            })?;
+            let name = CString::new(name.as_bytes()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "socket filename contains NUL")
+            })?;
+            crate::ensure_owned_dir(parent)?;
+            let directory = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(parent)?;
+            let metadata = directory.metadata()?;
+            if !crate::unix_dir_is_safe_for_endpoint(
+                metadata.is_dir(),
+                metadata.uid(),
+                metadata.mode(),
+            ) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "unsafe socket directory",
+                ));
             }
+            remove_owned_socket(&directory, &name)?;
             let inner = UnixListener::bind(endpoint)?;
             std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))?;
             Ok(Self {
                 inner,
-                path: endpoint.into(),
+                directory,
+                name,
             })
         }
 
@@ -1216,8 +1220,43 @@ mod imp {
     impl Drop for CtlListener {
         fn drop(&mut self) {
             // Remove the socket file so the registry never points at a dead one.
-            let _ = std::fs::remove_file(&self.path);
+            let _ = remove_owned_socket(&self.directory, &self.name);
         }
+    }
+
+    fn remove_owned_socket(directory: &File, name: &std::ffi::CStr) -> io::Result<()> {
+        // Resolve cleanup through the validated directory even if its pathname changes.
+        // SAFETY: stat is valid output storage; directory and name live for the call.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            let error = io::Error::last_os_error();
+            return if error.kind() == io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFSOCK
+            || stat.st_uid != unsafe { libc::geteuid() }
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "endpoint is not an owned socket",
+            ));
+        }
+        // SAFETY: the descriptor and single-component name are valid for this call.
+        if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// Connect a client to `endpoint`. Retry briefly on a transient failure such
@@ -1604,6 +1643,65 @@ fn unix_peer_pid(fd: std::os::fd::RawFd) -> io::Result<libc::pid_t> {
 pub(crate) mod tests {
     use super::*;
     use std::io::BufRead as _;
+
+    #[cfg(unix)]
+    #[test]
+    fn rejected_symlink_parent_preserves_endpoint_contents() {
+        let root = kettle_test_support::private_tempdir("kettle-ctl-bind-symlink-");
+        let target_dir = root.join("target");
+        std::fs::create_dir(&target_dir).unwrap();
+        let target = target_dir.join("endpoint.sock");
+        std::fs::write(&target, b"keep me").unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&target_dir, &link).unwrap();
+        assert!(CtlListener::bind(link.join("endpoint.sock").to_str().unwrap()).is_err());
+        assert!(
+            target.exists(),
+            "a rejected bind must not delete through its symlink parent"
+        );
+        assert_eq!(std::fs::read(target).unwrap(), b"keep me");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binding_preserves_existing_non_socket_entries() {
+        let root = kettle_test_support::private_tempdir("kettle-ctl-bind-file-");
+        let endpoint = root.join("endpoint.sock");
+        std::fs::write(&endpoint, b"keep me").unwrap();
+        assert!(CtlListener::bind(endpoint.to_str().unwrap()).is_err());
+        assert!(
+            endpoint.exists(),
+            "binding must preserve a regular file at the endpoint"
+        );
+        assert_eq!(std::fs::read(endpoint).unwrap(), b"keep me");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_half_closed_client_receives_a_delayed_response() {
+        let (stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut ctl = CtlStream::Unix(UnixStream::new(stream).unwrap());
+        let request = b"{\"v\":1,\"id\":1,\"method\":\"get_state\"}\n";
+        peer.write_all(request).unwrap();
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut bytes = vec![0; request.len()];
+        ctl.read_exact(&mut bytes).unwrap();
+        assert_eq!(bytes, request);
+        for _ in 0..6 {
+            assert!(
+                !ctl.peer_disconnected(),
+                "receive EOF must not discard a pending response"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let response = b"{\"v\":1,\"id\":1,\"ok\":true}\n";
+        ctl.write_all_until(response, Instant::now() + Duration::from_secs(1), None)
+            .unwrap();
+        let mut bytes = vec![0; response.len()];
+        peer.read_exact(&mut bytes).unwrap();
+        assert_eq!(bytes, response);
+    }
 
     #[cfg(unix)]
     #[test]

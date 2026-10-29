@@ -246,23 +246,34 @@ impl BuildKey {
 /// an update. Shared per-user state that two primaries would fight over, such
 /// as the restorable session, waits until they have exited.
 #[derive(Clone, Debug, Default)]
-pub struct OtherBuilds(Arc<Mutex<Vec<PathBuf>>>);
+pub struct OtherBuilds(Arc<Mutex<OtherBuildState>>);
+
+#[derive(Debug, Default)]
+struct OtherBuildState {
+    locks: Vec<PathBuf>,
+    // An incomplete scan cannot authorize shared-state writes.
+    rescan: Option<ActivationPaths>,
+}
 
 impl OtherBuilds {
     /// Whether any of them is still running. Checks each lock again, and
-    /// forgets a build once its lock is free.
+    /// forgets a build once its lock is free. Repeats incomplete scans before
+    /// allowing shared-state writes.
     pub fn running(&self) -> bool {
-        let mut locks = self
+        let mut state = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        locks.retain(|lock| {
+        if let Some(paths) = &state.rescan {
+            *state = scan_other_builds(paths);
+        }
+        state.locks.retain(|lock| {
             !matches!(
                 kettle_state::ExclusiveFileLock::try_acquire(lock),
                 Ok(Some(_))
             )
         });
-        !locks.is_empty()
+        state.rescan.is_some() || !state.locks.is_empty()
     }
 }
 
@@ -397,11 +408,29 @@ const MAX_SWEEP_ENTRIES: usize = 256;
 /// held; a launcher that opened it just before then finds it retired and
 /// retries.
 fn sweep_other_builds(paths: &ActivationPaths) -> OtherBuilds {
-    let Ok(entries) = std::fs::read_dir(&paths.base) else {
-        return OtherBuilds::default();
+    OtherBuilds(Arc::new(Mutex::new(scan_other_builds(paths))))
+}
+
+fn scan_other_builds(paths: &ActivationPaths) -> OtherBuildState {
+    let mut state = OtherBuildState {
+        locks: Vec::new(),
+        rescan: Some(paths.clone()),
     };
-    let mut running = Vec::new();
-    for entry in entries.take(MAX_SWEEP_ENTRIES).flatten() {
+    let mut entries = match std::fs::read_dir(&paths.base) {
+        Ok(entries) => entries,
+        // No activation directory: no other build ever started here.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            state.rescan = None;
+            return state;
+        }
+        Err(_) => return state,
+    };
+    let mut incomplete = false;
+    for entry in entries.by_ref().take(MAX_SWEEP_ENTRIES) {
+        let Ok(entry) = entry else {
+            incomplete = true;
+            continue;
+        };
         let name = entry.file_name();
         let Some(build) = name.to_str().and_then(other_build_of_lock) else {
             continue;
@@ -411,11 +440,16 @@ fn sweep_other_builds(paths: &ActivationPaths) -> OtherBuilds {
         }
         let lock_path = entry.path();
         // Only regular files: never follow a symlink someone left here.
-        if !std::fs::symlink_metadata(&lock_path).is_ok_and(|meta| meta.file_type().is_file()) {
-            continue;
+        match std::fs::symlink_metadata(&lock_path) {
+            Ok(meta) if meta.file_type().is_file() => {}
+            Ok(_) => continue,
+            Err(_) => {
+                incomplete = true;
+                continue;
+            }
         }
         match kettle_state::ExclusiveFileLock::try_acquire(&lock_path) {
-            Ok(None) => running.push(lock_path),
+            Ok(None) => state.locks.push(lock_path),
             Ok(Some(lock)) => {
                 #[cfg(unix)]
                 for endpoint in other_build_endpoints(paths, build) {
@@ -426,11 +460,15 @@ fn sweep_other_builds(paths: &ActivationPaths) -> OtherBuilds {
                 let _ = lock.remove(&lock_path);
             }
             Err(error) => {
+                incomplete = true;
                 log::debug!("activation sweep skipped {}: {error}", lock_path.display());
             }
         }
     }
-    OtherBuilds(Arc::new(Mutex::new(running)))
+    if entries.next().is_none() && !incomplete {
+        state.rescan = None;
+    }
+    state
 }
 
 /// The build an activation lock file belongs to: `Some(None)` for the
@@ -450,15 +488,17 @@ fn other_build_endpoints(paths: &ActivationPaths, build: Option<BuildKey>) -> [P
     match build {
         Some(build) => [
             paths.base.join(keyed_socket_name(build)),
-            paths
-                .private_temp
-                .join(fallback_socket_name(&paths.base, Some(build))),
+            length_safe_unix_socket_path(
+                &fallback_socket_name(&paths.base, Some(build)),
+                &paths.private_temp,
+            ),
         ],
         None => [
             paths.base.join("activation.sock"),
-            paths
-                .private_temp
-                .join(fallback_socket_name(&paths.base, None)),
+            length_safe_unix_socket_path(
+                &fallback_socket_name(&paths.base, None),
+                &paths.private_temp,
+            ),
         ],
     }
 }
@@ -1518,6 +1558,60 @@ mod tests {
         assert_eq!(paths.endpoint_dir.as_deref(), endpoint.parent());
     }
 
+    /// No activation directory means no other build has started, not an
+    /// incomplete scan: shared-state writes must not wait on it forever.
+    #[test]
+    fn a_missing_activation_directory_means_no_other_build() {
+        let dir = kettle_test_support::private_tempdir("kettle-activation-missing-");
+        let paths = activation_paths_with_temp(&dir.join("absent"), &dir.join("temp"), build('a'));
+        assert!(!sweep_other_builds(&paths).running());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_candidates_include_the_second_temp_fallback() {
+        let base = PathBuf::from("/tmp").join("registry-component".repeat(8));
+        let private_temp = PathBuf::from("/tmp").join("temp-component".repeat(12));
+        let paths = activation_paths_with_temp(&base, &private_temp, build('a'));
+        for build in [Some(build('b')), None] {
+            let endpoint =
+                length_safe_unix_socket_path(&fallback_socket_name(&base, build), &private_temp);
+            assert!(
+                other_build_endpoints(&paths, build).contains(&endpoint),
+                "cleanup must include the endpoint in the second temp fallback"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweeping_removes_sockets_in_the_second_temp_fallback() {
+        let dir = kettle_test_support::private_tempdir("kettle-activation-second-fallback-");
+        let base = dir.join("registry-component".repeat(8));
+        let private_temp = dir.join("temp-component".repeat(12));
+        ensure_private_dir(&base).unwrap();
+        let paths = activation_paths_with_temp(&base, &private_temp, build('a'));
+        for build in [Some(build('b')), None] {
+            let name = build.map_or_else(
+                || "activation.lock".to_string(),
+                |build| format!("activation-{}.lock", build.as_str()),
+            );
+            drop(
+                kettle_state::ExclusiveFileLock::try_acquire(&base.join(name))
+                    .unwrap()
+                    .unwrap(),
+            );
+            let endpoint =
+                length_safe_unix_socket_path(&fallback_socket_name(&base, build), &private_temp);
+            ensure_private_dir(endpoint.parent().unwrap()).unwrap();
+            drop(std::os::unix::net::UnixListener::bind(&endpoint).unwrap());
+            sweep_other_builds(&paths);
+            let remains = endpoint.exists();
+            let _ = std::fs::remove_file(&endpoint);
+            assert!(!remains, "the second-fallback socket must be swept");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn activation_measures_non_utf8_paths_after_lossy_conversion() {
@@ -1553,6 +1647,27 @@ mod tests {
 
     fn build(hex_digit: char) -> BuildKey {
         BuildKey::new(&hex_digit.to_string().repeat(16)).unwrap()
+    }
+
+    #[test]
+    fn an_incomplete_sweep_blocks_shared_state_until_it_can_finish() {
+        let dir = kettle_test_support::private_tempdir("kettle-activation-crowded-");
+        let paths = activation_paths(dir.path(), build('a'));
+        for i in 0..=MAX_SWEEP_ENTRIES {
+            std::fs::write(dir.join(format!("ctl-{i}.json")), b"x").unwrap();
+        }
+        let others = sweep_other_builds(&paths);
+        assert!(
+            others.running(),
+            "an incomplete sweep cannot authorize shared-state writes"
+        );
+        for i in 0..=MAX_SWEEP_ENTRIES {
+            std::fs::remove_file(dir.join(format!("ctl-{i}.json"))).unwrap();
+        }
+        assert!(
+            !others.running(),
+            "a complete rescan establishes that no other builds run"
+        );
     }
 
     #[test]

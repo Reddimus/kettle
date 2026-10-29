@@ -78,7 +78,8 @@ fn request_stream(bytes: &[u8], piece: usize) {
             continue;
         };
         let written = serde_json::to_string(&request).expect("a request serializes");
-        let again = protocol::parse_request_line(&written).expect("a written request parses");
+        let again: protocol::Request =
+            serde_json::from_str(&written).expect("a written request deserializes");
         assert_eq!(
             (
                 again.v,
@@ -152,6 +153,25 @@ mod tests {
     use kettle_test_support::mutate::{cases, save_seeds};
 
     use super::*;
+
+    #[test]
+    fn omitted_params_at_the_line_limit_round_trip_semantically() {
+        let prefix = r#"{"v":1,"id":7,"method":""#;
+        let suffix = r#""}"#;
+        let line = format!(
+            "{prefix}{}{suffix}",
+            "a".repeat(protocol::MAX_LINE_BYTES - prefix.len() - suffix.len())
+        );
+        let request = protocol::parse_request_line(&line).expect("a request at the cap parses");
+        assert!(request.params.is_null());
+        let written = serde_json::to_string(&request).unwrap();
+        assert!(written.len() > protocol::MAX_LINE_BYTES);
+        assert!(
+            protocol::parse_request_line(&written).is_err(),
+            "framing still rejects oversized lines"
+        );
+        request_stream(line.as_bytes(), 4096);
+    }
 
     #[test]
     fn mutated_peer_input_parses_back_as_itself() {

@@ -265,6 +265,10 @@ fn alias_path(dir: &std::path::Path, pid: u32) -> PathBuf {
     dir.join(format!("{pid}.alias.json"))
 }
 
+fn alias_lock_path(dir: &std::path::Path) -> PathBuf {
+    dir.join("aliases.lock")
+}
+
 /// Point `alias_dir` at `pid`'s entry in `registry`. Does nothing when the two
 /// are the same directory.
 pub fn publish_alias(
@@ -285,6 +289,10 @@ pub fn publish_alias(
             )
         })?;
     crate::ensure_private_dir(alias_dir)?;
+    let _lock = kettle_state::ExclusiveFileLock::acquire_timeout(
+        &alias_lock_path(alias_dir),
+        REGISTRATION_LOCK_TIMEOUT,
+    )?;
     let record = AliasRecord {
         v: 1,
         pid,
@@ -310,6 +318,22 @@ pub fn withdraw_alias(alias_dir: &std::path::Path, pid: u32) {
 /// read that judged it and this delete, a new server that took the same pid
 /// may have replaced either, and its alias must survive.
 fn withdraw_dead_alias(dir: &std::path::Path, dead: &RegistryEntry, registry: &std::path::Path) {
+    withdraw_dead_alias_with(dir, dead, registry, || {});
+}
+
+fn withdraw_dead_alias_with(
+    dir: &std::path::Path,
+    dead: &RegistryEntry,
+    registry: &std::path::Path,
+    after_alias_read: impl FnOnce(),
+) {
+    if !crate::private_dir_is_valid(dir) {
+        return;
+    }
+    let Ok(Some(_lock)) = kettle_state::ExclusiveFileLock::try_acquire(&alias_lock_path(dir))
+    else {
+        return;
+    };
     let path = alias_path(dir, dead.pid);
     let same_alias = read_registry_entry(&path)
         .and_then(|text| serde_json::from_str::<AliasRecord>(&text).ok())
@@ -318,10 +342,33 @@ fn withdraw_dead_alias(dir: &std::path::Path, dead: &RegistryEntry, registry: &s
                 && record.pid == dead.pid
                 && std::path::Path::new(&record.registry) == registry
         });
+    after_alias_read();
     let same_entry = read_registry_entry(&entry_path(registry, dead.pid))
         .and_then(|text| serde_json::from_str::<RegistryEntry>(&text).ok())
         .is_none_or(|current| current == *dead);
     if same_alias && same_entry {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn withdraw_missing_alias(dir: &std::path::Path, record: &AliasRecord) {
+    let Ok(Some(_alias_lock)) = kettle_state::ExclusiveFileLock::try_acquire(&alias_lock_path(dir))
+    else {
+        return;
+    };
+    let registry = std::path::Path::new(&record.registry);
+    let Ok(Some(_registry_lock)) =
+        kettle_state::ExclusiveFileLock::try_acquire(&lock_path(registry))
+    else {
+        return;
+    };
+    let path = alias_path(dir, record.pid);
+    let unchanged = read_registry_entry(&path)
+        .and_then(|text| serde_json::from_str::<AliasRecord>(&text).ok())
+        .is_some_and(|current| current == *record);
+    let absent = std::fs::symlink_metadata(entry_path(registry, record.pid))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+    if unchanged && absent {
         let _ = std::fs::remove_file(path);
     }
 }
@@ -364,6 +411,8 @@ fn list_aliased(dir: &std::path::Path) -> Vec<(RegistryEntry, PathBuf)> {
             .filter(|entry| registry_entry_is_valid(&registry, pid, entry))
         {
             out.push((entry, registry));
+        } else {
+            withdraw_missing_alias(dir, &record);
         }
         if out.len() >= MAX_REGISTRY_DIR_ENTRIES {
             break;
@@ -1398,6 +1447,92 @@ mod tests {
         let short = root.join("short");
         assert!(!endpoint_is_derived(&short, pid, &at(&other, &name)));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discovery_prunes_aliases_after_visiting_the_primary_registry() {
+        let root = kettle_test_support::private_tempdir("kettle-ctl-orphan-alias-");
+        let primary = root.join("primary");
+        let canonical = root.join("canonical");
+        let pid = u32::MAX - 1;
+        let dead = RegistryEntry::registering("gui", pid, default_endpoint(&primary, pid), "x", 1);
+        register(&primary, &dead).unwrap();
+        publish_alias(&canonical, &primary, pid).unwrap();
+        assert!(live_candidates_by(&[primary.clone(), canonical.clone()], |_| false).is_empty());
+        assert!(!entry_path(&primary, pid).exists());
+        assert!(
+            !alias_path(&canonical, pid).exists(),
+            "an alias to a pruned target must also be pruned"
+        );
+    }
+
+    #[test]
+    fn missing_alias_cleanup_preserves_replacements_and_pending_registration() {
+        let root = kettle_test_support::private_tempdir("kettle-ctl-missing-alias-");
+        let primary = root.join("primary");
+        let canonical = root.join("canonical");
+        let elsewhere = root.join("elsewhere");
+        crate::ensure_private_dir(&primary).unwrap();
+        publish_alias(&canonical, &primary, 40).unwrap();
+        let expected: AliasRecord =
+            serde_json::from_str(&read_registry_entry(&alias_path(&canonical, 40)).unwrap())
+                .unwrap();
+        let registration = begin_registration(&primary);
+        withdraw_missing_alias(&canonical, &expected);
+        assert!(
+            alias_path(&canonical, 40).exists(),
+            "an in-progress registration keeps its alias"
+        );
+        drop(registration);
+        let replacement =
+            RegistryEntry::registering("gui", 40, default_endpoint(&primary, 40), "x", 2);
+        register(&primary, &replacement).unwrap();
+        withdraw_missing_alias(&canonical, &expected);
+        assert!(
+            alias_path(&canonical, 40).exists(),
+            "a replacement target keeps its alias"
+        );
+        std::fs::remove_file(entry_path(&primary, 40)).unwrap();
+        publish_alias(&canonical, &elsewhere, 40).unwrap();
+        withdraw_missing_alias(&canonical, &expected);
+        assert!(
+            alias_path(&canonical, 40).exists(),
+            "a replacement alias must survive cleanup"
+        );
+    }
+
+    #[test]
+    fn alias_publication_during_pruning_survives() {
+        let root = kettle_test_support::private_tempdir("kettle-ctl-alias-race-");
+        let primary = root.join("primary");
+        let canonical = root.join("canonical");
+        let elsewhere = root.join("elsewhere");
+        let dead = RegistryEntry::registering("gui", 40, default_endpoint(&primary, 40), "x", 1);
+        register(&primary, &dead).unwrap();
+        publish_alias(&canonical, &primary, 40).unwrap();
+        std::thread::scope(|scope| {
+            let (start_tx, start_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let canonical = &canonical;
+            let elsewhere = &elsewhere;
+            let publisher = scope.spawn(move || {
+                start_rx.recv().unwrap();
+                publish_alias(canonical, elsewhere, 40).unwrap();
+                done_tx.send(()).unwrap();
+            });
+            withdraw_dead_alias_with(canonical, &dead, &primary, || {
+                start_tx.send(()).unwrap();
+                let _ = done_rx.recv_timeout(std::time::Duration::from_millis(100));
+            });
+            publisher.join().unwrap();
+        });
+        let record = read_registry_entry(&alias_path(&canonical, 40));
+        assert!(
+            record.is_some(),
+            "a replacement published during pruning must keep its alias"
+        );
+        let record: AliasRecord = serde_json::from_str(&record.unwrap()).unwrap();
+        assert_eq!(std::path::Path::new(&record.registry), elsewhere);
     }
 
     /// A dead server's alias is withdrawn only while it still points at that
