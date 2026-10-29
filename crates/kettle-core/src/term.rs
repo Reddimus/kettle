@@ -4643,9 +4643,10 @@ const POWERSHELL_BOOTSTRAP_PREFIX: &str = "& ([scriptblock]::Create([IO.StreamRe
 #[cfg(any(windows, test))]
 const POWERSHELL_BOOTSTRAP_SUFFIX: &str =
     "')),[IO.Compression.CompressionMode]::Decompress),[Text.Encoding]::UTF8).ReadToEnd()))";
-#[cfg(any(windows, test))]
+// The budget is checked by a test of the real bootstrap; see below.
+#[cfg(test)]
 const POWERSHELL_BOOTSTRAP_MAX_CHARS: usize = 32_767 - 3_000;
-#[cfg(any(windows, test))]
+#[cfg(test)]
 const POWERSHELL_BOOTSTRAP_GROWTH_HEADROOM: usize = 512;
 
 // Keep the embedded command comfortably below CreateProcessW's 32,767-code-unit
