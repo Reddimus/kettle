@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- Edit every modal text field like the search bar: titles, the command
+  palette, SSH, the layout and theme pickers and Settings paths now have a
+  caret, selection, Home/End, word movement and deletion, cut/copy/paste,
+  mouse placement and drag selection, horizontal scrolling, and IME
+  composition anywhere in the text.
+
 ### Changed
 
 - Check workflows, standalone shell scripts, Python scripts, spelling and
@@ -39,6 +47,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   maximum-size transmission from about 392 MiB to 168 MiB, and hold each
   terminal to a 192 MiB transient decode ceiling so one pane's images
   cannot make another pane's fail.
+- Dismiss pickers, editors, hints and the Settings panel consistently when
+  clicking outside them, without the click also acting on what is under it;
+  confirmation dialogs stay open. Shorten long field labels with an ellipsis
+  instead of clipping them.
+- List "Paste primary selection" in the command palette only on Linux.
 
 ### Fixed
 
