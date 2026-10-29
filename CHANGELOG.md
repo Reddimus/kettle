@@ -124,6 +124,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   keyblock failure.
 - Keep multi-line command buffers whole in Fish completion, and emit no
   command-start mark for an incomplete PowerShell command.
+- Keep the PowerShell integration working when a profile turns on strict
+  mode.
 - Depend on Arch's `wayland` package, which provides `libwayland-client`.
 - Bring the security, agent, recording, protocol and architecture documents
   in line with the code, and buffer partial output lines per pane in the
