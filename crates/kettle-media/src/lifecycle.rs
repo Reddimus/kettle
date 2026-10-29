@@ -1094,9 +1094,8 @@ mod tests {
         /// How long each spawn and file check take, and how many spawns have
         /// begun.
         spawn_delay: Mutex<Duration>,
-        /// How long a spawn holds its worker after counting it, before the
-        /// client has it.
-        handover_delay: Mutex<Duration>,
+        /// Hold a counted spawn until the test lets the client have it.
+        handover: Mutex<Option<Receiver<()>>>,
         inspect_delay: Mutex<Duration>,
         /// Cancelled as the file check ends, before its caller can look.
         cancel_on_inspect: Mutex<Option<RenderControl>>,
@@ -1107,6 +1106,7 @@ mod tests {
         /// Threads that guarded their pipe writes, and writes from any other.
         guarded: Arc<Mutex<Vec<std::thread::ThreadId>>>,
         unguarded_writes: Arc<AtomicUsize>,
+        writers: AtomicUsize,
     }
 
     /// The worker's stdin, counting writes from a thread that never guarded
@@ -1171,6 +1171,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(std::thread::current().id());
+            self.writers.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         fn spawn(&self, _: &Path) -> std::io::Result<SpawnedWorker> {
@@ -1178,7 +1179,11 @@ mod tests {
             let delay = *self.spawn_delay.lock().unwrap();
             std::thread::sleep(delay);
             self.spawns.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(*self.handover_delay.lock().unwrap());
+            if let Some(handover) = self.handover.lock().unwrap().take() {
+                handover
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(std::io::Error::other)?;
+            }
             let script = self
                 .scripts
                 .lock()
@@ -2384,39 +2389,71 @@ mod tests {
         assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
     }
 
-    /// A cancelled render's unkillable worker is counted and kept, whether
-    /// the cancel finds the worker in hand or still being handed over. In
-    /// the second case the late start's helper kills and keeps it after the
-    /// render has returned, so the count is read once that start is done.
+    /// Once the caller has its worker, cancellation finishes accounting
+    /// before the render returns.
     #[test]
     fn cancellation_preserves_abandoned_worker_accounting() {
         use crate::client::RenderError;
-        for handover in [Duration::ZERO, FAST.ready * 2] {
-            let fake = Fake::new(vec![Script {
-                killable: false,
-                ..Script::silent()
-            }]);
-            *fake.handover_delay.lock().unwrap() = handover;
-            let client = patient(&fake);
-            let control = RenderControl::default();
-            std::thread::scope(|scope| {
-                let rendering = scope.spawn(|| client.render_with_control(&job(1), &control));
-                wait_for_count(&fake.spawns, 1);
-                control.cancel();
-                assert_eq!(promptly(rendering), Err(RenderError::Cancelled));
-            });
-            let until = Instant::now() + Duration::from_secs(10);
-            while client.shared.late_spawns.load(Ordering::SeqCst) > 0 {
-                assert!(Instant::now() < until, "the late start never finished");
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            assert_eq!(client.shared.abandoned_count(), 1, "handover {handover:?}");
-            assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
-            fake.released.store(true, Ordering::SeqCst);
-            client.availability();
-            assert_eq!(client.shared.abandoned_count(), 0);
-            assert_eq!(fake.reaped.load(Ordering::SeqCst), 1);
+        let fake = Fake::new(vec![Script {
+            killable: false,
+            ..Script::silent()
+        }]);
+        let client = patient(&fake);
+        let control = RenderControl::default();
+        std::thread::scope(|scope| {
+            let rendering = scope.spawn(|| client.render_with_control(&job(1), &control));
+            // The writer starts only after the caller has its worker.
+            wait_for_count(&fake.writers, 1);
+            control.cancel();
+            assert_eq!(promptly(rendering), Err(RenderError::Cancelled));
+        });
+        assert_eq!(client.shared.late_spawns.load(Ordering::SeqCst), 0);
+        assert_eq!(client.shared.abandoned_count(), 1);
+        assert_eq!(client.shared.stuck.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+        fake.released.store(true, Ordering::SeqCst);
+        client.availability();
+        assert_eq!(client.shared.abandoned_count(), 0);
+        assert_eq!(fake.reaped.load(Ordering::SeqCst), 1);
+    }
+
+    /// A counted spawn need not be in the caller's hands. Its helper keeps
+    /// admission closed until it has killed and accounted for the worker.
+    #[test]
+    fn cancellation_during_handover_preserves_abandoned_worker_accounting() {
+        use crate::client::RenderError;
+        let fake = Fake::new(vec![Script {
+            killable: false,
+            ..Script::silent()
+        }]);
+        let (handover, held) = mpsc::channel();
+        *fake.handover.lock().unwrap() = Some(held);
+        let client = patient(&fake);
+        let control = RenderControl::default();
+        std::thread::scope(|scope| {
+            let rendering = scope.spawn(|| client.render_with_control(&job(1), &control));
+            wait_for_count(&fake.spawns, 1);
+            control.cancel();
+            assert_eq!(promptly(rendering), Err(RenderError::Cancelled));
+        });
+        assert_eq!(client.shared.late_spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(client.shared.abandoned_count(), 0);
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 0);
+        assert_eq!(client.render(&job(1)), Err(FailureCode::WorkerUnavailable));
+        assert_eq!(fake.spawn_calls.load(Ordering::SeqCst), 1);
+        handover.send(()).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while client.shared.late_spawns.load(Ordering::SeqCst) > 0 {
+            assert!(Instant::now() < until, "the late start never finished");
+            std::thread::sleep(Duration::from_millis(5));
         }
+        assert_eq!(client.shared.abandoned_count(), 1);
+        assert_eq!(client.shared.stuck.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+        fake.released.store(true, Ordering::SeqCst);
+        client.availability();
+        assert_eq!(client.shared.abandoned_count(), 0);
+        assert_eq!(fake.reaped.load(Ordering::SeqCst), 1);
     }
 
     impl Script {
