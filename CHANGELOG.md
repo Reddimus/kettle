@@ -100,6 +100,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   reconnect when it cannot reproduce the session (Docker TLS options,
   relative or drive-relative SSH identity and config paths, `-S` and
   `ControlPath`).
+- Stop a crash when a pane closes after a font change and before the next
+  frame.
+- Apply PNG and APNG background limits before reading their metadata, and
+  keep 32-bit Linux from overflowing on a 1080p wallpaper.
+- Draw the cursor on its row's shaped baseline, draw no underline or
+  strikeout on concealed cells, and keep glyph shaping offsets.
+- Place the search caret, pointer and selection correctly inside ligatures.
+- Size and place toasts and remote receipts from their measured text, and
+  wrap long failure messages.
+- Keep a confirmation dialog's focused button fully visible when no whole-line
+  scroll shows it.
+- Keep up to 30 combining marks per cell in snapshots, and the mask
+  foreground on non-sRGB surfaces.
 
 ## [5.6.0] — 2026-10-28
 
