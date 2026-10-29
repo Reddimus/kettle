@@ -84,7 +84,7 @@ def pasteboard(request):
 def clipboard_probe(text):
     snapshot = None
     try:
-        snapshot = pasteboard({"action": "snapshot"})
+        snapshot = pasteboard({"op": "snapshot"})
     except (subprocess.SubprocessError, ValueError) as error:
         print(f"clipboard probe skipped: snapshot failed ({type(error).__name__})", flush=True)
     if snapshot is None or not snapshot["ok"]:
@@ -96,7 +96,7 @@ def clipboard_probe(text):
         yield snapshot
     finally:
         try:
-            restored = pasteboard({"action": "restore", "snapshot": snapshot, "text": text})
+            restored = pasteboard({"op": "restore", "snapshot": snapshot, "text": text})
             if not restored["ok"]:
                 print(f"clipboard restore skipped: {restored['reason']}", flush=True)
         except (subprocess.SubprocessError, ValueError) as error:
@@ -134,7 +134,7 @@ def check(kettle, out):
                     live.json_ctl("dispatch_ui_key", {"keys": ["a"]})
                     copied = live_ui.run(["/usr/bin/pbpaste"], timeout=10)
                     copied.check_returncode()
-                    owned = pasteboard({"action": "check", "snapshot": probe, "text": hint_path})
+                    owned = pasteboard({"op": "check", "snapshot": probe, "text": hint_path})
                     results["ordinary_hint_still_selects"] = (
                         not live_ui.modal_open(live.json_ctl("ui_geometry"), "hint_mode")
                         and copied.stdout == hint_path

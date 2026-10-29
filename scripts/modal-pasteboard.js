@@ -8,7 +8,7 @@ function run() {
     function skip(reason) { return JSON.stringify({ok: false, reason: reason}); }
     if (!board || board.isNil()) return skip('pasteboard service unavailable');
     const count = Number(board.changeCount);
-    if (request.action === 'snapshot') {
+    if (request.op === 'snapshot') {
         const items = board.pasteboardItems;
         const saved = [];
         let bytes = 0;
@@ -33,11 +33,11 @@ function run() {
         return JSON.stringify({ok: true, count: count, items: saved});
     }
     const snapshot = request.snapshot;
-    if (request.action === 'restore' && count === snapshot.count) return JSON.stringify({ok: true});
+    if (request.op === 'restore' && count === snapshot.count) return JSON.stringify({ok: true});
     // Kettle clears once before writing its string. Any other generation is foreign.
     if (count !== snapshot.count + 1 || ObjC.unwrap(board.stringForType('public.utf8-plain-text')) !== request.text)
         return skip('pasteboard changed outside the clipboard probe');
-    if (request.action === 'check') return JSON.stringify({ok: true});
+    if (request.op === 'check') return JSON.stringify({ok: true});
     const items = $.NSMutableArray.alloc.init;
     for (const types of snapshot.items) {
         const item = $.NSPasteboardItem.alloc.init;

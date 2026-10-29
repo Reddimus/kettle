@@ -48,7 +48,7 @@ class ScriptRegressionTests(unittest.TestCase):
                     self.assertTrue(enabled)
                     raise RuntimeError('probe')
         self.assertEqual(board.call_args.args[0],
-                         {'action': 'restore', 'snapshot': snapshot, 'text': 'hint'})
+                         {'op': 'restore', 'snapshot': snapshot, 'text': 'hint'})
         with patch.object(modal, 'pasteboard', return_value={'ok': False, 'reason': 'unreadable type'}) as board, \
              contextlib.redirect_stdout(io.StringIO()) as output:
             with modal.clipboard_probe('hint') as enabled:
@@ -60,7 +60,7 @@ class ScriptRegressionTests(unittest.TestCase):
     def test_modal_native_pasteboard_restores_all_types_and_skips_foreign_changes(self):
         modal = load('check-modal-shortcuts')
         name = f'kettle-test-{os.getpid()}'
-        available = modal.pasteboard({'action': 'snapshot', 'name': name})
+        available = modal.pasteboard({'op': 'snapshot', 'name': name})
         if not available['ok'] and available['reason'] == 'pasteboard service unavailable':
             self.skipTest(available['reason'])
         def write(text, probe=False):
@@ -80,8 +80,8 @@ items.addObject(item);
 ''' + extra + ('' if probe else 'items.addObject(second);\n') + 'board.writeObjects(items);\n'
             subprocess.run(['osascript', '-l', 'JavaScript', '-e', source % (json.dumps(name), json.dumps(text))],
                            capture_output=True, check=True, timeout=10)
-        def request(action, **values):
-            return modal.pasteboard(dict(action=action, name=name, **values))
+        def request(op, **values):
+            return modal.pasteboard(dict(op=op, name=name, **values))
         write('original')
         snapshot = request('snapshot')
         self.assertTrue(snapshot['ok'], snapshot)
