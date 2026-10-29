@@ -53,12 +53,12 @@ EXPECTED_EDGES = {
     ("atspi-common", "zbus-lockstep-macros"),
 }
 REVIEWED_VERSIONS = {
-    "zvariant_derive": {"5.15.0"},
+    "zvariant_derive": {"5.15.1"},
     "atspi": {"0.29.0"},
-    "zbus_names": {"4.3.4"},
+    "zbus_names": {"4.3.5"},
     "accesskit_atspi_common": {"0.21.1"},
     "atspi-proxies": {"0.13.0"},
-    "zvariant": {"5.15.0"},
+    "zvariant": {"5.15.1"},
     "atspi-common": {"0.13.0"},
     "notify-rust": {"4.18.2"},
     "accesskit_unix": {"0.24.1"},
@@ -66,7 +66,7 @@ REVIEWED_VERSIONS = {
     "zbus_macros": {"5.19.0"},
     "accesskit_winit": {"0.34.2"},
     "zbus": {"5.19.0"},
-    "zbus_xml": {"5.2.0"},
+    "zbus_xml": {"5.2.1"},
     "zbus-lockstep": {"0.5.2"},
 }
 REVIEWED_SOURCES = {

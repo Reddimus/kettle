@@ -6,12 +6,14 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
 ## Security and boundaries
 
 - **D-Bus maintenance notices.** The product graph accepts the informational
-  unmaintained notices RUSTSEC-2026-0370/0371/0372 for `zvariant 5.15.0`,
-  `zvariant_derive 5.15.0` and `zbus_names 4.3.4`. The all-target exact reverse
+  unmaintained notices RUSTSEC-2026-0370/0371/0372 for `zvariant 5.15.1`,
+  `zvariant_derive 5.15.1` and `zbus_names 4.3.5`. The all-target exact reverse
   graph and registry sources are guarded by `scripts/check-dbus-scope.py`;
   `cargo audit --deny warnings` remains enforced for every other notice and
   vulnerability. Reassess these exceptions when the guarded Linux desktop
   integration dependencies change. The vendor-validation graph has no waiver.
+  Moving to zbus 6 is blocked upstream: the newest `accesskit_unix` (0.24.1)
+  requires zbus 5.19 and `atspi` 0.29, and `atspi` 0.30 still requires zbus 5.
 
 - **Upstream `lru` advisory.** `Cargo.lock` still pins `lru 0.16.4` through
   `glyphon 0.12.0`; `deny.toml` ignores RUSTSEC-2026-0253. Deferred because the
