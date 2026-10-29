@@ -549,7 +549,9 @@ headless-gpu-smoke: release
       exit 1
     fi
     export LIBGL_ALWAYS_SOFTWARE=1
-    log="{{TMPDIR}}/kettle-headless-smoke.log"
+    # A private file: a fixed name under the shared temporary directory could be
+    # precreated by another user, or as a symlink to one of ours.
+    log=$(mktemp "{{TMPDIR}}/kettle-headless-smoke.XXXXXX")
     # The `bash -c '…$rc…'` invocation is single-quoted on purpose so
     # the inner `$rc` expands inside the *nested* bash, not this one.
     env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET xvfb-run -a bash -c 'timeout 10 ./target/release/kettle >'"$log"' 2>&1; rc=$?; \
@@ -574,8 +576,8 @@ gpu-render-smoke: release
     #!/usr/bin/env bash
     set -euo pipefail
     export LIBGL_ALWAYS_SOFTWARE=1
-    out_dir="{{TMPDIR}}/kettle-gpu-render-smoke"
-    mkdir -p "$out_dir"
+    # A private directory, for the reason headless-gpu-smoke gives.
+    out_dir=$(mktemp -d "{{TMPDIR}}/kettle-gpu-render-smoke.XXXXXX")
     ./target/release/kettle --gpu-info | tee "$out_dir/gpu-info.txt"
     grep -qE '^Backend:[[:space:]]+' "$out_dir/gpu-info.txt"
     grep -qE '^Adapter:[[:space:]]+' "$out_dir/gpu-info.txt"
@@ -603,8 +605,8 @@ gpu-render-smoke: release
 # and asserts both the happy-path output shape and the error-path exit
 # codes. Rebuilds the debug binary so a prior checkout cannot make the smoke
 # report success against stale code.
-# Artifacts land under {{TMPDIR}}/kettle-cli-smoke instead of a CI
-# runner's throwaway workspace. The CI script's `$RUNNER_OS` branch
+# Artifacts land in a private {{TMPDIR}}/kettle-cli-smoke.* directory instead
+# of a CI runner's throwaway workspace. The CI script's `$RUNNER_OS` branch
 # collapses to the non-Windows binary path — Git Bash on Windows
 # resolves the extensionless name to `kettle.exe` on its own, so this
 # also works if invoked under Git Bash, hence [unix] rather than a hard
@@ -617,9 +619,7 @@ cli-smoke:
     # 12-character Git/dirty identity before the legacy shell assertions below.
     python3 scripts/check-cli-smoke.py
     umask 077
-    out_dir="{{TMPDIR}}/kettle-cli-smoke"
-    mkdir -p "$out_dir"
-    chmod 700 "$out_dir"
+    out_dir=$(mktemp -d "{{TMPDIR}}/kettle-cli-smoke.XXXXXX")
     # Every config assertion below describes an empty CI-style profile. Keep
     # it independent of the developer machine: a real ~/.config/kettle made
     # the "no config" hint disappear and failed this smoke on Ubuntu.
