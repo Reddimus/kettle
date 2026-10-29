@@ -219,6 +219,67 @@ class PackageManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not match"):
                 MODULE.verify(root, target, VERSION)
 
+    @unittest.skipIf(os.name == "nt", "Linux package modes require POSIX")
+    def test_pack_preserves_nested_licenses_at_the_archive_entry_limit(self):
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            root = temporary / "package"
+            root.mkdir(mode=0o755)
+            self.package(root)
+            for index in range(124):
+                license_path = root / f"docs/licenses/dependency-{index}/LICENSE"
+                license_path.parent.mkdir(parents=True, exist_ok=True)
+                license_path.write_bytes(f"License {index}\n".encode("ascii"))
+                license_path.chmod(0o644)
+            for directory, _dirs, _files in os.walk(root):
+                Path(directory).chmod(0o755)
+            MODULE.generate(root, LINUX_TARGET, VERSION)
+
+            archive = temporary / "kettle.tar.gz"
+            MODULE.pack_archive(archive, root, LINUX_TARGET, VERSION)
+            with tarfile.open(archive) as packed:
+                members = packed.getmembers()
+                self.assertEqual(len(members), 128)
+                self.assertEqual(
+                    [member.name for member in members if member.isdir()], ["kettle"]
+                )
+                self.assertEqual(sum(member.isfile() for member in members), 127)
+            output = temporary / "output"
+            MODULE.extract_archive(archive, output, LINUX_TARGET, VERSION)
+            MODULE.verify(output, LINUX_TARGET, VERSION)
+            for index in range(124):
+                self.assertEqual(
+                    (
+                        output / f"docs/licenses/dependency-{index}/LICENSE"
+                    ).read_bytes(),
+                    f"License {index}\n".encode("ascii"),
+                )
+            self.assertEqual((output / "kettle").stat().st_mode & 0o777, 0o755)
+            (root / "one-more").write_bytes(b"limit\n")
+            (root / "one-more").chmod(0o644)
+            MODULE.generate(root, LINUX_TARGET, VERSION)
+            overflow = temporary / "overflow.tar.gz"
+            with self.assertRaisesRegex(ValueError, "128-entry limit"):
+                MODULE.pack_archive(overflow, root, LINUX_TARGET, VERSION)
+            self.assertFalse(overflow.exists())
+
+    @unittest.skipIf(os.name == "nt", "Linux package modes require POSIX")
+    def test_pack_requires_verified_contents_and_an_external_output(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "package"
+            root.mkdir(mode=0o755)
+            self.package(root)
+            MODULE.generate(root, LINUX_TARGET, VERSION)
+            with self.assertRaisesRegex(ValueError, "outside"):
+                MODULE.pack_archive(
+                    root / "archive.tar.gz", root, LINUX_TARGET, VERSION
+                )
+            archive = Path(raw) / "archive.tar.gz"
+            (root / "kettle").write_bytes(b"changed\n")
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                MODULE.pack_archive(archive, root, LINUX_TARGET, VERSION)
+            self.assertFalse(archive.exists())
+
     def test_windows_modes_are_null_and_identity_is_exact(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

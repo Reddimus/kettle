@@ -310,8 +310,9 @@ class ManifestTests(unittest.TestCase):
         release_workflow = (
             ROOT / ".github" / "workflows" / "release.yml"
         ).read_text(encoding="utf-8")
+        publication = release_workflow.split("\n  finalize:\n", 1)[1]
         self.assertEqual(
-            release_workflow.count("scripts/package-manifest.py extract"),
+            publication.count("scripts/package-manifest.py extract"),
             4,
         )
         for archive, target in (

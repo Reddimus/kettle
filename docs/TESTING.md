@@ -500,7 +500,7 @@ and archive validation; they do not prove public HTTPS availability.
 | `just update-manifest-test` | Signed-feed bytes, trust root, sidecars, signing command wiring |
 | `just release-assets-test` | Exact draft asset names, sizes, and SHA-256 binding |
 | `just release-script-test` | Release preparation, version/document updates, immutable historical references |
-| `just package-manifest-test` | Inner manifests, bounded extraction, media installation |
+| `just package-manifest-test` | Inner manifests, Linux packing at the 128-entry limit, bounded extraction, media installation |
 | `just online-installer-test` | Online install parsing, transport limits, no downgrade, hostile archives |
 | `just package-templates` | Deterministic Homebrew/AUR template rendering and optional published checks |
 | `just icons-check-required` | Generated icon geometry, rasters, and formats with tooling required |

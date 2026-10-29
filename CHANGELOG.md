@@ -49,6 +49,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Maintenance
 
+- Keep Linux archives within existing updaters' entry limit while retaining all
+  license files; verify each packed archive before upload.
 - Make native process-deadline tests independent of shell helper timing.
 - Refresh reviewed Rust dependencies and pinned workflow actions.
 
