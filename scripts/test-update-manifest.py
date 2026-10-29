@@ -366,6 +366,9 @@ class ManifestTests(unittest.TestCase):
         self.assertIn('--require "$tag"', promote)
         self.assertIn('--above "$current"', promote)
         self.assertNotIn("KETTLE_UPDATE_SIGNING_KEY_PEM", promote)
+        upgrade = release_workflow.split("\n  upgrade:\n", 1)[1]
+        # The upgrade checks expect latest to be this tag already.
+        self.assertIn("needs: [publish, promote]", upgrade)
         package = release_workflow.split("\n  package:\n", 1)[1].split(
             "\n  finalize:\n", 1
         )[0]

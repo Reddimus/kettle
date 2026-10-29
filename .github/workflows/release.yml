@@ -982,7 +982,8 @@ jobs:
   # follow-up release. See upgrade.yml.
   upgrade:
     name: upgrade from the previous release
-    needs: publish
+    # Upgrades check that latest is this tag, so they wait for promotion.
+    needs: [publish, promote]
     if: github.event_name == 'push'
     uses: ./.github/workflows/upgrade.yml
     with:
