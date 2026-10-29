@@ -176,6 +176,8 @@ def main() -> int:
             if is_launch_failure(output):
                 for line in output.strip().splitlines()[-15:]:
                     print(f"    {line}", file=sys.stderr)
+                if failures:
+                    break
                 return skip_or_fail(
                     f"mermaid-cli could not launch {chrome} in {LAUNCH_ATTEMPTS} attempts"
                 )

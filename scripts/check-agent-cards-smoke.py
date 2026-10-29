@@ -365,7 +365,7 @@ def check(kettle, worker, node, out):
             assets = media.card_fixtures(root / "assets")
             config = root / "kettle.conf"
             config.write_text(
-                "restore-session = false\nupdate-policy = off\nrecord = off\n"
+                "language = en\nrestore-session = false\nupdate-policy = off\nrecord = off\n"
                 "shell = /bin/sh\nlogin-shell = false\nshell-integration = false\n"
                 "agent-server = full\nagent-display = true\nagent-display-claude-code = true\n"
                 "preview-lane-side = right\n"

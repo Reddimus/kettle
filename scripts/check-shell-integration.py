@@ -360,6 +360,19 @@ def check_bash(executable: str, require_32: bool) -> None:
     print("Bash complete Unicode field fixture: PASS")
 
 
+def username_completion_prefix(executable: str, user: str) -> str | None:
+    for length in range(min(2, len(user)), len(user) + 1):
+        prefix = user[:length]
+        result = subprocess.run(
+            [executable, "--no-config", "-c", 'complete -C "$argv[1]"', f"echo ~{prefix}"],
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+        candidates = [line.split("\t", 1)[0] for line in result.stdout.splitlines()]
+        if candidates == [f"~{user}"]:
+            return prefix
+    return None
+
+
 def check_fish(executable: str) -> None:
     with tempfile.TemporaryDirectory(prefix="kettle fish ") as temporary:
         cwd = Path(temporary) / "kt test" / "\u00fcn\u00efcode"
@@ -1031,19 +1044,22 @@ def check_fish(executable: str) -> None:
         # public provider output hides those flags, so this live editor check
         # catches both quoting the tilde and adding a delimiter.
         user = getpass.getuser()
-        prefix_len = min(2, len(user))
-        os.write(master, b"\x03")
-        drain(0.25)
-        os.write(master, f"echo ~{user[:prefix_len]}\t".encode())
-        user_output, _ = drain_until_completion(2.0)
-        os.write(master, b"\x07")
-        user_output += drain(0.5)
-        expected_user = f"KETTLE_SINGLETON_BUFFER=<echo ~{user}>".encode()
-        if expected_user not in user_output:
-            raise RuntimeError(
-                "Fish's ~user singleton lost its expandable native spelling: "
-                f"{user_output[-1024:]!r}"
-            )
+        prefix = username_completion_prefix(executable, user)
+        if prefix is None:
+            print("Fish ~user singleton fixture: SKIP (no unique native prefix)")
+        else:
+            os.write(master, b"\x03")
+            drain(0.25)
+            os.write(master, f"echo ~{prefix}\t".encode())
+            user_output, _ = drain_until_completion(2.0)
+            os.write(master, b"\x07")
+            user_output += drain(0.5)
+            expected_user = f"KETTLE_SINGLETON_BUFFER=<echo ~{user}>".encode()
+            if expected_user not in user_output:
+                raise RuntimeError(
+                    "Fish's ~user singleton lost its expandable native spelling: "
+                    f"{user_output[-1024:]!r}"
+                )
 
         os.write(master, b"\x03")
         drain(0.25)
