@@ -29,6 +29,24 @@ Replace `<crate>` with the package you changed. Format only that crate while
 iterating. The workspace check catches formatting drift elsewhere.
 A focused test helps during development, but does not replace the gate.
 
+`kettle-vt::control` has a 14-state by 25-byte-class transition/event matrix,
+UTF-8 shielding checks across all 64 continuation values and three outstanding
+lengths, and bound checks for every open state. Its differential harness retains
+both former strippers as test-only source snapshots. Existing exec and session
+log stripping vectors run the shared implementation and both originals; ordinary
+output must match an original exactly. A second log oracle adapts only ground C1
+recognition, allowing cumulative intentional differences to be checked too.
+The edge table sweeps every two-chunk split. A 65,545-byte bound case splits
+at every offset near its introducer and its bound and at a prime stride
+between them; other long cases use one-byte feeds and sweep the restart
+boundary. One deterministic 1 MiB arbitrary-byte
+stream uses random chunks of 1 through 8192 bytes and matches the unmodified
+exec oracle over the whole stream. Stage 2 probes pin the extractor's distinct
+C1, private-ESC and bulk-recovery policies. Run these with
+`cargo test --locked --offline -p kettle-vt control::` and the consumer vectors
+with the full `kettle-core` and `kettle` suites. The extractor benchmarks remain
+in `crates/kettle-vt/benches/extract.rs`.
+
 The `kettle-ui` tests selected by `sandbox_pattern_` cover safe and restricted
 Lua pattern budgets: empty replacement expansions, expanded output bytes,
 separate calls and iterators, protected calls, callback retirement, and budget

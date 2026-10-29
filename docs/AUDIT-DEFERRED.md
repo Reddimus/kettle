@@ -39,13 +39,16 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
 
 ## Terminal and protocol
 
-- **One streaming control-state kernel for three ANSI parsers.**
-  `crates/kettle/src/exec.rs`, `crates/kettle-core/src/term.rs` and
-  `crates/kettle-vt/src/extract.rs` still implement separate state machines.
-  Deferred because concurrent parser repairs would collide with a shared
-  refactor. Close with shared ESC/CSI/string/C1, cancellation, split UTF-8 and
-  bounded-recovery semantics, policy hooks for each consumer, and a state/event
-  conformance matrix. Until then, check each parser fix against all three.
+- **Extractor policy hooks for the streaming control kernel.**
+  Exec/MCP and session logs now share `kettle-vt::control` and its stripper,
+  with frozen differential oracles and a state/event conformance matrix.
+  `Extractor` and `PrivateOutputFilter` retain their bulk scanners: C1 refusal,
+  high-byte escape prefixes, private non-ST ESC handling, and recovery after
+  a whole over-cap bulk run differ from the stripper. The private recovery
+  boundary depends on feed chunking, so a byte-only transition replacement
+  changes existing output. Close with run-aware policy hooks and a frozen
+  extractor oracle comparing emitted chunks exactly across existing vectors,
+  edge splits and random bytes.
 - **Grid/generation publication ordering.** `publish_output_if_ready` in
   `crates/kettle-core/src/term.rs` publishes after the grid lock is released;
   readers can pair a new grid with an old generation. Deferred because review

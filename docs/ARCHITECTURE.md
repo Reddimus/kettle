@@ -3219,6 +3219,31 @@ no context reads, clock queries, formatting or writes.
   times are O(bytes), designed to stay well under one frame's budget per drain
   even on fast scrolling.
 
+## Transcript control stripping
+
+`kettle-vt::control` owns the allocation-free streaming control kernel and
+`kettle_vt::AnsiStripper`. Exec (including MCP `kettle_run`) and session logs
+use that one stripper; their former public paths re-export it. `ControlParser`
+classifies each byte as text or a typed control event (start, continuation,
+end, cancellation, or bounded recovery), including executed C0 controls.
+It handles ESC intermediates, CSI, OSC, DCS/SOS/PM/APC, ground-position C1
+introducers, and unshielded ST. UTF-8 continuations cannot dispatch controls
+in any state and follow their lead's output disposition across recovery.
+The 64 KiB budget counts every byte after ESC, including its follower and
+UTF-8 continuations; a C1 introducer counts as the equivalent ESC follower.
+The overflowing byte is dropped, and a fresh ESC resets the budget. Text runs
+are appended directly to the caller's buffer without an intermediate copy.
+
+The extractor and private-output filter retain their existing bulk scanners.
+They deliberately differ from transcript stripping: C1 introducers pass
+through, high bytes keep an escape prefix pending, malformed non-ST escapes
+remain inside private completions, and private recovery begins after the
+whole bulk run that crosses its cap. That last rule depends on feed boundaries.
+Sharing their transitions still requires policy hooks for bulk admission,
+privacy, and recovery, with exact emitted-chunk differential coverage.
+Test-only probes in `kettle-vt/src/control/tests.rs` pin each of those
+differences, so a later port has to change them on purpose.
+
 ## Why the extractor sits *in front of* the VT engine
 
 The vendored VT engine has no image/graphics support and ignores OSC 7/133. The

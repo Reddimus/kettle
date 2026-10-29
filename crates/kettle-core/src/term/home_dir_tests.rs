@@ -1,3 +1,45 @@
+#[allow(dead_code)]
+mod differential {
+    use kettle_vt::AnsiStripper as SharedStripper;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../kettle-vt/src/control/differential.rs"
+    ));
+}
+use differential::CheckedStripper as AnsiStripper;
+
+// Retain the production session-boundary checks while running every stripping
+// vector through both frozen scanners as well.
+#[derive(Default)]
+struct SessionLogFilter {
+    inner: super::SessionLogFilter,
+    oracle: AnsiStripper,
+    observed: Option<(u64, bool)>,
+}
+
+impl SessionLogFilter {
+    fn filter(&mut self, input: &[u8], generation: u64, strip: bool) -> Vec<u8> {
+        if self.observed != Some((generation, strip)) {
+            self.oracle = AnsiStripper::new();
+            self.observed = Some((generation, strip));
+        }
+        let expected = if strip {
+            self.oracle.strip(input)
+        } else {
+            input.to_vec()
+        };
+        let actual = self.inner.filter(input, generation, strip);
+        assert_eq!(actual, expected);
+        actual
+    }
+}
+
+fn strip_ansi_bytes(input: &[u8]) -> Vec<u8> {
+    let actual = super::strip_ansi_bytes(input);
+    assert_eq!(actual, AnsiStripper::new().strip(input));
+    actual
+}
+
 use super::{LazySessionLogWriter, home_dir_fallback};
 use crate::persistence::AsyncFileWriter;
 use std::ffi::OsString;
@@ -79,7 +121,6 @@ fn empty_env_var_value_falls_through_to_next() {
 ///   - Plain printable bytes + newlines pass through
 #[test]
 fn strip_ansi_bytes_removes_csi_osc_and_single_esc() {
-    use super::strip_ansi_bytes;
     // CSI SGR around plain text: "hello world".
     let s = b"\x1b[31mhello\x1b[0m world";
     assert_eq!(strip_ansi_bytes(s), b"hello world");
@@ -215,7 +256,7 @@ fn the_log_stripper_ends_sequences_where_the_terminal_does() {
             "after",
         ),
     ] {
-        let mut stripper = super::AnsiStripper::new();
+        let mut stripper = AnsiStripper::new();
         let out = stripper.strip(input);
         assert_eq!(
             String::from_utf8_lossy(&out),
@@ -242,7 +283,7 @@ fn log_stripping_keeps_osc_state_across_escape_controls() {
             }
             expected.extend_from_slice(b"after");
             for split in 0..=wire.len() {
-                let mut stripper = super::AnsiStripper::new();
+                let mut stripper = AnsiStripper::new();
                 let mut output = stripper.strip(&wire[..split]);
                 output.extend(stripper.strip(&wire[split..]));
                 assert_eq!(output, expected, "control={control}, split={split}");
@@ -261,7 +302,7 @@ fn session_log_keeps_executable_controls_inside_escape_sequences() {
         (b"A\x1b( \r\n\t\x1aB", b"A\r\n\tB"),
     ] {
         for split in 0..=wire.len() {
-            let mut filter = super::SessionLogFilter::default();
+            let mut filter = SessionLogFilter::default();
             let mut output = filter.filter(&wire[..split], 1, true);
             output.extend(filter.filter(&wire[split..], 1, true));
             assert_eq!(output, expected, "wire={wire:?}, split={split}");
@@ -281,7 +322,7 @@ fn escaped_utf8_leads_do_not_emit_orphaned_continuations() {
             let scalar_start = input.len();
             input.extend_from_slice(scalar);
             input.extend_from_slice(b"tail");
-            let mut stripper = super::AnsiStripper::new();
+            let mut stripper = AnsiStripper::new();
             let boundary = scalar_start + split;
             let mut out = stripper.strip(&input[..boundary]);
             out.extend(stripper.strip(&input[boundary..]));
@@ -296,7 +337,7 @@ fn escaped_utf8_leads_do_not_emit_orphaned_continuations() {
 
 #[test]
 fn session_log_filter_resets_between_sessions_and_strip_modes() {
-    let mut filter = super::SessionLogFilter::default();
+    let mut filter = SessionLogFilter::default();
     assert_eq!(filter.filter(b"before\x1b]0;partial", 1, true), b"before");
 
     // Logging is inactive while the terminal consumes the BEL. A new log
@@ -315,7 +356,7 @@ fn session_log_filter_resets_between_sessions_and_strip_modes() {
 #[test]
 fn utf8_text_passes_through_the_log_stripper_unharmed() {
     for text in ["末端", "┌─┐ ‘quoted’ Ünicode └─┘", "🦀 crab", "Ûh"] {
-        let mut stripper = super::AnsiStripper::new();
+        let mut stripper = AnsiStripper::new();
         let out = stripper.strip(text.as_bytes());
         assert_eq!(
             String::from_utf8(out).as_deref(),
@@ -328,7 +369,7 @@ fn utf8_text_passes_through_the_log_stripper_unharmed() {
     let text = "末端 ▐ ‘q’";
     let bytes = text.as_bytes();
     for split in 1..bytes.len() {
-        let mut stripper = super::AnsiStripper::new();
+        let mut stripper = AnsiStripper::new();
         let mut out = stripper.strip(&bytes[..split]);
         out.extend_from_slice(&stripper.strip(&bytes[split..]));
         assert_eq!(
@@ -367,7 +408,7 @@ fn session_log_stripping_drops_image_payloads_not_just_their_introducers() {
             "beforeafter",
         ),
     ] {
-        let mut stripper = super::AnsiStripper::new();
+        let mut stripper = AnsiStripper::new();
         let out = stripper.strip(input);
         assert_eq!(
             String::from_utf8_lossy(&out),
@@ -383,7 +424,7 @@ fn session_log_stripping_drops_image_payloads_not_just_their_introducers() {
 fn a_control_string_split_across_log_chunks_stays_suppressed() {
     let input = b"before\x1b_Ga=T;payload-with-/tmp/path\x1b\\after";
     for split in 1..input.len() {
-        let mut stripper = super::AnsiStripper::new();
+        let mut stripper = AnsiStripper::new();
         let mut out = stripper.strip(&input[..split]);
         out.extend_from_slice(&stripper.strip(&input[split..]));
         assert_eq!(
@@ -406,7 +447,7 @@ fn a_cancelled_control_string_does_not_swallow_the_rest_of_the_log() {
             input.push(cancel);
             input.extend_from_slice(b"after");
 
-            let mut stripper = super::AnsiStripper::new();
+            let mut stripper = AnsiStripper::new();
             let out = stripper.strip(&input);
             assert_eq!(
                 String::from_utf8_lossy(&out),
@@ -435,7 +476,7 @@ fn an_unterminated_control_string_stops_swallowing_the_log() {
         ));
         input.extend_from_slice(b"after");
 
-        let mut stripper = super::AnsiStripper::new();
+        let mut stripper = AnsiStripper::new();
         let out = stripper.strip(&input);
         let text = String::from_utf8_lossy(&out);
         assert!(
@@ -462,7 +503,7 @@ fn utf8_continuations_count_toward_log_recovery_bound() {
         let scalar_start = input.len();
         input.extend_from_slice(b"\xf0\x9c\x80\x80visible");
         for split in scalar_start..=scalar_start + 4 {
-            let mut filter = super::SessionLogFilter::default();
+            let mut filter = SessionLogFilter::default();
             let mut out = filter.filter(&input[..split], 1, true);
             out.extend(filter.filter(&input[split..], 1, true));
             assert_eq!(
@@ -484,7 +525,7 @@ fn each_control_sequence_gets_the_whole_bound() {
     let payload = "t".repeat(super::MAX_LOGGED_CONTROL_SEQUENCE_BYTES - 100);
     let one = format!("\x1b]0;{payload}\x07");
 
-    let mut stripper = super::AnsiStripper::new();
+    let mut stripper = AnsiStripper::new();
     let mut out = stripper.strip(one.as_bytes());
     out.extend(stripper.strip(b"between"));
     out.extend(stripper.strip(one.as_bytes()));
@@ -506,7 +547,7 @@ fn restarted_osc_gets_a_fresh_log_stripping_budget() {
         let restart = input.len();
         input.extend_from_slice(b"\x1b]0;secret\x07visible");
         for split in [0, restart, restart + 1, restart + 2, input.len()] {
-            let mut filter = super::SessionLogFilter::default();
+            let mut filter = SessionLogFilter::default();
             let mut out = filter.filter(&input[..split], 1, true);
             out.extend(filter.filter(&input[split..], 1, true));
             assert_eq!(out, b"visible", "payload_len={payload_len}, split={split}");
@@ -522,8 +563,6 @@ fn restarted_osc_gets_a_fresh_log_stripping_budget() {
 /// escape-sequence bytes into the log as literal text.
 #[test]
 fn ansi_stripper_persists_state_across_split_sequences() {
-    use super::AnsiStripper;
-
     // CSI params split before the final byte: "\x1b[31mhello" split as
     // "\x1b[3" | "1mhello".
     let mut s = AnsiStripper::new();

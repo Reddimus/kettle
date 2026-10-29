@@ -2359,6 +2359,7 @@ dependencies = [
  "kettle-test-support",
  "kettle-ui",
  "kettle-update",
+ "kettle-vt",
  "libc",
  "log",
  "md-5",
