@@ -834,9 +834,9 @@ jobs:
             return 1
           }
 
-          # A re-run after a failed promotion finds its release already public.
-          # It then only proves the public assets are exactly this run's, and
-          # leaves promotion to the next step; it never uploads over them.
+          # A re-run finds its release already public. It then only proves the
+          # public assets are exactly this run's and never uploads over them;
+          # promotion is the promote job's.
           already_public=
           existing=$(find_release)
           if [ -n "$existing" ]; then
@@ -910,13 +910,32 @@ jobs:
           fi
           # Publish by id for the same reason, so the transition cannot depend
           # on GitHub having associated the tag with a still-draft release.
-          # "latest", where clients read the update feed, is left to the next
-          # step.
+          # "latest", where clients read the update feed, is left to the
+          # promote job.
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
             -F draft=false -f make_latest=false >/dev/null
 
-      # Its own step, so a failure here can be re-run on its own: the step
-      # above accepts a release this run already published.
+  # Moves "latest", where clients read the update feed, to the newest
+  # published release, and never to an older one. One promotion runs at a time
+  # across every tag; a pending one that GitHub replaces with a newer run is
+  # harmless, since that run promotes the newest release, its own included. A
+  # failed promotion can be re-run on its own: publishing is already done.
+  promote:
+    name: point latest at the newest release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: release-promote
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Point latest at the newest published release
         shell: bash
         env:
@@ -924,36 +943,38 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-          # Latest goes to the newest published stable release, which must
-          # include this run's own (the list can lag behind the publication).
-          # Each run checks again after its own update, so whichever writes
-          # last also corrects: overlapping tags settle on the newest one in
-          # any order. A lookup that fails fails the step instead of guessing.
           releases_json="$RUNNER_TEMP/releases.json"
-          promoted=
-          for _ in $(seq 1 10); do
+          latest_err="$RUNNER_TEMP/latest.err"
+          # Waits while the list has not caught up with this run's own
+          # publication (exit 3), then moves latest only to a strictly newer
+          # release, and stops once latest is the newest. Any other failed
+          # lookup fails the job instead of guessing.
+          for _ in $(seq 1 20); do
             gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
               > "$releases_json"
+            if ! current=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" \
+              --jq .tag_name 2>"$latest_err"); then
+              grep -q 'HTTP 404' "$latest_err" || { cat "$latest_err" >&2; exit 1; }
+              current=
+            fi
             status=0
-            newest=$(python3 scripts/newest-release.py --require "$tag" "$releases_json") || status=$?
+            target=$(python3 scripts/newest-release.py --require "$tag" \
+              --above "$current" "$releases_json") || status=$?
             if [ "$status" = 3 ]; then
               sleep 5
               continue
             fi
             test "$status" = 0
-            latest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .id)
-            if [ "$latest" = "$newest" ]; then
-              promoted=1
-              break
+            if [ -z "$target" ]; then
+              echo "latest (${current:-none}) is the newest published release"
+              exit 0
             fi
-            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${newest}" \
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${target}" \
               -f make_latest=true >/dev/null
-            sleep 5
+            sleep 3
           done
-          if [ -z "$promoted" ]; then
-            echo "::error::latest did not settle on the newest published release"
-            exit 1
-          fi
+          echo "::error::latest did not settle on the newest published release"
+          exit 1
 
   # Every published release is installed from the one before it and updated
   # with `kettle update` on Linux (x86_64, arm64) and macOS. It runs after

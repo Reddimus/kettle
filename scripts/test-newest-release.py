@@ -72,5 +72,23 @@ class NewestRelease(unittest.TestCase):
                                     capture_output=True, text=True, check=True)
             self.assertEqual(listed.stdout.strip(), "2")
 
+    def test_above_never_moves_latest_backward(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "releases.json")
+            script = os.path.join(HERE, "newest-release.py")
+            run = lambda *args: subprocess.run([sys.executable, script, *args, path],
+                                               capture_output=True, text=True, check=False)
+            # The list lags: v5.8.0 is latest but still shows as a draft here.
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump([[release(1, "v5.7.0"), release(2, "v5.8.0", draft=True)]], handle)
+            older = run("--require", "v5.7.0", "--above", "v5.8.0")
+            self.assertEqual((older.returncode, older.stdout), (0, ""))
+            newer = run("--require", "v5.7.0", "--above", "v5.6.0")
+            self.assertEqual((newer.returncode, newer.stdout.strip()), (0, "1"))
+            first = run("--require", "v5.7.0", "--above", "")
+            self.assertEqual(first.stdout.strip(), "1")
+            unknown = run("--require", "v5.7.0", "--above", "nightly")
+            self.assertEqual((unknown.returncode, unknown.stdout), (1, ""))
+
 if __name__ == "__main__":
     unittest.main()
