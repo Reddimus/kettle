@@ -54,15 +54,13 @@ fn path_re() -> &'static Regex {
     })
 }
 
-use crate::url_trim::trim_trailing;
-
 /// The path matches in one row's text that can become links, as (start byte,
 /// end byte before trimming, text): trimmed of trailing punctuation, and not
 /// starting inside a longer token. `/bar.png` in `foo(1)/bar.png` would name an unrelated file.
 fn path_candidates(text: &str) -> impl Iterator<Item = (usize, usize, &str)> {
     let runs = crate::hints::quoted_runs(text).collect::<Vec<_>>();
     path_re().find_iter(text).filter_map(move |m| {
-        let matched = trim_trailing(m.as_str());
+        let matched = crate::url_trim::trim_path_trailing(m.as_str());
         let before = text[..m.start()].chars().next_back();
         let after_host = text[..m.start()].strip_suffix(':').is_some_and(|prefix| {
             let previous = prefix
@@ -209,7 +207,7 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
                 group += 1;
             };
         for m in url_re().find_iter(&text) {
-            let matched = trim_trailing(m.as_str());
+            let matched = crate::url_trim::trim_trailing(m.as_str());
             if matched.is_empty() || fragment(m.start(), m.end()) {
                 continue;
             }
@@ -272,6 +270,18 @@ fn row_segments(
 }
 
 fn path_match_to_file_uri(raw: &str, cwd: Option<&str>) -> Option<String> {
+    path_match_to_file_uri_with_home(raw, cwd, || {
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()
+    })
+}
+
+fn path_match_to_file_uri_with_home(
+    raw: &str,
+    cwd: Option<&str>,
+    home: impl FnOnce() -> Option<String>,
+) -> Option<String> {
     let path = strip_location_suffix(raw);
     // Only a quoted path holds a space (see `hints::quoted_paths`); the
     // URL encodes it.
@@ -295,12 +305,13 @@ fn path_match_to_file_uri(raw: &str, cwd: Option<&str>) -> Option<String> {
     } else if normalized.starts_with('/') {
         normalized
     } else if let Some(rest) = normalized.strip_prefix("~/") {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .ok()?;
-        let home = home.replace('\\', "/");
+        let home = home()?;
+        let mut home = home.replace('\\', "/");
         if home.is_empty() || home.starts_with("//") || has_parent_component(&home) {
             return None;
+        }
+        if is_windows_drive_path(&home) {
+            home.insert(0, '/');
         }
         format!("{}/{}", home.trim_end_matches('/'), rest)
     } else {
@@ -339,6 +350,18 @@ fn strip_location_suffix(path: &str) -> &str {
             end = pos;
         } else {
             break;
+        }
+    }
+    if let Some(inner) = path[..end].strip_suffix(')')
+        && let Some(pos) = inner.rfind('(')
+    {
+        let mut parts = inner[pos + 1..].split(',');
+        let numeric = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+        if parts.next().is_some_and(numeric)
+            && parts.next().is_none_or(numeric)
+            && parts.next().is_none()
+        {
+            end = pos;
         }
     }
     &path[..end]
@@ -873,6 +896,44 @@ mod tests {
         assert_eq!(found("--out=/tmp/x.png"), ["/tmp/x.png"]);
         assert_eq!(found("cmd >/tmp/out.log"), ["/tmp/out.log"]);
         assert_eq!(found("see src/main.rs:12"), ["src/main.rs:12"]);
+    }
+
+    #[test]
+    fn parent_directory_path_does_not_become_a_link_to_its_prefix() {
+        let term = term_with(80, &["/tmp/.."], &[]);
+        assert!(links(&term).is_empty());
+    }
+
+    #[test]
+    fn tilde_links_expand_windows_home_directories() {
+        assert_eq!(
+            super::path_match_to_file_uri_with_home("~/Documents/report.pdf", None, || {
+                Some(r"C:\Users\me".into())
+            }),
+            Some("file:///C:/Users/me/Documents/report.pdf".into())
+        );
+    }
+
+    #[test]
+    fn parenthesized_diagnostic_locations_are_not_filename_components() {
+        for suffix in ["(12)", "(12,5)"] {
+            let text = format!("src/main.cpp{suffix}: error C2143");
+            let term = term_with(80, &[&text], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].uri, "file:///work/src/main.cpp");
+        }
+        for name in [
+            "src/main(backup).cpp",
+            "src/main.cpp(backup)",
+            "src/main.cpp(12,x)",
+        ] {
+            assert_eq!(
+                super::strip_location_suffix(name),
+                name,
+                "ordinary parentheses remain in filenames"
+            );
+        }
     }
 
     #[test]

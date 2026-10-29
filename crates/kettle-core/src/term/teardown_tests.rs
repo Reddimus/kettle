@@ -1942,12 +1942,60 @@ fn direct_child_observation_is_opt_in_for_interactive_callers() {
 
 #[cfg(unix)]
 #[test]
+fn fallback_observes_exit_while_output_remains_readable() {
+    use std::io::Write as _;
+    use std::os::unix::net::UnixStream;
+    let (reader, mut writer) = UnixStream::pair().unwrap();
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 7"])
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while unix_child_exit_code_unreaped(child.id()).unwrap().is_none() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    writer.write_all(b"continuous unread output").unwrap();
+    let mut watcher = UnixPtyWatcher::new(child.id(), reader.as_raw_fd());
+    let observed = watcher
+        .wait_fallback(reader.as_raw_fd(), Some(deadline))
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(7));
+    assert_eq!(observed, Some(UnixStartupWake::OutputAndChildExit));
+}
+
+#[cfg(unix)]
+struct WatcherTestChild(std::process::Child);
+
+#[cfg(unix)]
+impl WatcherTestChild {
+    fn silent() -> Self {
+        Self(
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "exec sleep 30"])
+                .spawn()
+                .expect("spawn silent child"),
+        )
+    }
+}
+
+#[cfg(unix)]
+impl Drop for WatcherTestChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn unix_pty_watcher_wakes_for_master_output() {
     use std::io::Write as _;
     use std::os::unix::net::UnixStream;
 
     let (reader, mut writer) = UnixStream::pair().expect("create pollable pair");
-    let mut watcher = UnixPtyWatcher::new(std::process::id(), reader.as_raw_fd());
+    let child = WatcherTestChild::silent();
+    let mut watcher = UnixPtyWatcher::new(child.0.id(), reader.as_raw_fd());
     writer.write_all(b"x").expect("make master readable");
 
     assert_eq!(
@@ -2016,19 +2064,21 @@ fn unix_pty_watcher_honors_a_bounded_wait() {
     use std::os::unix::net::UnixStream;
 
     let (reader, _writer) = UnixStream::pair().expect("create unreadable pair");
-    let mut watcher = UnixPtyWatcher::new(std::process::id(), reader.as_raw_fd());
-    let deadline = std::time::Instant::now() + Duration::from_millis(20);
-
-    assert_eq!(
-        watcher
-            .wait(reader.as_raw_fd(), Some(deadline))
-            .expect("bounded wait"),
-        None
-    );
-    assert!(
-        std::time::Instant::now() >= deadline,
-        "the watcher returned before its deadline without an event"
-    );
+    let child = WatcherTestChild::silent();
+    let mut watcher = UnixPtyWatcher::new(child.0.id(), reader.as_raw_fd());
+    for fallback in [false, true] {
+        let deadline = std::time::Instant::now() + Duration::from_millis(20);
+        let observed = if fallback {
+            watcher.wait_fallback(reader.as_raw_fd(), Some(deadline))
+        } else {
+            watcher.wait(reader.as_raw_fd(), Some(deadline))
+        };
+        assert_eq!(observed.expect("bounded wait"), None);
+        assert!(
+            std::time::Instant::now() >= deadline,
+            "the watcher returned before its deadline without an event"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]

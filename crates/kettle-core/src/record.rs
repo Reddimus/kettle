@@ -738,6 +738,13 @@ fn open_private(path: &Path) -> std::io::Result<File> {
 }
 
 fn create_unique_private_recording(directory: &Path) -> std::io::Result<(PathBuf, File)> {
+    create_unique_private_recording_before_lock(directory, |_| {})
+}
+
+fn create_unique_private_recording_before_lock(
+    directory: &Path,
+    mut before_lock: impl FnMut(&Path),
+) -> std::io::Result<(PathBuf, File)> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -750,6 +757,7 @@ fn create_unique_private_recording(directory: &Path) -> std::io::Result<(PathBuf
         ));
         match kettle_state::create_private_file_new(&path) {
             Ok(file) => {
+                before_lock(&path);
                 if let Err(error) = ensure_regular_file(&file, &path)
                     .and_then(|()| fs4::FileExt::try_lock(&file).map_err(std::io::Error::from))
                 {
@@ -757,6 +765,12 @@ fn create_unique_private_recording(directory: &Path) -> std::io::Result<(PathBuf
                     let _ = std::fs::remove_file(&path);
                     return Err(error);
                 }
+                let current = match std::fs::symlink_metadata(&path) {
+                    Ok(current) => current,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                ensure_same_file(&file.metadata()?, &current, &path)?;
                 return Ok((path, file));
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -2116,6 +2130,39 @@ mod tests {
         for line in contents.lines() {
             serde_json::from_str::<serde_json::Value>(line).expect("no partial JSON event");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recording_allocation_retries_if_retention_unlinked_it_before_lock() {
+        let temp = test_tempdir();
+        let mut other = None;
+        let mut retired = None;
+        let (path, file) =
+            super::create_unique_private_recording_before_lock(temp.path(), |path| {
+                if other.is_none() {
+                    other = Some(super::create_unique_private_recording(temp.path()).unwrap());
+                    prune_recording_directory(temp.path(), u64::MAX, 1).unwrap();
+                    assert!(
+                        !path.exists(),
+                        "retention removed the not-yet-locked recording"
+                    );
+                    retired = Some(path.to_owned());
+                }
+            })
+            .unwrap();
+        assert!(
+            path.exists(),
+            "a successful recording must retain its directory entry"
+        );
+        assert_ne!(Some(&path), retired.as_ref());
+        super::ensure_same_file(
+            &file.metadata().unwrap(),
+            &std::fs::metadata(&path).unwrap(),
+            &path,
+        )
+        .unwrap();
+        drop(other);
     }
 
     #[test]

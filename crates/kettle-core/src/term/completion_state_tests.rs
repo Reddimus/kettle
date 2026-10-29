@@ -38,6 +38,36 @@ fn sequenced_list(session: u64, generation: u64, request: u64) -> CompletionList
 }
 
 #[test]
+fn legacy_alt_tab_does_not_consume_a_completion_request() {
+    let cell = Mutex::new(CompletionSlot::default());
+    reset_completion_session(&cell, 0);
+    apply_completion_update(
+        &cell,
+        CompletionUpdate::Sync {
+            session: 7,
+            keys: kettle_vt::completion::KEY_TAB,
+        },
+    );
+    with_completion_input_admission_slot(
+        &mut cell.lock().unwrap(),
+        &[b"\x1b\t"],
+        Instant::now(),
+        || ((), true),
+    );
+    with_completion_input_admission_slot(
+        &mut cell.lock().unwrap(),
+        &[b"\t"],
+        Instant::now(),
+        || ((), true),
+    );
+    apply_completion_update(&cell, CompletionUpdate::Show(sequenced_list(7, 1, 1)));
+    assert!(
+        cell.lock().unwrap().list.is_some(),
+        "plain Tab still accepts the shell's first completion reply"
+    );
+}
+
+#[test]
 fn a_new_prompt_accepts_a_nested_shells_fresh_generation() {
     let slot = Mutex::new(CompletionSlot::default());
     arm_completion_refresh_slot(&mut slot.lock().unwrap(), Instant::now());

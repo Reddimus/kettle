@@ -142,6 +142,13 @@ fn keeps_kettle_out(text: &[u8]) -> bool {
                 .map(u8::to_ascii_lowercase)
                 .collect();
             folded.windows(b"rcs".len()).any(|window| window == b"rcs")
+                || line
+                    .split(|byte| byte.is_ascii_whitespace() || b";|&()'\"".contains(byte))
+                    .any(|word| {
+                        word.strip_prefix(b"-").is_some_and(|options| {
+                            options.iter().all(u8::is_ascii_alphabetic) && options.contains(&b'f')
+                        })
+                    })
         })
 }
 
@@ -490,6 +497,28 @@ mod tests {
                 "{spelling}"
             );
         }
+    }
+
+    #[test]
+    fn short_no_rcs_option_withholds_zsh_startup_additions() {
+        let dir = private_tempdir("kettle-shell-startup");
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        std::fs::create_dir_all(dir.path().join("etc")).unwrap();
+        let program = dir.path().join("bin/zsh");
+        let system = dir.path().join("etc/zshenv");
+        std::fs::write(&system, "set -f\n").unwrap();
+        assert_eq!(
+            zshenv_keeping_kettle_out(std::slice::from_ref(&system)),
+            Some(system)
+        );
+        let startup = ShellStartup {
+            zsh: Some(dir.path().join("kettle")),
+            fish: None,
+        };
+        assert_eq!(
+            additions(&program, Some(OsStr::new("/original")), &startup),
+            Additions::default()
+        );
     }
 
     /// A whole-line comment changes nothing zsh does, so naming `NO_RCS` or

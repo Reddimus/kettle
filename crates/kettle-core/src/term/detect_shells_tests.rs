@@ -1,20 +1,27 @@
-/// Drift guard. `list_wsl_distros` runs on the UI thread
-/// (new-tab `▾`), so its `wsl.exe` call must stay BOUNDED — a wedged
-/// LxssManager (the `Wsl/Service/E_UNEXPECTED` freeze) otherwise hangs the
-/// window. Pin the worker-thread + `recv_timeout` shape at the source level
-/// (a behavioral test would need to hang a real `wsl.exe`).
+/// Drift guard: both Windows probes use the bounded runner with the same
+/// two-second deadline. The runner's tests exercise timeout cleanup and capture.
 #[test]
 fn list_wsl_distros_is_time_bounded() {
     let src = super::production_source();
-    let start = src
-        .find("fn list_wsl_distros()")
-        .expect("list_wsl_distros present");
-    let body = &src[start..start + 1200];
-    assert!(
-        body.contains("recv_timeout"),
-        "list_wsl_distros must bound the wsl.exe call with recv_timeout so a \
-             hung LxssManager can't freeze the UI thread"
-    );
+    for function in ["fn list_wsl_distros()", "fn vs_dev_info()"] {
+        let body = src
+            .split_once(function)
+            .expect("probe present")
+            .1
+            .split_once("\n}")
+            .expect("probe body")
+            .0;
+        assert!(
+            body.contains(
+                "shell_probe::output(command, std::time::Duration::from_secs(2), 64 * 1024)"
+            ),
+            "{function} must use the bounded runner with a two-second deadline and 64 KiB capture limit"
+        );
+        assert!(
+            !body.contains(".output()"),
+            "{function} must not bypass the bounded runner"
+        );
+    }
 }
 
 #[test]

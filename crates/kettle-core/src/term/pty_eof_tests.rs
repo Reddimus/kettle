@@ -337,3 +337,169 @@ fn relevant_termios_change_with_pending_input_fails_closed() {
     terminated.observe(b"x\n", rules());
     assert_eq!(terminated.record_unterminated(changed), Ok(false));
 }
+
+#[cfg(unix)]
+fn native_stdin_pair() -> (super::PtyStdin, std::fs::File) {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::sync::{Arc, Mutex};
+    let (mut master, mut slave) = (-1, -1);
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    let master = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(master) });
+    let slave = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(slave) });
+    let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
+    assert_eq!(unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut attrs) }, 0);
+    attrs.c_lflag |= libc::ICANON;
+    attrs.c_lflag &= !libc::ECHO;
+    attrs.c_cc[libc::VEOF] = 4;
+    assert_eq!(
+        unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &attrs) },
+        0
+    );
+    let lease = super::UnixPtyStdinLease::acquire(
+        master.as_raw_fd(),
+        Arc::new(Mutex::new(super::PtyStdinLeasePhase::Available)),
+    )
+    .unwrap();
+    (
+        super::PtyStdin {
+            writer: super::PtyWriter(Arc::new(Mutex::new(Box::new(master)))),
+            lease,
+            input_state: super::PtyInputTail::default(),
+            pending_eof: None,
+        },
+        slave,
+    )
+}
+
+#[cfg(unix)]
+fn read_native_record(slave: &mut std::fs::File) -> Vec<u8> {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+    let mut poll_fd = libc::pollfd {
+        fd: slave.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert!(
+        unsafe { libc::poll(&mut poll_fd, 1, 1000) } > 0,
+        "canonical read did not become ready"
+    );
+    let mut bytes = [0; 32];
+    let count = slave.read(&mut bytes).unwrap();
+    bytes[..count].to_vec()
+}
+
+#[cfg(unix)]
+#[test]
+fn reply_between_eof_steps_requires_an_additional_empty_record_signal() {
+    use super::PtyEofProgress;
+    let (mut stdin, mut slave) = native_stdin_pair();
+    assert_eq!(stdin.try_write(b"input").unwrap(), 5);
+    assert_eq!(stdin.try_signal_eof().unwrap(), PtyEofProgress::Pending);
+    assert_eq!(read_native_record(&mut slave), b"input");
+    assert_eq!(stdin.try_write(b"reply").unwrap(), 5);
+    assert_eq!(stdin.try_signal_eof().unwrap(), PtyEofProgress::Pending);
+    assert_eq!(read_native_record(&mut slave), b"reply");
+    assert_eq!(stdin.try_signal_eof().unwrap(), PtyEofProgress::Signaled);
+    assert!(read_native_record(&mut slave).is_empty());
+}
+
+#[test]
+fn eof_admission_rejects_mapped_or_shadowed_control_bytes() {
+    for unsafe_rules in [
+        CanonicalEofRules {
+            veof: Some(b'\r'),
+            ..rules()
+        },
+        CanonicalEofRules {
+            veof: Some(b'\r'),
+            igncr: true,
+            ..rules()
+        },
+        CanonicalEofRules {
+            veof: Some(b'\n'),
+            ..rules()
+        },
+        CanonicalEofRules {
+            veof: Some(0x84),
+            istrip: true,
+            ..rules()
+        },
+        CanonicalEofRules {
+            veof: Some(b'A'),
+            iuclc: true,
+            ..rules()
+        },
+        CanonicalEofRules {
+            veof: Some(0x16),
+            ..rules()
+        },
+        CanonicalEofRules {
+            veof: Some(0x03),
+            ..rules()
+        },
+        CanonicalEofRules {
+            veof: Some(0x13),
+            ..rules()
+        },
+        CanonicalEofRules {
+            veof: Some(0x7f),
+            ..rules()
+        },
+    ] {
+        assert!(
+            !unsafe_rules.supports_eof(),
+            "unsafe VEOF admission: {unsafe_rules:?}"
+        );
+    }
+    assert!(
+        CanonicalEofRules {
+            veof: Some(b'\r'),
+            icrnl: false,
+            ..rules()
+        }
+        .supports_eof()
+    );
+    assert!(rules().supports_eof());
+}
+
+#[cfg(unix)]
+#[test]
+fn mapped_carriage_return_veof_is_not_injected() {
+    use std::os::fd::AsRawFd as _;
+    let (mut stdin, slave) = native_stdin_pair();
+    let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
+    assert_eq!(unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut attrs) }, 0);
+    attrs.c_cc[libc::VEOF] = b'\r';
+    attrs.c_iflag |= libc::ICRNL;
+    attrs.c_iflag &= !libc::IGNCR;
+    assert_eq!(
+        unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &attrs) },
+        0
+    );
+    assert_eq!(
+        stdin.try_signal_eof().unwrap(),
+        super::PtyEofProgress::Unsupported
+    );
+    let mut poll_fd = libc::pollfd {
+        fd: slave.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(
+        unsafe { libc::poll(&mut poll_fd, 1, 0) },
+        0,
+        "unsupported EOF must not deliver a newline"
+    );
+}

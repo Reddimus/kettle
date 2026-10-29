@@ -305,8 +305,18 @@ pub struct CompiledSearch {
     /// A reverse scan of a logical line that yielded, resumed by the next
     /// call with the same bounds and text.
     reverse_progress: Option<ReverseProgress>,
+    forward_progress: Option<ForwardProgress>,
     /// [`MAX_SEARCH_OPERATION_REGEX_BYTES`], smaller in tests.
     regex_budget: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ForwardProgress {
+    bounds: SearchBounds,
+    haystack: SearchHaystack,
+    next_start: usize,
+    last_match_end: Option<usize>,
+    seen: HashSet<SearchSpan>,
 }
 
 #[derive(Clone, Debug)]
@@ -380,23 +390,9 @@ impl CompiledSearch {
         Ok(Some(Self {
             regex,
             reverse_progress: None,
+            forward_progress: None,
             regex_budget: MAX_SEARCH_OPERATION_REGEX_BYTES,
         }))
-    }
-
-    fn nonempty_matches<'a>(
-        &'a self,
-        haystack: &'a SearchHaystack,
-    ) -> impl Iterator<Item = regex_automata::Match> + 'a {
-        let input = Input::new(&haystack.text).span(haystack.search_start..haystack.search_end);
-        // Terminal highlights need at least one cell. Keep the regex engine's standard
-        // leftmost-first ordering and discard zero-width results instead of re-running nullable
-        // expressions at every byte (which can turn an interactive search into quadratic work).
-        // So an earlier empty alternative still shadows a later consuming alternative at the same
-        // position; the filter only hides the empty match.
-        self.regex
-            .find_iter(input)
-            .filter(|found| found.start() != found.end())
     }
 
     /// Find one match from `origin` toward the terminal edge, optionally wrapping once.
@@ -567,15 +563,52 @@ impl CompiledSearch {
                     }
                     work.record(&haystack);
                     let matches_before_chunk = matches.len();
-                    for found in self.nonempty_matches(&haystack) {
+                    let resume_bounds = SearchBounds::new(frontier, end);
+                    let mut progress = self
+                        .forward_progress
+                        .take()
+                        .filter(|progress| {
+                            progress.bounds == resume_bounds && progress.haystack == haystack
+                        })
+                        .unwrap_or_else(|| ForwardProgress {
+                            bounds: resume_bounds,
+                            next_start: haystack.search_start,
+                            last_match_end: None,
+                            haystack: std::mem::take(&mut haystack),
+                            seen: HashSet::new(),
+                        });
+                    while progress.next_start <= progress.haystack.search_end {
                         if should_cancel() {
                             matches.truncate(matches_before_chunk);
                             return cancelled_batch(matches, false);
                         }
-                        let Some(span) = haystack.map_match(found.start(), found.end()) else {
+                        let cost = progress
+                            .haystack
+                            .text
+                            .len()
+                            .saturating_sub(progress.next_start)
+                            .max(1);
+                        if work.regex_bytes + cost > self.regex_budget {
+                            self.forward_progress = Some(progress);
+                            return yielded_batch(matches, frontier);
+                        }
+                        work.regex_bytes += cost;
+                        let input = Input::new(&progress.haystack.text)
+                            .span(progress.next_start..progress.haystack.search_end);
+                        let Some(found) = self.regex.find(input) else {
+                            break;
+                        };
+                        if found.is_empty() && progress.last_match_end == Some(found.end()) {
+                            progress.next_start += 1;
+                            continue;
+                        }
+                        progress.next_start = found.end();
+                        progress.last_match_end = Some(found.end());
+                        let Some(span) = progress.haystack.map_match(found.start(), found.end())
+                        else {
                             continue;
                         };
-                        if (span.end < low || span.start > high) || !seen.insert(span) {
+                        if (span.end < low || span.start > high) || !progress.seen.insert(span) {
                             continue;
                         }
                         matches.push(span);
@@ -585,11 +618,12 @@ impl CompiledSearch {
                                 cancelled: false,
                                 exhausted: false,
                                 truncated: true,
-                                accuracy_limited: haystack.truncated,
+                                accuracy_limited: progress.haystack.truncated,
                                 continuation: None,
                             };
                         }
                     }
+                    haystack = progress.haystack;
                     if haystack.truncated {
                         return accuracy_limited_batch(matches);
                     }
@@ -1396,6 +1430,49 @@ mod tests {
     }
 
     #[test]
+    fn forward_regex_budget_resumes_without_losing_matches() {
+        let mut term = empty_term(512, 1);
+        write_ascii(&mut term, 0, 0, &"a".repeat(512));
+        for first_col in [0, 500] {
+            for pattern in [r"(?:aa)*z|a", r"(?:aa)*z|a|\b", r"\b|(?:aa)*z|a"] {
+                let mut search = CompiledSearch::compile(pattern, CaseSensitivity::Always)
+                    .unwrap()
+                    .unwrap();
+                search.regex_budget = 64 * 1024;
+                let mut bounds =
+                    SearchBounds::new(SearchPoint::new(0, first_col), SearchPoint::new(0, 511));
+                let mut found = Vec::new();
+                let mut yields = 0;
+                loop {
+                    let batch = search.find_in_range(&term, bounds, SearchDirection::Forward, 512);
+                    assert!(!batch.accuracy_limited);
+                    found.extend(batch.matches);
+                    if let Some(next) = batch.continuation {
+                        bounds.start = next;
+                        yields += 1;
+                        assert!(yields < 16, "forward enumeration did not advance");
+                    } else {
+                        assert!(
+                            yields > 0,
+                            "forward enumeration bypassed the regex work budget"
+                        );
+                        assert_eq!(
+                            found,
+                            (first_col.max(usize::from(pattern.starts_with(r"\b")))..512)
+                                .map(|col| {
+                                    let point = SearchPoint::new(0, col);
+                                    SearchSpan::new(point, point)
+                                })
+                                .collect::<Vec<_>>()
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn reverse_regex_budget_resumes_without_losing_rightmost_matches() {
         let mut term = empty_term(512, 1);
         write_ascii(&mut term, 0, 0, &"a".repeat(512));
@@ -1434,6 +1511,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn forward_regex_resume_restarts_after_terminal_text_changes() {
+        let mut term = empty_term(512, 1);
+        write_ascii(&mut term, 0, 0, &"a".repeat(512));
+        let mut search = CompiledSearch::compile(r"(?:aa)*z|a", CaseSensitivity::Always)
+            .unwrap()
+            .unwrap();
+        search.regex_budget = 64 * 1024;
+        let bounds = SearchBounds::new(SearchPoint::new(0, 0), SearchPoint::new(0, 511));
+        let first = search.find_in_range(&term, bounds, SearchDirection::Forward, 512);
+        assert_eq!(first.continuation, Some(bounds.start));
+        write_ascii(&mut term, 0, 0, &"b".repeat(512));
+        let resumed = search.find_in_range(&term, bounds, SearchDirection::Forward, 512);
+        assert!(resumed.exhausted);
+        assert!(resumed.matches.is_empty());
+        assert_eq!(resumed.continuation, None);
     }
 
     #[test]
