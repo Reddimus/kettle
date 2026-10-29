@@ -323,3 +323,31 @@ fn braced_return_type_macros_cannot_leak_test_bodies() {
         }
     }
 }
+
+#[test]
+fn function_pointer_arrows_do_not_close_generic_arguments() {
+    assert_kept(
+        "function pointer and const argument",
+        "fn keep() {}\n#[cfg(test)]\nfn helper() -> Wrapper<fn() -> (), { 1 }> { panic!(\"guard_needle\"); }\nfn also_keep() {}\n",
+        &["fn keep()", "fn also_keep()"],
+        &["fn helper()", "guard_needle"],
+    );
+}
+
+#[test]
+fn inner_test_only_attributes_cannot_satisfy_source_guards() {
+    for src in [
+        "mod helpers { #![cfg(test)] fn helper() { panic!(\"guard_needle\"); } }\nfn keep() {}",
+        "#![cfg(test)]\nfn helper() { panic!(\"guard_needle\"); }",
+        "mod helpers { #![cfg_attr(not(test), cfg(test))] fn helper() { panic!(\"guard_needle\"); } }",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| production_source(src)).is_err(),
+            "test-only inner attribute must fail closed: {src}"
+        );
+    }
+    for attr in ["cfg(not(test))", "cfg(any(unix, test))", "allow(dead_code)"] {
+        let src = format!("#![{attr}]\nmod helpers {{ #![{attr}] fn keep() {{}} }}");
+        assert_eq!(production_source(&src), src);
+    }
+}

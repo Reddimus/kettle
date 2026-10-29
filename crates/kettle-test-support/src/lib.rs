@@ -188,8 +188,9 @@ fn parse_attribute(bytes: &[u8], start: usize) -> Result<Option<Attribute>, ()> 
     while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
         cursor += 1;
     }
-    if bytes.get(cursor) == Some(&b'!') {
-        return Ok(None);
+    let inner = bytes.get(cursor) == Some(&b'!');
+    if inner {
+        cursor = skip_trivia(bytes, cursor + 1)?;
     }
     if bytes.get(cursor) != Some(&b'[') {
         return Ok(None);
@@ -208,9 +209,15 @@ fn parse_attribute(bytes: &[u8], start: usize) -> Result<Option<Attribute>, ()> 
             b']' => {
                 depth -= 1;
                 if depth == 0 {
+                    let has_test_cfg = cfg_is_test_only(&bytes[contents_start..cursor])?;
+                    if inner {
+                        // Removing the next item would leave the rest of the
+                        // test-only enclosing scope in the production slice.
+                        return if has_test_cfg { Err(()) } else { Ok(None) };
+                    }
                     return Ok(Some(Attribute {
                         end: cursor + 1,
-                        has_test_cfg: cfg_is_test_only(&bytes[contents_start..cursor])?,
+                        has_test_cfg,
                     }));
                 }
             }
@@ -491,7 +498,8 @@ fn find_item_end(bytes: &[u8], mut cursor: usize) -> Result<usize, ()> {
             b'>' if !requires_semicolon
                 && paren_depth == 0
                 && bracket_depth == 0
-                && angle_depth > 0 =>
+                && angle_depth > 0
+                && bytes[cursor - 1] != b'-' =>
             {
                 angle_depth -= 1;
             }
