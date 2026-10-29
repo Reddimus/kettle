@@ -2482,8 +2482,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn soft_reset_state(&mut self) {
-        // DECSTR, not RIS. It restores the modifier resources and the
-        // scrolling region; it must leave the display, the scrollback and the
+        // DECSTR restores terminal state while leaving the display, scrollback and
         // title alone. Programs emit `CSI ! p` from terminfo `is2`/`rs2` while
         // initializing, so clearing here would destroy a user's scrollback
         // whenever a program started.
@@ -2493,11 +2492,22 @@ impl<T: EventListener> Handler for Term<T> {
         self.mode.remove(
             TermMode::MODIFY_OTHER_KEYS
                 | TermMode::MODIFY_OTHER_KEYS_NEGOTIATED
-                | TermMode::COLOR_SCHEME_REPORTS,
+                | TermMode::COLOR_SCHEME_REPORTS
+                | TermMode::INSERT
+                | TermMode::ORIGIN
+                | TermMode::APP_CURSOR
+                | TermMode::APP_KEYPAD,
         );
+        self.mode
+            .insert(TermMode::SHOW_CURSOR | TermMode::LINE_WRAP);
         self.mode.insert(unnegotiated_modified_enter_term_mode(
             self.config.unnegotiated_modified_enter,
         ));
+        self.active_charset = Default::default();
+        self.grid.cursor.template = Cell::default();
+        self.grid.cursor.charsets = Default::default();
+        self.grid.cursor.input_needs_wrap = false;
+        self.grid.saved_cursor = Default::default();
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
     }
 
@@ -3050,18 +3060,18 @@ fn decscusr_number(style: CursorStyle) -> u8 {
     if style.blinking { steady - 1 } else { steady }
 }
 
-/// The capabilities XTGETTCAP answers, in terminfo source form. Only what
+/// The capabilities XTGETTCAP answers, with literal control bytes. Only what
 /// this terminal does, and nothing a program would read as a key: truecolor,
 /// styled and coloured underlines, cursor shapes, and the palette size.
 fn termcap_value(name: &[u8]) -> Option<Option<&'static str>> {
     Some(match name {
         b"Tc" | b"RGB" => None,
-        b"setrgbf" => Some("\\E[38;2;%p1%d;%p2%d;%p3%dm"),
-        b"setrgbb" => Some("\\E[48;2;%p1%d;%p2%d;%p3%dm"),
-        b"Smulx" => Some("\\E[4:%p1%dm"),
-        b"Setulc" => Some("\\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m"),
-        b"Ss" => Some("\\E[%p1%d q"),
-        b"Se" => Some("\\E[0 q"),
+        b"setrgbf" => Some("\x1b[38;2;%p1%d;%p2%d;%p3%dm"),
+        b"setrgbb" => Some("\x1b[48;2;%p1%d;%p2%d;%p3%dm"),
+        b"Smulx" => Some("\x1b[4:%p1%dm"),
+        b"Setulc" => Some("\x1b[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m"),
+        b"Ss" => Some("\x1b[%p1%d q"),
+        b"Se" => Some("\x1b[0 q"),
         b"Co" | b"colors" => Some("256"),
         _ => return None,
     })
@@ -3497,6 +3507,35 @@ mod tests {
     }
 
     #[test]
+    fn xtgettcap_undercurl_expands_to_a_control_sequence() {
+        let size = TermSize::new(20, 6);
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &size, listener.clone());
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, b"\x1bP+q536D756C78\x1b\\");
+        let reply = listener.drain().concat();
+        let value = reply
+            .strip_prefix("\x1bP1+r536D756C78=")
+            .unwrap()
+            .strip_suffix("\x1b\\")
+            .unwrap();
+        let bytes: Vec<u8> = value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        let expanded = String::from_utf8(bytes).unwrap().replace("%p1%d", "3");
+        assert_eq!(expanded.as_bytes(), b"\x1b[4:3m");
+        processor.advance(&mut term, expanded.as_bytes());
+        processor.advance(&mut term, b"X");
+        assert!(
+            term.grid()[Line(0)][Column(0)]
+                .flags
+                .contains(Flags::UNDERCURL)
+        );
+    }
+
+    #[test]
     fn xtgettcap_answers_each_name_and_echoes_only_hex() {
         let size = TermSize::new(20, 6);
         let listener = PtyWriteListener::default();
@@ -3517,15 +3556,15 @@ mod tests {
         let every = [
             flag("Tc"),
             flag("RGB"),
-            value("setrgbf", "\\E[38;2;%p1%d;%p2%d;%p3%dm"),
-            value("setrgbb", "\\E[48;2;%p1%d;%p2%d;%p3%dm"),
-            value("Smulx", "\\E[4:%p1%dm"),
+            value("setrgbf", "\x1b[38;2;%p1%d;%p2%d;%p3%dm"),
+            value("setrgbb", "\x1b[48;2;%p1%d;%p2%d;%p3%dm"),
+            value("Smulx", "\x1b[4:%p1%dm"),
             value(
                 "Setulc",
-                "\\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m",
+                "\x1b[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m",
             ),
-            value("Ss", "\\E[%p1%d q"),
-            value("Se", "\\E[0 q"),
+            value("Ss", "\x1b[%p1%d q"),
+            value("Se", "\x1b[0 q"),
             value("Co", "256"),
             value("colors", "256"),
         ];
@@ -3538,7 +3577,7 @@ mod tests {
             listener.drain(),
             [format!(
                 "{}\x1bP0+r6B637575\x1b\\",
-                value("Smulx", "\\E[4:%p1%dm")
+                value("Smulx", "\x1b[4:%p1%dm")
             )]
         );
 
@@ -3688,6 +3727,56 @@ mod tests {
             assert!(!term.mode().contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED));
             assert!(term.mode().contains(TermMode::UNNEGOTIATED_MODIFIED_ENTER));
         }
+    }
+
+    #[test]
+    fn decstr_resets_attributes_modes_and_saved_cursor() {
+        let size = TermSize::new(20, 4);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, b"history\r\nkeep\r\nrows\r\nhere\r\n");
+        processor.advance(&mut term, b"\x1b]2;title\x07\x1b[31;1m\x1b)0\x0e\x1b7");
+        processor.advance(
+            &mut term,
+            b"\x1b[4h\x1b[?1h\x1b=\x1b[?7l\x1b[?25l\x1b[2;3r\x1b[?6h",
+        );
+        let before = term.grid().clone();
+        let point = term.grid.cursor.point;
+        processor.advance(&mut term, b"\x1b[!p");
+
+        assert_eq!(
+            term.grid.cursor.template,
+            Cell::default(),
+            "DECSTR resets SGR"
+        );
+        assert!(!term.mode.intersects(
+            TermMode::INSERT | TermMode::ORIGIN | TermMode::APP_CURSOR | TermMode::APP_KEYPAD
+        ));
+        assert!(
+            term.mode
+                .contains(TermMode::SHOW_CURSOR | TermMode::LINE_WRAP)
+        );
+        assert_eq!(term.grid.cursor.point, point);
+        assert_eq!(term.grid.cursor.charsets, Default::default());
+        assert_eq!(term.active_charset, Default::default());
+        assert_eq!(term.grid.saved_cursor, Default::default());
+        assert_eq!(term.scroll_region, Line(0)..Line(4));
+        assert_eq!(term.title.as_deref(), Some("title"));
+        assert_eq!(term.grid.history_origin(), before.history_origin());
+        assert_eq!(term.grid.history_size(), before.history_size());
+        for line in -(before.history_size() as i32)..4 {
+            assert_eq!(term.grid[Line(line)], before[Line(line)], "row {line}");
+        }
+        processor.advance(&mut term, b"q");
+        assert_eq!(term.grid[point.line][point.column].c, 'q');
+        assert_eq!(term.grid[point.line][point.column].fg, Cell::default().fg);
+        assert_eq!(
+            term.grid[point.line][point.column + 1],
+            before[point.line][point.column + 1]
+        );
+        processor.advance(&mut term, b"\x1b8");
+        assert_eq!(term.grid.cursor.point, Point::default());
+        assert_eq!(term.grid.cursor.template, Cell::default());
     }
 
     /// DECSTR restores the modifier resources like RIS, but it is a SOFT
@@ -3969,11 +4058,17 @@ mod tests {
         );
         selection.update(Point::new(Line(1), Column(4)), Side::Right);
         term.selection = Some(selection);
-        assert_eq!(term.selection_to_string(), Some("abcd\u{754c}\u{301}".into()));
+        assert_eq!(
+            term.selection_to_string(),
+            Some("abcd\u{754c}\u{301}".into())
+        );
 
         let end = Point::new(Line(2), Column(1));
         term.selection.as_mut().unwrap().update(end, Side::Right);
-        assert_eq!(term.selection_to_string(), Some("abcd\u{754c}\u{301}".into()));
+        assert_eq!(
+            term.selection_to_string(),
+            Some("abcd\u{754c}\u{301}".into())
+        );
     }
 
     #[test]

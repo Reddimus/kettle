@@ -130,6 +130,15 @@ date. Recheck that before upgrading a crate or dropping a patch.
   - ED 1 with the cursor on the second row clears the first row too.
 
   Upstream `master` still had all seven of these bugs on 2026-10-16.
+  Three more from the 5.7.0 audit, not yet checked against upstream:
+  - Growing the grid keeps `history_origin` when the synthetic padding it
+    scrolls in is not history.
+  - The terminfo capability values the terminal reports for XTGETTCAP carry
+    a real ESC byte where they start with one, so a decoded `Smulx` enables
+    undercurl.
+  - DECSTR (soft reset) resets SGR, insert, origin and application modes,
+    character sets and the saved cursor, and restores cursor visibility and
+    autowrap, keeping contents, history, title and the cursor's position.
 - Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
   is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
   from 2026-08-31, is `0.26.1-dev`. Since
@@ -360,7 +369,10 @@ the `Restore` and `Disable` variants, so it does not build against an upstream
   required by Kettle's warnings-denied direct-package clippy gate. Five
   additional Unix-only cleanups apply Rust 1.97's suggestions for redundant imports,
   borrows, conversions, and `Option` dereferencing. Drop those cleanups if a
-  later upstream release already carries them.
+  later upstream release already carries them. From the 5.7.0 audit (not yet
+  checked upstream): the waiter keeps completion and the registered waker
+  under one lock, so a waker registered after completion is woken at once
+  instead of never.
 - Upstream status, checked 2026-09-30: crates.io's newest `portable-pty` is
   still 0.9.0, published 2025-02-11. WezTerm develops it in the `pty/`
   directory of wezterm/wezterm, whose `main` is at `cab25161` from 2026-09-29.
@@ -422,7 +434,9 @@ them.
   for a file list first, as a paste does, its 1 MiB+ transfer was left waiting
   on an undeleted segment, and the text read after it timed out (4 s for each
   of six formats). A transfer of another type is drained, then refused. Upstream
-  `master` reads segments the same old way (checked 2026-10-16).
+  `master` reads segments the same old way (checked 2026-10-16). The drain of a
+  refused transfer is bounded (four seconds and 4,096 segments, not renewed by
+  each segment), so an owner that keeps sending cannot hold a read forever.
 - Upstream: backport the decoder line from
   [b4e0616](https://github.com/1Password/arboard/commit/b4e061622caa1356425f81073d9685166017c7f9).
   On 2026-10-14 the latest published version was still 3.6.1. The upstream

@@ -60,7 +60,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // Move existing lines up for every line that couldn't be pulled from history.
         if from_history != lines_added {
             let delta = lines_added - from_history;
+            let history_origin = self.history_origin;
             self.scroll_up(&(Line(0)..Line(target as i32)), delta);
+            // Only newly allocated padding was discarded by this scroll.
+            self.history_origin = history_origin;
         }
 
         // Move cursor down for every line pulled from history.
@@ -402,7 +405,11 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             // The cursor's row, which may now be above the screen.
             let cursor_line = cursor_line_before.0 as isize - cursor_pushed_up;
             let below = (self.lines as isize - 1 - cursor_line).max(0) as usize;
-            let blank = reversed.iter().take(below).take_while(|row| row.is_clear()).count();
+            let blank = reversed
+                .iter()
+                .take(below)
+                .take_while(|row| row.is_clear())
+                .count();
             let room = min(added_on_screen, blank);
             if room > 0 {
                 reversed.drain(..room);
