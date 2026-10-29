@@ -879,6 +879,34 @@ fn require_live_bundle_upgrade(
     require_strict_upgrade(candidate, &installed)
 }
 
+fn require_live_bundle_identity(
+    directory: &File,
+    parent: &File,
+    name: &std::ffi::OsStr,
+) -> Result<(), UpdateError> {
+    let live = open_directory_at(parent, &c_name(name)?)?.metadata()?;
+    let held = directory.metadata()?;
+    if live.dev() != held.dev() || live.ino() != held.ino() {
+        return Err(UpdateError::UpdateLocked);
+    }
+    Ok(())
+}
+
+fn lock_live_bundle(parent: &File, name: &std::ffi::OsStr) -> Result<File, UpdateError> {
+    let directory = open_directory_at(parent, &c_name(name)?)?;
+    if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
+            UpdateError::UpdateLocked
+        } else {
+            error.into()
+        });
+    }
+    // An exchange can displace the directory between open and lock.
+    require_live_bundle_identity(&directory, parent, name)?;
+    Ok(directory)
+}
+
 /// The `CFBundleShortVersionString` an app bundle's `Info.plist` records.
 pub(crate) fn read_bundle_version(info_plist: &Path) -> Result<semver::Version, UpdateError> {
     let output = Command::new("/usr/libexec/PlistBuddy")
@@ -942,6 +970,11 @@ fn install_bundle_update_with_download(
     let lock_path = update_lock_path(bundle)?;
     let _lock = kettle_state::ExclusiveFileLock::try_acquire(&lock_path)?
         .ok_or(UpdateError::UpdateLocked)?;
+    let parent_directory = open_directory(parent)?;
+    let live_name = bundle.file_name().ok_or_else(|| {
+        UpdateError::UnmanagedInstall("the bundle path has no final component".to_string())
+    })?;
+    let bundle_lock = lock_live_bundle(&parent_directory, live_name)?;
     require_live_bundle_upgrade(install, &update.version, verifier)?;
     sweep_interrupted_updates(parent);
 
@@ -958,12 +991,9 @@ fn install_bundle_update_with_download(
         return Err(error);
     }
 
-    let parent_directory = open_directory(parent)?;
-    let live_name = bundle.file_name().ok_or_else(|| {
-        UpdateError::UnmanagedInstall("the bundle path has no final component".to_string())
-    })?;
-
-    if let Err(error) = require_live_bundle_upgrade(install, &update.version, verifier) {
+    if let Err(error) = require_live_bundle_identity(&bundle_lock, &parent_directory, live_name)
+        .and_then(|()| require_live_bundle_upgrade(install, &update.version, verifier))
+    {
         staging.discard();
         return Err(error);
     }
@@ -1622,6 +1652,70 @@ mod tests {
         let _restore = StateHome(std::env::var_os("XDG_STATE_HOME"));
         unsafe { std::env::set_var("XDG_STATE_HOME", state) };
         body()
+    }
+
+    #[test]
+    fn bundle_updates_share_a_lock_across_state_homes() {
+        let _serial = serialized();
+        for replaced_while_downloading in [false, true] {
+            let temp = kettle_test_support::private_tempdir("kettle-macos-bundle-lock-");
+            let seal = StubSeal::official();
+            let executable = seed_bundle(temp.path(), "kettle.app");
+            let install = locate_bundle_install(&executable, &seal).unwrap();
+            let plist = format!(
+                "<plist version=\"1.0\"><dict>\
+                 <key>CFBundleShortVersionString</key><string>{}</string>\
+                 </dict></plist>",
+                env!("CARGO_PKG_VERSION")
+            );
+            std::fs::write(&install.marker_path, &plist).unwrap();
+            let archive = official_zip();
+            let update = AvailableUpdate {
+                version: semver::Version::new(99, 0, 0),
+                tag: "v99.0.0".into(),
+                release_url: "https://example.invalid/release".into(),
+                download_url: None,
+                asset: Some(crate::ManifestAsset {
+                    target: current_target().unwrap().into(),
+                    name: "kettle-macos-universal.zip".into(),
+                    size: archive.len() as u64,
+                    sha256: hex::encode(Sha256::digest(&archive)),
+                }),
+                signed_manifest: None,
+            };
+            let _state_lock = with_state_home(&temp.path().join("state-a"), || {
+                kettle_state::ExclusiveFileLock::try_acquire(
+                    &update_lock_path(&install.prefix).unwrap(),
+                )
+                .unwrap()
+                .unwrap()
+            });
+            let directory = open_directory(&install.prefix).unwrap();
+            if !replaced_while_downloading {
+                assert_eq!(
+                    unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                    0
+                );
+            }
+            let result = with_state_home(&temp.path().join("state-b"), || {
+                install_bundle_update_with_download(&update, &install, &seal, || {
+                    if replaced_while_downloading {
+                        std::fs::rename(&install.prefix, temp.path().join("displaced.app"))?;
+                        seed_bundle(temp.path(), "kettle.app");
+                        std::fs::write(&install.marker_path, &plist)?;
+                    }
+                    Ok(archive)
+                })
+            });
+            assert!(
+                matches!(result, Err(UpdateError::UpdateLocked)),
+                "an update must hold a lock on the current live bundle: {result:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&install.marker_path).unwrap(),
+                plist
+            );
+        }
     }
 
     #[test]

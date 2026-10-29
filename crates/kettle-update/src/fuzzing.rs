@@ -4,10 +4,9 @@
 //! The fuzz target (feature `fuzzing`) and the in-process sweep below call
 //! the same function.
 //!
-//! No manifest here carries the release key's signature, so every one must
-//! be refused under that key. Signed with a test key instead, a manifest the
-//! updater accepts has unique, safely named assets of a bounded size with a
-//! lowercase SHA-256, and flipping any bit of it voids the signature.
+//! Inputs may include authentic release metadata. Signed with a test key, a
+//! manifest the updater accepts has unique, safely named assets of a bounded
+//! size with a lowercase SHA-256, and flipping any bit of it voids the signature.
 
 use std::path::{Component, Path};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -48,10 +47,7 @@ fn feed(bytes: &[u8], flip: usize) {
         Some(at) => (&bytes[..at], &bytes[at + 1..]),
         None => (bytes, &[][..]),
     };
-    assert!(
-        verify_manifest(manifest, signature, &UPDATE_PUBLIC_KEY).is_err(),
-        "a manifest verified under the release key"
-    );
+    let _ = verify_manifest(manifest, signature, &UPDATE_PUBLIC_KEY);
     let test_key = SigningKey::from_bytes(&TEST_SECRET)
         .verifying_key()
         .to_bytes();
@@ -116,6 +112,15 @@ mod tests {
     use kettle_test_support::mutate::{cases, save_seeds};
 
     use super::*;
+
+    #[test]
+    fn authentic_release_metadata_does_not_panic() {
+        let mut input = vec![0];
+        input.extend_from_slice(include_bytes!("../tests/fixtures/manifest-v1.json"));
+        input.push(0);
+        input.extend_from_slice(include_bytes!("../tests/fixtures/manifest-v1.json.sig"));
+        update(&input);
+    }
 
     #[test]
     fn mutated_feeds_and_archive_paths_stay_within_what_the_updater_accepts() {
