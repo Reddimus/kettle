@@ -657,10 +657,8 @@ impl App {
         let Some(ctx) = &pane.remote_context else {
             return;
         };
-        // clone_session_command returns None when a host/user/container token
-        // is unsafe (control chars / shell metachars that can't be
-        // neutralized). Drop the menu item and its separator rather than type
-        // an unsafe line into the PTY.
+        // Unreproducible argv suppresses the action. A failed environment
+        // capture keeps a refusal action that uses the existing failure notice.
         if let Some(item) = remote_reconnect_item(ctx, &self.ui_text) {
             items.push(ContextMenuItem::Separator);
             items.push(item);

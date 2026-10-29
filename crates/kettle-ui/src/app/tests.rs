@@ -17463,8 +17463,44 @@ fn remote_reconnect_menu_uses_new_pane_action() {
         else {
             panic!("reconnect must open a new pane");
         };
-        assert_eq!(Some(command), kettle_remote::clone_session_command(&ctx));
+        assert_eq!(command, kettle_remote::clone_session_command(&ctx));
     }
+}
+
+#[test]
+fn remote_reconnect_unavailable_environment_reports_failure_without_spawning() {
+    use super::{Config, PtyGeometry};
+    let mut ctx = kettle_remote::RemoteContext::Container {
+        runtime: kettle_remote::ContainerRuntime::Kubectl,
+        container: "api".into(),
+        options: kettle_remote::ContainerOptions {
+            environment_unavailable: true,
+            unreproducible: true,
+            ..Default::default()
+        },
+    };
+    let item = super::remote_reconnect_item(&ctx, &EN_TEXT).expect("reconnect refusal action");
+    let Some(super::ContextMenuClick::ReconnectRemote(command)) = super::item_to_click(&item, 0)
+    else {
+        panic!("reconnect refusal must use the existing failure-notice path");
+    };
+    let mut mux = Mux::new();
+    let result = super::reconnect_remote_session(
+        &mut mux,
+        &Config::default(),
+        PtyGeometry::from_cell_size(80, 24, 8, 16),
+        Arc::new(|| {}),
+        command,
+    );
+    assert!(result.is_err());
+    assert!(mux.panes.is_empty());
+    if let kettle_remote::RemoteContext::Container { options, .. } = &mut ctx {
+        options.environment_unavailable = false;
+    }
+    assert!(
+        super::remote_reconnect_item(&ctx, &EN_TEXT).is_none(),
+        "unreproducible arguments still suppress the reconnect action"
+    );
 }
 
 #[cfg(unix)]
@@ -17489,10 +17525,12 @@ fn remote_reconnect_spawns_client_without_typing_into_source() {
         &cfg,
         geometry,
         waker,
-        kettle_remote::SessionCommand {
+        Some(kettle_remote::SessionCommand {
             program: "/bin/cat".into(),
             args: Vec::new(),
-        },
+            environment: Default::default(),
+            argv0: None,
+        }),
     )
     .unwrap();
     let target = mux.active_focus().unwrap();
@@ -17544,10 +17582,12 @@ fn remote_reconnect_passes_literal_arguments_to_client() {
         &cfg,
         geometry,
         Arc::new(|| {}),
-        kettle_remote::SessionCommand {
+        Some(kettle_remote::SessionCommand {
             program: std::env::current_exe().unwrap().to_str().unwrap().into(),
             args: args.clone(),
-        },
+            environment: Default::default(),
+            argv0: None,
+        }),
     )
     .unwrap();
     let target = mux.active_focus().unwrap();
@@ -17592,12 +17632,130 @@ fn remote_reconnect_uses_detected_client_outside_kettle_path() {
     .map(String::from)
     .to_vec();
     command.args = args.clone();
-    super::reconnect_remote_session(&mut mux, &cfg, geometry, Arc::new(|| {}), command).unwrap();
+    super::reconnect_remote_session(&mut mux, &cfg, geometry, Arc::new(|| {}), Some(command))
+        .unwrap();
     let target = mux.active_focus().unwrap();
     assert_eq!(&mux.panes[&target].argv[1..], args);
     assert!(wait_for_pane_screen(&mux, target, |text, _| text
         .contains("RECONNECT_ARGV_PRESERVED")));
     mux.kill_children();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[ignore = "subprocess fixture for reconnect environment and argv0"]
+fn remote_reconnect_environment_child() {
+    if std::env::var_os("KETTLE_RECONNECT_CAPTURE").is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
+    assert_eq!(std::env::args().next().unwrap(), "docker");
+    assert_eq!(std::env::var("DOCKER_HOST").unwrap(), "tcp://client:2376");
+    assert_eq!(std::env::var("DOCKER_TLS_VERIFY").unwrap(), "1");
+    for name in ["DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH"] {
+        assert!(
+            std::env::var_os(name).is_none(),
+            "{name} must remain absent"
+        );
+    }
+    assert_eq!(std::env::var("PRIVATE_TOKEN").unwrap(), "from-config");
+    println!("RECONNECT_ENV_AND_ARGV0_PRESERVED");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn remote_reconnect_preserves_client_environment_and_invocation() {
+    use super::{Config, PtyGeometry};
+    use kettle_remote::ProcessTree;
+    let args = [
+        "--exact",
+        "app::tests::remote_reconnect_environment_child",
+        "--ignored",
+        "--nocapture",
+    ]
+    .map(String::from)
+    .to_vec();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(&args)
+        .env_clear()
+        .env("KETTLE_RECONNECT_CAPTURE", "1")
+        .env("DOCKER_HOST", "tcp://client:2376")
+        .env("DOCKER_TLS_VERIFY", "1")
+        .env("PRIVATE_TOKEN", "from-client")
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let sys = kettle_remote::SysinfoSystem::new();
+    let names = [
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_CONFIG",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+    ];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let environment = loop {
+        if let Some(environment) = sys.connection_environment_of(child.id(), &names)
+            && environment
+                .iter()
+                .any(|(name, value)| name == "DOCKER_HOST" && value == Some("tcp://client:2376"))
+        {
+            break environment;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("client environment never became readable");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    let context = kettle_remote::RemoteContext::Container {
+        runtime: kettle_remote::ContainerRuntime::Docker,
+        container: "web".into(),
+        options: kettle_remote::ContainerOptions {
+            executable: Some(std::env::current_exe().unwrap().to_str().unwrap().into()),
+            invocation: Some("docker".into()),
+            environment,
+            ..Default::default()
+        },
+    };
+    let mut command = kettle_remote::clone_session_command(&context).unwrap();
+    command.args = args;
+    let cfg = Config {
+        env: vec![
+            ("DOCKER_HOST".into(), "tcp://wrong:2376".into()),
+            ("DOCKER_CONTEXT".into(), "wrong-context".into()),
+            ("PRIVATE_TOKEN".into(), "from-config".into()),
+        ],
+        shell: Some("kettle-nonexistent-shell".into()),
+        login_shell: true,
+        shell_integration: true,
+        ..Default::default()
+    };
+    let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
+    for existing_pane in [false, true] {
+        let mut mux = Mux::new();
+        if existing_pane {
+            mux.new_tab_with_geometry(&cfg, geometry, Arc::new(|| {}), &["/bin/cat".into()], None)
+                .unwrap();
+        }
+        super::reconnect_remote_session(
+            &mut mux,
+            &cfg,
+            geometry,
+            Arc::new(|| {}),
+            Some(command.clone()),
+        )
+        .unwrap();
+        let target = mux.active_focus().unwrap();
+        let passed = wait_for_pane_screen(&mux, target, |text, _| {
+            text.contains("RECONNECT_ENV_AND_ARGV0_PRESERVED")
+        });
+        mux.kill_children();
+        assert!(passed, "client must receive captured env and invocation");
+    }
 }
 
 #[test]

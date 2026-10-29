@@ -321,6 +321,10 @@ the `Restore` and `Disable` variants, so it does not build against an upstream
   the arguments follow. Upstream panics on any argument for the default
   program, so Kettle could not hand the user's fish its `-C` startup without
   naming the shell itself and losing that login `argv[0]`.
+  On Unix, `CommandBuilder::set_argv0` preserves a client's original invocation
+  name independently of its executable path, so reconnect can launch multicall
+  clients outside Kettle's PATH in the correct mode. Serialized builders without
+  the new field retain their existing invocation behavior.
   On Unix, `CommandBuilder::resolve_program` names the executable a spawn
   would run, through the same `PATH` search, child working directory and
   access checks, so Kettle's shell startup inspects that same file. Relative

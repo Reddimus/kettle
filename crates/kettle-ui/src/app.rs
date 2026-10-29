@@ -7522,7 +7522,7 @@ enum ContextMenuClick {
     /// `CMD\n` to the focused pane's PTY.
     ConfigCommand(String),
     /// Reopen a detected session in a fresh local pane.
-    ReconnectRemote(kettle_remote::SessionCommand),
+    ReconnectRemote(Option<kettle_remote::SessionCommand>),
     /// Profile picked from the right-click "Profile ▸" submenu.
     /// Dispatch sets `App::config_path` via the profile-path
     /// resolution helper and calls `reload_config`.
@@ -7595,7 +7595,9 @@ enum ContextMenuItem {
     },
     ReconnectItem {
         label: String,
-        command: kettle_remote::SessionCommand,
+        // None keeps an unreadable-environment action available to explain
+        // the refusal through the existing split-failure notice.
+        command: Option<kettle_remote::SessionCommand>,
     },
     /// A submenu row carries a nested item list; activation replaces the visible
     /// menu level.
@@ -10182,9 +10184,15 @@ fn remote_reconnect_item(
     ctx: &kettle_remote::RemoteContext,
     tr: &kettle_i18n::Translator,
 ) -> Option<ContextMenuItem> {
+    let command = kettle_remote::clone_session_command(ctx);
+    let environment_unavailable = matches!(ctx,
+        kettle_remote::RemoteContext::Container { options, .. } if options.environment_unavailable);
+    if command.is_none() && !environment_unavailable {
+        return None;
+    }
     Some(ContextMenuItem::ReconnectItem {
         label: remote_reconnect_label(ctx, tr),
-        command: kettle_remote::clone_session_command(ctx)?,
+        command,
     })
 }
 
@@ -10193,17 +10201,28 @@ fn reconnect_remote_session(
     cfg: &Config,
     geometry: PtyGeometry,
     waker: kettle_core::Waker,
-    command: kettle_remote::SessionCommand,
+    command: Option<kettle_remote::SessionCommand>,
 ) -> Result<()> {
+    let command = command.ok_or_else(|| anyhow::anyhow!(
+        "Cannot reconnect: the original client's connection environment could not be read safely"
+    ))?;
     let argv = std::iter::once(command.program)
         .chain(command.args)
         .collect();
-    let client_cfg = Config {
+    let mut client_cfg = Config {
         login_shell: false,
         shell_integration: false,
         ..cfg.clone()
     };
-    mux.split_with_geometry(
+    let mut remove_env = Vec::new();
+    for (name, value) in command.environment.iter() {
+        client_cfg.env.retain(|(key, _)| key != name);
+        match value {
+            Some(value) => client_cfg.env.push((name.to_owned(), value.to_owned())),
+            None => remove_env.push(name.to_owned()),
+        }
+    }
+    mux.split_with_launch(
         Dir::Horizontal,
         false,
         &client_cfg,
@@ -10211,6 +10230,10 @@ fn reconnect_remote_session(
         waker,
         argv,
         None,
+        &kettle_core::LaunchOverrides {
+            argv0: command.argv0.as_deref(),
+            remove_env: &remove_env,
+        },
     )?;
     Ok(())
 }

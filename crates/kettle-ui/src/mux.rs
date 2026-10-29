@@ -2051,6 +2051,26 @@ impl Mux {
         cwd: Option<&str>,
         argv: &[String],
     ) -> Result<u64> {
+        self.spawn_pane_with_launch(
+            cfg,
+            geometry,
+            waker,
+            cwd,
+            argv,
+            &kettle_core::LaunchOverrides::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_pane_with_launch(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        cwd: Option<&str>,
+        argv: &[String],
+        launch: &kettle_core::LaunchOverrides<'_>,
+    ) -> Result<u64> {
         let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) =
             crossbeam_channel::bounded(TERM_EVENT_QUEUE_DEPTH);
         // Terminator plugin parity: optional output sidechannel for
@@ -2090,9 +2110,9 @@ impl Mux {
         // cfg.term / cfg.colorterm / cfg.login_shell take effect at
         // PTY spawn. The legacy `Terminal::new` shim still exists
         // for non-Mux callers (currently none in-tree).
-        let mut term = Terminal::new_with_env_and_output_geometry_and_capabilities(
+        let mut term = Terminal::new_with_launch_environment(
             argv,
-            cwd,
+            cwd.map(std::path::Path::new),
             cfg.scrollback,
             cfg.scrollback_bytes,
             geometry,
@@ -2102,6 +2122,7 @@ impl Mux {
             &cfg.term,
             &cfg.colorterm,
             &pane_env,
+            launch,
             cfg.login_shell,
             cfg.shell_integration,
             &shell_startup,
@@ -2112,6 +2133,7 @@ impl Mux {
                 observe_child_exit: true,
                 color_scheme_dark: self.color_scheme_dark,
             },
+            kettle_core::WorkingDirectoryPolicy::FallbackToHome,
             tx,
             waker.clone(),
             output_tx,
@@ -2479,7 +2501,27 @@ impl Mux {
         argv: &[String],
         cwd: Option<&str>,
     ) -> Result<()> {
-        let id = self.spawn_pane(cfg, geometry, waker, cwd, argv)?;
+        self.new_tab_with_overrides(
+            cfg,
+            geometry,
+            waker,
+            argv,
+            cwd,
+            &kettle_core::LaunchOverrides::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_tab_with_overrides(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        argv: &[String],
+        cwd: Option<&str>,
+        launch: &kettle_core::LaunchOverrides<'_>,
+    ) -> Result<()> {
+        let id = self.spawn_pane_with_launch(cfg, geometry, waker, cwd, argv, launch)?;
         let new_tab = Tab {
             root: Node::Leaf(id),
             focus: id,
@@ -2754,11 +2796,43 @@ impl Mux {
         argv: Vec<String>,
         raw_cwd: Option<String>,
     ) -> Result<()> {
+        self.split_with_launch(
+            dir,
+            new_first,
+            cfg,
+            geometry,
+            waker,
+            argv,
+            raw_cwd,
+            &kettle_core::LaunchOverrides::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_with_launch(
+        &mut self,
+        dir: Dir,
+        new_first: bool,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        argv: Vec<String>,
+        raw_cwd: Option<String>,
+        launch: &kettle_core::LaunchOverrides<'_>,
+    ) -> Result<()> {
         let (argv, cwd) = launch_cwd(argv, raw_cwd);
         if self.tabs.is_empty() {
-            return self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref());
+            return self.new_tab_with_overrides(
+                cfg,
+                geometry,
+                waker,
+                &argv,
+                cwd.as_deref(),
+                launch,
+            );
         }
-        let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
+        let new_id =
+            self.spawn_pane_with_launch(cfg, geometry, waker, cwd.as_deref(), &argv, launch)?;
         self.inherit_split_group(cfg, new_id);
         let a = self.active;
         let grafted = self
@@ -9433,7 +9507,7 @@ mod node_tests {
             .find("pane_environment(cfg, id, std::process::id())")
             .expect("pane environment names the pane");
         let spawned = spawn
-            .find("Terminal::new_with_env_and_output_geometry_and_capabilities(")
+            .find("Terminal::new_with_launch_environment(")
             .expect("terminal spawn");
         assert!(allocated < environment && environment < spawned);
         assert_eq!(spawn.matches("NEXT_PANE_ID.fetch_add(").count(), 1);

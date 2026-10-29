@@ -315,6 +315,10 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
 pub struct CommandBuilder {
     args: Vec<OsString>,
+    /// Unix invocation name, independent of the executable used for spawning.
+    #[cfg(unix)]
+    #[cfg_attr(feature = "serde_support", serde(default))]
+    argv0: Option<OsString>,
     envs: BTreeMap<OsString, EnvEntry>,
     cwd: Option<OsString>,
     #[cfg(unix)]
@@ -341,6 +345,8 @@ impl CommandBuilder {
     pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
         Self {
             args: vec![program.as_ref().to_owned()],
+            #[cfg(unix)]
+            argv0: None,
             envs: get_base_env(),
             cwd: None,
             #[cfg(unix)]
@@ -356,6 +362,8 @@ impl CommandBuilder {
     pub fn from_argv(args: Vec<OsString>) -> Self {
         Self {
             args,
+            #[cfg(unix)]
+            argv0: None,
             envs: get_base_env(),
             cwd: None,
             #[cfg(unix)]
@@ -365,6 +373,12 @@ impl CommandBuilder {
             require_cwd: false,
             shell_args: vec![],
         }
+    }
+
+    /// Set Unix argv[0] without changing the executable resolved for spawn.
+    #[cfg(unix)]
+    pub fn set_argv0<S: AsRef<OsStr>>(&mut self, argv0: S) {
+        self.argv0 = Some(argv0.as_ref().to_owned());
     }
 
     /// Set whether we should set the pty as the controlling terminal.
@@ -409,6 +423,8 @@ impl CommandBuilder {
     pub fn new_default_prog() -> Self {
         Self {
             args: vec![],
+            #[cfg(unix)]
+            argv0: None,
             envs: get_base_env(),
             cwd: None,
             #[cfg(unix)]
@@ -708,7 +724,7 @@ impl CommandBuilder {
         } else {
             let resolved = self.search_path(&self.args[0], &dir)?;
             let mut cmd = std::process::Command::new(&resolved);
-            cmd.arg0(&self.args[0]);
+            cmd.arg0(self.argv0.as_ref().unwrap_or(&self.args[0]));
             cmd.args(&self.args[1..]);
             cmd
         };
@@ -1084,6 +1100,33 @@ mod tests {
             println!("iterated_envs: {:?}", iterated_envs);
             assert!(iterated_envs.is_empty());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_argv0_preserves_client_mode_with_a_separate_executable() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "printf '%s' \"$0\""]);
+        cmd.set_argv0("ssh");
+        assert_eq!(cmd.resolve_program().unwrap(), OsStr::new("/bin/sh"));
+        let output = cmd.as_command().unwrap().output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ssh");
+    }
+
+    #[cfg(all(unix, feature = "serde_support"))]
+    #[test]
+    fn serialized_builder_preserves_argv0_and_defaults_old_builders() {
+        let mut original = CommandBuilder::new("/bin/sh");
+        original.env_clear();
+        let mut serialized = serde_json::to_value(&original).unwrap();
+        serialized.as_object_mut().unwrap().remove("argv0");
+        let restored: CommandBuilder = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored, original);
+        original.set_argv0("ssh");
+        let serialized = serde_json::to_value(&original).unwrap();
+        let restored: CommandBuilder = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored, original);
     }
 
     #[cfg(feature = "serde_support")]

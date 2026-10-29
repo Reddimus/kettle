@@ -3385,11 +3385,24 @@ Other additions:
   BFS scratch, idle windows receive explicit redraw/title events, and
   Split/Duplicate consumes the cached foreground-shell result rather than
   walking processes on the input path. The public full-snapshot API remains
-  available for one-shot callers. Treat detected process arguments as untrusted:
-  validate fields against their specific character sets and a 512-byte limit,
-  then shell-quote every dynamic value in the reconnect command. Reject control
-  characters again when building the command because the UI submits it to a live
-  shell.
+  available for one-shot callers. Reconnect launches a separate client pane
+  directly with literal arguments and shell integration disabled. The executable
+  path and original invocation name are separate: Unix preserves `argv[0]` for
+  multicall clients, and a missing captured executable (including Linux's
+  ` (deleted)` path after an update) falls back to the original invocation.
+  Linux reads `/proc/<pid>/environ`; macOS reuses the bounded `KERN_PROCARGS2`
+  reader. Only same-user clients can supply connection variables, with a 1 MiB
+  read limit. The retained allowlists are kubectl's `KUBECONFIG`; Docker's
+  `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, `DOCKER_TLS_VERIFY`, and
+  `DOCKER_CERT_PATH`; and Podman's `CONTAINER_HOST` and `CONTAINER_CONNECTION`.
+  SSH and lxc capture no extra environment. Captured values override pane
+  configuration; absent allowlisted variables are removed from the child.
+  Unreadable, oversized, invalid, or cwd-dependent connection environments refuse
+  reconnect through the existing failure notice instead of selecting defaults.
+  Debug output redacts captured values.
+  Windows retains its current environment behavior. Treat detected process
+  arguments as untrusted: validate fields against their specific character sets
+  and a 512-byte limit, then reject controls again before direct spawning.
 - **named-broadcast-groups subsystem** (`BroadcastScope` enum with
   per-tab / per-window / cross-tab named scopes).
 - **right-click drill-in submenu UX** (Theme + Profile + Preferences).

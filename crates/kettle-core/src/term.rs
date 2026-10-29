@@ -1127,6 +1127,15 @@ pub struct PtyGeometry {
     pub pixel_height: u16,
 }
 
+/// Overrides needed when reproducing an existing direct client launch.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LaunchOverrides<'a> {
+    /// Unix invocation name, independent of the executable path.
+    pub argv0: Option<&'a str>,
+    /// Variables absent from the original client, removed after pane env.
+    pub remove_env: &'a [String],
+}
+
 /// Runtime capabilities that influence terminal protocol replies.
 ///
 /// These are separate from the parser's compiled feature set: a capability
@@ -5245,6 +5254,55 @@ impl Terminal {
         waker: Waker,
         output_tx: Option<PtyOutputSender>,
     ) -> Result<Terminal> {
+        Self::new_with_launch_environment(
+            argv,
+            cwd,
+            scrollback,
+            scrollback_bytes,
+            geometry,
+            cursor_blink,
+            cursor_shape,
+            word_delimiters,
+            term_env,
+            colorterm_env,
+            extra_env,
+            &LaunchOverrides::default(),
+            login_shell,
+            shell_integration,
+            shell_startup,
+            capabilities,
+            cwd_policy,
+            event_tx,
+            waker,
+            output_tx,
+        )
+    }
+
+    /// Spawn a direct client with its invocation name and absent environment
+    /// variables preserved. Removals apply after the pane environment.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_launch_environment(
+        argv: &[String],
+        cwd: Option<&std::path::Path>,
+        scrollback: usize,
+        scrollback_bytes: usize,
+        geometry: PtyGeometry,
+        cursor_blink: bool,
+        cursor_shape: CursorShape,
+        word_delimiters: Option<&str>,
+        term_env: &str,
+        colorterm_env: &str,
+        extra_env: &[(String, String)],
+        launch: &LaunchOverrides<'_>,
+        login_shell: bool,
+        shell_integration: bool,
+        shell_startup: &ShellStartup,
+        capabilities: TerminalCapabilities,
+        cwd_policy: WorkingDirectoryPolicy,
+        event_tx: crossbeam_channel::Sender<TermEvent>,
+        waker: Waker,
+        output_tx: Option<PtyOutputSender>,
+    ) -> Result<Terminal> {
         let cols = geometry.columns;
         let rows = geometry.rows;
         let pty = portable_pty::native_pty_system();
@@ -5267,6 +5325,13 @@ impl Terminal {
         // `colorterm` stay authoritative for those protocol-critical values.
         for (name, value) in extra_env {
             cmd.env(name, value);
+        }
+        #[cfg(unix)]
+        if let Some(argv0) = launch.argv0 {
+            cmd.set_argv0(argv0);
+        }
+        for name in launch.remove_env {
+            cmd.env_remove(name);
         }
         // Honor cfg.term + cfg.colorterm (empty preserves
         // kettle's default).

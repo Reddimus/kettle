@@ -66,6 +66,8 @@ pub struct SshOptions {
     /// Absolute executable path captured from argv or the process snapshot.
     /// Retained because shell startup may supply a PATH Kettle does not have.
     pub executable: Option<String>,
+    /// Original client invocation, separate from a resolved multicall binary.
+    pub invocation: Option<String>,
     /// `-p PORT` (or the joined `-pPORT`): the port the session connected to.
     pub port: Option<String>,
     /// `-J DESTINATION`: the ProxyJump chain the session tunnelled through. A
@@ -98,6 +100,8 @@ pub struct ContainerOptions {
     /// Absolute executable path captured from argv or the process snapshot.
     /// Retained because shell startup may supply a PATH Kettle does not have.
     pub executable: Option<String>,
+    /// Original client invocation, separate from a resolved multicall binary.
+    pub invocation: Option<String>,
     /// Which named connection the client used: Docker `--context`/`-c`,
     /// Podman `--connection`/`-c`, kubectl `--context`.
     pub context: Option<String>,
@@ -113,12 +117,95 @@ pub struct ContainerOptions {
     /// is not one shell — reconnecting without this lands in the pod's default
     /// container.
     pub pod_container: Option<String>,
+    /// Allowlisted environment from the detected client, with private values.
+    pub environment: ConnectionEnvironment,
+    /// Environment capture failed; the UI can explain why reconnect is refused.
+    pub environment_unavailable: bool,
     /// An endpoint-selecting option was present that this crate does not
     /// reproduce — a credential that must never be re-emitted (`--token`,
     /// `--password`), a selector with no single-flag equivalent, or a value
     /// that escaped its charset. Reconnect is suppressed rather than sent to
     /// the local daemon.
     pub unreproducible: bool,
+}
+
+/// Connection variables captured from a client, including explicit absence.
+/// Debug output never includes values. Only the detector constructs entries.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ConnectionEnvironment(Vec<(String, Option<String>)>);
+
+impl std::fmt::Debug for ConnectionEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ConnectionEnvironment(<private>)")
+    }
+}
+
+impl ConnectionEnvironment {
+    /// Apply only the client's allowlisted variables. `None` means remove the
+    /// variable even when Kettle or the pane configuration supplies it.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.0
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_deref()))
+    }
+}
+
+#[cfg(any(unix, test))]
+fn connection_environment_names(runtime: ContainerRuntime) -> &'static [&'static str] {
+    match runtime {
+        ContainerRuntime::Kubectl => &["KUBECONFIG"],
+        ContainerRuntime::Docker => &[
+            "DOCKER_HOST",
+            "DOCKER_CONTEXT",
+            "DOCKER_CONFIG",
+            "DOCKER_TLS_VERIFY",
+            "DOCKER_CERT_PATH",
+        ],
+        ContainerRuntime::Podman => &["CONTAINER_HOST", "CONTAINER_CONNECTION"],
+        ContainerRuntime::Lxc => &[],
+    }
+}
+
+/// Parse bounded, complete NUL-terminated environment entries without decoding
+/// or retaining variables outside the allowlist. Invalid or duplicate selected
+/// entries fail closed rather than changing the selected endpoint.
+#[cfg(any(unix, test))]
+fn parse_connection_environment(bytes: &[u8], names: &[&str]) -> Option<ConnectionEnvironment> {
+    if bytes.len() as u64 >= MAX_PROC_FILE_BYTES || (!bytes.is_empty() && !bytes.ends_with(&[0])) {
+        return None;
+    }
+    let mut result =
+        ConnectionEnvironment(names.iter().map(|name| ((*name).into(), None)).collect());
+    for entry in bytes.split(|&b| b == 0).filter(|entry| !entry.is_empty()) {
+        let eq = entry.iter().position(|&b| b == b'=')?;
+        if let Some((_, value)) = result
+            .0
+            .iter_mut()
+            .find(|(name, _)| name.as_bytes() == &entry[..eq])
+        {
+            if value.is_some() {
+                return None;
+            }
+            let text = std::str::from_utf8(&entry[eq + 1..]).ok()?;
+            *value = Some(text.to_owned());
+        }
+    }
+    for (name, value) in result.iter() {
+        let Some(value) = value.filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let reproducible = match name {
+            "KUBECONFIG" => value
+                .split(':')
+                .all(|path| path.is_empty() || connection_path_is_absolute(path)),
+            "DOCKER_CONFIG" | "DOCKER_CERT_PATH" => connection_path_is_absolute(value),
+            _ => true,
+        };
+        if !reproducible {
+            return None;
+        }
+    }
+    Some(result)
 }
 
 /// Which container runtime the detected `docker exec` /
@@ -173,8 +260,17 @@ pub trait ProcessTree {
     /// argv is exotic and the detectors only read `argv[0]` and flags, which
     /// are ASCII in practice.
     fn argv_of(&self, pid: u32) -> Option<Vec<String>>;
-    /// The process's executable path, independent of argv[0] and Kettle's PATH.
+    /// The process's executable path, independent of `argv[0]` and Kettle's PATH.
     fn executable_of(&self, _pid: u32) -> Option<String> {
+        None
+    }
+    /// Read a same-user client's bounded environment, retaining only `names`.
+    /// `None` means unavailable or incomplete, never an empty environment.
+    fn connection_environment_of(
+        &self,
+        _pid: u32,
+        _names: &[&str],
+    ) -> Option<ConnectionEnvironment> {
         None
     }
     /// The working directory of `pid` (lossy UTF-8), or `None` if
@@ -256,6 +352,22 @@ impl ProcessTree for sysinfo::System {
             .exe()?
             .to_str()
             .map(String::from)
+    }
+
+    fn connection_environment_of(&self, pid: u32, names: &[&str]) -> Option<ConnectionEnvironment> {
+        #[cfg(target_os = "linux")]
+        {
+            read_linux_connection_environment(std::path::Path::new("/proc"), pid, names)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            macos::read_connection_environment(pid, names)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (pid, names);
+            None
+        }
     }
 
     fn cwd_of(&self, pid: u32) -> Option<String> {
@@ -693,7 +805,7 @@ fn normalize_probe_targets(targets: &mut Vec<RemoteProbeTarget>) {
     targets.truncate(write.min(MAX_REMOTE_PROBE_TARGETS));
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(unix, test))]
 const MAX_PROC_FILE_BYTES: u64 = 1 << 20;
 const MAX_REMOTE_PROBE_TARGETS: usize = 4096;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -789,6 +901,27 @@ fn kern_procargs2_argv(area: &[u8]) -> Option<&[u8]> {
     Some(&rest[..end])
 }
 
+/// Environment follows the last argv entry and ends at an empty entry.
+/// Missing environment (including kernel redaction) is not a successful read.
+#[cfg(any(target_os = "macos", test))]
+fn kern_procargs2_environment(area: &[u8], names: &[&str]) -> Option<ConnectionEnvironment> {
+    let argv = kern_procargs2_argv(area)?;
+    let offset = (argv.as_ptr() as usize).checked_sub(area.as_ptr() as usize)?;
+    let tail = area.get(offset + argv.len()..)?;
+    if tail.first().is_none_or(|&byte| byte == 0) {
+        // An empty/redacted area cannot prove the client had no selectors.
+        return None;
+    }
+    // XNU pads the end of the argument area with NULs. Do not interpret
+    // executable/apple strings after the empty environment entry as variables.
+    let end = tail
+        .windows(2)
+        .position(|pair| pair == [0, 0])
+        .map(|pos| pos + 1)
+        .unwrap_or(tail.len());
+    parse_connection_environment(&tail[..end], names)
+}
+
 #[cfg(test)]
 fn parse_kern_procargs2(area: &[u8]) -> Option<ParsedProcArgv> {
     Some(parse_proc_argv(kern_procargs2_argv(area)?))
@@ -835,6 +968,28 @@ mod kern_procargs2_tests {
             out.push(0);
         }
         out
+    }
+
+    #[test]
+    fn reads_connection_environment_after_exactly_argc_arguments() {
+        let bytes = area(
+            2,
+            "/bin/kubectl",
+            &["kubectl", "exec"],
+            &["KUBECONFIG=/client/config", "SECRET=ignored"],
+        );
+        let env = super::kern_procargs2_environment(&bytes, &["KUBECONFIG"]).unwrap();
+        assert_eq!(
+            env.iter().collect::<Vec<_>>(),
+            [("KUBECONFIG", Some("/client/config"))]
+        );
+        let missing = area(2, "/bin/kubectl", &["kubectl", "exec"], &[]);
+        assert!(super::kern_procargs2_environment(&missing, &["KUBECONFIG"]).is_none());
+        let mut redacted = missing.clone();
+        redacted.extend([0; 16]);
+        assert!(super::kern_procargs2_environment(&redacted, &["KUBECONFIG"]).is_none());
+        let truncated = &bytes[..bytes.len() - 1];
+        assert!(super::kern_procargs2_environment(truncated, &["KUBECONFIG"]).is_none());
     }
 
     #[test]
@@ -1310,6 +1465,11 @@ impl ProcessTree for LinuxProcessTree {
             .map(String::from)
     }
 
+    fn connection_environment_of(&self, pid: u32, names: &[&str]) -> Option<ConnectionEnvironment> {
+        self.entries.get(&pid)?;
+        read_linux_connection_environment(&self.proc_root, pid, names)
+    }
+
     fn cwd_of(&self, pid: u32) -> Option<String> {
         self.entries.get(&pid)?;
         std::fs::read_link(self.proc_root.join(pid.to_string()).join("cwd"))
@@ -1320,6 +1480,34 @@ impl ProcessTree for LinuxProcessTree {
     fn all_pids(&self) -> Vec<u32> {
         self.entries.keys().copied().collect()
     }
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_connection_environment(
+    proc_root: &std::path::Path,
+    pid: u32,
+    names: &[&str],
+) -> Option<ConnectionEnvironment> {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+
+    let uid = std::fs::metadata("/proc/self").ok()?.uid();
+    let directory = proc_root.join(pid.to_string());
+    if std::fs::metadata(&directory).ok()?.uid() != uid {
+        return None;
+    }
+    let file = std::fs::File::open(directory.join("environ")).ok()?;
+    if file.metadata().ok()?.uid() != uid {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PROC_FILE_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if std::fs::metadata(&directory).ok()?.uid() != uid {
+        return None;
+    }
+    parse_connection_environment(&bytes, names)
 }
 
 /// Generic BFS over any [`ProcessTree`]. Walks descendants
@@ -1411,13 +1599,44 @@ fn detect_root_in_index_with_scratch<T: ProcessTree + ?Sized>(
             && let Some(mut ctx) = detect_ssh(&argv).or_else(|| detect_container(&argv))
         {
             // sshpass is a wrapper; its executable is not the SSH client.
-            if argv0_basename(&argv[0]) != "sshpass"
-                && let Some(executable) = tree.executable_of(pid)
-            {
+            if argv0_basename(&argv[0]) != "sshpass" {
+                let executable = tree.executable_of(pid);
                 match &mut ctx {
-                    RemoteContext::Ssh { options, .. } => options.executable = Some(executable),
-                    RemoteContext::Container { options, .. } => {
-                        options.executable = Some(executable)
+                    RemoteContext::Ssh { options, .. } => {
+                        #[cfg(unix)]
+                        {
+                            options.invocation = Some(argv[0].clone());
+                        }
+                        if executable.is_some() {
+                            options.executable = executable;
+                        }
+                    }
+                    RemoteContext::Container {
+                        runtime, options, ..
+                    } => {
+                        #[cfg(unix)]
+                        {
+                            options.invocation = Some(argv[0].clone());
+                        }
+                        if executable.is_some() {
+                            options.executable = executable;
+                        }
+                        // Windows retains its existing environment behavior.
+                        #[cfg(unix)]
+                        {
+                            let names = connection_environment_names(*runtime);
+                            if !names.is_empty() {
+                                match tree.connection_environment_of(pid, names) {
+                                    Some(environment) => options.environment = environment,
+                                    None => {
+                                        options.unreproducible = true;
+                                        options.environment_unavailable = true;
+                                    }
+                                }
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        let _ = runtime;
                     }
                 }
             }
@@ -1506,7 +1725,7 @@ pub fn argv_accepts_unnegotiated_modified_enter(argv: &[String]) -> bool {
     })
 }
 
-/// Is `prog` (an argv[0]) a known interactive shell a split should
+/// Is `prog` (an `argv[0]`) a known interactive shell a split should
 /// reproduce? Matched on the basename (path- and `.exe`-insensitive, via
 /// [`argv0_basename`]). Deliberately an allowlist — a split should clone
 /// `wsl` / `bash` / `pwsh`, but NOT an arbitrary foreground program like `vim`.
@@ -1695,7 +1914,7 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
     }
 }
 
-/// Whether a `wsl …` argv tail (everything after argv[0]) carries a command to
+/// Whether a `wsl …` argv tail (everything after `argv[0]`) carries a command to
 /// run (→ exits) rather than launching an interactive login shell. Value-taking
 /// options (`-d`/`-u`/`--cd`/`--shell-type`) consume their argument so a distro
 /// name or directory isn't mistaken for a command — notably kettle's own
@@ -2884,7 +3103,10 @@ fn apply_short_option(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionCommand {
     pub program: String,
+    /// Unix `argv[0]`, when it differs from the executable path.
+    pub argv0: Option<String>,
     pub args: Vec<String>,
+    pub environment: ConnectionEnvironment,
 }
 
 /// Build the command behind the Reconnect menu item.
@@ -2914,9 +3136,16 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<SessionCommand> {
             {
                 return None;
             }
+            let (program, argv0) = session_client_program(
+                options.executable.as_deref(),
+                options.invocation.as_deref(),
+                "ssh",
+            )?;
             let mut cmd = SessionCommand {
-                program: session_executable(options.executable.as_deref(), "ssh")?,
+                program,
+                argv0,
                 args: Vec::new(),
+                environment: ConnectionEnvironment::default(),
             };
             // Fixed order (config, identity, jump, port) so the emitted line is
             // deterministic regardless of how the user happened to type it.
@@ -2946,7 +3175,10 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<SessionCommand> {
             container,
             options,
         } => {
-            if options.unreproducible || has_control_char(container) {
+            if options.unreproducible
+                || options.environment_unavailable
+                || has_control_char(container)
+            {
                 return None;
             }
             let program = match runtime {
@@ -2955,9 +3187,16 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<SessionCommand> {
                 ContainerRuntime::Kubectl => "kubectl",
                 ContainerRuntime::Lxc => "lxc-attach",
             };
+            let (program, argv0) = session_client_program(
+                options.executable.as_deref(),
+                options.invocation.as_deref(),
+                program,
+            )?;
             let mut cmd = SessionCommand {
-                program: session_executable(options.executable.as_deref(), program)?,
+                program,
+                argv0,
                 args: Vec::new(),
+                environment: options.environment.clone(),
             };
             // Each runtime spells the same concept differently, so re-emit the
             // flag this runtime understands rather than the one that was typed.
@@ -3026,6 +3265,40 @@ fn connection_path_is_absolute_on(path: &str, windows: bool) -> bool {
 
 fn absolute_client_executable(program: &str) -> Option<String> {
     connection_path_is_absolute(program).then(|| program.to_owned())
+}
+
+fn session_client_program(
+    executable: Option<&str>,
+    invocation: Option<&str>,
+    fallback: &str,
+) -> Option<(String, Option<String>)> {
+    let Some(invocation) = invocation else {
+        return Some((session_executable(executable, fallback)?, None));
+    };
+    if invocation.len() > 4096 || has_control_char(invocation) {
+        return None;
+    }
+    if let Some(path) = executable {
+        let path = session_executable(Some(path), fallback)?;
+        // Updated Linux processes can still report "/path (deleted)". Fall
+        // back to the original invocation when the captured file is gone.
+        if std::path::Path::new(&path).is_file() {
+            #[cfg(unix)]
+            return Some((
+                path.clone(),
+                (path != invocation).then(|| invocation.to_owned()),
+            ));
+            #[cfg(not(unix))]
+            if argv0_basename(&path) == argv0_basename(invocation) {
+                return Some((path, None));
+            }
+        }
+    }
+    // A relative invocation is safe as argv[0] above, but cannot be resolved
+    // as a fallback program without the original shell's cwd.
+    let bare_client =
+        !invocation.contains(['/', '\\']) && argv0_basename(invocation) == argv0_basename(fallback);
+    (connection_path_is_absolute(invocation) || bare_client).then(|| (invocation.to_owned(), None))
 }
 
 fn session_executable(executable: Option<&str>, fallback: &str) -> Option<String> {
@@ -3113,6 +3386,17 @@ mod tests {
             user: user.map(str::to_string),
             options: SshOptions::default(),
         }
+    }
+
+    /// [`ssh_ctx`] as the Unix process scanners report it: they also record
+    /// the client's `argv[0]`, here plain `ssh`.
+    #[cfg(target_os = "linux")]
+    fn scanned_ssh_ctx(host: &str, user: Option<&str>) -> RemoteContext {
+        let mut ctx = ssh_ctx(host, user);
+        if let RemoteContext::Ssh { options, .. } = &mut ctx {
+            options.invocation = Some("ssh".into());
+        }
+        ctx
     }
 
     /// The `Container` context an `exec` against the client's default daemon
@@ -3273,7 +3557,7 @@ mod tests {
         );
         assert_eq!(
             detect_root_in_index(10, &tree, &index),
-            Some(ssh_ctx("box.example", Some("alice")))
+            Some(scanned_ssh_ctx("box.example", Some("alice")))
         );
 
         std::fs::remove_dir_all(root).unwrap();
@@ -3373,7 +3657,7 @@ mod tests {
         assert_eq!(tree.parent_of(20), Some(10));
         assert_eq!(
             detect_root_in_index(10, &tree, &index),
-            Some(ssh_ctx("threaded.example", None))
+            Some(scanned_ssh_ctx("threaded.example", None))
         );
 
         std::fs::remove_dir_all(root).unwrap();
@@ -3486,7 +3770,7 @@ mod tests {
             assert!(!tree.partial_roots.contains(&20));
             assert_eq!(
                 detect_in_tree(20, &mut tree),
-                Some(ssh_ctx("healthy.example", None)),
+                Some(scanned_ssh_ctx("healthy.example", None)),
             );
             assert!(tree.bytes_read < MAX_PROC_TREE_TOTAL_BYTES);
         }
@@ -3917,7 +4201,9 @@ mod tests {
     fn session_command(argv: &[&str]) -> SessionCommand {
         SessionCommand {
             program: argv[0].into(),
+            argv0: None,
             args: argv[1..].iter().map(|s| s.to_string()).collect(),
+            environment: ConnectionEnvironment::default(),
         }
     }
 
@@ -4189,7 +4475,7 @@ mod tests {
         assert!(detect_ssh(&argv(&["ssh", "-V"])).is_none());
     }
 
-    /// Drift guard: argv[0] in the Windows shape (a backslash path WITH a
+    /// Drift guard: `argv[0]` in the Windows shape (a backslash path WITH a
     /// `.exe` extension) must still be recognized. Splitting only on `/` and
     /// keeping `.exe` would leave the whole remote feature dead on Windows 11.
     #[test]
@@ -5767,6 +6053,7 @@ mod tests {
 
     struct MockProc {
         executable: Option<String>,
+        environment: Option<Vec<u8>>,
         parent: Option<u32>,
         argv: Vec<String>,
         cwd: Option<String>,
@@ -5784,6 +6071,7 @@ mod tests {
                 pid,
                 MockProc {
                     executable: None,
+                    environment: Some(Vec::new()),
                     parent,
                     argv: argv.iter().map(|s| (*s).to_string()).collect(),
                     cwd: None,
@@ -5798,6 +6086,7 @@ mod tests {
                 pid,
                 MockProc {
                     executable: None,
+                    environment: Some(Vec::new()),
                     parent,
                     argv: argv.iter().map(|s| (*s).to_string()).collect(),
                     cwd: Some(cwd.to_string()),
@@ -5823,6 +6112,14 @@ mod tests {
             self.procs.get(&pid)?.executable.clone()
         }
 
+        fn connection_environment_of(
+            &self,
+            pid: u32,
+            names: &[&str],
+        ) -> Option<ConnectionEnvironment> {
+            parse_connection_environment(self.procs.get(&pid)?.environment.as_deref()?, names)
+        }
+
         fn cwd_of(&self, pid: u32) -> Option<String> {
             self.procs.get(&pid).and_then(|p| p.cwd.clone())
         }
@@ -5833,12 +6130,309 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_captures_only_client_connection_environment() {
+        let bytes = b"KUBECONFIG=/private/cluster config\0DOCKER_HOST=tcp://remote:2376\0DOCKER_CONTEXT=prod\0DOCKER_CONFIG=/private/docker\0DOCKER_TLS_VERIFY=1\0DOCKER_CERT_PATH=/private/certs\0CONTAINER_HOST=ssh://remote\0CONTAINER_CONNECTION=prod\0PRIVATE_TOKEN=never-copy-me\0";
+        for (client, expected) in [
+            (
+                "kubectl",
+                vec![("KUBECONFIG", Some("/private/cluster config"))],
+            ),
+            (
+                "docker",
+                vec![
+                    ("DOCKER_HOST", Some("tcp://remote:2376")),
+                    ("DOCKER_CONTEXT", Some("prod")),
+                    ("DOCKER_CONFIG", Some("/private/docker")),
+                    ("DOCKER_TLS_VERIFY", Some("1")),
+                    ("DOCKER_CERT_PATH", Some("/private/certs")),
+                ],
+            ),
+            (
+                "podman",
+                vec![
+                    ("CONTAINER_HOST", Some("ssh://remote")),
+                    ("CONTAINER_CONNECTION", Some("prod")),
+                ],
+            ),
+        ] {
+            let mut tree = MockProcessTree::new();
+            tree.add(100, None, &[client, "exec", "-it", "web", "sh"]);
+            tree.procs.get_mut(&100).unwrap().environment = Some(bytes.to_vec());
+            let ctx = detect_in_tree(100, &mut tree).unwrap();
+            let command = clone_session_command(&ctx).unwrap();
+            #[cfg(unix)]
+            assert_eq!(command.environment.iter().collect::<Vec<_>>(), expected);
+            #[cfg(not(unix))]
+            {
+                let _ = expected;
+                assert_eq!(command.environment.iter().count(), 0);
+            }
+            let debug = format!("{ctx:?} {command:?}");
+            assert!(!debug.contains("/private/"));
+            assert!(!debug.contains("never-copy-me"));
+        }
+    }
+
+    #[test]
+    fn connection_environment_preserves_absence_and_rejects_incomplete_data() {
+        let names = connection_environment_names(ContainerRuntime::Docker);
+        let env = parse_connection_environment(b"DOCKER_HOST=\0SECRET=ignored\0", names).unwrap();
+        assert_eq!(
+            env.iter().collect::<Vec<_>>(),
+            [
+                ("DOCKER_HOST", Some("")),
+                ("DOCKER_CONTEXT", None),
+                ("DOCKER_CONFIG", None),
+                ("DOCKER_TLS_VERIFY", None),
+                ("DOCKER_CERT_PATH", None),
+            ]
+        );
+        for bytes in [
+            b"DOCKER_HOST=tcp://partial".to_vec(),
+            b"DOCKER_HOST=one\0DOCKER_HOST=two\0".to_vec(),
+            b"DOCKER_HOST=\xff\0".to_vec(),
+            vec![0; MAX_PROC_FILE_BYTES as usize],
+        ] {
+            assert!(parse_connection_environment(&bytes, names).is_none());
+        }
+        assert!(parse_connection_environment(b"OTHER=\xff\0", names).is_some());
+        assert!(parse_connection_environment(b"DOCKER_CONFIG=relative\0", names).is_none());
+        let kube = connection_environment_names(ContainerRuntime::Kubectl);
+        assert!(parse_connection_environment(b"KUBECONFIG=/absolute:relative\0", kube).is_none());
+        assert!(parse_connection_environment(b"KUBECONFIG=/one:/two\0", kube).is_some());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[ignore = "subprocess fixture for native environment capture"]
+    fn reconnect_environment_probe_child() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn reconnect_reads_native_client_environment() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::reconnect_environment_probe_child",
+                "--ignored",
+            ])
+            .env_clear()
+            .env("KUBECONFIG", "/client/cluster config")
+            .env("PRIVATE_TOKEN", "never-copy-me")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        struct Stop(std::process::Child);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let pid = child.id();
+        // Ensure exec has replaced the inherited parent image before capture.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut tree = RootedProcessTree::default();
+        while !tree.refresh_roots_within(&[pid], std::time::Duration::from_secs(1))
+            || !tree.argv_of(pid).is_some_and(|argv| {
+                argv.iter()
+                    .any(|arg| arg == "tests::reconnect_environment_probe_child")
+            })
+        {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("probe did not exec");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _stop = Stop(child);
+        let names = connection_environment_names(ContainerRuntime::Kubectl);
+        let environment = tree
+            .connection_environment_of(pid, names)
+            .expect("same-user environment");
+        assert_eq!(
+            environment.iter().collect::<Vec<_>>(),
+            [("KUBECONFIG", Some("/client/cluster config"))]
+        );
+        let sys = sysinfo::System::new();
+        let environment = sys
+            .connection_environment_of(pid, names)
+            .expect("full-snapshot adapter environment");
+        assert_eq!(
+            environment.iter().collect::<Vec<_>>(),
+            [("KUBECONFIG", Some("/client/cluster config"))]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reconnect_refuses_unavailable_client_environment() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["kubectl", "exec", "-it", "api", "--", "sh"]);
+        tree.procs.get_mut(&100).unwrap().environment = None;
+        let ctx = detect_in_tree(100, &mut tree).unwrap();
+        assert!(
+            matches!(&ctx, RemoteContext::Container { options, .. } if options.environment_unavailable)
+        );
+        assert!(clone_session_command(&ctx).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reconnect_reads_bounded_linux_environment() {
+        let root = kettle_test_support::private_tempdir("kettle-connection-env-");
+        let process = root.path().join("10");
+        std::fs::create_dir(&process).unwrap();
+        let path = process.join("environ");
+        let names = connection_environment_names(ContainerRuntime::Kubectl);
+        assert!(read_linux_connection_environment(root.path(), 10, names).is_none());
+        std::fs::write(
+            &path,
+            b"KUBECONFIG=/client/cluster\0PRIVATE_TOKEN=ignored\0",
+        )
+        .unwrap();
+        let env = read_linux_connection_environment(root.path(), 10, names).unwrap();
+        assert_eq!(
+            env.iter().collect::<Vec<_>>(),
+            [("KUBECONFIG", Some("/client/cluster"))]
+        );
+        std::fs::write(&path, vec![0; MAX_PROC_FILE_BYTES as usize + 1]).unwrap();
+        assert!(read_linux_connection_environment(root.path(), 10, names).is_none());
+        std::fs::write(&path, b"KUBECONFIG=partial").unwrap();
+        assert!(read_linux_connection_environment(root.path(), 10, names).is_none());
+        // pid 1 is normally another user's. The explicit owner check must
+        // reject it even on hosts whose procfs mount permits the read.
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::metadata("/proc/1").unwrap().uid()
+            != std::fs::metadata("/proc/self").unwrap().uid()
+        {
+            assert!(
+                read_linux_connection_environment(std::path::Path::new("/proc"), 1, names)
+                    .is_none()
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reconnect_uses_replacement_for_a_live_deleted_client() {
+        let root = kettle_test_support::private_tempdir("kettle-updated-client-");
+        let executable = root.path().join("ssh");
+        // Not a copy of sleep: uutils coreutils (Ubuntu 25.10 and later) is one
+        // multi-call binary that picks its tool from argv[0], so a copy named
+        // ssh exits at once. A copied shell keeps its own image while it waits.
+        // Found on PATH, since build sandboxes such as Nix have no /bin/bash.
+        let shell = std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|dir| dir.join("bash"))
+            .find(|candidate| candidate.is_file())
+            .expect("bash on PATH");
+        std::fs::copy(&shell, &executable).unwrap();
+        let child = std::process::Command::new(&executable)
+            .args(["-c", "sleep 30; :", "box"])
+            .spawn()
+            .unwrap();
+        struct Stop(std::process::Child);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let stop = Stop(child);
+        let mut tree = RootedProcessTree::default();
+        let pid = stop.0.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            assert!(tree.refresh_roots_within(&[pid], std::time::Duration::from_secs(1)));
+            if tree
+                .argv_of(pid)
+                .is_some_and(|argv| argv.first() == Some(&executable.to_str().unwrap().to_owned()))
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::fs::remove_file(&executable).unwrap();
+        std::fs::copy(&shell, &executable).unwrap();
+        assert!(tree.executable_of(pid).unwrap().ends_with(" (deleted)"));
+        let context = detect_in_tree(pid, &mut tree).unwrap();
+        let command = clone_session_command(&context).unwrap();
+        assert_eq!(command.program, executable.to_str().unwrap());
+        assert!(std::path::Path::new(&command.program).is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconnect_falls_back_from_deleted_executable() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["ssh", "box"]);
+        let path = if cfg!(windows) {
+            r"C:\missing\ssh (deleted)"
+        } else {
+            "/missing/ssh (deleted)"
+        };
+        tree.procs.get_mut(&100).unwrap().executable = Some(path.into());
+        let ctx = detect_in_tree(100, &mut tree).unwrap();
+        assert_eq!(clone_session_command(&ctx).unwrap().program, "ssh");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconnect_preserves_multicall_client_invocation() {
+        for invocation in ["ssh", "kubectl"] {
+            let args = if invocation == "ssh" {
+                vec![invocation, "box"]
+            } else {
+                vec![invocation, "exec", "-it", "api", "--", "sh"]
+            };
+            let mut tree = MockProcessTree::new();
+            tree.add(100, None, &args);
+            tree.procs.get_mut(&100).unwrap().executable =
+                Some(std::env::current_exe().unwrap().to_str().unwrap().into());
+            let ctx = detect_in_tree(100, &mut tree).unwrap();
+            let command = clone_session_command(&ctx).unwrap();
+            assert_eq!(
+                command.argv0.as_deref().unwrap_or(&command.program),
+                invocation
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconnect_uses_captured_executable_for_relative_client_invocation() {
+        let mut tree = MockProcessTree::new();
+        tree.add(100, None, &["./ssh", "box"]);
+        let executable = std::env::current_exe()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        tree.procs.get_mut(&100).unwrap().executable = Some(executable.clone());
+        let context = detect_in_tree(100, &mut tree).unwrap();
+        let command = clone_session_command(&context).unwrap();
+        assert_eq!(command.program, executable);
+        assert_eq!(command.argv0.as_deref(), Some("./ssh"));
+        tree.procs.get_mut(&100).unwrap().executable = Some("/missing/ssh (deleted)".into());
+        let context = detect_in_tree(100, &mut tree).unwrap();
+        assert!(clone_session_command(&context).is_none());
+    }
+
+    #[test]
     fn reconnect_resolves_bare_argv_from_process_executable() {
         let root = if cfg!(windows) {
             r"C:\shell tools"
         } else {
             "/shell tools"
         };
+        let directory = kettle_test_support::private_tempdir("kettle-client-executable-");
         for args in [
             vec!["ssh", "box"],
             vec!["docker", "exec", "-it", "web", "sh"],
@@ -5849,8 +6443,9 @@ mod tests {
             let mut tree = MockProcessTree::new();
             tree.add(100, None, &["sh"]);
             tree.add(101, Some(100), &args);
-            // A versioned executable may have a different basename from argv[0].
-            let executable = format!("{root}/{}-client", args[0]);
+            let path = directory.path().join(args[0]);
+            std::fs::write(&path, b"fixture").unwrap();
+            let executable = path.to_str().unwrap().to_owned();
             tree.procs.get_mut(&101).unwrap().executable = Some(executable.clone());
             let ctx = detect_in_tree(100, &mut tree).unwrap();
             assert_eq!(clone_session_command(&ctx).unwrap().program, executable);
@@ -6341,6 +6936,46 @@ mod tests {
         assert!(shell_launch_is_interactive(&argv(&["zsh", "-l"])));
     }
 
+    #[cfg(not(unix))]
+    fn detected_ssh_ctx(host: &str, user: Option<&str>) -> RemoteContext {
+        ssh_ctx(host, user)
+    }
+
+    #[cfg(not(unix))]
+    fn detected_container_ctx(runtime: ContainerRuntime, container: &str) -> RemoteContext {
+        container_ctx(runtime, container)
+    }
+
+    #[cfg(unix)]
+    fn detected_ssh_ctx(host: &str, user: Option<&str>) -> RemoteContext {
+        let mut ctx = ssh_ctx(host, user);
+        if let RemoteContext::Ssh { options, .. } = &mut ctx {
+            #[cfg(unix)]
+            {
+                options.invocation = Some("ssh".into());
+            }
+        }
+        ctx
+    }
+
+    #[cfg(unix)]
+    fn detected_container_ctx(runtime: ContainerRuntime, container: &str) -> RemoteContext {
+        let mut ctx = container_ctx(runtime, container);
+        if let RemoteContext::Container { options, .. } = &mut ctx {
+            #[cfg(unix)]
+            {
+                options.invocation = Some(runtime.name().into());
+            }
+            #[cfg(unix)]
+            {
+                options.environment =
+                    parse_connection_environment(b"", connection_environment_names(runtime))
+                        .unwrap();
+            }
+        }
+        ctx
+    }
+
     /// Drift guard: ssh as a direct child of the pane's
     /// shell is the most common shape. `detect_in_tree` must reach
     /// it in a single BFS hop.
@@ -6351,7 +6986,7 @@ mod tests {
         tree.add(200, Some(100), &["ssh", "alice@server.example.com"]);
         assert_eq!(
             detect_in_tree(100, &mut tree),
-            Some(ssh_ctx("server.example.com", Some("alice")))
+            Some(detected_ssh_ctx("server.example.com", Some("alice")))
         );
     }
 
@@ -6366,7 +7001,7 @@ mod tests {
         tree.add(100, None, &["ssh", "carol@direct.example.com"]);
         assert_eq!(
             detect_in_tree(100, &mut tree),
-            Some(ssh_ctx("direct.example.com", Some("carol")))
+            Some(detected_ssh_ctx("direct.example.com", Some("carol")))
         );
     }
 
@@ -6381,7 +7016,7 @@ mod tests {
         let idx = build_children_index(&tree);
         assert_eq!(
             detect_root_in_index(100, &tree, &idx),
-            Some(container_ctx(ContainerRuntime::Docker, "api-1"))
+            Some(detected_container_ctx(ContainerRuntime::Docker, "api-1"))
         );
     }
 
@@ -6436,7 +7071,7 @@ mod tests {
 
         assert_eq!(
             detect_root_in_index_with_scratch(100, &tree, &index, &mut queue, &mut visited,),
-            Some(ssh_ctx("a.example", Some("alice")))
+            Some(detected_ssh_ctx("a.example", Some("alice")))
         );
         assert!(!visited.contains(&999));
 
@@ -6624,7 +7259,7 @@ mod tests {
         tree.add(200, Some(150), &["ssh", "bob@deep.example"]);
         assert_eq!(
             detect_in_tree(100, &mut tree),
-            Some(ssh_ctx("deep.example", Some("bob")))
+            Some(detected_ssh_ctx("deep.example", Some("bob")))
         );
     }
 
@@ -6645,7 +7280,10 @@ mod tests {
         );
         assert_eq!(
             detect_in_tree(100, &mut tree),
-            Some(container_ctx(ContainerRuntime::Docker, "ubuntu-2204"))
+            Some(detected_container_ctx(
+                ContainerRuntime::Docker,
+                "ubuntu-2204"
+            ))
         );
     }
 
@@ -6663,7 +7301,7 @@ mod tests {
         tree.add(201, Some(200), &["ssh", "far.example"]);
         assert_eq!(
             detect_in_tree(100, &mut tree),
-            Some(container_ctx(ContainerRuntime::Docker, "near"))
+            Some(detected_container_ctx(ContainerRuntime::Docker, "near"))
         );
     }
 

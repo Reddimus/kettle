@@ -266,6 +266,30 @@ on every platform to cover failed termination, polling errors, bounded cleanup,
 and eventual background reaping. The Windows pipe tests still require a native
 Windows runner.
 
+The remote reconnect tests run offline without a remote daemon or cluster:
+
+```sh
+cargo test -j 2 --locked --offline -p kettle-remote reconnect_
+cargo test -j 2 --locked --offline -p kettle-ui remote_reconnect_
+cargo test -j 2 --locked --offline --manifest-path vendor/Cargo.toml -p portable-pty --features serde_support
+cargo test -j 2 --locked --offline -p kettle-remote
+```
+
+`reconnect_refuses_unavailable_client_environment`,
+`reconnect_falls_back_from_deleted_executable`, and
+`reconnect_preserves_multicall_client_invocation` cover the three reconnect
+regressions. Native Linux/macOS subprocess probes read the client's environment
+through procfs or KERN_PROCARGS2, and portable fixtures cover filtering,
+explicit absence, size limits, malformed values, relative connection paths,
+and debug redaction. The macOS tests reject unreadable and SIP-redacted
+captures. Linux also exercises a running executable replaced on disk. The UI
+PTY probe checks the captured environment and original invocation in both a
+split and an empty mux, without a window or GPU. A separate UI regression
+checks that an unavailable environment routes to the existing failure notice
+without creating a pane. Ignored probe functions run only as subprocess fixtures. Native branches run on their respective CI hosts;
+a macOS pass does not verify procfs or Windows. Windows keeps its existing
+environment behavior.
+
 ### Drift guards and source scans
 
 Some contracts cross files or cannot be exercised cheaply in every unit test.
