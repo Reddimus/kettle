@@ -1,5 +1,34 @@
 use super::{Config, PaneSnapshot, PaneView, text_layout_damage_key};
 
+#[test]
+fn inactive_color_glyph_dimming_invalidates_cached_instances() {
+    let mut cfg = Config::default();
+    let snap = PaneSnapshot::default();
+    let mut panes = [
+        super::headless_tests::pane(&snap, 200, 160),
+        super::headless_tests::pane(&snap, 200, 160),
+    ];
+    panes[1].id = 2;
+    panes[1].focused = false;
+    let key = |panes: &[PaneView<'_>], cfg: &Config| {
+        text_layout_damage_key(panes, cfg, (400.0, 160.0), (8.0, 16.0), 0.0)
+    };
+    let active = key(&panes, &cfg);
+    panes[0].focused = false;
+    panes[1].focused = true;
+    let inactive = key(&panes, &cfg);
+    assert_ne!(
+        active, inactive,
+        "focus changes color glyph dimming even if text colors hit the contrast floor"
+    );
+    cfg.unfocused_split_opacity = 0.1;
+    assert_ne!(
+        inactive,
+        key(&panes, &cfg),
+        "opacity changes must refresh color glyph instances"
+    );
+}
+
 /// A pane's rect can move while the window size, cell size, and every row's
 /// text stay identical — bottom chrome or a banner appearing, for instance.
 /// The layout damage key must still change, or the cached cell-locked glyph

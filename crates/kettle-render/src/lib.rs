@@ -6386,11 +6386,7 @@ impl Renderer {
                 i,
                 pv,
                 cfg,
-                if !pv.focused && panes.len() > 1 {
-                    inactive_pane_amount(cfg)
-                } else {
-                    0.0
-                },
+                pane_inactive_amount(pv, panes.len(), cfg),
                 &family,
                 overlay.window_focused,
                 if pane_has_search {
@@ -8450,10 +8446,13 @@ impl Renderer {
             let pane_fg = pv.snap.colors[256]
                 .map(|c| Rgb::new(c.r, c.g, c.b))
                 .unwrap_or(theme.foreground);
-            // In the default grid mode, pane cell text is drawn by the
-            // cell-locked `glyph_pipeline` (emitted below), NOT glyphon, so don't
-            // push a pane TextArea here. Legacy mode keeps the glyphon path.
+            // Glyphon's color shader ignores foreground tint. Inactive legacy
+            // panes use our pipeline at their original layout positions so
+            // bitmap dimming and ordinary text contrast remain independent.
             if cfg.text_renderer == TextRendererMode::Legacy {
+                if pane_inactive_amount(pv, panes.len(), cfg) > 0.0 {
+                    continue;
+                }
                 areas.push(TextArea {
                     buffer: &self.pane_buffers[i],
                     left: grid_origin.0,
@@ -9426,8 +9425,8 @@ impl Renderer {
         // can force `need_prepare` via `cursor_char_changed` for the separate
         // cursor glyph pass, but it must not clear/re-upload pane glyph
         // instances. Only pane text changes and layout/style damage refresh the
-        // grid pipeline. Legacy mode uploads an empty instance set on the same
-        // gate so switching grid→legacy cannot leave stale grid glyphs behind.
+        // glyph pipeline. Legacy panes use it only while dimmed, preserving
+        // their continuous layout. The same gate clears unused instances.
         let grid_upload_needed =
             self.grid_glyphs_dirty || any_pane_text_changed || text_layout_changed;
         if grid_upload_needed {
@@ -9435,9 +9434,7 @@ impl Renderer {
             let mut gc = std::mem::take(&mut self.glyph_clips);
             gi.clear();
             gc.clear();
-            if cfg.text_renderer == TextRendererMode::Grid {
-                self.emit_pane_glyphs(panes, cfg, &mut gi, &mut gc);
-            }
+            self.emit_pane_glyphs(panes, cfg, &mut gi, &mut gc);
             self.grid_glyphs_dirty =
                 !self
                     .glyph_pipeline
@@ -10023,10 +10020,9 @@ impl Renderer {
             .render(&self.atlas, &self.viewport, &mut pass)?;
         self.pane_dimming.draw(&mut pass);
         self.text_decorations.draw(&mut pass);
-        // Cell-locked pane text sits above cell backgrounds + inline
-        // images and below chrome text (titlebars / menus) and the cursor
-        // glyph. A no-op (count 0) in legacy mode, where pane text rides the
-        // glyphon `text_renderer` below.
+        // Pane text sits above backgrounds + images and below chrome and the
+        // cursor glyph. Grid pins cells; inactive Legacy retains continuous
+        // positions. Other Legacy pane text rides glyphon below.
         match window {
             None => {
                 self.glyph_pipeline
@@ -10980,8 +10976,8 @@ impl Renderer {
         text_changed
     }
 
-    /// Cell-locked rendering: walk every visible pane's freshly-shaped `Buffer`
-    /// and emit ONE pinned glyph instance per laid-out glyph, positioned at its
+    /// Walk each pane buffer routed through the glyph pipeline. Grid mode
+    /// emits ONE pinned glyph instance per laid-out glyph, positioned at its
     /// grid cell (`pane_origin + col*cell_w`) instead of cosmic-text's
     /// continuous advance. Rasterization, the cache key, and the vertical /
     /// bearing math are byte-identical to glyphon (see `glyphpipe.rs`); only
@@ -11017,6 +11013,10 @@ impl Renderer {
         let queue = &gpu.queue;
 
         for (i, pv) in panes.iter().enumerate() {
+            let inactive = pane_inactive_amount(pv, panes.len(), cfg);
+            if cfg.text_renderer == TextRendererMode::Legacy && inactive == 0.0 {
+                continue;
+            }
             let (rx, ry, rw, rh) = pv.terminal;
             let (ox, oy) = pane_grid_origin(pv.terminal, (pad_x, pad_y));
             // This pane's glyphs form one contiguous instance range; record it
@@ -11037,7 +11037,7 @@ impl Renderer {
                 out,
                 buf,
                 (ox, oy),
-                cw,
+                (cfg.text_renderer == TextRendererMode::Grid).then_some(cw),
                 default_color,
                 glyph_pipeline,
                 swash,
@@ -11046,6 +11046,9 @@ impl Renderer {
                 queue,
                 glyph_char_starts,
             );
+            for glyph in &mut out[clip_start as usize..] {
+                glyph.dim_color(cfg.theme.background, inactive);
+            }
             clips.push(GlyphClip {
                 rect: [rx, ry, rw, rh],
                 start: clip_start,
@@ -14417,6 +14420,14 @@ fn inactive_pane_amount(cfg: &Config) -> f32 {
         .max((1.0 - cfg.unfocused_split_opacity).clamp(0.0, 0.95))
 }
 
+fn pane_inactive_amount(pane: &PaneView<'_>, count: usize, cfg: &Config) -> f32 {
+    if !pane.focused && count > 1 {
+        inactive_pane_amount(cfg)
+    } else {
+        0.0
+    }
+}
+
 /// Apply dim after palette brightening and RGB resolution. The caller applies
 /// minimum contrast last, against the background actually painted under it.
 fn transformed_foreground(fg: Rgb, bg: Rgb, dim: bool) -> Rgb {
@@ -14706,10 +14717,12 @@ fn cell_locked_glyph_offset(
 /// `capture_png_with_annotation` screenshot path, and the `grid_prompt_blink`
 /// test fixture all call it so they can never drift apart.
 ///
+/// A `None` cell width retains glyphon's continuous layout for inactive Legacy
+/// panes, whose color bitmaps need this pipeline's dimming shader.
 /// `origin` is the buffer's top-left in physical pixels (the same coordinate a
-/// glyphon `TextArea`'s `left`/`top` would use); every glyph is pinned to its
-/// grid cell `origin.0 + col * cell_w`, snapped to an integer pixel, while any
-/// intra-cluster `x_offset` (combining marks) is preserved. `default_color` is
+/// glyphon `TextArea`'s `left`/`top` would use). With a cell width, each glyph is
+/// pinned to its grid cell and snapped to an integer pixel, preserving any
+/// intra-cluster `x_offset` (combining marks). `default_color` is
 /// the fallback for a glyph with no explicit color span (mirrors a `TextArea`'s
 /// `default_color`). `char_starts` is a scratch buffer reused across runs to
 /// avoid per-line allocation. Glyphs are appended in buffer order, so the
@@ -14719,7 +14732,7 @@ fn emit_cell_locked_glyphs(
     out: &mut Vec<GlyphInstance>,
     buf: &TextBuffer,
     origin: (f32, f32),
-    cell_w: f32,
+    cell_w: Option<f32>,
     default_color: GColor,
     glyph_pipeline: &mut GlyphPipeline,
     swash: &mut SwashCache,
@@ -14752,8 +14765,10 @@ fn emit_cell_locked_glyphs(
             // lands the logical X exactly there reuses its exact cache-key +
             // vertical + subpixel math, so the rasterized bitmap is byte-
             // identical to glyphon's.
-            let cell_left = origin.0 + col as f32 * cell_w;
-            let off_x = cell_locked_glyph_offset(cell_left, glyph, cluster_x);
+            let off_x = cell_w.map_or(origin.0, |cw| {
+                let cell_left = origin.0 + col as f32 * cw;
+                cell_locked_glyph_offset(cell_left, glyph, cluster_x)
+            });
             let phys = glyph.physical((off_x, origin.1), 1.0);
             let key = phys.cache_key;
             let mut image = None;
@@ -15020,6 +15035,7 @@ fn text_layout_damage_key(
     cfg.title_at_bottom.hash(&mut h);
     for pv in panes {
         pv.id.hash(&mut h);
+        hf(&mut h, pane_inactive_amount(pv, panes.len(), cfg));
         // The terminal can move inside an unmoved pane (a preview lane
         // opening or closing), and its glyphs move with it.
         for v in [
@@ -15633,7 +15649,7 @@ pub fn capture_png_with_annotation(
                     &mut grid_instances,
                     buf_ref,
                     origin,
-                    cw,
+                    Some(cw),
                     default_color,
                     &mut grid_glyphs,
                     &mut swash,

@@ -47,12 +47,25 @@ pub struct GlyphInstance {
     /// Atlas slot top-left in atlas PIXELS. The shader normalizes by the live
     /// `textureDimensions`, so growing the atlas never invalidates an instance.
     pub uv: [f32; 2],
-    /// Straight-alpha sRGB rgba. Used for mask glyphs (the glyph fg); ignored
-    /// for color glyphs (the atlas already carries their color).
+    /// Straight-alpha sRGB rgba. Mask glyphs use the foreground; color glyphs
+    /// use rgb as their dimming backdrop and alpha as the retained brightness.
     pub color: [f32; 4],
     /// 0 = sample the color atlas, 1 = sample the mask atlas.
     pub kind: u32,
     pub _pad: [u32; 3],
+}
+
+impl GlyphInstance {
+    pub fn dim_color(&mut self, background: kettle_config::Rgb, amount: f32) {
+        if self.kind == 0 && amount > 0.0 {
+            self.color = [
+                background.r as f32 / 255.0,
+                background.g as f32 / 255.0,
+                background.b as f32 / 255.0,
+                1.0 - amount,
+            ];
+        }
+    }
 }
 
 /// A rasterized glyph the caller hands to the atlas. Borrowing the bitmap (and
@@ -618,10 +631,11 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if in.kind == 0u {
-        // Color glyph: straight sample of the sRGB color atlas (the hardware
-        // decodes rgb to linear); returned as-is for straight-alpha blending,
-        // exactly as glyphon's color branch does.
-        return textureSampleLevel(color_atlas, atlas_smp, in.uv, 0.0);
+        // Dim bitmap colors independently of the contrast-corrected text
+        // foreground, retaining coverage so transparent edges stay transparent.
+        let glyph = textureSampleLevel(color_atlas, atlas_smp, in.uv, 0.0);
+        let dim = srgb_to_linear(in.color.rgb);
+        return vec4<f32>(mix(dim, glyph.rgb, in.color.a), glyph.a);
     }
     // Mask glyph: theme-colored coverage. `vec4(linear_fg, fg.a * coverage)`,
     // straight alpha — identical to glyphon's mask branch.
@@ -635,15 +649,77 @@ fn glyph_shader_source(format: wgpu::TextureFormat) -> String {
     if format.is_srgb() {
         SHADER.to_string()
     } else {
-        SHADER.replace(
-            "let lin = srgb_to_linear(in.color.rgb);",
-            "let lin = in.color.rgb;",
-        )
+        SHADER
+            .replace(
+                "let lin = srgb_to_linear(in.color.rgb);",
+                "let lin = in.color.rgb;",
+            )
+            .replace(
+                "let dim = srgb_to_linear(in.color.rgb);",
+                "let dim = in.color.rgb;",
+            )
     }
 }
 
 #[cfg(test)]
 mod target_color_tests {
+    #[test]
+    fn inactive_color_glyph_material_preserves_text_and_active_bitmaps() {
+        use super::GlyphInstance;
+        let mut bitmap = GlyphInstance {
+            pos: [0.0; 2],
+            size: [1.0; 2],
+            uv: [0.0; 2],
+            color: [1.0, 0.5, 0.0, 1.0],
+            kind: 0,
+            _pad: [0; 3],
+        };
+        let background = kettle_config::Rgb::new(0, 51, 102);
+        let original = bitmap.color;
+        bitmap.dim_color(background, 0.0);
+        assert_eq!(bitmap.color, original);
+        let mut text = GlyphInstance { kind: 1, ..bitmap };
+        text.dim_color(background, 0.75);
+        assert_eq!(
+            text.color, original,
+            "text already has its contrast-corrected foreground"
+        );
+        bitmap.dim_color(background, 0.75);
+        assert_eq!(bitmap.color, [0.0, 0.2, 0.4, 0.25]);
+    }
+
+    #[test]
+    fn color_glyph_shader_uses_pane_dimming_without_changing_coverage() {
+        for format in [
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ] {
+            let shader = super::glyph_shader_source(format);
+            let module = wgpu::naga::front::wgsl::parse_str(&shader).expect("valid glyph WGSL");
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .expect("glyph shader validates without a GPU adapter");
+            let color = shader
+                .split("if in.kind == 0u {")
+                .nth(1)
+                .unwrap()
+                .split("// Mask glyph:")
+                .next()
+                .unwrap();
+            assert!(
+                color.contains("in.color.rgb") && color.contains("in.color.a"),
+                "color bitmaps must consume the per-instance dimming color and amount"
+            );
+            assert!(
+                color.contains("glyph.a"),
+                "dimming must retain bitmap coverage"
+            );
+        }
+    }
+
     #[test]
     fn mask_shader_preserves_non_srgb_foregrounds() {
         let shader = super::glyph_shader_source(wgpu::TextureFormat::Rgba8Unorm);

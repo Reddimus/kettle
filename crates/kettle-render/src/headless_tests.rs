@@ -3536,6 +3536,140 @@ fn regression_active_close_glyph_contrasts_with_its_painted_chip() {
 }
 
 #[test]
+fn regression_inactive_color_emoji_dim_grid() {
+    inactive_color_emoji_dim(TextRendererMode::Grid);
+}
+
+#[test]
+fn regression_inactive_color_emoji_dim_legacy() {
+    inactive_color_emoji_dim(TextRendererMode::Legacy);
+}
+
+fn inactive_color_emoji_dim(mode: TextRendererMode) {
+    let _serialized = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.text_renderer = mode;
+    // Per-pane titlebars sit over the first row and change color with focus.
+    cfg.show_titlebar = false;
+    cfg.theme.background = Rgb::new(0, 0, 0);
+    cfg.theme.foreground = Rgb::new(255, 255, 255);
+    cfg.unfocused_split_opacity = 1.0;
+    cfg.inactive_color_offset = 1.0;
+    cfg.inactive_bg_color_offset = 1.0;
+    let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 400, 160).unwrap() else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(20, 4, "\u{1f600}  M".as_bytes());
+    let other = snapshot_of(20, 4, b"");
+    let shot = |renderer: &mut Renderer, cfg: &Config, active| {
+        let mut view = pane(&snap, 200, 160);
+        view.focused = active;
+        let mut second = pane(&other, 200, 160);
+        second.id = 2;
+        second.rect.0 = 200.0;
+        second.terminal.0 = 200.0;
+        second.focused = !active;
+        capture(renderer, cfg, &[view, second], &focused(false))
+    };
+    let active = shot(&mut renderer, &cfg, true);
+    let color_font_available = {
+        let Renderer {
+            pane_buffers,
+            swash,
+            font_system,
+            ..
+        } = &mut renderer;
+        pane_buffers[0].layout_runs().any(|run| {
+            run.glyphs.iter().any(|glyph| {
+                swash
+                    .get_image_uncached(font_system, glyph.physical((0.0, 0.0), 1.0).cache_key)
+                    .is_some_and(|image| image.content == glyphon::cosmic_text::SwashContent::Color)
+            })
+        })
+    };
+    if !color_font_available {
+        eprintln!("no color emoji font on this host; skipped");
+        return;
+    }
+    let undimmed = shot(&mut renderer, &cfg, false);
+    let (ox, oy) = pane_grid_origin((0.0, 0.0, 200.0, 160.0), (cfg.padding_x, cfg.padding_y));
+    let (cw, ch) = (renderer.cell_w, renderer.cell_h);
+    let row = |image: &image::RgbaImage| {
+        image::imageops::crop_imm(
+            image,
+            ox as u32,
+            oy as u32,
+            (8.0 * cw).ceil() as u32,
+            ch.ceil() as u32,
+        )
+        .to_image()
+    };
+    assert_eq!(
+        row(&active),
+        row(&undimmed),
+        "zero dimming leaves the text unchanged"
+    );
+    let emoji_pixels: Vec<_> = (oy as u32..(oy + renderer.cell_h) as u32)
+        .flat_map(|y| (ox as u32..(ox + 2.0 * renderer.cell_w) as u32).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let p = active.get_pixel(x, y);
+            p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]) > 50
+        })
+        .collect();
+    assert!(emoji_pixels.len() > 10, "fixture must render a color emoji");
+    for offsets in [false, true] {
+        cfg.unfocused_split_opacity = if offsets { 1.0 } else { 0.1 };
+        cfg.inactive_color_offset = if offsets { 0.1 } else { 1.0 };
+        let inactive = shot(&mut renderer, &cfg, false);
+        let brightness = |image: &image::RgbaImage| -> u64 {
+            emoji_pixels
+                .iter()
+                .map(|&(x, y)| {
+                    image.get_pixel(x, y).0[..3]
+                        .iter()
+                        .map(|&v| u64::from(v))
+                        .sum::<u64>()
+                })
+                .sum()
+        };
+        assert!(
+            brightness(&inactive) < brightness(&active) * 3 / 4,
+            "{mode:?} offsets={offsets}: inactive color emoji must dim"
+        );
+        // Legacy's emoji advance can move the following M off the cell grid.
+        let text_x = (ox + 3.0 * cw) as u32;
+        let text_end = (ox + 8.0 * cw) as u32;
+        let best = (oy as u32..(oy + renderer.cell_h) as u32)
+            .flat_map(|y| (text_x..text_end).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let p = inactive.get_pixel(x, y);
+                color::contrast_ratio(Rgb::new(p[0], p[1], p[2]), cfg.theme.background)
+            })
+            .fold(1.0_f64, f64::max);
+        // Legacy keeps continuous glyph positions, so anti-aliasing can leave
+        // no pixel at full coverage; dimming text like a bitmap would fall far
+        // below either bound.
+        let floor = if mode == TextRendererMode::Grid {
+            4.5
+        } else {
+            4.3
+        };
+        assert!(best >= floor, "{mode:?} ordinary text: {best:.3}:1");
+        assert_eq!(
+            inactive,
+            shot(&mut renderer, &cfg, false),
+            "cached frame retains dimming"
+        );
+        assert_eq!(
+            row(&active),
+            row(&shot(&mut renderer, &cfg, true)),
+            "focus restores the color emoji"
+        );
+    }
+}
+
+#[test]
 fn regression_inactive_decorations_keep_the_glyph_contrast_floor() {
     let _serialized = gpu_test_guard();
     for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {

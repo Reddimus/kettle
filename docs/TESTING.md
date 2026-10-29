@@ -810,12 +810,19 @@ Headless readbacks still do not prove native input or installed-package behavior
 
 The `regression_` tests in `kettle-render` and `kettle-ui` cover close-chip
 contrast with an overridden chrome background, pane and lane dimming order,
-single dimming of terminal decorations, picker pointer routing, translated
+single dimming of terminal decorations, inactive color emoji dimming with an
+ordinary-text contrast floor in Grid and Legacy, picker pointer routing, translated
 theme queries and scroll-arrow containment in subpixel strips. The headless
 pixel cases print a skip when no GPU adapter is available; portable colour,
 geometry, draw-order and picker interaction tests still run. Report those
 skips separately from pixel acceptance. Picker interaction tests exercise
 all four modal projections without a native window.
+The emoji pixel cases also skip explicitly when no color emoji font is available.
+
+Portable renderer checks cover color-glyph dimming material, shader inputs and
+cache invalidation on focus or dimming changes. Animation stills tests use
+distinct APNG frame colors and fractional delays to verify that selection keeps
+frame starts unrounded while returned timestamps use milliseconds.
 
 ### Authenticated agent and configured editor checks
 

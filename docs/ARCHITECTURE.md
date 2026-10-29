@@ -2605,7 +2605,9 @@ Each frame uses the same wgpu render-pass encoder. Quads cover earlier
 text; later text covers their pixels. Pane dimming covers cell backgrounds,
 inline images and complete cards before terminal glyphs and decorations,
 whose inactive colours already include the text contrast floor. Active-pane
-decorations stay in the cell pass below cursor quads. Preview lanes receive
+decorations stay in the cell pass below cursor quads. Color glyphs blend their
+bitmap RGB toward the pane dimming backdrop in their shader, preserving bitmap
+alpha. Preview lanes receive
 their owning pane's dimming after all lane content is drawn:
 
 ```mermaid
@@ -2618,8 +2620,8 @@ flowchart LR
     cards --> owned["Card decoration and labels"]
     owned --> dim["Pane dimming"]
     dim --> decorations["Inactive terminal underlines and strikeouts"]
-    decorations --> glyphs["Cell-locked pane glyphs in Grid mode"]
-    glyphs --> text["Chrome text and Legacy pane text"]
+    decorations --> glyphs["Grid pane glyphs and inactive Legacy pane glyphs"]
+    glyphs --> text["Chrome text and active Legacy pane text"]
     text --> cursor["Fallback cursors and focused cursor glyph"]
     cursor --> lanes["Preview lane surfaces, images and text"]
     lanes --> overlay["Lane dimming and scrollbar"]
@@ -2635,7 +2637,8 @@ Alacritty / kitty / WezTerm / Ghostty model. `build_pane` still shapes each row
 with cosmic-text and reuses the per-line shaping cache, but instead of handing
 the whole `Buffer` to glyphon, `emit_pane_glyphs` walks the laid-out glyphs and
 emits one pinned instance each, rasterized through cosmic-text's own `SwashCache`
-into a private mask+color atlas. The fragment shader replicates glyphon's exactly
+into a private mask+color atlas. Without pane dimming, the fragment shader
+matches glyphon's
 (mask = `sRGB→linear(fg) · coverage`, color = straight sample of an sRGB atlas),
 so antialiasing, gamma and theme colors are identical. Only the X position
 differs. This prevents glyph drift. Without pinning, a glyph whose advance
@@ -2657,6 +2660,12 @@ only what is drawn: the cursor's quads are built and uploaded in both phases,
 and the off phase skips their instance range and the cursor-glyph pass at draw
 time. A steady frame re-draws the retained instance buffer. A blink must never
 invalidate or stale-draw ordinary pane glyphs.
+
+Inactive Legacy panes also use this glyph pipeline, retaining glyphon's
+continuous positions instead of pinning to cells. Glyphon's color shader does
+not accept a tint, so this route keeps bitmap dimming separate from the
+contrast floor applied to ordinary text. Focus and dimming settings participate
+in the glyph damage key, including when text colours stay at the contrast floor.
 
 Every GPU upload goes through `upload.rs`, which holds the renderer's only
 `write_buffer` and `write_texture` calls. Each pipeline keeps an exact CPU copy

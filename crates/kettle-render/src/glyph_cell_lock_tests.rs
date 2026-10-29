@@ -59,7 +59,7 @@ fn cell_locked_pen_snaps_to_the_cell() {
 
 /// Wiring drift guards: the grid path must NOT push a pane TextArea (that
 /// would double-draw via glyphon), the cell-locked draw must sit in the
-/// shared scene pass, and the emit must be gated on grid mode.
+/// shared scene pass. Legacy panes use that pipeline only while dimmed.
 #[test]
 fn grid_path_wiring_is_present() {
     let src = super::production_source();
@@ -75,9 +75,9 @@ fn grid_path_wiring_is_present() {
         "the cell-locked glyph pipeline must draw against the live target size"
     );
     assert!(
-        src.contains("if cfg.text_renderer == TextRendererMode::Grid {")
-            && src.contains("self.emit_pane_glyphs("),
-        "glyph emission must be gated on grid mode"
+        src.contains("if cfg.text_renderer == TextRendererMode::Legacy && inactive == 0.0 {")
+            && src.contains("(cfg.text_renderer == TextRendererMode::Grid).then_some(cw)"),
+        "active legacy panes use glyphon; inactive legacy panes retain continuous layout"
     );
     assert!(
         src.contains("buf.set_wrap(Wrap::None);"),

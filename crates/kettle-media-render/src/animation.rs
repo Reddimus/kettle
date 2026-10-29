@@ -58,6 +58,7 @@ pub(crate) fn frames(
     let mut delays = Vec::new();
     let mut starts = Vec::new();
     let mut elapsed_ms = 0.0f64;
+    let mut correction_ms = 0.0f64;
     let mut timeline = open(format, bytes)?;
     while let Some(frame) = next(&mut timeline)? {
         spend(deadline)?;
@@ -73,8 +74,13 @@ pub(crate) fn frames(
         } else {
             (numer, denom)
         };
-        starts.push(elapsed_ms.round() as u64);
-        elapsed_ms += delay.0 as f64 / delay.1 as f64;
+        starts.push(elapsed_ms);
+        // Compensate accumulation so fractional rates do not drift across
+        // exact sampling boundaries (30 frames at 60 Hz start at 500 ms).
+        let increment_ms = delay.0 as f64 / delay.1 as f64 - correction_ms;
+        let next_ms = elapsed_ms + increment_ms;
+        correction_ms = (next_ms - elapsed_ms) - increment_ms;
+        elapsed_ms = next_ms;
         delays.push(delay);
     }
     if delays.is_empty() {
@@ -92,7 +98,9 @@ pub(crate) fn frames(
         .iter()
         .map(|&time| {
             starts
-                .partition_point(|&start| start <= time)
+                // One representable step covers division roundoff at an exact
+                // boundary without quantizing sub-millisecond frame starts.
+                .partition_point(|&start| start <= (time as f64).next_up())
                 .saturating_sub(1)
         })
         .collect();
@@ -118,7 +126,7 @@ pub(crate) fn frames(
             Ok(Still {
                 sample: StillSample {
                     requested_ms,
-                    actual_ms: starts[index].min(duration_ms),
+                    actual_ms: (starts[index].round() as u64).min(duration_ms),
                 },
                 width: tile_w,
                 height: tile_h,
@@ -268,6 +276,40 @@ mod tests {
             frames(&bytes, &sheet(2), later()).unwrap_err(),
             FailureCode::RenderParse
         );
+    }
+
+    #[test]
+    fn apng_stills_do_not_select_frames_before_fractional_starts() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_animated(4, 0).unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            for (color, num, den) in [
+                (RED, 1, 6000),
+                (GREEN, 1, 1000),
+                (BLUE, 1, 1000),
+                (WHITE, 1, 1),
+            ] {
+                writer.set_frame_delay(num, den).unwrap();
+                writer.write_image_data(&color).unwrap();
+            }
+        }
+        for (requested_ms, actual_ms, color) in
+            [(0, 0, RED), (1, 0, GREEN), (2, 1, BLUE), (3, 2, WHITE)]
+        {
+            let at = VideoStills {
+                at_s: Some(requested_ms as f64 / 1000.0),
+                layout: StillsLayout::Poster,
+                ..sheet(1)
+            };
+            let (info, stills, _) = frames(&bytes, &at, later()).unwrap();
+            assert_eq!(info.duration_ms, 1002);
+            assert_eq!(stills[0].sample.requested_ms, requested_ms);
+            assert_eq!(stills[0].sample.actual_ms, actual_ms);
+            assert_eq!(&stills[0].rgba[..4], &color, "at {requested_ms} ms");
+        }
     }
 
     #[test]
