@@ -3654,15 +3654,16 @@ mod windows {
     #[cfg(test)]
     use windows_sys::Win32::Security::WinWorldSid;
     use windows_sys::Win32::Security::{
-        ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CreateWellKnownSid,
-        DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl,
-        GetTokenInformation, INHERIT_ONLY_ACE, InitializeAcl, InitializeSecurityDescriptor,
-        IsValidAcl, IsValidSid, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
-        SECURITY_MAX_SID_SIZE, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
-        SetSecurityDescriptorOwner, TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
-        TokenOwner, TokenUser, UNPROTECTED_DACL_SECURITY_INFORMATION, WELL_KNOWN_SID_TYPE,
-        WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddAccessAllowedAceEx,
+        CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid,
+        GetSecurityDescriptorControl, GetTokenInformation, INHERIT_ONLY_ACE, InitializeAcl,
+        InitializeSecurityDescriptor, IsValidAcl, IsValidSid, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+        SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE,
+        SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
+        TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser,
+        UNPROTECTED_DACL_SECURITY_INFORMATION, WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid,
+        WinLocalSystemSid,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, CreateHardLinkW,
@@ -5108,16 +5109,16 @@ mod windows {
             if unsafe { GetAce(dacl, u32::from(index), &mut ace) } == 0 || ace.is_null() {
                 return Err(io::Error::last_os_error());
             }
-            let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
-            // All access-allowed ACE forms begin with ACE_HEADER + ACCESS_MASK.
-            // SAFETY: GetAce returned a kernel-validated ACE.
-            let kind = u32::from(unsafe { (*allowed).Header.AceType });
-            // SAFETY: GetAce returned an ACE in the retained, validated DACL;
-            // AceFlags is in its common header.
-            let flags = unsafe { (*allowed).Header.AceFlags };
-            // SAFETY: This relies on Windows returning ACEs with an ACCESS_MASK
-            // after the header, even before kind is checked; short unknown ACEs need review.
-            let mask = unsafe { (*allowed).Mask };
+            let header = ace.cast::<ACE_HEADER>();
+            // SAFETY: GetAce returned an ACE inside the retained, validated DACL,
+            // and every ACE starts with an ACE_HEADER.
+            let (kind, flags, size) = unsafe {
+                (
+                    u32::from((*header).AceType),
+                    (*header).AceFlags,
+                    usize::from((*header).AceSize),
+                )
+            };
             let is_allow = matches!(
                 kind,
                 ACCESS_ALLOWED_ACE_TYPE
@@ -5126,7 +5127,25 @@ mod windows {
                     | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
                     | ACCESS_ALLOWED_COMPOUND_ACE_TYPE
             );
-            if !is_allow || flags & INHERIT_ONLY_ACE as u8 != 0 || mask & dangerous_rights == 0 {
+            if !is_allow || flags & INHERIT_ONLY_ACE as u8 != 0 {
+                continue;
+            }
+            // Every access-allowed form stores its ACCESS_MASK right after the
+            // header; one too short for that, and a SID, is not trusted.
+            if size < std::mem::size_of::<ACCESS_ALLOWED_ACE>() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{description} has a malformed access-control entry: {}",
+                        path.display()
+                    ),
+                ));
+            }
+            let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
+            // SAFETY: this access-allowed ACE spans at least an ACCESS_ALLOWED_ACE,
+            // so Mask, right after the header, is inside it.
+            let mask = unsafe { (*allowed).Mask };
+            if mask & dangerous_rights == 0 {
                 continue;
             }
             if !matches!(
@@ -5144,6 +5163,19 @@ mod windows {
             // SAFETY: kind is an access-allowed or callback access-allowed ACE
             // from the retained OS descriptor, both of which have SidStart at this offset.
             let sid: PSID = unsafe { std::ptr::addr_of!((*allowed).SidStart).cast_mut().cast() };
+            let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+            // SAFETY: the size check above keeps SidStart's first four bytes, which
+            // hold the SID's revision and sub-authority count, inside the ACE.
+            let sid_len = unsafe { GetLengthSid(sid) } as usize;
+            if sid_len > size - sid_offset {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{description} has a malformed access-control entry: {}",
+                        path.display()
+                    ),
+                ));
+            }
             if !trusted_windows_sid(sid, current_user, administrators, system) {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
