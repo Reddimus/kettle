@@ -2775,6 +2775,8 @@ fn record_chunk(recorder: &mut Option<kettle_core::record::Recorder>, bytes: &[u
         return;
     };
     recorder.record_output(bytes);
+    #[cfg(test)]
+    tests::note_recorded_output(bytes);
     report_recording_status(recorder);
 }
 
@@ -4095,6 +4097,28 @@ mod tests {
     #[cfg(target_os = "linux")]
     pub(super) static LINUX_PROC_SCAN_TIME_FOR_TESTS: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
+
+    /// The latest output a recorder in this process took, kept only while a
+    /// recorder stop case watches for its marker. Each case runs alone in its
+    /// own test process.
+    static RECORDED_TAIL: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+    pub(super) fn note_recorded_output(bytes: &[u8]) {
+        let mut tail = RECORDED_TAIL.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(tail) = tail.as_mut() {
+            tail.extend_from_slice(bytes);
+            let excess = tail.len().saturating_sub(4096);
+            tail.drain(..excess);
+        }
+    }
+
+    fn recorded_output_contains(needle: &[u8]) -> bool {
+        RECORDED_TAIL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|tail| tail.windows(needle.len()).any(|window| window == needle))
+    }
 
     #[test]
     fn a_blocked_writer_takes_the_pending_command_once_its_queue_has_room() {
@@ -7219,9 +7243,15 @@ wait
         };
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancel = cancelled.clone();
+        *RECORDED_TAIL.lock().unwrap() = Some(Vec::new());
         let trigger = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(10);
-            while !ready.exists() {
+            // ConPTY renders the child's output on its own schedule, after
+            // Kettle answers its startup cursor query, so `ready` can exist
+            // before the marker reaches Kettle. A cancel waits for the
+            // recorder to take it.
+            let recorded = || timeout || recorded_output_contains(b"recorded-before-stop");
+            while !ready.exists() || !recorded() {
                 assert!(
                     Instant::now() < deadline,
                     "child did not announce readiness"
