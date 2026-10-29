@@ -1423,6 +1423,9 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), b"first");
     }
 
+    // Windows refuses a path rename while the staged handle is open; its
+    // handle-based rename has its own test in `private`.
+    #[cfg(unix)]
     #[test]
     fn atomic_create_new_keeps_renamed_content_without_a_staging_name() {
         let dir = crate::test_tempdir();
