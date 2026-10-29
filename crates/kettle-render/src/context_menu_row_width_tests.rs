@@ -191,3 +191,52 @@ fn cut_menu_paints_arrow_inside_reserved_strip() {
     menu.panel_h_clamped = 0.0;
     assert!(arrows(&menu).is_empty());
 }
+
+#[test]
+fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
+    let theme = kettle_config::Theme::default();
+    for panel_h in [28.25, 29.0, 32.0, 40.0, 64.0] {
+        let menu = ContextMenu {
+            anchor: (10.0, 10.0),
+            rows: (0..10)
+                .map(|_| ContextMenuRow {
+                    label: "row".into(),
+                    separator: false,
+                    enabled: true,
+                    hint: String::new(),
+                })
+                .collect(),
+            highlight: usize::MAX,
+            scroll_offset: 1,
+            panel_w_clamped: 200.0,
+            panel_h_clamped: panel_h,
+            a11y_label: None,
+        };
+        let (inset, _) = menu::scroll_content(280.0, panel_h, 28.0);
+        // Shadow, panel and four border quads precede the two arrows.
+        let quads = menu_chrome_quads(
+            &menu,
+            &theme,
+            theme.accent,
+            8.0,
+            16.0,
+            &mut crate::chrome::Colors::default(),
+            true,
+        );
+        assert_eq!(quads.len(), 12);
+        for (arrow, top) in [
+            (&quads[6..9], 10.0),
+            (&quads[9..12], 10.0 + panel_h - inset),
+        ] {
+            for q in arrow {
+                assert!(
+                    q.pos[1] >= top && q.pos[1] + q.size[1] <= top + inset + 0.0001,
+                    "panel {panel_h}, strip {top}..{}, quad {}..{}",
+                    top + inset,
+                    q.pos[1],
+                    q.pos[1] + q.size[1]
+                );
+            }
+        }
+    }
+}

@@ -1750,7 +1750,7 @@ impl App {
             return;
         };
         let count = |state: &crate::window_state::ThemePickerState| {
-            theme_picker_matches(&state.query, &state.opened_on).len()
+            theme_picker_matches(&state.query, &state.opened_on, &self.ui_text).len()
         };
         let step = |state: &mut crate::window_state::ThemePickerState, forward: bool, n: usize| {
             if n > 0 {
@@ -1788,7 +1788,7 @@ impl App {
                 step(state, matches!(s.as_str(), "j" | "n"), n);
             }
             Key::Named(NamedKey::Enter) => {
-                let pick = theme_picker_selection(state);
+                let pick = theme_picker_selection(state, &self.ui_text);
                 ws.theme_picker_input = None;
                 if let Some(name) = pick {
                     self.commit_theme(ws, name);

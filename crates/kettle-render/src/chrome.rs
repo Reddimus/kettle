@@ -77,21 +77,20 @@ impl Colors {
 
     pub(crate) fn close_background(
         &mut self,
-        fg: Rgb,
+        theme: &kettle_config::Theme,
         bg: Rgb,
         inactive_bg: Rgb,
-        red: Rgb,
         state: (bool, bool),
         linear: bool,
     ) -> Rgb {
         let (active, hovered) = state;
         let base = if active { bg } else { inactive_bg };
         let (top, alpha) = if hovered {
-            (red, 0.85)
+            (theme.palette[1], 0.85)
         } else if active {
-            (inactive_bg, 0.55)
+            (theme.palette[8], 0.55)
         } else {
-            (fg, 0.12)
+            (theme.foreground, 0.12)
         };
         self.surface(base, top, alpha, linear)
     }
@@ -139,19 +138,6 @@ impl Colors {
         }
         self.cache.resolve(fg, bg, minimum)
     }
-}
-
-#[cfg(test)]
-fn close_background(
-    fg: Rgb,
-    bg: Rgb,
-    inactive_bg: Rgb,
-    red: Rgb,
-    active: bool,
-    hovered: bool,
-    linear: bool,
-) -> Rgb {
-    Colors::default().close_background(fg, bg, inactive_bg, red, (active, hovered), linear)
 }
 
 #[cfg(test)]
@@ -213,15 +199,8 @@ mod tests {
                 ];
                 for active in [false, true] {
                     for hovered in [false, true] {
-                        let close = close_background(
-                            fg,
-                            bg,
-                            strip,
-                            theme.palette[1],
-                            active,
-                            hovered,
-                            linear,
-                        );
+                        let close =
+                            colors.close_background(&theme, bg, strip, (active, hovered), linear);
                         roles.push((
                             "tab close",
                             colors.icon(if hovered { theme.cursor_text } else { strip }, close),
@@ -418,5 +397,52 @@ mod completion_tests {
                 .collect::<Vec<_>>()
                 .join("; ")
         );
+    }
+}
+
+#[cfg(test)]
+mod review_regression_tests {
+    use super::*;
+
+    #[test]
+    fn regression_close_contrast_uses_chip_tint_independent_of_strip() {
+        let theme = kettle_config::Theme::by_name("Builtin Dark");
+        let strip = Rgb::new(0, 0, 0);
+        let mut colors = Colors::default();
+        for linear in [false, true] {
+            for active in [false, true] {
+                for hovered in [false, true] {
+                    let base = if active { theme.background } else { strip };
+                    let (tint, alpha) = if hovered {
+                        (theme.palette[1], 0.85)
+                    } else if active {
+                        (theme.palette[8], 0.55)
+                    } else {
+                        (theme.foreground, 0.12)
+                    };
+                    let painted = color::over(base, tint, alpha, linear);
+                    let assumed = colors.close_background(
+                        &theme,
+                        theme.background,
+                        strip,
+                        (active, hovered),
+                        linear,
+                    );
+                    let icon = colors.icon(
+                        if hovered {
+                            theme.cursor_text
+                        } else {
+                            theme.palette[8]
+                        },
+                        assumed,
+                    );
+                    let ratio = color::contrast_ratio(icon, painted);
+                    assert!(
+                        ratio >= ICON_CONTRAST,
+                        "active={active}, hovered={hovered}, linear={linear}: {ratio:.3}:1"
+                    );
+                }
+            }
+        }
     }
 }

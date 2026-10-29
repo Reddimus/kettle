@@ -2120,6 +2120,9 @@ impl App {
         if self.drag_split_divider(ws) {
             return;
         }
+        if self.picker_pointer(ws, PickerPointer::Hover) {
+            return;
+        }
         self.promote_tab_drag_if_needed(ws);
         if ws.tab_drag_active && ws.tab_drag_press.is_none() {
             self.reorder_active_tab_for_cursor(ws);
@@ -2170,6 +2173,9 @@ impl App {
         }
         let bar = self.tab_bar(ws);
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if bcode == 0 && self.picker_pointer(ws, PickerPointer::Press) {
+            return true;
+        }
         if bcode == 0
             && let Some(delta) = self.context_menu_scroll_edge(ws)
         {

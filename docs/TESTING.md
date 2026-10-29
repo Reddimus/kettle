@@ -808,6 +808,15 @@ and `INLINE_CARD_GPU_SKIPPED` when the adapter cannot exercise it.
 Require acceptance for both Grid and Legacy cases you claim to have tested.
 Headless readbacks still do not prove native input or installed-package behavior.
 
+The `regression_` tests in `kettle-render` and `kettle-ui` cover close-chip
+contrast with an overridden chrome background, pane and lane dimming order,
+single dimming of terminal decorations, picker pointer routing, translated
+theme queries and scroll-arrow containment in subpixel strips. The headless
+pixel cases print a skip when no GPU adapter is available; portable colour,
+geometry, draw-order and picker interaction tests still run. Report those
+skips separately from pixel acceptance. Picker interaction tests exercise
+all four modal projections without a native window.
+
 ### Authenticated agent and configured editor checks
 
 The default agent TUI smoke uses version/help probes for installed agents.

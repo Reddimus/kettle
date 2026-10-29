@@ -26,7 +26,7 @@ fn state(query: &str, selected: usize, opened_on: &str) -> ThemePickerState {
 fn an_empty_query_lists_the_opening_appearance_first_in_look_order() {
     for opened_on in ["TokyoNight Night", "TokyoNight Day"] {
         let dark = Theme::by_name(opened_on).is_dark();
-        let matches = theme_picker_matches("", opened_on);
+        let matches = theme_picker_matches("", opened_on, &EN);
         let names: Vec<&str> = matches.iter().map(|(name, _)| *name).collect();
         let first = Theme::look_order(dark);
         assert_eq!(names.len(), Theme::list().len());
@@ -41,7 +41,7 @@ fn an_empty_query_lists_the_opening_appearance_first_in_look_order() {
         }
         assert_eq!(names[theme_picker_start(opened_on)], opened_on);
         // A blank query is no query.
-        assert_eq!(theme_picker_matches("   ", opened_on), matches);
+        assert_eq!(theme_picker_matches("   ", opened_on, &EN), matches);
     }
 }
 
@@ -49,7 +49,7 @@ fn an_empty_query_lists_the_opening_appearance_first_in_look_order() {
 fn a_query_ranks_matching_themes_and_says_when_none_match() {
     // "Dracula+" scores the same and comes first in look order, but the
     // theme the query names exactly wins.
-    let matches = theme_picker_matches("dracula", "TokyoNight Night");
+    let matches = theme_picker_matches("dracula", "TokyoNight Night", &EN);
     assert_eq!(matches.first().map(|(name, _)| *name), Some("Dracula"));
     assert!(matches.iter().any(|(name, _)| *name == "Dracula+"));
     for (name, _) in &matches {
@@ -69,7 +69,7 @@ fn a_query_ranks_matching_themes_and_says_when_none_match() {
         "No matching theme"
     );
     assert_eq!(
-        theme_picker_selection(&state("zzqqxxjj", 3, "TokyoNight Night")),
+        theme_picker_selection(&state("zzqqxxjj", 3, "TokyoNight Night"), &EN),
         None
     );
 }
@@ -112,7 +112,7 @@ fn settle(ws: &mut WindowState, wearing: &str) -> String {
         theme_name: wearing.to_string(),
         ..Default::default()
     };
-    theme_preview_change(ws, &cfg)
+    theme_preview_change(ws, &cfg, &EN)
         .map(|(name, _)| name)
         .unwrap_or_else(|| wearing.to_string())
 }
@@ -143,7 +143,7 @@ fn the_preview_restores_the_theme_the_picker_opened_on() {
         state.opened_on, opened,
         "the new picker ticks the theme from before"
     );
-    assert_eq!(theme_picker_selection(state), Some(opened));
+    assert_eq!(theme_picker_selection(state, &EN), Some(opened));
 
     // Nothing matches: the window wears the opening theme again, and the
     // baseline survives for Esc even if something else changes the theme.
@@ -166,7 +166,8 @@ fn the_preview_restores_the_theme_the_picker_opened_on() {
             &kettle_config::Config {
                 theme_name: opened.to_string(),
                 ..Default::default()
-            }
+            },
+            &EN
         )
         .is_none()
     );
@@ -188,7 +189,8 @@ fn a_kept_theme_stays() {
             &kettle_config::Config {
                 theme_name: kept.to_string(),
                 ..Default::default()
-            }
+            },
+            &EN
         )
         .is_none()
     );
@@ -289,7 +291,7 @@ fn the_selection_is_the_highlighted_row() {
         ("tokyo", 2),
         ("tokyo", 999),
     ] {
-        let picked = theme_picker_selection(&state(query, selected, opened_on));
+        let picked = theme_picker_selection(&state(query, selected, opened_on), &EN);
         let list = theme_picker_list(query, selected, opened_on, &EN);
         assert_eq!(
             picked,
@@ -298,7 +300,7 @@ fn the_selection_is_the_highlighted_row() {
         );
     }
     assert_eq!(
-        theme_picker_selection(&state("", theme_picker_start(opened_on), opened_on)),
+        theme_picker_selection(&state("", theme_picker_start(opened_on), opened_on), &EN),
         Some(opened_on)
     );
 }
@@ -312,7 +314,10 @@ fn builtin_theme_picker_localizes_labels_and_keeps_selection_identifiers() {
         let list = theme_picker_list(name, 0, name, &ES);
         assert_eq!(list.rows[0].label, label);
         assert!(list.rows[0].hint.starts_with("✓ "));
-        assert_eq!(theme_picker_selection(&state(name, 0, name)), Some(name));
+        assert_eq!(
+            theme_picker_selection(&state(name, 0, name), &EN),
+            Some(name)
+        );
     }
 }
 
@@ -327,4 +332,186 @@ fn picker_scroll_strips_leave_the_selected_row_fully_visible() {
     );
     let visible = (content_h / 28.0).floor() as usize;
     assert!((menu.scroll_offset..menu.scroll_offset + visible).contains(&menu.highlight));
+}
+
+#[test]
+fn regression_translated_theme_names_find_canonical_selections() {
+    for (name, label) in [
+        ("Builtin Dark", "Oscuro integrado"),
+        ("Builtin Light", "Claro integrado"),
+    ] {
+        for query in [label.to_string(), label.to_uppercase(), name.to_string()] {
+            let list = theme_picker_list(&query, 0, name, &ES);
+            assert!(list.rows[0].enabled, "no match for {query}");
+            assert_eq!(list.rows[0].label, label);
+            assert!(list.rows[0].hint.starts_with("✓ "));
+            assert_eq!(
+                theme_picker_selection(&state(&query, 0, name), &ES),
+                Some(name)
+            );
+        }
+    }
+}
+
+#[test]
+fn regression_picker_scroll_strips_have_pointer_and_wheel_routes() {
+    let source = production_source();
+    let motion = source
+        .split("WindowEvent::CursorMoved")
+        .last()
+        .unwrap()
+        .split("WindowEvent::MouseInput")
+        .next()
+        .unwrap();
+    assert!(
+        motion.contains("self.picker_pointer"),
+        "picker arrows need a hover route"
+    );
+    let press = source
+        .split("let bcode = match button {")
+        .nth(1)
+        .unwrap()
+        .split("WindowEvent::MouseWheel")
+        .next()
+        .unwrap();
+    assert!(
+        press.contains("self.picker_pointer"),
+        "picker arrows need a click route"
+    );
+    let wheel = include_str!("pointer.rs")
+        .split("fn dispatch_wheel(")
+        .nth(1)
+        .unwrap();
+    assert!(
+        wheel.contains("self.picker_pointer"),
+        "picker needs a wheel route before modal swallow"
+    );
+    let ctl = include_str!("ctl.rs")
+        .split("fn ctl_mouse_press(")
+        .nth(1)
+        .unwrap();
+    assert!(
+        ctl.contains("self.picker_pointer"),
+        "synthetic presses share the picker route"
+    );
+}
+
+#[test]
+fn picker_arrows_and_wheel_scroll_all_four_modal_projections() {
+    use super::{PickerPointer, apply_picker_pointer, open_picker_list, picker_context_menu};
+    let cfg = kettle_config::Config {
+        ssh_hosts: (0..40)
+            .map(|i| (format!("host-{i}"), format!("ssh host-{i}")))
+            .collect(),
+        ..Default::default()
+    };
+    let surface = (320.0, 160.0);
+    let cell = (8.0, 16.0);
+    let project = |ws: &WindowState| {
+        picker_context_menu(
+            open_picker_list(ws, &cfg, &ES, None).unwrap(),
+            surface,
+            cell,
+        )
+        .unwrap()
+    };
+    for kind in 0..4 {
+        let mut ws = WindowState::new(0, Mux::new());
+        match kind {
+            0 => ws.palette_input = Some((String::new(), 0)),
+            1 => ws.theme_picker_input = Some(state("", 0, "Builtin Dark")),
+            2 => {
+                ws.layout_picker_entries = (0..40).map(|i| format!("layout-{i}")).collect();
+                ws.layout_picker_input = Some((String::new(), 0));
+            }
+            _ => ws.ssh_input = Some((String::new(), 0)),
+        }
+        assert!(ws.context_menu.is_none());
+        let menu = project(&ws);
+        assert_eq!(menu.scroll_offset, 0);
+        ws.cursor.x = f64::from(menu.anchor.0 + menu.panel_w_clamped * 0.5);
+        ws.cursor.y = f64::from(menu.anchor.1 + menu.panel_h_clamped - 0.25);
+        assert!(apply_picker_pointer(
+            &mut ws,
+            &menu,
+            cell.1,
+            PickerPointer::Press
+        ));
+        let menu = project(&ws);
+        assert_eq!(menu.scroll_offset, 1, "picker {kind}: bottom click");
+        assert!(apply_picker_pointer(
+            &mut ws,
+            &menu,
+            cell.1,
+            PickerPointer::Hover
+        ));
+        let menu = project(&ws);
+        assert_eq!(menu.scroll_offset, 2, "picker {kind}: bottom hover");
+        ws.cursor.y = f64::from(menu.anchor.1 + 0.25);
+        assert!(apply_picker_pointer(
+            &mut ws,
+            &menu,
+            cell.1,
+            PickerPointer::Hover
+        ));
+        let menu = project(&ws);
+        assert_eq!(menu.scroll_offset, 1, "picker {kind}: top hover");
+        assert!(apply_picker_pointer(
+            &mut ws,
+            &menu,
+            cell.1,
+            PickerPointer::Wheel(3)
+        ));
+        let menu = project(&ws);
+        assert_eq!(menu.scroll_offset, 4, "picker {kind}: wheel down");
+        assert!(apply_picker_pointer(
+            &mut ws,
+            &menu,
+            cell.1,
+            PickerPointer::Wheel(-100)
+        ));
+        let menu = project(&ws);
+        assert_eq!(menu.scroll_offset, 0, "picker {kind}: wheel up clamps");
+        assert!(apply_picker_pointer(
+            &mut ws,
+            &menu,
+            cell.1,
+            PickerPointer::Press
+        ));
+        assert_eq!(
+            project(&ws).scroll_offset,
+            0,
+            "disabled top arrow consumes press"
+        );
+        ws.cursor.x = f64::from(menu.anchor.0 - 1.0);
+        assert!(!apply_picker_pointer(
+            &mut ws,
+            &menu,
+            cell.1,
+            PickerPointer::Press
+        ));
+        assert!(
+            open_picker_list(&ws, &cfg, &ES, None).is_some(),
+            "picker stays open"
+        );
+        assert!(ws.context_menu.is_none());
+    }
+}
+
+#[test]
+fn translated_theme_query_previews_its_canonical_theme() {
+    for (label, canonical) in [
+        ("Oscuro integrado", "Builtin Dark"),
+        ("Claro integrado", "Builtin Light"),
+    ] {
+        let mut ws = WindowState::new(0, Mux::new());
+        begin_theme_picker(&mut ws, live("Dracula"));
+        ws.theme_picker_input.as_mut().unwrap().query = label.into();
+        let cfg = kettle_config::Config {
+            theme_name: "Dracula".into(),
+            ..Default::default()
+        };
+        let (preview, _) = theme_preview_change(&mut ws, &cfg, &ES).unwrap();
+        assert_eq!(preview, canonical);
+    }
 }

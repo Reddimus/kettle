@@ -8794,7 +8794,11 @@ fn layout_picker_list(
 /// palettes and reach the other appearance only at the end. A query ranks by
 /// fuzzy match, ties keeping that order, except that a theme named exactly by
 /// the query comes first: `dracula` scores the same against "Dracula+".
-fn theme_picker_matches(query: &str, opened_on: &str) -> Vec<(&'static str, bool)> {
+fn theme_picker_matches(
+    query: &str,
+    opened_on: &str,
+    tr: &kettle_i18n::Translator,
+) -> Vec<(&'static str, bool)> {
     let opened_dark = kettle_config::Theme::by_name(opened_on).is_dark();
     let order = [opened_dark, !opened_dark].into_iter().flat_map(|dark| {
         kettle_config::Theme::look_order(dark)
@@ -8808,8 +8812,13 @@ fn theme_picker_matches(query: &str, opened_on: &str) -> Vec<(&'static str, bool
     let mut ranked: Vec<(bool, i32, usize, (&'static str, bool))> = order
         .enumerate()
         .filter_map(|(index, theme)| {
-            let exact = theme.0.eq_ignore_ascii_case(query);
-            kettle_config::fuzzy::score(query, theme.0).map(|score| (exact, score, index, theme))
+            let label = tr.theme_name(theme.0);
+            let exact = theme.0.eq_ignore_ascii_case(query) || label.eq_ignore_ascii_case(query);
+            kettle_config::fuzzy::score(query, theme.0)
+                .into_iter()
+                .chain(kettle_config::fuzzy::score(query, label))
+                .max()
+                .map(|score| (exact, score, index, theme))
         })
         .collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
@@ -8825,7 +8834,7 @@ fn theme_picker_list(
     tr: &kettle_i18n::Translator,
 ) -> PickerList {
     use kettle_i18n::Text;
-    let rows: Vec<ContextMenuRow> = theme_picker_matches(query, opened_on)
+    let rows: Vec<ContextMenuRow> = theme_picker_matches(query, opened_on, tr)
         .into_iter()
         .map(|(name, dark)| {
             let appearance = tr.text(if dark {
@@ -8863,8 +8872,11 @@ fn theme_picker_list(
 
 /// The theme the picker's highlighted row names, if any row matches. Clamped
 /// like the painted highlight, so the preview and Enter use the row shown.
-fn theme_picker_selection(state: &crate::window_state::ThemePickerState) -> Option<&'static str> {
-    let matches = theme_picker_matches(&state.query, &state.opened_on);
+fn theme_picker_selection(
+    state: &crate::window_state::ThemePickerState,
+    tr: &kettle_i18n::Translator,
+) -> Option<&'static str> {
+    let matches = theme_picker_matches(&state.query, &state.opened_on, tr);
     let last = matches.len().checked_sub(1)?;
     Some(matches[state.selected.min(last)].0)
 }
@@ -8912,12 +8924,16 @@ fn begin_theme_picker_session(
 /// baseline while nothing matches the query; the baseline stays until the
 /// picker closes. A picker that closed without keeping a theme (a kept one
 /// clears the baseline first) puts the baseline back.
-fn theme_preview_change(ws: &mut WindowState, cfg: &Config) -> Option<ThemeState> {
+fn theme_preview_change(
+    ws: &mut WindowState,
+    cfg: &Config,
+    tr: &kettle_i18n::Translator,
+) -> Option<ThemeState> {
     let live_name = cfg.theme_name.as_str();
     let Some(state) = ws.theme_picker_input.as_ref() else {
         return ws.theme_preview.take();
     };
-    match theme_picker_selection(state) {
+    match theme_picker_selection(state, tr) {
         Some(name) if name == live_name => None,
         Some(name) => Some((name.to_string(), cfg.theme_by_name(name))),
         None => ws
@@ -8943,7 +8959,7 @@ fn end_modal_composition(ws: &mut WindowState) {
 /// Where the theme picker opens: on the current theme, so the first arrow
 /// press steps to its nearest look.
 fn theme_picker_start(current: &str) -> usize {
-    theme_picker_matches("", current)
+    theme_picker_matches("", current, &kettle_i18n::Translator::default())
         .iter()
         .position(|(name, _)| name.eq_ignore_ascii_case(current.trim()))
         .unwrap_or(0)
@@ -9079,6 +9095,106 @@ fn picker_overlay_context_menu(
         .flatten()
         .next()
         .and_then(|list| picker_context_menu(list, surface, cell))
+}
+
+#[derive(Clone, Copy)]
+enum PickerPointer {
+    Hover,
+    Press,
+    Wheel(isize),
+}
+
+fn open_picker_list(
+    ws: &WindowState,
+    cfg: &Config,
+    tr: &kettle_i18n::Translator,
+    notice: Option<&crate::update_notice::Notice>,
+) -> Option<PickerList> {
+    if let Some((query, selected)) = &ws.palette_input {
+        Some(command_picker_list(
+            query,
+            *selected,
+            &cfg.keybinds,
+            tr,
+            notice,
+        ))
+    } else if let Some(state) = &ws.theme_picker_input {
+        Some(theme_picker_list(
+            &state.query,
+            state.selected,
+            &state.opened_on,
+            tr,
+        ))
+    } else if let Some((query, selected)) = &ws.layout_picker_input {
+        Some(layout_picker_list(
+            query,
+            *selected,
+            &ws.layout_picker_entries,
+            tr,
+        ))
+    } else {
+        ws.ssh_input
+            .as_ref()
+            .map(|(query, selected)| ssh_picker_list(query, *selected, &cfg.ssh_hosts, tr))
+    }
+}
+
+fn apply_picker_pointer(
+    ws: &mut WindowState,
+    menu: &ContextMenu,
+    cell_h: f32,
+    event: PickerPointer,
+) -> bool {
+    let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+    let (x, y) = menu.anchor;
+    let (w, h) = (menu.panel_w_clamped, menu.panel_h_clamped);
+    if px < x || px >= x + w || py < y || py >= y + h {
+        return false;
+    }
+    let row_h = cell_h + kettle_render::menu::ROW_PAD;
+    let (inset, content_h) =
+        kettle_render::menu::scroll_content(menu.rows.len() as f32 * row_h, h, row_h);
+    let delta = match event {
+        PickerPointer::Wheel(delta) => delta,
+        _ if inset > 0.0 && py < y + inset => -1,
+        _ if inset > 0.0 && py >= y + inset + content_h => 1,
+        _ => return false,
+    };
+    let visible = ((content_h / row_h).floor() as usize)
+        .max(1)
+        .min(menu.rows.len());
+    let max_offset = menu.rows.len().saturating_sub(visible);
+    let offset = menu
+        .scroll_offset
+        .saturating_add_signed(delta)
+        .min(max_offset);
+    // The picker viewport follows selection. Crossing the cut edge selects
+    // the newly exposed row and keeps keyboard/preview routing in sync.
+    let selected = if offset == menu.scroll_offset {
+        menu.highlight
+    } else {
+        offset + visible - 1
+    };
+    let selection = if let Some((_, selected)) = ws.palette_input.as_mut() {
+        selected
+    } else if let Some(state) = ws.theme_picker_input.as_mut() {
+        &mut state.selected
+    } else if let Some((_, selected)) = ws.layout_picker_input.as_mut() {
+        selected
+    } else if let Some((_, selected)) = ws.ssh_input.as_mut() {
+        selected
+    } else {
+        return false;
+    };
+    if *selection != selected {
+        *selection = selected;
+        ws.accessibility_pending = true;
+        ws.reuse_pane_snapshots_once = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+    true
 }
 
 /// The `vim-menu-nav` `Ctrl+d`/`Ctrl+u` half-page target. Moves
@@ -13353,6 +13469,31 @@ impl App {
                 })
                 .collect(),
         })
+    }
+
+    fn picker_pointer(&self, ws: &mut WindowState, event: PickerPointer) -> bool {
+        if ws.context_menu.is_some() {
+            return false;
+        }
+        let Some(list) =
+            open_picker_list(ws, &self.cfg, &self.ui_text, self.update_notice().as_ref())
+        else {
+            return false;
+        };
+        let surface = ws
+            .renderer
+            .as_ref()
+            .map(|renderer| {
+                let (w, h) = renderer.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0));
+        let cell = self.menu_cell(ws);
+        let Some(menu) = picker_context_menu(list, surface, cell) else {
+            return false;
+        };
+        let handled = apply_picker_pointer(ws, &menu, cell.1, event);
+        handled || matches!(event, PickerPointer::Wheel(_))
     }
 
     fn overlay(&self, ws: &WindowState, reuse_pane_snapshots: bool) -> Overlay {
@@ -20634,6 +20775,8 @@ impl App {
                 // GTK/NSMenu/Win32 menu conventions.
                 if ws.context_menu.is_some() {
                     self.update_menu_highlight_from_cursor(ws);
+                } else {
+                    self.picker_pointer(ws, PickerPointer::Hover);
                 }
                 // Terminator parity, terminatorlib/config.py:73
                 // `focus = sloppy`: focus-follows-mouse. The pane
@@ -20894,6 +21037,9 @@ impl App {
                 // outside the panel — closes the menu. Middle-click outside
                 // dismisses too; only right-click falls through so it can
                 // reopen/relocate the menu.
+                if bcode == 0 && self.picker_pointer(ws, PickerPointer::Press) {
+                    return;
+                }
                 if bcode == 0
                     && let Some(delta) = self.context_menu_scroll_edge(ws)
                 {

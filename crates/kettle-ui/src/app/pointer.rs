@@ -756,6 +756,9 @@ impl App {
             }
             return true;
         }
+        if self.picker_pointer(ws, PickerPointer::Wheel(-(steps.notches as isize))) {
+            return true;
+        }
         // A wheel over a lane is the lane's: it pans a rendered item or
         // scrolls a source, and reaches nothing behind it.
         if self.lane_takes_wheel(ws) {

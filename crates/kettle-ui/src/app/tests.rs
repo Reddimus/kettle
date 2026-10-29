@@ -17848,6 +17848,7 @@ fn only_one_window_can_own_the_theme_preview() {
             theme_name: baseline.0.clone(),
             ..Default::default()
         },
+        &kettle_i18n::Translator::default(),
     )
     .unwrap();
     windows.insert(1, first);
@@ -17869,6 +17870,7 @@ fn only_one_window_can_own_the_theme_preview() {
             theme_name: baseline.0.clone(),
             ..Default::default()
         },
+        &kettle_i18n::Translator::default(),
     )
     .unwrap();
     assert!(
@@ -17877,7 +17879,8 @@ fn only_one_window_can_own_the_theme_preview() {
             &Config {
                 theme_name: preview.0.clone(),
                 ..Default::default()
-            }
+            },
+            &kettle_i18n::Translator::default()
         )
         .is_none()
     );
@@ -17888,6 +17891,7 @@ fn only_one_window_can_own_the_theme_preview() {
             theme_name: preview.0.clone(),
             ..Default::default()
         },
+        &kettle_i18n::Translator::default(),
     )
     .unwrap();
     assert_eq!(restored.0, baseline.0);
@@ -17906,7 +17910,8 @@ fn theme_previews_preserve_configured_color_overrides() {
     let picker = ws.theme_picker_input.as_mut().unwrap();
     picker.query = "Dracula".into();
     picker.selected = 0;
-    let (name, preview) = super::theme_preview_change(&mut ws, &cfg).unwrap();
+    let (name, preview) =
+        super::theme_preview_change(&mut ws, &cfg, &kettle_i18n::Translator::default()).unwrap();
     assert_eq!(
         preview.background,
         kettle_config::Rgb::parse("#010203").unwrap(),
@@ -17928,7 +17933,8 @@ fn theme_previews_preserve_configured_color_overrides() {
     assert_eq!(preview.background, committed.background);
     assert_eq!(preview.palette, committed.palette);
     ws.theme_picker_input = None;
-    let restored = super::theme_preview_change(&mut ws, &cfg).unwrap();
+    let restored =
+        super::theme_preview_change(&mut ws, &cfg, &kettle_i18n::Translator::default()).unwrap();
     assert_eq!(restored.1.background, baseline.background);
     assert_eq!(restored.1.palette, baseline.palette);
 }

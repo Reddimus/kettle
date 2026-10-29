@@ -2602,8 +2602,11 @@ family because they render a single static image and do not benefit from a later
 warm-up frame.
 
 Each frame uses the same wgpu render-pass encoder. Quads cover earlier
-text; later text covers their pixels. Card layers therefore precede terminal
-text, with owned card labels and fallback cursors afterward:
+text; later text covers their pixels. Pane dimming covers cell backgrounds,
+inline images and complete cards before terminal glyphs and decorations,
+whose inactive colours already include the text contrast floor. Active-pane
+decorations stay in the cell pass below cursor quads. Preview lanes receive
+their owning pane's dimming after all lane content is drawn:
 
 ```mermaid
 flowchart LR
@@ -2612,11 +2615,14 @@ flowchart LR
     base --> outlines["Pane outlines"]
     outlines --> images["PTY images: sixel, Kitty, iTerm2"]
     images --> cards["Card bases and letterboxed posters"]
-    cards --> glyphs["Cell-locked pane glyphs in Grid mode"]
+    cards --> owned["Card decoration and labels"]
+    owned --> dim["Pane dimming"]
+    dim --> decorations["Inactive terminal underlines and strikeouts"]
+    decorations --> glyphs["Cell-locked pane glyphs in Grid mode"]
     glyphs --> text["Chrome text and Legacy pane text"]
-    text --> owned["Card decoration, fallback cursors and labels"]
-    owned --> cursor["Focused block cursor's inverted glyph"]
-    cursor --> overlay["Pane dimming and scrollbar"]
+    text --> cursor["Fallback cursors and focused cursor glyph"]
+    cursor --> lanes["Preview lane surfaces, images and text"]
+    lanes --> overlay["Lane dimming and scrollbar"]
     overlay --> menu["Menu chrome and receipt image"]
     menu --> labels["Menu and settings text"]
 ```
@@ -2695,8 +2701,9 @@ about 3.6 MiB for the previous single glyph buffer. The 120x36 gate grid does
 not measure this large-window cost. `text-renderer = legacy` keeps the continuous-glyphon pane path
 (pass 4) as a rollback escape hatch; pass 3 is then an empty no-op.
 
-The five quad layers (`pane_bases`, `live_pane_bases`, `quads`,
-`overlay_quads` and `menu_quads`) differ only in blending, and the three image
+The pane and chrome quad layers (`pane_bases`, `live_pane_bases`, `quads`,
+`pane_dimming`, `text_decorations`, `overlay_quads` and `menu_quads`) differ
+only in blending, and the three image
 layers (`bg_imgs`, `imgs` and `media_receipt_img`) not at all. A renderer
 therefore compiles one replacing and one blending quad pipeline and one image
 pipeline (`SharedPipelines`), and each layer keeps only its own uniform, bind
@@ -2752,7 +2759,7 @@ rendered, it would paint over them and leave the menu blank.
 
 The cursor pass draws the inverted glyph **under a focused solid
 block cursor** in its own 1-glyph renderer, on top of the block quad and the
-pane text and card layers, and below dimming, menus and the paste receipt, so
+pane text and card layers, and below lanes, menus and the paste receipt, so
 an opaque overlay hides the whole terminal cursor. Decoupling it from the pane text buffer — rather than
 recoloring the glyph in-place — means a cursor blink leaves the pane
 buffer byte-identical, and because the cursor glyph is prepared in both blink
@@ -3850,7 +3857,7 @@ The hit target routes through the existing play action, including its native
 user file access guard. Controls take priority over the picture, so scrubbing
 never toggles playback. The backdrop reuses the projected viewer rectangle;
 painting and hit testing therefore share the presentation's geometry.
-Post-terminal effects (inactive-pane dimming, scrollbars and focus decoration)
+Post-terminal effects (inactive-lane dimming, scrollbars and focus decoration)
 are clipped around that rectangle. Each affected quad yields at most four
 disjoint pieces in blend order, keeping the pass count unchanged and clipping
 time and storage linear in the existing overlay count.

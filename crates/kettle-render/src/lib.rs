@@ -2947,7 +2947,10 @@ pub struct Renderer {
     /// dominate that buffer, and paying a larger instance for every cell to
     /// fix at most two window corners would be the wrong hot-path trade-off.
     pane_outlines: OutlinePipeline,
-    /// Second quad pass drawn *after* text (pane dimming, scrollbar).
+    /// Pane backgrounds, images and cards dim before contrast-resolved text.
+    pane_dimming: QuadPipeline,
+    text_decorations: QuadPipeline,
+    /// Preview-lane dimming and scrollbars draw after lane content.
     overlay_quads: QuadPipeline,
     /// Third quad pass drawn after the overlay quads, for overlay chrome
     /// (context menu, settings panel, confirm bar, resize chip, and similar).
@@ -4678,6 +4681,8 @@ impl Renderer {
         let live_pane_bases = shared.quads.replace(&device);
         let quads = shared.quads.blend(&device);
         let pane_outlines = OutlinePipeline::new(&device, format);
+        let pane_dimming = shared.quads.blend(&device);
+        let text_decorations = shared.quads.blend(&device);
         let overlay_quads = shared.quads.blend(&device);
         let menu_quads = shared.quads.blend(&device);
         let menu_text_renderer =
@@ -4834,6 +4839,8 @@ impl Renderer {
             live_pane_bases,
             quads,
             pane_outlines,
+            pane_dimming,
+            text_decorations,
             overlay_quads,
             menu_quads,
             menu_text_renderer,
@@ -5721,7 +5728,9 @@ impl Renderer {
         // large per-cell `quads` / `spans` buffers, where it pays off.
         use kettle_config::BackgroundType;
         let mut menu_q: Vec<QuadInstance> = Vec::with_capacity(64);
-        // Drawn *after* text: unfocused-pane dimming + scrollbar thumbs.
+        let mut pane_dim = Vec::with_capacity(panes.len());
+        let mut decorations = Vec::new();
+        // Drawn after lane content: lane dimming and scrollbar thumbs.
         let mut over: Vec<QuadInstance> = Vec::with_capacity(panes.len() * 4 + 8);
         let mut img_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(16);
         let mut media_receipt_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(1);
@@ -6390,6 +6399,7 @@ impl Renderer {
                     &[]
                 },
                 &mut quads,
+                &mut decorations,
                 &mut pane_bases,
                 card_frame,
                 &mut card_scene.base,
@@ -6546,7 +6556,11 @@ impl Renderer {
                 let amount = inactive_pane_amount(cfg);
                 if amount > 0.0 {
                     let (x, y, w, h) = pv.terminal;
-                    quads.push(rect(x, y, w, h, theme.background, amount));
+                    pane_dim.push(rect(x, y, w, h, theme.background, amount));
+                    for lane in overlay.media_lanes.iter().filter(|lane| lane.pane == pv.id) {
+                        let (x, y, w, h) = lane.rect;
+                        over.push(rect(x, y, w, h, theme.background, amount));
+                    }
                 }
             }
             if cfg.scrollbar != ScrollbarMode::Never {
@@ -8567,10 +8581,9 @@ impl Renderer {
                     theme.palette[8]
                 };
                 let close_background = self.chrome_colors.close_background(
-                    theme.foreground,
+                    theme,
                     default_bg,
                     chrome_strip_bg,
-                    theme.palette[1],
                     (s.active, hovered),
                     self.config.format.is_srgb(),
                 );
@@ -9509,6 +9522,10 @@ impl Renderer {
         }
         self.quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &quads);
+        self.pane_dimming
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_dim);
+        self.text_decorations
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &decorations);
         self.pane_outlines
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_outlines);
         // Return the scratch to the pool (keeps its capacity for next
@@ -9846,6 +9863,8 @@ impl Renderer {
             self.pane_bases.upload_counts(),
             self.live_pane_bases.upload_counts(),
             self.quads.upload_counts(),
+            self.pane_dimming.upload_counts(),
+            self.text_decorations.upload_counts(),
             self.pane_outlines.upload_counts(),
             self.overlay_quads.upload_counts(),
             self.menu_quads.upload_counts(),
@@ -9999,6 +10018,11 @@ impl Renderer {
         if let Some(posters) = &self.card_posters {
             posters.draw(&mut pass);
         }
+        self.card_decoration.draw(&mut pass);
+        self.card_text_renderer
+            .render(&self.atlas, &self.viewport, &mut pass)?;
+        self.pane_dimming.draw(&mut pass);
+        self.text_decorations.draw(&mut pass);
         // Cell-locked pane text sits above cell backgrounds + inline
         // images and below chrome text (titlebars / menus) and the cursor
         // glyph. A no-op (count 0) in legacy mode, where pane text rides the
@@ -10017,7 +10041,6 @@ impl Renderer {
         }
         self.text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
-        self.card_decoration.draw(&mut pass);
         self.card_cursors.draw_hiding(
             &mut pass,
             if cursor_on {
@@ -10026,8 +10049,6 @@ impl Renderer {
                 self.card_cursor_quad_range.clone()
             },
         );
-        self.card_text_renderer
-            .render(&self.atlas, &self.viewport, &mut pass)?;
         // The focused solid-block cursor's inverted glyph sits on its block
         // quad and the normal glyph, but below every overlay and chrome layer:
         // an opaque menu or receipt must cover all of the terminal cursor. The
@@ -10046,7 +10067,7 @@ impl Renderer {
             .draw_range(&mut pass, 0..self.transport_surface_count);
         self.lane_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
-        // Dimming + scrollbar sit on top of glyphs.
+        // Lane dimming and scrollbars sit above the complete lane.
         self.overlay_quads.draw(&mut pass);
         // Menu chrome sits above terminal content. The receipt thumbnail is
         // then composited below the shared chrome-text pass, so its own labels
@@ -10246,6 +10267,7 @@ impl Renderer {
         window_focused: bool,
         search_highlights: &[HighlightRect],
         quads: &mut Vec<QuadInstance>,
+        decorations: &mut Vec<QuadInstance>,
         pane_bases: &mut Vec<QuadInstance>,
         card_frame: &inline_cards::CardFrame,
         card_base: &mut Vec<QuadInstance>,
@@ -10256,6 +10278,7 @@ impl Renderer {
             pane_bases.len(),
             card_base.len(),
             card_cursors.len(),
+            decorations.len(),
         );
         let text_changed = self.build_pane_cells(
             idx,
@@ -10266,12 +10289,14 @@ impl Renderer {
             window_focused,
             search_highlights,
             quads,
+            decorations,
             pane_bases,
             card_frame,
             card_base,
             card_cursors,
         );
         clip_quads(&mut quads[starts.0..], pv.terminal);
+        clip_quads(&mut decorations[starts.4..], pv.terminal);
         clip_quads(&mut pane_bases[starts.1..], pv.terminal);
         clip_quads(&mut card_base[starts.2..], pv.terminal);
         clip_quads(&mut card_cursors[starts.3..], pv.terminal);
@@ -10290,6 +10315,7 @@ impl Renderer {
         window_focused: bool,
         search_highlights: &[HighlightRect],
         quads: &mut Vec<QuadInstance>,
+        decorations: &mut Vec<QuadInstance>,
         pane_bases: &mut Vec<QuadInstance>,
         card_frame: &inline_cards::CardFrame,
         card_base: &mut Vec<QuadInstance>,
@@ -10533,19 +10559,17 @@ impl Renderer {
                 theme,
                 &mut self.minimum_contrast_cache,
             );
+            let cell_background = match highlight {
+                CellHighlight::Search(true) => cfg.search_background.unwrap_or(theme.palette[3]),
+                CellHighlight::Search(false) | CellHighlight::Selection => {
+                    theme.selection_background
+                }
+                CellHighlight::None => bg,
+            };
             if inactive > 0.0 {
-                let background = match highlight {
-                    CellHighlight::Search(true) => {
-                        cfg.search_background.unwrap_or(theme.palette[3])
-                    }
-                    CellHighlight::Search(false) | CellHighlight::Selection => {
-                        theme.selection_background
-                    }
-                    CellHighlight::None => bg,
-                };
                 fg = self.chrome_colors.inactive(
                     fg,
-                    background,
+                    cell_background,
                     theme.background,
                     inactive,
                     self.config.format.is_srgb(),
@@ -10603,10 +10627,24 @@ impl Renderer {
             // for the undercurl approximation's limits.
             let line_color = sc
                 .underline_color
-                .map(|c| color::resolve(c, theme, term_colors))
+                .map(|c| {
+                    let line = color::resolve(c, theme, term_colors);
+                    self.chrome_colors.inactive(
+                        line,
+                        cell_background,
+                        theme.background,
+                        inactive,
+                        self.config.format.is_srgb(),
+                    )
+                })
                 .unwrap_or(fg);
+            let decoration_quads = if inactive > 0.0 {
+                &mut *decorations
+            } else {
+                &mut *quads
+            };
             push_cell_decorations(
-                quads,
+                decoration_quads,
                 (ox + col as f32 * cw, oy + vrow as f32 * ch, cw, ch),
                 col,
                 flags,
@@ -14222,18 +14260,12 @@ fn menu_chrome_quads(
         }
         let center = ax + panel_w * 0.5;
         let size = (inset * 0.7).min(panel_w * 0.25);
+        let step_h = (inset / 3.0).min(2.0);
         for step in 0..3 {
             let width = size * (step + 1) as f32 / 3.0;
-            let dy = step as f32 * 2.0;
-            let y = top + (inset - 6.0) * 0.5 + if down { 4.0 - dy } else { dy };
-            out.push(rect(
-                center - width * 0.5,
-                y,
-                width,
-                2.0_f32.min(inset),
-                arrow,
-                1.0,
-            ));
+            let dy = if down { 2 - step } else { step } as f32 * step_h;
+            let y = top + (inset - 3.0 * step_h) * 0.5 + dy;
+            out.push(rect(center - width * 0.5, y, width, step_h, arrow, 1.0));
         }
     }
     out

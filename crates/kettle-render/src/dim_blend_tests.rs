@@ -36,3 +36,87 @@ fn inactive_pane_text_keeps_a_text_contrast_floor() {
     let ratio = contrast_ratio(dimmed, theme.background);
     assert!(ratio >= 4.5, "inactive pane: {ratio:.3}:1 < 4.5");
 }
+
+#[test]
+fn regression_media_layers_are_covered_by_their_pane_dimmer() {
+    let source = crate::production_source();
+    let pass = source
+        .split("    fn encode_scene_pass(")
+        .nth(1)
+        .unwrap()
+        .split("    fn create_screenshot_target(")
+        .next()
+        .unwrap();
+    let pane_dim = pass
+        .find("self.pane_dimming.draw(")
+        .expect("pane dimming must have its own pass after image and card surfaces");
+    for layer in ["self.imgs.draw(", "self.card_base.draw(", "posters.draw("] {
+        assert!(
+            pass.find(layer).unwrap() < pane_dim,
+            "{layer} must dim with the pane"
+        );
+    }
+    let lane_dim = pass.find("self.overlay_quads.draw(").unwrap();
+    for layer in [
+        "self.lane_quads.draw(",
+        "lanes.draw(",
+        "self.lane_text_renderer",
+    ] {
+        assert!(
+            pass.find(layer).unwrap() < lane_dim,
+            "{layer} must dim with the lane"
+        );
+    }
+    let build = source
+        .split("        let mut pane_dim")
+        .nth(1)
+        .expect("separate pane dim draw list");
+    assert!(
+        build.contains("lane.pane == pv.id"),
+        "lane dimming follows its owning pane"
+    );
+    assert!(
+        build.contains("let (x, y, w, h) = lane.rect;"),
+        "dimmer must cover the reserved lane outside the terminal"
+    );
+}
+
+#[test]
+fn regression_cell_decorations_paint_after_the_dimmer() {
+    let source = crate::production_source();
+    let pass = source
+        .split("    fn encode_scene_pass(")
+        .nth(1)
+        .unwrap()
+        .split("    fn create_screenshot_target(")
+        .next()
+        .unwrap();
+    let dim = pass
+        .find("self.pane_dimming.draw(")
+        .expect("separate dim pass");
+    let decorations = pass
+        .find("self.text_decorations.draw(")
+        .expect("separate decoration pass");
+    assert!(
+        decorations > dim,
+        "final inactive decoration colours must not be dimmed twice"
+    );
+    let cells = source.split("    fn build_pane_cells(").nth(1).unwrap();
+    assert!(cells.contains("let decoration_quads = if inactive > 0.0 {"));
+    assert!(
+        cells.contains("&mut *decorations\n            } else {\n                &mut *quads"),
+        "active decorations retain their original ordering below the cursor"
+    );
+    let sink = cells
+        .split("push_cell_decorations(")
+        .nth(1)
+        .unwrap()
+        .split(',')
+        .next()
+        .unwrap()
+        .trim();
+    assert_eq!(
+        sink, "decoration_quads",
+        "inactive decorations need the foreground draw list"
+    );
+}

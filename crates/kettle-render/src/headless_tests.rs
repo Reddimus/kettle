@@ -72,6 +72,16 @@ pub(crate) fn capture(
     panes: &[PaneView<'_>],
     overlay: &Overlay,
 ) -> image::RgbaImage {
+    capture_with_tabs(renderer, cfg, panes, overlay, &TabBar::hidden())
+}
+
+fn capture_with_tabs(
+    renderer: &mut Renderer,
+    cfg: &Config,
+    panes: &[PaneView<'_>],
+    overlay: &Overlay,
+    tabs: &TabBar,
+) -> image::RgbaImage {
     // The capture goes through the process-wide persistence pool.
     let _pool = crate::live_screenshot_tests::shared_persistence_pool_guard();
     let dir = kettle_test_support::private_tempdir("kettle-headless-");
@@ -90,7 +100,7 @@ pub(crate) fn capture(
     let outcome = renderer
         .render_frame_with_status_and_pre_present(
             panes,
-            &TabBar::hidden(),
+            tabs,
             cfg,
             overlay,
             &StatusBar::hidden(),
@@ -3488,4 +3498,206 @@ fn disabled_wallpaper_discards_late_worker_frames() {
             "disabled backgrounds retained decoded frames"
         );
     }
+}
+
+#[test]
+fn regression_active_close_glyph_contrasts_with_its_painted_chip() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 160) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    cfg.theme = kettle_config::Theme::by_name("Builtin Dark");
+    cfg.background_type = kettle_config::BackgroundType::Starfield;
+    cfg.chrome_background = kettle_config::ChromeBackground::Black;
+    let mut tabs = TabBar::hidden();
+    tabs.height = 40.0;
+    tabs.segments.push(TabSeg {
+        idx: 0,
+        rect: (0.0, 0.0, 200.0, 40.0),
+        title_rect: (0.0, 0.0, 150.0, 40.0),
+        close: (150.0, 0.0, 40.0, 40.0),
+        title: "Tab".into(),
+        path: None,
+        active: true,
+        activity: TabActivity::Normal,
+    });
+    let shot = capture_with_tabs(&mut renderer, &cfg, &[], &focused(false), &tabs);
+    let background = shot.get_pixel(156, 6);
+    let bg = Rgb::new(background[0], background[1], background[2]);
+    let best = (155..185)
+        .flat_map(|x| (5..35).map(move |y| (x, y)))
+        .map(|(x, y)| {
+            let p = shot.get_pixel(x, y);
+            color::contrast_ratio(Rgb::new(p[0], p[1], p[2]), bg)
+        })
+        .fold(1.0_f64, f64::max);
+    assert!(best >= 2.9, "painted close glyph: {best:.3}:1");
+}
+
+#[test]
+fn regression_inactive_decorations_keep_the_glyph_contrast_floor() {
+    let _serialized = gpu_test_guard();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        let Some((probe, mut cfg)) = renderer(400, 160) else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+        drop(probe);
+        cfg.text_renderer = mode;
+        cfg.theme.background = Rgb::new(0, 0, 0);
+        cfg.theme.foreground = Rgb::new(255, 255, 255);
+        cfg.unfocused_split_opacity = 0.1;
+        let mut renderer = Renderer::headless_for_tests(&cfg, 400, 160)
+            .unwrap()
+            .unwrap();
+        let snap = snapshot_of(20, 4, b"\x1b[4;9mM");
+        let other = snapshot_of(20, 4, b"");
+        let mut view = pane(&snap, 200, 160);
+        view.focused = false;
+        let mut second = pane(&other, 200, 160);
+        second.id = 2;
+        second.rect.0 = 200.0;
+        second.terminal.0 = 200.0;
+        let shot = capture(&mut renderer, &cfg, &[view, second], &focused(false));
+        let x = (cfg.padding_x + renderer.cell_w * 0.5) as u32;
+        for (name, dy) in [
+            ("underline", renderer.cell_h - 2.0),
+            ("strikeout", renderer.cell_h * 0.5),
+        ] {
+            let y = (cfg.padding_y + dy) as u32;
+            let best = (y.saturating_sub(1)..=y + 1)
+                .map(|y| {
+                    let p = shot.get_pixel(x, y);
+                    color::contrast_ratio(Rgb::new(p[0], p[1], p[2]), cfg.theme.background)
+                })
+                .fold(1.0_f64, f64::max);
+            assert!(best >= 4.5, "{mode:?} {name}: {best:.3}:1");
+        }
+    }
+}
+
+#[test]
+fn regression_inactive_images_cards_and_preview_lanes_dim() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(1200, 600) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    cfg.theme.background = Rgb::new(0, 0, 0);
+    cfg.unfocused_split_opacity = 0.4;
+    let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+    let white = kettle_core::ImageData::new(16, 16, vec![255; 16 * 16 * 4]).unwrap();
+    cards.set_poster(nonce, Some(&white));
+    let images = [kettle_core::Placement {
+        abs_line: snap.history_origin + 6,
+        col: 30,
+        cell_cols: 4,
+        cell_rows: 1,
+        x_offset_cells: 0.0,
+        y_offset_cells: 0.0,
+        display_cols: 4.0,
+        display_rows: 1.0,
+        img: white.clone(),
+        source_rect: None,
+        source_crop: None,
+        id: None,
+        placement_id: 0,
+        kitty_params: None,
+        z: 0,
+    }];
+    let lane = MediaLanePanel {
+        focused_control: None,
+        pin_label: None,
+        play: None,
+        play_feedback: None,
+        sound: None,
+        frame: None,
+        scrubber: None,
+        pane: 1,
+        rect: (0.0, 200.0, 1200.0, 300.0),
+        collapsed: false,
+        title: "Preview".into(),
+        detail: String::new(),
+        sender: MediaLaneSender::default(),
+        hint: String::new(),
+        position: (1, 1),
+        page: None,
+        document: false,
+        image: Some(white),
+        status: String::new(),
+        canvas: MediaCanvas::Theme,
+        open_outside: false,
+        mode: MediaLaneMode::Rendered,
+        source: None,
+        copy: false,
+        reload: false,
+        notice: None,
+        view: MediaViewport::FIT,
+        tile: None,
+        edge: None,
+    };
+    let geometry = media_lane_geometry(
+        &lane,
+        (renderer.cell_w, renderer.cell_h),
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.metrics.line_height,
+        ),
+    )
+    .unwrap();
+    let (lx, ly, lw, lh) = geometry.image_area;
+    let lane_pixel = ((lx + lw * 0.5) as u32, (ly + lh * 0.5) as u32);
+    let overlay = Overlay {
+        media_lanes: vec![lane],
+        ..focused(false)
+    };
+    let other = snapshot_of(20, 4, b"");
+    let shot = |renderer: &mut Renderer, cfg: &Config, active| {
+        let mut view = pane(&snap, 1200, 500);
+        view.terminal.3 = 200.0;
+        view.inline_cards = Some(&cards);
+        view.images = &images;
+        view.focused = active;
+        let mut second = pane(&other, 1200, 100);
+        second.id = 2;
+        second.rect.1 = 500.0;
+        second.terminal.1 = 500.0;
+        second.focused = !active;
+        capture(renderer, cfg, &[view, second], &overlay)
+    };
+    let active = shot(&mut renderer, &cfg, true);
+    let card = renderer.painted_cards()[0].rect;
+    let samples = [
+        (
+            "inline image",
+            (
+                (cfg.padding_x + 32.0 * renderer.cell_w) as u32,
+                (cfg.padding_y + 6.5 * renderer.cell_h) as u32,
+            ),
+        ),
+        (
+            "card poster",
+            (
+                (card[0] + card[2] * 0.5) as u32,
+                (card[1] + card[3] * 0.5) as u32,
+            ),
+        ),
+        ("preview lane", lane_pixel),
+    ];
+    let mut failures = Vec::new();
+    for offsets in [false, true] {
+        cfg.unfocused_split_opacity = if offsets { 1.0 } else { 0.4 };
+        cfg.inactive_color_offset = if offsets { 0.4 } else { 1.0 };
+        let inactive = shot(&mut renderer, &cfg, false);
+        for (name, (x, y)) in samples {
+            let bright = active.get_pixel(x, y)[0];
+            let dim = inactive.get_pixel(x, y)[0];
+            assert!(bright > 220, "fixture {name} pixel ({x},{y}) was {bright}");
+            if dim >= bright - 20 {
+                failures.push(format!("{name} offsets={offsets}: {bright} -> {dim}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("; "));
 }
