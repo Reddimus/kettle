@@ -291,7 +291,7 @@ fn build_pane_keys_and_shapes_the_same_extent() {
         .split_once("    fn build_pane_cells(")
         .expect("build_pane_cells")
         .1
-        .split_once("\n    fn ")
+        .split_once("\n    }\n")
         .expect("end of build_pane")
         .0;
     let compact: String = build_pane.split_whitespace().collect();

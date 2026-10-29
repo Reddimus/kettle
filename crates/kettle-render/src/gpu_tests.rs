@@ -1,4 +1,8 @@
 use super::*;
+#[cfg(target_os = "windows")]
+use crate::gpu::{
+    gpu_instance_for_backends, preferred_adapter_key, request_direct_adapter, resolve_adapters,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 

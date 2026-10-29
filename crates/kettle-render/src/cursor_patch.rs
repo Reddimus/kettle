@@ -1589,7 +1589,7 @@ mod tests {
             .split("pub fn render_frame_with_status_and_pre_present<F>(")
             .nth(1)
             .expect("frame method")
-            .split("pub fn render_uploads(")
+            .split("\n    }\n")
             .next()
             .expect("frame body");
         let reset = frame.find("self.last_scene = None;").expect("frame reset");

@@ -94,7 +94,7 @@ fn ime_preedit_layer_covers_terminal_text_before_cursor() {
         .split("fn encode_scene_pass(")
         .nth(1)
         .unwrap()
-        .split("fn create_screenshot_target(")
+        .split("\n    }\n")
         .next()
         .unwrap();
     let terminal = scene.find("self.text_renderer").unwrap();

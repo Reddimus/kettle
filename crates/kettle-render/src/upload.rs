@@ -676,7 +676,7 @@ mod tests {
     /// that keeps discrete GPUs and GL off them.
     #[test]
     fn the_live_device_requests_features_only_through_the_upload_check() {
-        let text = include_str!("lib.rs");
+        let text = include_str!("gpu.rs");
         let production = kettle_test_support::production_source(text);
         assert_eq!(
             production.matches("required_features:").count(),

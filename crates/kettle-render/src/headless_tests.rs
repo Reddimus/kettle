@@ -1219,10 +1219,10 @@ fn blanks_at_the_end_of_a_row_are_not_shaped() {
 fn the_blink_phase_reaches_only_the_draw() {
     let src = crate::production_source();
     let build_pane = src
-        .split_once("    fn build_pane(")
+        .split_once("fn build_pane(")
         .expect("build_pane")
         .1
-        .split_once("\n    fn ")
+        .split_once("\n    }\n")
         .expect("end of build_pane")
         .0;
     assert!(
@@ -1237,10 +1237,10 @@ fn the_blink_phase_reaches_only_the_draw() {
     );
     assert!(src.contains("cursor_on: overlay.cursor_visible,"));
     let scene = src
-        .split_once("    fn encode_scene_pass(")
+        .split_once("fn encode_scene_pass(")
         .expect("encode_scene_pass")
         .1
-        .split_once("\n    fn ")
+        .split_once("\n    }\n")
         .expect("end of encode_scene_pass")
         .0;
     assert!(scene.contains("self.quads.draw_hiding(&mut pass, hidden_cursor);"));

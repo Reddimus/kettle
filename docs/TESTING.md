@@ -309,7 +309,7 @@ All paths below are relative to the repository root.
 | `kettle-media-worker` | `crates/kettle-media-worker/src/`, `crates/kettle-media-worker/tests/` | Process boundary, playback, native audio |
 | `kettle-media-native` | `crates/kettle-media-native/src/`, `crates/kettle-media-native/tests/` | Decoders, sandboxing, audio output |
 | `kettle-media-render` | `crates/kettle-media-render/src/`, `crates/kettle-media-render/tests/` | Raster, SVG, Mermaid, PDF, hostile inputs |
-| `kettle-render` | `crates/kettle-render/src/lib.rs`, `crates/kettle-render/src/headless_tests.rs`, `crates/kettle-render/tests/` | Text, geometry, GPU pixels, menus |
+| `kettle-render` | `crates/kettle-render/src/geometry.rs`, `crates/kettle-render/src/*_tests.rs`, `crates/kettle-render/tests/` | Text, geometry, GPU pixels, menus |
 | `kettle-ui` | `crates/kettle-ui/src/app.rs`, `crates/kettle-ui/src/app/`, `crates/kettle-ui/src/` | Input routing, windows, settings, control actions |
 | `kettle-i18n` | `crates/kettle-i18n/src/`, `crates/kettle-i18n/tests/` | Locale selection and catalogue/build rules |
 | `kettle-state` | `crates/kettle-state/src/` | Private state and filesystem policy |
@@ -420,6 +420,13 @@ Use `rg -n 'source_guard|production_source|drift' crates` to find them.
 When moving a function, read the guard's invariant before changing its matcher.
 Do not make the scan pass by letting it match its own assertion or a comment.
 Keep a behavioral regression when the contract can be exercised directly.
+
+The renderer's `production_source()` joins `lib.rs` and its extracted modules,
+stripping test-only items from each file before joining. Its existing test
+modules stay at the crate root to preserve test names. The UI text-sink guard
+also scans each extracted renderer file; extend both source lists when moving
+production code into another module. Function-order guards bound a method by
+its closing brace so moving the following method does not widen their scan.
 
 The tracked audit protects repository files rather than runtime behavior.
 It checks path/case collisions, object identity, text hygiene, TOML/JSON,

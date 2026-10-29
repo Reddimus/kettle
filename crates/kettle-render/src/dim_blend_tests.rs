@@ -41,10 +41,10 @@ fn inactive_pane_text_keeps_a_text_contrast_floor() {
 fn regression_media_layers_are_covered_by_their_pane_dimmer() {
     let source = crate::production_source();
     let pass = source
-        .split("    fn encode_scene_pass(")
+        .split("fn encode_scene_pass(")
         .nth(1)
         .unwrap()
-        .split("    fn create_screenshot_target(")
+        .split("\n    }\n")
         .next()
         .unwrap();
     let pane_dim = pass
@@ -85,10 +85,10 @@ fn regression_media_layers_are_covered_by_their_pane_dimmer() {
 fn regression_cell_decorations_paint_after_the_dimmer() {
     let source = crate::production_source();
     let pass = source
-        .split("    fn encode_scene_pass(")
+        .split("fn encode_scene_pass(")
         .nth(1)
         .unwrap()
-        .split("    fn create_screenshot_target(")
+        .split("\n    }\n")
         .next()
         .unwrap();
     let dim = pass

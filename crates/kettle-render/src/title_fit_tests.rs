@@ -103,7 +103,7 @@ fn confirm_text_renders_above_its_menu_chrome_background() {
         .split_once("fn encode_scene_pass(")
         .unwrap()
         .1
-        .split("fn create_screenshot_target")
+        .split("\n    }\n")
         .next()
         .unwrap();
     let menu = scene.find("self.menu_text_renderer").unwrap();

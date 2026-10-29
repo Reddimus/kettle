@@ -2044,9 +2044,20 @@ fn a_confirm_dialog_outranks_every_overlay_including_the_one_that_raised_it() {
         );
     }
 
-    let render =
-        kettle_test_support::production_source(include_str!("../../../kettle-render/src/lib.rs"));
-    let pass = render.split("fn encode_scene_pass(").nth(1).unwrap();
+    let render = [
+        kettle_test_support::production_source(include_str!("../../../kettle-render/src/lib.rs")),
+        kettle_test_support::production_source(include_str!(
+            "../../../kettle-render/src/batching.rs"
+        )),
+    ]
+    .join("\n");
+    let pass = render
+        .split("fn encode_scene_pass(")
+        .nth(1)
+        .unwrap()
+        .split("\n    }\n")
+        .next()
+        .unwrap();
     let settings_text = pass.find("self.menu_text_renderer").unwrap();
     let surfaces = pass.rfind("self.rounded_surfaces").unwrap();
     let modal_text = pass.find("self.confirmation_text_renderer").unwrap();

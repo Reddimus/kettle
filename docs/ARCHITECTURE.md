@@ -2685,6 +2685,40 @@ launches and 128 pickups. No permit reaches model content or geometry/state
 responses. Background registration and pickup do not draw a frame. Existing
 macOS signature admission remains separate.
 
+## kettle-render module map
+
+The crate root preserves the public API through re-exports. `lib.rs` owns the
+`Renderer` state and its three frame entry points. The main frame method still
+coordinates chrome painting, retained text preparation, uploads and presentation
+in one ordered body; extracting new helpers from that body is separate from
+moving existing items.
+
+| Module | Responsibility |
+| --- | --- |
+| `gpu` | Device/adapter selection, display-handle ownership, surface setup, constructors, resize and recovery |
+| `batching` | Shared pipelines, retained text damage keys, quad helpers, glyph emission and ordered scene encoding |
+| `terminal` | Pane projections, cell/run painting, selection/search projection, cursor glyphs, decorations and painted-card access |
+| `overlays` | Tab/status bars, menus, title editing, IME projections, toasts, receipts, confirmation projections and shared overlay state |
+| `completion` | Completion projections, card layout, visible rows, selection and scroll chrome |
+| `search` | Search projections, responsive bar layout, shaped editor clusters and pointer stops |
+| `settings` | Settings projections, display lines, scrolling layout and hit testing |
+| `geometry` | GPU-free rectangle, viewport, placement, selection, cell-position and size-limit helpers, with focused unit tests |
+| `labels` | Display-column measurement, fitting and title/path truncation |
+| `fonts` | Startup font preparation, fallback selection, cell measurement, metrics and runtime font changes |
+| `theme` | Chrome/terminal color derivation, contrast caching, visual bell and surface alpha policy |
+| `background` | Decoded wallpaper state, bounded decode worker and animation scheduling |
+| `screenshot` | Live capture requests, cancellation, bounded workers, readback, cropping and atomic persistence |
+| `capture` | Synthetic screenshot scenes, GPU diagnostic render fixtures and offscreen self-test |
+| `quad`, `glyphpipe`, `imgpipe`, `outline`, `rounded_surface`, `starfield`, `present`, `upload` | Existing GPU pipelines, presentation conversion and retained/mapped uploads |
+| `chrome`, `color`, `confirm` | Existing contrast policy, terminal color resolution and final confirmation layout/text |
+| `snapshot`, `cursor_policy`, `cursor_patch` | Lock-free terminal projections, cursor compatibility policy and native cursor patch rendering |
+| `card_marks`, `inline_cards`, `card_scene` | Complete card marks, registered-card recognition and card draw lists |
+| `bg_image`, `media_lane`, `media_transport`, `media_viewport` | Image decoding, preview lane layout/text, player chrome and zoom/pan |
+
+Existing test modules remain attached to the crate root so their test names stay
+stable. The renderer source-guard helper joins the production portions of the
+root and extracted modules, excluding test-only items from each file.
+
 ## Render pass order
 
 The renderer's per-pane text buffers, per-row shaping keys, style keys, and
