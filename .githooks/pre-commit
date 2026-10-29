@@ -39,8 +39,9 @@ set -euo pipefail
 # Include D (deletions) in the filter — a commit that
 # ONLY deletes .rs files would otherwise skip the gate, but
 # deleting code can break the build (lost call site, broken
-# import, etc).
-non_doc=$(git diff --cached --name-only --diff-filter=ACMRD \
+# import, etc). --no-renames lists a rename as its deletion and its
+# addition: moving a source file under docs/ removes the source.
+non_doc=$(git diff --cached --name-only --no-renames --diff-filter=ACMD \
     | grep -vE '^(CHANGELOG\.md|README\.md|docs/|packaging/|\.github/|\.githooks/|NOTICE|LICENSE|SECURITY\.md|CODE_OF_CONDUCT\.md|CONTRIBUTING\.md|deny\.toml|\.gitignore)' \
     || true)
 
