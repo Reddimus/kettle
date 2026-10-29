@@ -515,6 +515,11 @@ The media stub worker and panic injection are test-only feature legs.
 Run `just media-protocol-test` after changing their boundaries.
 Do not enable those features in a shipped binary to make a test pass.
 
+`cargo test --locked --offline -p kettle-media --lib exit_grace` models a
+caller resuming after an observed worker exit's grace period with a reply
+already queued. The tests backdate the recorded exit without sleeping and
+check clean versus crashing exits, missing events, deadlines and cancellation.
+
 The fuzz workspace has its own manifest and lockfile.
 The vendor validation workspace also has its own manifest and lockfile.
 Root workspace tests do not run those package-owned suites.

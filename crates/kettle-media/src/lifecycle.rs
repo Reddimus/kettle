@@ -571,8 +571,17 @@ impl<'a> Running<'a> {
                 None => until,
             };
             let now = Instant::now();
-            if now >= limit {
+            if now >= until {
                 return Err(Wait::Timeout);
+            }
+            if now >= limit {
+                // A descheduled caller may resume after the exit grace
+                // period with the reader's complete reply already queued.
+                return match received.recv_timeout(Duration::ZERO) {
+                    Ok(event) => Ok(event),
+                    Err(RecvTimeoutError::Disconnected) => Err(Wait::ReaderGone),
+                    Err(RecvTimeoutError::Timeout) => Err(Wait::Timeout),
+                };
             }
             if now >= self.next_sample {
                 self.look();
@@ -1397,6 +1406,82 @@ mod tests {
         let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
         let fake = Fake::new(vec![Script::replies(output, WorkerExit::Code(0))]);
         assert_eq!(client(&fake).render(&job(1)), Ok(rendered()));
+    }
+
+    fn reaped_worker(shared: &Arc<Shared>, exit: WorkerExit) -> Running<'_> {
+        let now = Instant::now();
+        Running {
+            memory: None,
+            process: None,
+            exited: Some((exit, now - FAST.cleanup - TICK)),
+            next_sample: now + TICK,
+            shared,
+            budgets: FAST,
+            control: None,
+        }
+    }
+
+    #[test]
+    fn a_queued_reply_survives_the_exit_grace_period() {
+        let fake = Fake::new(vec![]);
+        let client = client(&fake);
+        for (exit, expected) in [
+            (WorkerExit::Code(0), Ok(rendered())),
+            (WorkerExit::Signal(6), Err(FailureCode::RenderResource)),
+        ] {
+            let mut worker = reaped_worker(&client.shared, exit);
+            let (events, received) = mpsc::channel();
+            events
+                .send(Event::Reply(Ok(Some(Frame::Rendered(rendered()))), true))
+                .unwrap();
+            // The reader queued the reply while the caller was descheduled
+            // past the exit grace period, but inside the render deadline.
+            let result = match worker.next(&received, Instant::now() + FAST.ready, None) {
+                Ok(Event::Reply(Ok(Some(Frame::Rendered(rendered))), true)) => {
+                    stop_rendered(&mut worker, Some(MediaKind::Raster), rendered)
+                        .map(|output| output.rendered)
+                }
+                _ => Err(worker.stop_failure()),
+            };
+            assert_eq!(result, expected, "{exit:?}");
+        }
+    }
+
+    #[test]
+    fn the_exit_grace_period_does_not_wait_for_missing_events() {
+        let fake = Fake::new(vec![]);
+        let client = client(&fake);
+        let mut worker = reaped_worker(&client.shared, WorkerExit::Code(0));
+        let (_events, received) = mpsc::channel::<Event>();
+        assert!(matches!(
+            worker.next(&received, Instant::now() + FAST.ready, None),
+            Err(Wait::Timeout)
+        ));
+    }
+
+    #[test]
+    fn exit_grace_keeps_deadlines_and_cancellation() {
+        let fake = Fake::new(vec![]);
+        let client = client(&fake);
+        for cancelled in [false, true] {
+            let mut worker = reaped_worker(&client.shared, WorkerExit::Code(0));
+            let (events, received) = mpsc::channel();
+            events.send(()).unwrap();
+            let control = RenderControl::default();
+            let until = if cancelled {
+                control.cancel();
+                Instant::now() + FAST.ready
+            } else {
+                Instant::now()
+            };
+            let result = worker.next(&received, until, Some(&control));
+            if cancelled {
+                assert!(matches!(result, Err(Wait::Interrupted)));
+            } else {
+                assert!(matches!(result, Err(Wait::Timeout)));
+            }
+            assert_eq!(received.try_recv(), Ok(()));
+        }
     }
 
     #[test]
