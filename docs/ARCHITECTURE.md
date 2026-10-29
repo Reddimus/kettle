@@ -2960,7 +2960,12 @@ no context reads, clock queries, formatting or writes.
   server after one quiet half-period and stops waking for it (see "macOS cursor
   blink layer"). Empty `Ime::Preedit` events normalize to absent state and
   do not reposition IME or request another frame unless visible preedit state
-  actually changed. The visual bell is per pane: `drain_events` stamps each
+  actually changed. Terminal preedit has an opaque layer above terminal and card
+  text. Its background follows the larger of the terminal-cell width and shaped
+  text width, with glyphs clipped to that background and the pane. During
+  composition, a visible terminal cursor becomes a thin caret so a solid block
+  cannot hide the composition glyph. The visual bell is per pane: `drain_events`
+  stamps each
   ringing pane in `WindowState::bell_flashes`, the frame builder turns each
   stamp into a `PaneView::bell_flash` ramp (`bell_flash_ramp`: instant on,
   quadratic ease-out over `BELL_FLASH_DURATION`), the idle loop keeps the

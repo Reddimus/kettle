@@ -1693,22 +1693,43 @@ fn completion_selection_surface(theme_selection: Rgb, panel_bg: Rgb, accent: Rgb
     color::with_min_contrast(accent, panel_bg, COMPLETION_SELECTION_SEPARATION)
 }
 
-fn push_ime_preedit_quads(
-    quads: &mut Vec<QuadInstance>,
+fn ime_cursor_shape(
+    shape: alacritty_terminal::vte::ansi::CursorShape,
+) -> alacritty_terminal::vte::ansi::CursorShape {
+    use alacritty_terminal::vte::ansi::CursorShape;
+    match shape {
+        CursorShape::Hidden => CursorShape::Hidden,
+        _ => CursorShape::Beam,
+    }
+}
+
+fn ime_preedit_rect(
     preedit: &ImePreedit,
-    pane: Rect4,
     origin: (f32, f32),
     cell: (f32, f32),
+    shaped_width: f32,
+) -> Rect4 {
+    let cells = unicode_width::UnicodeWidthStr::width(preedit.text.as_str()).max(1);
+    (
+        origin.0 + preedit.col as f32 * cell.0,
+        origin.1 + preedit.row as f32 * cell.1,
+        (cells as f32 * cell.0).max(shaped_width).ceil(),
+        cell.1,
+    )
+}
+
+fn push_ime_preedit_quads(
+    quads: &mut Vec<QuadInstance>,
+    bounds: Rect4,
+    pane: Rect4,
     background: Rgb,
     underline: Rgb,
-) {
-    let cells = unicode_width::UnicodeWidthStr::width(preedit.text.as_str()).max(1);
-    let x = origin.0 + preedit.col as f32 * cell.0;
-    let y = origin.1 + preedit.row as f32 * cell.1;
-    for (top, height, color) in [(y, cell.1, background), (y + cell.1 - 2.0, 2.0, underline)] {
+) -> TextBounds {
+    let (x, y, width, height) = bounds;
+    for (top, height, color) in [(y, height, background), (y + height - 2.0, 2.0, underline)] {
         let left = x.max(pane.0);
         let top_clipped = top.max(pane.1);
-        let right = (x + cells as f32 * cell.0).min(pane.0 + pane.2);
+        let right = (x + width).min(pane.0 + pane.2);
         let bottom = (top + height).min(pane.1 + pane.3);
         if right > left && bottom > top_clipped {
             quads.push(rect(
@@ -1720,6 +1741,14 @@ fn push_ime_preedit_quads(
                 1.0,
             ));
         }
+    }
+    // Keep glyph overhang inside fully opaque pixels, including fractional
+    // pane origins and the last column of a clipped composition.
+    TextBounds {
+        left: x.max(pane.0).ceil() as i32,
+        top: y.max(pane.1).ceil() as i32,
+        right: (x + width).min(pane.0 + pane.2).floor() as i32,
+        bottom: (y + height).min(pane.1 + pane.3).floor() as i32,
     }
 }
 
@@ -6485,6 +6514,7 @@ impl Renderer {
                 pane_inactive_amount(pv, panes.len(), cfg),
                 &family,
                 overlay.window_focused,
+                pv.focused && overlay.ime_preedit.is_some(),
                 if pane_has_search {
                     &overlay.highlights
                 } else {
@@ -6620,20 +6650,6 @@ impl Renderer {
                     }
                 }
             }
-            if pv.focused
-                && let Some(preedit) = &overlay.ime_preedit
-            {
-                push_ime_preedit_quads(
-                    &mut ime_q,
-                    preedit,
-                    pv.terminal,
-                    grid_origin,
-                    (cw, ch),
-                    theme.selection_background,
-                    cfg.search_background.unwrap_or(theme.palette[3]),
-                );
-            }
-
             if !pv.focused && panes.len() > 1 {
                 let amount = inactive_pane_amount(cfg);
                 if amount > 0.0 {
@@ -7857,10 +7873,8 @@ impl Renderer {
             }
         }
         if let Some(preedit) = &overlay.ime_preedit {
-            let cells = unicode_width::UnicodeWidthStr::width(preedit.text.as_str()).max(1);
             self.ime_buffer.set_metrics(metrics);
-            self.ime_buffer
-                .set_size(Some(cells as f32 * cw + 2.0), Some(ch));
+            self.ime_buffer.set_size(None, Some(ch));
             if self.ime_text != preedit.text {
                 self.ime_buffer.set_text(
                     &preedit.text,
@@ -7876,6 +7890,29 @@ impl Renderer {
             self.ime_text.clear();
         }
         let focus_origin = panes.iter().find(|p| p.focused).map(|p| p.terminal);
+        let ime_geometry = focus_origin
+            .zip(overlay.ime_preedit.as_ref())
+            .map(|(pane, preedit)| {
+                let shaped_width = self
+                    .ime_buffer
+                    .layout_runs()
+                    .map(|run| run.line_w)
+                    .fold(0.0_f32, f32::max);
+                let rect = ime_preedit_rect(
+                    preedit,
+                    pane_grid_origin(pane, (pad_x, pad_y)),
+                    (cw, ch),
+                    shaped_width,
+                );
+                let bounds = push_ime_preedit_quads(
+                    &mut ime_q,
+                    rect,
+                    pane,
+                    theme.selection_background,
+                    cfg.search_background.unwrap_or(theme.palette[3]),
+                );
+                (rect, bounds)
+            });
 
         // Assemble text areas (panes + tab bar + search).
         self.viewport.update(
@@ -8868,18 +8905,13 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
-            if let Some(preedit) = &overlay.ime_preedit {
+            if let Some((rect, bounds)) = ime_geometry {
                 ime_areas.push(TextArea {
                     buffer: &self.ime_buffer,
-                    left: focus_grid_origin.0 + preedit.col as f32 * cw,
-                    top: focus_grid_origin.1 + preedit.row as f32 * ch,
+                    left: rect.0,
+                    top: rect.1,
                     scale: 1.0,
-                    bounds: TextBounds {
-                        left: frx as i32,
-                        top: fry as i32,
-                        right: (frx + frw) as i32,
-                        bottom: (fry + frh) as i32,
-                    },
+                    bounds,
                     default_color: GColor::rgb(fg.r, fg.g, fg.b),
                     custom_glyphs: &[],
                 });
@@ -10146,7 +10178,7 @@ impl Renderer {
             },
         );
         // The preedit is its own layer above the terminal and card text,
-        // and the cursor draws again above it.
+        // and the composition caret draws again above it.
         self.ime_quads.draw(&mut pass);
         self.ime_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
@@ -10374,6 +10406,7 @@ impl Renderer {
         inactive: f32,
         family: &str,
         window_focused: bool,
+        composing: bool,
         search_highlights: &[HighlightRect],
         quads: &mut Vec<QuadInstance>,
         decorations: &mut Vec<QuadInstance>,
@@ -10396,6 +10429,7 @@ impl Renderer {
             inactive,
             family,
             window_focused,
+            composing,
             search_highlights,
             quads,
             decorations,
@@ -10422,6 +10456,7 @@ impl Renderer {
         inactive: f32,
         family: &str,
         window_focused: bool,
+        composing: bool,
         search_highlights: &[HighlightRect],
         quads: &mut Vec<QuadInstance>,
         decorations: &mut Vec<QuadInstance>,
@@ -10523,6 +10558,11 @@ impl Renderer {
             EShape::HollowBlock
         } else {
             snap.cursor.shape
+        };
+        let shape = if composing {
+            ime_cursor_shape(shape)
+        } else {
+            shape
         };
         let cvrow = cp.line.0 + display_off;
         // Built in its on phase whatever the blink phase: the off phase skips

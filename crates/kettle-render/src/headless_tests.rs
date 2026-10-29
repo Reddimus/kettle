@@ -3837,6 +3837,89 @@ fn regression_inactive_images_cards_and_preview_lanes_dim() {
 }
 
 #[test]
+fn ime_preedit_single_glyph_survives_solid_block_cursor() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    cfg.cursor_blink = false;
+    cfg.theme.cursor = cfg.theme.foreground;
+    let snap = snapshot_of(20, 4, b"W\r\x1b[2 q");
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        cfg.text_renderer = mode;
+        let mut overlay = focused(true);
+        overlay.ime_preedit = Some(ImePreedit {
+            text: "a".into(),
+            row: 0,
+            col: 0,
+        });
+        let glyph = capture(&mut renderer, &cfg, &[pane(&snap, 320, 120)], &overlay);
+        overlay.ime_preedit.as_mut().unwrap().text = " ".into();
+        let blank = capture(&mut renderer, &cfg, &[pane(&snap, 320, 120)], &overlay);
+        let cell = |image: &image::RgbaImage| {
+            image::imageops::crop_imm(
+                image,
+                cfg.padding_x.ceil() as u32,
+                cfg.padding_y.ceil() as u32,
+                renderer.cell_w.floor() as u32,
+                renderer.cell_h.floor() as u32,
+            )
+            .to_image()
+        };
+        assert!(
+            cell(&glyph) != cell(&blank),
+            "composition glyph hidden in {mode:?}"
+        );
+        assert!(
+            cursor_pixels(&blank, &cfg, &snap) > 0,
+            "composition caret must remain visible in {mode:?}"
+        );
+    }
+}
+
+#[test]
+fn ime_preedit_narrow_cells_cover_the_shaped_text() {
+    let _serialized = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.cell_width = 0.5;
+    let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 320, 120).unwrap() else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let first = snapshot_of(40, 4, b"WWWWWWWWWWWWWWWW\r");
+    let second = snapshot_of(40, 4, b"iiiiiiiiiiiiiiii\r");
+    let overlay = Overlay {
+        ime_preedit: Some(ImePreedit {
+            text: "abcd".into(),
+            row: 0,
+            col: 0,
+        }),
+        ..focused(false)
+    };
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        cfg.text_renderer = mode;
+        let a = capture(&mut renderer, &cfg, &[pane(&first, 320, 120)], &overlay);
+        let b = capture(&mut renderer, &cfg, &[pane(&second, 320, 120)], &overlay);
+        let shaped_width = renderer.ime_buffer.layout_runs().next().unwrap().line_w;
+        assert!(shaped_width > 4.0 * renderer.cell_w);
+        let x0 = cfg.padding_x.ceil() as u32;
+        let y0 = cfg.padding_y.ceil() as u32;
+        let x1 = (cfg.padding_x + shaped_width).floor() as u32;
+        let y1 = (cfg.padding_y + renderer.cell_h).floor() as u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                assert_eq!(
+                    a.get_pixel(x, y),
+                    b.get_pixel(x, y),
+                    "terminal text leaked through shaped IME extent at {x},{y} in {mode:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn ime_preedit_screenshot_hides_existing_glyphs_and_retains_cursor() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 120) else {

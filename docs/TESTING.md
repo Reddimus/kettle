@@ -37,6 +37,14 @@ matching and replacement behavior against native Lua. For an offline run, use
 `cargo test -j 2 --locked --offline -p kettle-ui sandbox_pattern_`, followed by
 `cargo test -j 2 --locked --offline -p kettle-ui` for the full crate suite.
 
+The renderer's `ime_preedit_` tests cover a single composition glyph with a
+nonblinking block cursor and composition over existing terminal text with
+`cell-width = 0.5`, in both grid and legacy modes. The headless screenshots
+require a GPU adapter and report a skip when none is available. Run
+`cargo test -j 2 --locked --offline -p kettle-render -p kettle-ui ime_preedit_ -- --nocapture`
+to see those skips, then run the same command without the filter for both full
+crate suites.
+
 ### Main gates
 
 The MCP stdio integration suite exercises Codex guidance, turn-end-only fallback,
