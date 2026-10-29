@@ -9874,6 +9874,25 @@ fn keybind_resolver_uses_logical_before_physical_fallback() {
     );
 }
 
+/// `new_tab = <Control><Shift>comma` imports as Ctrl+Shift+`,`, but with
+/// Shift held a US keyboard reports `<`. The binding must still fire, or the
+/// import (which replaces the default chord) leaves New Tab without one.
+#[test]
+fn imported_shifted_punctuation_binding_matches_the_shifted_character() {
+    use super::resolve_keybind_action;
+    use kettle_config::{Action, Config};
+    use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+
+    let cfg = Config::parse_text("[keybindings]\nnew_tab = <Control><Shift>comma\n");
+    let matched = resolve_keybind_action(
+        &cfg.keybinds,
+        Some(&Key::Character("<".into())),
+        Some(&PhysicalKey::Code(KeyCode::Comma)),
+        ModifiersState::CONTROL | ModifiersState::SHIFT,
+    );
+    assert_eq!(matched.map(|(_, action)| action), Some(Action::NewTab));
+}
+
 #[test]
 fn keybind_resolver_honors_shifted_digit_rebinds_and_unbinds() {
     use super::resolve_keybind_action;

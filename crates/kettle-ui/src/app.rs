@@ -17017,12 +17017,33 @@ fn physical_keybind_chars(physical: &PhysicalKey, mods: ModifiersState) -> &'sta
                 &['-']
             }
         }
+        // US punctuation keys. A binding written with the unshifted
+        // character, as imported Terminator accelerators are
+        // (`<Control><Shift>comma`), must match the shifted character the
+        // keyboard produces with Shift held.
+        PhysicalKey::Code(KeyCode::Comma) => shifted(mods, &[','], &[',', '<']),
+        PhysicalKey::Code(KeyCode::Period) => shifted(mods, &['.'], &['.', '>']),
+        PhysicalKey::Code(KeyCode::Slash) => shifted(mods, &['/'], &['/', '?']),
+        PhysicalKey::Code(KeyCode::Semicolon) => shifted(mods, &[';'], &[';', ':']),
+        PhysicalKey::Code(KeyCode::Quote) => shifted(mods, &['\''], &['\'', '"']),
+        PhysicalKey::Code(KeyCode::BracketLeft) => shifted(mods, &['['], &['[', '{']),
+        PhysicalKey::Code(KeyCode::BracketRight) => shifted(mods, &[']'], &[']', '}']),
+        PhysicalKey::Code(KeyCode::Backslash) => shifted(mods, &['\\'], &['\\', '|']),
+        PhysicalKey::Code(KeyCode::Backquote) => shifted(mods, &['`'], &['`', '~']),
         PhysicalKey::Code(KeyCode::NumpadAdd) => &['+'],
         PhysicalKey::Code(KeyCode::NumpadSubtract) => &['-'],
         PhysicalKey::Code(KeyCode::NumpadEqual) => &['='],
         PhysicalKey::Code(KeyCode::Digit0) | PhysicalKey::Code(KeyCode::Numpad0) => &['0'],
         _ => &[],
     }
+}
+
+fn shifted(
+    mods: ModifiersState,
+    plain: &'static [char],
+    with_shift: &'static [char],
+) -> &'static [char] {
+    if mods.shift_key() { with_shift } else { plain }
 }
 
 fn keybind_candidates(

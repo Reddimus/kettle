@@ -2229,9 +2229,10 @@ The input worker is a separate per-pane boundary from the output pump/parser
 pair. User messages are capped at 4 MiB plus the bracketed-paste envelope, with
 a slightly larger aggregate reservation for interactive input already queued.
 Protocol replies have a separate 2 MiB message/aggregate budget and a 64-reply
-depth. A reply beyond either is dropped and logged once per run of drops; the
-pane stays alive, because a program that stops reading its input would
-otherwise turn its own query flood into the loss of the session.
+depth. A reply that exceeds the aggregate byte budget or queue depth is dropped
+and logged once per run of drops, so a program that stops reading cannot turn
+its query flood into the loss of the session. A single reply larger than 2 MiB
+fails the input worker and closes the pane.
 Broadcast fan-out returns the strongest result across its targets and scrolls
 only panes that accepted the write. Paste fan-out builds at most one raw and
 one bracketed immutable payload regardless of pane count.
