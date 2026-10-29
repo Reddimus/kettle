@@ -682,6 +682,11 @@ jobs:
     needs: [finalize]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # One publication at a time across every tag, so two overlapping releases
+    # cannot interleave their promotion. The latest check below orders them.
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -898,10 +903,26 @@ jobs:
             sleep 5
           done
           test "$verified" = 1
+          # Mark it latest only when no newer release is already published:
+          # an older tag that finishes later must not take "latest" back,
+          # which is where clients read the update feed.
+          make_latest=true
+          current_latest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" \
+            --jq .tag_name 2>/dev/null || true)
+          if [ -n "$current_latest" ] && python3 - "$tag" "$current_latest" <<'PY'
+          import sys
+          def key(tag):
+              return tuple(int(part) for part in tag.lstrip("v").split("-")[0].split("."))
+          sys.exit(0 if key(sys.argv[1]) < key(sys.argv[2]) else 1)
+          PY
+          then
+            echo "::warning::${tag} is older than the published ${current_latest}; not marking it latest"
+            make_latest=false
+          fi
           # Publish by id for the same reason, so the transition cannot depend
           # on GitHub having associated the tag with a still-draft release.
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-            -F draft=false -f make_latest=true >/dev/null
+            -F draft=false -f make_latest="$make_latest" >/dev/null
 
   # Every published release is installed from the one before it and updated
   # with `kettle update` on Linux (x86_64, arm64) and macOS. It runs after
