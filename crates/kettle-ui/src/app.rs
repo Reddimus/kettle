@@ -28,6 +28,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{
     CursorIcon, Fullscreen, Theme as WindowTheme, UserAttentionType, Window, WindowId,
 };
@@ -11710,7 +11711,7 @@ impl App {
                 crate::modal_input::push_text(&mut state.input, accepted);
             }
         } else if ws.search.open {
-            self.search_key(ws, &key, None, Some(text));
+            self.search_key(ws, &key, None, Some(text), None);
         } else {
             ws.mods = latched_mods;
             let _ = self.write_terminal_input(ws, text.as_bytes());
@@ -13139,6 +13140,7 @@ impl App {
             })
             .or_else(|| ws.ssh_input.as_ref().map(|(query, _)| (8, query.as_str())));
         let search_cursor = self.search_geometry(ws).map(|geometry| {
+            let cw = self.overlay_text_cell_width(ws);
             let mut projected = ws.search.query().to_string();
             let replace = ws
                 .search
@@ -13674,8 +13676,11 @@ impl App {
             .search_geometry(ws)
             .and_then(|geometry| {
                 let renderer = ws.renderer.as_ref()?;
-                let columns =
-                    kettle_render::search_bar_columns(geometry.editor.2, renderer.cell_w).max(1);
+                let columns = kettle_render::search_bar_columns(
+                    geometry.editor.2,
+                    renderer.overlay_text_cell_width(),
+                )
+                .max(1);
                 Some(crate::search_input::SearchEditor::visible_scroll_for(
                     &search_query,
                     search_cursor,
@@ -14506,6 +14511,7 @@ impl App {
         // A card held under a modal that opened is not clicked, even if the
         // modal is gone by the release.
         ws.card_press = None;
+        ws.dragging_split = None;
         // The modal that opens takes the keyboard from a preview lane, even
         // if it closes again before the event loop looks.
         self.exit_preview_focus(ws);
@@ -16379,6 +16385,7 @@ impl App {
                             tab: dt,
                             source_color: self.tear_off_source_color(ws),
                             font_size: ws.renderer.as_ref().map(|r| r.font_size()),
+                            scaled_zoom_prev_font_size: ws.scaled_zoom_prev_font_size,
                             paste: Box::new(paste),
                         },
                         None,
@@ -17173,7 +17180,8 @@ fn physical_keybind_chars(physical: &PhysicalKey, mods: ModifiersState) -> &'sta
         PhysicalKey::Code(KeyCode::NumpadAdd) => &['+'],
         PhysicalKey::Code(KeyCode::NumpadSubtract) => &['-'],
         PhysicalKey::Code(KeyCode::NumpadEqual) => &['='],
-        PhysicalKey::Code(KeyCode::Digit0) | PhysicalKey::Code(KeyCode::Numpad0) => &['0'],
+        PhysicalKey::Code(KeyCode::Digit0) => shifted(mods, &['0'], &['0', ')']),
+        PhysicalKey::Code(KeyCode::Numpad0) => &['0'],
         _ => &[],
     }
 }
@@ -17190,6 +17198,7 @@ fn keybind_candidates(
     logical_key: Option<&Key>,
     physical_key: Option<&PhysicalKey>,
     mods: ModifiersState,
+    unshifted_key: Option<&Key>,
 ) -> Vec<Trigger> {
     let mut out = Vec::new();
     let kmods = to_mods(mods);
@@ -17198,7 +17207,7 @@ fn keybind_candidates(
     }
     if let Some(physical) = physical_key {
         let aliases = physical_keybind_chars(physical, mods);
-        if physical_aliases_apply(logical_key, aliases) {
+        if physical_aliases_apply(logical_key, aliases, unshifted_key) {
             for c in aliases {
                 push_unique_trigger(&mut out, Trigger::new(kmods, KKey::Char(*c)));
             }
@@ -17210,11 +17219,16 @@ fn keybind_candidates(
 /// Whether a key's US characters may stand in for what the layout produced.
 /// Only where the layout gives the key no ASCII character of its own (a
 /// non-Latin layout, or AZERTY's `à` on the 0 key) or produced one of those
-/// same characters at another shift level. On Dvorak, Ctrl+W is the US comma
-/// key: aliasing it to Ctrl+, would open Settings instead of reaching the
+/// same characters at another shift level. Prefer the layout's unshifted key
+/// so German Shift+comma (`;`) keeps its comma alias. On Dvorak, Ctrl+W is
+/// the US comma key: aliasing it to Ctrl+, would open Settings instead of reaching the
 /// shell.
-fn physical_aliases_apply(logical_key: Option<&Key>, aliases: &[char]) -> bool {
-    let Some(Key::Character(text)) = logical_key else {
+fn physical_aliases_apply(
+    logical_key: Option<&Key>,
+    aliases: &[char],
+    unshifted_key: Option<&Key>,
+) -> bool {
+    let Some(Key::Character(text)) = unshifted_key.or(logical_key) else {
         return true;
     };
     let mut chars = text.chars();
@@ -17565,9 +17579,16 @@ fn is_vi_mode_toggle_chord(
     logical_key: &Key,
     physical_key: &PhysicalKey,
     mods: ModifiersState,
+    unshifted_key: Option<&Key>,
 ) -> bool {
     matches!(
-        resolve_keybind_action(bindings, Some(logical_key), Some(physical_key), mods),
+        resolve_keybind_action(
+            bindings,
+            Some(logical_key),
+            Some(physical_key),
+            mods,
+            unshifted_key
+        ),
         Some((_, Action::ToggleViMode))
     )
 }
@@ -17577,8 +17598,9 @@ fn resolve_keybind_action(
     logical_key: Option<&Key>,
     physical_key: Option<&PhysicalKey>,
     mods: ModifiersState,
+    unshifted_key: Option<&Key>,
 ) -> Option<(Trigger, Action)> {
-    keybind_candidates(logical_key, physical_key, mods)
+    keybind_candidates(logical_key, physical_key, mods, unshifted_key)
         .into_iter()
         .find_map(|trigger| {
             bindings
@@ -19074,6 +19096,8 @@ enum WindowOpen {
         /// draws its tab and status bars at the size the drag anchor was
         /// measured with.
         font_size: Option<f32>,
+        /// Font size to restore when the adopted tab leaves scaled zoom.
+        scaled_zoom_prev_font_size: Option<f32>,
         /// The moved tab's paste receipt and pending video preview.
         paste: Box<crate::window_state::MovedPasteState>,
     },
@@ -19831,7 +19855,91 @@ impl App {
         } else {
             None
         };
-        // Restored sibling windows can drain output as soon as they open.
+        let restored = if spawned_early {
+            true
+        } else if has_launch_override {
+            let argv = cmd_override.unwrap_or_default();
+            let cwd = cwd_override
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
+            if let Err(e) = ws.mux.new_tab_with_geometry(
+                &self.cfg,
+                geometry,
+                self.waker(),
+                &argv,
+                cwd.as_deref(),
+            ) {
+                log::error!("failed to spawn `-e` command: {e}");
+                event_loop.exit();
+                return;
+            }
+            true
+        } else {
+            match restore_plan.as_ref() {
+                Some((wins, _)) => {
+                    // The theme is config-governed (the config `theme =` line,
+                    // with the compile-time default as fallback) and persisted
+                    // via `persist_pref`. Restore never applies a
+                    // session-stored theme, which would override the
+                    // config/default on every restore. The session's `theme`
+                    // field is ignored (kept only for back-compat parsing of
+                    // older session.json files).
+                    // `self.waker()` is the latched waker constructor; a
+                    // hand-rolled closure would bypass the wakeup-dedup latch
+                    // for every restored pane.
+                    // Window 1 of the session restores into THIS window; each
+                    // additional saved window opens via open_window(Restore),
+                    // which works here because the GPU context was cached just
+                    // above. A legacy single-window file normalizes to one
+                    // entry.
+                    if let Some((first, _)) = wins.split_first() {
+                        let first_session = crate::session::Session {
+                            tabs: first.tabs.to_vec(),
+                            active: first.active,
+                            theme: None,
+                            windows: Vec::new(),
+                        };
+                        let geometries = self.restore_geometries(ws, &first_session);
+                        let mk = || self.waker();
+                        let outcome =
+                            ws.mux
+                                .restore_geometry(&first_session, &self.cfg, &geometries, &mk);
+                        // A tab that could not be rebuilt is gone from the live
+                        // mux, and the next save rewrites the file from it. Keep
+                        // the original so a transient failure — a command not on
+                        // PATH yet, a fork refused under a process limit — costs
+                        // nothing permanent.
+                        if outcome.skipped > 0 {
+                            self.stash_unrestorable_session(&format!(
+                                "{} tab(s) could not be rebuilt",
+                                outcome.skipped
+                            ));
+                        }
+                        outcome.restored_any
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            }
+        };
+        if !restored && let Err(e) = ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
+            log::error!("failed to spawn shell: {e}");
+            event_loop.exit();
+            return;
+        }
+        if !spawned_early {
+            crate::startup_trace::mark(crate::startup_trace::Phase::PaneSpawned);
+            crate::startup_trace::note_path(crate::startup_trace::StartupPath::AfterRenderer);
+        }
+        if ws.cursor_exit_log.enabled
+            && let Some(pane_id) = ws.mux.tabs.get(ws.mux.active).map(|tab| tab.focus)
+            && let Some(window) = ws.window.as_deref()
+        {
+            ws.cursor_exit_log.bind(ws.seq, pane_id, window);
+        }
+        self.resize_all(ws);
+        // Use the restored layout for the header before sibling windows can drain output.
         if let Some((target, raw)) = dev_record {
             let (cols, rows) = self.grid_of(ws, self.area(ws));
             match crate::dev_record::Recorder::start_target_async(
@@ -19861,120 +19969,31 @@ impl App {
                 }
             }
         }
-        let restored = if spawned_early {
-            true
-        } else if has_launch_override {
-            let argv = cmd_override.unwrap_or_default();
-            let cwd = cwd_override
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned());
-            if let Err(e) = ws.mux.new_tab_with_geometry(
-                &self.cfg,
-                geometry,
-                self.waker(),
-                &argv,
-                cwd.as_deref(),
-            ) {
-                log::error!("failed to spawn `-e` command: {e}");
-                event_loop.exit();
-                return;
-            }
-            true
-        } else {
-            match restore_plan.as_ref() {
-                Some((wins, surfaces)) => {
-                    // The theme is config-governed (the config `theme =` line,
-                    // with the compile-time default as fallback) and persisted
-                    // via `persist_pref`. Restore never applies a
-                    // session-stored theme, which would override the
-                    // config/default on every restore. The session's `theme`
-                    // field is ignored (kept only for back-compat parsing of
-                    // older session.json files).
-                    // `self.waker()` is the latched waker constructor; a
-                    // hand-rolled closure would bypass the wakeup-dedup latch
-                    // for every restored pane.
-                    // Window 1 of the session restores into THIS window; each
-                    // additional saved window opens via open_window(Restore),
-                    // which works here because the GPU context was cached just
-                    // above. A legacy single-window file normalizes to one
-                    // entry.
-                    if let Some((first, rest)) = wins.split_first() {
-                        let first_session = crate::session::Session {
-                            tabs: first.tabs.to_vec(),
-                            active: first.active,
-                            theme: None,
-                            windows: Vec::new(),
-                        };
-                        let geometries = self.restore_geometries(ws, &first_session);
-                        let mk = || self.waker();
-                        let outcome =
-                            ws.mux
-                                .restore_geometry(&first_session, &self.cfg, &geometries, &mk);
-                        // A tab that could not be rebuilt is gone from the live
-                        // mux, and the next save rewrites the file from it. Keep
-                        // the original so a transient failure — a command not on
-                        // PATH yet, a fork refused under a process limit — costs
-                        // nothing permanent.
-                        if outcome.skipped > 0 {
-                            self.stash_unrestorable_session(&format!(
-                                "{} tab(s) could not be rebuilt",
-                                outcome.skipped
-                            ));
-                        }
-                        if !rest.is_empty() {
-                            for (sw, surface) in rest.iter().zip(&surfaces[1..]) {
-                                let sw = crate::session::SWindow {
-                                    tabs: sw.tabs.to_vec(),
-                                    active: sw.active,
-                                    geometry: surface.geometry(),
-                                };
-                                let size =
-                                    winit::dpi::PhysicalSize::new(surface.size.0, surface.size.1);
-                                if self
-                                    .open_window(
-                                        event_loop,
-                                        WindowOpen::Restore(sw),
-                                        None,
-                                        Some(size),
-                                    )
-                                    .is_err()
-                                {
-                                    self.stash_unrestorable_session(
-                                        "could not open an additional window",
-                                    );
-                                    log::warn!(
-                                        "session restore: could not open an additional window"
-                                    );
-                                }
-                            }
-                            // Focus comes home to window 1 (open_window moves
-                            // focused_seq to each window it opens).
-                            self.focused_seq = ws.seq;
-                        }
-                        outcome.restored_any
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            }
-        };
-        if !restored && let Err(e) = ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
-            log::error!("failed to spawn shell: {e}");
-            event_loop.exit();
-            return;
-        }
-        if !spawned_early {
-            crate::startup_trace::mark(crate::startup_trace::Phase::PaneSpawned);
-            crate::startup_trace::note_path(crate::startup_trace::StartupPath::AfterRenderer);
-        }
-        if ws.cursor_exit_log.enabled
-            && let Some(pane_id) = ws.mux.tabs.get(ws.mux.active).map(|tab| tab.focus)
-            && let Some(window) = ws.window.as_deref()
+        if !spawned_early
+            && !has_launch_override
+            && let Some((wins, surfaces)) = restore_plan.as_ref()
+            && let Some((_, rest)) = wins.split_first()
+            && !rest.is_empty()
         {
-            ws.cursor_exit_log.bind(ws.seq, pane_id, window);
+            for (sw, surface) in rest.iter().zip(&surfaces[1..]) {
+                let sw = crate::session::SWindow {
+                    tabs: sw.tabs.to_vec(),
+                    active: sw.active,
+                    geometry: surface.geometry(),
+                };
+                let size = winit::dpi::PhysicalSize::new(surface.size.0, surface.size.1);
+                if self
+                    .open_window(event_loop, WindowOpen::Restore(sw), None, Some(size))
+                    .is_err()
+                {
+                    self.stash_unrestorable_session("could not open an additional window");
+                    log::warn!("session restore: could not open an additional window");
+                }
+            }
+            // Focus comes home to window 1 (open_window moves
+            // focused_seq to each window it opens).
+            self.focused_seq = ws.seq;
         }
-        self.resize_all(ws);
         // Start the control server right after the first pane exists and BEFORE
         // the first GPU paint, which can take several seconds on a cold shader
         // cache. The server only needs the pid + a live proxy for its waker, so
@@ -21267,6 +21286,10 @@ impl App {
                 // handler below takes it; a program's goes on to get its
                 // release from `report_mouse`.
                 ws.held_buttons.end_own(bcode);
+                // End any split-divider drag on left-button up.
+                if bcode == 0 {
+                    ws.dragging_split = None;
+                }
                 if self.confirm_mouse_release(ws, bcode) {
                     return;
                 }
@@ -21376,8 +21399,6 @@ impl App {
                 if bcode == 0 {
                     ws.search.dragging_editor = false;
                     ws.scrollbar_drag_offset = None;
-                    // End any split-divider drag on left-button up.
-                    ws.dragging_split = None;
                     // End the drag-to-reorder gesture on
                     // left-button release. Any swaps that happened
                     // during the drag are already committed; this just
@@ -21433,6 +21454,7 @@ impl App {
                                         tab: dt,
                                         source_color: self.tear_off_source_color(ws),
                                         font_size: ws.renderer.as_ref().map(|r| r.font_size()),
+                                        scaled_zoom_prev_font_size: ws.scaled_zoom_prev_font_size,
                                         paste: Box::new(paste),
                                     },
                                     pos,
@@ -22030,6 +22052,7 @@ impl App {
                         &event.logical_key,
                         &event.physical_key,
                         ws.mods,
+                        Some(&event.key_without_modifiers()),
                     ) {
                         // A held chord leaves once, not on every repeat.
                         if !event.repeat {
@@ -22176,13 +22199,20 @@ impl App {
                     {
                         return;
                     }
-                    if !self.search_key(ws, &event.logical_key, Some(&event.physical_key), text) {
+                    if !self.search_key(
+                        ws,
+                        &event.logical_key,
+                        Some(&event.physical_key),
+                        text,
+                        Some(&event.key_without_modifiers()),
+                    ) {
                         self.search_bar_shortcut(
                             ws,
                             &event.logical_key,
                             Some(&event.physical_key),
                             event.repeat,
                             event_loop,
+                            Some(&event.key_without_modifiers()),
                         );
                     }
                     remember_closing_key(ws, key_modal, event.physical_key);
@@ -22205,6 +22235,7 @@ impl App {
                     Some(&event.logical_key),
                     Some(&event.physical_key),
                     ws.mods,
+                    Some(&event.key_without_modifiers()),
                 ) && !self.chord_falls_through(ws, trigger, &act)
                 {
                     track_consumed_key_release(

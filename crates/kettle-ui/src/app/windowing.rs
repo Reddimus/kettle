@@ -428,7 +428,13 @@ impl App {
                     return Err(Box::new(WindowOpen::Fresh { cwd }));
                 }
             }
-            WindowOpen::AdoptTab { tab: dt, paste, .. } => {
+            WindowOpen::AdoptTab {
+                tab: dt,
+                paste,
+                scaled_zoom_prev_font_size,
+                ..
+            } => {
+                ws.scaled_zoom_prev_font_size = scaled_zoom_prev_font_size;
                 ws.mux.attach_tab(dt, None);
                 ws.adopt_moved_paste_state(*paste);
             }
@@ -695,6 +701,7 @@ impl App {
                     tab: dt,
                     source_color: self.tear_off_source_color(ws),
                     font_size: ws.renderer.as_ref().map(|r| r.font_size()),
+                    scaled_zoom_prev_font_size: ws.scaled_zoom_prev_font_size,
                     paste: Box::new(paste),
                 },
                 pos,
@@ -1635,6 +1642,7 @@ impl App {
                     tab: dt,
                     source_color: color,
                     font_size,
+                    scaled_zoom_prev_font_size: ws.scaled_zoom_prev_font_size,
                     paste: Box::new(paste),
                 },
                 None,

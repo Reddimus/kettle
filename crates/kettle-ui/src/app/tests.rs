@@ -6757,7 +6757,7 @@ fn window_constructors_size_through_the_shared_startup_rule() {
 fn later_saved_windows_do_not_depend_on_the_first_restore_succeeding() {
     let src = production_source();
     let restore = src
-        .split("if let Some((first, rest)) = wins.split_first() {")
+        .split("if let Some((first, _)) = wins.split_first() {")
         .nth(1)
         .expect("multi-window startup restore");
     let (before_loop, _) = restore
@@ -7149,9 +7149,9 @@ fn keys_the_search_bar_does_not_use_reach_the_shortcuts() {
         })
         .expect("native search key branch");
     assert!(
-        native.contains(
-            "if !self.search_key(ws, &event.logical_key, Some(&event.physical_key), text)"
-        ) && native.contains("self.search_bar_shortcut("),
+        native.contains("if !self.search_key(")
+            && native.contains("Some(&event.key_without_modifiers()),")
+            && native.contains("self.search_bar_shortcut("),
         "a native key the bar does not use must reach the shortcuts"
     );
     let ctl = src
@@ -7160,8 +7160,8 @@ fn keys_the_search_bar_does_not_use_reach_the_shortcuts() {
         .and_then(|rest| rest.split("}\n            }").next())
         .expect("control-plane search key branch");
     assert!(
-        ctl.contains("if !self.search_key(ws, key, None, text) {")
-            && ctl.contains("self.search_bar_shortcut(ws, key, None, false, event_loop);"),
+        ctl.contains("if !self.search_key(ws, key, None, text, None) {")
+            && ctl.contains("self.search_bar_shortcut(ws, key, None, false, event_loop, None);"),
         "a dispatched key the bar does not use must reach the shortcuts"
     );
 }
@@ -9425,7 +9425,13 @@ fn every_configurable_named_key_matches_its_real_key() {
     let defaults = kettle_config::keybinds::defaults();
     let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
     assert_eq!(
-        resolve_keybind_action(&defaults, Some(&Key::Named(NamedKey::Space)), None, mods),
+        resolve_keybind_action(
+            &defaults,
+            Some(&Key::Named(NamedKey::Space)),
+            None,
+            mods,
+            None
+        ),
         Some((
             Trigger::new(Mods::CTRL | Mods::SHIFT, KKey::Char(' ')),
             Action::ToggleViMode
@@ -9447,19 +9453,22 @@ fn the_vi_mode_chord_leaves_vi_mode() {
         &defaults,
         &Key::Named(NamedKey::Space),
         &space,
-        cs
+        cs,
+        None,
     ));
     assert!(!is_vi_mode_toggle_chord(
         &defaults,
         &Key::Named(NamedKey::Space),
         &space,
-        ModifiersState::empty()
+        ModifiersState::empty(),
+        None,
     ));
     assert!(!is_vi_mode_toggle_chord(
         &defaults,
         &Key::Character("j".into()),
         &PhysicalKey::Code(KeyCode::KeyJ),
-        ModifiersState::empty()
+        ModifiersState::empty(),
+        None,
     ));
     let src = production_source();
     let intercept = src
@@ -9954,6 +9963,7 @@ fn keybind_resolver_uses_logical_before_physical_fallback() {
         Some(&Key::Character("=".into())),
         Some(&PhysicalKey::Code(KeyCode::Equal)),
         mods,
+        None,
     );
     assert_eq!(
         matched,
@@ -9976,6 +9986,7 @@ fn imported_shifted_punctuation_binding_matches_the_shifted_character() {
         Some(&Key::Character("<".into())),
         Some(&PhysicalKey::Code(KeyCode::Comma)),
         ModifiersState::CONTROL | ModifiersState::SHIFT,
+        None,
     );
     assert_eq!(matched.map(|(_, action)| action), Some(Action::NewTab));
 }
@@ -9997,6 +10008,7 @@ fn physical_aliases_never_replace_another_latin_character() {
         Some(&Key::Character("w".into())),
         Some(&PhysicalKey::Code(KeyCode::Comma)),
         ctrl,
+        None,
     );
     assert_ne!(
         dvorak_ctrl_w.map(|(_, action)| action),
@@ -10008,6 +10020,7 @@ fn physical_aliases_never_replace_another_latin_character() {
         Some(&Key::Character("]".into())),
         Some(&PhysicalKey::Code(KeyCode::Equal)),
         ctrl,
+        None,
     );
     assert!(
         !matches!(
@@ -10021,11 +10034,79 @@ fn physical_aliases_never_replace_another_latin_character() {
         Some(&Key::Character("à".into())),
         Some(&PhysicalKey::Code(KeyCode::Digit0)),
         ctrl,
+        None,
     );
     assert_eq!(
         azerty_ctrl_zero.map(|(_, action)| action),
         Some(Action::ResetFontSize)
     );
+}
+
+#[test]
+fn review_shifted_zero_bindings_match_us_keyboard() {
+    use super::resolve_keybind_action;
+    use kettle_config::Config;
+    use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+    let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    for (config, expected) in [
+        ("keybind = ctrl+shift+0=copy\n", Action::Copy),
+        (
+            "keybind = ctrl+shift+0=reset_font_size\n",
+            Action::ResetFontSize,
+        ),
+        (
+            "[keybindings]\nnew_tab = <Control><Shift>0\n",
+            Action::NewTab,
+        ),
+    ] {
+        let cfg = Config::parse_text(config);
+        let matched = resolve_keybind_action(
+            &cfg.keybinds,
+            Some(&Key::Character(")".into())),
+            Some(&PhysicalKey::Code(KeyCode::Digit0)),
+            mods,
+            None,
+        );
+        assert_eq!(
+            matched.map(|(_, action)| action),
+            Some(expected),
+            "{config}"
+        );
+    }
+}
+
+#[test]
+fn review_shifted_punctuation_uses_layout_base_key() {
+    use super::resolve_keybind_action;
+    use kettle_config::Config;
+    use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+    let cfg = Config::parse_text("[keybindings]\nnew_tab = <Control><Shift>comma\n");
+    let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    let physical = PhysicalKey::Code(KeyCode::Comma);
+    let matched = resolve_keybind_action(
+        &cfg.keybinds,
+        Some(&Key::Character(";".into())),
+        Some(&physical),
+        mods,
+        Some(&Key::Character(",".into())),
+    );
+    assert_eq!(matched.map(|(_, action)| action), Some(Action::NewTab));
+    let dvorak = resolve_keybind_action(
+        &cfg.keybinds,
+        Some(&Key::Character("W".into())),
+        Some(&physical),
+        mods,
+        Some(&Key::Character("w".into())),
+    );
+    let logical_only = resolve_keybind_action(
+        &cfg.keybinds,
+        Some(&Key::Character("W".into())),
+        None,
+        mods,
+        Some(&Key::Character("w".into())),
+    );
+    assert_eq!(dvorak, logical_only, "Dvorak must keep its logical binding");
+    assert_ne!(dvorak.map(|(_, action)| action), Some(Action::NewTab));
 }
 
 #[test]
@@ -10045,6 +10126,7 @@ fn keybind_resolver_honors_shifted_digit_rebinds_and_unbinds() {
                     Some(&Key::Character(logical.into())),
                     Some(&physical),
                     mods,
+                    None,
                 );
                 assert_eq!(
                     matched.map(|(_, action)| action),
@@ -10098,7 +10180,7 @@ fn keybind_resolver_falls_back_to_physical_zoom_keys() {
             Action::ResetFontSize,
         ),
     ] {
-        let matched = resolve_keybind_action(&defaults, None, Some(&physical), mods)
+        let matched = resolve_keybind_action(&defaults, None, Some(&physical), mods, None)
             .unwrap_or_else(|| panic!("{physical:?} should resolve"));
         assert_eq!(matched.1, expected);
     }
@@ -10108,6 +10190,7 @@ fn keybind_resolver_falls_back_to_physical_zoom_keys() {
             None,
             Some(&PhysicalKey::Code(KeyCode::KeyA)),
             ctrl,
+            None,
         ),
         None
     );
@@ -11699,7 +11782,7 @@ fn a_held_buttons_reports_stay_with_the_pane_its_press_went_to() {
         "self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, bcode) { return; } // Context menu:",
         "if bcode == 0 { ws.card_press = None; } if ws.card_focus.take().is_some() { ws.accessibility_pending = true; } self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, bcode) { return true; } let bar",
         // Each release ends a gesture of Kettle's own first.
-        "ws.held_buttons.end_own(bcode); if self.confirm_mouse_release(ws, bcode) { return; } // A release ends an editor drag inside the search bar;",
+        "ws.held_buttons.end_own(bcode); // End any split-divider drag on left-button up. if bcode == 0 { ws.dragging_split = None; } if self.confirm_mouse_release(ws, bcode) { return; } // A release ends an editor drag inside the search bar;",
         "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); if self.confirm_mouse_release(ws, sgr) { return; } self.send_mouse(ws, sgr, false, false); return; }",
         "// As natively: a gesture of Kettle's own ends with its release. ws.held_buttons.end_own(bcode);",
     ] {
@@ -14560,7 +14643,7 @@ fn tear_off_flow_stays_wired() {
     //    the grab offset (open_window's size override).
     assert!(
         src.contains(
-            "WindowOpen::AdoptTab {\n                    tab: dt,\n                    source_color: self.tear_off_source_color(ws),\n                    font_size: ws.renderer.as_ref().map(|r| r.font_size()),\n                    paste: Box::new(paste),\n                },\n                pos,\n                Some(size),"
+            "WindowOpen::AdoptTab {\n                    tab: dt,\n                    source_color: self.tear_off_source_color(ws),\n                    font_size: ws.renderer.as_ref().map(|r| r.font_size()),\n                    scaled_zoom_prev_font_size: ws.scaled_zoom_prev_font_size,\n                    paste: Box::new(paste),\n                },\n                pos,\n                Some(size),"
         ),
         "the tear must open the torn window at the grab position and source size"
     );
@@ -18221,4 +18304,115 @@ fn trigger_grid_snapshot_preserves_wide_and_combining_text() {
         ]))
     );
     mux.kill_children();
+}
+
+#[test]
+fn review_search_projection_uses_natural_text_width() {
+    let src = production_source();
+    let overlay = finding_body(&src, "overlay");
+    let scroll = overlay
+        .split("let search_horizontal_scroll =")
+        .nth(1)
+        .unwrap();
+    assert!(scroll.contains("renderer.overlay_text_cell_width()"));
+    assert!(!scroll.contains("geometry.editor.2, renderer.cell_w"));
+    let ime = finding_body(&src, "update_ime_cursor_area");
+    let search = ime
+        .split("let search_cursor =")
+        .nth(1)
+        .unwrap()
+        .split("let (x, y) =")
+        .next()
+        .unwrap();
+    assert!(search.contains("self.overlay_text_cell_width(ws)"));
+
+    let natural_width = 10.0;
+    let terminal_width = natural_width * 0.5;
+    let geometry = kettle_render::search_bar_geometry(800.0, 600.0, natural_width, 20.0, &EN_TEXT);
+    let columns =
+        kettle_render::search_bar_columns(geometry.editor.2, natural_width).saturating_sub(2);
+    let mut editor = crate::search_input::SearchEditor::default();
+    editor.insert(&"x".repeat(columns + 6), 1024);
+    editor.ensure_cursor_visible(columns);
+    let scroll = crate::search_input::SearchEditor::visible_scroll_for(
+        editor.text(),
+        editor.cursor(),
+        editor.horizontal_scroll(),
+        columns,
+    );
+    assert!(scroll > 0);
+    assert_eq!(scroll, editor.horizontal_scroll());
+    let wrong_columns =
+        kettle_render::search_bar_columns(geometry.editor.2, terminal_width).saturating_sub(2);
+    assert_eq!(
+        crate::search_input::SearchEditor::visible_scroll_for(
+            editor.text(),
+            editor.cursor(),
+            scroll,
+            wrong_columns,
+        ),
+        0,
+        "terminal width reproduces the tail being clipped"
+    );
+}
+
+#[test]
+fn review_recording_header_follows_restore_and_precedes_siblings() {
+    let src = production_source();
+    let startup = finding_body(&src, "resumed_inner");
+    let restore = startup.find(".restore_geometry(").unwrap();
+    let resize = startup[restore..].find("self.resize_all(ws);").unwrap() + restore;
+    let header = startup.find("Recorder::start_target_async(").unwrap();
+    let recorder = startup.find("self.recorder = Some(rec);").unwrap();
+    let sibling = startup.find(".open_window(").unwrap();
+    assert!(
+        restore < resize && resize < header && header < recorder && recorder < sibling,
+        "record the actual restored grid before any sibling can drain output"
+    );
+}
+
+#[test]
+fn review_torn_tab_keeps_scaled_zoom_baseline() {
+    let src = production_source();
+    let mut handoffs = 0;
+    for body in src.split("WindowOpen::AdoptTab {").skip(1) {
+        let fields = body.split('}').next().unwrap();
+        if fields.contains("paste: Box::new(paste)") {
+            handoffs += 1;
+            assert!(
+                fields.contains("scaled_zoom_prev_font_size: ws.scaled_zoom_prev_font_size"),
+                "every live tab handoff must carry the unzoom font size: {fields}"
+            );
+        }
+    }
+    assert_eq!(handoffs, 4);
+    let open = finding_body(include_str!("windowing.rs"), "open_window");
+    assert!(open.contains("ws.scaled_zoom_prev_font_size = scaled_zoom_prev_font_size;"));
+}
+
+#[test]
+fn review_modals_and_early_releases_end_divider_drags() {
+    let src = production_source();
+    for name in ["install_confirm_dialog", "close_all_modals"] {
+        let body = finding_body(&src, name);
+        assert!(body.contains("ws.dragging_split = None;"), "{name}");
+    }
+    let ctl = finding_body(include_str!("ctl.rs"), "ctl_mouse_release");
+    assert!(
+        ctl.find("ws.dragging_split = None;").unwrap()
+            < ctl.find("self.confirm_mouse_release(").unwrap()
+    );
+    let native = src
+        .split("state: ElementState::Released,\n                button,")
+        .nth(1)
+        .unwrap()
+        .split("WindowEvent::CursorLeft")
+        .next()
+        .unwrap();
+    assert!(
+        native.find("ws.dragging_split = None;").unwrap()
+            < native
+                .find("self.confirm_mouse_release(ws, bcode)")
+                .unwrap()
+    );
 }

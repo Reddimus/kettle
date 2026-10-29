@@ -1650,7 +1650,7 @@ impl App {
             Ok(m) => m,
             Err(e) => return Response::err(req.id, ec::BAD_PARAMS, e),
         };
-        let candidates = keybind_candidates(logical.as_ref(), physical.as_ref(), mods);
+        let candidates = keybind_candidates(logical.as_ref(), physical.as_ref(), mods, None);
         let candidate_labels: Vec<String> = candidates.iter().map(Trigger::label).collect();
         let modal_blocked = self.any_modal_open(ws);
         if modal_blocked {
@@ -1669,6 +1669,7 @@ impl App {
             logical.as_ref(),
             physical.as_ref(),
             mods,
+            None,
         ) else {
             return Response::ok(
                 req.id,
@@ -1813,8 +1814,8 @@ impl App {
                 TextModal::Ssh => self.ssh_key(ws, key, text),
                 TextModal::TitleEdit => self.title_edit_key(ws, key, text),
                 TextModal::Search => {
-                    if !self.search_key(ws, key, None, text) {
-                        self.search_bar_shortcut(ws, key, None, false, event_loop);
+                    if !self.search_key(ws, key, None, text, None) {
+                        self.search_bar_shortcut(ws, key, None, false, event_loop, None);
                     }
                 }
                 TextModal::Preview => self.preview_focus_key(ws, key, false),
@@ -2316,6 +2317,9 @@ impl App {
     pub(super) fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
         // As natively: a gesture of Kettle's own ends with its release.
         ws.held_buttons.end_own(bcode);
+        if bcode == 0 {
+            ws.dragging_split = None;
+        }
         if self.confirm_mouse_release(ws, bcode) {
             return true;
         }
@@ -2349,7 +2353,6 @@ impl App {
         }
         if bcode == 0 {
             ws.scrollbar_drag_offset = None;
-            ws.dragging_split = None;
             ws.tab_drag_active = false;
             ws.tab_drag_press = None;
             ws.tab_pressed_idx = None;

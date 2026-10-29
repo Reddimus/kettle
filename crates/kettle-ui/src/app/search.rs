@@ -1027,6 +1027,7 @@ impl App {
         key: &Key,
         physical_key: Option<&PhysicalKey>,
         text: Option<&str>,
+        unshifted_key: Option<&Key>,
     ) -> bool {
         let macos = cfg!(target_os = "macos");
         let mods = ws.mods;
@@ -1067,7 +1068,7 @@ impl App {
         // to the query and selects it. It is whatever `start_search` is bound
         // to, so a rebound shortcut works too.
         if matches!(
-            resolve_keybind_action(&self.cfg.keybinds, Some(key), None, mods),
+            resolve_keybind_action(&self.cfg.keybinds, Some(key), None, mods, unshifted_key),
             Some((_, Action::StartSearch))
         ) {
             ws.search.focused_control = kettle_render::SearchControl::Editor;
@@ -1075,8 +1076,14 @@ impl App {
             self.sync_search_editor_scroll(ws);
             return true;
         }
-        let bound =
-            resolve_keybind_action(&self.cfg.keybinds, Some(key), physical_key, mods).is_some();
+        let bound = resolve_keybind_action(
+            &self.cfg.keybinds,
+            Some(key),
+            physical_key,
+            mods,
+            unshifted_key,
+        )
+        .is_some();
         let typed = search_bar_text(
             crate::modal_input::accept_text(text, ws.mods),
             mods,
@@ -1315,10 +1322,15 @@ impl App {
         physical_key: Option<&PhysicalKey>,
         repeat: bool,
         event_loop: &ActiveEventLoop,
+        unshifted_key: Option<&Key>,
     ) -> bool {
-        let Some((trigger, action)) =
-            resolve_keybind_action(&self.cfg.keybinds, Some(key), physical_key, ws.mods)
-        else {
+        let Some((trigger, action)) = resolve_keybind_action(
+            &self.cfg.keybinds,
+            Some(key),
+            physical_key,
+            ws.mods,
+            unshifted_key,
+        ) else {
             return false;
         };
         match search_bar_shortcut_kind(&action) {

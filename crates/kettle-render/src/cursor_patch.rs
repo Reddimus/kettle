@@ -43,6 +43,7 @@ use kettle_core::{GraphicsBudget, GraphicsReservation};
 use crate::Renderer;
 use crate::outline::OutlineInstance;
 use crate::quad::QuadInstance;
+use crate::{FontSystem, PendingCursorGlyph, SwashCache, TextBuffer, cursor_glyph_top};
 
 /// The largest patch, in cells of the current font, in each direction.
 const MAX_PATCH_CELLS: f32 = 4.0;
@@ -932,42 +933,13 @@ impl Renderer {
     /// The pixels the inverted cursor glyph inks, placed and clipped as
     /// glyphon's `prepare_glyph` places them, or `None` for no glyph.
     fn cursor_glyph_ink(&mut self, target_size: [u32; 2]) -> Option<PixelBox> {
-        let (left, top, clip) = {
-            let glyph = self.pending_cursor_glyph.as_ref()?;
-            (glyph.x, glyph.y, glyph.clip)
-        };
-        let bounds = glyphon_bounds(clip, target_size);
-        let mut ink: Option<PixelBox> = None;
-        for run in self.cursor_glyph_buffer.layout_runs() {
-            for glyph in run.glyphs {
-                let physical = glyph.physical((left, top), 1.0);
-                let Some(image) = self
-                    .swash
-                    .get_image(&mut self.font_system, physical.cache_key)
-                    .as_ref()
-                else {
-                    continue;
-                };
-                let placement = image.placement;
-                if placement.width == 0 || placement.height == 0 {
-                    continue;
-                }
-                let x = i64::from(physical.x) + i64::from(placement.left);
-                let y = i64::from(run.line_y.round() as i32) + i64::from(physical.y)
-                    - i64::from(placement.top);
-                let quad = PixelBox {
-                    x0: x,
-                    y0: y,
-                    x1: x + i64::from(placement.width),
-                    y1: y + i64::from(placement.height),
-                }
-                .intersect(bounds);
-                if !quad.is_empty() {
-                    ink = Some(ink.map_or(quad, |ink| ink.union(quad)));
-                }
-            }
-        }
-        ink
+        cursor_glyph_ink(
+            self.pending_cursor_glyph.as_ref()?,
+            &self.cursor_glyph_buffer,
+            &mut self.font_system,
+            &mut self.swash,
+            target_size,
+        )
     }
 
     /// Whether an image or a pane outline can paint inside `near`. Their
@@ -1311,12 +1283,86 @@ fn read_texture(
     bytes
 }
 
+fn cursor_glyph_ink(
+    cursor: &PendingCursorGlyph,
+    buffer: &TextBuffer,
+    fonts: &mut FontSystem,
+    swash: &mut SwashCache,
+    target_size: [u32; 2],
+) -> Option<PixelBox> {
+    let left = cursor.x;
+    let top = cursor_glyph_top(cursor.y, cursor.row_baseline, buffer);
+    let bounds = glyphon_bounds(cursor.clip, target_size);
+    let mut ink: Option<PixelBox> = None;
+    for run in buffer.layout_runs() {
+        for glyph in run.glyphs {
+            let physical = glyph.physical((left, top), 1.0);
+            let Some(image) = swash.get_image(fonts, physical.cache_key).as_ref() else {
+                continue;
+            };
+            let placement = image.placement;
+            if placement.width == 0 || placement.height == 0 {
+                continue;
+            }
+            let x = i64::from(physical.x) + i64::from(placement.left);
+            let y = i64::from(run.line_y.round() as i32) + i64::from(physical.y)
+                - i64::from(placement.top);
+            let quad = PixelBox {
+                x0: x,
+                y0: y,
+                x1: x + i64::from(placement.width),
+                y1: y + i64::from(placement.height),
+            }
+            .intersect(bounds);
+            if !quad.is_empty() {
+                ink = Some(ink.map_or(quad, |ink| ink.union(quad)));
+            }
+        }
+    }
+    ink
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::gpu_tests::{gpu_test_config, gpu_test_guard};
     use crate::headless_tests::{capture, focused, pane, snapshot_of};
-    use crate::{PaneView, Rect4};
+    use crate::{
+        Attrs, AttrsOwned, Family, Metrics, PaneView, Rect4, Rgb, Shaping, load_bundled_font,
+    };
+
+    #[test]
+    fn review_cursor_patch_ink_follows_shifted_row_baseline() {
+        let mut fonts = FontSystem::new();
+        for face in kettle_config::font::all() {
+            load_bundled_font(&mut fonts, face);
+        }
+        let attrs = Attrs::new().family(Family::Name(kettle_config::font::FAMILY));
+        let mut buffer = TextBuffer::new(&mut fonts, Metrics::new(14.0, 20.0));
+        buffer.set_text("x", &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut fonts, false);
+        let mut cursor = PendingCursorGlyph {
+            x: 20.0,
+            y: 40.0,
+            row_baseline: buffer.layout_runs().next().unwrap().line_y,
+            ch: 'x',
+            text: "x".into(),
+            emoji_qualified: false,
+            attrs: AttrsOwned::new(&attrs),
+            color: Rgb::new(255, 255, 255),
+            clip: (0.0, 0.0, 200.0, 200.0),
+        };
+        let mut swash = SwashCache::new();
+        let original =
+            cursor_glyph_ink(&cursor, &buffer, &mut fonts, &mut swash, [200, 200]).unwrap();
+        cursor.row_baseline += 12.0;
+        let shifted =
+            cursor_glyph_ink(&cursor, &buffer, &mut fonts, &mut swash, [200, 200]).unwrap();
+        assert_eq!(shifted.x0, original.x0);
+        assert_eq!(shifted.x1, original.x1);
+        assert_eq!(shifted.y0, original.y0 + 12);
+        assert_eq!(shifted.y1, original.y1 + 12);
+    }
 
     fn production_source() -> String {
         kettle_test_support::production_source(include_str!("cursor_patch.rs"))

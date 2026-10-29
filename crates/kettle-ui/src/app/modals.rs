@@ -156,6 +156,7 @@ impl App {
         // silently lost.
         self.finish_selection_gesture(ws);
         ws.card_press = None;
+        ws.dragging_split = None;
         // The press that opens a question also owns its later release.
         ws.confirm_pointer_release |= ws
             .held_buttons
