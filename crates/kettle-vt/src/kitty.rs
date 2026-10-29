@@ -35,10 +35,86 @@ use crate::image::{ImageData, Placed, PlacementParams, rgba_bytes};
 #[derive(Default)]
 struct Acc {
     control: String,
-    payload: String,
+    payload: Payload,
     reservation: Option<GraphicsReservation>,
     in_flight: Option<InFlightReservation>,
     reply: Option<ReplyIntent>,
+}
+
+const PAYLOAD_SEGMENT_BYTES: usize = 1024 * 1024;
+
+// Segments never resize. Small initial appends start with small segments; later
+// segments double up to 1 MiB so byte-at-a-time uploads have bounded metadata.
+#[derive(Default)]
+struct Payload {
+    segments: Vec<Box<[u8]>>,
+    len: usize,
+    capacity: usize,
+}
+
+impl Payload {
+    fn next_segment(needed: usize, capacity: usize, previous: usize, limit: usize) -> usize {
+        (needed - capacity)
+            .max(previous.saturating_mul(2))
+            .min(PAYLOAD_SEGMENT_BYTES)
+            .min(limit - capacity)
+    }
+
+    fn projected_capacity(&self, needed: usize, limit: usize) -> Option<usize> {
+        if needed > limit {
+            return None;
+        }
+        let mut capacity = self.capacity;
+        let mut previous = self.segments.last().map_or(0, |segment| segment.len());
+        while capacity < needed {
+            previous = Self::next_segment(needed, capacity, previous, limit);
+            capacity += previous;
+        }
+        Some(capacity)
+    }
+
+    fn append(
+        &mut self,
+        mut bytes: &[u8],
+        limit: usize,
+        control_capacity: usize,
+        reservation: &mut GraphicsReservation,
+    ) -> Option<()> {
+        let needed = self.len.checked_add(bytes.len())?;
+        while !bytes.is_empty() {
+            if self.len == self.capacity {
+                let size = Self::next_segment(
+                    needed,
+                    self.capacity,
+                    self.segments.last().map_or(0, |segment| segment.len()),
+                    limit,
+                );
+                if !reservation.try_grow_to(control_capacity.checked_add(self.capacity + size)?) {
+                    return None;
+                }
+                self.segments.try_reserve(1).ok()?;
+                let mut segment = Vec::new();
+                segment.try_reserve_exact(size).ok()?;
+                segment.resize(size, 0);
+                self.segments.push(segment.into_boxed_slice());
+                self.capacity += size;
+            }
+            let segment = self.segments.last_mut()?;
+            let used = self.len - (self.capacity - segment.len());
+            let take = bytes.len().min(segment.len() - used);
+            segment[used..used + take].copy_from_slice(&bytes[..take]);
+            self.len += take;
+            bytes = &bytes[take..];
+        }
+        Some(())
+    }
+
+    fn bytes(&self) -> impl Iterator<Item = u8> + Clone {
+        self.segments
+            .iter()
+            .flat_map(|segment| segment.iter().copied())
+            .take(self.len)
+    }
 }
 
 #[derive(Default)]
@@ -56,7 +132,7 @@ impl Acc {
         };
         self.control
             .len()
-            .checked_add(self.payload.len())?
+            .checked_add(self.payload.len)?
             .checked_add(control_bytes)?
             .checked_add(payload.len())
     }
@@ -76,14 +152,10 @@ impl Acc {
         } else {
             self.control.capacity()
         };
-        let needed = self.payload.len().checked_add(payload.len())?;
-        let payload_capacity = if needed > self.payload.capacity() {
-            needed
-                .max(self.payload.capacity().saturating_mul(2))
-                .min(limit.checked_sub(control_capacity)?)
-        } else {
-            self.payload.capacity()
-        };
+        let needed = self.payload.len.checked_add(payload.len())?;
+        let payload_capacity = self
+            .payload
+            .projected_capacity(needed, limit.checked_sub(control_capacity)?)?;
         if control_capacity.checked_add(payload_capacity)? > limit {
             return None;
         }
@@ -107,27 +179,12 @@ impl Acc {
             };
             self.in_flight = Some(r);
         }
-        if let Some(r) = self.reservation.as_mut() {
-            if !r.try_grow_to(new_len) {
-                return false;
-            }
-        } else {
-            let Some(r) = budget.reserve_transient_cpu(new_len) else {
+        if self.reservation.is_none() {
+            let Some(r) = budget.reserve_transient_cpu(control_capacity.max(1)) else {
                 return false;
             };
             self.reservation = Some(r);
         }
-        // A moving reallocation can briefly retain both payload buffers.
-        let _reallocation = if payload_capacity > self.payload.capacity()
-            && self.payload.capacity() > 0
-        {
-            let Some(reservation) = budget.reserve_transient_cpu(self.payload.capacity()) else {
-                return false;
-            };
-            Some(reservation)
-        } else {
-            None
-        };
         if self.control.is_empty() {
             if self
                 .control
@@ -138,21 +195,20 @@ impl Acc {
             }
             self.control.push_str(control);
         }
-        if self
-            .payload
-            .try_reserve_exact(payload_capacity - self.payload.len())
-            .is_err()
-        {
-            return false;
-        }
-        self.payload.push_str(payload);
-        true
+        self.payload
+            .append(
+                payload.as_bytes(),
+                budget.limits().transmission_bytes - control_capacity,
+                control_capacity,
+                self.reservation.as_mut().unwrap(),
+            )
+            .is_some()
     }
 
     fn buffered_bytes(&self) -> usize {
         self.control
             .capacity()
-            .saturating_add(self.payload.capacity())
+            .saturating_add(self.payload.capacity)
     }
 }
 
@@ -1816,12 +1872,11 @@ impl KittyState {
 
     fn in_flight_append_fits(&self, slot: Option<&Acc>, control: &str, payload: &str) -> bool {
         let old_slot_bytes = slot.map_or(0, Acc::buffered_bytes);
-        let new_slot_bytes = match slot {
-            Some(acc) => acc
-                .projected_capacity(control, payload, self.budget.limits().transmission_bytes)
-                .and_then(|(control, payload)| control.checked_add(payload)),
-            None => control.len().checked_add(payload.len()),
-        };
+        let empty = Acc::default();
+        let new_slot_bytes = slot
+            .unwrap_or(&empty)
+            .projected_capacity(control, payload, self.budget.limits().transmission_bytes)
+            .and_then(|(control, payload)| control.checked_add(payload));
         new_slot_bytes
             .filter(|&bytes| bytes != 0 && bytes <= self.budget.limits().transmission_bytes)
             .and_then(|bytes| {
@@ -2217,7 +2272,7 @@ fn decode_with_budget(control: &str, b64: &str, budget: &GraphicsBudget) -> Opti
 
 fn decode_acc_with_budget(acc: Acc, budget: &GraphicsBudget) -> Option<ImageData> {
     let kv = parse_control(&acc.control);
-    let (raw, reservation) = crate::decode_base64::decode(&acc.payload, budget)?;
+    let (raw, reservation) = crate::decode_base64::decode_bytes(acc.payload.bytes(), budget)?;
     // The accumulator owns both payload capacity and its lease. Neither survives
     // into inflation or pixel decoding, including queries and animation frames.
     drop(acc);
@@ -2303,7 +2358,7 @@ mod tests {
     // A maximum transmission and maximum RGBA output, through all decode stages.
     // PNG and zlib permit trailing bytes; padding exercises the wire/inflate caps
     // without a large incompressible fixture checked into the repository.
-    fn maximum_transmission(budget: &GraphicsBudget) -> KittyState {
+    fn maximum_transmission_fixture(budget: &GraphicsBudget) -> (&'static str, String) {
         use image::ImageEncoder;
         use std::io::Write;
         let limits = budget.limits();
@@ -2331,6 +2386,12 @@ mod tests {
             ' ',
             limits.transmission_bytes - control.len() - payload.len(),
         ));
+        (control, payload)
+    }
+
+    fn maximum_transmission(budget: &GraphicsBudget) -> KittyState {
+        let limits = budget.limits();
+        let (control, payload) = maximum_transmission_fixture(budget);
         let mut state = KittyState::new(budget.clone());
         for (index, chunk) in payload.as_bytes().chunks(1024 * 1024).enumerate() {
             let control = if index == 0 { control } else { "m=1" };
@@ -2341,6 +2402,115 @@ mod tests {
         assert_eq!(state.in_flight_bytes(), limits.transmission_bytes);
         state.feed("m=0;");
         state
+    }
+
+    fn maximum_transmission_with_extractor_chunks(pattern: &[usize], name: &str) -> usize {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+        let (control, payload) = maximum_transmission_fixture(&budget);
+        let mut extractor = crate::Extractor::with_budget(budget.clone());
+        let mut offset = 0;
+        let mut index = 0;
+        let mut wire = String::new();
+        while offset < payload.len() {
+            let size = pattern[index.min(pattern.len() - 1)].min(payload.len() - offset);
+            let more = offset + size < payload.len();
+            let control = if offset == 0 {
+                control
+            } else if more {
+                "m=1"
+            } else {
+                "m=0"
+            };
+            wire.clear();
+            wire.push_str("\x1b_G");
+            wire.push_str(control);
+            wire.push(';');
+            wire.push_str(&payload[offset..offset + size]);
+            wire.push_str("\x1b\\");
+            assert!(wire.len() - 4 <= budget.limits().sequence_bytes);
+            drop(extractor.feed(wire.as_bytes()));
+            offset += size;
+            index += 1;
+            assert_eq!(
+                budget.in_flight_usage().0,
+                usize::from(more),
+                "upload discarded after {offset} payload bytes ({name})"
+            );
+        }
+        drop(payload);
+        let out = extractor.feed(b"\x1b_Ga=p,i=1;\x1b\\");
+        let image = out
+            .iter()
+            .find_map(|chunk| match chunk {
+                crate::Chunk::Image(placed) => Some(&placed.img),
+                _ => None,
+            })
+            .expect("maximum transmission must survive extractor chunks");
+        assert_eq!(
+            (image.width, image.height, image.rgba.len()),
+            (4096, 4096, 64 * 1024 * 1024)
+        );
+        let (current, peak) = budget.transient_usage();
+        eprintln!("{name} extractor transient peak: {peak} bytes");
+        assert_eq!(current, 0);
+        assert!(peak <= 184 * 1024 * 1024, "transient peak: {peak}");
+        drop((out, extractor));
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+        assert_eq!(budget.in_flight_usage(), (0, 0));
+        peak
+    }
+
+    #[test]
+    fn maximum_transmission_transient_peak_with_uneven_extractor_chunks() {
+        let mib = 1024 * 1024;
+        assert_eq!(
+            maximum_transmission_with_extractor_chunks(
+                &[
+                    11 * mib,
+                    11 * mib,
+                    11 * mib,
+                    11 * mib,
+                    11 * mib,
+                    11 * mib,
+                    11 * mib,
+                    15 * mib
+                ],
+                "uneven",
+            ),
+            180_355_038
+        );
+    }
+
+    #[test]
+    fn maximum_transmission_transient_peak_with_one_byte_extractor_chunks() {
+        assert_eq!(
+            maximum_transmission_with_extractor_chunks(&[1], "1-byte"),
+            176_160_750
+        );
+    }
+
+    #[test]
+    fn maximum_transmission_transient_peak_with_4k_extractor_chunks() {
+        assert_eq!(
+            maximum_transmission_with_extractor_chunks(&[4096], "4-KiB"),
+            176_160_750
+        );
+    }
+
+    #[test]
+    fn maximum_transmission_transient_peak_with_maximum_extractor_chunks() {
+        let limits = crate::GraphicsLimits::default();
+        let maximum = limits.sequence_bytes - "Gm=0;".len();
+        let payload_len = limits.transmission_bytes - "a=t,i=1,f=100,o=z,m=1".len();
+        // Put a full sequence in the final append, where payload, base64 output
+        // and the extractor's sequence lease all overlap.
+        assert_eq!(
+            maximum_transmission_with_extractor_chunks(
+                &[payload_len % maximum, maximum],
+                "maximum-size",
+            ),
+            192_937_966
+        );
     }
 
     #[test]
@@ -2445,32 +2615,102 @@ mod tests {
     }
 
     #[test]
-    fn chunked_upload_growth_is_amortized_and_charged() {
+    fn segmented_payload_growth_refusal_releases_allocated_segments() {
+        let control = "a=t,i=1,m=1";
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits {
+            transient_cpu_bytes: 2 * PAYLOAD_SEGMENT_BYTES + control.len(),
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let mut state = KittyState::new(budget.clone());
+        let body = format!("{control};{}", "A".repeat(3 * PAYLOAD_SEGMENT_BYTES));
+        let result = state.feed_command(Command::parse(&body).unwrap());
+        assert!(matches!(
+            result.completion,
+            CommandCompletion::Finished(Some(CommandReply {
+                status: CommandStatus::NoSpace,
+                ..
+            }))
+        ));
+        assert_eq!(
+            budget.transient_usage(),
+            (0, 2 * PAYLOAD_SEGMENT_BYTES + control.len())
+        );
+        assert_eq!(budget.in_flight_usage(), (0, 0));
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+        state.feed("a=t,i=1,f=32,s=1,v=1;AQIDBA==");
+        assert!(
+            state.image(1).is_some(),
+            "retry after segment growth refusal"
+        );
+        drop(state);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn segmented_payload_decodes_quartets_across_allocations() {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+        let mut acc = Acc::default();
+        for chunk in ["A", "QI", "DBA=="] {
+            assert!(acc.append("f=32,s=1,v=1", chunk, &budget));
+        }
+        assert_eq!(
+            acc.payload
+                .segments
+                .iter()
+                .map(|segment| segment.len())
+                .collect::<Vec<_>>(),
+            [1, 2, 5]
+        );
+        let image = decode_acc_with_budget(acc, &budget).expect("quartets spanning segments");
+        assert_eq!(image.rgba.as_slice(), &[1, 2, 3, 4]);
+        assert_eq!(budget.transient_usage().0, 0);
+        drop(image);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn chunked_upload_segments_never_move_and_are_charged() {
         let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
         let mut acc = Acc::default();
         let chunk = "AQID".repeat(1024);
-        let mut growths = 0;
-        let mut capacity = 0;
+        let mut pointers = Vec::new();
         for _ in 0..256 {
             assert!(acc.append("a=t,f=32,s=512,v=512", &chunk, &budget));
-            if acc.payload.capacity() != capacity {
-                growths += 1;
-                capacity = acc.payload.capacity();
+            for (segment, &pointer) in acc.payload.segments.iter().zip(&pointers) {
+                assert_eq!(segment.as_ptr(), pointer, "payload segment moved");
             }
-            let allocated = acc.control.capacity() + acc.payload.capacity();
+            pointers = acc
+                .payload
+                .segments
+                .iter()
+                .map(|segment| segment.as_ptr())
+                .collect();
             assert!(
-                budget.usage().0 >= allocated,
+                acc.payload
+                    .segments
+                    .iter()
+                    .all(|segment| segment.len() <= PAYLOAD_SEGMENT_BYTES)
+            );
+            let allocated = acc.control.capacity() + acc.payload.capacity;
+            assert_eq!(
+                budget.usage().0,
+                allocated,
                 "allocated upload capacity must be charged"
             );
-            assert!(
-                budget.in_flight_usage().1 >= allocated,
+            assert_eq!(
+                budget.in_flight_usage().1,
+                allocated,
                 "in-flight capacity must be charged"
             );
         }
-        assert_eq!(acc.payload, chunk.repeat(256));
+        assert_eq!(
+            acc.payload.bytes().collect::<Vec<_>>(),
+            chunk.repeat(256).as_bytes()
+        );
         assert!(
-            growths <= 12,
-            "256 continuation chunks grew the buffer {growths} times"
+            acc.payload.segments.len() <= 12,
+            "256 continuation chunks must use bounded segment metadata"
         );
         drop(acc);
         assert_eq!(budget.usage(), (0, 0, 0, 0));

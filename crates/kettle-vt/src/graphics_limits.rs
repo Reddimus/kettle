@@ -37,9 +37,11 @@ impl Default for GraphicsLimits {
             in_flight_bytes: 128 * MIB,
             image_bytes: 64 * MIB,
             retained_bytes: 256 * MIB,
-            // Measured maximum Kitty decode: 96 MiB payload + 72 MiB base64
-            // output = 168 MiB. Another 16 MiB covers the extractor sequence;
-            // 8 MiB of headroom leaves the terminal ceiling at 192 MiB.
+            // Maximum-transmission extractor regressions (1-byte, 4 KiB,
+            // uneven 11/15 MiB, and full-sequence chunks) peak at 192,937,966
+            // bytes, just under 184 MiB: 96 MiB segmented payload + 72 MiB
+            // base64 output + 16 MiB sequence. Segments never reallocate;
+            // rounding up to 184 MiB + 8 MiB headroom gives 192 MiB.
             transient_cpu_bytes: 192 * MIB,
             process_cpu_bytes: 512 * MIB,
             process_gpu_bytes: 512 * MIB,

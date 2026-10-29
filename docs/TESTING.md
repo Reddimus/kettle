@@ -372,10 +372,17 @@ environment behavior.
 
 The graphics decode accounting regressions run with
 `cargo test -j 2 --locked --offline -p kettle-vt transient_ -- --nocapture`.
-The maximum-transmission test feeds a 96 MiB chunked Kitty upload that inflates
-to the 64 MiB cap and decodes a 4096x4096 RGBA image. It prints and asserts the
-transient high-water charge, verifies idle-terminal admission, and releases all
-leases. Other cases cover a full terminal while a second terminal decodes under
+The maximum-transmission tests feed a 96 MiB Kitty upload that inflates to
+the 64 MiB cap and decodes a 4096x4096 RGBA image. Extractor cases exercise
+1-byte, 4 KiB and maximum-size protocol chunks, plus seven 11 MiB chunks,
+a 15 MiB chunk and the remainder. The final sequence decodes while its lease
+is still live. Each case prints and asserts the transient high-water charge,
+verifies idle-terminal admission, and releases all leases. The 1-byte case
+processes about 100 million APC sequences and takes substantially longer.
+`chunked_upload_segments_never_move_and_are_charged` checks stable segment
+addresses and exact capacity charges. `segmented_` tests cover base64 quartets,
+whitespace and padding across segment boundaries.
+Other cases cover a full terminal while a second terminal decodes under
 the same process account, failed decode/growth rollback, shared query/staging
 ceilings, and iTerm2's bounded base64 stage. These are CPU accounting checks;
 they do not require a GPU or live UI.

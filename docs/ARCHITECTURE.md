@@ -2323,16 +2323,25 @@ protocol refusal/reply behavior. Independent terminals share only the process
 account, so one terminal at its transient ceiling leaves room for another decode
 unless other process allocations exhaust that account.
 
-The maximum-size Kitty accounting regression measures 176,160,750 bytes
-(167.999983 MiB), down from 411,041,751 bytes (391.999961 MiB) before staging.
-The default allows 96 MiB accumulated transmission + 72 MiB base64 output =
-168 MiB, plus 16 MiB for an active extractor sequence and 8 MiB headroom.
+The maximum-size Kitty extractor regressions measure 176,160,750 bytes with
+1-byte and 4 KiB protocol chunks, 180,355,038 bytes with seven 11 MiB chunks,
+a 15 MiB chunk and the remainder, and 192,937,966 bytes with a full 16 MiB
+final sequence. The worst peak is just under 184 MiB: 96 MiB accumulated
+transmission + 72 MiB base64 output + 16 MiB active extractor sequence.
+Rounding up to 184 MiB and adding 8 MiB headroom keeps the ceiling at 192 MiB.
+Kitty accumulates payloads in separately allocated segments that never resize.
+Small initial segments grow geometrically up to 1 MiB per new segment, keeping
+metadata bounded even with 1-byte chunks. Each segment's capacity is charged
+before allocation; the final segment is capped by the remaining transmission
+allowance. No payload reallocation retains an old and a new copy at once.
 Base64 filtering uses a fixed 4 KiB stack block, without a whitespace-free payload
-copy. The accumulator and its lease drop before inflation; compressed bytes and
-their lease drop before image decoding. Inflation grows geometrically under its
-cap, charging old capacity during moving reallocations. It keeps capacity charged
-and compacts any unused capacity only after releasing compressed input. iTerm2 uses the same
-bounded base64 filtering. Sixel has no intermediate base64 or inflated buffer;
+copy, reading across segment boundaries even when a base64 quartet spans
+allocations. The accumulator and its lease drop before inflation; compressed
+bytes and their lease drop before image decoding. Inflation grows geometrically
+under its cap, charging old capacity during moving reallocations. It keeps
+capacity charged and compacts any unused capacity only after releasing compressed
+input. iTerm2 uses the same bounded base64 filtering on a single bounded OSC body,
+with no separate payload accumulator. Sixel has no intermediate base64 or inflated buffer;
 its old/new canvas overlap during geometric growth and final compaction already
 uses retained image leases and remains bounded by the image and process limits.
 All transmission, inflate, image, in-flight, dimension, and work limits still
