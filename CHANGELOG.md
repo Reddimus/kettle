@@ -122,6 +122,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Fix races, quoting and cleanup in the smoke, live-UI, performance and
   Linux check scripts, including the standing self-test's intermittent
   keyblock failure.
+- Keep multi-line command buffers whole in Fish completion, and emit no
+  command-start mark for an incomplete PowerShell command.
+- Depend on Arch's `wayland` package, which provides `libwayland-client`.
+- Bring the security, agent, recording, protocol and architecture documents
+  in line with the code, and buffer partial output lines per pane in the
+  example `init.lua`.
 
 ## [5.6.0] — 2026-10-28
 
