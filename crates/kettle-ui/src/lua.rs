@@ -2304,6 +2304,34 @@ mod tests {
         );
     }
 
+    /// A build's last line may end without a newline; it still notifies, and
+    /// only once when the newline does arrive.
+    #[test]
+    fn documented_output_hook_notifies_on_an_unterminated_last_line() {
+        let eng = LuaEngine::new("Default").expect("init");
+        let hook = include_str!("../../../docs/examples/init.lua")
+            .lines()
+            .skip_while(|line| !line.starts_with("local last_notify"))
+            .take_while(|line| !line.starts_with("-- 4."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        eng.eval_str(&hook).expect("documented output hook");
+        eng.fire_event(&LuaEvent::Output(
+            7,
+            b"> Task :build\nBUILD SUCCESSFUL in 3s".to_vec(),
+        ));
+        let commands = eng.drain_commands();
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [LuaCommand::Notify { body, .. }] if body == "Build done in pane 7"
+            ),
+            "{commands:?}"
+        );
+        eng.fire_event(&LuaEvent::Output(7, b"\n".to_vec()));
+        assert!(eng.drain_commands().is_empty(), "announced twice");
+    }
+
     #[test]
     fn documented_url_handlers_receive_detectable_safe_urls() {
         let eng = LuaEngine::new("Default").expect("init");

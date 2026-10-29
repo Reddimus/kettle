@@ -118,8 +118,17 @@ end)
 -- build system emits.
 local last_notify = 0
 local partial_lines = {}
+local announced = {}
+local function notify_build(pane_id, now)
+    -- Coalescing — don't spam notifications, but keep collecting output.
+    if now - last_notify >= 5 then
+        last_notify = now
+        kettle.notify("kettle", "Build done in pane " .. tostring(pane_id))
+    end
+end
 kettle.on("pane_close", function(pane_id)
     partial_lines[pane_id] = nil
+    announced[pane_id] = nil
 end)
 kettle.on("output", function(pane_id, bytes)
     local now = os.time()
@@ -130,16 +139,22 @@ kettle.on("output", function(pane_id, bytes)
         local last = text:find("[\r\n]", first)
         if not last then break end
         local line = text:sub(first, last - 1)
-        -- Coalescing — don't spam notifications, but keep collecting output.
-        if now - last_notify >= 5 and
+        if not announced[pane_id] and
             (line:find("BUILD SUCCESSFUL") or line:find("Compiling%s*$")) then
-            last_notify = now
-            kettle.notify("kettle", "Build done in pane " .. tostring(pane_id))
+            notify_build(pane_id, now)
         end
+        announced[pane_id] = nil
         first = last + 1
     end
+    local tail = text:sub(first)
+    -- A build's last line may never get a newline, so the success message
+    -- also counts while its line is still open, once.
+    if not announced[pane_id] and tail:find("BUILD SUCCESSFUL") then
+        notify_build(pane_id, now)
+        announced[pane_id] = true
+    end
     -- Bound retained output even when a program never ends its line.
-    partial_lines[pane_id] = text:sub(math.max(first, #text - 4095))
+    partial_lines[pane_id] = tail:sub(math.max(1, #tail - 4095))
 end)
 
 -------------------------------------------------------------------------------
