@@ -77,7 +77,21 @@ pub(crate) struct FactsQuery {
     pub generation: u64,
     pub source: kettle_media::Source,
     pub why: FileWhy,
-    pub reply: Option<Box<(super::Origin, kettle_ctl::show::ShowResult)>>,
+    pub reply: Option<Box<FileReply>>,
+}
+
+pub(crate) struct FileReply {
+    pub origin: super::Origin,
+    pub result: kettle_ctl::show::ShowResult,
+    pub inline: Option<FileInline>,
+}
+
+pub(crate) struct FileInline {
+    pub draft: super::InlineDraft,
+    pub cell: (f32, f32),
+    pub grid: (usize, usize),
+    pub column: usize,
+    pub permit: Option<kettle_ctl::agent_launch::PickupPermit>,
 }
 
 pub(crate) struct FactsAnswer {

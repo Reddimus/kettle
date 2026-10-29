@@ -145,7 +145,11 @@ impl BlurDiscovery {
                 if let Ok(mut state) = state.lock()
                     && state.0 == epoch
                 {
-                    state.1 = if supported { 3 } else { 2 };
+                    state.1 = match supported {
+                        Some(true) => 3,
+                        Some(false) => 2,
+                        None => 0,
+                    };
                 }
                 wake();
             });
@@ -162,15 +166,32 @@ impl BlurDiscovery {
 fn bounded_blur_probe(
     source: impl FnOnce() -> bool + Send + 'static,
     timeout: std::time::Duration,
-) -> bool {
-    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
-        return false;
+) -> Option<bool> {
+    static SLOT: (std::sync::Mutex<bool>, std::sync::Condvar) =
+        (std::sync::Mutex::new(false), std::sync::Condvar::new());
+    let Ok(running) = SLOT.0.lock() else {
+        return Some(false);
+    };
+    let Ok((mut running, _)) = SLOT
+        .1
+        .wait_timeout_while(running, timeout, |running| *running)
+    else {
+        return Some(false);
+    };
+    if *running {
+        // Another epoch may still own a timed-out worker. Retry at a bounded
+        // cadence instead of caching "unsupported" or spinning the UI wake.
+        return None;
     }
+    *running = true;
+    drop(running);
     struct ProbeSlot;
     impl Drop for ProbeSlot {
         fn drop(&mut self) {
-            RUNNING.store(false, std::sync::atomic::Ordering::Release);
+            if let Ok(mut running) = SLOT.0.lock() {
+                *running = false;
+                SLOT.1.notify_all();
+            }
         }
     }
     let slot = ProbeSlot;
@@ -181,7 +202,7 @@ fn bounded_blur_probe(
             let _slot = slot;
             let _ = answer.send(source());
         });
-    started.is_ok() && result.recv_timeout(timeout).unwrap_or(false)
+    Some(started.is_ok() && result.recv_timeout(timeout).unwrap_or(false))
 }
 
 pub(crate) struct NativeMaterial {
@@ -684,8 +705,61 @@ mod tests {
     };
     use kettle_config::{BackgroundType, Config};
 
+    static BLUR_PROBE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn followup_busy_blur_probe_retries_after_reset() {
+        let _serial = BLUR_PROBE_TEST_LOCK.lock().unwrap();
+        let discovery = super::BlurDiscovery::default();
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let (wake, woken) = std::sync::mpsc::channel();
+        let notify: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+            let _ = wake.send(());
+        });
+        discovery.request(
+            true,
+            move || {
+                entered.send(()).unwrap();
+                let _ = waiting.recv();
+                true
+            },
+            std::time::Duration::from_millis(50),
+            notify.clone(),
+        );
+        started
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        discovery.reset();
+        discovery.request(
+            true,
+            || true,
+            std::time::Duration::from_millis(50),
+            notify.clone(),
+        );
+        // Keep the first worker occupied until both deadlines have elapsed.
+        for _ in 0..2 {
+            woken
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+        }
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !discovery.supported() && std::time::Instant::now() < deadline {
+            discovery.request(
+                true,
+                || true,
+                std::time::Duration::from_millis(50),
+                notify.clone(),
+            );
+            let _ = woken.recv_timeout(std::time::Duration::from_millis(50));
+        }
+        assert!(discovery.supported(), "busy is pending, not unsupported");
+    }
+
     #[test]
     fn stalled_blur_discovery_keeps_install_responsive_and_fallback_active() {
+        let _serial = BLUR_PROBE_TEST_LOCK.lock().unwrap();
         let discovery = super::BlurDiscovery::default();
         discovery.request(
             false,

@@ -57,7 +57,7 @@ pub(crate) use external::{
 };
 #[cfg(test)]
 pub(crate) use file_card::FileFacts;
-pub(crate) use file_card::{FactsAnswer, FactsLane, FactsQuery, FileWhy};
+pub(crate) use file_card::{FactsAnswer, FactsLane, FactsQuery, FileInline, FileReply, FileWhy};
 pub(crate) use focus::{PageStep, PreviewFocus, PreviewKey, ViewerKey, preview_key, viewer_key};
 pub(crate) use inline::{card_caption, card_message, card_size};
 pub(crate) use playback::{

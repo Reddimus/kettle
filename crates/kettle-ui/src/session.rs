@@ -1000,17 +1000,17 @@ fn stash_unrestorable_session(path: &std::path::Path, reason: &str) {
     let Ok(identity) = SnapshotIdentity::of(&file) else {
         return;
     };
-    stash_unrestorable_snapshot(path, &identity, reason);
+    let _ = stash_unrestorable_snapshot(path, &identity, reason);
 }
 
 pub(crate) fn stash_unrestorable_snapshot(
     path: &std::path::Path,
     identity: &SnapshotIdentity,
     reason: &str,
-) {
+) -> std::io::Result<std::path::PathBuf> {
     let backup = session_lock(path)
         .and_then(|_lock| stash_session_file_locked(path, "unrestored", identity));
-    match backup {
+    match &backup {
         Ok(destination) => log::warn!(
             "session at {} could not be restored ({reason}); kept at {} so the \
              next save cannot overwrite it",
@@ -1023,10 +1023,11 @@ pub(crate) fn stash_unrestorable_snapshot(
         // had been prevented.
         Err(error) => log::error!(
             "session at {} could not be restored ({reason}) and could not be moved \
-             aside ({error}); the next save will overwrite it",
+             aside ({error}); automatic saving must be disabled",
             path.display()
         ),
     }
+    backup
 }
 
 fn stash_oversize_session(
@@ -1754,7 +1755,7 @@ mod tests {
             kettle_state::AtomicWriteOptions::PRIVATE,
         )
         .unwrap();
-        stash_unrestorable_snapshot(&path, &identity, "rejected loaded session");
+        assert!(stash_unrestorable_snapshot(&path, &identity, "rejected loaded session").is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"new snapshot");
         assert!(
             !directory

@@ -2233,6 +2233,10 @@ impl Mux {
         argv: &[String],
         launch: Option<&ReconnectLaunch>,
     ) -> Result<u64> {
+        #[cfg(windows)]
+        let launch_argv = pane_launch_argv(argv, default_wsl_distribution);
+        #[cfg(windows)]
+        let argv = launch_argv.as_slice();
         let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) =
             crossbeam_channel::bounded(TERM_EVENT_QUEUE_DEPTH);
         // Terminator plugin parity: optional output sidechannel for
@@ -5070,6 +5074,87 @@ fn wsl_unc_parts(path: &std::path::Path) -> Option<(String, String)> {
         }
     }
     None
+}
+
+#[cfg(any(windows, test))]
+fn pane_launch_argv(
+    argv: &[String],
+    default_distribution: impl FnOnce() -> Option<String>,
+) -> Vec<String> {
+    let mut resolved = argv.to_vec();
+    if argv_is_wsl(argv)
+        && wsl_distribution(argv).is_none()
+        && let Some(distro) = default_distribution().filter(|name| valid_wsl_distribution(name))
+    {
+        // Resolve once and launch that distribution explicitly. Querying the
+        // default during paste could name a different distribution by then.
+        resolved.splice(1..1, ["--distribution".into(), distro]);
+    }
+    resolved
+}
+
+#[cfg(any(windows, test))]
+fn valid_wsl_distribution(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && !matches!(name, "." | "..")
+        && !name.starts_with('-')
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\'))
+}
+
+#[cfg(windows)]
+fn default_wsl_distribution() -> Option<String> {
+    use windows::Win32::System::Registry::{
+        HKEY_CURRENT_USER, RRF_NOEXPAND, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY, RegGetValueW,
+    };
+    use windows::core::PCWSTR;
+
+    fn read_string(key: &str, value: &str) -> Option<String> {
+        let key: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
+        let value: Vec<u16> = value.encode_utf16().chain(Some(0)).collect();
+        let mut buffer = [0u16; 512];
+        let mut bytes = std::mem::size_of_val(&buffer) as u32;
+        // SAFETY: both names are NUL terminated and buffer holds `bytes`
+        // writable bytes. Oversized or non-string registry values fail closed.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key.as_ptr()),
+                PCWSTR(value.as_ptr()),
+                RRF_RT_REG_SZ | RRF_NOEXPAND | RRF_SUBKEY_WOW6464KEY,
+                None,
+                Some(buffer.as_mut_ptr().cast()),
+                Some(&mut bytes),
+            )
+        };
+        if status.is_err()
+            || bytes < 2
+            || bytes as usize > std::mem::size_of_val(&buffer)
+            || !bytes.is_multiple_of(2)
+        {
+            return None;
+        }
+        let units = &buffer[..bytes as usize / 2];
+        if units.last() != Some(&0) || units[..units.len() - 1].contains(&0) {
+            return None;
+        }
+        String::from_utf16(&units[..units.len() - 1]).ok()
+    }
+
+    const LXSS: &str = r"Software\Microsoft\Windows\CurrentVersion\Lxss";
+    let id = read_string(LXSS, "DefaultDistribution")?;
+    if id.len() != 38
+        || !id.starts_with('{')
+        || !id.ends_with('}')
+        || !id[1..37]
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() || b == b'-')
+    {
+        return None;
+    }
+    read_string(&format!(r"{LXSS}\{id}"), "DistributionName")
 }
 
 fn wsl_distribution(argv: &[String]) -> Option<&str> {
@@ -8438,6 +8523,27 @@ mod node_tests {
         assert_eq!(shell_kind_for_argv(&s(&["cmd.exe"])), PaneShellKind::Cmd);
         // Unknown program → POSIX (portable default).
         assert_eq!(shell_kind_for_argv(&s(&["fish"])), PaneShellKind::Posix);
+    }
+
+    #[test]
+    fn followup_default_wsl_launch_pins_distribution_for_file_pastes() {
+        let argv = pane_launch_argv(&["wsl.exe".into()], || Some("Ubuntu".into()));
+        let path = std::path::PathBuf::from(r"\\wsl.localhost\Ubuntu\home\me\report.pdf");
+        assert!(
+            path_types_exactly(&argv, &path),
+            "the pane must accept its own distribution"
+        );
+        assert_eq!(
+            format_paths_for_paste(&argv, &[path]),
+            "'/home/me/report.pdf'"
+        );
+        let foreign = std::path::Path::new(r"\\wsl.localhost\Debian\home\me\report.pdf");
+        assert_eq!(
+            windows_path_for_wsl(foreign, wsl_distribution(&argv), |_| false),
+            None
+        );
+        // A later default change must not change the running pane's identity.
+        assert_eq!(pane_launch_argv(&argv, || panic!("already pinned")), argv);
     }
 
     #[test]

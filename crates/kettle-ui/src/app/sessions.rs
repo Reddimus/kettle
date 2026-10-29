@@ -195,19 +195,13 @@ impl App {
     /// no session at all, including the next save, so without this the file is
     /// replaced by a single fresh tab before the user has finished looking at
     /// the window.
-    pub(super) fn stash_unrestorable_session(&self, reason: &str) {
-        // The path this session was READ from, not a guess at where the next
-        // save would go. Those are not the same question: `session_write_target`
-        // routes on the snapshot being empty and on whether a named layout is
-        // writable, and a `--tab-handoff` restore has no durable file at all.
-        // Re-deriving it risked moving a file we never loaded.
-        let Some(path) = self.restore_source.as_deref() else {
-            log::warn!("session could not be restored ({reason}); it had no file to keep");
-            return;
-        };
-        if let Some(identity) = &self.restore_identity {
-            crate::session::stash_unrestorable_snapshot(path, identity, reason);
-        }
+    pub(super) fn stash_unrestorable_session(&mut self, reason: &str) {
+        recover_startup_snapshot(
+            self.restore_source.as_deref(),
+            self.restore_identity.as_ref(),
+            &mut self.session_load_failed,
+            reason,
+        );
     }
 
     /// Resolve the one startup restore source before window or GPU creation.
@@ -272,6 +266,24 @@ impl App {
             None
         }
     }
+}
+
+pub(super) fn recover_startup_snapshot(
+    path: Option<&std::path::Path>,
+    identity: Option<&crate::session::SnapshotIdentity>,
+    load_failed: &mut bool,
+    reason: &str,
+) {
+    let Some(path) = path else {
+        log::warn!("session could not be restored ({reason}); it had no file to keep");
+        return;
+    };
+    // Preserve the exact snapshot read by this launch. If it changed, or the
+    // backup failed, even a fresh/partial layout must never replace the file.
+    let recovered = identity.is_some_and(|identity| {
+        crate::session::stash_unrestorable_snapshot(path, identity, reason).is_ok()
+    });
+    *load_failed |= !recovered;
 }
 
 pub(super) fn loaded_startup_snapshot(

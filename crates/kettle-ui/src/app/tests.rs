@@ -6521,7 +6521,7 @@ fn cards_are_for_verified_harnesses_and_retire_with_their_item() {
     assert!(body("publish_show").contains(".publish(item, shown, &visible)"));
     let finish = body("publish_show");
     let retired = finish.find("cards.retire(").expect("replaced cards retire");
-    let registered = finish.find("register_card(").expect("a card registers");
+    let registered = finish.find("prepare_card(").expect("a card is prepared");
     assert!(
         retired < registered,
         "old cards retire before a new one registers"
@@ -20165,4 +20165,103 @@ fn failed_facts_from_an_old_generation_leave_the_new_placeholder_alone() {
     let item = ws.mux.panes[&pane].media_shelf.get(73).unwrap();
     assert!(matches!(item.kind, crate::media::ItemKind::CheckingFile(_)));
     assert_eq!(item.generation, 1);
+}
+
+#[test]
+fn followup_replaced_restore_snapshot_disables_saving() {
+    let temp = kettle_test_support::private_tempdir("kettle-replaced-restore-");
+    let path = temp.path().join("session.json");
+    std::fs::write(&path, br#"{"tabs":[],"active":0}"#).unwrap();
+    let (_, identity) = crate::session::load_snapshot_result(&path)
+        .unwrap()
+        .unwrap();
+    let newer = temp.path().join("newer.json");
+    let contents = br#"{"tabs":[],"active":1}"#;
+    std::fs::write(&newer, contents).unwrap();
+    std::fs::rename(&newer, &path).unwrap();
+    let mut failed = false;
+    super::sessions::recover_startup_snapshot(
+        Some(&path),
+        Some(&identity),
+        &mut failed,
+        "restore rejected",
+    );
+    assert!(failed, "failed recovery must disable automatic saves");
+    assert_eq!(std::fs::read(&path).unwrap(), contents);
+}
+
+#[test]
+fn followup_completed_file_card_uses_facts_in_message_and_registration() {
+    let (mut media, mut ws, pane, mut query, woke) =
+        review_file_facts_fixture(Some(review_file_identity()));
+    let (reply, received) = crossbeam_channel::bounded(1);
+    let origin = crate::media::Origin {
+        conn_id: 1,
+        request_id: 93,
+        reply,
+    };
+    let mut result = kettle_ctl::show::ShowResult::new(
+        (pane, true, 1),
+        73,
+        kettle_media::MediaKind::Raster,
+        (0, 0),
+        &[],
+    );
+    result.kind = kettle_ctl::show::FILE_KIND.into();
+    let state = ws.mux.panes.get_mut(&pane).unwrap();
+    let item = state.media_shelf.get(73).unwrap();
+    let image = item.card_image().unwrap();
+    let (delivery, pending) = super::media::prepare_card(
+        &mut media.cards,
+        (pane, &mut state.inline_cards, (80, 24), 0),
+        (8.0, 16.0),
+        (73, 0),
+        (item.kind, None, None),
+        &image,
+        crate::media::InlineDraft {
+            #[cfg(target_os = "linux")]
+            launch: None,
+            owner: kettle_ctl::process::ProcessIdentity::new_for_tests(40, 400),
+            harness: kettle_render::CardHarness::Cli,
+            name: Some("report.docx".into()),
+            printer: None,
+        },
+        std::time::Instant::now(),
+    )
+    .unwrap();
+    result.inline = delivery;
+    assert!(
+        result.inline.is_none(),
+        "checking files must not have printable text"
+    );
+    assert_eq!(media.cards.len(), 0, "registration must wait for the facts");
+    super::media::prepare_file_reply(&mut query, origin, result);
+    query.reply.as_mut().unwrap().inline = pending;
+    assert!(media.request_facts(query, None, Arc::new(|| {})).is_ok());
+    woke.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    super::media::media_tick_ready(&mut media, &mut ws, &mut Default::default());
+    let response = received
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let result: kettle_ctl::show::ShowResult = serde_json::from_value(response.result).unwrap();
+    let message = &result
+        .inline
+        .expect("completed file must have an inline card")
+        .message;
+    assert_eq!(message.lines().last(), Some("    report.docx - file 12 kB"));
+    assert!(!message.contains("checking"));
+    let nonces = media.cards.cards_of(pane, (73, 0));
+    assert_eq!(nonces.len(), 1);
+    let state = ws.mux.panes.get_mut(&pane).unwrap();
+    let mut term = state.term.term.lock().unwrap();
+    let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+    parser.advance(&mut *term, message.as_bytes());
+    let mut snapshot = kettle_render::PaneSnapshot::default();
+    snapshot.capture_with_card_marks(&term, true);
+    assert_eq!(
+        state.inline_cards.placements(&snapshot).len(),
+        1,
+        "the registered caption must match the printed completed caption"
+    );
 }
