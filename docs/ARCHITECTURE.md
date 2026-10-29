@@ -3276,7 +3276,9 @@ no context reads, clock queries, formatting or writes.
   `CtlListener`'s owned pipe `HANDLE`, native audio `Output` handles, and
   AVFoundation `Frames` and `AudioFrames`. AVFoundation's `Keep` implements
   both `Send` and `Sync` to share asset lifetime and atomic reference counts,
-  without concurrent calls through the asset. Per-pane
+  without concurrent calls through the asset. Every unsafe block and
+  `unsafe impl` carries a `// SAFETY:` comment stating its invariant, and
+  the workspace denies `clippy::undocumented_unsafe_blocks`. Per-pane
   `Arc<Mutex<...>>` are contended only on PTY read or App snapshot; lock-hold
   times are O(bytes), designed to stay well under one frame's budget per drain
   even on fast scrolling.

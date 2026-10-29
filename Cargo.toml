@@ -147,6 +147,9 @@ unsafe_op_in_unsafe_fn = "deny"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
+# Every `unsafe` block and `unsafe impl` states, in a `// SAFETY:` comment
+# directly above it, the invariant that makes it sound.
+undocumented_unsafe_blocks = "deny"
 
 [patch.crates-io]
 # GNOME file URI lists use CRLF; retain encoded CR filename bytes.
