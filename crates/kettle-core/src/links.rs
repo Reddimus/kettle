@@ -241,7 +241,14 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
             if fragment(start, end) {
                 continue;
             }
-            if let Some(uri) = path_match_to_file_uri(matched, cwd) {
+            // Compiler locations have a diagnostic separator after the closing parenthesis.
+            // Without it, numeric parentheses belong to the filename, including inside quotes.
+            let path = if text[end..].starts_with(':') {
+                strip_parenthesized_location(matched)
+            } else {
+                matched
+            };
+            if let Some(uri) = path_match_to_file_uri(path, cwd) {
                 push(start, matched.len(), uri, &mut covered);
             }
         }
@@ -352,7 +359,11 @@ fn strip_location_suffix(path: &str) -> &str {
             break;
         }
     }
-    if let Some(inner) = path[..end].strip_suffix(')')
+    &path[..end]
+}
+
+fn strip_parenthesized_location(path: &str) -> &str {
+    if let Some(inner) = path.strip_suffix(')')
         && let Some(pos) = inner.rfind('(')
     {
         let mut parts = inner[pos + 1..].split(',');
@@ -361,10 +372,10 @@ fn strip_location_suffix(path: &str) -> &str {
             && parts.next().is_none_or(numeric)
             && parts.next().is_none()
         {
-            end = pos;
+            return &path[..pos];
         }
     }
-    &path[..end]
+    path
 }
 
 fn is_windows_drive_path(path: &str) -> bool {
@@ -912,6 +923,25 @@ mod tests {
             }),
             Some("file:///C:/Users/me/Documents/report.pdf".into())
         );
+    }
+
+    #[test]
+    fn numeric_parentheses_in_filenames_are_literal() {
+        for (text, uri) in [
+            ("/tmp/report(2024)", "file:///tmp/report%282024%29"),
+            ("/tmp/report(1,2)", "file:///tmp/report%281%2C2%29"),
+            ("\"/tmp/report (1)\"", "file:///tmp/report%20%281%29"),
+            (
+                "\"/tmp/report(2024)\": error",
+                "file:///tmp/report%282024%29",
+            ),
+            ("'/tmp/report (1,2)'", "file:///tmp/report%20%281%2C2%29"),
+        ] {
+            let term = term_with(100, &[text], &[]);
+            let found = links(&term);
+            assert_eq!(found.len(), 1, "{text}");
+            assert_eq!(found[0].uri, uri, "{text}");
+        }
     }
 
     #[test]

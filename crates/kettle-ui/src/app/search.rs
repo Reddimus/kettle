@@ -52,7 +52,7 @@ impl App {
                 map_case_sensitivity(ws.search.case_mode),
             ) {
                 Ok(compiled) => {
-                    ws.search.compiled = compiled;
+                    ws.search.set_compiled(compiled);
                     ws.search.compiled_revision = Some(ws.search.revision);
                     ws.search.status = if query.is_empty() {
                         kettle_render::SearchStatus::Typing
@@ -61,7 +61,7 @@ impl App {
                     };
                 }
                 Err(error) => {
-                    ws.search.compiled = None;
+                    ws.search.set_compiled(None);
                     ws.search.compiled_revision = Some(ws.search.revision);
                     ws.search.status = search_compile_error_status(error);
                 }
@@ -102,11 +102,7 @@ impl App {
         };
         let current_token =
             kettle_core::SearchScanToken::capture(&term, ws.search.revision, output_generation);
-        ws.search
-            .compiled
-            .as_mut()
-            .expect("compiled search checked")
-            .set_scan_token(current_token);
+        ws.search.set_scan_token(current_token);
 
         // Reflow invalidates grid coordinates and restarts from the viewport. Plain PTY output is
         // different: retain a chunked job and advance its token so a process that prints every
@@ -750,17 +746,12 @@ impl App {
                     kettle_core::MAX_SEARCH_MATCHES.saturating_sub(scan.matches.len()),
                 )
             };
-            let batch = ws
-                .search
-                .compiled
-                .as_mut()
-                .expect("compiled search checked")
-                .find_in_range(
-                    &term,
-                    bounds,
-                    kettle_core::SearchDirection::Forward,
-                    remaining,
-                );
+            let batch = ws.search.compiled_for_highlights().find_in_range(
+                &term,
+                bounds,
+                kettle_core::SearchDirection::Forward,
+                remaining,
+            );
             let finished = if remaining == 0 {
                 true
             } else {
@@ -1373,7 +1364,7 @@ impl App {
                 map_case_sensitivity(ws.search.case_mode),
             ) {
                 Ok(compiled) => {
-                    ws.search.compiled = compiled;
+                    ws.search.set_compiled(compiled);
                     ws.search.compiled_revision = Some(ws.search.revision);
                 }
                 Err(error) => {
@@ -1413,11 +1404,7 @@ impl App {
             ws.search.revision,
             pane.term.output_generation(),
         );
-        ws.search
-            .compiled
-            .as_mut()
-            .expect("compiled search checked")
-            .set_scan_token(token);
+        ws.search.set_scan_token(token);
         ws.search.invalidate_stale_navigation(token);
         let top_line = term.topmost_line().0;
         let bottom_line = term.bottommost_line().0;

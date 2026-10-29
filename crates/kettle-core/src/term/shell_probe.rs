@@ -58,10 +58,127 @@ pub(super) fn output(
         }
     })();
     if result.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
+        cleanup(child);
     }
     result
+}
+
+trait ProbeChild: Send + 'static {
+    fn kill(&mut self) -> io::Result<()>;
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>>;
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus>;
+}
+
+impl ProbeChild for std::process::Child {
+    fn kill(&mut self) -> io::Result<()> {
+        self.kill()
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
+
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        self.wait()
+    }
+}
+
+fn cleanup(mut child: impl ProbeChild) {
+    let _ = child.kill();
+    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    // A failed kill or slow termination must not hold the shell-discovery cache lock.
+    if let Err(error) = std::thread::Builder::new()
+        .name("shell-probe-reaper".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+    {
+        log::warn!("could not start shell probe reaper: {error}");
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+
+    struct StuckChild {
+        kill_fails: bool,
+        poll_fails: bool,
+        killed: Arc<AtomicBool>,
+        reaped: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl ProbeChild for StuckChild {
+        fn kill(&mut self) -> io::Result<()> {
+            self.killed.store(true, Ordering::SeqCst);
+            if self.kill_fails {
+                Err(io::Error::other("termination failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+            if self.poll_fails {
+                Err(io::Error::other("poll failed"))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+            let _ = self.release.recv();
+            self.reaped.send(()).unwrap();
+            Err(io::Error::other("fake exit"))
+        }
+    }
+
+    #[test]
+    fn shell_probe_cleanup_defers_a_stuck_child_to_a_reaper() {
+        for (kill_fails, poll_fails) in [(false, false), (true, false), (true, true)] {
+            let (release, pending) = mpsc::channel();
+            let (reaped, reap_done) = mpsc::channel();
+            let (done, finished) = mpsc::channel();
+            let killed = Arc::new(AtomicBool::new(false));
+            let child = StuckChild {
+                kill_fails,
+                poll_fails,
+                killed: killed.clone(),
+                reaped,
+                release: pending,
+            };
+            let worker = std::thread::spawn(move || {
+                cleanup(child);
+                done.send(()).unwrap();
+            });
+            let returned = finished.recv_timeout(Duration::from_secs(1));
+            // Release even on failure so a regressed synchronous wait cannot hang the suite.
+            release.send(()).unwrap();
+            worker.join().unwrap();
+            reap_done.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(killed.load(Ordering::SeqCst));
+            assert_eq!(
+                returned,
+                Ok(()),
+                "cleanup blocked: kill_fails={kill_fails}, poll_fails={poll_fails}"
+            );
+        }
+    }
 }
 
 #[cfg(windows)]

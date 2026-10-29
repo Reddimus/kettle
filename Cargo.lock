@@ -2574,6 +2574,7 @@ version = "5.6.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
+ "alacritty_terminal",
  "anyhow",
  "arboard",
  "async-channel",

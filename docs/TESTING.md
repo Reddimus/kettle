@@ -237,6 +237,14 @@ All paths below are relative to the repository root.
 | `kettle-test-support` | `crates/kettle-test-support/src/`, `crates/kettle-test-support/tests/` | Shared fixtures, source scans, MSRV drift |
 | `kettle` | `crates/kettle/src/`, `crates/kettle/tests/` | CLI, exec, MCP, source identity, native preview |
 
+The `search_input` tests in `kettle-ui` alternate navigation and highlight
+scans within one long wrapped line, including zero-width regex matches, and
+check that output invalidates saved highlight offsets. They need no window or
+GPU. In `kettle-core`, `shell_probe::cleanup_tests` uses a controllable child
+on every platform to cover failed termination, polling errors, bounded cleanup,
+and eventual background reaping. The Windows pipe tests still require a native
+Windows runner.
+
 ### Drift guards and source scans
 
 Some contracts cross files or cannot be exercised cheaply in every unit test.

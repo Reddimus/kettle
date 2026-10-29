@@ -1913,7 +1913,10 @@ whole scrollback buffer:
   search state and an in-memory per-pane query map. An open search bar follows
   focus and carries its query to the newly focused pane, where closing it
   stores that query; with the bar closed, each pane keeps its own remembered
-  query. No search state is process-global.
+  query. No search state is process-global. Navigation and visible highlights
+  use separate `CompiledSearch` instances so alternating work slices cannot
+  discard each other's saved offsets. Both receive the same scan token and
+  reset on query, output, or layout changes.
   The Unicode editor moves, selects, and deletes by grapheme boundary. A scan
   token combines pane output generation, query revision, and terminal layout.
   Query changes and reflow restart work from a fresh viewport anchor. Plain PTY
