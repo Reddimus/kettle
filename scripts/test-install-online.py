@@ -586,6 +586,13 @@ fi
                         f"kettle/extra-{index:03d}",
                         data=b"x",
                     )
+            elif variant == "implicit-directories":
+                for index in range(60):
+                    self._add(
+                        archive,
+                        f"kettle/docs/licenses/dependency-{index}/LICENSE",
+                        data=f"License {index}\n".encode("ascii"),
+                    )
         digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
         self.sidecar.write_text(
             f"{digest}  {self.asset}\n",
@@ -868,6 +875,21 @@ fi
         self.assertIn("Ed25519-signed manifest", result.stdout)
         self.assertNotIn("falling back", result.stderr)
         self.assertTrue((self.root / "prefix" / "bin" / "kettle").is_file())
+
+    def test_implicit_directories_do_not_consume_the_archive_member_limit(self):
+        archive = self._archive("implicit-directories", include_manifest=True)
+        with tarfile.open(archive) as packed:
+            members = packed.getmembers()
+            self.assertLessEqual(len(members), 128)
+            paths = {
+                "/".join(member.name.rstrip("/").split("/")[:index])
+                for member in members
+                for index in range(1, len(member.name.rstrip("/").split("/")) + 1)
+            }
+            self.assertGreater(len(paths), 128)
+        result = self._run(archive, version="v2.36.0", signed=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.root / "prefix/bin/kettle").is_file())
 
     def test_a_manifest_that_fails_ed25519_verification_is_refused(self):
         """The signature must be load-bearing, not merely consulted.

@@ -310,8 +310,9 @@ class ManifestTests(unittest.TestCase):
         release_workflow = (
             ROOT / ".github" / "workflows" / "release.yml"
         ).read_text(encoding="utf-8")
+        publication = release_workflow.split("\n  finalize:\n", 1)[1]
         self.assertEqual(
-            release_workflow.count("scripts/package-manifest.py extract"),
+            publication.count("scripts/package-manifest.py extract"),
             4,
         )
         for archive, target in (
@@ -355,6 +356,14 @@ class ManifestTests(unittest.TestCase):
         package = release_workflow.split("\n  package:\n", 1)[1].split(
             "\n  finalize:\n", 1
         )[0]
+        linux_package = workflow_step(package, "Package (Linux)")
+        self.assertNotIn("tar -C dist -czf", linux_package)
+        self.assertEqual(linux_package.count("scripts/package-manifest.py pack"), 1)
+        self.assertEqual(linux_package.count("scripts/package-manifest.py extract"), 1)
+        self.assertLess(
+            linux_package.index("scripts/package-manifest.py pack"),
+            linux_package.index("scripts/package-manifest.py extract"),
+        )
         self.assertIn("environment: ${{ matrix.environment }}", package)
         self.assertEqual(package.count("environment: release-build"), 2)
         self.assertEqual(package.count("environment: macos-signing"), 1)

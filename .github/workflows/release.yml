@@ -303,7 +303,14 @@ jobs:
             --root dist/kettle --target "$TARGET" --version "$VERSION"
           python3 scripts/package-manifest.py verify \
             --root dist/kettle --target "$TARGET" --version "$VERSION"
-          tar -C dist -czf ${{ matrix.artifact }} kettle
+          python3 scripts/package-manifest.py pack \
+            --archive "${{ matrix.artifact }}" \
+            --root dist/kettle --target "$TARGET" --version "$VERSION"
+          extracted=$(mktemp -d)
+          trap 'rm -rf "$extracted"' EXIT
+          python3 scripts/package-manifest.py extract \
+            --archive "${{ matrix.artifact }}" \
+            --root "$extracted/kettle" --target "$TARGET" --version "$VERSION"
 
       - name: Package (macOS .app bundle)
         if: runner.os == 'macOS'

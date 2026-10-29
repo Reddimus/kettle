@@ -369,6 +369,26 @@ def verify(root: Path, target: str, version: str) -> None:
         )
 
 
+def pack_archive(archive_path: Path, root: Path, target: str, version: str) -> None:
+    if not target.endswith("linux-gnu"):
+        raise ValueError("packing is only supported for Linux targets")
+    if archive_path.resolve().is_relative_to(root.resolve()):
+        raise ValueError("archive output must be outside the package root")
+    verify(root, target, version)
+    files = collect_files(root, target) + [root / MANIFEST_NAME]
+    if len(files) + 1 > MAX_ARCHIVE_ENTRIES:
+        raise ValueError(
+            "Linux archive exceeds the 128-entry limit including root and manifest"
+        )
+    # Existing updaters count directory headers toward their 128-entry limit.
+    # File paths already describe every required parent directory.
+    with tarfile.open(archive_path, "x:gz", format=tarfile.GNU_FORMAT) as archive:
+        archive.add(root, arcname="kettle", recursive=False)
+        for path in files:
+            relative = path.relative_to(root).as_posix()
+            archive.add(path, arcname=f"kettle/{relative}", recursive=False)
+
+
 def _archive_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
     return (
         metadata.st_dev,
@@ -957,7 +977,7 @@ def extract_archive(archive_path: Path, root: Path, target: str, version: str) -
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("generate", "verify", "extract"))
+    parser.add_argument("operation", choices=("generate", "verify", "pack", "extract"))
     parser.add_argument("--archive", type=Path)
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--target", required=True, choices=sorted(TARGETS))
@@ -966,12 +986,16 @@ def main() -> int:
     try:
         if args.operation == "generate":
             if args.archive is not None:
-                raise ValueError("--archive is only valid with extract")
+                raise ValueError("--archive is only valid with pack or extract")
             generate(args.root, args.target, args.version)
         elif args.operation == "verify":
             if args.archive is not None:
-                raise ValueError("--archive is only valid with extract")
+                raise ValueError("--archive is only valid with pack or extract")
             verify(args.root, args.target, args.version)
+        elif args.operation == "pack":
+            if args.archive is None:
+                raise ValueError("--archive is required with pack")
+            pack_archive(args.archive, args.root, args.target, args.version)
         else:
             if args.archive is None:
                 raise ValueError("--archive is required with extract")

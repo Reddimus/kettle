@@ -23,6 +23,12 @@ updater carry worker data through to the first 5.0 restart. Runtime lookup
 always uses the installed sibling, never this data directory. Modern updates
 use the existing transaction for both binaries and the installation record.
 
+Linux tarballs omit nested directory headers. This preserves
+all nested license files while staying within existing updaters' 128-entry limit.
+Each Linux tarball is extracted and verified before upload and by the finalizer.
+The online installer checks the resulting paths against the members and their
+implied parent directories, which do not consume archive entries.
+
 ```mermaid
 flowchart TD
     prep["1 · prep PR<br/>promote [Unreleased] to [X.Y.Z] — date"] --> prep_m{{"merged to main"}}
