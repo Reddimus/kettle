@@ -1,0 +1,7 @@
+# zizmor configuration; see docs/TESTING.md for how the check runs.
+rules:
+  # Local reusable workflows are referenced as `./.github/workflows/...`,
+  # GitHub's documented form, which actionlint also validates. The audit's
+  # suggested replacement is not used anywhere else in this repository.
+  self-repository:
+    disable: true

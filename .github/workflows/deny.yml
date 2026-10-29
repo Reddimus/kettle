@@ -56,6 +56,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The official EmbarkStudios action vendors `cargo-deny`
       # itself; no separate `cargo install` step needed. Pinned to
       # v2 so a future v3 breaking change doesn't silently flip
