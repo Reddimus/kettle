@@ -58,20 +58,15 @@ const SPCTL: &str = "/usr/sbin/spctl";
 /// `ditto -c -k --keepParent` puts the bundle at the archive root.
 const ARCHIVE_ROOT: &str = "kettle.app";
 
-/// Where per-install update locks live, under the user's private state
-/// directory.
-///
-/// Deliberately *not* beside the bundle. `/Applications` is group-writable, and
-/// the lock helper refuses, correctly, to create a private file in a directory
-/// an untrusted principal can write. A lock file there would also be litter in
-/// a directory that is not ours.
-fn update_lock_path(bundle: &Path) -> Result<PathBuf, UpdateError> {
-    let base = std::env::var_os("XDG_STATE_HOME")
+fn resolve_state_root(
+    xdg_state_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<PathBuf, UpdateError> {
+    xdg_state_home
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".local/state"))
+            home.map(|home| PathBuf::from(home).join(".local/state"))
                 .filter(|path| path.is_absolute())
         })
         .ok_or_else(|| {
@@ -80,8 +75,18 @@ fn update_lock_path(bundle: &Path) -> Result<PathBuf, UpdateError> {
                  hold the update lock"
                     .to_string(),
             )
-        })?;
-    let directory = base.join("kettle");
+        })
+}
+
+/// Where per-install update locks live, under the user's private state
+/// directory.
+///
+/// Deliberately *not* beside the bundle. `/Applications` is group-writable, and
+/// the lock helper refuses, correctly, to create a private file in a directory
+/// an untrusted principal can write. A lock file there would also be litter in
+/// a directory that is not ours.
+fn update_lock_path(bundle: &Path, state_root: &Path) -> Result<PathBuf, UpdateError> {
+    let directory = state_root.join("kettle");
     kettle_state::create_private_dirs(&directory)?;
     // One lock per install: two bundles on the same machine should not
     // serialize against each other, and the name must not leak the path.
@@ -324,6 +329,15 @@ fn leftover_is_removable(is_dir: bool, owner: u32, euid: u32) -> bool {
 /// pre-update window that later reads a resource it never opened may fail; the
 /// remedy is to restart after updating.
 pub(crate) fn sweep_leftovers_beside(executable: &Path) {
+    let Ok(state_root) =
+        resolve_state_root(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
+    else {
+        return;
+    };
+    sweep_leftovers_beside_with_state_root(executable, &state_root);
+}
+
+fn sweep_leftovers_beside_with_state_root(executable: &Path, state_root: &Path) {
     // Canonicalize first. The lock is keyed by the bundle path, and
     // `locate_bundle_install` keys it from a canonical one, so skipping this
     // would let the sweep and a running update take two different locks and
@@ -337,7 +351,7 @@ pub(crate) fn sweep_leftovers_beside(executable: &Path) {
     let Some(parent) = bundle.parent() else {
         return;
     };
-    let Ok(lock_path) = update_lock_path(&bundle) else {
+    let Ok(lock_path) = update_lock_path(&bundle, state_root) else {
         return;
     };
     sweep_locked(parent, &lock_path);
@@ -1031,13 +1045,18 @@ pub(crate) fn install_bundle_update(
     verifier: &dyn SealVerifier,
 ) -> Result<InstallOutcome, UpdateError> {
     reverify_available_update(update, &UPDATE_PUBLIC_KEY, std::time::SystemTime::now())?;
-    install_bundle_update_with_download(update, install, verifier, || client.download_bytes(update))
+    let state_root =
+        resolve_state_root(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))?;
+    install_bundle_update_with_download(update, install, verifier, &state_root, || {
+        client.download_bytes(update)
+    })
 }
 
 fn install_bundle_update_with_download(
     update: &AvailableUpdate,
     install: &ManagedInstall,
     verifier: &dyn SealVerifier,
+    state_root: &Path,
     download: impl FnOnce() -> Result<Vec<u8>, UpdateError>,
 ) -> Result<InstallOutcome, UpdateError> {
     let running = semver::Version::parse(env!("CARGO_PKG_VERSION"))
@@ -1058,7 +1077,7 @@ fn install_bundle_update_with_download(
     let parent = bundle.parent().ok_or_else(|| {
         UpdateError::UnmanagedInstall("the bundle has no containing directory".to_string())
     })?;
-    let lock_path = update_lock_path(bundle)?;
+    let lock_path = update_lock_path(bundle, state_root)?;
     let _lock = kettle_state::ExclusiveFileLock::try_acquire(&lock_path)?
         .ok_or(UpdateError::UpdateLocked)?;
     let parent_directory = open_directory(parent)?;
@@ -1136,6 +1155,43 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
+
+    #[test]
+    fn state_root_resolution_uses_absolute_xdg_then_home() {
+        for (xdg, home, expected) in [
+            (Some("/xdg-state"), Some("/home/user"), "/xdg-state"),
+            (Some("/xdg-state"), None, "/xdg-state"),
+            (
+                Some("relative/state"),
+                Some("/home/user"),
+                "/home/user/.local/state",
+            ),
+            (None, Some("/home/user"), "/home/user/.local/state"),
+            (Some(""), Some("/home/user"), "/home/user/.local/state"),
+        ] {
+            assert_eq!(
+                resolve_state_root(xdg.map(Into::into), home.map(Into::into)).unwrap(),
+                Path::new(expected),
+                "XDG_STATE_HOME={xdg:?}, HOME={home:?}"
+            );
+        }
+        for (xdg, home) in [
+            (None, None),
+            (Some("relative/state"), None),
+            (None, Some("relative/home")),
+            (Some(""), Some("")),
+        ] {
+            let error = resolve_state_root(xdg.map(Into::into), home.map(Into::into)).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    UpdateError::UnmanagedInstall(ref reason)
+                        if reason == "neither XDG_STATE_HOME nor HOME is set, so there is nowhere private to hold the update lock"
+                ),
+                "XDG_STATE_HOME={xdg:?}, HOME={home:?}: {error:?}"
+            );
+        }
+    }
 
     fn create_staging(parent: &Path, id: &str) -> Result<Staging, UpdateError> {
         Staging::create(parent, id, &parent.join("update.transactions"))
@@ -1258,7 +1314,6 @@ mod tests {
 
     #[test]
     fn parse_identity_reads_what_codesign_actually_prints() {
-        let _serial = serialized();
         // Trimmed from real `codesign -dvvv` output, which goes to stderr.
         let described = "Executable=/Applications/kettle.app/Contents/MacOS/kettle\n\
              Identifier=org.kettle.terminal\n\
@@ -1283,7 +1338,6 @@ mod tests {
 
     #[test]
     fn only_a_real_bundle_layout_is_accepted() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-layout-");
         let root = temp.path();
         let seal = StubSeal::official();
@@ -1312,7 +1366,6 @@ mod tests {
 
     #[test]
     fn copies_another_tool_owns_are_refused_with_a_next_step() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-owner-");
         let seal = StubSeal::official();
 
@@ -1339,7 +1392,6 @@ mod tests {
 
     #[test]
     fn a_bundle_signed_by_anyone_else_is_not_ours() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-identity-");
         let executable = seed_bundle(temp.path(), "kettle.app");
 
@@ -1369,7 +1421,6 @@ mod tests {
 
     #[test]
     fn extraction_round_trips_a_bundle_and_normalizes_its_modes() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-extract-");
         let staging = create_staging(temp.path(), "1").unwrap();
         extract_bundle_into(&staging, &official_zip()).unwrap();
@@ -1390,7 +1441,6 @@ mod tests {
 
     #[test]
     fn macos_bundle_requires_both_binaries() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-pair-");
         let mut files = bundle_files();
         files.remove(&format!(
@@ -1471,7 +1521,6 @@ mod tests {
 
     #[test]
     fn an_inheritable_acl_on_the_parent_does_not_reach_the_staged_bundle() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-acl-");
         let root = temp.path();
 
@@ -1512,7 +1561,6 @@ mod tests {
 
     #[test]
     fn extraction_refuses_archives_that_are_not_a_kettle_bundle() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-refuse-");
         let mut index = 0;
         let mut fresh = || {
@@ -1546,7 +1594,6 @@ mod tests {
 
     #[test]
     fn extraction_will_not_write_through_a_symlink_left_in_its_way() {
-        let _serial = serialized();
         // The arbitrary-write primitive this closes: if extraction created
         // files by pathname, a symlink planted at a destination name would
         // redirect an authenticated write onto whatever it pointed at.
@@ -1572,7 +1619,6 @@ mod tests {
 
     #[test]
     fn extraction_refuses_an_archive_with_too_many_entries() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-entries-");
         let staging = create_staging(temp.path(), "4").unwrap();
         let mut files = bundle_files();
@@ -1588,7 +1634,6 @@ mod tests {
 
     #[test]
     fn staging_refuses_a_bundle_apple_has_not_notarized() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-notarize-");
 
         // The regression this exists to prevent: re-signing a bundle keeps
@@ -1617,7 +1662,6 @@ mod tests {
 
     #[test]
     fn a_staging_directory_is_recognised_by_ownership_and_mode() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-ident-");
         let root = temp.path();
 
@@ -1643,7 +1687,6 @@ mod tests {
 
     #[test]
     fn discarding_staging_never_deletes_what_replaced_it() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-discard-");
         let root = temp.path();
         let staging = create_staging(root, "d1").unwrap();
@@ -1670,7 +1713,6 @@ mod tests {
 
     #[test]
     fn discarding_staging_retires_its_transaction() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-retire-");
         let root = temp.path();
         let staging = create_staging(root, "discard").unwrap();
@@ -1711,7 +1753,6 @@ mod tests {
 
     #[test]
     fn the_sweep_does_not_follow_a_leftover_named_symlink() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-sweeplink-");
         let root = temp.path();
         let target = root.join("Elsewhere");
@@ -1731,7 +1772,6 @@ mod tests {
 
     #[test]
     fn the_sweep_preserves_unrecorded_matching_directories() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-provenance-");
         let root = temp.path();
         let executable = seed_bundle(root, "kettle.app");
@@ -1741,7 +1781,7 @@ mod tests {
             std::fs::write(unrelated.join("private"), b"keep").unwrap();
         }
 
-        with_state_home(&root.join("state"), || sweep_leftovers_beside(&executable));
+        sweep_leftovers_beside_with_state_root(&executable, &root.join("state"));
 
         for prefix in [STAGED_PREFIX, PREVIOUS_PREFIX] {
             assert!(
@@ -1753,7 +1793,6 @@ mod tests {
 
     #[test]
     fn the_sweep_preserves_a_replacement_for_a_recorded_directory() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-replaced-");
         let root = temp.path();
         let staging = create_staging(root, "replaced").unwrap();
@@ -1772,7 +1811,6 @@ mod tests {
 
     #[test]
     fn the_sweep_recovers_crashes_before_directory_creation_and_identity_recording() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-crash-");
         let root = temp.path();
         let records = root.join("update.transactions");
@@ -1796,7 +1834,6 @@ mod tests {
 
     #[test]
     fn a_record_without_identity_cannot_authorize_recursive_removal() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-pending-");
         let root = temp.path();
         let records = root.join("update.transactions");
@@ -1813,7 +1850,6 @@ mod tests {
 
     #[test]
     fn the_sweep_removes_only_update_leftovers() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-sweep-");
         let root = temp.path();
         for name in [
@@ -1839,51 +1875,11 @@ mod tests {
         assert!(Transaction::load_all(&root.join("update.transactions")).is_empty());
     }
 
-    /// Serialize this module's tests.
-    ///
-    /// Several of them point `XDG_STATE_HOME` at a temporary root. Cargo runs
-    /// tests as threads in one process, so that change would otherwise leak
-    /// into whatever else is running at that moment. The whole module runs in
-    /// well under a second, so serializing is free.
-    fn serialized() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|error| error.into_inner())
-    }
-
-    /// Restores `XDG_STATE_HOME` even if the test body panics. Without this a
-    /// single failing assertion would leave the variable pointing at a deleted
-    /// temporary directory for every test that ran afterwards.
-    struct StateHome(Option<std::ffi::OsString>);
-
-    impl Drop for StateHome {
-        fn drop(&mut self) {
-            match self.0.take() {
-                // SAFETY: This relies on excluding all other process environment access,
-                // including libc readers; the module test mutex alone does not prove that.
-                Some(value) => unsafe { std::env::set_var("XDG_STATE_HOME", value) },
-                // SAFETY: This relies on excluding all other process environment access,
-                // including libc readers; the module test mutex alone does not prove that.
-                None => unsafe { std::env::remove_var("XDG_STATE_HOME") },
-            }
-        }
-    }
-
-    /// Point the private state directory at a temporary root. The caller
-    /// already holds [`serialized`].
-    fn with_state_home<T>(state: &Path, body: impl FnOnce() -> T) -> T {
-        let _restore = StateHome(std::env::var_os("XDG_STATE_HOME"));
-        // SAFETY: This relies on excluding all other process environment access,
-        // including libc readers; the module test mutex alone does not prove that.
-        unsafe { std::env::set_var("XDG_STATE_HOME", state) };
-        body()
-    }
-
     /// The folder holding the app is moved aside during the download and
     /// another official app restored at its path: the update must not be
     /// exchanged into the moved folder.
     #[test]
     fn a_completed_update_keeps_provenance_until_its_displaced_bundle_is_swept() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-finished-");
         let root = temp.path();
         let seal = StubSeal::official();
@@ -1912,31 +1908,31 @@ mod tests {
             }),
             signed_manifest: None,
         };
-        with_state_home(&root.join("state"), || {
-            let outcome =
-                install_bundle_update_with_download(&update, &install, &seal, || Ok(archive))
-                    .unwrap();
-            assert_eq!(outcome.disposition, InstallDisposition::Applied);
-            let records = update_lock_path(&install.prefix)
-                .unwrap()
-                .with_extension("transactions");
-            let transactions = Transaction::load_all(&records);
-            assert_eq!(transactions.len(), 1);
-            let [staged, previous] = transactions[0].names();
-            assert!(!root.join(staged).exists());
-            assert!(root.join(&previous).join(ARCHIVE_ROOT).exists());
+        let state_root = root.join("state");
+        let outcome =
+            install_bundle_update_with_download(&update, &install, &seal, &state_root, || {
+                Ok(archive)
+            })
+            .unwrap();
+        assert_eq!(outcome.disposition, InstallDisposition::Applied);
+        let records = update_lock_path(&install.prefix, &state_root)
+            .unwrap()
+            .with_extension("transactions");
+        let transactions = Transaction::load_all(&records);
+        assert_eq!(transactions.len(), 1);
+        let [staged, previous] = transactions[0].names();
+        assert!(!root.join(staged).exists());
+        assert!(root.join(&previous).join(ARCHIVE_ROOT).exists());
 
-            sweep_leftovers_beside(&executable);
+        sweep_leftovers_beside_with_state_root(&executable, &state_root);
 
-            assert!(!root.join(previous).exists());
-            assert!(Transaction::load_all(&records).is_empty());
-            assert_eq!(std::fs::read(&executable).unwrap(), b"mach-o");
-        });
+        assert!(!root.join(previous).exists());
+        assert!(Transaction::load_all(&records).is_empty());
+        assert_eq!(std::fs::read(&executable).unwrap(), b"mach-o");
     }
 
     #[test]
     fn an_update_refuses_a_parent_replaced_during_the_download() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-parent-moved-");
         let apps = temp.path().join("Apps");
         std::fs::create_dir(&apps).unwrap();
@@ -1965,15 +1961,15 @@ mod tests {
             signed_manifest: None,
         };
         let moved = temp.path().join("Apps-moved");
-        let result = with_state_home(&temp.path().join("state"), || {
-            install_bundle_update_with_download(&update, &install, &seal, || {
+        let state_root = temp.path().join("state");
+        let result =
+            install_bundle_update_with_download(&update, &install, &seal, &state_root, || {
                 std::fs::rename(&apps, &moved)?;
                 std::fs::create_dir(&apps)?;
                 seed_bundle(&apps, "kettle.app");
                 std::fs::write(&install.marker_path, &plist)?;
                 Ok(archive)
-            })
-        });
+            });
         assert!(
             matches!(result, Err(UpdateError::UnmanagedInstall(_))),
             "an update into a moved folder must be refused: {result:?}"
@@ -1987,7 +1983,6 @@ mod tests {
 
     #[test]
     fn bundle_updates_share_a_lock_across_state_homes() {
-        let _serial = serialized();
         for replaced_while_downloading in [false, true] {
             let temp = kettle_test_support::private_tempdir("kettle-macos-bundle-lock-");
             let seal = StubSeal::official();
@@ -2014,13 +2009,12 @@ mod tests {
                 }),
                 signed_manifest: None,
             };
-            let _state_lock = with_state_home(&temp.path().join("state-a"), || {
-                kettle_state::ExclusiveFileLock::try_acquire(
-                    &update_lock_path(&install.prefix).unwrap(),
-                )
-                .unwrap()
-                .unwrap()
-            });
+            let state_root_a = temp.path().join("state-a");
+            let _state_lock = kettle_state::ExclusiveFileLock::try_acquire(
+                &update_lock_path(&install.prefix, &state_root_a).unwrap(),
+            )
+            .unwrap()
+            .unwrap();
             let directory = open_directory(&install.prefix).unwrap();
             if !replaced_while_downloading {
                 assert_eq!(
@@ -2030,16 +2024,21 @@ mod tests {
                     0
                 );
             }
-            let result = with_state_home(&temp.path().join("state-b"), || {
-                install_bundle_update_with_download(&update, &install, &seal, || {
+            let state_root_b = temp.path().join("state-b");
+            let result = install_bundle_update_with_download(
+                &update,
+                &install,
+                &seal,
+                &state_root_b,
+                || {
                     if replaced_while_downloading {
                         std::fs::rename(&install.prefix, temp.path().join("displaced.app"))?;
                         seed_bundle(temp.path(), "kettle.app");
                         std::fs::write(&install.marker_path, &plist)?;
                     }
                     Ok(archive)
-                })
-            });
+                },
+            );
             assert!(
                 matches!(result, Err(UpdateError::UpdateLocked)),
                 "an update must hold a lock on the current live bundle: {result:?}"
@@ -2053,7 +2052,6 @@ mod tests {
 
     #[test]
     fn stale_bundle_update_cannot_replace_a_newer_live_bundle() {
-        let _serial = serialized();
         for advanced_before_lock in [true, false] {
             let temp = kettle_test_support::private_tempdir("kettle-macos-version-");
             let seal = StubSeal::official();
@@ -2086,17 +2084,18 @@ mod tests {
                 signed_manifest: None,
             };
 
-            with_state_home(&temp.path().join("state"), || {
-                if advanced_before_lock {
-                    let held = kettle_state::ExclusiveFileLock::try_acquire(
-                        &update_lock_path(&install.prefix).unwrap(),
-                    )
-                    .unwrap()
-                    .unwrap();
-                    write_version("100.0.0");
-                    drop(held);
-                }
-                let error = install_bundle_update_with_download(&update, &install, &seal, || {
+            let state_root = temp.path().join("state");
+            if advanced_before_lock {
+                let held = kettle_state::ExclusiveFileLock::try_acquire(
+                    &update_lock_path(&install.prefix, &state_root).unwrap(),
+                )
+                .unwrap()
+                .unwrap();
+                write_version("100.0.0");
+                drop(held);
+            }
+            let error =
+                install_bundle_update_with_download(&update, &install, &seal, &state_root, || {
                     assert!(
                         !advanced_before_lock,
                         "a stale update must stop before download"
@@ -2105,13 +2104,12 @@ mod tests {
                     Ok(archive)
                 })
                 .unwrap_err();
-                assert!(matches!(
-                    error,
-                    UpdateError::Rollback { candidate, installed }
-                        if candidate == update.version
-                            && installed == semver::Version::new(100, 0, 0)
-                ));
-            });
+            assert!(matches!(
+                error,
+                UpdateError::Rollback { candidate, installed }
+                    if candidate == update.version
+                        && installed == semver::Version::new(100, 0, 0)
+            ));
             assert!(
                 std::fs::read_to_string(&install.marker_path)
                     .unwrap()
@@ -2129,7 +2127,6 @@ mod tests {
 
     #[test]
     fn an_install_in_a_group_writable_directory_can_still_update() {
-        let _serial = serialized();
         // `/Applications` is `drwxrwxr-x root:admin`, and the private-file
         // helper refuses to create a lock in a directory an untrusted principal
         // can write. A lock beside the bundle would make `kettle update` fail
@@ -2146,17 +2143,17 @@ mod tests {
             .unwrap()
             .prefix;
 
-        with_state_home(&temp.path().join("state"), || {
-            let lock_path = update_lock_path(&bundle).expect("a private lock path is available");
-            assert!(
-                !lock_path.starts_with(&applications),
-                "the lock must not be created beside the bundle: {}",
-                lock_path.display()
-            );
-            kettle_state::ExclusiveFileLock::try_acquire(&lock_path)
-                .expect("a shared parent must not stop the updater taking its lock")
-                .expect("the lock is free");
-        });
+        let state_root = temp.path().join("state");
+        let lock_path =
+            update_lock_path(&bundle, &state_root).expect("a private lock path is available");
+        assert!(
+            !lock_path.starts_with(&applications),
+            "the lock must not be created beside the bundle: {}",
+            lock_path.display()
+        );
+        kettle_state::ExclusiveFileLock::try_acquire(&lock_path)
+            .expect("a shared parent must not stop the updater taking its lock")
+            .expect("the lock is free");
     }
 
     #[test]
@@ -2165,7 +2162,6 @@ mod tests {
         // the same way. If one canonicalizes and the other does not, a symlink
         // anywhere above the bundle gives them different locks and the mutual
         // exclusion quietly stops working.
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-agree-");
         let root = temp.path();
         let real = root.join("real");
@@ -2176,68 +2172,73 @@ mod tests {
         let leftover = real.join(".kettle-update-previous-1");
         std::fs::create_dir_all(&leftover).unwrap();
 
-        with_state_home(&root.join("state"), || {
-            let canonical = locate_bundle_install(&executable, &StubSeal::official())
-                .unwrap()
-                .prefix;
-            record_leftover(
-                &leftover,
-                &update_lock_path(&canonical)
-                    .unwrap()
-                    .with_extension("transactions"),
-            );
-            // Stand in for an update in flight, holding the lock the updater
-            // would hold.
-            let held = kettle_state::ExclusiveFileLock::try_acquire(
-                &update_lock_path(&canonical).unwrap(),
-            )
+        let state_root = root.join("state");
+        let canonical = locate_bundle_install(&executable, &StubSeal::official())
             .unwrap()
-            .expect("the lock is free to begin with");
+            .prefix;
+        record_leftover(
+            &leftover,
+            &update_lock_path(&canonical, &state_root)
+                .unwrap()
+                .with_extension("transactions"),
+        );
+        // Stand in for an update in flight, holding the lock the updater
+        // would hold.
+        let held = kettle_state::ExclusiveFileLock::try_acquire(
+            &update_lock_path(&canonical, &state_root).unwrap(),
+        )
+        .unwrap()
+        .expect("the lock is free to begin with");
 
-            // Start a process whose executable path reaches the same bundle
-            // through a symlink. It must resolve to the same lock, find it
-            // held, and leave the in-flight files alone.
-            sweep_leftovers_beside(&root.join("link/kettle.app/Contents/MacOS/kettle"));
-            assert!(
-                leftover.exists(),
-                "the sweep took a different lock and deleted files an update was using"
-            );
+        // Start a process whose executable path reaches the same bundle
+        // through a symlink. It must resolve to the same lock, find it
+        // held, and leave the in-flight files alone.
+        sweep_leftovers_beside_with_state_root(
+            &root.join("link/kettle.app/Contents/MacOS/kettle"),
+            &state_root,
+        );
+        assert!(
+            leftover.exists(),
+            "the sweep took a different lock and deleted files an update was using"
+        );
 
-            drop(held);
-            sweep_leftovers_beside(&root.join("link/kettle.app/Contents/MacOS/kettle"));
-            assert!(!leftover.exists(), "and sweeps once the lock is free");
-        });
+        drop(held);
+        sweep_leftovers_beside_with_state_root(
+            &root.join("link/kettle.app/Contents/MacOS/kettle"),
+            &state_root,
+        );
+        assert!(!leftover.exists(), "and sweeps once the lock is free");
     }
 
     #[test]
     fn each_install_gets_its_own_update_lock() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-locks-");
-        with_state_home(&temp.path().join("state"), || {
-            let one = update_lock_path(Path::new("/Applications/kettle.app")).unwrap();
-            let two =
-                update_lock_path(Path::new("/Users/someone/Applications/kettle.app")).unwrap();
-            assert_ne!(
-                one, two,
-                "two installs must not serialize against each other"
+        let state_root = temp.path().join("state");
+        let one = update_lock_path(Path::new("/Applications/kettle.app"), &state_root).unwrap();
+        let two = update_lock_path(
+            Path::new("/Users/someone/Applications/kettle.app"),
+            &state_root,
+        )
+        .unwrap();
+        assert_ne!(
+            one, two,
+            "two installs must not serialize against each other"
+        );
+        assert_eq!(
+            one,
+            update_lock_path(Path::new("/Applications/kettle.app"), &state_root).unwrap()
+        );
+        for path in [&one, &two] {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                !name.contains("Applications"),
+                "the lock name should not carry the install path: {name}"
             );
-            assert_eq!(
-                one,
-                update_lock_path(Path::new("/Applications/kettle.app")).unwrap()
-            );
-            for path in [&one, &two] {
-                let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                assert!(
-                    !name.contains("Applications"),
-                    "the lock name should not carry the install path: {name}"
-                );
-            }
-        });
+        }
     }
 
     #[test]
     fn the_startup_sweep_only_runs_inside_a_bundle() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-startup-");
         let root = temp.path();
         let leftover = root.join(".kettle-update-previous-1");
@@ -2249,22 +2250,19 @@ mod tests {
         let loose = root.join("kettle");
         std::fs::write(&loose, b"mach-o").unwrap();
         let executable = seed_bundle(root, "kettle.app");
-        with_state_home(&root.join("state"), || {
-            sweep_leftovers_beside(&loose);
-        });
+        let state_root = root.join("state");
+        sweep_leftovers_beside_with_state_root(&loose, &state_root);
         assert!(leftover.exists(), "a non-bundle binary sweeps nothing");
 
         // From inside the bundle, the sibling leftover goes.
-        with_state_home(&root.join("state"), || {
-            let bundle = bundle_of(&executable.canonicalize().unwrap()).unwrap();
-            record_leftover(
-                &leftover,
-                &update_lock_path(&bundle)
-                    .unwrap()
-                    .with_extension("transactions"),
-            );
-            sweep_leftovers_beside(&executable);
-        });
+        let bundle = bundle_of(&executable.canonicalize().unwrap()).unwrap();
+        record_leftover(
+            &leftover,
+            &update_lock_path(&bundle, &state_root)
+                .unwrap()
+                .with_extension("transactions"),
+        );
+        sweep_leftovers_beside_with_state_root(&executable, &state_root);
         assert!(!leftover.exists());
         assert!(root.join("kettle.app").exists(), "the live bundle survives");
     }
@@ -2275,7 +2273,6 @@ mod tests {
         // staging directory the updater is still filling. There are two
         // independent brakes, and this checks both, because the first one can
         // be defeated by two processes inheriting different environments.
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-sweeplock-");
         let root = temp.path();
         let staging = create_staging(root, "inflight").unwrap();
@@ -2309,7 +2306,6 @@ mod tests {
 
     #[test]
     fn a_swap_exchanges_two_bundles_without_either_disappearing() {
-        let _serial = serialized();
         let temp = kettle_test_support::private_tempdir("kettle-macos-swap-");
         let root = temp.path();
         let staging = create_staging(root, "s1").unwrap();
@@ -2374,7 +2370,6 @@ mod tests {
 
     #[test]
     fn a_swap_survives_its_staging_directory_being_renamed_away() {
-        let _serial = serialized();
         // The substitution this closes. An attacker who can write the enclosing
         // directory (every administrator, for `/Applications`) renames the
         // staged tree aside after verification and puts their own under the
@@ -2422,7 +2417,6 @@ mod tests {
     /// downloads the archive and sets the variable.
     #[test]
     fn a_published_archive_extracts_verifies_and_swaps_for_real() {
-        let _serial = serialized();
         let Ok(archive) = std::env::var("KETTLE_MACOS_ARCHIVE") else {
             // Like the mermaid gate, a missing archive skips locally but
             // fails when `KETTLE_MACOS_ARCHIVE_REQUIRED` is set, so a run that
