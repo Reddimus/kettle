@@ -85,6 +85,13 @@ fn show(notification: DesktopNotification) {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn discard_closed_sender<C>(sender: &mut Option<C>, is_closed: impl FnOnce(&C) -> bool) {
+    if sender.as_ref().is_some_and(is_closed) {
+        *sender = None;
+    }
+}
+
 fn spawn_dispatcher(
     capacity: usize,
     mut backend: impl FnMut(DesktopNotification) + Send + 'static,
@@ -220,6 +227,24 @@ mod tests {
     };
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn recoverable_call_errors_keep_the_notification_sender() {
+        let original = std::sync::Arc::new(());
+        let mut sender = Some(original.clone());
+        for _ in ["timeout", "method error", "invalid reply"] {
+            super::discard_closed_sender(&mut sender, |_| false);
+            assert!(
+                sender
+                    .as_ref()
+                    .is_some_and(|sender| std::sync::Arc::ptr_eq(sender, &original)),
+                "recoverable call error disconnected the original sender"
+            );
+        }
+        super::discard_closed_sender(&mut sender, |_| true);
+        assert!(sender.is_none(), "closed transport must be replaced");
+        assert_eq!(std::sync::Arc::strong_count(&original), 1);
+    }
 
     /// Notifications go out as the running bundle when there is one, else
     /// as Kettle, whose identifier is the one its bundle declares.

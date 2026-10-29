@@ -189,10 +189,10 @@ pub(crate) fn open(
         failed(OpenFailure::Busy);
         return;
     };
-    // A thread that cannot start drops the slot with its closure.
-    let _ = std::thread::Builder::new()
-        .name("kettle-ui-open-document".into())
-        .spawn(move || match hand_over(&copies, &document, reader) {
+    super::start_open(
+        "kettle-ui-open-document",
+        failed,
+        move |failed| match hand_over(&copies, &document, reader) {
             Ok(child) => {
                 // The slot bounds the work of opening, not how long the
                 // viewer stays up: Papers runs until the user closes it.
@@ -203,7 +203,8 @@ pub(crate) fn open(
                 drop(slot);
                 failed(why);
             }
-        });
+        },
+    );
 }
 
 /// Check the viewer, copy the PDF, and hand the viewer the copy. A copy
@@ -258,7 +259,13 @@ fn copy(copies: &PrivateCopies, document: &DocumentSource) -> Result<PathBuf, Op
                     if identity(&file.metadata()?) != Some(shown) {
                         return Err(changed("the PDF changed while it was copied"));
                     }
-                    check_copy(copy, shown.size, Some(shown), digest)
+                    check_copy(
+                        copy,
+                        shown.size,
+                        Some(shown),
+                        digest,
+                        (&|| copies.closing(), deadline),
+                    )
                 },
             )
             .map_err(copy_failure)
@@ -273,7 +280,7 @@ fn copy(copies: &PrivateCopies, document: &DocumentSource) -> Result<PathBuf, Op
                 copies,
                 (len, "pdf"),
                 |reservation, stop| reservation.write(bytes, stop, deadline),
-                |copy| check_copy(copy, len, None, digest),
+                |copy| check_copy(copy, len, None, digest, (&|| copies.closing(), deadline)),
             )
             .map_err(copy_failure)
         }
@@ -287,12 +294,38 @@ fn check_copy(
     len: u64,
     identity: Option<PathIdentity>,
     digest: &Digest,
+    (stop, deadline): (&dyn Fn() -> bool, Instant),
 ) -> io::Result<()> {
+    verification_running(stop, deadline)?;
     if copy.metadata()?.len() != len {
         return Err(changed("the copy is not the PDF's length"));
     }
-    if content_digest_read(At { file: copy, at: 0 }, len, identity)? != *digest {
+    if content_digest_read(
+        At {
+            file: copy,
+            at: 0,
+            stop,
+            deadline,
+        },
+        len,
+        identity,
+    )? != *digest
+    {
         return Err(changed("the copy is not the PDF shown"));
+    }
+    verification_running(stop, deadline)
+}
+
+fn verification_running(stop: &dyn Fn() -> bool, deadline: Instant) -> io::Result<()> {
+    if stop() {
+        // The digest reader retries Interrupted, so cancellation must be terminal.
+        return Err(io::Error::other("PDF verification was stopped"));
+    }
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "PDF verification ran past its deadline",
+        ));
     }
     Ok(())
 }
@@ -306,12 +339,15 @@ fn changed(what: &str) -> io::Error {
 struct At<'a> {
     file: &'a File,
     at: u64,
+    stop: &'a dyn Fn() -> bool,
+    deadline: Instant,
 }
 
 #[cfg(unix)]
 impl io::Read for At<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         use std::os::unix::fs::FileExt as _;
+        verification_running(self.stop, self.deadline)?;
         let read = self.file.read_at(buffer, self.at)?;
         self.at += read as u64;
         Ok(read)
@@ -321,7 +357,7 @@ impl io::Read for At<'_> {
 #[cfg(not(unix))]
 impl io::Read for At<'_> {
     fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
-        let _ = (self.file, self.at);
+        let _ = (self.file, self.at, self.stop, self.deadline);
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 }
@@ -476,6 +512,71 @@ mod tests {
         copies.close();
     }
 
+    #[test]
+    fn verification_obeys_the_deadline_and_discards_the_copy() {
+        let dir = private_tempdir("kettle-pdf-deadline-");
+        let copies = copies_in(&dir);
+        let digest = content_digest(PDF, None).unwrap();
+        let result = private_copy(
+            &copies,
+            (PDF.len() as u64, "pdf"),
+            |reservation, stop| reservation.write(PDF, stop, Instant::now() + COPY_DEADLINE),
+            |file| {
+                check_copy(
+                    file,
+                    PDF.len() as u64,
+                    None,
+                    &digest,
+                    (&|| false, Instant::now()),
+                )
+            },
+        );
+        assert_eq!(
+            result
+                .expect_err("expired PDF verification was accepted")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(kept(&dir), 0, "expired copy was retained");
+        copies.close();
+    }
+
+    #[test]
+    fn verification_stops_between_reads_and_discards_the_copy() {
+        let dir = private_tempdir("kettle-pdf-stop-");
+        let copies = copies_in(&dir);
+        let bytes = vec![b'x'; 200_000];
+        let digest = content_digest(&bytes, None).unwrap();
+        let reads = std::cell::Cell::new(0);
+        let stop = || {
+            reads.set(reads.get() + 1);
+            reads.get() >= 3
+        };
+        let result = private_copy(
+            &copies,
+            (bytes.len() as u64, "pdf"),
+            |reservation, stop| reservation.write(&bytes, stop, Instant::now() + COPY_DEADLINE),
+            |file| {
+                check_copy(
+                    file,
+                    bytes.len() as u64,
+                    None,
+                    &digest,
+                    (&stop, Instant::now() + COPY_DEADLINE),
+                )
+            },
+        );
+        assert_eq!(
+            result
+                .expect_err("cancelled PDF verification was accepted")
+                .kind(),
+            io::ErrorKind::Other
+        );
+        assert_eq!(reads.get(), 3, "verification stopped at its next read");
+        assert_eq!(kept(&dir), 0, "cancelled copy was retained");
+        copies.close();
+    }
+
     /// The check reads every byte of the copy from its start, and a copy
     /// shorter or longer than shown is not what was shown.
     #[test]
@@ -486,20 +587,48 @@ mod tests {
         std::fs::write(&at, &long).unwrap();
         let digest = content_digest(&long, None).unwrap();
         let file = File::open(&at).unwrap();
-        assert!(check_copy(&file, long.len() as u64, None, &digest).is_ok());
         assert!(
-            check_copy(&file, long.len() as u64, None, &digest).is_ok(),
+            check_copy(
+                &file,
+                long.len() as u64,
+                None,
+                &digest,
+                (&|| false, Instant::now() + COPY_DEADLINE)
+            )
+            .is_ok()
+        );
+        assert!(
+            check_copy(
+                &file,
+                long.len() as u64,
+                None,
+                &digest,
+                (&|| false, Instant::now() + COPY_DEADLINE)
+            )
+            .is_ok(),
             "again"
         );
         let kind = |result: io::Result<()>| result.map_err(|error| error.kind());
         assert_eq!(
-            kind(check_copy(&file, long.len() as u64 - 1, None, &digest)),
+            kind(check_copy(
+                &file,
+                long.len() as u64 - 1,
+                None,
+                &digest,
+                (&|| false, Instant::now() + COPY_DEADLINE)
+            )),
             Err(io::ErrorKind::InvalidData)
         );
         std::fs::write(&at, &long[..long.len() - 1]).unwrap();
         let file = File::open(&at).unwrap();
         assert_eq!(
-            kind(check_copy(&file, long.len() as u64, None, &digest)),
+            kind(check_copy(
+                &file,
+                long.len() as u64,
+                None,
+                &digest,
+                (&|| false, Instant::now() + COPY_DEADLINE)
+            )),
             Err(io::ErrorKind::InvalidData)
         );
     }

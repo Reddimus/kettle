@@ -2,6 +2,23 @@
 
 use super::*;
 
+#[cfg(any(target_os = "linux", test))]
+fn wayland_drag_destination(
+    performed: bool,
+    source: u64,
+    carrier: u64,
+    source_index: usize,
+    target: Option<(u64, usize)>,
+) -> Option<(u64, usize)> {
+    if !performed && source != carrier {
+        Some((source, source_index))
+    } else if performed {
+        target
+    } else {
+        None
+    }
+}
+
 impl App {
     /// Tear this window down for good: flush the recording, save the session,
     /// and flag the close for `finish_window_dispatch`.
@@ -1438,13 +1455,13 @@ impl App {
             self.apply_dock_preview(previous, None);
         }
         let drag = self.wayland_tab_drag.take().unwrap();
-        let destination = if ended == Some(false) && drag.source != drag.carrier {
-            Some((drag.source, drag.source_index))
-        } else if ended == Some(true) {
-            target
-        } else {
-            None
-        };
+        let destination = wayland_drag_destination(
+            ended == Some(true),
+            drag.source,
+            drag.carrier,
+            drag.source_index,
+            target,
+        );
         if let Some((seq, insertion)) = destination
             && let Some(mut carrier) = self.windows.remove(&drag.carrier)
         {
@@ -1854,5 +1871,32 @@ impl App {
         if ws.accent.is_none() && self.cfg.accent_auto && self.cfg.accent_color.is_none() {
             self.assign_window_accent(ws, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_performed_then_cancelled_wayland_drop_restores_the_source_tab() {
+        let mut outcome = crate::wayland::DragOutcome::default();
+        outcome.release();
+        assert!(outcome.succeeded(), "the drop was initially performed");
+        outcome.cancel();
+        assert_eq!(
+            wayland_drag_destination(outcome.succeeded(), 7, 8, 2, None),
+            Some((7, 2)),
+            "cancelled drop left the tab in its detached carrier",
+        );
+        assert_eq!(
+            wayland_drag_destination(outcome.succeeded(), 7, 8, 2, Some((9, 0))),
+            Some((7, 2)),
+            "cancellation overrides the last hovered target",
+        );
+        assert!(
+            !outcome.succeeded(),
+            "cancelled drop must not authorize activation"
+        );
     }
 }

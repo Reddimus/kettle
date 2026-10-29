@@ -46,8 +46,7 @@ struct Active {
     serial: u32,
     carrier: Option<Arc<Window>>,
     grab: (f64, f64),
-    performed: bool,
-    cancelled: bool,
+    outcome: crate::wayland::DragOutcome,
     finished: bool,
     deadline: Option<Instant>,
     drop: Option<Point>,
@@ -126,7 +125,7 @@ impl State {
             offer.proxy.destroy();
         }
         if let Some(active) = self.active.as_mut() {
-            active.cancelled = true;
+            active.outcome.cancel();
         }
         self.poll();
         for (_, device) in std::mem::take(&mut self.devices) {
@@ -140,7 +139,7 @@ impl State {
     pub(super) fn poll(&mut self) {
         self.files.poll();
         if self.active.as_ref().is_some_and(|active| {
-            active.cancelled
+            active.outcome.cancelled
                 || active.finished
                 || active.deadline.is_some_and(|end| Instant::now() >= end)
         }) {
@@ -155,10 +154,11 @@ impl State {
             {
                 window.set_decorations(true);
             }
+            let performed = active.outcome.succeeded();
             self.ended = Some(Update::End {
-                performed: active.performed,
+                performed,
                 drop: active.drop,
-                activation: (active.performed && active.drop.is_some()).then_some(DragActivation {
+                activation: (performed && active.drop.is_some()).then_some(DragActivation {
                     seat: active.seat,
                     serial: active.serial,
                     at: Instant::now(),
@@ -257,8 +257,7 @@ impl Bridge {
             serial,
             carrier: carrier_seq.is_none().then_some(origin),
             grab,
-            performed: false,
-            cancelled: false,
+            outcome: crate::wayland::DragOutcome::default(),
             finished: false,
             deadline: None,
             drop: None,
@@ -299,8 +298,8 @@ impl Bridge {
         };
         if active.expected_carrier != Some(seq)
             || active.carrier.is_some()
-            || active.performed
-            || active.cancelled
+            || active.outcome.performed
+            || active.outcome.cancelled
         {
             return;
         }
@@ -510,17 +509,17 @@ impl Dispatch<wl_data_source::WlDataSource, u64> for super::State {
             wl_data_source::Event::Send { .. } => {}
             wl_data_source::Event::DndDropPerformed => {
                 log::debug!("Wayland tab drag released");
-                active.performed = true;
+                active.outcome.release();
                 active.deadline = Some(Instant::now() + FINISH_WITHIN);
             }
             wl_data_source::Event::Cancelled => {
                 log::debug!("Wayland tab drag cancelled");
-                active.cancelled = true;
+                active.outcome.cancel();
             }
             wl_data_source::Event::DndFinished => active.finished = true,
             _ => {}
         }
-        if (active.performed || active.cancelled)
+        if (active.outcome.performed || active.outcome.cancelled)
             && let Some(extension) = active.extension.take()
         {
             extension.destroy();

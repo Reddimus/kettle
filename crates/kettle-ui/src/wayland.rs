@@ -6,6 +6,26 @@ use std::time::{Duration, Instant};
 const GESTURE_AGE: Duration = Duration::from_secs(5);
 const MAX_SEATS: usize = 16;
 
+#[derive(Default)]
+pub(crate) struct DragOutcome {
+    performed: bool,
+    cancelled: bool,
+}
+
+impl DragOutcome {
+    pub(crate) fn release(&mut self) {
+        self.performed = true;
+    }
+
+    pub(crate) fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+
+    pub(crate) fn succeeded(&self) -> bool {
+        self.performed && !self.cancelled
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Gesture {
     window: u64,

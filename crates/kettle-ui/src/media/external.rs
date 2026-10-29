@@ -398,6 +398,41 @@ impl Drop for Slot {
     }
 }
 
+fn start_open(
+    name: &str,
+    failed: impl FnOnce(OpenFailure) + Send + 'static,
+    work: impl FnOnce(Box<dyn FnOnce(OpenFailure) + Send>) + Send + 'static,
+) {
+    start_open_with(failed, work, |work| {
+        std::thread::Builder::new()
+            .name(name.into())
+            .spawn(work)
+            .map(drop)
+    });
+}
+
+fn start_open_with(
+    failed: impl FnOnce(OpenFailure) + Send + 'static,
+    work: impl FnOnce(Box<dyn FnOnce(OpenFailure) + Send>) + Send + 'static,
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> io::Result<()>,
+) {
+    let failed = Arc::new(Mutex::new(Some(failed)));
+    let in_thread = Arc::clone(&failed);
+    if spawn(Box::new(move || {
+        let failed = in_thread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .unwrap();
+        work(Box::new(failed));
+    }))
+    .is_err()
+        && let Some(failed) = failed.lock().unwrap_or_else(PoisonError::into_inner).take()
+    {
+        failed(OpenFailure::Busy);
+    }
+}
+
 /// Open a PNG copy of `image`, kept in `copies`, in `viewer`, on a short
 /// thread. `failed` hears why, if it does not open; it runs on that thread.
 pub(crate) fn open(
@@ -410,10 +445,8 @@ pub(crate) fn open(
         failed(OpenFailure::Busy);
         return;
     };
-    // A thread that cannot start drops the slot with its closure.
-    let _ = std::thread::Builder::new()
-        .name("kettle-ui-open".into())
-        .spawn(move || match hand_over(&copies, &image, viewer) {
+    start_open("kettle-ui-open", failed, move |failed| {
+        match hand_over(&copies, &image, viewer) {
             Ok(child) => {
                 // The slot bounds the work of opening, not how long the
                 // viewer stays up: Eye of GNOME runs until the user closes
@@ -427,7 +460,8 @@ pub(crate) fn open(
                 drop(slot);
                 failed(why);
             }
-        });
+        }
+    });
 }
 
 /// Check the viewer, write and mark the copy, check it is still Kettle's,
@@ -440,6 +474,24 @@ fn hand_over(
     if !viewer.verified() {
         return Err(OpenFailure::Viewer);
     }
+    save_and_open(copies, image, |path| {
+        #[cfg(target_os = "linux")]
+        if viewer == Viewer::Loupe {
+            return loupe::open(path);
+        }
+        viewer
+            .command(path)
+            .spawn()
+            .map(Some)
+            .map_err(|_| OpenFailure::Viewer)
+    })
+}
+
+fn save_and_open(
+    copies: &Mutex<PastedImages>,
+    image: &ImageData,
+    handoff: impl FnOnce(&Path) -> Result<Option<std::process::Child>, OpenFailure>,
+) -> Result<Option<std::process::Child>, OpenFailure> {
     let width = usize::try_from(image.width).map_err(|_| OpenFailure::Copy)?;
     let height = usize::try_from(image.height).map_err(|_| OpenFailure::Copy)?;
     let mut copies = copies.lock().unwrap_or_else(PoisonError::into_inner);
@@ -454,28 +506,78 @@ fn hand_over(
                 OpenFailure::Copy
             }
         })?;
-    copies
-        .mark_downloaded(&path)
-        .map_err(|_| OpenFailure::Copy)?;
-    if !copies.path_still_matches(&path) {
-        return Err(OpenFailure::Copy);
+    let started = (|| {
+        copies
+            .mark_downloaded(&path)
+            .map_err(|_| OpenFailure::Copy)?;
+        if !copies.path_still_matches(&path) {
+            return Err(OpenFailure::Copy);
+        }
+        // Started while the store is held, so the copy cannot be dropped for a
+        // newer one before the viewer is on its way to it.
+        handoff(&path)
+    })();
+    if started.is_err() {
+        let _ = copies.remove(&path);
     }
-    #[cfg(target_os = "linux")]
-    if viewer == Viewer::Loupe {
-        return loupe::open(&path);
-    }
-    // Started while the store is held, so the copy cannot be dropped for a
-    // newer one before the viewer is on its way to it.
-    viewer
-        .command(&path)
-        .spawn()
-        .map(Some)
-        .map_err(|_| OpenFailure::Viewer)
+    started
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_thread_start_failure_notifies_once_and_releases_its_work() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let held = Arc::new(());
+        let in_work = held.clone();
+        start_open_with(
+            move |why| tx.send(why).unwrap(),
+            move |_| {
+                drop(in_work);
+                panic!("a refused thread ran");
+            },
+            |work| {
+                drop(work);
+                Err(io::Error::other("thread limit"))
+            },
+        );
+        assert_eq!(Arc::strong_count(&held), 1, "the refused work was released");
+        assert_eq!(
+            rx.try_recv(),
+            Ok(OpenFailure::Busy),
+            "startup failure was silent"
+        );
+        assert_eq!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn failed_image_handoff_releases_the_copy_and_budget() {
+        let dir = kettle_test_support::private_tempdir("kettle-failed-open");
+        let copies = Mutex::new(PastedImages::of_kind_in(
+            crate::paste_image::OPENED,
+            dir.path().join("copies"),
+        ));
+        let image = ImageData::new(1, 1, vec![0, 0, 0, 255]).unwrap();
+        let mut saved = None;
+        for _ in 0..33 {
+            let result = save_and_open(&copies, &image, |path| {
+                assert!(path.exists());
+                saved = Some(path.to_owned());
+                Err(OpenFailure::Viewer)
+            });
+            assert_eq!(result.map(|_| ()), Err(OpenFailure::Viewer));
+            assert!(
+                !saved.as_ref().unwrap().exists(),
+                "failed handoff retained its PNG"
+            );
+        }
+        copies.lock().unwrap().cleanup();
+    }
 
     #[test]
     fn ubuntu_default_viewer_is_preferred_with_an_older_viewer_fallback() {
@@ -563,13 +665,15 @@ mod tests {
             .split("\n}")
             .next()
             .expect("body");
+        assert!(body.contains("save_and_open(copies, image, |path| {"));
+        assert!(body.contains("viewer .command(path) .spawn()"));
         let order = [
             "if !viewer.verified() { return Err(OpenFailure::Viewer); }",
             "let mut copies = copies.lock().unwrap_or_else(PoisonError::into_inner);",
             ".save_rgba(width, height, &image.rgba[..], false)",
             ".mark_downloaded(&path)",
             "if !copies.path_still_matches(&path) { return Err(OpenFailure::Copy); }",
-            ".command(&path) .spawn()",
+            "handoff(&path)",
         ]
         .map(|step| body.find(step).unwrap_or_else(|| panic!("{step}")));
         assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");

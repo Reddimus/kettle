@@ -651,6 +651,12 @@ fn display_lines<'a>(
                     if column >= first_column && shown < columns {
                         row.push(glyph);
                         shown += each;
+                    } else if column < first_column {
+                        let visible = (column + each)
+                            .saturating_sub(first_column)
+                            .min(columns - shown);
+                        row.extend(std::iter::repeat_n(' ', visible));
+                        shown += visible;
                     }
                     column += each;
                 }
@@ -949,6 +955,17 @@ mod tests {
             "{} bytes",
             row.len()
         );
+    }
+
+    #[test]
+    fn scrolling_into_a_wide_character_preserves_its_visible_spacing() {
+        assert_eq!(
+            display_rows("ab\u{65e5}x", 0, 1, 3, 2),
+            [" x"],
+            "text after a clipped wide glyph shifted left"
+        );
+        assert_eq!(display_rows("ab\u{65e5}x", 0, 1, 3, 1), [" "]);
+        assert_eq!(display_rows("ab\u{65e5}x", 0, 1, 4, 2), ["x"]);
     }
 
     #[test]
