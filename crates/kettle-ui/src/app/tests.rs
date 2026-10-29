@@ -17793,14 +17793,20 @@ fn default_ui_entry_points_honor_recording_config() {
     let root = crate::test_tempdir();
     let config = root.path().join("config");
     let recordings = root.path().join("casts");
-    std::fs::write(
-        &config,
-        format!(
-            "record = on\nrecord-dir = {}\nrecord-raw-input = on\n",
-            recordings.display()
-        ),
-    )
-    .unwrap();
+    // Configs are written privately, as Kettle writes them: the trusted
+    // reader refuses a group-writable file, which a umask of 002 makes.
+    let write = |text: &str| {
+        kettle_state::atomic_replace(
+            &config,
+            text.as_bytes(),
+            kettle_state::AtomicWriteOptions::PRIVATE,
+        )
+        .unwrap();
+    };
+    write(&format!(
+        "record = on\nrecord-dir = {}\nrecord-raw-input = on\n",
+        recordings.display()
+    ));
     let startup = App::default_startup_options(Some(config.clone()));
     let crate::RecordingPolicy::Enabled { target, raw_input } = startup.recording else {
         panic!("default UI launch must resolve record = on without a supplied policy");
@@ -17809,7 +17815,7 @@ fn default_ui_entry_points_honor_recording_config() {
     assert!(raw_input);
     assert_eq!(startup.config, Some(config.clone()));
 
-    std::fs::write(&config, "record = off\nrecord-raw-input = on\n").unwrap();
+    write("record = off\nrecord-raw-input = on\n");
     assert!(matches!(
         App::default_startup_options(Some(config)).recording,
         crate::RecordingPolicy::Disabled
@@ -17833,7 +17839,12 @@ fn default_ui_entry_points_honor_recording_config() {
 fn default_ui_startup_uses_default_recording_directory() {
     let root = crate::test_tempdir();
     let config = root.path().join("config");
-    std::fs::write(&config, "record = on\n").unwrap();
+    kettle_state::atomic_replace(
+        &config,
+        b"record = on\n",
+        kettle_state::AtomicWriteOptions::PRIVATE,
+    )
+    .unwrap();
     let startup = App::default_startup_options(Some(config));
     let expected = kettle_config::Config::default_path()
         .and_then(|path| path.parent().map(|parent| parent.join("recordings")));
