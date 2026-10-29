@@ -3374,7 +3374,8 @@ Other additions:
   argument area silently receives its tail, the environment, so the walk asks
   for the exact size first and treats a read that still fills the buffer as
   incomplete. Each scan is capped by 1 MiB per file or argument area, 4 MiB
-  aggregate argv and child-list content, 4096 nodes, 1024 Linux task-file
+  aggregate Linux argv, child-list and client environment content (whole
+  argument areas on macOS), 4096 nodes, 1024 Linux task-file
   reads, bounded argv count/decoded bytes, and a 25 ms deadline; an
   incomplete scan never replaces the last applied state. An argv past the
   per-process caps holds back only its own pane, which keeps its previous
@@ -3388,11 +3389,14 @@ Other additions:
   available for one-shot callers. Reconnect launches a separate client pane
   directly with literal arguments and shell integration disabled. The executable
   path and original invocation name are separate: Unix preserves `argv[0]` for
-  multicall clients, and a missing captured executable (including Linux's
-  ` (deleted)` path after an update) falls back to the original invocation.
-  Linux reads `/proc/<pid>/environ`; macOS reuses the bounded `KERN_PROCARGS2`
-  reader. Only same-user clients can supply connection variables, with a 1 MiB
-  read limit. The retained allowlists are kubectl's `KUBECONFIG`; Docker's
+  multicall clients. Linux's ` (deleted)` marker after an update resolves to
+  the replacement at the original absolute path, preserving the invocation
+  separately; if that file is missing, the original invocation is the fallback.
+  During the bounded scan, Linux reads `/proc/<pid>/environ` and macOS reuses
+  its already-read `KERN_PROCARGS2` buffer. Detection reads cached values, so
+  environment capture shares the scan's aggregate byte and time limits.
+  Only same-user clients can supply connection variables, with a 1 MiB
+  per-process read limit. The retained allowlists are kubectl's `KUBECONFIG`; Docker's
   `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, `DOCKER_TLS_VERIFY`, and
   `DOCKER_CERT_PATH`; and Podman's `CONTAINER_HOST` and `CONTAINER_CONNECTION`.
   SSH and lxc capture no extra environment. Captured values override pane

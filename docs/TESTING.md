@@ -270,6 +270,11 @@ The remote reconnect tests run offline without a remote daemon or cluster:
 
 ```sh
 cargo test -j 2 --locked --offline -p kettle-remote reconnect_
+cargo test -j 2 --locked --offline -p kettle-remote connection_environment_preserves_absence_and_rejects_incomplete_data
+cargo test -j 2 --locked --offline -p kettle-remote reads_connection_environment_after_exactly_argc_arguments
+cargo test -j 2 --locked --offline -p kettle-remote environments_share_the_scan_budget
+cargo test -j 2 --locked --offline -p kettle-remote the_final_argument_area_read_obeys_the_scan_deadline
+cargo test -j 2 --locked --offline -p kettle-remote deleted_client_fixture_has_no_descendants
 cargo test -j 2 --locked --offline -p kettle-ui remote_reconnect_
 cargo test -j 2 --locked --offline --manifest-path vendor/Cargo.toml -p portable-pty --features serde_support
 cargo test -j 2 --locked --offline -p kettle-remote
@@ -282,7 +287,14 @@ regressions. Native Linux/macOS subprocess probes read the client's environment
 through procfs or KERN_PROCARGS2, and portable fixtures cover filtering,
 explicit absence, size limits, malformed values, relative connection paths,
 and debug redaction. The macOS tests reject unreadable and SIP-redacted
-captures. Linux also exercises a running executable replaced on disk. The UI
+captures. Both environment parser fixtures use Unix path semantics on every
+host. Linux and macOS tests cover multiple clients sharing the aggregate byte
+ceiling; a macOS clock fixture covers expiry during the final argument-area
+read. Native capture also remains available from the snapshot after the client
+exits. Linux exercises a running executable replaced on disk with bare `ssh`
+as its invocation, while portable Unix fixtures cover replacement resolution
+and preserved `argv[0]`. The copied Bash fixture blocks in a builtin on an open
+pipe; a Linux/macOS regression checks that it creates no descendants. The UI
 PTY probe checks the captured environment and original invocation in both a
 split and an empty mux, without a window or GPU. A separate UI regression
 checks that an unavailable environment routes to the existing failure notice

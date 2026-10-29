@@ -166,9 +166,34 @@ fn connection_environment_names(runtime: ContainerRuntime) -> &'static [&'static
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn client_connection_environment_names(argv: &[String]) -> Option<&'static [&'static str]> {
+    let runtime = match argv0_basename(argv.first()?).as_str() {
+        "docker" => ContainerRuntime::Docker,
+        "podman" => ContainerRuntime::Podman,
+        "kubectl" => ContainerRuntime::Kubectl,
+        _ => return None,
+    };
+    Some(connection_environment_names(runtime))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn cached_connection_environment(
+    environment: Option<&ConnectionEnvironment>,
+    names: &[&str],
+) -> Option<ConnectionEnvironment> {
+    let environment = environment?;
+    (environment
+        .iter()
+        .map(|(name, _)| name)
+        .eq(names.iter().copied()))
+    .then(|| environment.clone())
+}
+
 /// Parse bounded, complete NUL-terminated environment entries without decoding
 /// or retaining variables outside the allowlist. Invalid or duplicate selected
-/// entries fail closed rather than changing the selected endpoint.
+/// entries fail closed rather than changing the selected endpoint. These are
+/// Unix environments, including colon-separated paths, even in portable tests.
 #[cfg(any(unix, test))]
 fn parse_connection_environment(bytes: &[u8], names: &[&str]) -> Option<ConnectionEnvironment> {
     if bytes.len() as u64 >= MAX_PROC_FILE_BYTES || (!bytes.is_empty() && !bytes.ends_with(&[0])) {
@@ -197,8 +222,8 @@ fn parse_connection_environment(bytes: &[u8], names: &[&str]) -> Option<Connecti
         let reproducible = match name {
             "KUBECONFIG" => value
                 .split(':')
-                .all(|path| path.is_empty() || connection_path_is_absolute(path)),
-            "DOCKER_CONFIG" | "DOCKER_CERT_PATH" => connection_path_is_absolute(value),
+                .all(|path| path.is_empty() || connection_path_is_absolute_on(path, false)),
+            "DOCKER_CONFIG" | "DOCKER_CERT_PATH" => connection_path_is_absolute_on(value, false),
             _ => true,
         };
         if !reproducible {
@@ -822,9 +847,9 @@ const MAX_PROC_SCAN_RETRY_DURATION: std::time::Duration = std::time::Duration::f
 const MAX_PROC_ARGS_PER_PROCESS: usize = 256;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 const MAX_PROC_ARG_DECODED_BYTES: usize = 64 * 1024;
-/// Aggregate ceiling, in bytes, on ALL `cmdline` + `children` content read
-/// across one [`LinuxProcessTree::refresh_from`] walk, and on the argv bytes of
-/// a macOS walk. `MAX_PROC_FILE_BYTES` bounds only a SINGLE file or argument
+/// Aggregate ceiling on Linux cmdline, children and client environment reads,
+/// and on whole macOS argument areas (including environments).
+/// `MAX_PROC_FILE_BYTES` bounds only a SINGLE file or argument
 /// area; without this cap, up to `MAX_PROC_TREE_NODES` (4096) descendants each
 /// near that 1 MiB ceiling could retain multiple GiB in `self.entries` and cost
 /// multiple GiB of file I/O on one `refresh_roots` tick. Four MiB is generous
@@ -1198,6 +1223,7 @@ struct LinuxProcessTree {
 struct LinuxProcessEntry {
     parent: Option<u32>,
     argv: Option<Vec<String>>,
+    environment: Option<ConnectionEnvironment>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1216,8 +1242,8 @@ impl LinuxProcessTree {
     /// bounds node COUNT and `MAX_PROC_FILE_BYTES` a single file's size, but
     /// neither bounds the SUM of every node's argv/children bytes, so this walk
     /// also enforces `MAX_PROC_TREE_TOTAL_BYTES`. Once the running total reaches
-    /// that ceiling, later `cmdline`/`children` reads are skipped; the node and
-    /// its already-known parent are still recorded. Cwd is read on demand for
+    /// that ceiling, later cmdline/children/environment reads are skipped; the
+    /// node and its already-known parent are still recorded. Cwd is read on demand for
     /// the selected foreground process instead of being kept for every entry.
     /// Together these stop a pathological or hostile descendant subtree from
     /// costing multiple GiB of retained memory or synchronous I/O.
@@ -1274,6 +1300,19 @@ impl LinuxProcessTree {
                     None
                 }
             };
+            let environment = argv.as_deref().and_then(|argv| {
+                let names = client_connection_environment_names(argv)?;
+                read_linux_connection_environment_charged(
+                    proc_root,
+                    pid,
+                    names,
+                    &mut total_bytes,
+                    deadline,
+                )
+            });
+            if total_bytes >= MAX_PROC_TREE_TOTAL_BYTES || std::time::Instant::now() >= deadline {
+                complete = false;
+            }
             let task_dir = process_dir.join("task");
             let mut child_metadata_read = false;
             // Always inspect the leader task first so a process with more than
@@ -1350,8 +1389,16 @@ impl LinuxProcessTree {
             if argv.is_none() && !child_metadata_read && parent.is_none() {
                 continue;
             }
-            self.entries.insert(pid, LinuxProcessEntry { parent, argv });
+            self.entries.insert(
+                pid,
+                LinuxProcessEntry {
+                    parent,
+                    argv,
+                    environment,
+                },
+            );
         }
+        complete &= std::time::Instant::now() < deadline;
         self.bytes_read = total_bytes;
         self.task_files_read = task_files_read;
         self.timed_out = !complete && std::time::Instant::now() >= deadline;
@@ -1466,8 +1513,7 @@ impl ProcessTree for LinuxProcessTree {
     }
 
     fn connection_environment_of(&self, pid: u32, names: &[&str]) -> Option<ConnectionEnvironment> {
-        self.entries.get(&pid)?;
-        read_linux_connection_environment(&self.proc_root, pid, names)
+        cached_connection_environment(self.entries.get(&pid)?.environment.as_ref(), names)
     }
 
     fn cwd_of(&self, pid: u32) -> Option<String> {
@@ -1488,9 +1534,32 @@ fn read_linux_connection_environment(
     pid: u32,
     names: &[&str],
 ) -> Option<ConnectionEnvironment> {
+    read_linux_connection_environment_charged(
+        proc_root,
+        pid,
+        names,
+        &mut 0,
+        std::time::Instant::now() + MAX_PROC_SCAN_DURATION,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_connection_environment_charged(
+    proc_root: &std::path::Path,
+    pid: u32,
+    names: &[&str],
+    total_bytes: &mut u64,
+    deadline: std::time::Instant,
+) -> Option<ConnectionEnvironment> {
     use std::io::Read;
     use std::os::unix::fs::MetadataExt;
 
+    let limit = MAX_PROC_TREE_TOTAL_BYTES
+        .saturating_sub(*total_bytes)
+        .min(MAX_PROC_FILE_BYTES);
+    if limit == 0 || std::time::Instant::now() >= deadline {
+        return None;
+    }
     let uid = std::fs::metadata("/proc/self").ok()?.uid();
     let directory = proc_root.join(pid.to_string());
     if std::fs::metadata(&directory).ok()?.uid() != uid {
@@ -1501,9 +1570,11 @@ fn read_linux_connection_environment(
         return None;
     }
     let mut bytes = Vec::new();
-    file.take(MAX_PROC_FILE_BYTES)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    let result = file.take(limit).read_to_end(&mut bytes);
+    *total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+    if result.is_err() || bytes.len() as u64 == limit || std::time::Instant::now() >= deadline {
+        return None;
+    }
     if std::fs::metadata(&directory).ok()?.uid() != uid {
         return None;
     }
@@ -3280,8 +3351,13 @@ fn session_client_program(
     }
     if let Some(path) = executable {
         let path = session_executable(Some(path), fallback)?;
-        // Updated Linux processes can still report "/path (deleted)". Fall
-        // back to the original invocation when the captured file is gone.
+        // Linux appends this marker after unlink. Resolve the replacement at
+        // the original absolute path while preserving the client argv[0].
+        let path = if std::path::Path::new(&path).is_file() {
+            path
+        } else {
+            path.strip_suffix(" (deleted)").unwrap_or(&path).to_owned()
+        };
         if std::path::Path::new(&path).is_file() {
             #[cfg(unix)]
             return Some((
@@ -6212,7 +6288,9 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn reconnect_reads_native_client_environment() {
+        use std::os::unix::process::CommandExt;
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg0("kubectl")
             .args([
                 "--exact",
                 "tests::reconnect_environment_probe_child",
@@ -6248,7 +6326,7 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let _stop = Stop(child);
+        let mut stop = Stop(child);
         let names = connection_environment_names(ContainerRuntime::Kubectl);
         let environment = tree
             .connection_environment_of(pid, names)
@@ -6264,6 +6342,13 @@ mod tests {
         assert_eq!(
             environment.iter().collect::<Vec<_>>(),
             [("KUBECONFIG", Some("/client/cluster config"))]
+        );
+        stop.0.kill().unwrap();
+        stop.0.wait().unwrap();
+        assert_eq!(
+            tree.connection_environment_of(pid, names),
+            Some(environment),
+            "detection must use the bounded snapshot after the client exits"
         );
     }
 
@@ -6318,9 +6403,55 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn reconnect_uses_replacement_for_a_live_deleted_client() {
-        let root = kettle_test_support::private_tempdir("kettle-updated-client-");
-        let executable = root.path().join("ssh");
+    fn multiple_linux_client_environments_share_the_scan_budget() {
+        let root = kettle_test_support::private_tempdir("kettle-environment-budget-");
+        let mut bytes = b"DOCKER_HOST=".to_vec();
+        bytes.resize(MAX_PROC_FILE_BYTES as usize - 2, b'x');
+        bytes.push(0);
+        let roots: Vec<u32> = (10..74).collect();
+        for pid in &roots {
+            let dir = root.path().join(pid.to_string());
+            std::fs::create_dir_all(dir.join("task").join(pid.to_string())).unwrap();
+            std::fs::write(dir.join("cmdline"), b"docker\0exec\0-it\0web\0sh\0").unwrap();
+            std::fs::write(dir.join("task").join(pid.to_string()).join("children"), b"").unwrap();
+            std::fs::write(dir.join("environ"), &bytes).unwrap();
+        }
+        let mut tree = LinuxProcessTree::default();
+        assert!(!tree.refresh_from_within(root.path(), &roots, std::time::Duration::from_secs(60)));
+        assert!(!tree.timed_out);
+        assert_eq!(tree.bytes_read, MAX_PROC_TREE_TOTAL_BYTES);
+        let retained: usize = tree
+            .entries
+            .values()
+            .filter_map(|entry| entry.environment.as_ref())
+            .flat_map(ConnectionEnvironment::iter)
+            .filter_map(|(_, value)| value.map(str::len))
+            .sum();
+        assert!(retained > 0);
+        assert!(retained as u64 <= tree.bytes_read);
+
+        let mut total_bytes = 0;
+        assert!(
+            read_linux_connection_environment_charged(
+                root.path(),
+                roots[0],
+                connection_environment_names(ContainerRuntime::Docker),
+                &mut total_bytes,
+                std::time::Instant::now(),
+            )
+            .is_none()
+        );
+        assert_eq!(
+            total_bytes, 0,
+            "an expired scan must not read an environment"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn spawn_deleted_client_fixture(
+        executable: &std::path::Path,
+        invocation: &str,
+    ) -> std::process::Child {
         // Not a copy of sleep: uutils coreutils (Ubuntu 25.10 and later) is one
         // multi-call binary that picks its tool from argv[0], so a copy named
         // ssh exits at once. A copied shell keeps its own image while it waits.
@@ -6332,40 +6463,111 @@ mod tests {
             .map(|dir| dir.join("bash"))
             .find(|candidate| candidate.is_file())
             .expect("bash on PATH");
-        std::fs::copy(&shell, &executable).unwrap();
-        let child = std::process::Command::new(&executable)
-            .args(["-c", "sleep 30; :", "box"])
-            .spawn()
-            .unwrap();
+        std::fs::copy(&shell, executable).unwrap();
+        use std::os::unix::process::CommandExt;
+        // A child another test thread forks while the copy is still open for
+        // writing holds that descriptor until it execs, and exec then fails
+        // with ETXTBSY. That window is brief, so retry for a bounded time.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match std::process::Command::new(executable)
+                .arg0(invocation)
+                // Bash's builtin blocks on the pipe retained by Child, without
+                // starting a descendant that could outlive the cleanup guard.
+                .args(["-c", "read -r -t 30; :", "box"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(child) => return child,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("spawn the client fixture: {error}"),
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn deleted_client_fixture_has_no_descendants() {
+        let root = kettle_test_support::private_tempdir("kettle-client-fixture-");
+        let executable = root.path().join("ssh");
+        let child = spawn_deleted_client_fixture(&executable, "ssh");
         struct Stop(std::process::Child);
         impl Drop for Stop {
             fn drop(&mut self) {
-                let _ = self.0.kill();
+                kill_detached_shell(self.0.id());
                 let _ = self.0.wait();
             }
         }
-        let stop = Stop(child);
+        let mut stop = Stop(child);
         let mut tree = RootedProcessTree::default();
-        let pid = stop.0.id();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            assert!(tree.refresh_roots_within(&[pid], std::time::Duration::from_secs(1)));
-            if tree
-                .argv_of(pid)
-                .is_some_and(|argv| argv.first() == Some(&executable.to_str().unwrap().to_owned()))
-            {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut descendants = Vec::new();
+        while std::time::Instant::now() < deadline {
+            assert!(tree.refresh_roots_within(&[stop.0.id()], std::time::Duration::from_secs(1)));
+            descendants = tree
+                .all_pids()
+                .into_iter()
+                .filter(|&pid| pid != stop.0.id())
+                .collect();
+            if !descendants.is_empty() {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline);
+            assert!(stop.0.try_wait().unwrap().is_none(), "fixture exited early");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        std::fs::remove_file(&executable).unwrap();
-        std::fs::copy(&shell, &executable).unwrap();
-        assert!(tree.executable_of(pid).unwrap().ends_with(" (deleted)"));
-        let context = detect_in_tree(pid, &mut tree).unwrap();
-        let command = clone_session_command(&context).unwrap();
-        assert_eq!(command.program, executable.to_str().unwrap());
-        assert!(std::path::Path::new(&command.program).is_file());
+        drop(stop);
+        assert!(
+            descendants.is_empty(),
+            "fixture spawned descendants: {descendants:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reconnect_uses_replacement_for_a_live_deleted_client() {
+        let root = kettle_test_support::private_tempdir("kettle-updated-client-");
+        let executable = root.path().join("ssh");
+        for invocation in ["ssh", executable.to_str().unwrap()] {
+            let child = spawn_deleted_client_fixture(&executable, invocation);
+            struct Stop(std::process::Child);
+            impl Drop for Stop {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+            let stop = Stop(child);
+            let mut tree = RootedProcessTree::default();
+            let pid = stop.0.id();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(tree.refresh_roots_within(&[pid], std::time::Duration::from_secs(1)));
+                if tree
+                    .argv_of(pid)
+                    .is_some_and(|argv| argv.first().map(String::as_str) == Some(invocation))
+                {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            std::fs::remove_file(&executable).unwrap();
+            std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+            assert!(tree.executable_of(pid).unwrap().ends_with(" (deleted)"));
+            let context = detect_in_tree(pid, &mut tree).unwrap();
+            let command = clone_session_command(&context).unwrap();
+            assert_eq!(command.program, executable.to_str().unwrap());
+            assert!(std::path::Path::new(&command.program).is_file());
+            assert_eq!(
+                command.argv0.as_deref().unwrap_or(&command.program),
+                invocation
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -6381,6 +6583,24 @@ mod tests {
         tree.procs.get_mut(&100).unwrap().executable = Some(path.into());
         let ctx = detect_in_tree(100, &mut tree).unwrap();
         assert_eq!(clone_session_command(&ctx).unwrap().program, "ssh");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconnect_resolves_deleted_bare_client_without_kettles_path() {
+        let root = kettle_test_support::private_tempdir("kettle-replaced-client-");
+        let replacement = root.path().join("multicall");
+        std::fs::write(&replacement, b"replacement").unwrap();
+        for invocation in ["ssh", "./ssh", "/original/bin/ssh"] {
+            let mut tree = MockProcessTree::new();
+            tree.add(100, None, &[invocation, "box"]);
+            tree.procs.get_mut(&100).unwrap().executable =
+                Some(format!("{} (deleted)", replacement.display()));
+            let context = detect_in_tree(100, &mut tree).unwrap();
+            let command = clone_session_command(&context).unwrap();
+            assert_eq!(command.program, replacement.to_str().unwrap());
+            assert_eq!(command.argv0.as_deref(), Some(invocation));
+        }
     }
 
     #[cfg(unix)]
