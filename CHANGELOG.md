@@ -315,12 +315,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   output.
 - Align the control-message buffers of the legacy tab handoff and bound the
   Windows access-control entry checks to each entry's size.
+- Finish a `kettle exec` recording before returning from a timeout or
+  cancellation, instead of reporting a healthy recording as incomplete and
+  leaving the file locked.
 
 ### Security
 
 - Stop PTY children from inheriting open descriptors numbered above a
   lowered `RLIMIT_NOFILE` soft limit, and fail the spawn rather than leave
   any descriptor unchecked.
+- On Linux, run each MCP `kettle_run` in its own supervising
+  `kettle exec` process, so descendants that leave the terminal session are
+  stopped with the command on timeout or cancellation, and one command's
+  cancellation never touches another's. `kettle exec` now treats SIGTERM and
+  SIGINT as a bounded cancellation (exit 130).
 
 ## [5.6.0] — 2026-10-28
 
