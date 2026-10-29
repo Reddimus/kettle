@@ -28,6 +28,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Show Sixel images' HLS palette colors correctly, and refuse a Sixel image
+  whose declared size cannot be reserved instead of drawing a smaller one.
+- Keep trailing spaces in `text:` key bindings.
+- Saving a theme or a finite scrollback in Settings now sticks: a
+  `palette = NAME` or `scrollback-infinite` line no longer overrides it on the
+  next load.
+- Import Terminator punctuation shortcuts and `[keybindings]` full-screen
+  accelerators as key bindings.
+- Follow the sun correctly near the poles, and apply a forced light or dark
+  theme even when the solar schedule lacks coordinates.
+- Say how to enable shell integration when an agent's `run_command` times out
+  without it.
 - Keep titles, prompt marks, clipboard writes and notifications working in
   every pane while other panes hold all image memory.
 - Stop a large image or control string that is refused for lack of memory from
