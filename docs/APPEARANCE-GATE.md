@@ -5,6 +5,40 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 5.6.0 cut - 2026-10-28
+
+macOS 27.2, Apple silicon, 2x display, system appearance Dark. The signed,
+notarized universal candidate came from [rehearsal 40794697330](https://github.com/Reddimus/kettle/actions/runs/40794697330)
+at `cad7626e` (bundle version 5.5.1). The 5.6.0 cut changes only versions,
+lockfile workspace records and documentation; registry dependencies and
+application source are unchanged. Both terminal and worker have arm64 and
+x86_64 slices. Deep codesign, Gatekeeper and stapled-ticket validation passed.
+
+Passed with native application screenshots and input in isolated windows:
+
+- Decorated 86% opacity with blur, zoom resizing and a full-screen round trip:
+  rounded corners remained filled, the title stayed beside the traffic lights,
+  and terminal content and input survived. Borderless full screen also kept
+  the terminal visible and returned with its content intact.
+- A cold TokyoNight Day start on the dark desktop kept the caption beside the
+  buttons. Switching that private configuration to Night changed the native
+  titlebar with the palette. Blur-off translucency and opaque surfaces with
+  blur both on and off showed no clear corner strip.
+- The signed bundled worker rendered an SVG inline card. A native click opened
+  its centered viewer; Shift+F10 opened its media menu, and two Escape presses
+  restored the terminal without changing its contents.
+- `just macos-update-smoke v5.5.1` passed against the previous published archive
+  using real extraction, codesign, spctl and a private atomic bundle swap.
+
+Not run: live Reduce Transparency, running/closed-but-pinned Dock, Finder and
+app-switcher icon captures, Dock magnification, mixed-DPI transitions, physical
+Intel and screen-reader acceptance. System settings and the owner's existing
+Kettle processes were preserved; app-window captures omit the Dock. Decorated
+screenshots were inspected in the release session; private renderer-frame
+captures and process-closure receipts were retained separately. No production
+installation occurred. Final tagged-package publication and upgrade checks
+remain separate gates.
+
 ## 5.5.0 cut - 2026-10-20
 
 macOS 27.0.1, Apple silicon, 1920x1080 at 1x, system appearance Dark.
