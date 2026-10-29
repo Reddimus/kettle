@@ -446,7 +446,6 @@ fn run_pty_input_worker<F>(
 #[derive(Default)]
 struct PendingFocusReport {
     desired: Option<bool>,
-    delivered: Option<bool>,
 }
 
 struct PtyInputQueue {
@@ -533,7 +532,9 @@ impl PtyInputQueue {
 
     fn enqueue_focus_report(&self, focused: bool) -> PaneInputResult {
         let mut pending = self.pending_focus.lock().unwrap_or_else(|e| e.into_inner());
-        pending.desired = (pending.delivered != Some(focused)).then_some(focused);
+        // The caller supplies focus transitions; only retries of the pending
+        // transition are deduplicated here. Reporting may skip a transition.
+        pending.desired = Some(focused);
         self.flush_focus_report(&mut pending)
     }
 
@@ -547,7 +548,6 @@ impl PtyInputQueue {
             &b"\x1b[O"[..]
         }));
         if result.is_queued() {
-            pending.delivered = Some(focused);
             pending.desired = None;
         }
         result
@@ -4304,7 +4304,12 @@ impl Mux {
     ) -> PaneInputResult {
         let mut result = PaneInputResult::Queued;
         for (id, key, bytes) in releases {
-            if let Some(pane) = self.panes.get(id) {
+            if let Some(pane) = self.panes.get(id)
+                && pane.term.term.lock().ok().is_some_and(|term| {
+                    term.mode()
+                        .contains(kettle_core::TermMode::REPORT_EVENT_TYPES)
+                })
+            {
                 result = result.merge(pane.feed_key_release(*key, bytes.clone()));
             }
         }
@@ -5392,6 +5397,15 @@ mod node_tests {
             ids.push(mux.active_focus().unwrap());
         }
         let (a, b, c) = (ids[0], ids[1], ids[2]);
+        for id in [a, b] {
+            use alacritty_terminal::vte::ansi::{Handler, KeyboardModes};
+            mux.panes[&id]
+                .term
+                .term
+                .lock()
+                .unwrap()
+                .push_keyboard_mode(KeyboardModes::REPORT_EVENT_TYPES);
+        }
         assert!(mux.focus_pane(a));
         mux.broadcast = BroadcastScope::Tab;
         let (_, pressed) =
@@ -5456,6 +5470,70 @@ mod node_tests {
             },
             user_rx,
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_key_release_is_dropped_after_keyboard_reporting_resets() {
+        use alacritty_terminal::vte::ansi::{Handler, KeyboardModes};
+
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &["/bin/cat".into()],
+            None,
+        )
+        .expect("PTY fixture");
+        let id = mux.active_focus().unwrap();
+        let (queue, rx) = input_queue_fixture();
+        let pane = mux.panes.get_mut(&id).unwrap();
+        pane.pty_input = queue;
+        {
+            let mut term = pane.term.term.lock().unwrap();
+            term.push_keyboard_mode(KeyboardModes::REPORT_EVENT_TYPES);
+            term.pop_keyboard_modes(1);
+        }
+        let releases = [(
+            id,
+            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA),
+            Arc::from(&b"\x1b[97;1:3u"[..]),
+        )];
+        assert_eq!(mux.release_key_to(&releases), PaneInputResult::Queued);
+        let after_reset: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+        mux.panes[&id]
+            .term
+            .term
+            .lock()
+            .unwrap()
+            .push_keyboard_mode(KeyboardModes::REPORT_EVENT_TYPES);
+        assert_eq!(mux.release_key_to(&releases), PaneInputResult::Queued);
+        let while_reporting: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+        mux.kill_children();
+        assert!(
+            after_reset.is_empty(),
+            "a saved release must not reach the shell"
+        );
+        assert_eq!(while_reporting, [b"\x1b[97;1:3u".to_vec()]);
+    }
+
+    #[test]
+    fn focus_in_after_unreported_focus_out_is_delivered() {
+        let (queue, rx) = input_queue_fixture();
+        assert_eq!(queue.enqueue_focus_report(true), PaneInputResult::Queued);
+        assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[I");
+        // Focus-out occurred with reporting disabled, so the caller sent nothing.
+        assert_eq!(queue.enqueue_focus_report(true), PaneInputResult::Queued);
+        assert_eq!(queue.retry_pending_reports(), PaneInputResult::Queued);
+        assert_eq!(queue.retry_pending_reports(), PaneInputResult::Queued);
+        let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+        assert_eq!(delivered, [b"\x1b[I".to_vec()]);
     }
 
     #[test]

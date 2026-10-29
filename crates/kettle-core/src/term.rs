@@ -4066,6 +4066,8 @@ fn child_wslenv(parent: &str, extra_env: &[(String, String)]) -> String {
 pub type ShellChoice = (String, Vec<String>);
 
 static SHELL_CACHE: std::sync::OnceLock<Vec<ShellChoice>> = std::sync::OnceLock::new();
+// Keep the fallback separate: publishing it must not wait on a running probe.
+static SHELL_FALLBACK: std::sync::OnceLock<Vec<ShellChoice>> = std::sync::OnceLock::new();
 
 /// Auto-detect the shells to offer in
 /// the new-tab dropdown, Windows-Terminal style (and in WT's order). Always
@@ -4105,7 +4107,7 @@ pub fn detect_shells() -> Vec<ShellChoice> {
 
 /// Return cached choices while shell detection runs in the background.
 pub fn cached_shells() -> Option<Vec<ShellChoice>> {
-    cached_shells_from(&SHELL_CACHE)
+    cached_shells_from(&SHELL_CACHE).or_else(|| cached_shells_from(&SHELL_FALLBACK))
 }
 
 fn cached_shells_from(cache: &std::sync::OnceLock<Vec<ShellChoice>>) -> Option<Vec<ShellChoice>> {
@@ -4116,12 +4118,31 @@ fn cached_shells_from(cache: &std::sync::OnceLock<Vec<ShellChoice>>) -> Option<V
 /// (the probes can block up to ~4s worst-case on a wedged WSL service + a
 /// slow vswhere). Spawned once from `App::resumed`.
 pub fn prewarm_shell_detection(waker: crate::Waker) {
-    let _ = std::thread::Builder::new()
-        .name("kettle-shell-probe".into())
-        .spawn(move || {
-            let _ = detect_shells();
-            waker();
-        });
+    prewarm_shell_detection_with(&SHELL_FALLBACK, waker, |waker| {
+        std::thread::Builder::new()
+            .name("kettle-shell-probe".into())
+            .spawn(move || {
+                let _ = detect_shells();
+                waker();
+            })
+            .map(|_| ())
+    });
+}
+
+fn prewarm_shell_detection_with(
+    fallback_cache: &std::sync::OnceLock<Vec<ShellChoice>>,
+    waker: crate::Waker,
+    spawn: impl FnOnce(crate::Waker) -> std::io::Result<()>,
+) {
+    if let Err(error) = spawn(waker.clone()) {
+        log::warn!("cannot spawn shell detector: {error}");
+        #[cfg(windows)]
+        let fallback = ("Command Prompt", "cmd.exe");
+        #[cfg(not(windows))]
+        let fallback = ("Shell", "/bin/sh");
+        let _ = fallback_cache.set(vec![(fallback.0.into(), vec![fallback.1.into()])]);
+        waker();
+    }
 }
 
 #[cfg(any(windows, test))]

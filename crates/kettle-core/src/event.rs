@@ -220,9 +220,30 @@ impl ClipboardJournal {
             else {
                 break;
             };
-            self.remove_store(index);
+            self.evict_store_and_reads(index);
         }
         first
+    }
+
+    fn evict_store_and_reads(&mut self, index: usize) {
+        let TermEvent::ClipboardStore(target, _) = &self.entries[index] else {
+            unreachable!();
+        };
+        let target = *target;
+        self.remove_store(index);
+        // Reads can depend on this write even across writes to the other
+        // target: platforms may keep the targets separate or alias them.
+        let mut next = index;
+        while next < self.entries.len() {
+            match &self.entries[next] {
+                TermEvent::ClipboardStore(kept, _) if *kept == target => break,
+                TermEvent::ClipboardLoad(..) => {
+                    self.entries.remove(next);
+                    self.loads -= 1;
+                }
+                _ => next += 1,
+            }
+        }
     }
 
     fn remove_store(&mut self, index: usize) {
@@ -620,10 +641,19 @@ mod tests {
     #[test]
     fn clipboard_journal_bounds_stores_and_refuses_newest_loads() {
         let (proxy, rx, _) = gated_proxy(1024);
+        proxy.send_event(TermEvent::ClipboardStore(
+            ClipboardType::Clipboard,
+            "x".repeat(super::MAX_CLIPBOARD_ENTRY_BYTES + 1),
+        ));
+        let entries = proxy.take_clipboard_events();
+        let TermEvent::ClipboardStore(_, text) = &entries[0] else {
+            panic!("expected store");
+        };
+        assert_eq!(text.len(), super::MAX_CLIPBOARD_ENTRY_BYTES);
         for index in 0..super::MAX_CLIPBOARD_LOADS + 10 {
             proxy.send_event(TermEvent::ClipboardStore(
                 ClipboardType::Clipboard,
-                "x".repeat(super::MAX_CLIPBOARD_ENTRY_BYTES + 1),
+                "x".into(),
             ));
             proxy.send_event(TermEvent::ClipboardLoad(
                 ClipboardType::Clipboard,
@@ -653,6 +683,81 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn clipboard_byte_eviction_never_answers_reads_with_unrelated_contents() {
+        let (proxy, _rx, _) = gated_proxy(1024);
+        for label in ["A", "B", "C"] {
+            proxy.send_event(TermEvent::ClipboardStore(
+                ClipboardType::Clipboard,
+                label.repeat(super::MAX_CLIPBOARD_ENTRY_BYTES),
+            ));
+            proxy.send_event(TermEvent::ClipboardLoad(
+                ClipboardType::Clipboard,
+                Arc::new(move |text| {
+                    assert!(
+                        text.starts_with(label),
+                        "read {label} saw unrelated clipboard"
+                    );
+                    assert_eq!(text.len(), super::MAX_CLIPBOARD_ENTRY_BYTES);
+                    label.to_string()
+                }),
+            ));
+        }
+        let journal = proxy.latched.clipboard.lock().unwrap();
+        assert!(journal.bytes <= super::MAX_CLIPBOARD_BYTES);
+        assert!(journal.entries.len() <= super::MAX_CLIPBOARD_ENTRIES);
+        drop(journal);
+        let mut clipboard = "old OS clipboard".to_string();
+        let mut replies = Vec::new();
+        for event in proxy.take_clipboard_events() {
+            match event {
+                TermEvent::ClipboardStore(_, text) => clipboard = text,
+                TermEvent::ClipboardLoad(_, fmt) => replies.push(fmt(&clipboard)),
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(
+            replies,
+            ["B", "C"],
+            "evicted writes must take their reads with them"
+        );
+    }
+
+    #[test]
+    fn clipboard_eviction_drops_dependent_reads_across_other_target_writes() {
+        let (proxy, _rx, _) = gated_proxy(1024);
+        for (target, label) in [
+            (ClipboardType::Clipboard, "A"),
+            (ClipboardType::Selection, "B"),
+            (ClipboardType::Clipboard, "C"),
+        ] {
+            proxy.send_event(TermEvent::ClipboardStore(
+                target,
+                label.repeat(super::MAX_CLIPBOARD_ENTRY_BYTES),
+            ));
+            proxy.send_event(TermEvent::ClipboardLoad(
+                ClipboardType::Clipboard,
+                Arc::new(str::to_owned),
+            ));
+        }
+        let mut clipboard = "old OS clipboard".to_string();
+        let mut replies = Vec::new();
+        for event in proxy.take_clipboard_events() {
+            match event {
+                TermEvent::ClipboardStore(ClipboardType::Clipboard, text) => clipboard = text,
+                TermEvent::ClipboardStore(ClipboardType::Selection, _) => {}
+                TermEvent::ClipboardLoad(_, fmt) => replies.push(fmt(&clipboard)),
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(
+            replies.len(),
+            1,
+            "reads still depend on A after a selection write"
+        );
+        assert_eq!(replies[0], "C".repeat(super::MAX_CLIPBOARD_ENTRY_BYTES));
     }
 
     #[test]

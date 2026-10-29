@@ -19319,13 +19319,27 @@ fn loading_shell_menu_survives_construction_and_can_refresh() {
     }
 }
 
+fn enable_key_release_reporting(mux: &Mux) {
+    use alacritty_terminal::vte::ansi::{Handler, KeyboardModes};
+
+    for pane in mux.panes.values() {
+        pane.term
+            .term
+            .lock()
+            .unwrap()
+            .push_keyboard_mode(KeyboardModes::REPORT_EVENT_TYPES);
+    }
+}
+
 #[test]
 fn deferred_key_releases_only_follow_accepted_presses() {
     let (mux, rejected, accepted) = title_test_split_mux();
     let mut ws = WindowState::new(1, mux);
+    enable_key_release_reporting(&ws.mux);
     let (mux, ids) = title_test_tab_mux(1);
     let foreign = ids[0];
     let mut other = WindowState::new(2, mux);
+    enable_key_release_reporting(&other.mux);
     ws.mux.panes.get_mut(&rejected).unwrap().read_only = true;
     let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
     let presses: Vec<_> = [rejected, accepted, foreign]
@@ -19383,6 +19397,7 @@ fn deferred_key_releases_keep_an_accepted_press_when_a_repeat_is_rejected() {
         let (mux, ids) = title_test_tab_mux(1);
         let pane = ids[0];
         let mut ws = WindowState::new(1, mux);
+        enable_key_release_reporting(&ws.mux);
         let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
         let release = super::TerminalKeyRelease::new(Arc::from(&b"\x1b[1;1:3A"[..]), immediate);
         let targets = [(pane, b"\x1b[1;1A".to_vec())];
@@ -19426,6 +19441,7 @@ fn deferred_key_releases_remember_rejection_after_read_only_ends() {
     let (mux, ids) = title_test_tab_mux(1);
     let pane = ids[0];
     let mut ws = WindowState::new(1, mux);
+    enable_key_release_reporting(&ws.mux);
     let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
     let release = super::TerminalKeyRelease::new(Arc::from(&b"\x1b[1;1:3A"[..]), false);
     ws.mux.panes.get_mut(&pane).unwrap().read_only = true;
@@ -19460,6 +19476,7 @@ fn deferred_key_releases_survive_coalesced_presses_and_pane_migration() {
     let (mux, ids) = title_test_tab_mux(1);
     let pane = ids[0];
     let mut ws = WindowState::new(1, mux);
+    enable_key_release_reporting(&ws.mux);
     let queued = |content, key_presses| QueuedPaste {
         window: 1,
         target: Some(pane),
