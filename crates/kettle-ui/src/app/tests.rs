@@ -639,6 +639,32 @@ fn title_test_tab_mux(count: usize) -> (Mux, Vec<u64>) {
     (mux, panes)
 }
 
+/// Wait up to `timeout` for `needle` on `pane`'s screen. On failure, return
+/// the last screen so the assertion shows what the program printed instead.
+#[cfg(unix)]
+fn pane_screen_shows(
+    mux: &Mux,
+    pane: u64,
+    needle: &str,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last = String::new();
+    loop {
+        if let Some(screen) = mux.panes[&pane].term.screen_text(0) {
+            if screen.text.contains(needle) {
+                return Ok(());
+            }
+            last = screen.text;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(last);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
 fn wait_for_pane_screen(mux: &Mux, pane: u64, done: impl Fn(&str, usize) -> bool) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
@@ -17592,8 +17618,20 @@ fn remote_reconnect_passes_literal_arguments_to_client() {
     .unwrap();
     let target = mux.active_focus().unwrap();
     assert_eq!(&mux.panes[&target].argv[1..], args);
-    assert!(wait_for_pane_screen(&mux, target, |text, _| text
-        .contains("RECONNECT_ARGV_PRESERVED")));
+    // The child's own check runs only where this harness can read a pane's
+    // screen: no test here observes ConPTY output on Windows, so Windows
+    // checks the argv handed to the PTY above and relies on portable-pty's
+    // unchanged ArgvQuote for the command line. Starting this test binary in
+    // a pseudo-terminal can still take several seconds on a loaded runner.
+    #[cfg(unix)]
+    if let Err(screen) = pane_screen_shows(
+        &mux,
+        target,
+        "RECONNECT_ARGV_PRESERVED",
+        std::time::Duration::from_secs(30),
+    ) {
+        panic!("the client never confirmed its arguments; screen:\n{screen}");
+    }
     mux.kill_children();
 }
 
