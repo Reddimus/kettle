@@ -15,7 +15,9 @@
 //! `--agent claude` selects its printed function. Setup is Unix-only.
 #![cfg_attr(not(unix), allow(dead_code))]
 
-use crate::cli::{SetupAgent, SetupArgs, SetupShell};
+#[cfg(unix)]
+use crate::cli::SetupAgent;
+use crate::cli::{SetupArgs, SetupShell};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
