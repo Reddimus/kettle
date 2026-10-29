@@ -367,9 +367,7 @@ mod tests {
         assert_eq!(session.theme, expected.theme);
     }
 
-    /// Runs alone: macOS marks a received descriptor close-on-exec only after
-    /// `recvmsg` returns, and a child another test spawns in between would keep
-    /// the peer from seeing end of file.
+    /// Runs alone so other tests cannot change the process descriptor table.
     #[test]
     fn handoff_failures_close_received_fds() {
         kettle_test_support::run_alone_in_child(
@@ -379,35 +377,78 @@ mod tests {
     }
 
     fn handoff_failures_close_received_fds_alone() {
-        use std::io::Read;
         for payload in [b"{".to_vec(), vec![b' '; 1024 * 1024 + 1]] {
-            let (sender, receiver) = UnixStream::pair().unwrap();
-            let (passed, mut peer) = UnixStream::pair().unwrap();
-            // Before the far end closes: macOS refuses the option after. End of
-            // file comes at once when the descriptor is closed; the wait only
-            // bounds a leak, and a loaded macOS runner has taken over 1 s to
-            // let the closed descriptor go.
-            peer.set_read_timeout(Some(std::time::Duration::from_secs(10)))
-                .unwrap();
-            // The descriptor travels with the first byte; macOS refuses one
-            // `sendmsg` of over 1 MiB with ancillary data.
-            let payload_len = payload.len();
-            let writer = std::thread::spawn(move || {
-                use std::io::Write as _;
-                crate::fd_transport::send_fds(&sender, &payload[..1], &[passed.as_raw_fd()])
-                    .unwrap();
-                (&sender).write_all(&payload[1..]).unwrap();
-                sender.shutdown(std::net::Shutdown::Write).unwrap();
-            });
-            let result = receive_handoff_session(&receiver);
-            writer.join().unwrap();
-            assert!(result.is_err());
-            let end = peer.read(&mut [0u8]);
-            assert!(
-                matches!(end, Ok(0)),
-                "a {payload_len}-byte handoff kept the received descriptor: {end:?}"
-            );
+            assert_handoff_failure_closes_received_fds(payload, receive_handoff_session);
         }
+    }
+
+    #[test]
+    fn handoff_timeouts_leave_no_received_fds() {
+        kettle_test_support::run_alone_in_child(
+            "app::sessions::tests::handoff_timeouts_leave_no_received_fds",
+            || {
+                assert_handoff_failure_closes_received_fds(b"{".to_vec(), |socket| {
+                    let result =
+                        super::receive_handoff_session_until(socket, std::time::Instant::now());
+                    assert!(
+                        matches!(&result, Err(error) if error.kind() == std::io::ErrorKind::TimedOut)
+                    );
+                    result
+                });
+            },
+        );
+    }
+
+    fn assert_handoff_failure_closes_received_fds(
+        payload: Vec<u8>,
+        receive: impl FnOnce(&UnixStream) -> std::io::Result<crate::session::Session>,
+    ) {
+        let before = open_fds();
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        let (passed, peer) = UnixStream::pair().unwrap();
+        // The descriptor travels with the first byte; macOS refuses one
+        // `sendmsg` of over 1 MiB with ancillary data.
+        let payload_len = payload.len();
+        let writer = std::thread::spawn(move || {
+            use std::io::Write as _;
+            crate::fd_transport::send_fds(&sender, &payload[..1], &[passed.as_raw_fd()]).unwrap();
+            (&sender).write_all(&payload[1..]).unwrap();
+            sender.shutdown(std::net::Shutdown::Write).unwrap();
+        });
+        let result = receive(&receiver);
+        writer.join().unwrap();
+        assert!(result.is_err());
+        drop(receiver);
+        drop(peer);
+        // Queued rights and macOS socket garbage collection can delay peer EOF
+        // without retaining a descriptor in this process.
+        assert_eq!(
+            open_fds(),
+            before,
+            "a {payload_len}-byte handoff leaked process descriptors"
+        );
+    }
+
+    fn open_fds() -> std::collections::BTreeSet<i32> {
+        let fds: Vec<i32> = std::fs::read_dir("/dev/fd")
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        // The directory iterator has closed its own descriptor before this scan.
+        fds.into_iter()
+            .filter(|&fd| {
+                // SAFETY: F_GETFD only queries the descriptor number, including closed ones.
+                unsafe { libc::fcntl(fd, libc::F_GETFD) >= 0 }
+            })
+            .collect()
     }
 }
 
