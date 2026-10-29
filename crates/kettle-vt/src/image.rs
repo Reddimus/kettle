@@ -844,6 +844,7 @@ mod tests {
             image_bytes: 1024 * 1024,
             retained_bytes: 1024 * 1024,
             process_cpu_bytes: 5 * 1024 * 1024 / 2,
+            transient_cpu_bytes: 5 * 1024 * 1024 / 2,
             ..crate::GraphicsLimits::default()
         })
         .unwrap();
@@ -875,6 +876,7 @@ mod tests {
             image_bytes: 64 * 1024,
             retained_bytes: 64 * 1024,
             process_cpu_bytes: 128 * 1024,
+            transient_cpu_bytes: 128 * 1024,
             ..crate::GraphicsLimits::default()
         };
         let budget = GraphicsBudget::isolated(limits).unwrap();
@@ -1076,6 +1078,7 @@ mod transient_crop_tests {
             retained_bytes,
             animation_bytes: 8,
             process_cpu_bytes: 64,
+            transient_cpu_bytes: 64,
             process_gpu_bytes: 64,
             ..GraphicsLimits::default()
         })

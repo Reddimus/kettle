@@ -20,16 +20,6 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   reviewed glyphon path does not call the affected `pop()` method, and a fork
   adds supply-chain surface. Close #207 when upstream accepts `lru >=0.18.2`;
   remove the audit ignores and `scripts/check-lru-scope.py` together.
-- **Per-terminal graphics decode ceiling.** Control strings up to 64 KiB no
-  longer charge the shared graphics account, and a string refused for memory
-  is discarded through its limit, so one pane's images cannot break another
-  pane's titles, prompt marks or clipboard writes. Images still compete for
-  the 512 MiB process account: one maximum kitty transmission can transiently
-  hold about 390 MiB (accumulated payload, whitespace-free copy, decoded and
-  inflated bytes, decoder scratch) in `crates/kettle-vt/src/kitty.rs`, so a
-  per-terminal ceiling below that would refuse legitimate images. Deferred
-  until decoding streams from the accumulated payload. Close by releasing each
-  stage before the next, then adding a per-terminal transient ceiling.
 - **`setsid()` descendants outside the Linux command line.** The Linux
   `kettle exec` command line adopts descendants that leave the PTY session and
   stops them on timeout or cancellation (`crates/kettle/src/exec.rs`). macOS

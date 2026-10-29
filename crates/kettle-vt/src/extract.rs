@@ -4611,6 +4611,7 @@ mod ordinary_graphics_reply_tests {
             image_bytes: 4,
             retained_bytes: 4,
             process_cpu_bytes: 64 * 1024,
+            transient_cpu_bytes: 64 * 1024,
             ..crate::GraphicsLimits::default()
         };
         let budget = crate::GraphicsBudget::isolated(limits).expect("small valid retained limit");
@@ -5130,6 +5131,7 @@ mod animation_graphics_reply_tests {
             image_bytes: 8,
             retained_bytes: 16,
             process_cpu_bytes: 64 * 1024,
+            transient_cpu_bytes: 64 * 1024,
             ..crate::GraphicsLimits::default()
         };
         let budget = crate::GraphicsBudget::isolated(limits).expect("small valid retained limit");
@@ -5354,6 +5356,7 @@ mod animation_graphics_reply_tests {
             image_bytes: 8,
             retained_bytes: 16,
             process_cpu_bytes: 64 * 1024,
+            transient_cpu_bytes: 64 * 1024,
             ..crate::GraphicsLimits::default()
         })
         .expect("two retained frames fit");

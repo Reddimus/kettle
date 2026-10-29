@@ -2314,14 +2314,39 @@ most eight/128 MiB in flight; decoded images and individual textures at 64 MiB;
 animation payloads at 128 frames/128 MiB; and placements at 256. RAII leases
 charge Kettle-owned decoded buffers, image textures, custom glyph atlases, and
 instance buffers to a 256 MiB terminal/window scope and 512 MiB process
-accounts. Decoders reserve before allocation. Pixels and their CPU lease share
+accounts. A separate 192 MiB transient CPU ceiling is shared by each terminal's
+active/inactive screens, partial transmissions, escape storage above 64 KiB,
+queries, upload staging, and animation decode scopes. Transient leases charge
+both that ceiling and the 512 MiB process CPU account; retained pixels have
+separate scope counters. A refusal rolls back both charges and keeps the existing
+protocol refusal/reply behavior. Independent terminals share only the process
+account, so one terminal at its transient ceiling leaves room for another decode
+unless other process allocations exhaust that account.
+
+The maximum-size Kitty accounting regression measures 176,160,750 bytes
+(167.999983 MiB), down from 411,041,751 bytes (391.999961 MiB) before staging.
+The default allows 96 MiB accumulated transmission + 72 MiB base64 output =
+168 MiB, plus 16 MiB for an active extractor sequence and 8 MiB headroom.
+Base64 filtering uses a fixed 4 KiB stack block, without a whitespace-free payload
+copy. The accumulator and its lease drop before inflation; compressed bytes and
+their lease drop before image decoding. Inflation grows geometrically under its
+cap, charging old capacity during moving reallocations. It keeps capacity charged
+and compacts any unused capacity only after releasing compressed input. iTerm2 uses the same
+bounded base64 filtering. Sixel has no intermediate base64 or inflated buffer;
+its old/new canvas overlap during geometric growth and final compaction already
+uses retained image leases and remains bounded by the image and process limits.
+All transmission, inflate, image, in-flight, dimension, and work limits still
+apply; file/shm Kitty media remain unsupported. Decoder scratch remains charged:
+non-JPEG codecs use the per-image bound, while JPEG uses the existing checked
+input/geometry estimate and can refuse on either transient or process pressure.
+Decoders reserve before allocation. Pixels and their CPU lease share
 one `Arc<PixelBuffer>`; retaining a pixel handle keeps its allocation charged
 even after its last `ImageData` wrapper is dropped. Read-only access cannot
 detach the lease or resize the buffer. Copy-on-write reserves a second image
 while retaining the original snapshot's charge. Encoded images parse their headers once
 with the decoder's existing dimension and working-allocation limits, then
 reserve the actual RGBA output size before decoding pixels. The separate
-conservative scratch reservation remains bounded by the per-image ceiling;
+conservative scratch reservation follows the codec bounds above;
 unused output capacity does not consume the retained-image quota. Consuming an
 already-RGBA8 decoded buffer avoids an extra full-image copy. Partial animation
 frames compose onto a full base-sized canvas. If neither a background/edit frame
@@ -2461,8 +2486,9 @@ Unicode placeholder cells themselves are reflowed by the grid.
 Kitty capability queries (`a=q,i=`) decode direct RGB/RGBA, compressed data,
 and supported encoded images without retaining or replacing an image. Their
 separate partial accumulator shares the existing transmission ceilings;
-temporary decoded pixels use a fresh scope under the same process account,
-so a full terminal retained quota does not prevent a capability probe. All
+temporary decoded pixels use a fresh retained scope under the same process
+account while transient storage shares the terminal ceiling, so a full terminal
+retained quota does not prevent a capability probe. All
 temporary leases are released before the reply. Typed query results become
 `Chunk::GraphicsReply` and use the existing `EventProxy` PTY-write channel in
 wire order. Queries and their continuations bypass DEC 2026 graphics deferral;
@@ -2516,9 +2542,9 @@ rectangles, and unavailable storage return typed errors without changing pixels.
 Animation controls cannot create playback state before a root exists, and invalid
 current-frame selectors leave playback selection unchanged.
 
-Kitty transmission decodes once into a temporary scope under the existing process
-account. At retained-byte or active image-count pressure, extraction requests an
-admission plan before publishing the new image. The Core handler adds metadata
+Kitty transmission decodes once into a temporary retained scope under the existing
+process account, sharing its terminal's transient ceiling. At retained-byte or
+active image-count pressure, extraction requests an admission plan before publishing the new image. The Core handler adds metadata
 for physical, virtual, relative, animation, and inactive-screen owners without
 cloning pixels. Weak allocation witnesses allow planning to read current strong
 owner counts without retaining pixels; current scope usage also reflects snapshots

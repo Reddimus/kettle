@@ -370,6 +370,16 @@ without creating a pane. Ignored probe functions run only as subprocess fixtures
 a macOS pass does not verify procfs or Windows. Windows keeps its existing
 environment behavior.
 
+The graphics decode accounting regressions run with
+`cargo test -j 2 --locked --offline -p kettle-vt transient_ -- --nocapture`.
+The maximum-transmission test feeds a 96 MiB chunked Kitty upload that inflates
+to the 64 MiB cap and decodes a 4096x4096 RGBA image. It prints and asserts the
+transient high-water charge, verifies idle-terminal admission, and releases all
+leases. Other cases cover a full terminal while a second terminal decodes under
+the same process account, failed decode/growth rollback, shared query/staging
+ceilings, and iTerm2's bounded base64 stage. These are CPU accounting checks;
+they do not require a GPU or live UI.
+
 ### Drift guards and source scans
 
 Some contracts cross files or cannot be exercised cheaply in every unit test.

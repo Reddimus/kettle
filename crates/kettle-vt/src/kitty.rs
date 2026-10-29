@@ -23,6 +23,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 
+#[cfg(test)]
 use base64::Engine;
 
 use crate::graphics_limits::{GraphicsBudget, GraphicsReservation, InFlightReservation};
@@ -1014,13 +1015,7 @@ impl KittyState {
             .expect("accepted query accumulator");
         let status = if first.get("t").is_some_and(|medium| medium != "d") {
             QueryStatus::UnsupportedMedium
-        } else if decode_with_budget(
-            &acc.data.control,
-            &acc.data.payload,
-            &self.budget.query_scope(),
-        )
-        .is_some()
-        {
+        } else if decode_acc_with_budget(acc.data, &self.budget.query_scope()).is_some() {
             QueryStatus::Ok
         } else {
             QueryStatus::Invalid
@@ -1422,19 +1417,13 @@ impl KittyState {
         if more {
             return CommandResult::partial();
         }
-        let Acc {
-            control,
-            payload,
-            reservation: _payload_reservation,
-            in_flight: _in_flight_reservation,
-            reply: _,
-        } = self.in_flight.remove(&id).unwrap_or_default();
-        let first = parse_control(&control);
+        let acc = self.in_flight.remove(&id).unwrap_or_default();
+        let first = parse_control(&acc.control);
         if first.get("t").is_some_and(|medium| medium != "d") {
             return CommandResult::refused(intent, CommandStatus::UnsupportedMedium);
         }
         let temporary = self.budget.query_scope();
-        let Some(mut img) = decode_with_budget(&control, &payload, &temporary) else {
+        let Some(mut img) = decode_acc_with_budget(acc, &temporary) else {
             return CommandResult::refused(intent, CommandStatus::InvalidImage);
         };
         let Some(created) = self.budget.next_image_order() else {
@@ -1993,7 +1982,7 @@ impl KittyState {
             return CommandResult::refused(intent, CommandStatus::UnsupportedMedium);
         }
         let staging = self.budget.query_scope();
-        let Some(patch) = decode_with_budget(&acc.control, &acc.payload, &staging) else {
+        let Some(patch) = decode_acc_with_budget(acc, &staging) else {
             return CommandResult::refused(intent, CommandStatus::InvalidImage);
         };
         let dim = |key: &str| first.get(key).and_then(|value| value.parse::<u32>().ok());
@@ -2182,14 +2171,25 @@ fn inflate_bounded_with_budget(
         if n == 0 {
             break;
         }
-        out.try_reserve_exact(n).ok()?;
+        let needed = out.len().checked_add(n)?;
+        if needed > out.capacity() {
+            // The cap lease covers the new allocation. A moving reallocation
+            // also holds the old capacity until the allocator releases it.
+            let _moving = if out.capacity() > 0 {
+                Some(budget.reserve_transient_cpu(out.capacity())?)
+            } else {
+                None
+            };
+            let capacity = needed.max(out.capacity().saturating_mul(2)).min(cap);
+            out.try_reserve_exact(capacity - out.len()).ok()?;
+        }
         out.extend_from_slice(&chunk[..n]);
     }
     let mut extra = [0u8; 1];
     if decoder.read(&mut extra).ok()? != 0 || out.is_empty() {
         return None;
     }
-    if !reservation.shrink_to(out.len()) {
+    if !reservation.shrink_to(out.capacity()) {
         return None;
     }
     Some((out, reservation))
@@ -2206,43 +2206,50 @@ fn decode(control: &str, b64: &str) -> Option<ImageData> {
     decode_with_budget(control, b64, &GraphicsBudget::default())
 }
 
+#[cfg(test)]
 fn decode_with_budget(control: &str, b64: &str, budget: &GraphicsBudget) -> Option<ImageData> {
-    let kv = parse_control(control);
-    // STANDARD base64 rejects embedded whitespace;
-    // `.trim()` only strips the ends. Strip all ASCII whitespace so a line-wrapped
-    // single-shot kitty payload still decodes (the chunked m=1 path is fine).
     if b64.len() > budget.limits().transmission_bytes {
         return None;
     }
-    let (cleaned, _cleaned_reservation): (std::borrow::Cow<'_, [u8]>, _) =
-        if b64.bytes().any(|b| b.is_ascii_whitespace()) {
-            let reservation = budget.reserve_transient_cpu(b64.len().max(1))?;
-            let mut bytes = Vec::new();
-            bytes.try_reserve_exact(b64.len()).ok()?;
-            bytes.extend(b64.bytes().filter(|b| !b.is_ascii_whitespace()));
-            (std::borrow::Cow::Owned(bytes), Some(reservation))
-        } else {
-            (std::borrow::Cow::Borrowed(b64.as_bytes()), None)
-        };
-    let decoded_cap = cleaned
-        .len()
-        .checked_add(3)?
-        .checked_div(4)?
-        .checked_mul(3)?
-        .max(1);
-    if decoded_cap > budget.limits().transmission_bytes {
-        return None;
-    }
-    let _raw_reservation = budget.reserve_transient_cpu(decoded_cap)?;
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(cleaned.as_ref())
-        .ok()?;
-    let (raw, _inflated_reservation) = if kv.get("o").map(|s| s == "z").unwrap_or(false) {
+    let (raw, reservation) = crate::decode_base64::decode(b64, budget)?;
+    decode_raw_with_budget(parse_control(control), raw, reservation, budget)
+}
+
+fn decode_acc_with_budget(acc: Acc, budget: &GraphicsBudget) -> Option<ImageData> {
+    let kv = parse_control(&acc.control);
+    let (raw, reservation) = crate::decode_base64::decode(&acc.payload, budget)?;
+    // The accumulator owns both payload capacity and its lease. Neither survives
+    // into inflation or pixel decoding, including queries and animation frames.
+    drop(acc);
+    decode_raw_with_budget(kv, raw, reservation, budget)
+}
+
+fn decode_raw_with_budget(
+    kv: HashMap<String, String>,
+    raw: Vec<u8>,
+    raw_reservation: GraphicsReservation,
+    budget: &GraphicsBudget,
+) -> Option<ImageData> {
+    let (raw, _raw_reservation) = if kv.get("o").is_some_and(|s| s == "z") {
         let (inflated, reservation) =
             inflate_bounded_with_budget(&raw, budget.limits().image_bytes, budget)?;
-        (inflated, Some(reservation))
+        drop(raw);
+        drop(raw_reservation);
+        if inflated.capacity() == inflated.len() {
+            (inflated, reservation)
+        } else {
+            // Compact only after releasing compressed input. The old capacity
+            // stays charged during the copy, including for raw RGBA ownership.
+            let tight_reservation = budget.reserve_transient_cpu(inflated.len())?;
+            let mut tight = Vec::new();
+            tight.try_reserve_exact(inflated.len()).ok()?;
+            tight.extend_from_slice(&inflated);
+            drop(inflated);
+            drop(reservation);
+            (tight, tight_reservation)
+        }
     } else {
-        (raw, None)
+        (raw, raw_reservation)
     };
     match kv.get("f").map(|s| s.as_str()).unwrap_or("32") {
         "100" => ImageData::from_encoded_with_budget(&raw, budget),
@@ -2290,6 +2297,150 @@ mod tests {
             KittyOut::Query(reply) => Some(reply.encode()),
             KittyOut::None => None,
             _ => panic!("query must not place, delete, or animate an image"),
+        }
+    }
+
+    // A maximum transmission and maximum RGBA output, through all decode stages.
+    // PNG and zlib permit trailing bytes; padding exercises the wire/inflate caps
+    // without a large incompressible fixture checked into the repository.
+    fn maximum_transmission(budget: &GraphicsBudget) -> KittyState {
+        use image::ImageEncoder;
+        use std::io::Write;
+        let limits = budget.limits();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(
+                &vec![0; limits.image_bytes],
+                4096,
+                4096,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        png.resize(limits.image_bytes, 0);
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&png).unwrap();
+        drop(png);
+        let mut compressed = encoder.finish().unwrap();
+        let control = "a=t,i=1,f=100,o=z,m=1";
+        let clean_len = (limits.transmission_bytes - control.len() - 1) / 4 * 4;
+        compressed.resize(clean_len / 4 * 3, 0);
+        let mut payload = base64::engine::general_purpose::STANDARD.encode(&compressed);
+        drop(compressed);
+        payload.insert(4, ' ');
+        payload.extend(std::iter::repeat_n(
+            ' ',
+            limits.transmission_bytes - control.len() - payload.len(),
+        ));
+        let mut state = KittyState::new(budget.clone());
+        for (index, chunk) in payload.as_bytes().chunks(1024 * 1024).enumerate() {
+            let control = if index == 0 { control } else { "m=1" };
+            let body = format!("{control};{}", std::str::from_utf8(chunk).unwrap());
+            state.feed(&body);
+        }
+        drop(payload);
+        assert_eq!(state.in_flight_bytes(), limits.transmission_bytes);
+        state.feed("m=0;");
+        state
+    }
+
+    #[test]
+    fn maximum_transmission_transient_peak_and_idle_terminal_decode() {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+        let state = maximum_transmission(&budget);
+        let (current, peak) = budget.transient_usage();
+        eprintln!(
+            "maximum transmission transient peak: {peak} bytes ({:.6} MiB)",
+            peak as f64 / 1048576.0
+        );
+        let image = state
+            .image(1)
+            .expect("maximum legitimate image decodes on an idle terminal");
+        assert_eq!(
+            (image.width, image.height, image.rgba.len()),
+            (4096, 4096, 64 * 1024 * 1024)
+        );
+        assert_eq!(current, 0);
+        assert_eq!(peak, 176_160_750);
+        assert!(peak <= 168 * 1024 * 1024, "staged transient peak: {peak}");
+        assert!(peak < 390 * 1024 * 1024 / 2);
+        drop(state);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn terminal_transient_ceiling_refuses_decode_without_blocking_another_terminal() {
+        let first = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+        let second = first.terminal_scope();
+        let held = first
+            .reserve_transient_cpu(first.limits().transient_cpu_bytes)
+            .unwrap();
+        let mut state = KittyState::new(first.clone());
+        let result = state.feed_command(Command::parse("a=t,i=1,f=32,s=1,v=1;AQIDBA==").unwrap());
+        assert!(matches!(
+            result.completion,
+            CommandCompletion::Finished(Some(CommandReply {
+                status: CommandStatus::NoSpace,
+                ..
+            }))
+        ));
+        assert_eq!(
+            query_reply(state.feed("a=q,i=2,f=32,s=1,v=1;AQIDBA==")),
+            Some("\x1b_Gi=2;EINVAL:Invalid image data\x1b\\".into())
+        );
+        let mut other = KittyState::new(second);
+        other.feed("a=t,i=3,f=32,s=1,v=1;AQIDBA==");
+        assert!(other.image(3).is_some());
+        assert_eq!(first.transient_usage().0, held.bytes());
+        drop((held, state, other));
+        assert_eq!(first.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn transient_refused_decode_releases_partial_reservations() {
+        let limits = crate::GraphicsLimits {
+            transient_cpu_bytes: 64,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = GraphicsBudget::isolated(limits).unwrap();
+        let held = budget.reserve_transient_cpu(32).unwrap();
+        let mut state = KittyState::new(budget.clone());
+        // Accumulator fits, but its base64 output does not fit alongside it.
+        state.feed("a=t,i=1,f=32,s=1,v=1;AQIDBA==");
+        assert!(state.image(1).is_none());
+        assert_eq!(budget.transient_usage().0, 32);
+        assert_eq!(budget.usage(), (32, 0, 0, 0));
+        assert_eq!(budget.in_flight_usage(), (0, 0));
+        drop((held, state));
+        assert_eq!(budget.transient_usage().0, 0);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+
+        use image::ImageEncoder;
+        use std::io::Write;
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[1, 2, 3, 4], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&vec![0; 32768]).unwrap();
+        for (control, bytes, image_cap, transient_cap) in [
+            ("f=100", png, 1024, 1024), // Decoder scratch overlaps encoded bytes.
+            (
+                "f=32,s=8192,v=1,o=z",
+                encoder.finish().unwrap(),
+                32768,
+                40000,
+            ), // Moving inflate buffer.
+        ] {
+            let budget = GraphicsBudget::isolated(crate::GraphicsLimits {
+                image_bytes: image_cap,
+                transient_cpu_bytes: transient_cap,
+                ..crate::GraphicsLimits::default()
+            })
+            .unwrap();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+            assert!(decode_with_budget(control, &encoded, &budget).is_none());
+            assert_eq!(budget.transient_usage().0, 0);
+            assert_eq!(budget.usage(), (0, 0, 0, 0));
         }
     }
 
@@ -2387,6 +2538,7 @@ mod tests {
             image_bytes: 64 * 1024,
             retained_bytes: 64 * 1024,
             process_cpu_bytes: 512 * 1024,
+            transient_cpu_bytes: 512 * 1024,
             ..crate::GraphicsLimits::default()
         };
         let budget = GraphicsBudget::isolated(limits).unwrap();
@@ -2445,6 +2597,23 @@ mod tests {
     /// and copying first; a correctly-sized payload still decodes.
     #[test]
     fn kitty_f24_validates_payload_length_before_alloc() {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+        for blocks in [0, 1, 2] {
+            for tail in [
+                "", "A", "AA", "AAA", "AAAA", "AA==", "AAA=", "AB==", "AAB=", "AA==AAAA", "%%%%",
+                "é",
+            ] {
+                let clean = format!("{}{tail}", "AAAA".repeat(blocks * 1024));
+                let wrapped = clean.replace('A', "A \r\n\t");
+                let expected = base64::engine::general_purpose::STANDARD
+                    .decode(&clean)
+                    .ok();
+                let actual =
+                    crate::decode_base64::decode(&wrapped, &budget).map(|(bytes, _)| bytes);
+                assert_eq!(actual, expected, "{blocks} blocks, tail {tail}");
+                assert_eq!(budget.usage(), (0, 0, 0, 0));
+            }
+        }
         // 1x1 RGB needs exactly 3 bytes. PX decodes to 4 -> mismatch -> None.
         assert!(super::decode("f=24,s=1,v=1", PX).is_none());
         // Exactly 3 bytes (base64 "AQID" = [1,2,3]) -> decodes.
@@ -2485,6 +2654,27 @@ mod tests {
         assert_eq!(ok.len(), 64 * 1024);
         // Tiny cap (1 KiB) → rejected without materializing the 64 KiB output.
         assert!(super::inflate_bounded(&compressed, 1024).is_none());
+
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+        for bytes in [4, 10004, 32764] {
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+            encoder.write_all(&vec![7; bytes]).unwrap();
+            let payload =
+                base64::engine::general_purpose::STANDARD.encode(encoder.finish().unwrap());
+            let image =
+                decode_with_budget(&format!("f=32,s={},v=1,o=z", bytes / 4), &payload, &budget)
+                    .unwrap();
+            assert_eq!(image.rgba.len(), bytes);
+            assert_eq!(
+                image.rgba.capacity(),
+                bytes,
+                "inflated capacity transfers without unused storage"
+            );
+            assert_eq!(budget.transient_usage().0, 0);
+            assert_eq!(budget.usage(), (bytes, bytes, 0, 0));
+            drop(image);
+            assert_eq!(budget.usage(), (0, 0, 0, 0));
+        }
     }
 
     #[test]
@@ -3047,6 +3237,7 @@ mod tests {
                 image_bytes: 64,
                 retained_bytes: 160,
                 process_cpu_bytes: 1024,
+                transient_cpu_bytes: 1024,
                 ..crate::GraphicsLimits::default()
             };
             let budget = crate::GraphicsBudget::isolated(limits).unwrap();

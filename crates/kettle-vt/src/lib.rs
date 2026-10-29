@@ -33,6 +33,7 @@
 
 pub mod completion;
 pub mod control;
+mod decode_base64;
 pub mod extract;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;

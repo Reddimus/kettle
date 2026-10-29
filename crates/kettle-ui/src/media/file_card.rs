@@ -411,6 +411,7 @@ mod tests {
             image_bytes: bytes,
             retained_bytes: bytes,
             process_cpu_bytes: bytes,
+            transient_cpu_bytes: bytes,
             process_gpu_bytes: bytes,
             ..kettle_core::GraphicsLimits::default()
         })
