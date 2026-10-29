@@ -3549,7 +3549,7 @@ fn require_file(path: &Path, label: impl std::fmt::Display) -> Result<(), Update
     Ok(())
 }
 
-#[cfg(any(windows, target_os = "linux", test))]
+#[cfg(any(windows, test))]
 fn collect_files(root: &Path) -> Result<Vec<PathBuf>, UpdateError> {
     if !root.is_dir() {
         return Err(UpdateError::MissingArchiveFile(root.display().to_string()));
