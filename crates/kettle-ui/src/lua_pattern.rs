@@ -693,6 +693,7 @@ fn gsub(
         count: 0,
     };
     let mut src = 0;
+    let mut unmatched = 0;
     let mut lastmatch = None;
     let mut count = 0;
     let mut changed = false;
@@ -701,6 +702,7 @@ fn gsub(
         let end = matcher.matches(src, usize::from(anchor), 0)?;
         if let Some(end) = end.filter(|&end| Some(end) != lastmatch) {
             count += 1;
+            output.append(&bytes[unmatched..src])?;
             if let Some(replacement) = &replacement_string {
                 add_string(lua, &matcher, &mut output, replacement, src, end)?;
                 changed = true;
@@ -741,9 +743,9 @@ fn gsub(
                 }
             }
             src = end;
+            unmatched = end;
             lastmatch = Some(end);
         } else if src < bytes.len() {
-            output.append(&bytes[src..src + 1])?;
             src += 1;
         } else {
             break;
@@ -753,7 +755,7 @@ fn gsub(
         }
     }
     let result = if changed {
-        output.append(&bytes[src..])?;
+        output.append(&bytes[unmatched..])?;
         concat.call::<mlua::LuaString>(output.chunks)?
     } else {
         subject
@@ -938,6 +940,36 @@ mod tests {
             run(native),
             "{op}: subject {s:?}, pattern {p:?}, init {init}, plain {plain}, replacement {replacement}, n {n:?}"
         );
+    }
+
+    #[test]
+    fn gsub_mib_misses_and_sparse_matches_use_bounded_memory() {
+        for match_at in [None, Some(0), Some(1 << 19), Some((1 << 20) - 1)] {
+            let lua = Lua::new();
+            let budget = Arc::new(Budget::new(Arc::new(AtomicBool::new(false))));
+            install(&lua, budget).unwrap();
+            let mut bytes = vec![b'a'; 1 << 20];
+            if let Some(at) = match_at {
+                bytes[at] = b'b';
+            }
+            let subject = lua.create_string(&bytes).unwrap();
+            let substitute: Function = lua
+                .load("return function(s) return string.gsub(s, 'b', 'x') end")
+                .eval()
+                .unwrap();
+            lua.gc_collect().unwrap();
+            lua.gc_stop();
+            // Allow strings and concatenation, but no table entry per missed byte.
+            lua.set_memory_limit(lua.used_memory() + (8 << 20)).unwrap();
+            let (result, count): (mlua::LuaString, i64) = substitute
+                .call(subject)
+                .unwrap_or_else(|err| panic!("match at {match_at:?}: {err}"));
+            if let Some(at) = match_at {
+                bytes[at] = b'x';
+            }
+            assert_eq!(count, i64::from(match_at.is_some()));
+            assert_eq!(&*result.as_bytes(), bytes);
+        }
     }
 
     #[test]

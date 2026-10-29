@@ -515,7 +515,7 @@ fn write_out_attested(
 #[cfg(unix)]
 fn write_out_attested(
     out: &Path,
-    _input: &Path,
+    input_path: &Path,
     input: ExternalAttested,
     bytes: &[u8],
     after_check: impl FnOnce(),
@@ -563,6 +563,14 @@ fn write_out_attested(
         }
     } else if std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound {
         return Err(OutputRefusal::Unwritable);
+    }
+    // The input path may now name a replacement for the attested video.
+    if let (Ok(out), Ok(input)) = (
+        std::fs::canonicalize(out),
+        std::fs::canonicalize(input_path),
+    ) && out == input
+    {
+        return Err(OutputRefusal::IsInput);
     }
     after_check();
     if shared_directory(&parent)? {
@@ -979,6 +987,22 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(".tmp")
         }));
+    }
+
+    #[test]
+    fn output_refuses_replaced_input_path() {
+        let root = kettle_test_support::private_tempdir("kettle-video-replaced-input-");
+        let input = root.path().join("clip.mp4");
+        let original = root.path().join("original.mp4");
+        std::fs::write(&input, b"original video").unwrap();
+        let attestation = crate::show_cli::attest(&input).unwrap();
+        std::fs::rename(&input, &original).unwrap();
+        std::fs::write(&input, b"replacement video").unwrap();
+
+        let result = write_out_attested(&input, &input, attestation, b"jpeg", || {});
+        assert_eq!(std::fs::read(&input).unwrap(), b"replacement video");
+        assert_eq!(result, Err(OutputRefusal::IsInput));
+        assert_eq!(std::fs::read(&original).unwrap(), b"original video");
     }
 
     #[cfg(unix)]
