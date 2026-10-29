@@ -331,6 +331,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Finish a `kettle exec` recording before returning from a timeout or
   cancellation, instead of reporting a healthy recording as incomplete and
   leaving the file locked.
+- Keep a media render whose worker answered and exited cleanly when the
+  waiting thread resumes late on a loaded machine, instead of reporting
+  the worker as unavailable.
 
 ### Security
 
@@ -342,6 +345,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   stopped with the command on timeout or cancellation, and one command's
   cancellation never touches another's. `kettle exec` now treats SIGTERM and
   SIGINT as a bounded cancellation (exit 130).
+
+### Maintenance
+
+- Make the recorder stop, media cancellation and session handoff tests
+  independent of thread and ConPTY scheduling.
 
 ## [5.6.0] — 2026-10-28
 
