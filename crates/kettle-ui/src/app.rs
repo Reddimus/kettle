@@ -2674,7 +2674,8 @@ struct QueuedPaste {
     /// The panes a broadcast paste reaches, every window's, when it was made.
     recipients: Vec<u64>,
     content: QueuedPasteContent,
-    key_releases: Vec<(u64, PhysicalKey, Arc<[u8]>)>,
+    key_presses: Vec<(u64, TerminalKeyRelease)>,
+    key_releases: Vec<(u64, PhysicalKey, TerminalKeyRelease)>,
 }
 
 enum QueuedPasteContent {
@@ -10474,9 +10475,32 @@ fn key_release_bytes(
         .map(Arc::from)
 }
 
+/// A release shares admission state with its deferred press, even when it
+/// waits on a later paste or remains held after replay. Any accepted repeat
+/// makes the release necessary; later rejected repeats must not clear it.
+#[derive(Clone)]
+pub(crate) struct TerminalKeyRelease {
+    bytes: Arc<[u8]>,
+    press_accepted: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl TerminalKeyRelease {
+    fn new(bytes: Arc<[u8]>, accepted: bool) -> Self {
+        Self {
+            bytes,
+            press_accepted: Arc::new(std::sync::atomic::AtomicBool::new(accepted)),
+        }
+    }
+
+    fn mark_accepted(&self) {
+        self.press_accepted
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn release_terminal_owned_keys(
     ws: &mut WindowState,
-    mut send: impl FnMut(u64, PhysicalKey, Arc<[u8]>),
+    mut send: impl FnMut(u64, PhysicalKey, TerminalKeyRelease),
 ) {
     for ((key, pane), bytes) in std::mem::take(&mut ws.terminal_key_release_bytes) {
         send(pane, key, bytes);
@@ -11860,7 +11884,7 @@ impl App {
     fn send_or_defer_key_releases(
         &mut self,
         ws: &mut WindowState,
-        releases: Vec<(u64, PhysicalKey, Arc<[u8]>)>,
+        releases: Vec<(u64, PhysicalKey, TerminalKeyRelease)>,
     ) {
         if let Some(paste) = self.queued_pastes.back_mut() {
             paste.key_releases.extend(releases);
@@ -11872,7 +11896,7 @@ impl App {
     fn send_key_releases(
         &mut self,
         ws: Option<&WindowState>,
-        releases: &[(u64, PhysicalKey, Arc<[u8]>)],
+        releases: &[(u64, PhysicalKey, TerminalKeyRelease)],
     ) {
         let mut result = PaneInputResult::Queued;
         for mux in ws
@@ -11880,9 +11904,25 @@ impl App {
             .into_iter()
             .chain(self.windows.values().map(|ws| &ws.mux))
         {
-            result = result.merge(mux.release_key_to(releases));
+            result = result.merge(Self::release_keys_to(mux, releases));
         }
         self.report_input_result(result);
+    }
+
+    fn release_keys_to(
+        mux: &Mux,
+        releases: &[(u64, PhysicalKey, TerminalKeyRelease)],
+    ) -> PaneInputResult {
+        let mut result = PaneInputResult::Queued;
+        for (id, key, release) in releases {
+            if release
+                .press_accepted
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                result = result.merge(mux.release_key_to(&[(*id, *key, release.bytes.clone())]));
+            }
+        }
+        result
     }
 
     fn write_terminal_key_event(
@@ -11940,7 +11980,8 @@ impl App {
                 if let Some(release) = key_release_bytes(&self.cfg, event, mods, mode) {
                     ws.terminal_key_release_bytes
                         .entry((event.physical_key, pane_id))
-                        .or_insert(release);
+                        .and_modify(|release| release.mark_accepted())
+                        .or_insert_with(|| TerminalKeyRelease::new(release, true));
                 }
                 ws.terminal_key_recipients
                     .entry(event.physical_key)
@@ -11981,7 +12022,8 @@ impl App {
             if let Some(bytes) = release_bytes.remove(id) {
                 ws.terminal_key_release_bytes
                     .entry((event.physical_key, *id))
-                    .or_insert(bytes);
+                    .and_modify(|release| release.mark_accepted())
+                    .or_insert_with(|| TerminalKeyRelease::new(bytes, true));
             }
         }
         ws.terminal_key_recipients
@@ -12016,7 +12058,8 @@ impl App {
                     if let Some(bytes) = release_bytes.remove(id) {
                         ws.terminal_key_release_bytes
                             .entry((event.physical_key, *id))
-                            .or_insert(bytes);
+                            .and_modify(|release| release.mark_accepted())
+                            .or_insert_with(|| TerminalKeyRelease::new(bytes, true));
                     }
                 }
                 ws.terminal_key_recipients
@@ -19077,13 +19120,17 @@ impl ApplicationHandler<UserEvent> for App {
                     let Some(mut ws) = self.windows.remove(&seq) else {
                         continue;
                     };
-                    if let Some(anchor) = ws.context_menu.as_ref().filter(|menu| {
-                        matches!(menu.items.as_slice(), [ContextMenuItem::Item { label, enabled: false, .. }]
-                            if *label == self.ui_text.text(kettle_i18n::Text::MenuDetectingShells))
-                    }).map(|menu| menu.anchor) {
+                    if let Some(anchor) = ws
+                        .context_menu
+                        .as_ref()
+                        .filter(|menu| Self::shell_menu_is_loading(&menu.items, &self.ui_text))
+                        .map(|menu| menu.anchor)
+                    {
                         let items = Self::new_tab_menu_items(&shells, &self.ui_text);
                         self.show_context_menu(&mut ws, items, anchor.0, anchor.1);
-                        if let Some(window) = &ws.window { window.request_redraw(); }
+                        if let Some(window) = &ws.window {
+                            window.request_redraw();
+                        }
                     }
                     if let Some((_, argv)) = pending.as_ref().filter(|(window, _)| *window == seq) {
                         self.open_tab_with_argv(&mut ws, argv);

@@ -1059,12 +1059,18 @@ impl App {
     ) -> Vec<ContextMenuItem> {
         match shells {
             Some(shells) => Self::new_tab_menu_items(shells, tr),
-            None => vec![ContextMenuItem::Item {
-                label: tr.text(kettle_i18n::Text::MenuDetectingShells),
-                action: Action::NewTabShell(0),
-                enabled: false,
+            None => vec![ContextMenuItem::Info {
+                label: tr.text(kettle_i18n::Text::MenuDetectingShells).to_string(),
             }],
         }
+    }
+
+    pub(super) fn shell_menu_is_loading(
+        items: &[ContextMenuItem],
+        tr: &kettle_i18n::Translator,
+    ) -> bool {
+        matches!(items, [ContextMenuItem::Info { label }]
+            if label == tr.text(kettle_i18n::Text::MenuDetectingShells))
     }
 
     /// Open the new-tab `▾` dropdown at

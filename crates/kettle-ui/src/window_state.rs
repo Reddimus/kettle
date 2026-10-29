@@ -897,7 +897,8 @@ pub(crate) struct WindowState {
     /// prevents a later geometry or modal transition from swallowing the
     /// matching release and leaving a Kitty-protocol client with a stuck key.
     pub(crate) terminal_owned_key_releases: std::collections::HashSet<winit::keyboard::PhysicalKey>,
-    pub(crate) terminal_key_release_bytes: std::collections::HashMap<(PhysicalKey, u64), Arc<[u8]>>,
+    pub(crate) terminal_key_release_bytes:
+        std::collections::HashMap<(PhysicalKey, u64), crate::app::TerminalKeyRelease>,
     pub(crate) terminal_key_recipients:
         std::collections::HashMap<PhysicalKey, std::collections::HashSet<u64>>,
     /// Keys whose press closed or replaced a Kettle modal (the search bar,

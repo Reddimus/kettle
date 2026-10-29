@@ -168,6 +168,7 @@ fn image_paste_holds_enter_and_keeps_its_original_recipient() {
     let target = *mux.panes.keys().find(|id| **id != focused).unwrap();
     let mut ws = WindowState::new(1, mux);
     let queued = |content| super::QueuedPaste {
+        key_presses: Vec::new(),
         key_releases: Vec::new(),
         window: 1,
         target: Some(target),
@@ -223,7 +224,7 @@ fn image_paste_holds_enter_and_keeps_its_original_recipient() {
     else {
         panic!("Enter must follow the image path");
     };
-    let result = App::deliver_deferred_input(&mut ws, &targets, prepare_input, false);
+    let result = App::deliver_deferred_input(&mut ws, &targets, &[], prepare_input, false);
     let after_enter = ws.mux.panes[&target].input_generation();
     let focused_after = ws.mux.panes[&focused].input_generation();
     ws.mux.kill_children();
@@ -241,6 +242,7 @@ fn image_paste_holds_enter_and_keeps_its_original_recipient() {
 #[test]
 fn held_keys_behind_an_encoding_paste_join_one_queue_entry() {
     let queued = |content| super::QueuedPaste {
+        key_presses: Vec::new(),
         key_releases: Vec::new(),
         window: 1,
         target: Some(1),
@@ -277,6 +279,7 @@ fn held_keys_behind_an_encoding_paste_join_one_queue_entry() {
 #[test]
 fn deferred_authored_input_obeys_the_existing_queue_byte_limit() {
     let queued = |content| super::QueuedPaste {
+        key_presses: Vec::new(),
         key_releases: Vec::new(),
         window: 1,
         target: Some(1),
@@ -19110,9 +19113,7 @@ fn pending_shell_action_runs_the_latest_shortcut_on_completion() {
     ] {
         let tr = kettle_i18n::Translator::new(language);
         let items = App::shell_menu_items(None, &tr);
-        assert!(
-            matches!(items.as_slice(), [ContextMenuItem::Item {label, enabled: false, ..}] if *label == text)
-        );
+        assert!(matches!(items.as_slice(), [ContextMenuItem::Info {label}] if label == text));
     }
     assert_eq!(
         pending.request(1, 1, Some(&shells)),
@@ -19140,8 +19141,10 @@ fn terminal_owned_key_focus_loss_sends_exactly_one_release() {
         .entry(key)
         .or_default()
         .insert(pane);
-    ws.terminal_key_release_bytes
-        .insert((key, pane), Arc::from(&b"\x1b[1;1:3A"[..]));
+    ws.terminal_key_release_bytes.insert(
+        (key, pane),
+        super::TerminalKeyRelease::new(Arc::from(&b"\x1b[1;1:3A"[..]), true),
+    );
     assert_eq!(
         ws.mux.panes[&pane].feed_input(b"\x1b[1;1A"),
         PaneInputResult::Queued
@@ -19155,7 +19158,7 @@ fn terminal_owned_key_focus_loss_sends_exactly_one_release() {
         "focus loss must release a terminal-owned key exactly once"
     );
     assert_eq!(
-        (releases[0].0, releases[0].1, releases[0].2.as_ref()),
+        (releases[0].0, releases[0].1, releases[0].2.bytes.as_ref()),
         (pane, key, &b"\x1b[1;1:3A"[..])
     );
     assert!(
@@ -19270,13 +19273,16 @@ fn deferred_key_releases_fence_later_authored_input() {
             targets: vec![(10, bytes.to_vec())],
             prepare_input: true,
         },
+        key_presses: Vec::new(),
         key_releases: Vec::new(),
     };
     let mut press = queued(b"\x1b[1;1A");
     let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
-    press
-        .key_releases
-        .push((10, key, Arc::from(&b"\x1b[1;1:3A"[..])));
+    press.key_releases.push((
+        10,
+        key,
+        super::TerminalKeyRelease::new(Arc::from(&b"\x1b[1;1:3A"[..]), true),
+    ));
     let mut queue = std::collections::VecDeque::from([press]);
     assert_eq!(
         defer_authored_input(&mut queue, queued(b"typed")),
@@ -19287,5 +19293,254 @@ fn deferred_key_releases_fence_later_authored_input() {
         2,
         "later input must stay behind the saved release"
     );
-    assert_eq!(queue[0].key_releases[0].2.as_ref(), b"\x1b[1;1:3A");
+    assert_eq!(queue[0].key_releases[0].2.bytes.as_ref(), b"\x1b[1;1:3A");
+}
+
+#[test]
+fn loading_shell_menu_survives_construction_and_can_refresh() {
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let items = filter_disabled(App::shell_menu_items(None, &tr));
+        assert_eq!(items.len(), 1, "the loading menu must have a visible row");
+        assert!(!super::item_is_dispatchable(&items[0]));
+        assert!(App::shell_menu_is_loading(&items, &tr));
+        let shells = vec![("Test shell".into(), vec!["test-shell".into()])];
+        let ready = filter_disabled(App::shell_menu_items(Some(&shells), &tr));
+        assert!(!App::shell_menu_is_loading(&ready, &tr));
+        assert!(ready.iter().any(|item| matches!(item,
+            ContextMenuItem::NewTabShell { argv, .. } if argv == &["test-shell"])));
+        assert!(!App::shell_menu_is_loading(&[], &tr));
+        assert!(!App::shell_menu_is_loading(
+            &[ContextMenuItem::Info {
+                label: "About".into(),
+            }],
+            &tr
+        ));
+    }
+}
+
+#[test]
+fn deferred_key_releases_only_follow_accepted_presses() {
+    let (mux, rejected, accepted) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    let (mux, ids) = title_test_tab_mux(1);
+    let foreign = ids[0];
+    let mut other = WindowState::new(2, mux);
+    ws.mux.panes.get_mut(&rejected).unwrap().read_only = true;
+    let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
+    let presses: Vec<_> = [rejected, accepted, foreign]
+        .into_iter()
+        .map(|id| {
+            (
+                id,
+                super::TerminalKeyRelease::new(Arc::from(&b"\x1b[1;1:3A"[..]), false),
+            )
+        })
+        .collect();
+    let targets: Vec<_> = presses
+        .iter()
+        .map(|(id, _)| (*id, b"\x1b[1;1A".to_vec()))
+        .collect();
+    let before = [
+        ws.mux.panes[&rejected].input_generation(),
+        ws.mux.panes[&accepted].input_generation(),
+        other.mux.panes[&foreign].input_generation(),
+    ];
+    let local_result = App::deliver_deferred_input(&mut ws, &targets, &presses, true, false);
+    let foreign_result = App::deliver_deferred_input(&mut other, &targets, &presses, true, false);
+    // Physical release may arrive after replay, or wait on a later paste.
+    let releases: Vec<_> = presses
+        .into_iter()
+        .map(|(id, release)| (id, key, release))
+        .collect();
+    assert_eq!(
+        App::release_keys_to(&ws.mux, &releases),
+        PaneInputResult::Queued
+    );
+    assert_eq!(
+        App::release_keys_to(&other.mux, &releases),
+        PaneInputResult::Queued
+    );
+    let after = [
+        ws.mux.panes[&rejected].input_generation(),
+        ws.mux.panes[&accepted].input_generation(),
+        other.mux.panes[&foreign].input_generation(),
+    ];
+    ws.mux.kill_children();
+    other.mux.kill_children();
+    assert_eq!(local_result, PaneInputResult::ReadOnly);
+    assert_eq!(foreign_result, PaneInputResult::Queued);
+    assert_eq!(
+        after,
+        [before[0], before[1] + 2, before[2] + 2],
+        "only panes that accepted the deferred press may receive its release"
+    );
+}
+
+#[test]
+fn deferred_key_releases_keep_an_accepted_press_when_a_repeat_is_rejected() {
+    for immediate in [false, true] {
+        let (mux, ids) = title_test_tab_mux(1);
+        let pane = ids[0];
+        let mut ws = WindowState::new(1, mux);
+        let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
+        let release = super::TerminalKeyRelease::new(Arc::from(&b"\x1b[1;1:3A"[..]), immediate);
+        let targets = [(pane, b"\x1b[1;1A".to_vec())];
+        let presses = [(pane, release.clone())];
+        if immediate {
+            assert_eq!(
+                ws.mux.panes[&pane].feed_input(&targets[0].1),
+                PaneInputResult::Queued
+            );
+        } else {
+            assert_eq!(
+                App::deliver_deferred_input(&mut ws, &targets, &presses, true, false),
+                PaneInputResult::Queued
+            );
+        }
+        ws.mux.panes.get_mut(&pane).unwrap().read_only = true;
+        let repeat_result = App::deliver_deferred_input(&mut ws, &targets, &presses, true, false);
+        ws.terminal_key_release_bytes.insert((key, pane), release);
+        let mut releases = Vec::new();
+        super::release_terminal_owned_keys(&mut ws, |id, key, release| {
+            releases.push((id, key, release))
+        });
+        let before = ws.mux.panes[&pane].input_generation();
+        assert_eq!(
+            App::release_keys_to(&ws.mux, &releases),
+            PaneInputResult::Queued
+        );
+        let after = ws.mux.panes[&pane].input_generation();
+        ws.mux.kill_children();
+        assert_eq!(repeat_result, PaneInputResult::ReadOnly);
+        assert_eq!(
+            after,
+            before + 1,
+            "a rejected repeat must not strand an accepted press"
+        );
+    }
+}
+
+#[test]
+fn deferred_key_releases_remember_rejection_after_read_only_ends() {
+    let (mux, ids) = title_test_tab_mux(1);
+    let pane = ids[0];
+    let mut ws = WindowState::new(1, mux);
+    let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
+    let release = super::TerminalKeyRelease::new(Arc::from(&b"\x1b[1;1:3A"[..]), false);
+    ws.mux.panes.get_mut(&pane).unwrap().read_only = true;
+    let result = App::deliver_deferred_input(
+        &mut ws,
+        &[(pane, b"\x1b[1;1A".to_vec())],
+        &[(pane, release.clone())],
+        true,
+        false,
+    );
+    ws.mux.panes.get_mut(&pane).unwrap().read_only = false;
+    let before = ws.mux.panes[&pane].input_generation();
+    assert_eq!(
+        App::release_keys_to(&ws.mux, &[(pane, key, release)]),
+        PaneInputResult::Queued
+    );
+    let after = ws.mux.panes[&pane].input_generation();
+    ws.mux.kill_children();
+    assert_eq!(result, PaneInputResult::ReadOnly);
+    assert_eq!(
+        after, before,
+        "releasing after replay must still honor press rejection"
+    );
+}
+
+#[test]
+fn deferred_key_releases_survive_coalesced_presses_and_pane_migration() {
+    use super::{
+        QueuedPaste, QueuedPasteContent,
+        paste::{defer_authored_input, pop_ready_paste},
+    };
+    let (mux, ids) = title_test_tab_mux(1);
+    let pane = ids[0];
+    let mut ws = WindowState::new(1, mux);
+    let queued = |content, key_presses| QueuedPaste {
+        window: 1,
+        target: Some(pane),
+        receipt_pane: Some(pane),
+        broadcast: BroadcastScope::Off,
+        recipients: Vec::new(),
+        content,
+        key_presses,
+        key_releases: Vec::new(),
+    };
+    let mut queue = std::collections::VecDeque::from([queued(
+        QueuedPasteContent::Text("paste".into()),
+        Vec::new(),
+    )]);
+    let mut releases = Vec::new();
+    for (key, press, release) in [
+        (
+            winit::keyboard::KeyCode::ArrowUp,
+            &b"\x1b[1;1A"[..],
+            &b"\x1b[1;1:3A"[..],
+        ),
+        (
+            winit::keyboard::KeyCode::ArrowDown,
+            &b"\x1b[1;1B"[..],
+            &b"\x1b[1;1:3B"[..],
+        ),
+    ] {
+        let release = super::TerminalKeyRelease::new(Arc::from(release), false);
+        assert_eq!(
+            defer_authored_input(
+                &mut queue,
+                queued(
+                    QueuedPasteContent::Input {
+                        targets: vec![(pane, press.to_vec())],
+                        prepare_input: true,
+                    },
+                    vec![(pane, release.clone())]
+                )
+            ),
+            Some(PaneInputResult::Queued)
+        );
+        releases.push((pane, winit::keyboard::PhysicalKey::Code(key), release));
+    }
+    assert_eq!(queue.len(), 2);
+    pop_ready_paste(&mut queue).unwrap();
+    let input = pop_ready_paste(&mut queue).unwrap();
+    let QueuedPasteContent::Input {
+        targets,
+        prepare_input,
+    } = input.content
+    else {
+        panic!("coalesced presses must follow the paste");
+    };
+    // The pane leaves the original window before replay.
+    let tab = ws.mux.detach_tab(0).unwrap();
+    let mut other = WindowState::new(2, Mux::new());
+    other.mux.attach_tab(tab, None);
+    let before = other.mux.panes[&pane].input_generation();
+    assert_eq!(
+        App::deliver_deferred_input(&mut ws, &targets, &input.key_presses, prepare_input, false),
+        PaneInputResult::Queued
+    );
+    assert_eq!(
+        App::deliver_deferred_input(
+            &mut other,
+            &targets,
+            &input.key_presses,
+            prepare_input,
+            false
+        ),
+        PaneInputResult::Queued
+    );
+    assert_eq!(
+        App::release_keys_to(&other.mux, &releases),
+        PaneInputResult::Queued
+    );
+    let after = other.mux.panes[&pane].input_generation();
+    other.mux.kill_children();
+    assert_eq!(
+        after,
+        before + 3,
+        "one coalesced input must authorize both saved releases in the new window"
+    );
 }

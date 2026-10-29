@@ -423,7 +423,22 @@ impl App {
             .collect();
         let reached: Vec<u64> = targets.iter().map(|(id, _)| *id).collect();
         release_bytes.retain(|((_, id), _)| reached.contains(id));
+        let release_bytes: Vec<_> = release_bytes
+            .into_iter()
+            .map(|(key, bytes)| {
+                let release = ws
+                    .terminal_key_release_bytes
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| TerminalKeyRelease::new(bytes, false));
+                (key, release)
+            })
+            .collect();
         let paste = QueuedPaste {
+            key_presses: release_bytes
+                .iter()
+                .map(|((_, id), release)| (*id, release.clone()))
+                .collect(),
             key_releases: Vec::new(),
             window: ws.seq,
             target: paste_target(&ws.mux),
@@ -436,8 +451,8 @@ impl App {
             },
         };
         let result = defer_authored_input(&mut self.queued_pastes, paste);
-        // A press queued here reaches these panes in its turn, so its
-        // release must go to them, whether it is sent at once or queued too.
+        // Keep the release with its press's admission state. Replay may
+        // reject the press after policy or queue capacity changes.
         if let Some(event) = event.filter(|_| prepare_input)
             && result.is_some_and(|result| result.is_queued())
         {
@@ -472,6 +487,7 @@ impl App {
     pub(super) fn deliver_deferred_input(
         ws: &mut WindowState,
         targets: &[(u64, Vec<u8>)],
+        key_presses: &[(u64, TerminalKeyRelease)],
         prepare_input: bool,
         scroll_to_bottom: bool,
     ) -> PaneInputResult {
@@ -481,6 +497,11 @@ impl App {
                 continue;
             };
             let delivered = pane.feed_input(bytes);
+            if delivered.is_queued() && !bytes.is_empty() {
+                for (_, release) in key_presses.iter().filter(|(pane, _)| pane == id) {
+                    release.mark_accepted();
+                }
+            }
             if delivered.is_queued() && prepare_input {
                 ws.last_typed = Some(std::time::Instant::now());
                 if scroll_to_bottom && let Ok(mut term) = pane.term.term.lock() {
@@ -517,6 +538,7 @@ impl App {
         }
         let recipients = self.broadcast_recipients(ws);
         self.queued_pastes.push_back(QueuedPaste {
+            key_presses: Vec::new(),
             key_releases: Vec::new(),
             window: ws.seq,
             target: paste_target(&ws.mux),
@@ -581,6 +603,7 @@ impl App {
             broadcast,
             recipients,
             content,
+            key_presses,
             key_releases,
         } = paste;
         // A single-pane paste follows its pane, which may have changed window.
@@ -630,6 +653,7 @@ impl App {
                 let mut result = Self::deliver_deferred_input(
                     &mut ws,
                     &targets,
+                    &key_presses,
                     prepare_input,
                     self.cfg.scroll_on_keystroke,
                 );
@@ -637,6 +661,7 @@ impl App {
                     result = result.merge(Self::deliver_deferred_input(
                         other,
                         &targets,
+                        &key_presses,
                         prepare_input,
                         self.cfg.scroll_on_keystroke,
                     ));
@@ -1220,6 +1245,7 @@ pub(super) fn defer_authored_input(
                     targets: queued,
                     prepare_input: queued_prepare,
                 },
+            key_presses,
             key_releases,
             ..
         }),
@@ -1234,6 +1260,13 @@ pub(super) fn defer_authored_input(
         && queued.len() == targets.len()
         && queued.iter().zip(targets).all(|(a, b)| a.0 == b.0)
     {
+        for (id, press) in &input.key_presses {
+            if !key_presses.iter().any(|(kept, release)| {
+                *kept == *id && Arc::ptr_eq(&release.press_accepted, &press.press_accepted)
+            }) {
+                key_presses.push((*id, press.clone()));
+            }
+        }
         for ((_, queued), (_, bytes)) in queued.iter_mut().zip(targets) {
             queued.extend_from_slice(bytes);
         }
