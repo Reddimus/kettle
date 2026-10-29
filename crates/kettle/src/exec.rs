@@ -2266,18 +2266,35 @@ fn linux_adopted_children(root: Option<u32>) -> std::io::Result<Vec<libc::pid_t>
 /// detaches short-lived helpers does not leave zombies here until it ends.
 #[cfg(target_os = "linux")]
 fn linux_reap_exited_adopted(root: Option<u32>) {
+    /// Where the next pass starts, so passes rotate through a long list.
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
     if !matches!(ADOPTION.get(), Some(Ok(()))) {
         return;
     }
     let Ok(children) = linux_adopted_children(root) else {
         return;
     };
-    for pid in children {
+    if children.is_empty() {
+        return;
+    }
+    let start = NEXT.fetch_add(MAX_ADOPTED_REAPED_PER_PASS, Ordering::Relaxed) % children.len();
+    for &pid in children
+        .iter()
+        .cycle()
+        .skip(start)
+        .take(MAX_ADOPTED_REAPED_PER_PASS.min(children.len()))
+    {
         // SAFETY: `pid` is this process's child and only this process reaps
         // it; a null status pointer is allowed.
         unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
     }
 }
+
+/// Most adopted children one periodic pass polls, so a command that detaches
+/// very many helpers cannot stall its output; the rest wait for a later pass
+/// or the teardown sweep.
+#[cfg(target_os = "linux")]
+const MAX_ADOPTED_REAPED_PER_PASS: usize = 1024;
 
 /// Kill and reap every descendant adopted during the run, including ones the
 /// kills hand down. Returns whether none remains by `deadline`.
@@ -2310,7 +2327,16 @@ fn linux_kill_adopted_as(
         }
         Some(Ok(())) => {}
     }
-    let mut pending: Vec<libc::pid_t> = Vec::new();
+    let timed_out = |remaining: usize| {
+        let _ = writeln!(
+            std::io::stderr(),
+            "kettle exec: {remaining} adopted descendant(s) did not exit after SIGKILL"
+        );
+        false
+    };
+    // Killed and not yet reaped. A reaped PID leaves the set, since a later
+    // adoptee may be given the same number.
+    let mut killed: std::collections::HashSet<libc::pid_t> = std::collections::HashSet::new();
     loop {
         let children = match linux_adopted_children(root) {
             Ok(children) => children,
@@ -2326,25 +2352,28 @@ fn linux_kill_adopted_as(
             return true;
         }
         for &pid in &children {
-            if !pending.contains(&pid) {
+            if killed.insert(pid) {
                 // SAFETY: see above; `pid` is an unreaped child of this process.
                 unsafe { libc::kill(pid, libc::SIGKILL) };
-                pending.push(pid);
+            }
+            if Instant::now() >= deadline {
+                return timed_out(children.len());
             }
         }
         // SIGKILL cannot be blocked, but a child in uninterruptible sleep
         // exits late, so poll rather than block on any one of them.
-        pending.retain(|&pid| {
+        let mut reaped = Vec::new();
+        for &pid in &killed {
             // SAFETY: as above; WNOHANG returns at once.
-            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) == 0 }
-        });
-        if Instant::now() >= deadline {
-            let _ = writeln!(
-                std::io::stderr(),
-                "kettle exec: {} adopted descendant(s) did not exit after SIGKILL",
-                children.len()
-            );
-            return false;
+            if unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) } != 0 {
+                reaped.push(pid);
+            }
+            if Instant::now() >= deadline {
+                return timed_out(children.len());
+            }
+        }
+        for pid in reaped {
+            killed.remove(&pid);
         }
         std::thread::sleep(Duration::from_millis(2));
     }
