@@ -6,6 +6,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep titles, prompt marks, clipboard writes and notifications working in
+  every pane while other panes hold all image memory.
+- Stop a large image or control string that is refused for lack of memory from
+  printing the rest of its payload as text.
+- On macOS, remove update leftovers through descriptors held since their
+  ownership check, so a tree renamed into their place in the shared
+  Applications folder is never deleted.
+
 ## [5.6.0] — 2026-10-28
 
 ### Added

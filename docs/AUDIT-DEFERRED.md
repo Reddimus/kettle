@@ -18,17 +18,16 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   reviewed glyphon path does not call the affected `pop()` method, and a fork
   adds supply-chain surface. Close #207 when upstream accepts `lru >=0.18.2`;
   remove the audit ignores and `scripts/check-lru-scope.py` together.
-- **Per-terminal transient graphics ceiling.**
-  `crates/kettle-vt/src/graphics_limits.rs::reserve_transient_cpu` charges only
-  the process budget; `extract.rs::append_seq` treats allocation failure like
-  an oversized sequence. One pane can exhaust shared space and disrupt other
-  panes' control strings. Deferred for a budget/API redesign. Close with a
-  per-terminal in-flight ceiling and distinct limit/allocation-failure recovery.
-- **macOS update cleanup races.** `Staging::discard` and `remove_leftover` in
-  `crates/kettle-update/src/macos.rs` check identity, rename, recheck, then delete
-  by pathname. A writer of the enclosing directory can still substitute a tree
-  before deletion. Deferred to avoid adding recursive FFI during the updater
-  change. Close with a descriptor-relative `unlinkat` walk with depth/entry caps.
+- **Per-terminal graphics decode ceiling.** Control strings up to 64 KiB no
+  longer charge the shared graphics account, and a string refused for memory
+  is discarded through its limit, so one pane's images cannot break another
+  pane's titles, prompt marks or clipboard writes. Images still compete for
+  the 512 MiB process account: one maximum kitty transmission can transiently
+  hold about 390 MiB (accumulated payload, whitespace-free copy, decoded and
+  inflated bytes, decoder scratch) in `crates/kettle-vt/src/kitty.rs`, so a
+  per-terminal ceiling below that would refuse legitimate images. Deferred
+  until decoding streams from the accumulated payload. Close by releasing each
+  stage before the next, then adding a per-terminal transient ceiling.
 - **Unix descendants can escape timeout teardown with `setsid()`.**
   `crates/kettle-core/src/term.rs` contains the PTY session, but a detached,
   reparented process cannot safely be identified by ancestry or PTY access.
@@ -103,16 +102,6 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   the frame pipeline, adapter selection, screenshot capture, overlay types and
   text-fit helpers. Deferred as a large refactor. Close by extracting GPU,
   screenshot, overlay and pure geometry modules with focused coverage.
-- **macOS staging emptiness branch.** `Staging::create` in
-  `crates/kettle-update/src/macos.rs` rejects children left before inherited ACLs
-  are cleared, but that rejection has no automated coverage. Deferred because
-  timing a microsecond race would not prove the guard. Close with a deterministic
-  seam or fixture that fails when the check is removed.
-- **macOS foreign-owner sweep branch.** `sweep_interrupted_updates` in
-  `crates/kettle-update/src/macos.rs` checks uid before deleting leftovers, but
-  tests do not reach the foreign-owner refusal. Deferred because one user cannot
-  create a second uid's files. Close with a second-uid fixture or a pure
-  `(file_type, uid, euid)` decision test that fails without the ownership guard.
 - **Live UI gate coverage and quarantine.** `scripts/check-live-ui-smoke.py`
   has manual cases beyond CI's selection; `.github/workflows/ci.yml` still makes
   Linux search-history and several other live checks advisory. Deferred until
