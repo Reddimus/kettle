@@ -442,6 +442,19 @@ impl LuaEngine {
                 ] {
                     io_tbl.set(k, mlua::Value::Nil)?;
                 }
+                let mode = if matches!(sandbox, LuaSandbox::Restricted) {
+                    "restricted"
+                } else {
+                    "safe"
+                };
+                io_tbl.set(
+                    "tmpfile",
+                    lua.create_function(move |_, ()| -> mlua::Result<()> {
+                        Err(mlua::Error::RuntimeError(format!(
+                            "io.tmpfile is unavailable in {mode} mode"
+                        )))
+                    })?,
+                )?;
             }
             // loadfile / dofile read arbitrary files; deny.
             globals.set("loadfile", mlua::Value::Nil)?;
@@ -527,6 +540,9 @@ impl LuaEngine {
         // function whose native work is unrelated to the admitted pattern.
         let matcher: mlua::Function = lua.globals().get::<mlua::Table>("string")?.get("match")?;
         lua.set_named_registry_value("kettle_url_match", matcher)?;
+        if !matches!(sandbox, LuaSandbox::Trusted) {
+            crate::lua_pattern::install(&lua)?;
+        }
         // Install the instruction-budget watchdog. The hook
         // fires every `HOOK_INSTRUCTION_INTERVAL` VM instructions; when a single
         // top-level invocation exceeds `max_fires` fires it errors out,
@@ -1062,7 +1078,13 @@ impl LuaEngine {
                     continue;
                 }
                 let cb: mlua::Function = entry.get("callback")?;
-                match cb.call::<mlua::Value>(url.to_string()) {
+                self.arm_budget();
+                let result = cb.call::<mlua::Value>(url.to_string());
+                if self.budget_was_exhausted() {
+                    log::warn!("lua url_handler callback {i} exceeded its instruction budget");
+                    continue;
+                }
+                match result {
                     Ok(mlua::Value::String(rewritten)) => {
                         let text = rewritten.to_string_lossy();
                         let text = text.trim();
@@ -1332,6 +1354,135 @@ impl LuaEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_refuses_temporary_file_handles() {
+        for (sandbox, mode) in [
+            (kettle_config::LuaSandbox::Safe, "safe"),
+            (kettle_config::LuaSandbox::Restricted, "restricted"),
+        ] {
+            let eng = LuaEngine::new_with_sandbox("Default", sandbox).unwrap();
+            let err = eng
+                .eval_str("io.tmpfile()")
+                .expect_err("sandbox must refuse writable temporary files");
+            let message = format!("{err:#}");
+            assert!(message.contains(mode), "{message}");
+        }
+    }
+
+    #[test]
+    fn sandbox_pattern_calls_are_step_bounded() {
+        const CHILD: &str = "KETTLE_LUA_PATTERN_RUNAWAY";
+        if let Ok(mode) = std::env::var(CHILD) {
+            let sandbox = if mode == "safe" {
+                kettle_config::LuaSandbox::Safe
+            } else {
+                kettle_config::LuaSandbox::Restricted
+            };
+            let eng = LuaEngine::new_with_sandbox("Default", sandbox).unwrap();
+            for call in [
+                "string.match(s, p)",
+                "s:match(p)",
+                "string.find(s, p)",
+                "string.gmatch(s, p)()",
+                "string.gsub(s, p, '')",
+            ] {
+                let started = std::time::Instant::now();
+                let err = eng.eval_str(&format!(
+                    "local s = string.rep('a', 100); local p = string.rep('a*', 24) .. 'b'; return {call}"
+                )).expect_err("pathological pattern must be stopped");
+                assert!(
+                    format!("{err:#}").contains("pattern too complex"),
+                    "{err:#}"
+                );
+                assert!(
+                    started.elapsed() < std::time::Duration::from_millis(750),
+                    "{mode}: {call} took {:?}",
+                    started.elapsed()
+                );
+            }
+            return;
+        }
+        for mode in ["safe", "restricted"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "lua::tests::sandbox_pattern_calls_are_step_bounded",
+                    "--nocapture",
+                ])
+                .env(CHILD, mode)
+                .spawn()
+                .expect("spawn isolated pattern regression");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "{mode}: {status}");
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{mode}: native pattern call exceeded the isolated 4 second deadline");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_patterns_accept_large_simple_subjects() {
+        for sandbox in [
+            kettle_config::LuaSandbox::Safe,
+            kettle_config::LuaSandbox::Restricted,
+        ] {
+            let eng = LuaEngine::new_with_sandbox("Default", sandbox).unwrap();
+            assert_eq!(eng.eval_str("local s, n = string.gsub(string.rep(' ', 1 << 20), '%s+', 'x'); return s == 'x' and n == 1").unwrap(), "true");
+            assert_eq!(eng.eval_str("local original = string.rep('a', 1 << 20); local s, n = string.gsub(original, '%s+', 'x'); return s == original and n == 0").unwrap(), "true");
+        }
+    }
+
+    #[test]
+    fn sandbox_pattern_replacements_obey_the_heap_limit() {
+        let eng = LuaEngine::new("Default").unwrap();
+        eng.lua.set_memory_limit(8 << 20).unwrap();
+        let err = eng
+            .eval_str("return string.gsub(string.rep('a', 1024), '.', string.rep('b', 1 << 20))")
+            .expect_err("substitution output must share the Lua heap limit");
+        assert!(format!("{err:#}").contains("memory"), "{err:#}");
+    }
+
+    #[test]
+    fn sandbox_pattern_iterations_share_the_step_budget() {
+        for sandbox in [
+            kettle_config::LuaSandbox::Safe,
+            kettle_config::LuaSandbox::Restricted,
+        ] {
+            let eng = LuaEngine::new_with_sandbox("Default", sandbox).unwrap();
+            for call in [
+                "string.gsub(s, 'a*', '')",
+                "(function() local it = string.gmatch(s, 'a*'); for i = 1, 10 do it() end end)()",
+            ] {
+                let err = eng
+                    .eval_str(&format!(
+                        "local s = string.rep(string.rep('a', 5 << 20) .. 'b', 4); return {call}"
+                    ))
+                    .expect_err("pattern iterations must share one step budget");
+                assert!(
+                    format!("{err:#}").contains("pattern too complex"),
+                    "{err:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_pattern_replacement_callbacks_obey_the_instruction_budget() {
+        let eng = LuaEngine::new_with_max_hook_fires("Default", 2).unwrap();
+        let err = eng
+            .eval_str("return string.gsub('a', '.', function() while true do end end)")
+            .expect_err("replacement callbacks must remain interruptible");
+        assert!(format!("{err:#}").contains("instruction budget"), "{err:#}");
+    }
 
     #[test]
     fn on_rejects_unknown_events_without_creating_registry_keys() {
@@ -2185,6 +2336,54 @@ mod tests {
     }
 
     #[test]
+    fn url_callbacks_each_receive_an_instruction_budget() {
+        let eng = LuaEngine::new_with_max_hook_fires("Default", 2).unwrap();
+        eng.eval_str(
+            "completed = 0
+             kettle.add_url_handler('first', '^https://', function()
+                 for i = 1, 1800000 do end
+                 completed = completed + 1
+                 return false
+             end)
+             kettle.add_url_handler('second', '^https://', function()
+                 for i = 1, 1800000 do end
+                 completed = completed + 1
+                 return true
+             end)",
+        )
+        .unwrap();
+        assert_eq!(
+            eng.try_url_handler("https://example.com/"),
+            UrlHandlerOutcome::Handled,
+            "each finite callback must get a fresh instruction budget"
+        );
+        assert_eq!(eng.eval_str("return completed").unwrap(), "2");
+    }
+
+    #[test]
+    fn url_callbacks_recover_after_a_runaway() {
+        let eng = LuaEngine::new_with_max_hook_fires("Default", 2).unwrap();
+        eng.eval_str(
+            "kettle.add_url_handler('runaway', '^https://', function()
+                 while true do end
+             end)
+             kettle.add_url_handler('healthy', '^https://', function()
+                 return pcall(function() end)
+             end)",
+        )
+        .unwrap();
+        assert_eq!(
+            eng.try_url_handler("https://example.com/"),
+            UrlHandlerOutcome::Handled,
+            "an exhausted callback must not poison the next callback's pcall"
+        );
+        assert!(
+            !eng.budget_was_exhausted(),
+            "URL callback exhaustion must be consumed"
+        );
+    }
+
+    #[test]
     fn url_handler_matches_pattern_and_short_circuits() {
         // `kettle.add_url_handler(name, pattern, cb)` registers a
         // handler; `try_url_handler(url)` invokes the cb only when the
@@ -2756,6 +2955,7 @@ mod tests {
             .expect("init (trusted sandbox)");
         assert_eq!(eng.eval_str("return type(os.execute)").unwrap(), "function");
         assert_eq!(eng.eval_str("return type(io.open)").unwrap(), "function");
+        assert_eq!(eng.eval_str("return type(io.tmpfile)").unwrap(), "function");
         // The symbol exists for Lua compatibility, but native modules remain
         // unavailable at every trust level.
         assert_eq!(
