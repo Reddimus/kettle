@@ -4179,6 +4179,16 @@ mod tests {
         }
     }
 
+    /// A fixture path that is absolute on the host running the test: Windows
+    /// reads a leading `/` as relative to the current drive, so it gets one.
+    fn host_path(posix: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{posix}")
+        } else {
+            posix.to_owned()
+        }
+    }
+
     /// The options that decide WHICH host `ssh` reached travel with the host
     /// and come back out. Dropping them would make Reconnect offer plain
     /// `ssh host`, a different service on a different port, reached without
@@ -4186,6 +4196,7 @@ mod tests {
     #[test]
     fn ssh_endpoint_options_are_reproduced_by_the_reconnect_command() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let key = host_path("/home/me/.ssh/id_ed25519");
         let ctx = detect_ssh(&argv(&[
             "ssh",
             "-p",
@@ -4193,7 +4204,7 @@ mod tests {
             "-J",
             "bastion.example",
             "-i",
-            "/home/me/.ssh/id_ed25519",
+            &key,
             "box",
         ]))
         .expect("a fully-specified ssh invocation is still an ssh session");
@@ -4205,17 +4216,16 @@ mod tests {
                 options: SshOptions {
                     port: Some("2222".into()),
                     jump: Some("bastion.example".into()),
-                    identity: Some("/home/me/.ssh/id_ed25519".into()),
+                    identity: Some(key.clone()),
                     ..SshOptions::default()
                 },
             }
         );
         assert_eq!(
             clone_session_command(&ctx),
-            Some(
-                "ssh -i '/home/me/.ssh/id_ed25519' -J 'bastion.example' -p '2222' 'box'"
-                    .to_string()
-            )
+            Some(format!(
+                "ssh -i '{key}' -J 'bastion.example' -p '2222' 'box'"
+            ))
         );
 
         // The joined spellings of the same options carry exactly as far.
@@ -4223,7 +4233,7 @@ mod tests {
             "ssh",
             "-p2222",
             "-Jbastion.example",
-            "-i/home/me/.ssh/id_ed25519",
+            &format!("-i{key}"),
             "-lroot",
             "box",
         ]))
@@ -4236,25 +4246,25 @@ mod tests {
                 options: SshOptions {
                     port: Some("2222".into()),
                     jump: Some("bastion.example".into()),
-                    identity: Some("/home/me/.ssh/id_ed25519".into()),
+                    identity: Some(key.clone()),
                     ..SshOptions::default()
                 },
             }
         );
         assert_eq!(
             clone_session_command(&joined),
-            Some(
-                "ssh -i '/home/me/.ssh/id_ed25519' -J 'bastion.example' -p '2222' 'root'@'box'"
-                    .to_string()
-            )
+            Some(format!(
+                "ssh -i '{key}' -J 'bastion.example' -p '2222' 'root'@'box'"
+            ))
         );
 
         // `-F` picks the config that resolves the alias, so the alias alone
         // does not name the same machine.
-        let aliased = detect_ssh(&argv(&["ssh", "-F", "/etc/ssh/work.conf", "build"])).unwrap();
+        let conf = host_path("/etc/ssh/work.conf");
+        let aliased = detect_ssh(&argv(&["ssh", "-F", &conf, "build"])).unwrap();
         assert_eq!(
             clone_session_command(&aliased),
-            Some("ssh -F '/etc/ssh/work.conf' 'build'".to_string())
+            Some(format!("ssh -F '{conf}' 'build'"))
         );
     }
 
@@ -4363,10 +4373,6 @@ mod tests {
                 &["ssh", "-J", "bastion.example", "box"],
                 "ssh -J 'bastion.example' 'box'",
             ),
-            (
-                &["ssh", "-i", "/keys/id_ed25519", "box"],
-                "ssh -i '/keys/id_ed25519' 'box'",
-            ),
             (&["ssh", "-L", "8080:localhost:80", "box"], "ssh 'box'"),
         ] {
             let ctx = detect_ssh(&argv(reproducible))
@@ -4377,6 +4383,13 @@ mod tests {
                 "{reproducible:?} names one endpoint this crate can rebuild"
             );
         }
+        let key = host_path("/keys/id_ed25519");
+        let ctx = detect_ssh(&argv(&["ssh", "-i", &key, "box"])).unwrap();
+        assert_eq!(
+            clone_session_command(&ctx),
+            Some(format!("ssh -i '{key}' 'box'")),
+            "an absolute identity names one endpoint this crate can rebuild"
+        );
     }
 
     /// `-o` is the whole ssh_config grammar on the command line, so the gate
@@ -4483,10 +4496,11 @@ mod tests {
         );
 
         // An apostrophe is reproduced with the close/escape/reopen idiom.
-        let apostrophe = detect_ssh(&argv(&["ssh", "-i", "/home/o'brien/.ssh/id", "box"])).unwrap();
+        let key = host_path("/home/o'brien/.ssh/id");
+        let apostrophe = detect_ssh(&argv(&["ssh", "-i", &key, "box"])).unwrap();
         assert_eq!(
             clone_session_command(&apostrophe),
-            Some(r"ssh -i '/home/o'\''brien/.ssh/id' 'box'".to_string())
+            Some(format!("ssh -i '{}' 'box'", key.replace('\'', r"'\''")))
         );
 
         // A path that genuinely needs a shell metacharacter is still dropped.
@@ -4531,11 +4545,11 @@ mod tests {
         assert_eq!(format_remote_title(&two_keys), "ssh box");
         assert_eq!(clone_session_command(&two_keys), None);
         // The same identity twice is still one identity.
-        let same_key =
-            detect_ssh(&argv(&["ssh", "-i", "/keys/a", "-i", "/keys/a", "box"])).unwrap();
+        let key = host_path("/keys/a");
+        let same_key = detect_ssh(&argv(&["ssh", "-i", &key, "-i", &key, "box"])).unwrap();
         assert_eq!(
             clone_session_command(&same_key),
-            Some("ssh -i '/keys/a' 'box'".to_string())
+            Some(format!("ssh -i '{key}' 'box'"))
         );
     }
 
@@ -5324,12 +5338,15 @@ mod tests {
             host: "box".into(),
             user: None,
             options: SshOptions {
-                identity: Some("/keys/a b; rm -rf ~".into()),
+                identity: Some(host_path("/keys/a b; rm -rf ~")),
                 ..SshOptions::default()
             },
         })
         .expect("no control char → Some, just quoted");
-        assert_eq!(quoted, "ssh -i '/keys/a b; rm -rf ~' 'box'");
+        assert_eq!(
+            quoted,
+            format!("ssh -i '{}' 'box'", host_path("/keys/a b; rm -rf ~"))
+        );
         assert!(
             !has_unquoted_metachar(&quoted),
             "option-value metachars must stay quoted: {quoted}"
