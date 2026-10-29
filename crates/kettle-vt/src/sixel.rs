@@ -53,7 +53,7 @@ fn hls_to_rgb(h: f32, l: f32, s: f32) -> Rgb {
     let l = l / 100.0;
     let s = s / 100.0;
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let hp = (h % 360.0) / 60.0;
+    let hp = ((h + 240.0) % 360.0) / 60.0;
     let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
     let (r, g, b) = match hp as i32 {
         0 => (c, x, 0.0),
@@ -345,7 +345,9 @@ pub(crate) fn decode_with_budget(data: &[u8], budget: &GraphicsBudget) -> Option
                 if vals[2] > 0 && vals[3] > 0 {
                     // Raster-attribute size hint (Ph, Pv): pre-grow once so the
                     // common (hinted) case allocates a single time.
-                    canvas.ensure(vals[2] as usize, vals[3] as usize);
+                    if !canvas.ensure(vals[2] as usize, vals[3] as usize) {
+                        return None;
+                    }
                 }
             }
             b'$' => {
@@ -537,6 +539,20 @@ mod tests {
     }
 
     #[test]
+    fn hls_palette_uses_dec_hue_origin() {
+        for (hue, expected) in [
+            (0, [0, 0, 255, 255]),
+            (120, [255, 0, 0, 255]),
+            (240, [0, 255, 0, 255]),
+            (360, [0, 0, 255, 255]),
+        ] {
+            let body = format!("#0;1;{hue};50;100#0@");
+            let img = decode(body.as_bytes()).expect("HLS palette entry should decode");
+            assert_eq!(&img.rgba[0..4], &expected, "DEC hue {hue}");
+        }
+    }
+
+    #[test]
     fn empty_band_char_is_transparent_but_sized() {
         // `?` (0x3f) → bits 0 → no pixel lit, but the column still sizes
         // the image to 1×6.
@@ -596,9 +612,43 @@ mod tests {
     #[test]
     fn oversized_raster_attr_is_rejected_without_panicking() {
         // A raster-attribute size hint past MAX_DIM must not allocate or
-        // panic; the `ensure` bound rejects it and the (still 0×0) image
-        // decodes to None.
+        // panic; the `ensure` bound rejects it and decoding returns None.
         let attr = format!("\"1;1;1;{}", MAX_DIM + 1);
         assert!(decode(attr.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn oversized_raster_hint_with_pixel_is_rejected() {
+        for (width, height) in [(MAX_DIM + 1, 1), (1, MAX_DIM + 1)] {
+            let body = format!("\"1;1;{width};{height}@");
+            assert!(
+                decode(body.as_bytes()).is_none(),
+                "oversized raster hint {width}x{height} must reject subsequent pixels"
+            );
+        }
+    }
+
+    #[test]
+    fn raster_hint_with_pixel_is_rejected_when_retained_budget_is_full() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 1024,
+            retained_bytes: 2048,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let retained = budget.reserve_retained_cpu(1536).unwrap();
+        let body = b"\"1;1;16;16@";
+        assert!(
+            super::decode_with_budget(body, &budget).is_none(),
+            "a failed raster reservation must not return a smaller image"
+        );
+        assert_eq!(budget.usage(), (1536, 1536, 0, 0));
+
+        drop(retained);
+        let img = super::decode_with_budget(body, &budget)
+            .expect("the raster should decode once retained storage is released");
+        assert_eq!((img.width, img.height), (16, 16));
+        assert_eq!(&img.rgba[0..4], &[51, 51, 204, 255]);
+        assert_eq!(&img.rgba[img.rgba.len() - 4..], &[0, 0, 0, 0]);
     }
 }
