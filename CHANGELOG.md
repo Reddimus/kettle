@@ -47,6 +47,32 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Repair three documentation links to testing sections that had moved.
 - On Linux, stop descendants that left the session with `setsid()` when
   `kettle exec` times out or is cancelled, instead of leaving them running.
+- Deliver end-of-file from `kettle exec` to a program reading a canonical
+  line even when a terminal reply arrives between its input and the EOF.
+- Report a stdout write failure during `kettle exec`'s final output grace as a
+  delivery failure when the run times out or is cancelled, instead of losing
+  it.
+- Refuse `kettle exec` geometry over 4,096 columns or rows, or 262,144 cells,
+  before allocating the terminal, and read Linux process names as bytes
+  during teardown.
+- Rebuild, and change the build's source id, when a vendored crate changes.
+- Show an artifact from the legacy agy edit tools only when its sidecar
+  metadata says it is user-facing.
+- Launch `kettle-console` without waiting when grouped short options include
+  one that takes a value, such as `-mTwork`.
+- Report a config file that cannot be looked up as a validation error in
+  `kettle check-config` instead of treating it as missing, and write the
+  first-run config privately and atomically.
+- Bound the SSH host table's name padding.
+- In the MCP server, stop and report failure when writing to stdout fails,
+  cancelling running tools and letting them stop their processes first,
+  return a smaller-limit error instead of truncated control results, and
+  accept integer arguments written as `5.0` or `5e0`.
+- Check every parent directory of the media worker before trusting it, and
+  on macOS keep refusing signature checks while any earlier check is stuck
+  past its kill, not only the most recent one.
+- Trust a sticky temporary directory for video frame export only when you or
+  root own it, and keep staging names short whatever the output name.
 
 ## [5.6.0] — 2026-10-28
 
