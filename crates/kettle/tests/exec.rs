@@ -2913,6 +2913,62 @@ fn exec_internal_capture_preserves_raw_strip_tail_and_status() {
 /// has separate native Linux coverage in mcp_supervisor.rs.
 #[cfg(unix)]
 #[test]
+fn exec_internal_capture_cancels_during_tail_delivery() {
+    use std::os::fd::AsRawFd as _;
+
+    let mut child = kettle()
+        .args([
+            "exec",
+            "--internal-capture-tail",
+            "--timeout",
+            "20",
+            "--",
+            "sh",
+            "-c",
+            "head -c 1100000 /dev/zero | tr '\\000' x; exit 7",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let unread = child.stdout.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut available: libc::c_int = 0;
+        // SAFETY: unread owns the pipe and available is writable integer storage.
+        let result = unsafe { libc::ioctl(unread.as_raw_fd(), libc::FIONREAD, &raw mut available) };
+        assert_eq!(result, 0);
+        if available > 0 {
+            // Internal capture emits nothing until the PTY command has exited.
+            break;
+        }
+        if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("capture never began delivering its final tail");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // SAFETY: the Child is ours and remains unreaped throughout cancellation.
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("cancellation stalled behind the unread capture tail");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(130));
+}
+
+#[cfg(unix)]
+#[test]
 fn exec_sigterm_and_sigint_follow_bounded_cancellation() {
     for signal in [libc::SIGTERM, libc::SIGINT] {
         let mut child = kettle()

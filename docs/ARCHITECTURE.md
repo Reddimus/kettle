@@ -1398,14 +1398,17 @@ descriptor (with F_SETNOSIGPIPE on macOS, where pipe signals are process-wide),
 so a closed pipe becomes a reported write failure and tool cancellation before
 process exit.
 
-On Linux, each MCP `kettle_run` command starts its own `kettle exec` child,
-located with `std::env::current_exe()` (never `PATH`). The server does not become
+On Linux, each MCP `kettle_run` command starts its own `kettle exec` child
+through `/proc/self/exe`, which retains the running image after an executable
+replacement. The server does not become
 a subreaper: each child adopts only its command's orphans, so concurrent commands
 cannot claim or kill each other's detached descendants. Argument boundaries are
 preserved through `Command`, with `--cwd`, `--cols`, `--rows`, `--timeout`,
 `--strip-ansi` (or default raw), and `--` before argv. The hidden internal
 `--internal-capture-tail` switch selects the existing in-process capture engine,
 disables stdin forwarding, and writes its final 1 MiB byte tail to stdout.
+Tail delivery runs through the engine's output worker and completion checks,
+so blocked delivery keeps cancellation, timeout and command-tree teardown active.
 Conversion to lossy UTF-8 happens once in the parent, just as in direct capture;
 startup diagnostics still appear in the capture. The existing MCP text cap,
 exit codes, `structuredContent.exit_code`/`truncated`, and the separate control

@@ -17,7 +17,11 @@ struct Peer {
 
 impl Peer {
     fn new() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
+        Self::with_executable(std::path::Path::new(env!("CARGO_BIN_EXE_kettle")))
+    }
+
+    fn with_executable(executable: &std::path::Path) -> Self {
+        let mut child = Command::new(executable)
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -193,6 +197,115 @@ mod linux {
     use super::*;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::path::Path;
+
+    #[test]
+    fn mcp_supervisor_runs_after_server_executable_is_replaced() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("kettle");
+        std::fs::copy(env!("CARGO_BIN_EXE_kettle"), &executable).unwrap();
+        let mut peer = Peer::with_executable(&executable);
+        let replacement = directory.path().join("replacement");
+        std::fs::copy("/bin/false", &replacement).unwrap();
+        std::fs::rename(&replacement, &executable).unwrap();
+        let running = std::fs::read_link(format!("/proc/{}/exe", peer.child.id())).unwrap();
+        assert!(
+            running
+                .as_os_str()
+                .as_encoded_bytes()
+                .ends_with(b" (deleted)")
+        );
+        for id in [1, 2] {
+            peer.run(
+                id,
+                json!({"command":["sh", "-c", "printf survived-update; exit 7"], "timeout_s":10}),
+            );
+            let reply = peer.reply();
+            assert_eq!(
+                reply["result"]["structuredContent"]["exit_code"], 7,
+                "{reply}"
+            );
+            assert_eq!(
+                reply["result"]["content"][0]["text"],
+                "exit code: 7\n\nsurvived-update"
+            );
+        }
+    }
+
+    #[test]
+    fn internal_capture_tail_delivery_keeps_setsid_contained() {
+        for mode in ["cancel", "timeout", "broken-pipe"] {
+            let directory = tempfile::tempdir().unwrap();
+            let pid = directory.path().join("pid");
+            let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
+                .args([
+                    "exec", "--internal-capture-tail", "--timeout",
+                    if mode == "timeout" { "4" } else { "20" },
+                    "--", "sh", "-c",
+                    "setsid sh -c 'echo $$ > \"$1\"; exec sleep 300' sh \"$1\" </dev/null >/dev/null 2>&1 & \
+                     while [ ! -s \"$1\" ]; do sleep 0.01; done; \
+                     head -c 1100000 /dev/zero | tr '\\000' x; exit 7",
+                    "fixture",
+                ])
+                .arg(&pid)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let descendant = Descendant::read(&pid);
+            let unread = child.stdout.take().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let mut available: libc::c_int = 0;
+                // SAFETY: unread owns the pipe and available is writable storage.
+                let result =
+                    unsafe { libc::ioctl(unread.as_raw_fd(), libc::FIONREAD, &raw mut available) };
+                assert_eq!(result, 0);
+                if available > 0 {
+                    break;
+                }
+                if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("capture never began final tail delivery: {mode}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if mode == "cancel" {
+                // SAFETY: child is owned and unreaped, so its PID is reserved.
+                assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+            }
+            let _unread = if mode == "broken-pipe" {
+                drop(unread);
+                None
+            } else {
+                Some(unread)
+            };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("tail delivery ignored {mode}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let expected = match mode {
+                "cancel" => 130,
+                "timeout" => 124,
+                _ => 74,
+            };
+            assert_eq!(status.code(), Some(expected), "{mode}");
+            assert!(
+                !descendant.alive(),
+                "{mode} leaked escaped daemon {}",
+                descendant.pid
+            );
+        }
+    }
 
     struct Descendant {
         pid: i32,

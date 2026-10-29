@@ -17,16 +17,7 @@ const KILL_GRACE: Duration = Duration::from_millis(250);
 
 #[cfg(target_os = "linux")]
 pub(super) fn capture(opts: ExecOpts, cancelled: Option<&AtomicBool>) -> (i32, String) {
-    let executable = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(error) => {
-            return (
-                EXIT_INTERNAL,
-                format!("kettle exec: cannot locate supervisor: {error}\n"),
-            );
-        }
-    };
-    let mut command = command(&executable, &opts);
+    let mut command = command(&opts);
     supervise(
         &mut command,
         cancelled,
@@ -36,8 +27,10 @@ pub(super) fn capture(opts: ExecOpts, cancelled: Option<&AtomicBool>) -> (i32, S
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn command(executable: &std::path::Path, opts: &ExecOpts) -> Command {
-    let mut command = Command::new(executable);
+fn command(opts: &ExecOpts) -> Command {
+    // The procfs handle still names our running image after an update unlinks
+    // it; current_exe() instead returns a path suffixed with " (deleted)".
+    let mut command = Command::new("/proc/self/exe");
     command
         .args(["exec", "--internal-capture-tail", "--cols"])
         .arg(opts.cols.to_string())
@@ -543,6 +536,22 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_command_uses_stable_linux_executable() {
+        let opts = ExecOpts {
+            argv: vec!["true".into()],
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            timeout: None,
+            mode: OutputMode::Raw,
+            record: None,
+            forward_stdin: false,
+        };
+        let command = command(&opts);
+        assert_eq!(command.get_program(), "/proc/self/exe");
+    }
+
+    #[test]
     fn supervisor_command_preserves_arguments_and_geometry() {
         let opts = ExecOpts {
             argv: vec![
@@ -560,8 +569,8 @@ mod tests {
             record: None,
             forward_stdin: false,
         };
-        let command = command(std::path::Path::new("/absolute/kettle"), &opts);
-        assert_eq!(command.get_program(), "/absolute/kettle");
+        let command = command(&opts);
+        assert_eq!(command.get_program(), "/proc/self/exe");
         let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
             args,

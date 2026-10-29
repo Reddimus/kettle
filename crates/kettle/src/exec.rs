@@ -413,23 +413,6 @@ pub fn run_exec(opts: ExecOpts, capture_tail: bool) -> i32 {
         );
         return EXIT_INTERNAL;
     }
-    if capture_tail {
-        let mut sink = TailSink::new(1024 * 1024);
-        let mut output = DirectOutput::new(opts.mode, &mut sink);
-        let code = run_exec_engine(opts, &default_size_probe, &mut output, cancelled, true);
-        // Preserve bytes until the MCP parent performs the same lossy UTF-8
-        // conversion as in-process capture, including a split multibyte tail.
-        return match std::io::stdout().write_all(sink.tail()) {
-            Ok(()) => code,
-            Err(error) => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "kettle exec: cannot write capture tail: {error}"
-                );
-                EXIT_OUTPUT_DELIVERY
-            }
-        };
-    }
     let sink = match stdout_sink() {
         Ok(sink) => sink,
         Err(error) => {
@@ -440,6 +423,31 @@ pub fn run_exec(opts: ExecOpts, capture_tail: bool) -> i32 {
             return EXIT_INTERNAL;
         }
     };
+    if capture_tail {
+        let mut output = match CaptureOutput::spawn(opts.mode, sink) {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: cannot start capture writer: {error}"
+                );
+                return EXIT_INTERNAL;
+            }
+        };
+        let code = run_exec_engine(opts, &default_size_probe, &mut output, cancelled, true);
+        // Startup failures have no command tree and bypass engine completion.
+        // Give their captured diagnostic the same bounded delivery grace.
+        if output.tail.is_some()
+            && let Err(error) = output.finish(code, Duration::ZERO, OutputFinish::AbandonPending)
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: cannot write capture tail: {error}"
+            );
+            return EXIT_OUTPUT_DELIVERY;
+        }
+        return code;
+    }
     let mut output = match WorkerOutput::spawn(opts.mode, sink) {
         Ok(output) => output,
         Err(error) => {
@@ -2936,11 +2944,74 @@ trait ExecOutput {
     fn finish(&mut self, code: i32, duration: Duration, mode: OutputFinish) -> OutputResult<()>;
 }
 
+/// Collect the bounded tail synchronously, then deliver it through the same
+/// worker acknowledgements as streaming output. The engine retains its tree
+/// and keeps checking cancellation/deadlines until that final write completes.
+struct CaptureOutput {
+    outputter: Outputter,
+    tail: Option<TailSink>,
+    delivery: WorkerOutput,
+}
+
+impl CaptureOutput {
+    fn spawn(mode: OutputMode, sink: impl Write + Send + 'static) -> std::io::Result<Self> {
+        Ok(Self {
+            outputter: Outputter::new(mode),
+            tail: Some(TailSink::new(1024 * 1024)),
+            delivery: WorkerOutput::spawn(OutputMode::Raw, sink)?,
+        })
+    }
+}
+
+impl ExecOutput for CaptureOutput {
+    fn ready(&mut self) -> OutputResult<bool> {
+        self.delivery.ready()
+    }
+
+    fn completion_ready(&mut self) -> OutputResult<bool> {
+        self.delivery.completion_ready()
+    }
+
+    fn start(&mut self, cols: u16, rows: u16) -> OutputResult<()> {
+        self.outputter
+            .start(
+                self.tail.as_mut().expect("capture is collecting"),
+                cols,
+                rows,
+            )
+            .map_err(Into::into)
+    }
+
+    fn output(&mut self, bytes: Vec<u8>) -> OutputResult<()> {
+        self.outputter
+            .output(self.tail.as_mut().expect("capture is collecting"), &bytes)
+            .map_err(Into::into)
+    }
+
+    fn title(&mut self, title: String) -> OutputResult<()> {
+        self.outputter
+            .title(self.tail.as_mut().expect("capture is collecting"), &title)
+            .map_err(Into::into)
+    }
+
+    fn finish(&mut self, code: i32, duration: Duration, mode: OutputFinish) -> OutputResult<()> {
+        if let Some(mut tail) = self.tail.take() {
+            self.outputter.finish(&mut tail, code, duration)?;
+            // Keep bytes intact until the MCP parent converts to lossy UTF-8,
+            // including when trimming split a multibyte sequence.
+            self.delivery.output(tail.tail().to_vec())?;
+        }
+        self.delivery.finish(code, duration, mode)
+    }
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
 struct DirectOutput<'a> {
     outputter: Outputter,
     sink: &'a mut dyn Write,
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 impl<'a> DirectOutput<'a> {
     fn new(mode: OutputMode, sink: &'a mut dyn Write) -> Self {
         Self {
@@ -2950,6 +3021,7 @@ impl<'a> DirectOutput<'a> {
     }
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 impl ExecOutput for DirectOutput<'_> {
     fn ready(&mut self) -> OutputResult<bool> {
         Ok(true)

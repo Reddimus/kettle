@@ -235,6 +235,18 @@ isolated Unix process (with adoption enabled on Linux) and verifies the child is
 still waitable at final output submission, then exercises acknowledgement,
 cancellation, timeout and output failure. The Linux parent-death startup-race
 unit test requires SIGTERM pending when registration discovers a lost parent.
+
+`supervisor_command_uses_stable_linux_executable` checks the generated Linux
+launch command on every Unix host. Native Linux coverage in
+`mcp_supervisor_runs_after_server_executable_is_replaced` copies and starts an
+MCP server, atomically replaces its executable with a different program, and
+requires two later commands to run through the server's original image.
+`exec_internal_capture_cancels_during_tail_delivery` waits for captured bytes
+to reach an unread pipe after command exit, then requires SIGTERM to produce
+exit 130 without reading the tail. The native Linux test
+`internal_capture_tail_delivery_keeps_setsid_contained` adds a detached daemon
+and checks containment during cancellation, timeout, and broken-pipe failure.
+
 Linux runtime containment cannot be certified by these portable tests. If the Linux target standard library is installed, try
 `cargo check --locked --offline -p kettle --target x86_64-unknown-linux-gnu`;
 a missing cross C compiler can still block dependency build scripts. Record
