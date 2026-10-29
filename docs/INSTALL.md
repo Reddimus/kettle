@@ -16,7 +16,7 @@ requirements, updates and removal.
 
 Prebuilt Linux archives work on Ubuntu 22.04+, Debian 12 and distributions
 with a compatible glibc. They do not run on stock musl-based Alpine. On older
-systems, use Nix or build from source. See [Testing](TESTING.md#platform-coverage)
+systems, use Nix or build from source. See [Testing](TESTING.md#release-pipeline-releaseyml)
 for the distinction between package validation and native runtime coverage.
 
 ## Linux
