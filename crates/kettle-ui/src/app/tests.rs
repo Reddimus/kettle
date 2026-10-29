@@ -9893,6 +9893,54 @@ fn imported_shifted_punctuation_binding_matches_the_shifted_character() {
     assert_eq!(matched.map(|(_, action)| action), Some(Action::NewTab));
 }
 
+/// A Latin layout's own character wins over a US alias of the same key: on
+/// Dvorak, Ctrl+W sits on the US comma key and must reach the shell rather
+/// than open Settings (Ctrl+,). A key whose character is not ASCII, as
+/// AZERTY's `à` on the 0 key, still finds its US alias.
+#[test]
+fn physical_aliases_never_replace_another_latin_character() {
+    use super::resolve_keybind_action;
+    use kettle_config::Action;
+    use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+
+    let defaults = kettle_config::keybinds::defaults();
+    let ctrl = ModifiersState::CONTROL;
+    let dvorak_ctrl_w = resolve_keybind_action(
+        &defaults,
+        Some(&Key::Character("w".into())),
+        Some(&PhysicalKey::Code(KeyCode::Comma)),
+        ctrl,
+    );
+    assert_ne!(
+        dvorak_ctrl_w.map(|(_, action)| action),
+        Some(Action::OpenSettings),
+        "Dvorak Ctrl+W opened Settings"
+    );
+    let dvorak_ctrl_bracket = resolve_keybind_action(
+        &defaults,
+        Some(&Key::Character("]".into())),
+        Some(&PhysicalKey::Code(KeyCode::Equal)),
+        ctrl,
+    );
+    assert!(
+        !matches!(
+            dvorak_ctrl_bracket.map(|(_, action)| action),
+            Some(Action::IncreaseFontSize | Action::ResetFontSize)
+        ),
+        "Dvorak Ctrl+] changed the font size"
+    );
+    let azerty_ctrl_zero = resolve_keybind_action(
+        &defaults,
+        Some(&Key::Character("à".into())),
+        Some(&PhysicalKey::Code(KeyCode::Digit0)),
+        ctrl,
+    );
+    assert_eq!(
+        azerty_ctrl_zero.map(|(_, action)| action),
+        Some(Action::ResetFontSize)
+    );
+}
+
 #[test]
 fn keybind_resolver_honors_shifted_digit_rebinds_and_unbinds() {
     use super::resolve_keybind_action;

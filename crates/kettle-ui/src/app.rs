@@ -17057,11 +17057,31 @@ fn keybind_candidates(
         push_unique_trigger(&mut out, Trigger::new(kmods, k));
     }
     if let Some(physical) = physical_key {
-        for c in physical_keybind_chars(physical, mods) {
-            push_unique_trigger(&mut out, Trigger::new(kmods, KKey::Char(*c)));
+        let aliases = physical_keybind_chars(physical, mods);
+        if physical_aliases_apply(logical_key, aliases) {
+            for c in aliases {
+                push_unique_trigger(&mut out, Trigger::new(kmods, KKey::Char(*c)));
+            }
         }
     }
     out
+}
+
+/// Whether a key's US characters may stand in for what the layout produced.
+/// Only where the layout gives the key no ASCII character of its own (a
+/// non-Latin layout, or AZERTY's `à` on the 0 key) or produced one of those
+/// same characters at another shift level. On Dvorak, Ctrl+W is the US comma
+/// key: aliasing it to Ctrl+, would open Settings instead of reaching the
+/// shell.
+fn physical_aliases_apply(logical_key: Option<&Key>, aliases: &[char]) -> bool {
+    let Some(Key::Character(text)) = logical_key else {
+        return true;
+    };
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii() => aliases.contains(&c),
+        _ => true,
+    }
 }
 
 /// Whether the search bar uses a key chord itself, on macOS or elsewhere.
