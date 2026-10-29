@@ -15447,37 +15447,6 @@ fn window_title_formats_and_falls_back() {
 }
 
 #[test]
-fn record_dir_tilde_is_expanded_to_home() {
-    use super::expand_user_path_with;
-    use std::path::{Path, PathBuf};
-    let home = Some("/home/k".to_string());
-    // `~` and `~/...` expand; a bare-relative or absolute path is untouched.
-    assert_eq!(
-        expand_user_path_with(Path::new("~/.cache/kettle/records"), home.clone()),
-        PathBuf::from("/home/k/.cache/kettle/records")
-    );
-    assert_eq!(
-        expand_user_path_with(Path::new("~"), home.clone()),
-        PathBuf::from("/home/k")
-    );
-    assert_eq!(
-        expand_user_path_with(Path::new("/abs/records"), home.clone()),
-        PathBuf::from("/abs/records")
-    );
-    // `~user` (no slash) is NOT expanded — only `~`/`~/`.
-    assert_eq!(
-        expand_user_path_with(Path::new("~bob/x"), home),
-        PathBuf::from("~bob/x")
-    );
-    // Without a home dir, expansion no-ops and the caller sees the literal
-    // path. No stray `~` dir under CWD is created here.
-    assert_eq!(
-        expand_user_path_with(Path::new("~/x"), None),
-        PathBuf::from("~/x")
-    );
-}
-
-#[test]
 fn recording_window_title_suffix_is_ascii_safe() {
     use super::{
         RECORDING_ERROR_TITLE_SUFFIX, RECORDING_LIMIT_TITLE_SUFFIX,
@@ -17842,8 +17811,8 @@ fn launch_recorder_precedes_restored_sibling_windows() {
         .next()
         .unwrap();
     assert!(
-        setup.contains("self.startup.record.is_some()")
-            && setup.contains("self.cfg.record.enabled()")
+        setup.contains("self.recorder.is_some()")
+            && setup.contains("crate::RecordingPolicy::Enabled { .. }")
     );
 }
 

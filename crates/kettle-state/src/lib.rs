@@ -20,6 +20,8 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
     kettle_test_support::private_tempdir("kettle-state-test-")
 }
 
+#[cfg(unix)]
+pub use private::create_user_selected_file_new_at;
 pub use private::{
     CreatedUserSelectedFile, StagedFilePublishError, StagedUserSelectedFile, create_private_dirs,
     create_private_file_new, create_user_selected_file_new, discard_created_private_file,

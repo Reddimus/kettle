@@ -903,6 +903,22 @@ pub fn restrict_private_file(file: &File) -> io::Result<()> {
     restrict_private_object(file)
 }
 
+/// Create a new owner-only export relative to an already-open directory.
+/// The caller keeps the directory trusted through publication and cleanup.
+#[cfg(unix)]
+pub fn create_user_selected_file_new_at(parent: &File, name: &std::ffi::OsStr) -> io::Result<File> {
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(component)) if component == name)
+        || components.next().is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "export name must be one component",
+        ));
+    }
+    unix::create_user_selected_file_new_at(parent, name, Path::new(name))
+}
+
 /// Remove the private file represented by both `file` and `path`.
 ///
 /// `file` must have been returned by [`open_existing_private_file`]. The
@@ -3060,34 +3076,15 @@ pub(crate) mod unix {
         ))
     }
 
-    pub(super) fn create_user_selected_file_new_with(
+    pub(super) fn create_user_selected_file_new_at(
+        parent: &File,
+        leaf: &OsStr,
         path: &Path,
-        after_parent_open: impl FnOnce(),
-    ) -> io::Result<(File, CreatedFileCleanup)> {
-        let path = std::path::absolute(path)?;
-        let leaf = path.file_name().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("user-selected output has no file name: {}", path.display()),
-            )
-        })?;
+    ) -> io::Result<File> {
         let leaf_c = c_name(leaf, "user-selected output file name")?;
-        let parent_path = path.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("user-selected output has no parent: {}", path.display()),
-            )
-        })?;
-        // Resolve the caller's existing parent exactly once and retain that
-        // directory capability through creation and postcondition checks.
-        // Following a parent symlink is intentional for an explicit export;
-        // the leaf itself is never followed.
-        let parent = open_user_selected_parent(parent_path)?;
-        let parent_identity = FileIdentity::from_metadata(&parent.metadata()?);
-        after_parent_open();
         #[cfg(target_os = "macos")]
         let file =
-            create_user_selected_file_without_acl_window(&parent, &leaf_c, &path, libc::O_RDWR)?;
+            create_user_selected_file_without_acl_window(parent, &leaf_c, path, libc::O_RDWR)?;
         #[cfg(not(target_os = "macos"))]
         let file = {
             // SAFETY: the held directory and NUL-terminated leaf are valid, and
@@ -3111,10 +3108,10 @@ pub(crate) mod unix {
             unsafe { File::from_raw_fd(fd) }
         };
         let result = (|| {
-            require_user_owned_regular(&file, &path)?;
+            require_user_owned_regular(&file, path)?;
             restrict_private_object(&file)?;
             let identity = FileIdentity::from_metadata(&file.metadata()?);
-            let linked = entry_stat(&parent, leaf)?
+            let linked = entry_stat(parent, leaf)?
                 .is_some_and(|stat| FileIdentity::from_stat(&stat) == identity);
             if !linked {
                 return Err(io::Error::new(
@@ -3122,16 +3119,54 @@ pub(crate) mod unix {
                     "user-selected output path no longer refers to the created file",
                 ));
             }
-            let current_parent = open_user_selected_parent(parent_path)?;
-            if FileIdentity::from_metadata(&current_parent.metadata()?) != parent_identity {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "user-selected output parent changed while the file was created",
-                ));
-            }
             Ok(())
         })();
-        result?;
+        if let Err(error) = result {
+            if file.metadata().ok().is_some_and(|metadata| {
+                entry_stat(parent, leaf).ok().flatten().is_some_and(|stat| {
+                    FileIdentity::from_stat(&stat) == FileIdentity::from_metadata(&metadata)
+                })
+            }) {
+                // SAFETY: this held directory and leaf still identify our file.
+                let _ = unsafe { libc::unlinkat(parent.as_raw_fd(), leaf_c.as_ptr(), 0) };
+            }
+            return Err(error);
+        }
+        Ok(file)
+    }
+
+    pub(super) fn create_user_selected_file_new_with(
+        path: &Path,
+        after_parent_open: impl FnOnce(),
+    ) -> io::Result<(File, CreatedFileCleanup)> {
+        let path = std::path::absolute(path)?;
+        let leaf = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("user-selected output has no file name: {}", path.display()),
+            )
+        })?;
+        let parent_path = path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("user-selected output has no parent: {}", path.display()),
+            )
+        })?;
+        // Resolve the caller's existing parent exactly once and retain that
+        // directory capability through creation and postcondition checks.
+        // Following a parent symlink is intentional for an explicit export;
+        // the leaf itself is never followed.
+        let parent = open_user_selected_parent(parent_path)?;
+        let parent_identity = FileIdentity::from_metadata(&parent.metadata()?);
+        after_parent_open();
+        let file = create_user_selected_file_new_at(&parent, leaf, &path)?;
+        let current_parent = open_user_selected_parent(parent_path)?;
+        if FileIdentity::from_metadata(&current_parent.metadata()?) != parent_identity {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "user-selected output parent changed while the file was created",
+            ));
+        }
         Ok((file, Box::new(|_| Ok(()))))
     }
 
@@ -5999,6 +6034,58 @@ mod tests {
             .unwrap();
         assert!(status.success(), "creating conf/sub failed: {status}");
         assert!(root.path().join("conf/sub").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_selected_file_at_stays_in_the_held_directory() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let root = crate::test_tempdir();
+        let exports = root.path().join("exports");
+        let held = root.path().join("held");
+        let other = root.path().join("other");
+        std::fs::create_dir(&exports).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let parent = File::open(&exports).unwrap();
+        std::fs::rename(&exports, &held).unwrap();
+        symlink(&other, &exports).unwrap();
+        let mut file = create_user_selected_file_new_at(&parent, OsStr::new("sheet.jpg")).unwrap();
+        file.write_all(b"jpeg").unwrap();
+        assert_eq!(std::fs::read(held.join("sheet.jpg")).unwrap(), b"jpeg");
+        assert!(!other.join("sheet.jpg").exists());
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            create_user_selected_file_new_at(&parent, OsStr::new("sheet.jpg"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        symlink(other.join("untouched"), held.join("link")).unwrap();
+        assert_eq!(
+            create_user_selected_file_new_at(&parent, OsStr::new("link"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert!(!other.join("untouched").exists());
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "sub/file",
+            "/absolute",
+            "nul\0name",
+        ] {
+            assert_eq!(
+                create_user_selected_file_new_at(&parent, OsStr::new(invalid))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput,
+                "{invalid:?}"
+            );
+        }
     }
 
     #[test]

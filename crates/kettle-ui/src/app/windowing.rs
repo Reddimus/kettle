@@ -381,9 +381,13 @@ impl App {
         mux.osc52_copy_allowed = osc52_copy_is_available(self.cfg.osc52, self.clipboard.is_some());
         mux.autoclean_groups = self.cfg.autoclean_groups;
         {
+            // The policy resolved at startup covers config-driven recording
+            // too; a later config change does not start a recorder.
             let recording_requested = self.recorder.is_some()
-                || self.startup.record.is_some()
-                || self.cfg.record.enabled();
+                || matches!(
+                    self.startup.recording,
+                    crate::RecordingPolicy::Enabled { .. }
+                );
             mux.lua_output_subscribed |= recording_requested;
             mux.record_lossless = recording_requested;
         }

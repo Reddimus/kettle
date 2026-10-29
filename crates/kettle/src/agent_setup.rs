@@ -15,6 +15,7 @@
 //! `--agent claude` selects its printed function. Setup is Unix-only.
 #![cfg_attr(not(unix), allow(dead_code))]
 
+use crate::cli::{SetupAgent, SetupArgs, SetupShell};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -359,16 +360,6 @@ fn this_kettle() -> Result<PathBuf, SetupError> {
         .map_err(|_| SetupError::UnnamedKettle)
 }
 
-/// A shell `--print` can write the function for. PowerShell is not one: its
-/// parameter binder drops a bare `--` before a function sees its arguments,
-/// so no function there could hand them on exactly.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SetupShell {
-    Bash,
-    Zsh,
-    Fish,
-}
-
 impl SetupShell {
     fn from_program(program: &Path) -> Option<Self> {
         match program.file_stem()?.to_str()? {
@@ -580,14 +571,6 @@ fn run_program(program: &str, args: Vec<OsString>) -> i32 {
     }
 }
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum SetupAgent {
-    #[default]
-    Codex,
-    Claude,
-    Agy,
-}
-
 #[cfg(any(target_os = "linux", test))]
 fn claude_interactive(args: &[OsString]) -> bool {
     let takes_value = |option: &str| {
@@ -688,44 +671,6 @@ fn launch_claude(argv: Vec<OsString>) -> i32 {
         }
     }
     run_program("claude", argv)
-}
-
-#[derive(clap::Args, Debug)]
-#[command(group(clap::ArgGroup::new("action").args(["print", "status", "uninstall", "install"])))]
-#[command(group(clap::ArgGroup::new("launch").args(["launch_codex", "launch_claude"])))]
-pub(crate) struct SetupArgs {
-    /// Print the selected agent's shell function, or agy's plugin install
-    /// command. agy files are staged in Kettle's private cache. Shell startup
-    /// files and agent configuration are never edited by --print.
-    #[arg(long)]
-    print: bool,
-    /// Install Kettle's native agy plugin. Only valid with --agent agy.
-    #[arg(long)]
-    install: bool,
-    /// Native agy command-hook adapter; not a user command.
-    #[arg(long, hide = true, conflicts_with = "action")]
-    agy_hook: Option<String>,
-    /// Report whether Codex launched from this shell would get Kettle's
-    /// display server, and how it delivers media.
-    #[arg(long)]
-    status: bool,
-    /// Print how to remove the selected agent's function.
-    #[arg(long)]
-    uninstall: bool,
-    /// Run by the printed function: start Codex with these arguments.
-    #[arg(long, hide = true, conflicts_with = "action")]
-    launch_codex: bool,
-    #[arg(long, hide = true, conflicts_with = "action")]
-    launch_claude: bool,
-    /// The agent integration to print, inspect, install or remove.
-    #[arg(long, value_enum, default_value_t = SetupAgent::Codex, conflicts_with_all = ["launch_codex", "launch_claude"])]
-    agent: SetupAgent,
-    /// The shell to print for (default: the one `SHELL` names).
-    #[arg(long, value_enum, conflicts_with_all = ["status", "launch_codex", "launch_claude"])]
-    shell: Option<SetupShell>,
-    /// The agent's own arguments, after `--`.
-    #[arg(last = true, allow_hyphen_values = true, requires = "launch")]
-    argv: Vec<OsString>,
 }
 
 /// The function and its launcher are Unix-only for now: on Windows Codex

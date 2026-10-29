@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use image::{DynamicImage, RgbaImage};
 use kettle_media::client::WorkerClient;
 use kettle_media::{
-    Canvas, ExternalRequest, ExternalSource, FailureCode, Job, JobKind, MAX_VIDEO_STILLS,
-    MediaKind, NativePath, StillsLayout, Target, Theme, VideoCodec, VideoStills, VideoStillsResult,
-    still_label,
+    Canvas, ExternalAttested, ExternalRequest, ExternalSource, FailureCode, Job, JobKind,
+    MAX_VIDEO_STILLS, MediaKind, NativePath, StillsLayout, Target, Theme, VideoCodec, VideoStills,
+    VideoStillsResult, still_label,
 };
 
 /// Frames on a sheet when none are asked for, and the most there may be.
@@ -119,18 +119,19 @@ pub(crate) struct Sheet {
 /// Open `path` here, in this process and its sandbox, and attest what was
 /// opened, as `kettle show` does. A relative path is taken from the working
 /// directory.
-fn source(path: &Path) -> Result<ExternalSource, FailureCode> {
+fn source(path: &Path) -> Result<(ExternalSource, ExternalAttested), FailureCode> {
     let path = std::path::absolute(path).map_err(|_| FailureCode::BadParams)?;
     let attestation = crate::show_cli::attest(&path)?;
     let path = NativePath::from_path(&path).map_err(|_| FailureCode::BadParams)?;
-    Ok(ExternalSource::Path { path, attestation })
+    Ok((ExternalSource::Path { path, attestation }, attestation))
 }
 
 /// The job for `stills` of the file at `path`.
-fn job(path: &Path, stills: VideoStills) -> Result<Job, FailureCode> {
+fn job(path: &Path, stills: VideoStills) -> Result<(Job, ExternalAttested), FailureCode> {
+    let (source, attestation) = source(path)?;
     let request = ExternalRequest {
         kind: JobKind::VideoStills(stills),
-        source: source(path)?,
+        source,
         theme: Theme {
             background: [24, 24, 24, 255],
             foreground: [235, 235, 235, 255],
@@ -147,13 +148,20 @@ fn job(path: &Path, stills: VideoStills) -> Result<Job, FailureCode> {
         },
         fallback_fonts: Vec::new(),
     };
-    Ok(request.into())
+    Ok((request.into(), attestation))
 }
 
 /// Take the stills `request` asks for, in a worker `client` starts.
 pub(crate) fn render(request: &FramesRequest, client: &WorkerClient) -> Result<Sheet, FailureCode> {
+    render_attested(request, client).map(|(sheet, _)| sheet)
+}
+
+fn render_attested(
+    request: &FramesRequest,
+    client: &WorkerClient,
+) -> Result<(Sheet, ExternalAttested), FailureCode> {
     let stills = request.stills()?;
-    let job = job(&request.path, stills)?;
+    let (job, attestation) = job(&request.path, stills)?;
     let rendered = client.render(&job)?;
     rendered
         .validate_as(MediaKind::Video)
@@ -161,11 +169,14 @@ pub(crate) fn render(request: &FramesRequest, client: &WorkerClient) -> Result<S
     let video = rendered.video.clone().ok_or(FailureCode::RenderParse)?;
     let image = RgbaImage::from_raw(rendered.width, rendered.height, rendered.rgba)
         .ok_or(FailureCode::RenderParse)?;
-    Ok(Sheet {
-        image,
-        video,
-        layout: stills.layout,
-    })
+    Ok((
+        Sheet {
+            image,
+            video,
+            layout: stills.layout,
+        },
+        attestation,
+    ))
 }
 
 impl Sheet {
@@ -354,13 +365,20 @@ impl OutputRefusal {
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+fn shared(directory: &Path) -> Result<bool, OutputRefusal> {
+    shared_directory(&std::fs::File::open(directory).map_err(|_| OutputRefusal::Unwritable)?)
+}
+
 /// Whether someone other than the owner could replace an entry in
 /// `directory`: it is group- or world-writable (or, on macOS, an ACL lets
 /// another write) and has no sticky bit.
 #[cfg(unix)]
-fn shared(directory: &Path) -> Result<bool, OutputRefusal> {
+fn shared_directory(directory: &std::fs::File) -> Result<bool, OutputRefusal> {
     use std::os::unix::fs::MetadataExt as _;
-    let found = std::fs::metadata(directory).map_err(|_| OutputRefusal::Unwritable)?;
+    let found = directory
+        .metadata()
+        .map_err(|_| OutputRefusal::Unwritable)?;
     if shared_mode(found.uid(), found.mode(), unsafe { libc::geteuid() }) {
         return Ok(true);
     }
@@ -368,7 +386,7 @@ fn shared(directory: &Path) -> Result<bool, OutputRefusal> {
         return Ok(false);
     }
     #[cfg(target_os = "macos")]
-    if kettle_media_native::acl::grants_write(directory) {
+    if kettle_media_native::acl::grants_write_file(directory) {
         return Ok(true);
     }
     Ok(false)
@@ -401,6 +419,7 @@ fn unpredictable() -> u64 {
 /// made by this call and by nothing else. Created as a
 /// user-selected export, so on macOS it never inherits an ACL from the
 /// folder that would let another user read the frames.
+#[cfg(not(unix))]
 fn create_private(directory: &Path) -> Result<(PathBuf, std::fs::File), OutputRefusal> {
     for _ in 0..16 {
         let candidate = format!(".kettle-{:016x}.tmp", unpredictable());
@@ -414,11 +433,50 @@ fn create_private(directory: &Path) -> Result<(PathBuf, std::fs::File), OutputRe
     Err(OutputRefusal::Unwritable)
 }
 
+#[cfg(unix)]
+fn create_private(
+    directory: &std::fs::File,
+) -> Result<(std::ffi::CString, std::fs::File), OutputRefusal> {
+    for _ in 0..16 {
+        let candidate = format!(".kettle-{:016x}.tmp", unpredictable());
+        match kettle_state::create_user_selected_file_new_at(directory, candidate.as_ref()) {
+            Ok(file) => return Ok((std::ffi::CString::new(candidate).unwrap(), file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(OutputRefusal::Unwritable),
+        }
+    }
+    Err(OutputRefusal::Unwritable)
+}
+
 /// Write `bytes` to `out` whole or not at all: a private file of this
 /// call's own beside it, renamed over it, in a folder no one else can
 /// change, and never over the video. Only a file this call made is ever
 /// removed.
+#[cfg(test)]
 fn write_out(out: &Path, input: &Path, bytes: &[u8]) -> Result<(), OutputRefusal> {
+    write_out_with(out, input, bytes, || {})
+}
+
+#[cfg(test)]
+fn write_out_with(
+    out: &Path,
+    input: &Path,
+    bytes: &[u8],
+    after_check: impl FnOnce(),
+) -> Result<(), OutputRefusal> {
+    let attestation = crate::show_cli::attest(input).map_err(|_| OutputRefusal::Unwritable)?;
+    write_out_attested(out, input, attestation, bytes, after_check)
+}
+
+// Windows retains path-based publication; it cannot pin parent replacements.
+#[cfg(not(unix))]
+fn write_out_attested(
+    out: &Path,
+    input: &Path,
+    _attestation: ExternalAttested,
+    bytes: &[u8],
+    after_check: impl FnOnce(),
+) -> Result<(), OutputRefusal> {
     if let (Ok(out), Ok(input)) = (std::fs::canonicalize(out), std::fs::canonicalize(input))
         && out == input
     {
@@ -435,6 +493,7 @@ fn write_out(out: &Path, input: &Path, bytes: &[u8]) -> Result<(), OutputRefusal
         })
         .ok_or(OutputRefusal::Unwritable)?;
     out.file_name().ok_or(OutputRefusal::Unwritable)?;
+    after_check();
     if shared(directory)? {
         return Err(OutputRefusal::Shared);
     }
@@ -453,13 +512,87 @@ fn write_out(out: &Path, input: &Path, bytes: &[u8]) -> Result<(), OutputRefusal
     Ok(())
 }
 
+#[cfg(unix)]
+fn write_out_attested(
+    out: &Path,
+    _input: &Path,
+    input: ExternalAttested,
+    bytes: &[u8],
+    after_check: impl FnOnce(),
+) -> Result<(), OutputRefusal> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let directory = out
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = out.file_name().ok_or(OutputRefusal::Unwritable)?;
+    let name = CString::new(name.as_bytes()).map_err(|_| OutputRefusal::Unwritable)?;
+    let parent = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(directory)
+        .map_err(|_| OutputRefusal::Unwritable)?;
+    // SAFETY: the held parent, NUL-terminated leaf and stat output are valid.
+    let mut found: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut found,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0
+    {
+        if found.st_dev as u64 == input.dev && found.st_ino as u64 == input.ino {
+            return Err(OutputRefusal::IsInput);
+        }
+        if found.st_mode & libc::S_IFMT == libc::S_IFLNK {
+            return Err(OutputRefusal::Unwritable);
+        }
+    } else if std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound {
+        return Err(OutputRefusal::Unwritable);
+    }
+    after_check();
+    if shared_directory(&parent)? {
+        return Err(OutputRefusal::Shared);
+    }
+    let (temporary, mut file) = create_private(&parent)?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    let written = written.and_then(|()| {
+        // SAFETY: both leaf names resolve within the same held directory.
+        if unsafe {
+            libc::renameat(
+                parent.as_raw_fd(),
+                temporary.as_ptr(),
+                parent.as_raw_fd(),
+                name.as_ptr(),
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    });
+    if written.is_err() {
+        // SAFETY: only this call created the unpredictable temporary entry.
+        let _ = unsafe { libc::unlinkat(parent.as_raw_fd(), temporary.as_ptr(), 0) };
+        return Err(OutputRefusal::Unwritable);
+    }
+    Ok(())
+}
+
 /// Run `kettle video-frames …`; returns the exit code (0 written, 1 not).
 pub(crate) fn run(request: FramesRequest, out: &Path) -> i32 {
     let sheet = crate::media_client()
         .ok_or(FailureCode::WorkerUnavailable)
-        .and_then(|client| render(&request, &client))
-        .and_then(|sheet| sheet.jpeg(&|_| true).map(|jpeg| (sheet, jpeg)));
-    let (sheet, jpeg) = match sheet {
+        .and_then(|client| render_attested(&request, &client))
+        .and_then(|(sheet, input)| sheet.jpeg(&|_| true).map(|jpeg| (sheet, jpeg, input)));
+    let (sheet, jpeg, input) = match sheet {
         Ok(taken) => taken,
         Err(failure) => {
             eprintln!("kettle video-frames: {}", failure.model_message());
@@ -469,7 +602,7 @@ pub(crate) fn run(request: FramesRequest, out: &Path) -> i32 {
             return 1;
         }
     };
-    if let Err(refusal) = write_out(out, &request.path, &jpeg) {
+    if let Err(refusal) = write_out_attested(out, &request.path, input, &jpeg, || {}) {
         eprintln!("kettle video-frames: {}", refusal.text());
         return 1;
     }
@@ -765,6 +898,81 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_refuses_input_identity_and_symlink_leaves() {
+        use std::os::unix::fs::symlink;
+        let root = kettle_test_support::private_tempdir("kettle-video-input-identity-");
+        let input = root.path().join("clip.webm");
+        std::fs::write(&input, b"video").unwrap();
+        let alias = root.path().join("alias.webm");
+        std::fs::hard_link(&input, &alias).unwrap();
+        assert_eq!(
+            write_out(&alias, &input, b"jpeg"),
+            Err(OutputRefusal::IsInput)
+        );
+        let output = root.path().join("frames.jpg");
+        symlink(&input, &output).unwrap();
+        assert_eq!(
+            write_out(&output, &input, b"jpeg"),
+            Err(OutputRefusal::Unwritable)
+        );
+        assert_eq!(std::fs::read(&input).unwrap(), b"video");
+        assert!(
+            std::fs::symlink_metadata(&output)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        std::fs::remove_file(&output).unwrap();
+        std::fs::create_dir(&output).unwrap();
+        assert_eq!(
+            write_out(&output, &input, b"jpeg"),
+            Err(OutputRefusal::Unwritable)
+        );
+        assert!(std::fs::read_dir(root.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_parent_swap_cannot_replace_the_video() {
+        use std::os::unix::fs::symlink;
+        let root = kettle_test_support::private_tempdir("kettle-video-parent-swap-");
+        let videos = root.path().join("videos");
+        let exports = root.path().join("exports");
+        let checked = root.path().join("checked");
+        std::fs::create_dir(&videos).unwrap();
+        std::fs::create_dir(&exports).unwrap();
+        let input = videos.join("clip.webm");
+        let out = exports.join("clip.webm");
+        std::fs::write(&input, b"video").unwrap();
+        let result = write_out_with(&out, &input, b"jpeg", || {
+            std::fs::rename(&exports, &checked).unwrap();
+            symlink(&videos, &exports).unwrap();
+        });
+        assert_eq!(
+            std::fs::read(&input).unwrap(),
+            b"video",
+            "a swapped output parent must never overwrite the input"
+        );
+        if result.is_ok() {
+            assert_eq!(std::fs::read(checked.join("clip.webm")).unwrap(), b"jpeg");
+        }
+        assert!(std::fs::read_dir(&checked).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
     }
 
     #[cfg(target_os = "macos")]

@@ -255,6 +255,17 @@ mod tab_handoff_tests {
     }
 }
 
+/// Recording policy resolved by the entry point before activation.
+#[derive(Clone, Debug, Default)]
+pub enum RecordingPolicy {
+    #[default]
+    Disabled,
+    Enabled {
+        target: kettle_core::record::RecordingTarget,
+        raw_input: bool,
+    },
+}
+
 /// First-tab startup overrides from the CLI.
 #[derive(Debug, Default, Clone)]
 pub struct Options {
@@ -335,15 +346,8 @@ pub struct Options {
     /// launch. `None` = use the config value, except that `--agent-server off`
     /// alone also turns display off (see [`kettle_ctl::CtlOverrides`]).
     pub agent_display: Option<bool>,
-    /// One-shot session-recorder file or managed directory target from the
-    /// CLI/env (`--record`/`--record-dir`/`KETTLE_RECORD*`). Writes an
-    /// asciicast-compatible trace. `None` here falls back to the persistent
-    /// `record`/`record-dir` config keys.
-    pub record: Option<kettle_core::record::RecordingTarget>,
-    /// With `record`, capture RAW typed characters in `i` events
-    /// (`--record-raw-input`). Off by default — keystrokes are redacted tokens,
-    /// not literal characters, so typed secrets aren't written to the trace.
-    pub record_raw_input: bool,
+    /// Immutable recording policy resolved before activation.
+    pub recording: RecordingPolicy,
     /// The media worker client, configured by the `kettle` binary with the
     /// worker's install path and this build's identity. Nothing is checked
     /// and no worker starts until something asks. `None` reports media as

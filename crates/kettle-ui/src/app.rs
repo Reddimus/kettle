@@ -5803,33 +5803,6 @@ fn window_title(template: &str, pane_title: &str, cwd: &str, tab: usize) -> Stri
     window_title_with_home(template, pane_title, cwd, home.as_deref(), tab)
 }
 
-/// Expand a leading `~` / `~/…` in a config-file path to the user's home dir.
-/// Config values (unlike `--record-dir` / `KETTLE_RECORD_DIR`, which a shell
-/// expands before Kettle sees them) are never shell-expanded, so a literal
-/// `record-dir = ~/.cache/kettle/records` would otherwise create a `~`-named
-/// directory under the launch CWD. Falls back to the raw path if `HOME` /
-/// `USERPROFILE` is unset.
-fn expand_user_path(path: &std::path::Path) -> std::path::PathBuf {
-    expand_user_path_with(path, crate::mux::home_dir_string())
-}
-
-/// Pure core of [`expand_user_path`], parameterized on the home dir for testing.
-fn expand_user_path_with(path: &std::path::Path, home: Option<String>) -> std::path::PathBuf {
-    let Some(s) = path.to_str() else {
-        return path.to_path_buf();
-    };
-    if (s == "~" || s.starts_with("~/"))
-        && let Some(home) = home.filter(|h| !h.is_empty())
-    {
-        let mut expanded = std::path::PathBuf::from(home);
-        if let Some(rest) = s.strip_prefix("~/") {
-            expanded.push(rest);
-        }
-        return expanded;
-    }
-    path.to_path_buf()
-}
-
 const RECORDING_TITLE_SUFFIX: &str = " [REC]";
 // A distinct suffix while RAW keystroke capture is active, so literal-keystroke
 // (potentially password-capturing) recording is never visually silent.
@@ -11003,14 +10976,11 @@ impl App {
         // App can fire LuaEvent::Output. Set before the Mux moves
         // into the struct.
         let lua_output_subscribed = lua_engine.is_some();
-        // Also subscribe to per-pane PTY output when recording is requested for
-        // this launch — either the one-shot CLI/env target (`startup.record`) OR
-        // the persistent `record = on` config key (`initial_cfg.record`) — so the
-        // recorder can tee output into the asciicast trace. The first pane is
-        // spawned (with this flag baked in) BEFORE the recorder starts in
-        // `resumed_inner`, so a missing config check here would leave the `o`
-        // (terminal output) channel permanently empty while still showing `[REC]`.
-        let recording_requested = startup.record.is_some() || initial_cfg.record.enabled();
+        // Recording policy is fixed before activation, including an explicit
+        // disabled state. Config reload still updates retention budgets only;
+        // it does not restart or reconfigure the active recorder.
+        let recording_requested =
+            matches!(startup.recording, crate::RecordingPolicy::Enabled { .. });
         // Retention budgets are process-wide in kettle-core, so publish them
         // before any recorder can be constructed.
         crate::dev_record::apply_retention_config(&initial_cfg);
@@ -19992,33 +19962,9 @@ impl App {
         // `startup_is_not_taken_wholesale` below.
         let cmd_override = self.startup.command.take();
         let cwd_override = self.startup.cwd.take();
-        // Resolve the session recording target for this launch: an explicit
-        // `--record`/`--record-dir`/`KETTLE_RECORD*` override (in
-        // `self.startup.record`) wins; otherwise the persistent `record = on`
-        // config key records into `record-dir` (default `<config-dir>/recordings`).
-        let dev_record = if let Some(target) = self.startup.record.clone() {
-            Some((target, self.startup.record_raw_input))
-        } else if self.cfg.record.enabled() {
-            // `record-dir` from the config file is NOT shell-expanded, so honor a
-            // leading `~`. Unset falls back to `<config-dir>/recordings`, resolved
-            // from `Config::default_path()` (the base config dir, never a
-            // `--profile` subdir) so it matches the documented default.
-            self.cfg
-                .record_dir
-                .as_deref()
-                .map(expand_user_path)
-                .or_else(|| {
-                    Config::default_path()
-                        .and_then(|p| p.parent().map(|dir| dir.join("recordings")))
-                })
-                .map(|dir| {
-                    (
-                        kettle_core::record::RecordingTarget::Directory(dir),
-                        self.cfg.record_raw_input,
-                    )
-                })
-        } else {
-            None
+        let dev_record = match self.startup.recording.clone() {
+            crate::RecordingPolicy::Enabled { target, raw_input } => Some((target, raw_input)),
+            crate::RecordingPolicy::Disabled => None,
         };
         let restored = if spawned_early {
             true

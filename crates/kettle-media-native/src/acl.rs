@@ -20,6 +20,7 @@ const READ_ONLY: [&[u8]; 5] = [
 ];
 
 unsafe extern "C" {
+    fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
     fn acl_get_link_np(path: *const c_char, kind: c_int) -> *mut c_void;
     fn acl_to_text(acl: *mut c_void, length: *mut ssize_t) -> *mut c_char;
     fn acl_free(object: *mut c_void) -> c_int;
@@ -34,6 +35,18 @@ pub fn grants_write(path: &Path) -> bool {
     };
     // SAFETY: `path` is NUL-terminated and outlives the call.
     let acl = unsafe { acl_get_link_np(path.as_ptr(), ACL_TYPE_EXTENDED) };
+    acl_grants_write(acl)
+}
+
+/// Whether the ACL on an open file or directory allows more than reading.
+pub fn grants_write_file(file: &std::fs::File) -> bool {
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: the descriptor stays open throughout the ACL lookup.
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    acl_grants_write(acl)
+}
+
+fn acl_grants_write(acl: *mut c_void) -> bool {
     if acl.is_null() {
         // A file without an extended ACL reads as ENOENT.
         return std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT);
@@ -50,7 +63,7 @@ pub fn grants_write(path: &Path) -> bool {
         unsafe { acl_free(text.cast()) };
         grants
     };
-    // SAFETY: `acl` came from acl_get_link_np and is freed once.
+    // SAFETY: the ACL lookup allocated `acl`, which is freed once.
     unsafe { acl_free(acl) };
     grants
 }
@@ -77,6 +90,27 @@ pub fn text_grants_write(text: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descriptor_acl_check_stays_with_the_open_directory() {
+        let root = kettle_test_support::private_tempdir("kettle-acl-descriptor-");
+        let path = root.path().join("exports");
+        let held = root.path().join("held");
+        std::fs::create_dir(&path).unwrap();
+        let directory = std::fs::File::open(&path).unwrap();
+        std::fs::rename(&path, &held).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args(["+a", "everyone allow write"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(grants_write(&path));
+        assert!(!grants_write_file(&directory));
+    }
 
     #[test]
     fn acl_text_counts_only_read_and_deny_entries_as_safe() {
