@@ -89,7 +89,7 @@ impl RevealTarget {
         })
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", all(test, unix)))]
     fn path_for_handoff(&self) -> Result<&Path, OpenFailure> {
         if !self.still_shown() {
             return Err(OpenFailure::Changed);
