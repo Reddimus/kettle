@@ -149,7 +149,18 @@ fn descriptor_sweep_limit() -> io::Result<libc::c_int> {
         Ok(0)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        // Lowering either process limit leaves existing high descriptors open.
+        let bound = macos_descriptor_limit()?;
+        // Fail spawn rather than leave a partial sweep or an unbounded loop.
+        if bound > MAX_FD_SWEEP {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        Ok(bound as libc::c_int)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let mut limits = libc::rlimit {
             rlim_cur: 0,
@@ -159,37 +170,8 @@ fn descriptor_sweep_limit() -> io::Result<libc::c_int> {
             return Err(io::Error::last_os_error());
         }
 
-        #[cfg(target_os = "macos")]
-        {
-            let mut per_process: libc::c_int = 0;
-            let mut len = mem::size_of::<libc::c_int>();
-            let rc = unsafe {
-                libc::sysctlbyname(
-                    b"kern.maxfilesperproc\0".as_ptr().cast(),
-                    (&mut per_process as *mut libc::c_int).cast(),
-                    &mut len,
-                    ptr::null_mut(),
-                    0,
-                )
-            };
-            if rc != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            // A failed or implausibly large bound must fail spawn, not leave an
-            // incomplete sweep or keep the forked child in a near-unbounded loop.
-            if len != mem::size_of::<libc::c_int>() || per_process <= FIRST_INHERITED_FD {
-                return Err(io::Error::from_raw_os_error(libc::EINVAL));
-            }
-            let bound = limits.rlim_max.min(per_process as libc::rlim_t);
-            if bound <= FIRST_INHERITED_FD as libc::rlim_t || bound > MAX_FD_SWEEP {
-                return Err(io::Error::from_raw_os_error(libc::EINVAL));
-            }
-            Ok(bound as libc::c_int)
-        }
-
         // Linux's default per-process fd ceiling is a practical fallback bound;
         // larger or unlimited values must not make child setup effectively hang.
-        #[cfg(not(target_os = "macos"))]
         Ok(
             if limits.rlim_max != libc::RLIM_INFINITY && limits.rlim_max <= MAX_FD_SWEEP {
                 limits.rlim_max
@@ -198,6 +180,28 @@ fn descriptor_sweep_limit() -> io::Result<libc::c_int> {
             } as libc::c_int,
         )
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_descriptor_limit() -> io::Result<libc::rlim_t> {
+    let mut per_process: libc::c_int = 0;
+    let mut len = mem::size_of::<libc::c_int>();
+    let rc = unsafe {
+        libc::sysctlbyname(
+            b"kern.maxfilesperproc\0".as_ptr().cast(),
+            (&mut per_process as *mut libc::c_int).cast(),
+            &mut len,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len != mem::size_of::<libc::c_int>() || per_process <= FIRST_INHERITED_FD {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    Ok(per_process as libc::rlim_t)
 }
 
 /// Room for the child's descriptor list on macOS. A shell normally inherits a
@@ -434,7 +438,7 @@ fn for_each_proc_fd(
 /// calling process, or `None` when the list is unreadable or may be truncated.
 ///
 /// macOS has no `close_range`. The sweep costs one `fcntl` per descriptor
-/// number up to the hard limit (bounded by kern.maxfilesperproc). A shell
+/// number up to kern.maxfilesperproc, independent of process limits. A shell
 /// started under Node-based tools can inherit a 1,048,576 limit, making every
 /// pane spawn wait about 100 ms. The kernel's list makes the cost proportional to
 /// the descriptors actually open. See `proc_pidinfo` and `PROC_PIDLISTFDS` in
@@ -541,7 +545,7 @@ impl PtyFd {
         let mut cmd = builder.as_command()?;
         let controlling_tty = builder.get_controlling_tty();
         // Resolve the bound in the parent because POSIX does not require
-        // getrlimit to be async-signal-safe on every supported Unix.
+        // getrlimit or sysctlbyname to be async-signal-safe on every Unix.
         let max_fd = descriptor_sweep_limit()?;
         #[cfg(target_os = "macos")]
         let mut fd_list = vec![
@@ -770,22 +774,28 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn descriptor_above_lowered_soft_limit_is_closed_on_exec() -> anyhow::Result<()> {
-        run_lowered_soft_limit_probe(false)
+        run_lowered_limit_probe(false, false)
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn fallback_closes_descriptor_above_lowered_soft_limit() -> anyhow::Result<()> {
-        run_lowered_soft_limit_probe(true)
+        run_lowered_limit_probe(true, false)
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn run_lowered_soft_limit_probe(force_fallback: bool) -> anyhow::Result<()> {
+    #[test]
+    fn fallback_closes_descriptor_above_lowered_hard_limit() -> anyhow::Result<()> {
+        run_lowered_limit_probe(true, true)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn run_lowered_limit_probe(force_fallback: bool, lower_hard: bool) -> anyhow::Result<()> {
         // Limits are process-wide, so never lower them in the main harness.
         let output = std::process::Command::new(std::env::current_exe()?)
             .args([
                 "--exact",
-                "unix::tests::lowered_soft_limit_probe",
+                "unix::tests::lowered_limit_probe",
                 "--ignored",
                 "--nocapture",
                 "--test-threads=1",
@@ -793,6 +803,10 @@ mod tests {
             .env(
                 "PORTABLE_PTY_TEST_FD_FALLBACK",
                 if force_fallback { "1" } else { "0" },
+            )
+            .env(
+                "PORTABLE_PTY_TEST_LOWER_HARD_LIMIT",
+                if lower_hard { "1" } else { "0" },
             )
             .output()?;
         assert!(
@@ -808,7 +822,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     #[ignore = "run in a subprocess to isolate RLIMIT_NOFILE changes"]
-    fn lowered_soft_limit_probe() -> anyhow::Result<()> {
+    fn lowered_limit_probe() -> anyhow::Result<()> {
         let mut original = libc::rlimit {
             rlim_cur: 0,
             rlim_max: 0,
@@ -817,15 +831,12 @@ mod tests {
             unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut original) },
             0
         );
-        struct RestoreLimit(libc::rlimit);
-        impl Drop for RestoreLimit {
-            fn drop(&mut self) {
-                assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &self.0) }, 0);
-            }
-        }
-        let _restore = RestoreLimit(original);
         let mut limits = original;
-        limits.rlim_cur = original.rlim_max.min(65_536);
+        #[cfg(target_os = "macos")]
+        let platform_ceiling = macos_descriptor_limit()?;
+        #[cfg(not(target_os = "macos"))]
+        let platform_ceiling = libc::RLIM_INFINITY;
+        limits.rlim_cur = regression_soft_limit(original.rlim_max, platform_ceiling);
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limits) }, 0);
         let target = 5_000.min(usable_descriptor_limit() - 1);
         assert!(target >= 64, "descriptor limit too low for regression");
@@ -834,14 +845,33 @@ mod tests {
         let leaked = unsafe { FileDescriptor::from_raw_fd(target) };
         assert_eq!(unsafe { libc::fcntl(target, libc::F_GETFD) }, 0);
         limits.rlim_cur = target.min(1_024) as libc::rlim_t;
+        if std::env::var("PORTABLE_PTY_TEST_LOWER_HARD_LIMIT").as_deref() == Ok("1") {
+            limits.rlim_max = limits.rlim_cur;
+        }
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limits) }, 0);
         FORCE_FD_FALLBACK.with(|force| {
             force.set(std::env::var("PORTABLE_PTY_TEST_FD_FALLBACK").as_deref() == Ok("1"));
         });
-        eprintln!("probing fd {target} above soft limit {}", limits.rlim_cur);
+        eprintln!(
+            "probing fd {target} above soft limit {} (hard limit {})",
+            limits.rlim_cur, limits.rlim_max
+        );
         assert_descriptor_is_closed_on_exec(target)?;
         drop(leaked);
         Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn regression_soft_limit(hard: libc::rlim_t, platform_ceiling: libc::rlim_t) -> libc::rlim_t {
+        hard.min(65_536).min(platform_ceiling)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn regression_soft_limit_respects_macos_ceiling() {
+        assert_eq!(regression_soft_limit(libc::RLIM_INFINITY, 10_240), 10_240);
+        assert_eq!(regression_soft_limit(4_096, 10_240), 4_096);
+        assert_eq!(regression_soft_limit(libc::RLIM_INFINITY, 131_072), 65_536);
     }
 
     #[test]
@@ -872,23 +902,7 @@ mod tests {
         );
         let soft = limits.rlim_cur.min(libc::c_int::MAX as libc::rlim_t) as libc::c_int;
         #[cfg(target_os = "macos")]
-        {
-            let mut per_process: libc::c_int = 0;
-            let mut len = mem::size_of::<libc::c_int>();
-            let name = b"kern.maxfilesperproc\0";
-            let rc = unsafe {
-                libc::sysctlbyname(
-                    name.as_ptr().cast(),
-                    (&mut per_process as *mut libc::c_int).cast(),
-                    &mut len,
-                    ptr::null_mut(),
-                    0,
-                )
-            };
-            if rc == 0 && per_process > 0 {
-                return soft.min(per_process);
-            }
-        }
+        let soft = soft.min(macos_descriptor_limit().expect("kern.maxfilesperproc") as libc::c_int);
         soft
     }
 
@@ -982,6 +996,7 @@ mod tests {
         command.args([
             "--ignored",
             "inherited_descriptor_probe",
+            "--nocapture",
             "--test-threads=1",
         ]);
         command.env(INHERITED_FD_ENV, leaked_fd.to_string());

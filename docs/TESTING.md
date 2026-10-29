@@ -445,10 +445,14 @@ The PTY descriptor regressions run a separate harness process so lowering
 `RLIMIT_NOFILE` cannot affect concurrent tests. They open a non-close-on-exec
 descriptor at 5000 (or the highest usable lower number), lower the soft limit
 below it, and execute a child that verifies `fcntl(F_GETFD)` returns `EBADF`.
+Another forced-fallback case lowers both the soft and hard limits below the
+open descriptor. On macOS, setup caps the raised soft limit by
+`kern.maxfilesperproc` before calling `setrlimit`; a portable calculation test
+covers an unlimited hard limit with a 10240 kernel ceiling.
 Both normal cleanup and a test-only forced fallback run: Linux's fallback
 enumerates `/proc/self/fd` in the child with raw `getdents64`, while macOS's
-fallback walks to the hard limit capped by the parent-read
-`kern.maxfilesperproc`. Synthetic directory-record tests run on every Unix
+fallback walks to the parent-read `kern.maxfilesperproc`, independently of
+lowered process limits. Synthetic directory-record tests run on every Unix
 host; the Linux enumeration itself requires the native Linux vendor gate.
 
 `cosmic-text` stays outside the vendor validation workspace.

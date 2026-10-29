@@ -2107,6 +2107,8 @@ The spawned child marks every descriptor it inherited above stderr
 close-on-exec before `exec`. macOS asks the kernel which descriptors are open
 instead of trying each number up to the soft limit, so a pane opens just as
 fast when Kettle inherits a 1,048,576-descriptor limit from its launcher.
+If that list is unavailable or full, macOS sweeps to `kern.maxfilesperproc`;
+lowered process limits cannot exclude descriptors that are already open.
 Rendered stdout commands cross a second four-slot queue to a dedicated writer,
 keeping blocking OS writes off the lifecycle thread. The writer hands each
 rendered command to the sink in one `write_all`. The Unix sink is an unbuffered
