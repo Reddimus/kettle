@@ -70,8 +70,8 @@ impl Direction {
     fn permits(self, kind: u8) -> bool {
         match self {
             Self::ExternalToParent => kind == 3,
-            Self::ParentToWorker => matches!(kind, 1 | 4 | 8 | 9 | 14),
-            Self::WorkerToParent => matches!(kind, 2 | 5 | 6 | 7 | 10 | 11 | 12 | 13 | 14),
+            Self::ParentToWorker => matches!(kind, 1 | 4 | 8 | 9 | 14 | 15),
+            Self::WorkerToParent => matches!(kind, 2 | 5 | 6 | 7 | 10 | 11 | 12 | 13 | 14 | 16),
         }
     }
 }
@@ -87,6 +87,8 @@ pub enum Frame {
         rendered: Rendered,
     },
     Failure(Failure),
+    FileFactsRequest(FileFactsRequest),
+    FileFactsReply(FileFactsReply),
     /// A playback session: what opens it, and what the parent asks of it.
     PlayOpen(PlayOpen),
     PlayCommand(PlayCommand),
@@ -109,6 +111,8 @@ impl Frame {
             Self::Job(_) => 4,
             Self::Rendered(_) => 5,
             Self::Failure(_) => 6,
+            Self::FileFactsRequest(_) => 15,
+            Self::FileFactsReply(_) => 16,
             Self::DetectedRendered { .. } => 7,
             Self::PlayOpen(_) => 8,
             Self::PlayCommand(_) => 9,
@@ -124,6 +128,11 @@ impl Frame {
             Self::Hello(h) => h.build_id.validate(),
             Self::Ready(r) => r.build_id.validate(),
             Self::Rendered(r) => r.validate(),
+            Self::FileFactsRequest(request) => match &request.source {
+                Source::Path { path, .. } => validate_path(path.as_bytes()),
+                Source::Bytes(_) => Err(ValidationError::BadParams),
+            },
+            Self::FileFactsReply(reply) => validate_identity(reply.identity),
             Self::DetectedRendered { kind, rendered } => rendered.validate_as(*kind),
             Self::Failure(_) | Self::PlayCommand(_) | Self::PlayState(_) | Self::AudioState(_) => {
                 Ok(())
@@ -715,6 +724,26 @@ fn put_frame(w: &mut Writer, frame: &Frame) -> Result<(), WireError> {
         Frame::Hello(h) => w.build(&h.build_id),
         Frame::Ready(r) => w.build(&r.build_id),
         Frame::Failure(f) => w.u8(f.code as u8),
+        Frame::FileFactsRequest(request) => {
+            if !matches!(request.source, Source::Path { .. }) {
+                return Err(ValidationError::BadParams.into());
+            }
+            w.u64(request.generation)?;
+            put_source(w, &request.source)
+        }
+        Frame::FileFactsReply(reply) => {
+            validate_identity(reply.identity)?;
+            w.u64(reply.generation)?;
+            w.u8(u8::from(reply.identity.is_some()))?;
+            if let Some(identity) = reply.identity {
+                w.u64(identity.dev)?;
+                w.u64(identity.ino)?;
+                w.u64(identity.size)?;
+                w.u64(identity.mtime_seconds as u64)?;
+                w.u32(identity.mtime_nanos)?;
+            }
+            Ok(())
+        }
         Frame::PlayOpen(open) => {
             put_source(w, &open.source)?;
             w.u32(open.max_width)?;
@@ -1414,6 +1443,33 @@ fn parse_frame(r: &mut Reader<'_>, kind: u8) -> Result<Frame, WireError> {
                 rendered: r.rendered(Some(kind))?,
             }
         }
+        15 => {
+            let generation = r.u64()?;
+            let source = r.source(JobKind::Auto, false)?;
+            if !matches!(source, Source::Path { .. }) {
+                return Err(ValidationError::BadParams.into());
+            }
+            Frame::FileFactsRequest(FileFactsRequest { generation, source })
+        }
+        16 => {
+            let generation = r.u64()?;
+            let identity = if r.flag()? {
+                Some(PathIdentity {
+                    dev: r.u64()?,
+                    ino: r.u64()?,
+                    size: r.u64()?,
+                    mtime_seconds: r.u64()? as i64,
+                    mtime_nanos: r.u32()?,
+                })
+            } else {
+                None
+            };
+            validate_identity(identity)?;
+            Frame::FileFactsReply(FileFactsReply {
+                generation,
+                identity,
+            })
+        }
         6 => Frame::Failure(Failure {
             code: failure_code(r.u8()?)?,
         }),
@@ -1596,4 +1652,44 @@ fn failure_code(v: u8) -> Result<FailureCode, WireError> {
         27 => SandboxUnavailable,
         _ => return Err(WireError::UnknownEnum),
     })
+}
+
+#[cfg(test)]
+mod file_facts_tests {
+    use super::*;
+
+    #[test]
+    fn file_facts_frames_preserve_generation_identity_and_direction() {
+        let request = Frame::FileFactsRequest(FileFactsRequest {
+            generation: 19,
+            source: Source::Path {
+                path: NativePath::from_path(&std::env::temp_dir().join("kettle-file-facts"))
+                    .unwrap(),
+                authorization: Authorization::ExternalAttested(ExternalAttested { dev: 1, ino: 2 }),
+            },
+        });
+        let reply = Frame::FileFactsReply(FileFactsReply {
+            generation: 19,
+            identity: Some(PathIdentity {
+                dev: 1,
+                ino: 2,
+                size: 1234,
+                mtime_seconds: -5,
+                mtime_nanos: 6,
+            }),
+        });
+        for (frame, direction) in [
+            (request, Direction::ParentToWorker),
+            (reply, Direction::WorkerToParent),
+        ] {
+            let bytes = encode(&frame, direction).unwrap();
+            assert_eq!(decode(&bytes, direction).unwrap(), frame);
+            assert!(decode(&bytes, Direction::ExternalToParent).is_err());
+        }
+        let inline = Frame::FileFactsRequest(FileFactsRequest {
+            generation: 0,
+            source: Source::Bytes(vec![]),
+        });
+        assert!(encode(&inline, Direction::ParentToWorker).is_err());
+    }
 }

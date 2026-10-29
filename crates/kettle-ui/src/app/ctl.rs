@@ -102,23 +102,15 @@ impl App {
     /// replies + a connection table.
     pub(super) fn drain_ctl(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
         use crate::ctl_server::CtlServerMsg;
-        // Pull a bounded batch first so we don't hold a `&self.ctl` borrow
-        // while calling `&mut self` handlers.
-        let mut msgs = Vec::new();
-        if let Some(ctl) = &self.ctl {
-            for _ in 0..crate::ctl_server::INBOX_CAP {
-                let Some(m) = ctl.try_recv() else { break };
-                msgs.push(m);
-            }
-        }
-        if msgs.is_empty() {
-            return;
-        }
+        let mut budget = crate::ctl_server::DrainBudget::new();
         // Only repaint when the batch could have changed visible state.
         // `wait_for` probes are pure reads arriving at up to 20/s for the
         // whole wait, and repainting an idle window for each one wastes CPU.
         let mut needs_redraw = false;
-        for msg in msgs {
+        while budget.take() {
+            let Some(msg) = self.ctl.as_ref().and_then(|ctl| ctl.try_recv()) else {
+                break;
+            };
             match msg {
                 CtlServerMsg::NewConn { conn_id, event_tx } => {
                     if let Some(ctl) = &mut self.ctl {
@@ -131,6 +123,9 @@ impl App {
                     request,
                     reply,
                 } => {
+                    if !self.ctl.as_ref().is_some_and(|ctl| ctl.connected(conn_id)) {
+                        continue;
+                    }
                     // Mutations + first-time attaches change visible state
                     // (pane content, agent badge); wait_for's internal
                     // probes and `ui_geometry` reads never do.
@@ -171,6 +166,12 @@ impl App {
                 }
             }
         }
+        budget.finish(
+            self.ctl.as_ref().is_some_and(|ctl| ctl.has_pending()),
+            || {
+                let _ = self.proxy.send_event(UserEvent::Ctl);
+            },
+        );
         if needs_redraw && let Some(w) = &ws.window {
             w.request_redraw();
         }

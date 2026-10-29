@@ -2592,8 +2592,10 @@ impl App {
             image: item.image().cloned(),
             // What the lane says where no picture is: why a file was not
             // drawn, or that pixels were let go.
-            status: tr
-                .text(match item.kind.file().map(|facts| facts.why) {
+            status: if matches!(item.kind, crate::media::ItemKind::CheckingFile(_)) {
+                tr.text(kettle_i18n::Text::InlineCardPending).to_owned()
+            } else {
+                tr.text(match item.kind.file().map(|facts| facts.why) {
                     Some(crate::media::FileWhy::Unsupported) => {
                         kettle_i18n::Text::MediaViewerFileUnsupported
                     }
@@ -2605,7 +2607,8 @@ impl App {
                     }
                     None => kettle_i18n::Text::MediaViewerReleased,
                 })
-                .to_string(),
+                .to_string()
+            },
             open_outside: self.preview_opens_outside(ws, pane).is_some(),
             canvas: preview_canvas(item, panel),
             mode,
@@ -2800,7 +2803,9 @@ impl App {
                 kettle_media::MediaKind::Markdown => kettle_i18n::Text::MediaViewerKindMarkdown,
                 kettle_media::MediaKind::Pdf => kettle_i18n::Text::MediaViewerKindPdf,
             },
-            crate::media::ItemKind::File(_) => kettle_i18n::Text::MediaViewerKindFile,
+            crate::media::ItemKind::File(_) | crate::media::ItemKind::CheckingFile(_) => {
+                kettle_i18n::Text::MediaViewerKindFile
+            }
         });
         let sender = match &item.provenance {
             crate::media::Provenance::Verified => kettle_render::MediaLaneSender {

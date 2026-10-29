@@ -276,6 +276,261 @@ fn held_keys_behind_an_encoding_paste_join_one_queue_entry() {
     assert_eq!(targets, &[(1, expected)]);
 }
 
+fn key_release_test_paste(pane: u64, content: super::QueuedPasteContent) -> super::QueuedPaste {
+    super::QueuedPaste {
+        window: 1,
+        target: Some(pane),
+        receipt_pane: Some(pane),
+        broadcast: BroadcastScope::Off,
+        recipients: Vec::new(),
+        content,
+        key_presses: Vec::new(),
+        key_releases: Vec::new(),
+    }
+}
+
+fn replay_key_release_test_queue(
+    ws: &mut WindowState,
+    queue: &mut std::collections::VecDeque<super::QueuedPaste>,
+) -> Vec<u8> {
+    let mut delivered = Vec::new();
+    while let Some(paste) = super::paste::pop_ready_paste(queue) {
+        if let super::QueuedPasteContent::Input {
+            targets,
+            prepare_input,
+        } = paste.content
+        {
+            assert_eq!(
+                App::deliver_deferred_input(ws, &targets, &paste.key_presses, prepare_input, false),
+                PaneInputResult::Queued
+            );
+            delivered.extend(targets.into_iter().flat_map(|(_, bytes)| bytes));
+        }
+        assert_eq!(
+            App::release_keys_to(&ws.mux, &paste.key_releases),
+            PaneInputResult::Queued
+        );
+        for (_, _, release) in paste.key_releases {
+            if release.press_accepted.load(Ordering::Relaxed) {
+                delivered.extend_from_slice(&release.bytes);
+            }
+        }
+    }
+    delivered
+}
+
+#[test]
+fn an_accepted_press_keeps_its_release_when_the_paste_queue_fills() {
+    use super::{QueuedPasteContent, TerminalKeyRelease, paste::*};
+    let (mux, ids) = title_test_tab_mux(1);
+    let pane = ids[0];
+    let mut ws = WindowState::new(1, mux);
+    let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
+    let queued = |content| key_release_test_paste(pane, content);
+    let mut queue = std::collections::VecDeque::from([queued(QueuedPasteContent::Image {
+        id: 0,
+        fallback: String::new(),
+        path: None,
+    })]);
+    for _ in 1..super::QUEUED_PASTES_MAX - 1 {
+        queue.push_back(queued(QueuedPasteContent::Text("x".into())));
+    }
+    let release = TerminalKeyRelease::new(Arc::from(&b"release"[..]), false);
+    let mut press = queued(QueuedPasteContent::Input {
+        targets: vec![(pane, b"press".to_vec())],
+        prepare_input: true,
+    });
+    press.key_presses.push((pane, release.clone()));
+    assert_eq!(
+        defer_authored_input(&mut queue, press),
+        Some(PaneInputResult::Queued)
+    );
+    assert_eq!(queue.len(), super::QUEUED_PASTES_MAX);
+    let mut releases = vec![(pane, key, release)];
+    assert!(
+        defer_key_releases(&mut queue, &mut releases),
+        "an accepted press must retain its release despite a full queue"
+    );
+    assert_eq!(queue.len(), super::QUEUED_PASTES_MAX);
+    assert!(releases.is_empty());
+    assert_eq!(queue.back().unwrap().key_releases.len(), 1);
+    assert!(pop_ready_paste(&mut queue).is_none());
+    queue.pop_front(); // Complete the image that held the captured input.
+    let before = ws.mux.panes[&pane].input_generation();
+    let delivered = replay_key_release_test_queue(&mut ws, &mut queue);
+    let after = ws.mux.panes[&pane].input_generation();
+    ws.mux.kill_children();
+    assert_eq!(delivered, b"pressrelease");
+    assert_eq!(after, before + 2);
+    assert!(queue.is_empty(), "a release is delivered exactly once");
+}
+
+#[test]
+fn full_paste_queue_focus_loss_releases_an_accepted_press_once() {
+    use super::{QueuedPasteContent, TerminalKeyRelease, paste::*};
+    for deferred in [false, true] {
+        for byte_full in [false, true] {
+            let (mux, ids) = title_test_tab_mux(1);
+            let pane = ids[0];
+            let mut ws = WindowState::new(1, mux);
+            let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
+            let queued = |content| key_release_test_paste(pane, content);
+            let release = TerminalKeyRelease::new(Arc::from(&b"release"[..]), !deferred);
+            let before = ws.mux.panes[&pane].input_generation();
+            if !deferred {
+                assert_eq!(
+                    ws.mux.panes[&pane].feed_input(b"press"),
+                    PaneInputResult::Queued
+                );
+            }
+            let mut queue = std::collections::VecDeque::from([queued(QueuedPasteContent::Image {
+                id: 0,
+                fallback: String::new(),
+                path: None,
+            })]);
+            let mut press = queued(QueuedPasteContent::Input {
+                targets: vec![(pane, b"press".to_vec())],
+                prepare_input: true,
+            });
+            press.key_presses.push((pane, release.clone()));
+            if deferred {
+                assert_eq!(
+                    defer_authored_input(&mut queue, press),
+                    Some(PaneInputResult::Queued)
+                );
+            }
+            if byte_full {
+                let bytes =
+                    super::QUEUED_PASTE_BYTES_MAX - if deferred { b"press".len() } else { 0 };
+                queue.push_back(queued(QueuedPasteContent::Text("x".repeat(bytes))));
+            } else {
+                while queue.len() < super::QUEUED_PASTES_MAX {
+                    queue.push_back(queued(QueuedPasteContent::Text("x".into())));
+                }
+            }
+            let refused = TerminalKeyRelease::new(Arc::from(&b"unowed"[..]), false);
+            let mut refused_press = queued(QueuedPasteContent::Input {
+                targets: vec![(pane, b"refused".to_vec())],
+                prepare_input: true,
+            });
+            refused_press.key_presses.push((pane, refused.clone()));
+            assert_eq!(
+                defer_authored_input(&mut queue, refused_press),
+                Some(PaneInputResult::Oversize)
+            );
+            assert_eq!(
+                App::release_keys_to(&ws.mux, &[(pane, key, refused)]),
+                PaneInputResult::Queued
+            );
+            ws.terminal_owned_key_releases.insert(key);
+            ws.terminal_key_recipients
+                .entry(key)
+                .or_default()
+                .insert(pane);
+            ws.terminal_key_release_bytes.insert((key, pane), release);
+            let len = queue.len();
+            let mut releases = Vec::new();
+            super::release_terminal_owned_keys(&mut ws, |id, key, release| {
+                releases.push((id, key, release))
+            });
+            assert_eq!(releases.len(), 1);
+            assert!(defer_key_releases(&mut queue, &mut releases));
+            assert!(releases.is_empty());
+            super::release_terminal_owned_keys(&mut ws, |id, key, release| {
+                releases.push((id, key, release))
+            });
+            assert!(
+                releases.is_empty(),
+                "focus loss consumes the obligation once"
+            );
+            assert_eq!(queue.len(), len, "releases need no paste queue capacity");
+            assert!(ws.suppressed_key_releases.contains(&key));
+            assert!(ws.terminal_key_release_bytes.is_empty());
+            assert!(ws.terminal_key_recipients.is_empty());
+            assert!(pop_ready_paste(&mut queue).is_none());
+            // Finish the blocked image and free room for later authored input.
+            queue.pop_front();
+            if byte_full {
+                // The last entry carries the release; retain it as the fence.
+                if let QueuedPasteContent::Text(text) = &mut queue.back_mut().unwrap().content {
+                    text.clear();
+                }
+            }
+            assert_eq!(
+                defer_authored_input(
+                    &mut queue,
+                    queued(QueuedPasteContent::Input {
+                        targets: vec![(pane, b"after".to_vec())],
+                        prepare_input: true,
+                    })
+                ),
+                Some(PaneInputResult::Queued)
+            );
+            let mut delivered = if deferred {
+                Vec::new()
+            } else {
+                b"press".to_vec()
+            };
+            delivered.extend(replay_key_release_test_queue(&mut ws, &mut queue));
+            let after = ws.mux.panes[&pane].input_generation();
+            #[cfg(unix)]
+            let ordered_on_pty =
+                wait_for_pane_screen(&ws.mux, pane, |text, _| text.contains("pressreleaseafter"));
+            ws.mux.kill_children();
+            assert_eq!(delivered, b"pressreleaseafter");
+            assert_eq!(
+                after,
+                before + 3,
+                "refused presses owe nothing and each release is delivered once"
+            );
+            assert!(queue.is_empty());
+            #[cfg(unix)]
+            assert!(
+                ordered_on_pty,
+                "the PTY must see the release after its press and before later input"
+            );
+        }
+    }
+}
+
+#[test]
+fn deferred_key_presses_bound_their_owed_release_recipients() {
+    use super::{QueuedPasteContent, TerminalKeyRelease, paste::defer_authored_input};
+    let queued = |content| key_release_test_paste(1, content);
+    let mut queue =
+        std::collections::VecDeque::from([queued(QueuedPasteContent::Text("x".into()))]);
+    let mut press = queued(QueuedPasteContent::Input {
+        targets: (0..1024).map(|id| (id, b"press".to_vec())).collect(),
+        prepare_input: true,
+    });
+    press.key_presses = (0..1024)
+        .map(|id| {
+            (
+                id,
+                TerminalKeyRelease::new(Arc::from(&b"release"[..]), false),
+            )
+        })
+        .collect();
+    assert_eq!(
+        defer_authored_input(&mut queue, press),
+        Some(PaneInputResult::Queued)
+    );
+    let mut extra = queued(QueuedPasteContent::Input {
+        targets: vec![(1, b"refused".to_vec())],
+        prepare_input: true,
+    });
+    extra.key_presses.push((
+        1,
+        TerminalKeyRelease::new(Arc::from(&b"release"[..]), false),
+    ));
+    assert_eq!(
+        defer_authored_input(&mut queue, extra),
+        Some(PaneInputResult::Oversize)
+    );
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue[1].key_presses.len(), 1024);
+}
+
 #[test]
 fn deferred_authored_input_obeys_the_existing_queue_byte_limit() {
     let queued = |content| super::QueuedPaste {

@@ -2358,10 +2358,14 @@ fn an_undrawable_file_goes_on_the_shelf_as_itself() {
             .to_owned()
     };
     let finish = body("finish_show");
+    assert!(
+        !finish.contains("file_facts("),
+        "filesystem metadata must stay off the UI thread"
+    );
     let steps = [
-        "Err(RenderError::Failure(failure)) => { let why = crate::media::FileWhy::of_job(&spec.kind, failure); let facts = why.and_then(|why| match &spec.input { crate::media::SourceInput::Path { path, authorization, } => super::native_path_buf(path) .and_then(|path| crate::media::file_facts(&path, authorization, why)), _ => None, });",
-        "let Some(facts) = facts else { return notify_preview_failure(tr, origin.refuse(failure)); };",
-        "let item = crate::media::ShelfItem::file( self.media.next_item(), key, title, provenance, facts, crate::media::ItemSource::undrawn(spec, facts.identity), );",
+        "let why = crate::media::FileWhy::of_job(&spec.kind, failure);",
+        "let Some(why) = why.filter(|_| matches!(spec.input, crate::media::SourceInput::Path { .. })) else { return notify_preview_failure(tr, origin.refuse(failure)); };",
+        "let item = crate::media::ShelfItem::checking_file( self.media.next_item(), key, title, provenance, why, crate::media::ItemSource::checking_file(spec), );",
         "return self.publish_show( ws, (origin, route), item, (inline, inline_refused), None, );",
         "self.publish_show(ws, (origin, route), item, (inline, inline_refused), page);",
     ];

@@ -57,7 +57,7 @@ pub(crate) use external::{
 };
 #[cfg(test)]
 pub(crate) use file_card::FileFacts;
-pub(crate) use file_card::{FileWhy, facts as file_facts};
+pub(crate) use file_card::{FactsAnswer, FactsLane, FactsQuery, FileWhy};
 pub(crate) use focus::{PageStep, PreviewFocus, PreviewKey, ViewerKey, preview_key, viewer_key};
 pub(crate) use inline::{card_caption, card_message, card_size};
 pub(crate) use playback::{
@@ -320,6 +320,7 @@ pub(crate) struct MediaService {
     /// in each lane; as bounded.
     lane_failures: Vec<LaneRender>,
     lane: Option<Lane>,
+    facts: Option<FactsLane>,
     /// The push being rendered.
     active: Option<Push>,
     /// The last item id handed out; ids are unique for the process's life.
@@ -329,6 +330,40 @@ pub(crate) struct MediaService {
 }
 
 impl MediaService {
+    pub(crate) fn request_facts(
+        &mut self,
+        query: FactsQuery,
+        client: Option<&Arc<WorkerClient>>,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        if self.facts.is_none()
+            && let Some(client) = client
+        {
+            let client = client.clone();
+            self.facts = FactsLane::start(
+                move |query| {
+                    let request = kettle_media::FileFactsRequest {
+                        generation: query.generation,
+                        source: query.source.clone(),
+                    };
+                    let control = RenderControl::with_deadline(
+                        Instant::now() + std::time::Duration::from_secs(6),
+                    )
+                    .limit_reply(64);
+                    client.file_facts(&request, &control).ok()?.identity
+                },
+                wake,
+            );
+        }
+        if let Some(facts) = &self.facts {
+            facts.request(query);
+        }
+    }
+
+    pub(crate) fn take_facts(&self) -> Option<FactsAnswer> {
+        self.facts.as_ref()?.try_recv()
+    }
+
     /// A fresh item id.
     pub(crate) fn next_item(&mut self) -> u64 {
         self.last_item += 1;

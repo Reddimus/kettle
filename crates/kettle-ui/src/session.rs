@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const MAX_RESTORE_WINDOWS: usize = 16;
 pub(crate) const MAX_RESTORE_PANES: usize = 256;
+// Two JSON objects per split, plus the window/tab envelope and leaf arrays,
+// must fit serde_json's unchanged 128-container recursion limit.
+pub(crate) const MAX_SPLIT_DEPTH: usize = 59;
 pub(crate) const MAX_RESTORE_TOTAL_SURFACE_PIXELS: u64 = 64 * 1024 * 1024;
 const MIN_RESTORE_WINDOW_WIDTH: u32 = 160;
 const MIN_RESTORE_WINDOW_HEIGHT: u32 = 120;
@@ -69,6 +72,20 @@ impl SNode {
             }
         }
         Some(leaves)
+    }
+
+    pub(crate) fn within_split_depth(&self) -> bool {
+        let mut pending = vec![(self, 0)];
+        while let Some((node, depth)) = pending.pop() {
+            if depth > MAX_SPLIT_DEPTH {
+                return false;
+            }
+            if let Self::Split { a, b, .. } = node {
+                pending.push((a, depth + 1));
+                pending.push((b, depth + 1));
+            }
+        }
+        true
     }
 
     /// Saved-tree leaf rectangles in the same DFS order `Mux::restore` spawns
@@ -286,9 +303,9 @@ impl Session {
         })
     }
 
-    pub fn load() -> Option<Session> {
+    pub(crate) fn load_with_identity() -> Option<(Session, SnapshotIdentity)> {
         let p = Self::path()?;
-        load_from_path(&p)
+        load_snapshot(&p)
     }
 
     /// Load from the named-layout path instead of the default
@@ -296,9 +313,9 @@ impl Session {
     /// <NAME>`. Returns `None` if the layout file doesn't exist yet —
     /// kettle just starts with a default first tab, exactly the same
     /// shape as a fresh install would.
-    pub fn load_layout(name: &str) -> Option<Session> {
+    pub(crate) fn load_layout_with_identity(name: &str) -> Option<(Session, SnapshotIdentity)> {
         let p = Self::path_for_layout(name)?;
-        load_from_path(&p)
+        load_snapshot(&p)
     }
 
     /// Load a one-shot tab-handoff JSON file (`--tab-handoff`) written by an
@@ -395,6 +412,9 @@ impl Session {
                 ));
             }
             for tab in window.tabs {
+                if !tab.root.within_split_depth() {
+                    return Err(format!("session split depth exceeds {MAX_SPLIT_DEPTH}"));
+                }
                 let remaining = MAX_RESTORE_PANES.saturating_sub(*total_panes);
                 let leaves = tab.root.bounded_leaf_count(remaining).ok_or_else(|| {
                     format!(
@@ -629,6 +649,50 @@ impl Drop for SessionWriter {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct SnapshotIdentity {
+    file: std::sync::Arc<std::fs::File>,
+    size: u64,
+    modified: std::time::SystemTime,
+}
+
+impl SnapshotIdentity {
+    fn of(file: &std::fs::File) -> std::io::Result<Self> {
+        let metadata = file.metadata()?;
+        Ok(Self {
+            file: std::sync::Arc::new(file.try_clone()?),
+            size: metadata.len(),
+            modified: metadata.modified()?,
+        })
+    }
+
+    fn matches(&self, path: &std::path::Path) -> std::io::Result<bool> {
+        if !kettle_state::path_matches_file(&self.file, path)? {
+            return Ok(false);
+        }
+        let (file, size) = open_session_file(path)?;
+        Ok(size == self.size
+            && file.metadata()?.modified()? == self.modified
+            && kettle_state::path_matches_file(&self.file, path)?)
+    }
+}
+
+fn session_lock(path: &std::path::Path) -> std::io::Result<kettle_state::ExclusiveFileLock> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".lock");
+    kettle_state::ExclusiveFileLock::acquire_timeout(
+        &path.with_file_name(name),
+        std::time::Duration::from_millis(500),
+    )
+}
+
+fn changed_session() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        "session changed since it was read",
+    )
+}
+
 /// Save a private, durable session snapshot. Exact on-disk bytes are compared
 /// before `atomic_replace` because this path follows many actions that do not
 /// change session state. Reading the file, rather than trusting cached bytes or
@@ -637,6 +701,7 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
     if let Some(dir) = p.parent() {
         kettle_state::create_private_dirs(dir)?;
     }
+    let _lock = session_lock(p)?;
     struct SessionBytes(Vec<u8>);
     impl std::io::Write for SessionBytes {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -716,9 +781,18 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
 /// are checked on the opened handle, and the read itself stops at limit + 1,
 /// so a path replacement or concurrent append cannot bypass the cap.
 pub(crate) fn load_from_path(p: &std::path::Path) -> Option<Session> {
+    load_snapshot(p).map(|(session, _)| session)
+}
+
+pub(crate) fn load_snapshot(p: &std::path::Path) -> Option<(Session, SnapshotIdentity)> {
+    if !std::fs::symlink_metadata(p).ok()?.file_type().is_file() {
+        return None;
+    }
+    let _lock = session_lock(p).ok()?;
     let (file, size) = open_session_file(p).ok()?;
+    let identity = SnapshotIdentity::of(&file).ok()?;
     if size > MAX_SESSION_BYTES {
-        stash_oversize_session(p, size, MAX_SESSION_BYTES);
+        stash_oversize_session(p, &identity, size, MAX_SESSION_BYTES);
         return None;
     }
     let mut bytes = Vec::with_capacity(size as usize);
@@ -726,14 +800,14 @@ pub(crate) fn load_from_path(p: &std::path::Path) -> Option<Session> {
         .read_to_end(&mut bytes)
         .ok()?;
     if bytes.len() as u64 > MAX_SESSION_BYTES {
-        stash_oversize_session(p, bytes.len() as u64, MAX_SESSION_BYTES);
+        stash_oversize_session(p, &identity, bytes.len() as u64, MAX_SESSION_BYTES);
         return None;
     }
     match serde_json::from_slice(&bytes) {
-        Ok(s) => Some(s),
+        Ok(s) => Some((s, identity)),
         Err(e) => {
             // Outside the log call: a disabled level skips its arguments.
-            let backup = stash_session_file(p, "broken");
+            let backup = stash_session_file_locked(p, "broken", &identity);
             log::warn!(
                 "session file {} is corrupted ({e}); {}",
                 p.display(),
@@ -748,26 +822,57 @@ pub(crate) fn load_from_path(p: &std::path::Path) -> Option<Session> {
 }
 
 /// Move a session file aside, to `<path>.json.<kind>.<unix-seconds>`.
-fn stash_session_file(path: &std::path::Path, kind: &str) -> std::io::Result<std::path::PathBuf> {
+fn stash_session_file_locked(
+    path: &std::path::Path,
+    kind: &str,
+    identity: &SnapshotIdentity,
+) -> std::io::Result<std::path::PathBuf> {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    stash_session_file_at(path, kind, seconds)
+    stash_session_file_checked(path, kind, seconds, identity, || {})
 }
 
 /// How many names one second's stashes of one kind may take.
 const MAX_STASHES_PER_SECOND: u32 = 64;
 
-/// [`stash_session_file`] at a given time. A second stash in the same second
+/// [`stash_session_file_locked`] at a given time. A second stash in the same second
 /// gets `.1`, `.2`… rather than replacing the first: the name is taken with a
 /// hard link, which never replaces, and only then is `path` removed. Where
 /// hard links are unsupported, a rename to a name not yet taken.
+#[cfg(test)]
 fn stash_session_file_at(
     path: &std::path::Path,
     kind: &str,
     seconds: u64,
 ) -> std::io::Result<std::path::PathBuf> {
+    stash_session_file_at_with(path, kind, seconds, || {})
+}
+
+#[cfg(test)]
+fn stash_session_file_at_with(
+    path: &std::path::Path,
+    kind: &str,
+    seconds: u64,
+    before_remove: impl FnOnce(),
+) -> std::io::Result<std::path::PathBuf> {
+    let _lock = session_lock(path)?;
+    let (file, _) = open_session_file(path)?;
+    let identity = SnapshotIdentity::of(&file)?;
+    stash_session_file_checked(path, kind, seconds, &identity, before_remove)
+}
+
+fn stash_session_file_checked(
+    path: &std::path::Path,
+    kind: &str,
+    seconds: u64,
+    identity: &SnapshotIdentity,
+    before_remove: impl FnOnce(),
+) -> std::io::Result<std::path::PathBuf> {
+    if !identity.matches(path)? {
+        return Err(changed_session());
+    }
     let base = path.with_extension(format!("json.{kind}.{seconds}"));
     for attempt in 0..MAX_STASHES_PER_SECOND {
         let mut name = base.clone().into_os_string();
@@ -776,10 +881,20 @@ fn stash_session_file_at(
         }
         let candidate = std::path::PathBuf::from(name);
         match std::fs::hard_link(path, &candidate) {
-            Ok(()) => return std::fs::remove_file(path).map(|()| candidate),
+            Ok(()) => {
+                before_remove();
+                if !identity.matches(path)? || !identity.matches(&candidate)? {
+                    return Err(changed_session());
+                }
+                return std::fs::remove_file(path).map(|()| candidate);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(error),
             Err(_) if std::fs::symlink_metadata(&candidate).is_err() => {
+                before_remove();
+                if !identity.matches(path)? {
+                    return Err(changed_session());
+                }
                 return std::fs::rename(path, &candidate).map(|()| candidate);
             }
             Err(_) => {}
@@ -857,11 +972,25 @@ fn open_session_file(path: &std::path::Path) -> std::io::Result<(std::fs::File, 
 /// save side enforces the limits the load side checks: seventeen open windows,
 /// or more than 256 panes, or a large enough aggregate surface area, and kettle
 /// writes a file it will refuse to read back.
-pub(crate) fn stash_unrestorable_session(path: &std::path::Path, reason: &str) {
-    if !path.exists() {
+#[cfg(test)]
+fn stash_unrestorable_session(path: &std::path::Path, reason: &str) {
+    let Ok((file, _)) = open_session_file(path) else {
         return;
-    }
-    match stash_session_file(path, "unrestored") {
+    };
+    let Ok(identity) = SnapshotIdentity::of(&file) else {
+        return;
+    };
+    stash_unrestorable_snapshot(path, &identity, reason);
+}
+
+pub(crate) fn stash_unrestorable_snapshot(
+    path: &std::path::Path,
+    identity: &SnapshotIdentity,
+    reason: &str,
+) {
+    let backup = session_lock(path)
+        .and_then(|_lock| stash_session_file_locked(path, "unrestored", identity));
+    match backup {
         Ok(destination) => log::warn!(
             "session at {} could not be restored ({reason}); kept at {} so the \
              next save cannot overwrite it",
@@ -880,7 +1009,12 @@ pub(crate) fn stash_unrestorable_session(path: &std::path::Path, reason: &str) {
     }
 }
 
-fn stash_oversize_session(path: &std::path::Path, size: u64, limit: u64) {
+fn stash_oversize_session(
+    path: &std::path::Path,
+    identity: &SnapshotIdentity,
+    size: u64,
+    limit: u64,
+) {
     log::warn!(
         "session file {} is {size} bytes (cap {limit}); \
          refusing to load and renaming to .toobig",
@@ -888,7 +1022,7 @@ fn stash_oversize_session(path: &std::path::Path, size: u64, limit: u64) {
     );
     // Stash for forensics like the parse-error branch above; future launches
     // start fresh rather than repeatedly encountering the oversized file.
-    if let Err(error) = stash_session_file(path, "toobig") {
+    if let Err(error) = stash_session_file_locked(path, "toobig", identity) {
         log::warn!("could not move {} aside: {error}", path.display());
     }
 }
@@ -1587,6 +1721,80 @@ mod tests {
         assert_eq!(
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn recovery_refuses_a_snapshot_replaced_since_it_was_loaded() {
+        let directory = private_tempdir();
+        let path = directory.path().join("session.json");
+        save_to_path(&Session::default(), &path).unwrap();
+        let (_, identity) = load_snapshot(&path).unwrap();
+        kettle_state::atomic_replace(
+            &path,
+            b"new snapshot",
+            kettle_state::AtomicWriteOptions::PRIVATE,
+        )
+        .unwrap();
+        stash_unrestorable_snapshot(&path, &identity, "rejected loaded session");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new snapshot");
+        assert!(
+            !directory
+                .path()
+                .read_dir()
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().contains(".unrestored."))
+        );
+    }
+
+    #[test]
+    fn session_saving_uses_the_recovery_lock() {
+        let directory = private_tempdir();
+        let path = directory.path().join("session.json");
+        let lock = session_lock(&path).unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            let result = save_to_path(&Session::default(), &worker_path);
+            done.send(result).unwrap();
+        });
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_millis(30))
+                .is_err(),
+            "saving must wait while recovery owns the path lock"
+        );
+        drop(lock);
+        finished
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+        assert!(load_from_path(&path).is_some());
+    }
+
+    #[test]
+    fn stashing_does_not_unlink_a_session_replaced_after_the_backup_link() {
+        let directory = private_tempdir();
+        let path = directory.path().join("session.json");
+        std::fs::write(&path, b"rejected snapshot").unwrap();
+        let _ = stash_session_file_at_with(&path, "broken", 17, || {
+            kettle_state::atomic_replace(
+                &path,
+                b"new durable snapshot",
+                kettle_state::AtomicWriteOptions::PRIVATE,
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            std::fs::read(&path).ok().as_deref(),
+            Some(b"new durable snapshot".as_slice()),
+            "recovery must not unlink a concurrently replaced session"
+        );
+        assert_eq!(
+            std::fs::read(path.with_extension("json.broken.17")).unwrap(),
+            b"rejected snapshot"
         );
     }
 

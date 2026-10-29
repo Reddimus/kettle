@@ -363,7 +363,8 @@ impl App {
             }
         };
         self.apply_post_create(&window);
-        let native_material = crate::native_material::NativeMaterial::install(&window, &self.cfg);
+        let native_material =
+            crate::native_material::NativeMaterial::install(&window, &self.cfg, self.proxy.clone());
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         // Synchronous renderer init against the shared device — no block_on,

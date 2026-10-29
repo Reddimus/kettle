@@ -102,6 +102,88 @@ fn live_opacity_floor_for_status(status: BackdropStatus, linux_fallback: bool) -
     (linux_fallback && status == BackdropStatus::Unavailable).then_some(0.99)
 }
 
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Default)]
+struct BlurDiscovery(Arc<std::sync::Mutex<(u64, u8)>>);
+
+#[cfg(any(target_os = "linux", test))]
+impl BlurDiscovery {
+    fn supported(&self) -> bool {
+        self.0.lock().is_ok_and(|state| state.1 == 3)
+    }
+
+    fn reset(&self) {
+        if let Ok(mut state) = self.0.lock() {
+            state.0 = state.0.wrapping_add(1);
+            state.1 = 0;
+        }
+    }
+
+    fn request(
+        &self,
+        enabled: bool,
+        source: impl FnOnce() -> bool + Send + 'static,
+        timeout: std::time::Duration,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        if !enabled {
+            return;
+        }
+        let epoch = {
+            let Ok(mut state) = self.0.lock() else { return };
+            if state.1 != 0 {
+                return;
+            }
+            state.1 = 1;
+            state.0
+        };
+        let state = self.0.clone();
+        let started = std::thread::Builder::new()
+            .name("kettle-blur-deadline".into())
+            .spawn(move || {
+                let supported = bounded_blur_probe(source, timeout);
+                if let Ok(mut state) = state.lock()
+                    && state.0 == epoch
+                {
+                    state.1 = if supported { 3 } else { 2 };
+                }
+                wake();
+            });
+        if started.is_err()
+            && let Ok(mut state) = self.0.lock()
+            && state.0 == epoch
+        {
+            state.1 = 2;
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn bounded_blur_probe(
+    source: impl FnOnce() -> bool + Send + 'static,
+    timeout: std::time::Duration,
+) -> bool {
+    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return false;
+    }
+    struct ProbeSlot;
+    impl Drop for ProbeSlot {
+        fn drop(&mut self) {
+            RUNNING.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let slot = ProbeSlot;
+    let (answer, result) = std::sync::mpsc::sync_channel(1);
+    let started = std::thread::Builder::new()
+        .name("kettle-blur-registry".into())
+        .spawn(move || {
+            let _slot = slot;
+            let _ = answer.send(source());
+        });
+    started.is_ok() && result.recv_timeout(timeout).unwrap_or(false)
+}
+
 pub(crate) struct NativeMaterial {
     last_blur: std::cell::Cell<Option<bool>>,
     status: std::cell::Cell<BackdropStatus>,
@@ -126,11 +208,21 @@ pub(crate) struct NativeMaterial {
     #[cfg(target_os = "windows")]
     last_caption: std::cell::Cell<Option<(kettle_config::Rgb, kettle_config::Rgb)>>,
     #[cfg(target_os = "linux")]
-    linux_blur_supported: bool,
+    linux_wayland: bool,
+    #[cfg(target_os = "linux")]
+    blur_discovery: BlurDiscovery,
+    #[cfg(target_os = "linux")]
+    blur_wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl NativeMaterial {
-    pub(crate) fn install(window: &Arc<Window>, config: &kettle_config::Config) -> Self {
+    pub(crate) fn install(
+        window: &Arc<Window>,
+        config: &kettle_config::Config,
+        proxy: winit::event_loop::EventLoopProxy<crate::app::UserEvent>,
+    ) -> Self {
+        #[cfg(not(target_os = "linux"))]
+        let _ = proxy;
         #[cfg(target_os = "macos")]
         {
             // The window and wgpu surface choose their transparency at creation.
@@ -165,7 +257,17 @@ impl NativeMaterial {
                 #[cfg(target_os = "windows")]
                 last_caption: std::cell::Cell::new(None),
                 #[cfg(target_os = "linux")]
-                linux_blur_supported: linux_blur_supported(window),
+                linux_wayland: linux_is_wayland(window),
+                #[cfg(target_os = "linux")]
+                blur_discovery: {
+                    static DISCOVERY: std::sync::OnceLock<BlurDiscovery> =
+                        std::sync::OnceLock::new();
+                    DISCOVERY.get_or_init(BlurDiscovery::default).clone()
+                },
+                #[cfg(target_os = "linux")]
+                blur_wake: Arc::new(move || {
+                    let _ = proxy.send_event(crate::app::UserEvent::BlurDiscovered);
+                }),
             };
             material.sync(window, config);
             material
@@ -197,17 +299,31 @@ impl NativeMaterial {
         }
 
         #[cfg(target_os = "linux")]
-        if self.last_blur.replace(Some(config.window_blur)) != Some(config.window_blur) {
-            let active = config.window_blur && self.linux_blur_supported;
-            window.set_blur(active);
-            self.set_status(
-                config.window_blur,
-                if active {
-                    BackdropStatus::Active
-                } else {
-                    BackdropStatus::Unavailable
-                },
+        {
+            let changed =
+                self.last_blur.replace(Some(config.window_blur)) != Some(config.window_blur);
+            if changed && !config.window_blur {
+                self.blur_discovery.reset();
+            }
+            self.blur_discovery.request(
+                config.window_blur && self.linux_wayland,
+                probe_wayland_kwin_blur,
+                std::time::Duration::from_millis(500),
+                self.blur_wake.clone(),
             );
+            let active = config.window_blur
+                && linux_blur_policy(self.linux_wayland, self.blur_discovery.supported());
+            if changed || (self.status.get() == BackdropStatus::Active) != active {
+                window.set_blur(active);
+                self.set_status(
+                    config.window_blur,
+                    if active {
+                        BackdropStatus::Active
+                    } else {
+                        BackdropStatus::Unavailable
+                    },
+                );
+            }
         }
 
         #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
@@ -449,7 +565,7 @@ fn linux_blur_policy(is_wayland: bool, kwin_blur_advertised: bool) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_blur_supported(window: &Window) -> bool {
+fn linux_is_wayland(window: &Window) -> bool {
     use winit::raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 
     let Ok(handle) = window.window_handle() else {
@@ -458,46 +574,105 @@ fn linux_blur_supported(window: &Window) -> bool {
     if !matches!(handle.as_raw(), RawWindowHandle::Wayland(_)) {
         return false;
     }
-    linux_blur_policy(true, wayland_advertises_kwin_blur())
-}
-
-#[cfg(target_os = "linux")]
-fn wayland_advertises_kwin_blur() -> bool {
-    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *SUPPORTED.get_or_init(probe_wayland_kwin_blur)
+    true
 }
 
 #[cfg(target_os = "linux")]
 fn probe_wayland_kwin_blur() -> bool {
+    use std::os::fd::{AsFd as _, AsRawFd as _};
     use wayland_client::{
         Connection, Dispatch, QueueHandle,
-        globals::{GlobalListContents, registry_queue_init},
-        protocol::wl_registry,
+        protocol::{wl_callback, wl_registry},
     };
 
-    struct RegistryProbe;
-    impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for RegistryProbe {
+    #[derive(Default)]
+    struct RegistryProbe {
+        supported: bool,
+        done: bool,
+    }
+    impl Dispatch<wl_registry::WlRegistry, ()> for RegistryProbe {
         fn event(
-            _state: &mut Self,
-            _proxy: &wl_registry::WlRegistry,
-            _event: wl_registry::Event,
-            _data: &GlobalListContents,
-            _connection: &Connection,
-            _queue: &QueueHandle<Self>,
+            state: &mut Self,
+            _: &wl_registry::WlRegistry,
+            event: wl_registry::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
         ) {
+            if let wl_registry::Event::Global { interface, .. } = event
+                && interface == "org_kde_kwin_blur_manager"
+            {
+                state.supported = true;
+            }
+        }
+    }
+    impl Dispatch<wl_callback::WlCallback, ()> for RegistryProbe {
+        fn event(
+            state: &mut Self,
+            _: &wl_callback::WlCallback,
+            _: wl_callback::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+            state.done = true;
         }
     }
 
-    let Ok(connection) = Connection::connect_to_env() else {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    // A private probe must not consume WAYLAND_SOCKET or mutate the process environment.
+    let Some(display) = std::env::var_os("WAYLAND_DISPLAY").map(std::path::PathBuf::from) else {
         return false;
     };
-    let Ok((globals, _queue)) = registry_queue_init::<RegistryProbe>(&connection) else {
+    let path = if display.is_absolute() {
+        display
+    } else {
+        let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)
+        else {
+            return false;
+        };
+        if !runtime.is_absolute() {
+            return false;
+        }
+        runtime.join(display)
+    };
+    let Ok(socket) = std::os::unix::net::UnixStream::connect(path) else {
         return false;
     };
-    globals.contents().with_list(|list| {
-        list.iter()
-            .any(|global| global.interface == "org_kde_kwin_blur_manager")
-    })
+    let Ok(connection) = Connection::from_socket(socket) else {
+        return false;
+    };
+    let mut queue = connection.new_event_queue::<RegistryProbe>();
+    let handle = queue.handle();
+    let _registry = connection.display().get_registry(&handle, ());
+    let _sync = connection.display().sync(&handle, ());
+    let mut state = RegistryProbe::default();
+    loop {
+        if std::time::Instant::now() >= deadline || queue.dispatch_pending(&mut state).is_err() {
+            return false;
+        }
+        if state.done {
+            return state.supported;
+        }
+        if connection.flush().is_err() {
+            return false;
+        }
+        let Some(read) = queue.prepare_read() else {
+            continue;
+        };
+        let mut poll = libc::pollfd {
+            fd: connection.as_fd().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let millis = remaining.as_millis().min(i32::MAX as u128) as i32;
+        // SAFETY: poll points to one initialized descriptor for this helper's connection.
+        let ready = unsafe { libc::poll(&mut poll, 1, millis) };
+        if ready <= 0 || read.read().is_err() {
+            return false;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -508,6 +683,61 @@ mod tests {
         macos_material_policy, macos_native_blur_allowed,
     };
     use kettle_config::{BackgroundType, Config};
+
+    #[test]
+    fn stalled_blur_discovery_keeps_install_responsive_and_fallback_active() {
+        let discovery = super::BlurDiscovery::default();
+        discovery.request(
+            false,
+            || panic!("disabled blur must not probe"),
+            std::time::Duration::from_millis(20),
+            std::sync::Arc::new(|| {}),
+        );
+        let (release, waiting) = std::sync::mpsc::channel();
+        let (entered, started) = std::sync::mpsc::channel();
+        let (returned, received) = std::sync::mpsc::channel();
+        let (wake, woken) = std::sync::mpsc::channel();
+        let checked = discovery.clone();
+        let ui = std::thread::spawn(move || {
+            checked.request(
+                true,
+                move || {
+                    entered.send(()).unwrap();
+                    let _ = waiting.recv();
+                    false
+                },
+                std::time::Duration::from_millis(20),
+                std::sync::Arc::new(move || {
+                    let _ = wake.send(());
+                }),
+            );
+            returned.send(()).unwrap();
+        });
+        started
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let responsive = received
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_ok();
+        assert!(!discovery.supported());
+        woken
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        discovery.request(
+            true,
+            || panic!("a timeout must not retry before configuration changes"),
+            std::time::Duration::from_millis(20),
+            std::sync::Arc::new(|| {}),
+        );
+        release.send(()).unwrap();
+        ui.join().unwrap();
+        assert!(
+            responsive,
+            "Wayland discovery must not block window installation"
+        );
+        discovery.reset();
+        assert!(!discovery.supported());
+    }
 
     #[test]
     fn borderless_macos_windows_keep_visible_alpha_instead_of_covering_metal() {
@@ -714,14 +944,19 @@ mod tests {
     }
 
     #[test]
-    fn wayland_registry_probe_is_cached_per_process() {
+    fn wayland_registry_discovery_is_shared_and_never_round_trips_on_install() {
         let source = kettle_test_support::production_source(include_str!("native_material.rs"));
-        let probe = source
-            .split("fn wayland_advertises_kwin_blur()")
+        assert!(source.contains("std::sync::OnceLock<BlurDiscovery>"));
+        assert!(!source.contains("registry_queue_init"));
+        assert!(!source.contains(".roundtrip("));
+        let install = source
+            .split("fn install(")
             .nth(1)
-            .and_then(|body| body.split("fn probe_wayland_kwin_blur()").next())
-            .expect("Wayland blur cache body");
-        assert!(probe.contains("std::sync::OnceLock<bool>"));
-        assert!(probe.contains("SUPPORTED.get_or_init(probe_wayland_kwin_blur)"));
+            .unwrap()
+            .split("fn sync(")
+            .next()
+            .unwrap();
+        assert!(!install.contains("probe_wayland_kwin_blur"));
+        assert!(source.contains("UserEvent::BlurDiscovered"));
     }
 }

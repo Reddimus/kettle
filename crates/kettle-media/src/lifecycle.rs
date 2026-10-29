@@ -100,6 +100,16 @@ pub(crate) enum Stopped {
     OverFootprint,
 }
 
+enum Work<'a> {
+    Render(&'a Job),
+    Facts(&'a crate::FileFactsRequest),
+}
+
+enum WorkOutput {
+    Media(Box<RenderOutput>),
+    Facts(crate::FileFactsReply),
+}
+
 pub(crate) fn attempt(
     shared: &Arc<Shared>,
     build_id: &BuildId,
@@ -107,6 +117,43 @@ pub(crate) fn attempt(
     budgets: Budgets,
     control: Option<&RenderControl>,
 ) -> Result<Result<RenderOutput, FailureCode>, NeverReady> {
+    attempt_work(shared, build_id, Work::Render(job), budgets, control).map(|result| {
+        result.and_then(|output| match output {
+            WorkOutput::Media(output) => Ok(*output),
+            WorkOutput::Facts(_) => Err(FailureCode::WorkerUnavailable),
+        })
+    })
+}
+
+pub(crate) fn facts_attempt(
+    shared: &Arc<Shared>,
+    build_id: &BuildId,
+    request: &crate::FileFactsRequest,
+    budgets: Budgets,
+    control: &RenderControl,
+) -> Result<Result<crate::FileFactsReply, FailureCode>, NeverReady> {
+    attempt_work(
+        shared,
+        build_id,
+        Work::Facts(request),
+        budgets,
+        Some(control),
+    )
+    .map(|result| {
+        result.and_then(|output| match output {
+            WorkOutput::Facts(output) => Ok(output),
+            WorkOutput::Media(_) => Err(FailureCode::WorkerUnavailable),
+        })
+    })
+}
+
+fn attempt_work(
+    shared: &Arc<Shared>,
+    build_id: &BuildId,
+    work: Work<'_>,
+    budgets: Budgets,
+    control: Option<&RenderControl>,
+) -> Result<Result<WorkOutput, FailureCode>, NeverReady> {
     if control.is_some_and(|control| control.interrupted(Instant::now())) {
         return Ok(Err(FailureCode::RenderTimeout));
     }
@@ -115,7 +162,13 @@ pub(crate) fn attempt(
     };
     let (Ok(hello_bytes), Ok(job_bytes)) = (
         wire::encode(&Frame::Hello(hello.clone()), Direction::ParentToWorker),
-        wire::encode_job(job),
+        match work {
+            Work::Render(job) => wire::encode_job(job),
+            Work::Facts(request) => wire::encode(
+                &Frame::FileFactsRequest(request.clone()),
+                Direction::ParentToWorker,
+            ),
+        },
     ) else {
         return Ok(Err(FailureCode::BadParams));
     };
@@ -180,7 +233,11 @@ pub(crate) fn attempt(
     }
 
     // The job's deadline starts before the job is written.
-    let reply_until = Instant::now() + budgets.render_deadline(job.kind);
+    let reply_until = Instant::now()
+        + match work {
+            Work::Render(job) => budgets.render_deadline(job.kind),
+            Work::Facts(_) => Duration::from_millis(500),
+        };
     let reply_until = control.map_or(reply_until, |control| control.limit(reply_until));
     if control.is_some_and(|control| control.interrupted(Instant::now())) {
         worker.kill();
@@ -205,11 +262,31 @@ pub(crate) fn attempt(
             },
         },
         Ok(Event::Reply(Ok(Some(Frame::Rendered(rendered))), true)) => {
-            stop_rendered(&mut worker, MediaKind::for_job(job.kind), rendered)
+            let kind = match work {
+                Work::Render(job) => MediaKind::for_job(job.kind),
+                Work::Facts(_) => None,
+            };
+            stop_rendered(&mut worker, kind, rendered)
+                .map(|output| WorkOutput::Media(Box::new(output)))
         }
         Ok(Event::Reply(Ok(Some(Frame::DetectedRendered { kind, rendered })), true)) => {
-            let accepted = job.kind == JobKind::Auto || MediaKind::for_job(job.kind) == Some(kind);
+            let accepted = match work {
+                Work::Render(job) => {
+                    job.kind == JobKind::Auto || MediaKind::for_job(job.kind) == Some(kind)
+                }
+                Work::Facts(_) => false,
+            };
             stop_rendered(&mut worker, accepted.then_some(kind), rendered)
+                .map(|output| WorkOutput::Media(Box::new(output)))
+        }
+        Ok(Event::Reply(Ok(Some(Frame::FileFactsReply(reply))), true)) => {
+            let accepted =
+                matches!(work, Work::Facts(request) if request.generation == reply.generation);
+            match worker.stop() {
+                Stopped::Exited(WorkerExit::Code(0)) if accepted => Ok(WorkOutput::Facts(reply)),
+                Stopped::OverFootprint => Err(FailureCode::RenderResource),
+                _ => Err(FailureCode::WorkerUnavailable),
+            }
         }
         Ok(Event::Reply(Ok(Some(Frame::Failure(failure))), true)) => {
             Err(refusal_end(failure.code, worker.stop()))
@@ -1182,6 +1259,69 @@ mod tests {
 
     fn reply(parts: &[Vec<u8>]) -> Vec<u8> {
         parts.concat()
+    }
+
+    fn facts_request() -> crate::FileFactsRequest {
+        crate::FileFactsRequest {
+            generation: 7,
+            source: Source::Path {
+                path: crate::NativePath::from_path(&std::env::temp_dir().join("report.docx"))
+                    .unwrap(),
+                authorization: crate::Authorization::ExternalAttested(crate::ExternalAttested {
+                    dev: 1,
+                    ino: 2,
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn file_facts_require_the_requested_generation_and_clean_worker_exit() {
+        for generation in [7, 8] {
+            let expected = crate::FileFactsReply {
+                generation,
+                identity: Some(crate::PathIdentity {
+                    dev: 1,
+                    ino: 2,
+                    size: 1234,
+                    mtime_seconds: 3,
+                    mtime_nanos: 4,
+                }),
+            };
+            let output = reply(&[ready(build_id()), frame(&Frame::FileFactsReply(expected))]);
+            let fake = Fake::new(vec![Script::replies(output, WorkerExit::Code(0))]);
+            let result = client(&fake).file_facts(
+                &facts_request(),
+                &RenderControl::with_deadline(Instant::now() + Duration::from_secs(1)),
+            );
+            if generation == 7 {
+                assert_eq!(result, Ok(expected));
+            } else {
+                assert_eq!(
+                    result,
+                    Err(crate::client::RenderError::Failure(
+                        FailureCode::WorkerUnavailable
+                    ))
+                );
+            }
+            assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn file_facts_kill_a_worker_that_never_answers() {
+        let fake = Fake::new(vec![Script::silent_with(ready(build_id()))]);
+        let result = client(&fake).file_facts(
+            &facts_request(),
+            &RenderControl::with_deadline(Instant::now() + Duration::from_millis(80)),
+        );
+        assert_eq!(
+            result,
+            Err(crate::client::RenderError::Failure(
+                FailureCode::RenderTimeout
+            ))
+        );
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
     }
 
     #[test]

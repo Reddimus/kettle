@@ -45,6 +45,15 @@ impl Snapshot<'_> {
     }
 }
 
+/// Metadata only, from the same checked descriptor used for source reads.
+/// Called only by a worker under its metadata deadline.
+pub fn file_facts(source: &Source) -> Option<PathIdentity> {
+    let (path, attested) = source_path(source)?;
+    let (_, metadata) =
+        open_regular(Path::new(std::ffi::OsStr::from_bytes(path)), attested).ok()?;
+    PathIdentity::of(&metadata)
+}
+
 /// Read `source`, refusing more than `cap` bytes.
 pub fn load(source: &Source, cap: usize) -> Result<Snapshot<'_>, FailureCode> {
     match source {
@@ -420,6 +429,35 @@ fn open_failure(error: std::io::Error) -> FailureCode {
 mod tests {
     use super::*;
     use kettle_media::ExternalAttested;
+
+    #[test]
+    fn file_facts_are_metadata_of_the_attested_regular_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.docx");
+        std::fs::write(&path, [7; 1234]).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let source = |ino| Source::Path {
+            path: kettle_media::NativePath::from_path(&path).unwrap(),
+            authorization: Authorization::ExternalAttested(ExternalAttested {
+                dev: metadata.dev(),
+                ino,
+            }),
+        };
+        let facts = super::file_facts(&source(metadata.ino())).unwrap();
+        assert_eq!(facts.size, 1234);
+        assert_eq!(facts, PathIdentity::of(&metadata).unwrap());
+        assert!(super::file_facts(&source(metadata.ino() + 1)).is_none());
+        let directory_source = Source::Path {
+            path: kettle_media::NativePath::from_path(directory.path()).unwrap(),
+            authorization: Authorization::ExternalAttested(ExternalAttested {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            }),
+        };
+        assert!(super::file_facts(&directory_source).is_none());
+        std::fs::remove_file(&path).unwrap();
+        assert!(super::file_facts(&source(metadata.ino())).is_none());
+    }
 
     fn user_pull() -> Authorization {
         // The source's own constructor for a GUI action; tests build the

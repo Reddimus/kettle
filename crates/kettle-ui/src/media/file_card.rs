@@ -11,7 +11,7 @@
 use std::sync::OnceLock;
 
 use kettle_core::ImageData;
-use kettle_media::{Authorization, FailureCode, JobKind, PathIdentity};
+use kettle_media::{FailureCode, JobKind, PathIdentity};
 
 /// Why a file was not drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,46 +70,54 @@ pub(crate) struct FileFacts {
     pub why: FileWhy,
 }
 
-/// The facts of the file at `path`, opened as the worker opens a source,
-/// when it is a regular file and, for a request that named it by its
-/// device and inode, still that file. `None` otherwise: the request's own
-/// failure then stands.
-#[cfg(unix)]
-pub(crate) fn facts(
-    path: &std::path::Path,
-    authorization: &Authorization,
-    why: FileWhy,
-) -> Option<FileFacts> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
-        .open(path)
-        .ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
-    let identity = PathIdentity::of(&metadata)?;
-    if let Authorization::ExternalAttested(attested) = authorization
-        && (attested.dev, attested.ino) != (identity.dev, identity.ino)
-    {
-        return None;
-    }
-    Some(FileFacts {
-        bytes: identity.size,
-        identity,
-        why,
-    })
+pub(crate) struct FactsQuery {
+    pub window: u64,
+    pub pane: u64,
+    pub item: u64,
+    pub generation: u64,
+    pub source: kettle_media::Source,
+    pub why: FileWhy,
 }
 
-#[cfg(not(unix))]
-pub(crate) fn facts(
-    _path: &std::path::Path,
-    _authorization: &Authorization,
-    _why: FileWhy,
-) -> Option<FileFacts> {
-    None
+pub(crate) struct FactsAnswer {
+    pub query: FactsQuery,
+    pub identity: Option<PathIdentity>,
+}
+
+pub(crate) struct FactsLane {
+    work: crossbeam_channel::Sender<FactsQuery>,
+    done: crossbeam_channel::Receiver<FactsAnswer>,
+}
+
+impl FactsLane {
+    pub(crate) fn start(
+        source: impl Fn(&FactsQuery) -> Option<PathIdentity> + Send + 'static,
+        wake: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) -> Option<Self> {
+        let (work, jobs) = crossbeam_channel::bounded::<FactsQuery>(32);
+        let (finished, done) = crossbeam_channel::bounded(32);
+        std::thread::Builder::new()
+            .name("kettle-file-facts".into())
+            .spawn(move || {
+                for query in jobs {
+                    let identity = source(&query);
+                    if finished.send(FactsAnswer { query, identity }).is_err() {
+                        break;
+                    }
+                    wake();
+                }
+            })
+            .ok()?;
+        Some(Self { work, done })
+    }
+
+    pub(crate) fn request(&self, query: FactsQuery) {
+        let _ = self.work.try_send(query);
+    }
+
+    pub(crate) fn try_recv(&self) -> Option<FactsAnswer> {
+        self.done.try_recv().ok()
+    }
 }
 
 /// The picture a file's card shows: a page with its corner turned down,
@@ -223,6 +231,56 @@ fn page_color((x, y): (f32, f32)) -> Option<[u8; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stalled_file_facts_leave_the_ui_free_to_show_a_placeholder() {
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let (returned, received) = std::sync::mpsc::channel();
+        let ui = std::thread::spawn(move || {
+            let lane = FactsLane::start(
+                move |_| {
+                    entered.send(()).unwrap();
+                    let _ = waiting.recv();
+                    None
+                },
+                std::sync::Arc::new(|| {}),
+            )
+            .unwrap();
+            lane.request(FactsQuery {
+                window: 1,
+                pane: 2,
+                item: 3,
+                generation: 4,
+                source: kettle_media::Source::Bytes(Vec::new()),
+                why: FileWhy::Unsupported,
+            });
+            returned.send(lane).ok();
+        });
+        started
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let responsive = received
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_ok();
+        release.send(()).unwrap();
+        ui.join().unwrap();
+        assert!(
+            responsive,
+            "file facts must not hold the UI while the source is checking"
+        );
+        assert_eq!(
+            crate::media::card_caption(
+                None,
+                crate::media::ItemKind::CheckingFile(FileWhy::Unsupported),
+                (0, 0),
+                None,
+                None,
+                80
+            ),
+            "file checking"
+        );
+    }
 
     /// A poster an account had no room for is drawn again once it has room,
     /// and kept from then on: no room once is not no card for good.
@@ -341,34 +399,5 @@ mod tests {
             &poster.rgba,
             &self::poster().unwrap().rgba
         ));
-    }
-
-    /// The facts are the file's own: its length and identity, read from a
-    /// descriptor Kettle opened; a directory, a missing file, or another
-    /// file than the one a request named by device and inode give none.
-    #[cfg(unix)]
-    #[test]
-    fn facts_are_read_from_the_named_file() {
-        use std::os::unix::fs::MetadataExt as _;
-        let dir = kettle_test_support::private_tempdir("kettle-file-card-");
-        let path = dir.path().join("report.docx");
-        std::fs::write(&path, [7; 1234]).unwrap();
-        let meta = std::fs::metadata(&path).unwrap();
-        let named = Authorization::ExternalAttested(kettle_media::ExternalAttested {
-            dev: meta.dev(),
-            ino: meta.ino(),
-        });
-        let facts = facts(&path, &named, FileWhy::Unsupported).expect("facts");
-        assert_eq!(facts.bytes, 1234);
-        assert_eq!(facts.identity, PathIdentity::of(&meta).unwrap());
-        assert_eq!(facts.why, FileWhy::Unsupported);
-        let other = Authorization::ExternalAttested(kettle_media::ExternalAttested {
-            dev: meta.dev(),
-            ino: meta.ino() + 1,
-        });
-        assert_eq!(super::facts(&path, &other, FileWhy::Unsupported), None);
-        assert_eq!(super::facts(dir.path(), &named, FileWhy::Unsupported), None);
-        let gone = dir.path().join("gone.docx");
-        assert_eq!(super::facts(&gone, &named, FileWhy::Unsupported), None);
     }
 }

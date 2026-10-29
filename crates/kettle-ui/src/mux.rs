@@ -1315,6 +1315,7 @@ pub(crate) fn split_falls_back_to_shell(argv: &[String], always_with_profile: bo
     argv.is_empty() || (!always_with_profile && direct_launch_splits_to_shell(argv))
 }
 
+#[derive(Clone)]
 pub enum Node {
     Leaf(u64),
     Split {
@@ -1428,6 +1429,16 @@ impl Node {
         walk(self, n, &mut idx).unwrap_or_else(|| self.first_leaf())
     }
 
+    fn leaf_depth(&self, id: u64) -> Option<usize> {
+        match self {
+            Self::Leaf(leaf) => (*leaf == id).then_some(0),
+            Self::Split { a, b, .. } => a
+                .leaf_depth(id)
+                .or_else(|| b.leaf_depth(id))
+                .map(|depth| depth + 1),
+        }
+    }
+
     /// Replace the leaf `id` with a split of itself and `new_id`.
     #[cfg(test)]
     fn split_leaf(&mut self, id: u64, new_id: u64, dir: Dir) -> bool {
@@ -1441,6 +1452,16 @@ impl Node {
     /// target, where appending would put it on the other side of the pane the
     /// user aimed at.
     fn split_leaf_ordered(&mut self, id: u64, new_id: u64, dir: Dir, new_first: bool) -> bool {
+        if !self
+            .leaf_depth(id)
+            .is_some_and(|depth| depth < crate::session::MAX_SPLIT_DEPTH)
+        {
+            return false;
+        }
+        self.split_leaf_at(id, new_id, dir, new_first)
+    }
+
+    fn split_leaf_at(&mut self, id: u64, new_id: u64, dir: Dir, new_first: bool) -> bool {
         match self {
             Node::Leaf(x) if *x == id => {
                 let (a, b) = if new_first {
@@ -1458,8 +1479,8 @@ impl Node {
             }
             Node::Leaf(_) => false,
             Node::Split { a, b, .. } => {
-                a.split_leaf_ordered(id, new_id, dir, new_first)
-                    || b.split_leaf_ordered(id, new_id, dir, new_first)
+                a.split_leaf_at(id, new_id, dir, new_first)
+                    || b.split_leaf_at(id, new_id, dir, new_first)
             }
         }
     }
@@ -2533,6 +2554,10 @@ impl Mux {
         // real layout) and surface why.
         let mut spawned = 0usize;
         for (i, st) in s.tabs.iter().enumerate() {
+            if !st.root.within_split_depth() {
+                log::warn!("session restore: split depth exceeds the session limit");
+                break;
+            }
             let Some(tab_leaves) = st
                 .root
                 .bounded_leaf_count(MAX_RESTORE_PANES.saturating_sub(spawned))
@@ -2906,6 +2931,24 @@ impl Mux {
         )
     }
 
+    fn check_split_depth(&self) -> Result<()> {
+        if let Some(tab) = self.tabs.get(self.active) {
+            let focus = if tab.root.contains(tab.focus) {
+                tab.focus
+            } else {
+                tab.root.first_leaf()
+            };
+            if !tab
+                .root
+                .leaf_depth(focus)
+                .is_some_and(|depth| depth < crate::session::MAX_SPLIT_DEPTH)
+            {
+                anyhow::bail!("split failed: session tree depth limit reached");
+            }
+        }
+        Ok(())
+    }
+
     /// Split the focused pane along `dir`. The new pane goes first (left or
     /// above) when `new_first`, and second otherwise.
     pub fn split_geometry(
@@ -2923,6 +2966,7 @@ impl Mux {
         // split-friendly by falling back to a shell in the focused cwd. See
         // `split_focused_launch`.
         let (argv, cwd, launch) = self.split_focused_launch(cfg);
+        self.check_split_depth()?;
         let new_id = self.spawn_pane_with_launch(
             cfg,
             geometry,
@@ -3014,6 +3058,7 @@ impl Mux {
                 launch,
             );
         }
+        self.check_split_depth()?;
         let new_id =
             self.spawn_pane_with_launch(cfg, geometry, waker, cwd.as_deref(), &argv, launch)?;
         self.inherit_split_group(cfg, new_id);
@@ -3326,7 +3371,7 @@ impl Mux {
         if !tab.root.contains(moving) || !tab.root.contains(target) {
             return false;
         }
-        let root = std::mem::replace(&mut tab.root, Node::Leaf(moving));
+        let root = tab.root.clone();
         // `remove_leaf` reports three outcomes, and two of them are ordinary:
         //   `Ok(tree)`       the pane sat somewhere below the root; the tree
         //                    comes back with its parent split collapsed.
@@ -3339,19 +3384,15 @@ impl Mux {
         //                    the `contains` guards above already excluded it —
         //                    so it is unreachable here. Refuse rather than
         //                    leave the tab holding the placeholder.
-        let lifted = match root.remove_leaf(moving) {
+        let mut lifted = match root.remove_leaf(moving) {
             Ok(tree) => tree,
             Err(Some(rest)) => rest,
             Err(None) => return false,
         };
-        tab.root = lifted;
-        if !tab.root.split_leaf_ordered(target, moving, dir, before) {
-            // The target vanished with the lift (it cannot, given the guards
-            // above) — put the pane back beside the first leaf rather than
-            // dropping it out of the tree entirely.
-            let anchor = tab.root.first_leaf();
-            tab.root.split_leaf_ordered(anchor, moving, dir, before);
+        if !lifted.split_leaf_ordered(target, moving, dir, before) {
+            return false;
         }
+        tab.root = lifted;
         tab.focus = moving;
         tab.zoomed = false;
         true
@@ -3977,6 +4018,7 @@ impl Mux {
         // Clone the focused pane's argv + cwd, WSL-aware, as
         // `duplicate_focused_tab` does.
         let (argv, cwd, launch) = self.clone_focused_launch(cfg);
+        self.check_split_depth()?;
         let new_id = self.spawn_pane_with_launch(
             cfg,
             geometry,
@@ -4882,25 +4924,17 @@ fn rotate_tree(node: &mut Node, clockwise: bool) {
 /// UX after `split-window`, WezTerm's `SplitHorizontal/Vertical`). Pure so
 /// the contract is unit-testable without a real spawn.
 fn insert_split(tab: &mut Tab, new_id: u64, dir: Dir, new_first: bool) -> bool {
-    let focus = tab.focus;
-    if tab.root.split_leaf_ordered(focus, new_id, dir, new_first) {
-        tab.focus = new_id;
-        tab.zoomed = false;
-        return true;
+    let focus = if tab.root.contains(tab.focus) {
+        tab.focus
+    } else {
+        tab.root.first_leaf()
+    };
+    if !tab.root.split_leaf_ordered(focus, new_id, dir, new_first) {
+        return false;
     }
-    // `tab.focus` was stale (not a leaf in this tree, a focus-desync class of
-    // bug). Repair focus to a real leaf and retry; if even this fails, the
-    // caller reaps the new pane instead of leaking its PTY + child.
-    let repaired = tab.root.first_leaf();
-    if tab
-        .root
-        .split_leaf_ordered(repaired, new_id, dir, new_first)
-    {
-        tab.focus = new_id;
-        tab.zoomed = false;
-        return true;
-    }
-    false
+    tab.focus = new_id;
+    tab.zoomed = false;
+    true
 }
 
 fn shell_argv(cfg: &Config) -> Vec<String> {
@@ -5023,36 +5057,138 @@ pub(crate) fn shell_kind_for_argv(argv: &[String]) -> PaneShellKind {
     }
 }
 
-/// Translate a Windows path to the WSL path a Linux shell can open, or `None`
-/// if it is not a Windows-style path (already POSIX / unrecognized). Handles
-/// drive paths (`C:\Users\me\v.mp4` → `/mnt/c/Users/me/v.mp4`) and the WSL UNC
-/// shares Explorer produces for in-distro files (`\\wsl.localhost\Ubuntu\home\
-/// me\v` and the legacy `\\wsl$\…` → `/home/me/v`). Pure.
-pub(crate) fn windows_path_to_wsl(p: &std::path::Path) -> Option<String> {
-    let s = p.to_string_lossy();
-    // `\\wsl.localhost\<distro>\rest` or `\\wsl$\<distro>\rest` → `/rest`
-    // (drop the distro component; the pane's own distro is what matters).
-    for prefix in [
-        r"\\wsl.localhost\",
-        r"\\wsl$\",
-        "//wsl.localhost/",
-        "//wsl$/",
-    ] {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            let rest = rest.replace('\\', "/");
-            let after_distro = rest.split_once('/').map(|(_, r)| r).unwrap_or("");
-            return Some(format!("/{after_distro}"));
+fn wsl_unc_parts(path: &std::path::Path) -> Option<(String, String)> {
+    let text = path.to_string_lossy().replace('\\', "/");
+    for prefix in ["//wsl.localhost/", "//wsl$/"] {
+        if text
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
+            let rest = &text[prefix.len()..];
+            let (distro, tail) = rest.split_once('/').unwrap_or((rest, ""));
+            return Some((distro.to_owned(), tail.to_owned()));
         }
     }
-    // Drive-letter path `X:\…` / `X:/…`.
-    let b = s.as_bytes();
-    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
-        let drive = (b[0] as char).to_ascii_lowercase();
-        let rest = s[2..].replace('\\', "/");
-        let rest = rest.strip_prefix('/').unwrap_or(&rest);
-        return Some(format!("/mnt/{drive}/{rest}"));
+    None
+}
+
+fn wsl_distribution(argv: &[String]) -> Option<&str> {
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--" | "-e" | "--exec" => break,
+            "-d" | "--distribution" => {
+                return args
+                    .next()
+                    .map(String::as_str)
+                    .filter(|s| !s.is_empty() && !s.starts_with('-'));
+            }
+            "--cd" | "-u" | "--user" | "--shell-type" => {
+                args.next();
+            }
+            _ if arg.starts_with("--distribution=") => {
+                return arg
+                    .split_once('=')
+                    .map(|(_, distro)| distro)
+                    .filter(|s| !s.is_empty());
+            }
+            _ if !arg.starts_with('-') => break,
+            _ => {}
+        }
     }
     None
+}
+
+fn windows_path_for_wsl(
+    path: &std::path::Path,
+    target: Option<&str>,
+    mounted: impl Fn(&str) -> bool,
+) -> Option<String> {
+    if let Some((distro, tail)) = wsl_unc_parts(path) {
+        if distro.is_empty() || matches!(distro.as_str(), "." | "..") {
+            return None;
+        }
+        if target.is_some_and(|target| target.eq_ignore_ascii_case(&distro)) {
+            return Some(format!("/{tail}"));
+        }
+        let path = format!("/mnt/wsl/{distro}/{tail}");
+        return mounted(&path).then_some(path);
+    }
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = text[2..].replace('\\', "/");
+        return Some(format!(
+            "/mnt/{drive}/{}",
+            rest.strip_prefix('/').unwrap_or(&rest)
+        ));
+    }
+    None
+}
+
+#[cfg(windows)]
+fn wsl_mount_verified(target: Option<&str>, source: &std::path::Path, candidate: &str) -> bool {
+    type Key = (String, std::path::PathBuf, String);
+    type Cache = std::collections::VecDeque<(Key, bool, std::time::Instant)>;
+    static CACHE: std::sync::OnceLock<Arc<std::sync::Mutex<Cache>>> = std::sync::OnceLock::new();
+    static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(target) = target else { return false };
+    if target.contains(['/', '\\'])
+        || matches!(target, "." | "..")
+        || target.len() > 256
+        || source.as_os_str().len() > 32 * 1024
+        || candidate.len() > 32 * 1024
+    {
+        return false;
+    }
+    let key = (target.to_owned(), source.to_owned(), candidate.to_owned());
+    let cache = CACHE.get_or_init(Default::default);
+    if let Ok(cache) = cache.lock()
+        && let Some((_, verified, _)) = cache.iter().find(|(saved, _, at)| {
+            saved == &key && at.elapsed() < std::time::Duration::from_secs(5)
+        })
+    {
+        return *verified;
+    }
+    // A stalled UNC lookup holds at most this one helper, never the UI.
+    if CHECKING.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    let cache = cache.clone();
+    if std::thread::Builder::new()
+        .name("kettle-wsl-mount".into())
+        .spawn(move || {
+            let mounted = format!("\\\\wsl.localhost\\{}{}", key.0, key.2.replace('/', "\\"));
+            let verified = std::fs::File::open(&key.1).ok().is_some_and(|source| {
+                kettle_state::path_matches_file(&source, std::path::Path::new(&mounted))
+                    .unwrap_or(false)
+            });
+            if let Ok(mut cache) = cache.lock() {
+                if cache.len() >= 32 {
+                    cache.pop_front();
+                }
+                cache.push_back((key, verified, std::time::Instant::now()));
+            }
+            CHECKING.store(false, Ordering::Release);
+        })
+        .is_err()
+    {
+        CHECKING.store(false, Ordering::Release);
+    }
+    false
+}
+
+#[cfg(not(windows))]
+fn wsl_mount_verified(_target: Option<&str>, _source: &std::path::Path, _candidate: &str) -> bool {
+    false
+}
+
+fn path_for_wsl(argv: &[String], path: &std::path::Path) -> Option<String> {
+    let target = wsl_distribution(argv);
+    windows_path_for_wsl(path, target, |candidate| {
+        wsl_mount_verified(target, path, candidate)
+    })
 }
 
 /// Quote a single path string for one shell family so the user can press Enter
@@ -5101,6 +5237,9 @@ pub(crate) fn path_types_exactly(argv: &[String], path: &std::path::Path) -> boo
         return false;
     };
     !text.chars().any(char::is_control)
+        && !(argv_is_wsl(argv)
+            && wsl_unc_parts(path).is_some()
+            && path_for_wsl(argv, path).is_none())
         && !(shell_kind_for_argv(argv) == PaneShellKind::Cmd && text.contains(['%', '!']))
 }
 
@@ -5111,18 +5250,22 @@ pub(crate) fn path_types_exactly(argv: &[String], path: &std::path::Path) -> boo
 pub(crate) fn format_paths_for_paste(argv: &[String], paths: &[std::path::PathBuf]) -> String {
     let wsl = argv_is_wsl(argv);
     let kind = shell_kind_for_argv(argv);
-    paths
+    let translated: Option<Vec<_>> = paths
         .iter()
-        .map(|p| {
-            let s = if wsl {
-                windows_path_to_wsl(p).unwrap_or_else(|| p.to_string_lossy().into_owned())
+        .map(|path| {
+            let text = if wsl {
+                match path_for_wsl(argv, path) {
+                    Some(text) => text,
+                    None if wsl_unc_parts(path).is_some() => return None,
+                    None => path.to_string_lossy().into_owned(),
+                }
             } else {
-                p.to_string_lossy().into_owned()
+                path.to_string_lossy().into_owned()
             };
-            quote_path_for(kind, &s)
+            Some(quote_path_for(kind, &text))
         })
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect();
+    translated.map(|paths| paths.join(" ")).unwrap_or_default()
 }
 
 pub(crate) fn format_paths_for_targets<'a>(
@@ -8257,28 +8400,63 @@ mod node_tests {
     }
 
     #[test]
+    fn wsl_unc_paths_preserve_the_source_distribution() {
+        let source = std::path::Path::new(r"\\wsl.localhost\Debian\etc\hosts");
+        for (target, mounted, expected) in [
+            (Some("Debian"), false, Some("/etc/hosts")),
+            (Some("Ubuntu"), false, None),
+            (None, false, None),
+            (Some("Ubuntu"), true, Some("/mnt/wsl/Debian/etc/hosts")),
+            (None, true, Some("/mnt/wsl/Debian/etc/hosts")),
+        ] {
+            let actual = windows_path_for_wsl(source, target, |path| {
+                assert_eq!(path, "/mnt/wsl/Debian/etc/hosts");
+                mounted
+            });
+            assert_eq!(
+                actual.as_deref(),
+                expected,
+                "target {target:?}, mounted {mounted}: source distribution must survive"
+            );
+        }
+    }
+
+    #[test]
     fn windows_path_to_wsl_translates_drive_and_unc() {
         use std::path::Path;
         assert_eq!(
-            windows_path_to_wsl(Path::new(r"C:\Users\me\v.mp4")).as_deref(),
+            windows_path_for_wsl(Path::new(r"C:\Users\me\v.mp4"), None, |_| false).as_deref(),
             Some("/mnt/c/Users/me/v.mp4")
         );
         // Lowercased drive, forward-slash input also accepted.
         assert_eq!(
-            windows_path_to_wsl(Path::new("D:/data/x")).as_deref(),
+            windows_path_for_wsl(Path::new("D:/data/x"), None, |_| false).as_deref(),
             Some("/mnt/d/data/x")
         );
         // WSL UNC share → in-distro absolute path (distro component dropped).
         assert_eq!(
-            windows_path_to_wsl(Path::new(r"\\wsl.localhost\Ubuntu\home\me\v.mp4")).as_deref(),
+            windows_path_for_wsl(
+                Path::new(r"\\wsl.localhost\Ubuntu\home\me\v.mp4"),
+                Some("Ubuntu"),
+                |_| false
+            )
+            .as_deref(),
             Some("/home/me/v.mp4")
         );
         assert_eq!(
-            windows_path_to_wsl(Path::new(r"\\wsl$\Debian\etc\hosts")).as_deref(),
+            windows_path_for_wsl(
+                Path::new(r"\\wsl$\Debian\etc\hosts"),
+                Some("Debian"),
+                |_| false
+            )
+            .as_deref(),
             Some("/etc/hosts")
         );
         // Already-POSIX / unrecognized → None (caller keeps the original).
-        assert_eq!(windows_path_to_wsl(Path::new("/home/me/v.mp4")), None);
+        assert_eq!(
+            windows_path_for_wsl(Path::new("/home/me/v.mp4"), None, |_| false),
+            None
+        );
     }
 
     #[test]
@@ -9538,6 +9716,52 @@ mod node_tests {
         assert!(m.tabs.is_empty(), "all tabs gone");
         assert!(m.panes.is_empty(), "all panes gone");
         assert_eq!(m.active, 0, "active reset to 0");
+    }
+
+    #[test]
+    fn skewed_live_split_tree_round_trips_at_the_session_depth_limit() {
+        let mut tab = Tab {
+            root: Node::Leaf(1),
+            focus: 1,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+            title_override: None,
+            lanes: HashMap::new(),
+        };
+        for id in 2..=60 {
+            assert!(insert_split(&mut tab, id, Dir::Horizontal, false));
+        }
+        let mux = Mux::new();
+        let saved = crate::session::STab {
+            root: mux.snap(&tab.root),
+            focus: 59,
+            title_override: None,
+            zoomed: false,
+        };
+        let session = crate::session::Session {
+            tabs: vec![saved.clone()],
+            active: 0,
+            theme: None,
+            windows: vec![crate::session::SWindow {
+                tabs: vec![saved],
+                active: 0,
+                geometry: None,
+            }],
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.json");
+        crate::session::save_to_path(&session, &path).unwrap();
+        assert!(
+            crate::session::load_from_path(&path).is_some(),
+            "the deepest supported skewed tree must load"
+        );
+        assert!(
+            !insert_split(&mut tab, 61, Dir::Horizontal, false),
+            "one more split must be refused before making an unloadable session"
+        );
+        assert_eq!(tab.focus, 60, "refusal must preserve focus and tree");
     }
 
     #[test]

@@ -202,7 +202,9 @@ impl App {
             log::warn!("session could not be restored ({reason}); it had no file to keep");
             return;
         };
-        crate::session::stash_unrestorable_session(path, reason);
+        if let Some(identity) = &self.restore_identity {
+            crate::session::stash_unrestorable_snapshot(path, identity, reason);
+        }
     }
 
     /// Resolve the one startup restore source before window or GPU creation.
@@ -245,14 +247,18 @@ impl App {
             crate::session::Session::load_tab_handoff(path)
         } else if let Some(name) = self.startup.layout.as_deref() {
             self.restore_source = crate::session::Session::path_for_layout(name);
-            crate::session::Session::load_layout(name)
+            let (session, identity) = crate::session::Session::load_layout_with_identity(name)?;
+            self.restore_identity = Some(identity);
+            Some(session)
         } else if should_restore_session(
             self.startup.restore,
             self.cfg.restore_session,
             self.other_builds.running(),
         ) {
             self.restore_source = crate::session::Session::path();
-            crate::session::Session::load()
+            let (session, identity) = crate::session::Session::load_with_identity()?;
+            self.restore_identity = Some(identity);
+            Some(session)
         } else {
             None
         }

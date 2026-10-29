@@ -1442,6 +1442,19 @@ impl Warning {
         }
     }
 }
+/// Metadata-only work, bound to the shelf generation which requested it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileFactsRequest {
+    pub generation: u64,
+    pub source: Source,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileFactsReply {
+    pub generation: u64,
+    pub identity: Option<PathIdentity>,
+}
+
 /// Open-file identity included in content digests. Timestamps are seconds + nanoseconds
 /// relative to the Unix epoch; callers provide metadata from the held source descriptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -154,6 +154,24 @@ pub(crate) fn serve(
     watchdog.arm(JOB_ARRIVAL_DEADLINE);
     let job = match read_frame(&mut input, Direction::ParentToWorker) {
         Ok(Some(Frame::Job(job))) => job,
+        Ok(Some(Frame::FileFactsRequest(request))) => {
+            watchdog.arm(std::time::Duration::from_millis(500));
+            if crate::early_unix::limit_job_cpu().is_err() {
+                return EXIT_SETUP;
+            }
+            let reply = kettle_media::FileFactsReply {
+                generation: request.generation,
+                identity: kettle_media_render::source::file_facts(&request.source),
+            };
+            return match write_frame(
+                output,
+                &Frame::FileFactsReply(reply),
+                Direction::WorkerToParent,
+            ) {
+                Ok(()) => 0,
+                Err(_) => EXIT_PROTOCOL,
+            };
+        }
         #[cfg(target_os = "linux")]
         Ok(Some(Frame::Pcm(kettle_media::pcm::Message::Open(open)))) => {
             return crate::pcm::serve(open, input, output, watchdog);

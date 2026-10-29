@@ -444,6 +444,34 @@ impl App {
         while let Some(finished) = self.media.take_finished() {
             self.finish_show(ws, finished);
         }
+        while let Some(answer) = self.media.take_facts() {
+            let query = answer.query;
+            let Some(identity) = answer.identity else {
+                continue;
+            };
+            let owner = self
+                .all_windows(ws)
+                .find(|window| {
+                    window.seq == query.window && window.mux.panes.contains_key(&query.pane)
+                })
+                .or_else(|| {
+                    self.all_windows(ws)
+                        .find(|window| window.mux.panes.contains_key(&query.pane))
+                })
+                .map(|window| window.seq);
+            let Some(window) = owner.and_then(|seq| self.window_by_seq(ws, seq)) else {
+                continue;
+            };
+            let accepted = window
+                .mux
+                .panes
+                .get_mut(&query.pane)
+                .and_then(|pane| pane.media_shelf.get_mut(query.item))
+                .is_some_and(|item| item.accept_file_facts(query.generation, query.why, identity));
+            if accepted && let Some(handle) = &window.window {
+                handle.request_redraw();
+            }
+        }
         let proxy = self.proxy.clone();
         self.media.pump(self.startup.media.as_ref(), move || {
             std::sync::Arc::new(move || {
@@ -1310,15 +1338,9 @@ impl App {
             // failure it was.
             Err(RenderError::Failure(failure)) => {
                 let why = crate::media::FileWhy::of_job(&spec.kind, failure);
-                let facts = why.and_then(|why| match &spec.input {
-                    crate::media::SourceInput::Path {
-                        path,
-                        authorization,
-                    } => super::native_path_buf(path)
-                        .and_then(|path| crate::media::file_facts(&path, authorization, why)),
-                    _ => None,
-                });
-                let Some(facts) = facts else {
+                let Some(why) =
+                    why.filter(|_| matches!(spec.input, crate::media::SourceInput::Path { .. }))
+                else {
                     return notify_preview_failure(tr, origin.refuse(failure));
                 };
                 let crate::media::Draft {
@@ -1329,13 +1351,13 @@ impl App {
                     inline_refused,
                     gallery: _,
                 } = draft;
-                let item = crate::media::ShelfItem::file(
+                let item = crate::media::ShelfItem::checking_file(
                     self.media.next_item(),
                     key,
                     title,
                     provenance,
-                    facts,
-                    crate::media::ItemSource::undrawn(spec, facts.identity),
+                    why,
+                    crate::media::ItemSource::checking_file(spec),
                 );
                 return self.publish_show(
                     ws,
@@ -1557,6 +1579,36 @@ impl App {
         if let Some(handle) = &window.window {
             handle.request_redraw();
         }
+        if let crate::media::ItemKind::CheckingFile(why) = kind
+            && let Some(item) = self
+                .window_by_seq(ws, seq)
+                .and_then(|window| window.mux.panes.get(&route.pane))
+                .and_then(|pane| pane.media_shelf.get(published.id))
+            && let crate::media::SourceInput::Path {
+                path,
+                authorization,
+            } = &item.source.spec.input
+        {
+            let query = crate::media::FactsQuery {
+                window: seq,
+                pane: route.pane,
+                item: item.id,
+                generation: item.generation,
+                why,
+                source: kettle_media::Source::Path {
+                    path: path.clone(),
+                    authorization: authorization.clone(),
+                },
+            };
+            let proxy = self.proxy.clone();
+            self.media.request_facts(
+                query,
+                self.startup.media.as_ref(),
+                std::sync::Arc::new(move || {
+                    let _ = proxy.send_event(UserEvent::MediaRendered);
+                }),
+            );
+        }
         let origin = match origin {
             crate::media::Requester::Ctl(origin) => origin,
             // What the user asked to preview opens in its pane's lane, from
@@ -1579,6 +1631,17 @@ impl App {
                 (width, height),
                 &warnings,
             ),
+            crate::media::ItemKind::CheckingFile(_) => {
+                let mut result = kettle_ctl::show::ShowResult::new(
+                    target,
+                    published.id,
+                    kettle_media::MediaKind::Raster,
+                    (0, 0),
+                    &[],
+                );
+                result.kind = kettle_ctl::show::FILE_KIND.into();
+                result
+            }
             crate::media::ItemKind::File(facts) => kettle_ctl::show::ShowResult::file(
                 target,
                 published.id,

@@ -36,6 +36,13 @@ pub use tree::{
     remove_directory_tree_at, remove_owned_readonly_tree_at,
 };
 
+/// Whether `path` still names the native file held by `file`.
+/// This compares identity, not contents; callers coordinate replacements and
+/// check size and modification time separately when those matter.
+pub fn path_matches_file(file: &File, path: &Path) -> io::Result<bool> {
+    private::same_file_identity(file, path)
+}
+
 /// Maximum on-disk size of the shared remote-command spool.
 ///
 /// Sender and receiver both enforce this boundary so an accepted append can

@@ -17,6 +17,7 @@ use super::file_card::FileFacts;
 pub(crate) enum ItemKind {
     Media(MediaKind),
     File(FileFacts),
+    CheckingFile(super::FileWhy),
 }
 
 impl From<MediaKind> for ItemKind {
@@ -30,7 +31,7 @@ impl ItemKind {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Media(kind) => kind.as_str(),
-            Self::File(_) => kettle_ctl::show::FILE_KIND,
+            Self::File(_) | Self::CheckingFile(_) => kettle_ctl::show::FILE_KIND,
         }
     }
 
@@ -38,14 +39,14 @@ impl ItemKind {
     pub(crate) fn media(self) -> Option<MediaKind> {
         match self {
             Self::Media(kind) => Some(kind),
-            Self::File(_) => None,
+            Self::File(_) | Self::CheckingFile(_) => None,
         }
     }
 
     /// The file, if the item is a file shown as itself.
     pub(crate) fn file(self) -> Option<FileFacts> {
         match self {
-            Self::Media(_) => None,
+            Self::Media(_) | Self::CheckingFile(_) => None,
             Self::File(facts) => Some(facts),
         }
     }
@@ -180,6 +181,7 @@ impl ShelfItem {
 
     /// An item for the file `facts` describe, read from `source`'s path:
     /// no pixels and no warnings, as nothing was drawn.
+    #[cfg(test)]
     pub(crate) fn file(
         id: u64,
         key: Option<ShelfKey>,
@@ -205,6 +207,51 @@ impl ShelfItem {
             published: 0,
             seen: false,
         }
+    }
+
+    pub(crate) fn checking_file(
+        id: u64,
+        key: Option<ShelfKey>,
+        title: String,
+        provenance: Provenance,
+        why: super::FileWhy,
+        source: super::ItemSource,
+    ) -> Self {
+        Self {
+            id,
+            generation: 0,
+            key,
+            title,
+            provenance,
+            kind: ItemKind::CheckingFile(why),
+            size: (0, 0),
+            warnings: Vec::new(),
+            pixels: ItemPixels::Undrawn,
+            source,
+            layout: None,
+            video: None,
+            viewed: 0,
+            published: 0,
+            seen: false,
+        }
+    }
+
+    pub(crate) fn accept_file_facts(
+        &mut self,
+        generation: u64,
+        why: super::FileWhy,
+        identity: kettle_media::PathIdentity,
+    ) -> bool {
+        if self.generation != generation || self.kind != ItemKind::CheckingFile(why) {
+            return false;
+        }
+        self.kind = ItemKind::File(FileFacts {
+            bytes: identity.size,
+            identity,
+            why,
+        });
+        self.source.digest.path_identity = Some(identity);
+        true
     }
 
     pub(crate) fn image(&self) -> Option<&ImageData> {
@@ -423,6 +470,25 @@ mod tests {
             ImageData::new(1, 1, vec![0, 0, 0, 255]).unwrap(),
             crate::media::ItemSource::sample(b"<svg/>"),
         )
+    }
+
+    #[test]
+    fn file_facts_from_an_older_generation_are_ignored() {
+        let mut item = item(7, None);
+        item.kind = ItemKind::CheckingFile(super::super::FileWhy::Unsupported);
+        item.generation = 2;
+        let identity = kettle_media::PathIdentity {
+            dev: 1,
+            ino: 2,
+            size: 42,
+            mtime_seconds: 3,
+            mtime_nanos: 4,
+        };
+        assert!(!item.accept_file_facts(1, super::super::FileWhy::Unsupported, identity));
+        assert!(matches!(item.kind, ItemKind::CheckingFile(_)));
+        assert!(item.accept_file_facts(2, super::super::FileWhy::Unsupported, identity));
+        assert_eq!(item.kind.file().unwrap().bytes, 42);
+        assert!(!item.accept_file_facts(2, super::super::FileWhy::Unsupported, identity));
     }
 
     /// A file shown as itself has no pixels of its own: its card shows the

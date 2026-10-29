@@ -80,6 +80,7 @@ pub(crate) fn card_caption(
     let kind = kind.into();
     let (width, height) = size;
     let mut detail = match (kind.file(), duration_ms) {
+        _ if matches!(kind, super::ItemKind::CheckingFile(_)) => "file checking".to_owned(),
         (Some(facts), _) => format!(
             "{} {}",
             kind.as_str(),

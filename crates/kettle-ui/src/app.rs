@@ -2475,6 +2475,9 @@ fn media_item_detail(
     kind: &str,
     item: &crate::media::ShelfItem,
 ) -> String {
+    if matches!(item.kind, crate::media::ItemKind::CheckingFile(_)) {
+        return format!("{kind} {}", tr.text(kettle_i18n::Text::InlineCardPending));
+    }
     if let Some(facts) = item.kind.file() {
         return format!("{kind} · {}", kettle_ctl::show::size_label(facts.bytes));
     }
@@ -2733,6 +2736,8 @@ pub enum UserEvent {
     PastedImageEncoded,
     #[cfg(target_os = "linux")]
     Wayland,
+    #[cfg(target_os = "linux")]
+    BlurDiscovered,
     /// The coalescing process-tree worker published a new remote/cwd snapshot.
     /// Kept distinct from PTY output wakeups so an idle window consumes the
     /// result even when no output generation advanced.
@@ -9871,6 +9876,7 @@ pub struct App {
     /// from state this never sees, and a one-shot tab handoff is deleted as it
     /// is read.
     restore_source: Option<std::path::PathBuf>,
+    restore_identity: Option<crate::session::SnapshotIdentity>,
     session_writer: crate::session::SessionWriter,
     /// All per-window state, keyed by the
     /// window's stable sequence number (`WindowState::seq`, 1-based, never
@@ -11283,6 +11289,7 @@ impl App {
             #[cfg(target_os = "linux")]
             wayland_file_drops: std::collections::BTreeMap::new(),
             restore_source: None,
+            restore_identity: None,
             session_writer: crate::session::SessionWriter::new()?,
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override
@@ -11886,9 +11893,8 @@ impl App {
         ws: &mut WindowState,
         releases: Vec<(u64, PhysicalKey, TerminalKeyRelease)>,
     ) {
-        if let Some(paste) = self.queued_pastes.back_mut() {
-            paste.key_releases.extend(releases);
-        } else {
+        let mut releases = releases;
+        if !paste::defer_key_releases(&mut self.queued_pastes, &mut releases) {
             self.send_key_releases(Some(ws), &releases);
         }
     }
@@ -19140,6 +19146,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
             #[cfg(target_os = "linux")]
             UserEvent::Wayland => self.poll_wayland(el),
+            #[cfg(target_os = "linux")]
+            UserEvent::BlurDiscovered => {
+                for window in self.windows.values() {
+                    if let (Some(material), Some(handle)) =
+                        (&window.native_material, &window.window)
+                    {
+                        material.sync(handle, &self.cfg);
+                        handle.request_redraw();
+                    }
+                }
+            }
             UserEvent::Activation => self.drain_activation_requests(el),
             #[cfg(target_os = "macos")]
             UserEvent::DockReopen => {
@@ -20118,7 +20135,9 @@ impl App {
         ));
         ws.native_caption_drag = Some(crate::native_drag::NativeCaptionDrag::install(&window));
         ws.native_material = Some(crate::native_material::NativeMaterial::install(
-            &window, &self.cfg,
+            &window,
+            &self.cfg,
+            self.proxy.clone(),
         ));
         crate::startup_trace::mark(crate::startup_trace::Phase::WindowCreated);
         // Measured AFTER apply_post_create because the gpu figure below is
@@ -20491,7 +20510,7 @@ impl App {
             | UserEvent::DockReopenReady(_)
             | UserEvent::DockReopenFinished(_) => {}
             #[cfg(target_os = "linux")]
-            UserEvent::Wayland => {}
+            UserEvent::Wayland | UserEvent::BlurDiscovered => {}
             // Consumed by the outer window-less dispatch before a WindowState
             // is checked out.
             UserEvent::ShellsDetected

@@ -1231,6 +1231,16 @@ pub(super) fn defer_authored_input(
     if queue.is_empty() {
         return None;
     }
+    if !input.key_presses.is_empty() {
+        let recipients = queue
+            .iter()
+            .filter(|paste| paste.window == input.window)
+            .map(|paste| paste.key_presses.len())
+            .fold(input.key_presses.len(), usize::saturating_add);
+        if recipients > MAX_OWED_KEY_RECIPIENTS {
+            return Some(PaneInputResult::Oversize);
+        }
+    }
     let bytes = queue
         .iter()
         .map(|paste| paste.content.bytes())
@@ -1277,6 +1287,22 @@ pub(super) fn defer_authored_input(
     }
     queue.push_back(input);
     Some(PaneInputResult::Queued)
+}
+
+const MAX_OWED_KEY_RECIPIENTS: usize = 1024;
+
+/// Releases take no new queue slot or byte admission: their presses already
+/// reserved the obligation. The tail fences later input behind each release.
+pub(super) fn defer_key_releases(
+    queue: &mut std::collections::VecDeque<QueuedPaste>,
+    releases: &mut Vec<(u64, PhysicalKey, TerminalKeyRelease)>,
+) -> bool {
+    if let Some(paste) = queue.back_mut() {
+        paste.key_releases.append(releases);
+        true
+    } else {
+        false
+    }
 }
 
 pub(super) fn pop_ready_paste(
