@@ -80,6 +80,26 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   reliable correlation needs the shell integration to echo a request token
   for each run. Close with a token in the command-start mark that
   `run_command` matches.
+- **Grapheme-cluster widths (DEC mode 2027).** ucs-detect on 5.7.0
+  (`docs/TESTING.md`, "Terminal conformance") found that a grapheme cluster
+  takes the sum of its codepoints' widths: 0.7% of emoji ZWJ sequences, 50% of
+  VS16 and 0% of VS15 sequences, and 84% of graphemes across 85 languages,
+  chiefly Indic conjuncts, get the width `wcwidth` gives the whole cluster.
+  The grid measures each codepoint (`unicode-width`) in the vendored
+  `alacritty_terminal`. Deferred as a product decision, not a defect: a
+  program's cursor arithmetic must agree with the terminal, so clustering
+  would arrive behind mode 2027, which a program sets when it measures
+  clusters too, or as a new default that changes how every program's output
+  lays out. Close by choosing, then measuring and storing whole clusters per
+  cell with their recorded width, with ucs-detect scores before and after.
+- **Unimplemented DEC and xterm controls.** esctest2 still fails 252 tests,
+  listed by reason in `scripts/conformance-esctest-expected.txt`: chiefly
+  left and right margins (DECSLRM), rectangular-area operations, character
+  protection and selective erase, column editing, reverse wraparound and
+  colour syntaxes beyond `rgb:` and `#rrggbb`. None is a defect in a control
+  Kettle implements. Close each by implementing it in the vendored engine and
+  moving its tests out of the list; `just conformance-esctest` fails until the
+  list matches.
 
 ## UX
 

@@ -912,6 +912,22 @@ modal-shortcuts-smoke: release
 interaction-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release interaction
 
+# Run esctest2 in a live 80x25 window and compare its failures with
+# scripts/conformance-esctest-expected.txt. Local only: it fetches esctest2 at
+# a pinned commit and needs a desktop (Linux: wrap it in `xvfb-run -a`).
+[unix]
+conformance-esctest: release
+    python3 scripts/check-conformance.py esctest --kettle ./target/release/kettle
+
+# Measure Unicode width handling with ucs-detect, pinned, in a live window.
+[unix]
+conformance-ucs: release
+    python3 scripts/check-conformance.py ucs --kettle ./target/release/kettle
+
+# Both terminal conformance suites; docs/TESTING.md records the results.
+[unix]
+conformance: conformance-esctest conformance-ucs
+
 # Confirm centered modal focus and input isolation using a private X11 display.
 [linux]
 confirmation-smoke: release
