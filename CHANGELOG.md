@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.7.0] — 2026-10-29
+
 ### Added
 
 - Edit every modal text field like the search bar: titles, the command
@@ -176,7 +178,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Tie IME composition to its pane, end it on focus changes, and accept new
   input after a cancelled composition.
 - Start recording before restored sibling windows open.
-- Respect menus and other modal pointer owners in mouse motion reports.
 - Keep the new-tab button and tab overflow arrows in step with focus changes.
 - Open a second theme picker from the first one's baseline, and keep
   configured theme overrides in previews.
@@ -228,8 +229,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Bound the Linux audio relay's queue before admitting blocks.
 - Keep the Linux media sandbox from reading or changing other processes'
   resource limits or aiming I/O signals at them.
-- Bound the control inbox and each UI drain, so a flood of control requests
-  cannot stall the window.
 - Keep runtime incident logs within their size cap after a write failure, and
   record exit incidents without raw error text.
 - Send application-keypad sequences for Num Lock-off numpad navigation, use
@@ -305,14 +304,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   detection, then run a held New Tab With Shell action when it finishes.
 - Deliver focus reports that arrive while terminal input is backed up,
   once and in order.
-- Release keys held in a terminal when its window loses focus.
 - Let the control API drag panes the same way the pointer does.
 - Remove only staging directories that an update recorded next to the macOS
   app, never other directories whose names match the pattern.
-- Bound the control server's request queue per connection and the work each
-  UI frame takes from it, so a busy client cannot stall the window.
-- Never drop a key release owed to a terminal when the paste queue is full
-  or the window loses focus.
+- Bound the control server's inbox, each connection's request queue and the
+  work each UI frame takes from them, so a flood of requests or a busy client
+  cannot stall the window.
+- Release keys held in a terminal when its window loses focus, and never
+  drop a key release owed to it when the paste queue is full.
 - Read file-card metadata in the media worker instead of on the UI thread.
 - Translate a pasted path for another WSL distribution only through a
   verified mount of the same file.
