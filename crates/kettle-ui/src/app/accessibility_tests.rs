@@ -893,6 +893,10 @@ fn modal_text_actions_reach_the_open_editor() {
         .nth(1)
         .and_then(|rest| rest.split("\n    }\n").next())
         .expect("modal_text_accessibility_action body");
+    let composing = action
+        .find("if ws.ime_preedit.is_some() {")
+        .expect("an active composition is left alone");
+    assert!(composing < action.find("modal_editor_mut(ws)").expect("the editor"));
     for line in [
         "editor.set_character_selection(",
         "editor.replace_all(&value, crate::modal_input::MAX_MODAL_INPUT_BYTES);",

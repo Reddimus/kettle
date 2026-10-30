@@ -944,6 +944,12 @@ impl App {
         kind: u64,
         request: ActionRequest,
     ) {
+        // A composition owns the caret until it commits or is cancelled, and
+        // the projected text includes it, so screen-reader offsets do not
+        // map onto the editor's own text until then.
+        if ws.ime_preedit.is_some() {
+            return;
+        }
         let run = accessibility_modal_text_run_id(kind);
         let Some(editor) = modal_editor_mut(ws) else {
             return;
