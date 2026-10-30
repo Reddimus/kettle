@@ -97,6 +97,11 @@ def in_kettle(kettle, out, label, command_for):
         config = root / "kettle.conf"
         config.write_text(CONFIG)
         env = {"SHELL": "/bin/sh", "ENV": None, "BASH_ENV": None, "PS1": "$ "}
+        # A relative WAYLAND_DISPLAY names a socket in XDG_RUNTIME_DIR, which
+        # is about to become private: pass the compositor's absolute path.
+        display = os.environ.get("WAYLAND_DISPLAY")
+        if display and not os.path.isabs(display) and os.environ.get("XDG_RUNTIME_DIR"):
+            env["WAYLAND_DISPLAY"] = os.path.join(os.environ["XDG_RUNTIME_DIR"], display)
         for key in ("CONFIG", "STATE", "DATA", "CACHE", "RUNTIME"):
             path = root / key.lower()
             path.mkdir(mode=0o700)
@@ -125,6 +130,7 @@ def in_kettle(kettle, out, label, command_for):
 def esctest(args, out):
     tests = fetch_esctest()
     log = out / "esctest.log"
+    log.unlink(missing_ok=True)
 
     def command(root, pid, ctl_env):
         config = root / "esctest.json"
@@ -136,12 +142,14 @@ def esctest(args, out):
             str(config), "--", "--expected-terminal=xterm", f"--logfile={log}",
             "--timeout=1", *extra])
 
-    in_kettle(args.kettle, out, "esctest", command)
-    text = log.read_text(errors="replace")
+    status = in_kettle(args.kettle, out, "esctest", command)
+    text = log.read_text(errors="replace") if log.exists() else ""
     failed = set(re.findall(r"^\*\*\* TEST (\w+\.\w+) FAILED", text, re.M))
-    ran = set(re.findall(r"^Run test: (\w+\.\w+)", text, re.M))
     summary = re.search(r"^\*\*\* \d+ tests? passed.*$", text, re.M)
-    print("esctest:", summary.group(0) if summary else f"{len(ran)} run, {len(failed)} failed")
+    if status != 0 or summary is None:
+        print(f"esctest did not finish (exit {status}); see {out / 'esctest-final.png'}")
+        return 1
+    print("esctest:", summary.group(0))
     if args.include:
         print("--include ran a subset; the expected list is not compared")
         return 0
@@ -191,6 +199,7 @@ def write_expected(expected):
 def ucs(args, out):
     tool = fetch_ucs_detect()
     results = out / "ucs-detect.yaml"
+    results.unlink(missing_ok=True)
     version = subprocess.run([str(args.kettle), "--version"], capture_output=True,
                              text=True).stdout.split()
     version = version[1] if len(version) > 1 else "unknown"
@@ -201,7 +210,10 @@ def ucs(args, out):
             f"--set-software-version={version}", "--no-final-summary"])
 
     status = in_kettle(args.kettle, out, "ucs-detect", command)
-    print(f"ucs-detect exited {status}; results in {results}")
+    if status != 0 or not results.exists():
+        print(f"ucs-detect did not finish (exit {status})")
+        return 1
+    print(f"ucs-detect results in {results}")
     summary = subprocess.run(
         [str(tool.parent / "python"), "-I", "-c", UCS_SUMMARY, str(results)],
         capture_output=True, text=True)
@@ -339,7 +351,9 @@ def main():
                         help="esctest: rewrite the expected-failure list")
     args = parser.parse_args()
     args.kettle = args.kettle.resolve()
-    out = args.out or REPO / "target" / "diagnostics" / time.strftime("conformance-%Y%m%d-%H%M%S")
+    # The pane starts in its own directory, so every path it gets is absolute.
+    out = (args.out or REPO / "target" / "diagnostics"
+           / time.strftime("conformance-%Y%m%d-%H%M%S")).resolve()
     out.mkdir(parents=True, exist_ok=True)
     return esctest(args, out) if args.suite == "esctest" else ucs(args, out)
 

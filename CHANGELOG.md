@@ -11,8 +11,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Stop the cursor at the scroll margins for CUU, CUD, CPL and CNL whether or
   not origin mode is on, as xterm and DEC terminals do. Kettle 5.7.0 stopped
   it only under origin mode.
-- Save and restore origin mode with the cursor on DECSC/DECRC and
-  `CSI s`/`CSI u`, keeping a restored origin-mode cursor inside the margins.
+- Save and restore origin mode with the cursor on DECSC/DECRC, `CSI s`/`CSI u`
+  and the alternate screen's mode 1049, keeping a restored origin-mode cursor
+  inside the margins.
 - Reset the margins and home the cursor on DECALN (`ESC # 8`).
 - Ignore a scroll region (DECSTBM) that lies entirely below the screen, as
   xterm does, instead of storing an empty one.
