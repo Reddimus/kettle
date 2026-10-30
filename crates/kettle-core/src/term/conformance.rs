@@ -1020,6 +1020,17 @@ fn decrc_keeps_an_origin_mode_cursor_inside_new_margins() {
 }
 
 #[test]
+fn private_mode_1048_saves_and_restores_the_cursor() {
+    let (mut t, mut p) = harness(10, 8);
+    feed(&mut t, &mut p, b"\x1b[3;4H\x1b[?1048h\x1b[6;7H\x1b[?1048l");
+    assert_eq!(t.grid().cursor.point, Point::new(Line(2), Column(3)));
+    // It shares DECSC's saved state, origin mode included.
+    feed(&mut t, &mut p, b"\x1b[5;8r\x1b[?6h\x1b[?1048h\x1b[?6l\x1b8");
+    assert!(t.mode().contains(TermMode::ORIGIN));
+    assert_eq!(t.grid().cursor.point, Point::new(Line(4), Column(0)));
+}
+
+#[test]
 fn linefeed_newline_mode_returns_to_the_first_column() {
     let (mut t, mut p) = harness(10, 8);
     // With LNM set, LF, VT and FF each add a carriage return.

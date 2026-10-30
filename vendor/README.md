@@ -137,8 +137,8 @@ date. Recheck that before upgrading a crate or dropping a patch.
     character sets and the saved cursor, and restores cursor visibility and
     autowrap, keeping contents, history, title and the cursor's position.
 
-  Four more from an esctest2 run on 5.7.0 (2026-10-30), each matching
-  xterm's `CursorUp`, `CursorDown`, `CursorSave` and DECALN code:
+  Five more from an esctest2 run on 5.7.0 (2026-10-30), each matching
+  xterm's `CursorUp`, `CursorDown`, `CursorSave`, DECALN and mode 1048 code:
   - CUU, CUD, CPL and CNL stop at the scroll margin whenever the cursor
     starts inside the region, with or without origin mode. From above the
     region CUU reaches the top line and CUD stops at the bottom margin; from
@@ -156,6 +156,9 @@ date. Recheck that before upgrading a crate or dropping a patch.
     fills the screen. Upstream only filled it.
   - LF, VT and FF honour LNM (mode 20) through `Handler::newline`; see the
     `vte-0.15.0` section. Upstream accepted the mode but never applied it.
+  - Private mode 1048 saves the cursor as DECSC does when set and restores
+    it as DECRC does when reset, sharing their saved state. Upstream ignored
+    the mode.
 - Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
   is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
   from 2026-08-31, is `0.26.1-dev`. Since

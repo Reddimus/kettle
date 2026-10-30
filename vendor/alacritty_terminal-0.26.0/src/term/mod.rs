@@ -2631,6 +2631,12 @@ impl<T: EventListener> Handler for Term<T> {
                 }
                 return;
             }
+            // xterm's mode 1048 saves the cursor as DECSC does.
+            PrivateMode::Unknown(1048) => {
+                trace!("Setting private mode: 1048");
+                self.save_cursor_position();
+                return;
+            }
             PrivateMode::Unknown(mode) => {
                 debug!("Ignoring unknown mode {mode} in set_private_mode");
                 return;
@@ -2714,6 +2720,12 @@ impl<T: EventListener> Handler for Term<T> {
                     self.graphics_events
                         .push(GraphicsEvent::LeaveAlternate { mode, clear });
                 }
+                return;
+            }
+            // Resetting mode 1048 restores the cursor as DECRC does.
+            PrivateMode::Unknown(1048) => {
+                trace!("Unsetting private mode: 1048");
+                self.restore_cursor_position();
                 return;
             }
             PrivateMode::Unknown(mode) => {
