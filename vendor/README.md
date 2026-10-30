@@ -62,8 +62,7 @@ date. Recheck that before upgrading a crate or dropping a patch.
   (each name answered separately, in one write, and echoed only as validated
   hex, at most 32 per request), and DECRQM for modes 47 and 1047. DSR and
   DECXCPR count the row from the top margin under origin mode, as xterm
-  does, never below row 1 (DECRC does not restore DECOM here, so the cursor
-  can sit above the margin); upstream reported the absolute row.
+  does, never below row 1; upstream reported the absolute row.
   `Term::set_color_scheme` and `Config::color_scheme_dark` give the light or
   dark scheme that `CSI ? 996 n` answers and DEC mode 2031 reports on every
   colour change the caller signals, dark to dark included; DECSTR and RIS
@@ -124,9 +123,7 @@ date. Recheck that before upgrading a crate or dropping a patch.
     no orphaned spacer is left to swallow the next character typed.
   - CHA changes only the column, and CUU, CUD, CNL and CPL move from the
     cursor's own row. Upstream sent all of them through CUP, which adds the
-    top margin again under origin mode. The margins stop the cursor under
-    origin mode only while it is inside them, since DECRC does not restore
-    DECOM.
+    top margin again under origin mode.
   - ED 1 with the cursor on the second row clears the first row too.
 
   Upstream `master` still had all seven of these bugs on 2026-10-16.
@@ -139,6 +136,22 @@ date. Recheck that before upgrading a crate or dropping a patch.
   - DECSTR (soft reset) resets SGR, insert, origin and application modes,
     character sets and the saved cursor, and restores cursor visibility and
     autowrap, keeping contents, history, title and the cursor's position.
+
+  Four more from an esctest2 run on 5.7.0 (2026-10-30), each matching
+  xterm's `CursorUp`, `CursorDown`, `CursorSave` and DECALN code:
+  - CUU, CUD, CPL and CNL stop at the scroll margin whenever the cursor
+    starts inside the region, with or without origin mode. From above the
+    region CUU reaches the top line and CUD stops at the bottom margin; from
+    below it, the reverse. Upstream ignores the margins entirely, and 5.7.0
+    applied them only under origin mode.
+  - DECSC and SCOSC (`ESC 7`, `CSI s`) save DECOM with the cursor
+    (`Grid::saved_origin_mode`), and DECRC and SCORC restore it, keeping a
+    restored origin-mode row inside the current margins. Upstream saved the
+    cursor alone, so DECRC left origin mode as it found it.
+  - DECALN (`ESC # 8`) resets the margins and homes the cursor before it
+    fills the screen. Upstream only filled it.
+  - LF, VT and FF honour LNM (mode 20) through `Handler::newline`; see the
+    `vte-0.15.0` section. Upstream accepted the mode but never applied it.
 - Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
   is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
   from 2026-08-31, is `0.26.1-dev`. Since
@@ -266,6 +279,11 @@ cosmic-text release that contains both commits.
   new `Handler::soft_reset_state` hook. It is kept apart from RIS's
   `reset_state` so that a program sending DECSTR from terminfo `is2` or `rs2`
   while it initializes cannot clear the screen and the scrollback.
+  LF, VT and FF dispatch to `Handler::newline`, which adds the carriage
+  return LNM (mode 20) asks for, instead of `Handler::linefeed`; IND and NEL
+  keep their own fixed meanings. Upstream calls `linefeed`, so the mode was
+  accepted and reported but never applied (found by esctest2's
+  `test_SM_LNM`, 2026-10-30).
   One unrelated single-token fix: an OSC debug log borrowed its buffer
   redundantly, which upstream's own `#![deny(clippy::all)]` rejects from Rust
   1.97 onward under `clippy::useless_borrows_in_formatting`. Drop the fix if a

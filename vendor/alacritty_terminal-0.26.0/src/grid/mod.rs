@@ -116,6 +116,11 @@ pub struct Grid<T> {
     #[cfg_attr(feature = "serde", serde(skip))]
     pub saved_cursor: Cursor<T>,
 
+    /// Origin mode (DECOM) when the cursor was last saved. DECSC saves it
+    /// with the cursor and DECRC restores it, as xterm does.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub saved_origin_mode: bool,
+
     /// Lines in the grid. Each row holds a list of cells corresponding to the
     /// columns in that row.
     raw: Storage<T>,
@@ -160,6 +165,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             history_limit_on_growth: None,
             display_offset: 0,
             saved_cursor: Cursor::default(),
+            saved_origin_mode: false,
             cursor: Cursor::default(),
             lines,
             columns,
@@ -406,6 +412,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         self.history_origin = self.history_origin.saturating_add(self.lines as u64);
 
         self.saved_cursor = Cursor::default();
+        self.saved_origin_mode = false;
         self.cursor = Cursor::default();
         self.display_offset = 0;
 

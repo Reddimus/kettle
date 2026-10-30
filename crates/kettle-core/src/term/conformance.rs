@@ -925,16 +925,116 @@ fn origin_mode_relative_moves_do_not_reapply_top_margin() {
 
     feed(&mut t, &mut p, b"\x1b[?6l\x1b[3;3H\x1b[999A");
     assert_eq!(t.grid().cursor.point, Point::new(Line(0), Column(2)));
+    // From above the region, CUD stops at the bottom margin, as in xterm.
     feed(&mut t, &mut p, b"\x1b[999B");
-    assert_eq!(t.grid().cursor.point, Point::new(Line(23), Column(2)));
+    assert_eq!(t.grid().cursor.point, Point::new(Line(19), Column(2)));
 
-    // DECRC does not restore DECOM, so the cursor can sit above the top
-    // margin under origin mode. Moving up there must not pull it down
-    // to the margin.
-    feed(&mut t, &mut p, b"\x1b[2;1H\x1b7\x1b[?6h\x1b8\x1b[A");
-    assert_eq!(t.grid().cursor.point, Point::new(Line(0), Column(0)));
-    feed(&mut t, &mut p, b"\x1b[B");
+    // DECRC restores DECOM with the cursor: saved outside origin mode, the
+    // cursor comes back above the margin with origin mode off again.
+    feed(&mut t, &mut p, b"\x1b[2;1H\x1b7\x1b[?6h\x1b8");
+    assert!(!t.mode().contains(TermMode::ORIGIN));
     assert_eq!(t.grid().cursor.point, Point::new(Line(1), Column(0)));
+    feed(&mut t, &mut p, b"\x1b[A");
+    assert_eq!(t.grid().cursor.point, Point::new(Line(0), Column(0)));
+}
+
+#[test]
+fn decsc_and_scosc_save_and_restore_origin_mode() {
+    for (save, restore) in [(&b"\x1b7"[..], &b"\x1b8"[..]), (b"\x1b[s", b"\x1b[u")] {
+        let (mut t, mut p) = harness(10, 24);
+        feed(&mut t, &mut p, b"\x1b[5;20r");
+        // Saved with origin mode on, restored after it was turned off.
+        feed(&mut t, &mut p, b"\x1b[?6h\x1b[3;2H");
+        feed(&mut t, &mut p, save);
+        feed(&mut t, &mut p, b"\x1b[?6l\x1b[1;1H");
+        feed(&mut t, &mut p, restore);
+        assert!(t.mode().contains(TermMode::ORIGIN));
+        assert_eq!(t.grid().cursor.point, Point::new(Line(6), Column(1)));
+        // Saved with origin mode off, restored after it was turned on.
+        feed(&mut t, &mut p, b"\x1b[?6l\x1b[2;3H");
+        feed(&mut t, &mut p, save);
+        feed(&mut t, &mut p, b"\x1b[?6h");
+        feed(&mut t, &mut p, restore);
+        assert!(!t.mode().contains(TermMode::ORIGIN));
+        assert_eq!(t.grid().cursor.point, Point::new(Line(1), Column(2)));
+    }
+}
+
+#[test]
+fn decrc_keeps_an_origin_mode_cursor_inside_new_margins() {
+    let (mut t, mut p) = harness(10, 24);
+    // Saved at the top of rows 5..=20 under origin mode, then the margins
+    // move down to rows 10..=20: the restored row is clamped into them.
+    feed(
+        &mut t,
+        &mut p,
+        b"\x1b[5;20r\x1b[?6h\x1b[1;1H\x1b7\x1b[10;20r\x1b8",
+    );
+    assert!(t.mode().contains(TermMode::ORIGIN));
+    assert_eq!(t.grid().cursor.point, Point::new(Line(9), Column(0)));
+}
+
+#[test]
+fn linefeed_newline_mode_returns_to_the_first_column() {
+    let (mut t, mut p) = harness(10, 8);
+    // With LNM set, LF, VT and FF each add a carriage return.
+    feed(&mut t, &mut p, b"\x1b[20h");
+    for (line, control) in [b'\n', 0x0b, 0x0c].into_iter().enumerate() {
+        feed(&mut t, &mut p, b"ab");
+        feed(&mut t, &mut p, &[control]);
+        assert_eq!(
+            t.grid().cursor.point,
+            Point::new(Line(line as i32 + 1), Column(0)),
+            "control {control:#04x}"
+        );
+    }
+    // IND is a pure index under LNM, and LF is one again once LNM is reset.
+    feed(&mut t, &mut p, b"ab\x1bD");
+    assert_eq!(t.grid().cursor.point, Point::new(Line(4), Column(2)));
+    feed(&mut t, &mut p, b"\x1b[20l\n");
+    assert_eq!(t.grid().cursor.point, Point::new(Line(5), Column(2)));
+}
+
+#[test]
+fn relative_moves_stop_at_margins_without_origin_mode() {
+    let (mut t, mut p) = harness(10, 24);
+    // Rows 5..=20 scroll; origin mode stays off.
+    feed(&mut t, &mut p, b"\x1b[5;20r");
+    let cases: &[(&[u8], i32)] = &[
+        // From inside the region the margins stop CUU, CUD, CPL and CNL.
+        (b"\x1b[10;3H\x1b[99A", 4),
+        (b"\x1b[10;3H\x1b[99B", 19),
+        (b"\x1b[10;3H\x1b[99F", 4),
+        (b"\x1b[10;3H\x1b[99E", 19),
+        // From above the region CUU reaches the top line, and CUD stops at
+        // the bottom margin.
+        (b"\x1b[3;3H\x1b[99A", 0),
+        (b"\x1b[3;3H\x1b[99B", 19),
+        // From below the region CUD reaches the bottom line, and CUU stops
+        // at the top margin.
+        (b"\x1b[22;3H\x1b[99B", 23),
+        (b"\x1b[22;3H\x1b[99A", 4),
+    ];
+    for &(sequence, line) in cases {
+        feed(&mut t, &mut p, sequence);
+        assert_eq!(
+            t.grid().cursor.point.line,
+            Line(line),
+            "{}",
+            String::from_utf8_lossy(sequence).escape_debug()
+        );
+    }
+}
+
+#[test]
+fn decaln_resets_margins_and_homes_cursor() {
+    let (mut t, mut p) = harness(10, 8);
+    feed(&mut t, &mut p, b"\x1b[3;5r\x1b[4;4H\x1b#8");
+    assert_eq!(t.grid().cursor.point, Point::new(Line(0), Column(0)));
+    assert_eq!(row_text(&t, 7), "EEEEEEEEEE");
+    // The region is the whole screen again, so CUD runs to the last line.
+    feed(&mut t, &mut p, b"\x1b[4;4H\x1b[99B");
+    assert_eq!(t.grid().cursor.point.line, Line(7));
 }
 
 #[test]
