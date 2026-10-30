@@ -159,6 +159,9 @@ context = "crates/kettle-ui/src/app.rs: label before the text being edited, for 
 [messages.hint_a11y_list]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of quick-select hint mode, which labels links and paths with short letter codes."
 
+[messages.menu_a11y_about]
+context = "crates/kettle-ui/src/app/menus.rs open_about_panel: screen-reader name of the About panel, which shows the version and update status and opens from the About kettle menu row. Kettle is the product name."
+
 [messages.menu_a11y_terminal]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the right-click menu."
 

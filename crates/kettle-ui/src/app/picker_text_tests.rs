@@ -118,6 +118,29 @@ fn modal_accessibility_names_follow_the_ui_language() {
             .iter()
             .any(|l| l == "Menú de la terminal")
     );
+    // The About panel reuses the menu but is announced by its own name.
+    for (tr, name) in [(&EN, "About Kettle"), (&ES, "Acerca de Kettle")] {
+        let mut about = menu();
+        if let Some(menu) = about.context_menu.as_mut() {
+            menu.a11y_label = Some(tr.text(Text::MenuA11yAbout).to_string());
+        }
+        let labels = labels(about, tr);
+        assert!(labels.iter().any(|l| l == name), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == tr.text(Text::MenuA11yTerminal)));
+    }
+    // Opening a menu clears its name, so the About panel names itself after.
+    let source = super::production_source();
+    let about = &source[source
+        .find("    fn open_about_panel(")
+        .expect("open_about_panel")..];
+    let about = &about[..about.find("\n    }\n").expect("end of open_about_panel")];
+    let shown = about
+        .find("self.show_context_menu(ws, items,")
+        .expect("the panel is a menu");
+    let named = about
+        .find("ws.context_menu_a11y_label = Some(tr.text(T::MenuA11yAbout).to_string());")
+        .expect("the panel is named");
+    assert!(shown < named);
     let hints = kettle_render::Overlay {
         hint_labels: vec![kettle_render::HintLabel {
             row: 0,

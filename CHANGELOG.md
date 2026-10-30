@@ -18,6 +18,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   xterm does, instead of storing an empty one.
 - Honour linefeed/newline mode (LNM, mode 20): LF, VT and FF return to the
   first column, and Return sends CR LF while the mode is set.
+- Keep `Esc cancel` visible in the key hints of the pickers and title editors
+  in narrow windows and splits: hints that do not fit now drop their middle
+  entries first instead of cutting off the way out.
+- Announce the About panel to screen readers as "About Kettle" rather than
+  as the right-click menu.
 
 ## [5.7.0] — 2026-10-30
 

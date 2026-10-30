@@ -191,6 +191,7 @@ edit_title_pane = "accepted"
 edit_title_tab = "accepted"
 edit_title_window = "accepted"
 hint_a11y_list = "accepted"
+menu_a11y_about = "draft"
 menu_a11y_terminal = "accepted"
 menu_about = "accepted"
 menu_close_pane = "accepted"
@@ -781,6 +782,7 @@ keys = [
     "media_lane_a11y_video_time",
     "media_lane_a11y_zoom_in",
     "media_lane_a11y_zoom_out",
+    "menu_a11y_about",
     "menu_a11y_terminal",
     "picker_a11y_layouts",
     "picker_a11y_palette",

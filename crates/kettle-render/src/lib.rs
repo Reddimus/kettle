@@ -87,7 +87,8 @@ use gpu::{
 };
 use gpu::{latch_gpu_fault, live_device_limits, resolve_headless_adapter};
 use labels::{
-    display_width, fit_single_line_label, middle_ellipsis, take_cols_back, take_cols_front,
+    display_width, fit_key_hint, fit_single_line_label, middle_ellipsis, take_cols_back,
+    take_cols_front,
 };
 pub use labels::{fit_pane_titlebar_title, fit_tab_segment_title};
 #[cfg(test)]
