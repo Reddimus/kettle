@@ -1025,8 +1025,10 @@ impl<T> Term<T> {
             self.inactive_grid.cursor = self.grid.cursor.clone();
 
             if save_restore_cursor {
-                // Drop information about the primary screen's saved cursor.
+                // Mode 1049 saves the cursor as DECSC does, origin mode
+                // included, replacing the primary screen's saved cursor.
                 self.grid.saved_cursor = self.grid.cursor.clone();
+                self.grid.saved_origin_mode = self.mode.contains(TermMode::ORIGIN);
             }
 
             if clear_on_entry {
@@ -1046,8 +1048,14 @@ impl<T> Term<T> {
         mem::swap(&mut self.keyboard_mode, &mut self.inactive_keyboard_mode);
         self.set_keyboard_term_mode(self.keyboard_mode.into());
 
+        let leaving_with_restore = save_restore_cursor && self.mode.contains(TermMode::ALT_SCREEN);
         mem::swap(&mut self.grid, &mut self.inactive_grid);
         self.mode ^= TermMode::ALT_SCREEN;
+        if leaving_with_restore {
+            // Resetting 1049 restores the cursor as DECRC does; the primary
+            // grid kept its cursor, so only origin mode comes back here.
+            self.mode.set(TermMode::ORIGIN, self.grid.saved_origin_mode);
+        }
         self.selection = None;
         self.mark_fully_damaged();
     }

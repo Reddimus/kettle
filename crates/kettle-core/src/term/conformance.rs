@@ -961,6 +961,24 @@ fn decsc_and_scosc_save_and_restore_origin_mode() {
 }
 
 #[test]
+fn mode_1049_saves_origin_mode_for_a_later_decrc() {
+    let (mut t, mut p) = harness(10, 24);
+    // Entering the alternate screen saves the cursor as DECSC does, so a
+    // DECRC after leaving it restores origin mode as it was on entry.
+    feed(
+        &mut t,
+        &mut p,
+        b"\x1b[5;20r\x1b[?6h\x1b[3;2H\x1b[?1049h\x1b[?1049l\x1b8",
+    );
+    assert!(t.mode().contains(TermMode::ORIGIN));
+    assert_eq!(t.grid().cursor.point, Point::new(Line(6), Column(1)));
+    // Leaving it restores origin mode too, so a program that turns origin
+    // mode on in the alternate screen does not leave it on for the shell.
+    feed(&mut t, &mut p, b"\x1b[?6l\x1b[?1049h\x1b[?6h\x1b[?1049l");
+    assert!(!t.mode().contains(TermMode::ORIGIN));
+}
+
+#[test]
 fn decrc_keeps_an_origin_mode_cursor_inside_new_margins() {
     let (mut t, mut p) = harness(10, 24);
     // Saved at the top of rows 5..=20 under origin mode, then the margins

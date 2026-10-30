@@ -146,8 +146,9 @@ date. Recheck that before upgrading a crate or dropping a patch.
     applied them only under origin mode.
   - DECSC and SCOSC (`ESC 7`, `CSI s`) save DECOM with the cursor
     (`Grid::saved_origin_mode`), and DECRC and SCORC restore it, keeping a
-    restored origin-mode row inside the current margins. Upstream saved the
-    cursor alone, so DECRC left origin mode as it found it.
+    restored origin-mode row inside the current margins. Mode 1049 saves
+    DECOM with the cursor on entry and restores it on exit. Upstream saved
+    the cursor alone, so DECRC left origin mode as it found it.
   - DECALN (`ESC # 8`) resets the margins and homes the cursor before it
     fills the screen. Upstream only filled it.
   - LF, VT and FF honour LNM (mode 20) through `Handler::newline`; see the
