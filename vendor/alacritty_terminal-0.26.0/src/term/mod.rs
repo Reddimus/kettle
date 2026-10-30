@@ -2888,8 +2888,13 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn set_scrolling_region(&mut self, top: usize, bottom: Option<usize>) {
-        // Fallback to the last line as default.
-        let bottom = bottom.unwrap_or_else(|| self.screen_lines());
+        // Fallback to the last line as default. A bottom margin past the
+        // screen is clipped to its last line first, as xterm does, so a
+        // region that would then be empty is refused rather than stored:
+        // the region always holds at least one line.
+        let bottom = bottom
+            .unwrap_or_else(|| self.screen_lines())
+            .min(self.screen_lines());
 
         if top >= bottom {
             debug!("Invalid scrolling region: ({top};{bottom})");
@@ -2905,9 +2910,7 @@ impl<T: EventListener> Handler for Term<T> {
 
         trace!("Setting scrolling region: ({start};{end})");
 
-        let screen_lines = Line(self.screen_lines() as i32);
-        self.scroll_region.start = cmp::min(start, screen_lines);
-        self.scroll_region.end = cmp::min(end, screen_lines);
+        self.scroll_region = start..end;
         self.goto(0, 0);
     }
 

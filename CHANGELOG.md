@@ -14,6 +14,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Save and restore origin mode with the cursor on DECSC/DECRC and
   `CSI s`/`CSI u`, keeping a restored origin-mode cursor inside the margins.
 - Reset the margins and home the cursor on DECALN (`ESC # 8`).
+- Ignore a scroll region (DECSTBM) that lies entirely below the screen, as
+  xterm does, instead of storing an empty one.
 - Honour linefeed/newline mode (LNM, mode 20): LF, VT and FF return to the
   first column, and Return sends CR LF while the mode is set.
 

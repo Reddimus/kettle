@@ -149,6 +149,9 @@ date. Recheck that before upgrading a crate or dropping a patch.
     restored origin-mode row inside the current margins. Mode 1049 saves
     DECOM with the cursor on entry and restores it on exit. Upstream saved
     the cursor alone, so DECRC left origin mode as it found it.
+  - DECSTBM clips a bottom margin past the screen to its last line before it
+    checks the region, and refuses one that is then empty, as xterm does.
+    Upstream clipped afterwards and could store an empty region.
   - DECALN (`ESC # 8`) resets the margins and homes the cursor before it
     fills the screen. Upstream only filled it.
   - LF, VT and FF honour LNM (mode 20) through `Handler::newline`; see the

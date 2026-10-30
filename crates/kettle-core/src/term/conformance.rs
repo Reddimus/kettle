@@ -988,6 +988,24 @@ fn mode_1049_saves_origin_mode_for_a_later_decrc() {
 }
 
 #[test]
+fn a_scroll_region_past_the_screen_is_clipped_or_refused() {
+    let (mut t, mut p) = harness(10, 24);
+    // Both margins past the last line leave nothing once clipped, so the
+    // region is refused, as xterm refuses it, and the old one stays.
+    feed(&mut t, &mut p, b"\x1b[5;20r\x1b[25;26r\x1b[10;1H\x1b[99B");
+    assert_eq!(t.grid().cursor.point.line, Line(19));
+    // A bottom margin past the screen is clipped to its last line.
+    feed(&mut t, &mut p, b"\x1b[20;30r\x1b[22;1H\x1b[99A");
+    assert_eq!(t.grid().cursor.point.line, Line(19));
+    // Restoring an origin-mode cursor after such a region, through DECRC
+    // and by leaving 1049, keeps it on the screen.
+    feed(&mut t, &mut p, b"\x1b[r\x1b[?6h\x1b7\x1b[25;26r\x1b8");
+    feed(&mut t, &mut p, b"\x1b[?1049h\x1b[?6l\x1b[25;26r\x1b[?1049l");
+    assert!(t.mode().contains(TermMode::ORIGIN));
+    assert!(t.grid().cursor.point.line < Line(24));
+}
+
+#[test]
 fn decrc_keeps_an_origin_mode_cursor_inside_new_margins() {
     let (mut t, mut p) = harness(10, 24);
     // Saved at the top of rows 5..=20 under origin mode, then the margins
