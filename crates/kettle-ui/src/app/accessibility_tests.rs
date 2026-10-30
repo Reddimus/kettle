@@ -764,6 +764,13 @@ fn modal_text_inputs_expose_their_text_and_selection() {
         ..Default::default()
     };
     let (input, run) = text_input(&overlay);
+    for action in [
+        accesskit::Action::SetTextSelection,
+        accesskit::Action::SetValue,
+        accesskit::Action::ReplaceSelectedText,
+    ] {
+        assert!(input.supports_action(action), "{action:?}");
+    }
     assert_eq!(run.role(), accesskit::Role::TextRun);
     assert_eq!(run.value(), Some("mi año"));
     assert_eq!(run.character_lengths(), &[1, 1, 1, 1, 2, 1]);
@@ -838,5 +845,60 @@ fn accessibility_key_tracks_the_modal_text_caret_and_selection() {
         "field.selection.hash(&mut hasher);",
     ] {
         assert!(body.contains(line), "a moved caret must republish: {line}");
+    }
+}
+
+#[test]
+fn modal_text_runs_cannot_collide_with_rows_or_decode_as_buttons() {
+    use super::{
+        MODAL_KIND_LAYOUTS, MODAL_KIND_PALETTE, MODAL_KIND_SSH, MODAL_KIND_THEMES,
+        MODAL_KIND_TITLE, accessibility_confirm_button_index, accessibility_modal_id,
+        accessibility_modal_text_run_id,
+    };
+    let kinds = [
+        MODAL_KIND_PALETTE,
+        MODAL_KIND_LAYOUTS,
+        MODAL_KIND_SSH,
+        MODAL_KIND_TITLE,
+        MODAL_KIND_THEMES,
+    ];
+    let runs: Vec<_> = kinds.iter().map(|&kind| accessibility_modal_text_run_id(kind)).collect();
+    for (index, run) in runs.iter().enumerate() {
+        assert_eq!(runs.iter().filter(|other| *other == run).count(), 1);
+        assert_eq!(accessibility_confirm_button_index(*run), None);
+        for kind in 0..16 {
+            // Every row index a modal could assign, the 16-bit maximum included.
+            for row in [0, 1, 2, 3, kinds[index] as usize, 0xfffe, 0xffff] {
+                assert_ne!(accessibility_modal_id(kind, row), *run);
+            }
+        }
+    }
+}
+
+#[test]
+fn modal_text_actions_reach_the_open_editor() {
+    let src = production_source();
+    let handler = src
+        .split("fn handle_accessibility_action(")
+        .nth(1)
+        .and_then(|rest| rest.split("        if !ws.search.open {").next())
+        .expect("handler before search");
+    assert!(
+        handler.contains("if let Some(kind) = accessibility_modal_input_kind(ws)")
+            && handler.contains("self.modal_text_accessibility_action(ws, kind, request);"),
+        "a screen reader's caret or text change on a modal input must reach its editor"
+    );
+    let action = src
+        .split("fn modal_text_accessibility_action(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .expect("modal_text_accessibility_action body");
+    for line in [
+        "editor.set_character_selection(",
+        "editor.replace_all(&value, crate::modal_input::MAX_MODAL_INPUT_BYTES);",
+        "editor.insert(&value, crate::modal_input::MAX_MODAL_INPUT_BYTES);",
+        "reset_modal_results(ws);",
+    ] {
+        assert!(action.contains(line), "{line}");
     }
 }

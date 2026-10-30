@@ -936,6 +936,47 @@ impl App {
         }
     }
 
+    /// A screen reader's caret, selection or text change on the modal text
+    /// input of `kind`, applied to its editor as typing would apply it.
+    fn modal_text_accessibility_action(
+        &mut self,
+        ws: &mut WindowState,
+        kind: u64,
+        request: ActionRequest,
+    ) {
+        let run = accessibility_modal_text_run_id(kind);
+        let Some(editor) = modal_editor_mut(ws) else {
+            return;
+        };
+        let before = editor.text().to_string();
+        match (request.action, request.data) {
+            (
+                AccessibilityAction::SetTextSelection,
+                Some(ActionData::SetTextSelection(selection)),
+            ) if selection.anchor.node == run && selection.focus.node == run => {
+                editor.set_character_selection(
+                    selection.anchor.character_index,
+                    selection.focus.character_index,
+                );
+            }
+            (AccessibilityAction::SetValue, Some(ActionData::Value(value))) => {
+                editor.replace_all(&value, crate::modal_input::MAX_MODAL_INPUT_BYTES);
+            }
+            (AccessibilityAction::ReplaceSelectedText, Some(ActionData::Value(value))) => {
+                editor.insert(&value, crate::modal_input::MAX_MODAL_INPUT_BYTES);
+            }
+            _ => return,
+        }
+        if modal_editor(ws).is_some_and(|editor| editor.text() != before) {
+            reset_modal_results(ws);
+        }
+        ws.accessibility_pending = true;
+        self.update_ime_cursor_area(ws);
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
     pub(super) fn handle_accessibility_action(
         &mut self,
         ws: &mut WindowState,
@@ -1098,6 +1139,16 @@ impl App {
                     window.request_redraw();
                 }
             }
+            return;
+        }
+        if let Some(kind) = accessibility_modal_input_kind(ws)
+            && [
+                accessibility_modal_id(kind, 1),
+                accessibility_modal_text_run_id(kind),
+            ]
+            .contains(&request.target_node)
+        {
+            self.modal_text_accessibility_action(ws, kind, request);
             return;
         }
         if !ws.search.open {
@@ -1479,8 +1530,39 @@ pub(super) struct ModalAccessibilityProjection {
     pub(super) focus: Option<NodeId>,
 }
 
-/// The index of a modal text input's text run, above every row index.
-const ACCESSIBILITY_MODAL_TEXT_RUN_INDEX: usize = 0xffff;
+/// Modal kinds that have a text input, as `accessibility_modal_id` takes them.
+pub(super) const MODAL_KIND_PALETTE: u64 = 4;
+pub(super) const MODAL_KIND_LAYOUTS: u64 = 6;
+pub(super) const MODAL_KIND_SSH: u64 = 7;
+pub(super) const MODAL_KIND_TITLE: u64 = 8;
+pub(super) const MODAL_KIND_THEMES: u64 = 10;
+/// Text runs take kinds of their own, above every modal kind, so no row index
+/// can reach them.
+const MODAL_KIND_TEXT_RUN: u64 = 1 << 8;
+
+pub(super) fn accessibility_modal_text_run_id(kind: u64) -> NodeId {
+    accessibility_modal_id(MODAL_KIND_TEXT_RUN | kind, 0)
+}
+
+/// The kind of the modal text input that has the keyboard, in
+/// `modal_editor`'s precedence; Settings edits paths in its own dialog.
+fn accessibility_modal_input_kind(ws: &WindowState) -> Option<u64> {
+    if ws.confirm_dialog.is_some() || ws.context_menu.is_some() {
+        None
+    } else if ws.palette_input.is_some() {
+        Some(MODAL_KIND_PALETTE)
+    } else if ws.theme_picker_input.is_some() {
+        Some(MODAL_KIND_THEMES)
+    } else if ws.settings_text_edit.is_some() {
+        None
+    } else if ws.layout_picker_input.is_some() {
+        Some(MODAL_KIND_LAYOUTS)
+    } else if ws.ssh_input.is_some() {
+        Some(MODAL_KIND_SSH)
+    } else {
+        ws.editing_title.is_some().then_some(MODAL_KIND_TITLE)
+    }
+}
 
 /// Give a modal text input its text as a text run, with the caret or the
 /// selection when `field` is that input's projection. AT-SPI exposes text
@@ -1501,6 +1583,9 @@ fn push_text_input_run(
             .collect::<Vec<_>>(),
     );
     input.set_children([run_id]);
+    input.add_action(AccessibilityAction::SetValue);
+    input.add_action(AccessibilityAction::ReplaceSelectedText);
+    input.add_action(AccessibilityAction::SetTextSelection);
     if let Some(field) = field.filter(|field| field.text == text) {
         let character_index =
             |byte: usize| text.char_indices().take_while(|(at, _)| *at < byte).count();
@@ -1549,7 +1634,7 @@ fn push_picker_accessibility(
     push_text_input_run(
         &mut projection.nodes,
         &mut input,
-        accessibility_modal_id(kind, ACCESSIBILITY_MODAL_TEXT_RUN_INDEX),
+        accessibility_modal_text_run_id(kind),
         query,
         field,
     );
@@ -1721,7 +1806,7 @@ pub(super) fn modal_accessibility_projection(
         push_picker_accessibility(
             &mut projection,
             overlay,
-            4,
+            MODAL_KIND_PALETTE,
             tr.text(kettle_i18n::Text::PickerA11yPalette),
             query,
             full_bounds,
@@ -1732,7 +1817,7 @@ pub(super) fn modal_accessibility_projection(
         push_picker_accessibility(
             &mut projection,
             overlay,
-            10,
+            MODAL_KIND_THEMES,
             tr.text(kettle_i18n::Text::PickerA11yThemes),
             query,
             full_bounds,
@@ -1787,7 +1872,7 @@ pub(super) fn modal_accessibility_projection(
         push_picker_accessibility(
             &mut projection,
             overlay,
-            6,
+            MODAL_KIND_LAYOUTS,
             tr.text(kettle_i18n::Text::PickerA11yLayouts),
             query,
             full_bounds,
@@ -1798,7 +1883,7 @@ pub(super) fn modal_accessibility_projection(
         push_picker_accessibility(
             &mut projection,
             overlay,
-            7,
+            MODAL_KIND_SSH,
             tr.text(kettle_i18n::Text::PickerA11ySsh),
             query,
             full_bounds,
@@ -1807,15 +1892,15 @@ pub(super) fn modal_accessibility_projection(
     }
 
     if let Some(edit) = overlay.edit_title.as_ref() {
-        let container_id = accessibility_modal_id(8, 0);
-        let input_id = accessibility_modal_id(8, 1);
+        let container_id = accessibility_modal_id(MODAL_KIND_TITLE, 0);
+        let input_id = accessibility_modal_id(MODAL_KIND_TITLE, 1);
         let mut input = Node::new(Role::TextInput);
         input.set_label(edit.label.clone());
         input.set_value(edit.input.clone());
         push_text_input_run(
             &mut projection.nodes,
             &mut input,
-            accessibility_modal_id(8, ACCESSIBILITY_MODAL_TEXT_RUN_INDEX),
+            accessibility_modal_text_run_id(MODAL_KIND_TITLE),
             &edit.input,
             overlay.text_field.as_ref(),
         );
