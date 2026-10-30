@@ -5,6 +5,50 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 5.7.0 cut - 2026-10-29
+
+macOS 27.2, Apple silicon, 1920x1080 at 1x, system appearance Dark. The signed,
+notarized universal candidate came from [rehearsal 40982794212](https://github.com/Reddimus/kettle/actions/runs/40982794212)
+at `d206e468` (bundle version 5.6.0). The 5.7.0 prep and cut change only the
+changelog, versions, lockfile workspace records and documentation; application
+source is unchanged. Both terminal and worker have arm64 and x86_64 slices.
+Deep codesign, Gatekeeper and stapled-ticket validation passed.
+
+Passed through the candidate's control API, pinned to each window's process, in
+six isolated windows: decorated 86% opacity with blur, a cold TokyoNight Day
+start on the dark desktop, blur-off translucency, opaque surfaces with blur on
+and off, and borderless:
+
+- A full-screen round trip filled the 1920x1080 display and returned the
+  window's surface and content rect exactly, and so did a resize; typed input
+  reached the shell after both, and the renderer's own frames show its output.
+- Switching the light-start window's private configuration to TokyoNight Night
+  changed the running palette.
+- `just macos-update-smoke` passed against the published 5.6.0 archive and
+  against this candidate, using real extraction, codesign, spctl and a private
+  atomic bundle swap.
+
+Not run: every check that needs the composited native window. That covers the
+material reaching both rounded corners, clear strips and seams, the title
+beside the traffic lights, and the AppKit titlebar following the palette. It
+also covers live Reduce Transparency, the Dock, Finder and app-switcher icons,
+Dock magnification, mixed-DPI transitions, physical Intel and screen-reader
+acceptance.
+
+This session had neither Screen Recording nor Accessibility permission:
+`screencapture` could not create an image of any window or display, and
+Accessibility queries returned `kAXErrorAPIDisabled`. The macOS window
+treatment has not changed since the 5.6.0 run below, where those checks
+passed. Its material code gained only SAFETY comments and an unused parameter,
+and the titlebar policy and the deferred appearance moved between modules
+unchanged.
+
+The `modal-shortcuts`, `native-titlebar` and `dock-menu` smokes did not run
+either: System Events refused automation (-1743), and other Kettle processes
+were running. System settings and the owner's Kettle processes were preserved,
+and no production installation occurred. Final tagged-package publication and
+upgrade checks remain separate gates.
+
 ## 5.6.0 cut - 2026-10-28
 
 macOS 27.2, Apple silicon, 2x display, system appearance Dark. The signed,
