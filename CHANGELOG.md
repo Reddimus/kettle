@@ -6,7 +6,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-## [5.7.0] — 2026-10-29
+## [5.7.0] — 2026-10-30
 
 ### Added
 
