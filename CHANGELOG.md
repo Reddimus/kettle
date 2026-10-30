@@ -23,6 +23,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries first instead of cutting off the way out.
 - Announce the About panel to screen readers as "About Kettle" rather than
   as the right-click menu.
+- Let Linux screen readers read each Settings value and the text, caret and
+  selection of the title editor and picker fields: Orca announced only the
+  setting's name and an empty "entry".
 
 ## [5.7.0] — 2026-10-30
 

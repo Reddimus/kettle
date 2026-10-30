@@ -717,3 +717,126 @@ fn accessibility_reactivation_invalidates_published_tree() {
     assert!(dispatch.contains("ws.accessibility_pending = true;"));
 }
 
+
+#[test]
+fn modal_text_inputs_expose_their_text_and_selection() {
+    let field = |text: &str, cursor_byte, selection| kettle_render::TextFieldOverlay {
+        text: text.into(),
+        cursor_byte,
+        selection,
+        horizontal_scroll: 0,
+        rect: (0.0, 0.0, 400.0, 26.0),
+        prefix: String::new(),
+        hint: String::new(),
+        accent_palette: 0,
+    };
+    let text_input = |overlay: &kettle_render::Overlay| {
+        let projection = super::modal_accessibility_projection(
+            overlay,
+            (800.0, 600.0),
+            (8.0, 16.0),
+            1.0,
+            &EN_TEXT,
+        );
+        let input = projection
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == accesskit::Role::TextInput)
+            .map(|(_, node)| node.clone())
+            .expect("a text input");
+        let run = projection
+            .nodes
+            .iter()
+            .find(|(id, _)| Some(id) == input.children().first())
+            .map(|(_, node)| node.clone())
+            .expect("the input's text run");
+        (input, run)
+    };
+    // The title editor, with "año" selected from the end back to the caret.
+    let overlay = kettle_render::Overlay {
+        edit_title: Some(kettle_render::TitleEditOverlay {
+            label: "Edit tab title:".into(),
+            input: "mi año".into(),
+            hint: String::new(),
+            rect: (0.0, 0.0, 400.0, 26.0),
+        }),
+        text_field: Some(field("mi año", 3, Some((3, 7)))),
+        ..Default::default()
+    };
+    let (input, run) = text_input(&overlay);
+    assert_eq!(run.role(), accesskit::Role::TextRun);
+    assert_eq!(run.value(), Some("mi año"));
+    assert_eq!(run.character_lengths(), &[1, 1, 1, 1, 2, 1]);
+    let selection = input.text_selection().expect("a selection");
+    assert_eq!(
+        (selection.anchor.character_index, selection.focus.character_index),
+        (6, 3)
+    );
+    // A picker's query gets one too, with a collapsed caret.
+    let overlay = kettle_render::Overlay {
+        palette_query: Some("spl".into()),
+        text_field: Some(field("spl", 3, None)),
+        ..Default::default()
+    };
+    let (input, run) = text_input(&overlay);
+    assert_eq!(run.value(), Some("spl"));
+    let selection = input.text_selection().expect("a caret");
+    assert_eq!(
+        (selection.anchor.character_index, selection.focus.character_index),
+        (3, 3)
+    );
+}
+
+#[test]
+fn settings_rows_carry_their_values_for_every_screen_reader() {
+    let overlay = kettle_render::Overlay {
+        settings: Some(kettle_render::SettingsOverlay {
+            categories: vec!["Appearance".into()],
+            label_cols: 20,
+            value_cols: 20,
+            active_category: 0,
+            background_page: false,
+            rows: vec![kettle_render::SettingsRow {
+                label: "Theme".into(),
+                value: "Builtin Dark".into(),
+                disabled: false,
+            }],
+            focused_row: 0,
+            title: "Settings".into(),
+            hints: String::new(),
+            footer_note: None,
+        }),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    let (_, row) = projection
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == accesskit::Role::ListBoxOption)
+        .expect("a settings row");
+    assert_eq!(row.label(), Some("Theme"));
+    assert_eq!(row.value(), Some("Builtin Dark"));
+    // AT-SPI reads a string value only through text ranges, so there the
+    // value is also the description, which Orca speaks after the name.
+    let spoken = cfg!(all(unix, not(target_os = "macos"))).then_some("Builtin Dark");
+    assert_eq!(row.description(), spoken);
+}
+
+#[test]
+fn accessibility_key_tracks_the_modal_text_caret_and_selection() {
+    let src = production_source();
+    let body = src
+        .split("fn accessibility_key(&self, ws: &WindowState, overlay: &Overlay) -> u64")
+        .nth(1)
+        .and_then(|rest| rest.split("fn publish_accessibility_if_due").next())
+        .expect("accessibility_key body");
+    for line in [
+        "if let Some(field) = overlay.text_field.as_ref() {",
+        "field.text.hash(&mut hasher);",
+        "field.cursor_byte.hash(&mut hasher);",
+        "field.selection.hash(&mut hasher);",
+    ] {
+        assert!(body.contains(line), "a moved caret must republish: {line}");
+    }
+}

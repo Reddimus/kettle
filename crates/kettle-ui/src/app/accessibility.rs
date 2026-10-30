@@ -756,6 +756,12 @@ impl App {
         overlay.layout_picker_query.hash(&mut hasher);
         overlay.theme_picker_query.hash(&mut hasher);
         overlay.ssh_query.hash(&mut hasher);
+        // Modal text inputs expose their caret and selection.
+        if let Some(field) = overlay.text_field.as_ref() {
+            field.text.hash(&mut hasher);
+            field.cursor_byte.hash(&mut hasher);
+            field.selection.hash(&mut hasher);
+        }
         if let Some(edit) = overlay.edit_title.as_ref() {
             edit.label.hash(&mut hasher);
             edit.input.hash(&mut hasher);
@@ -1473,21 +1479,80 @@ pub(super) struct ModalAccessibilityProjection {
     pub(super) focus: Option<NodeId>,
 }
 
+/// The index of a modal text input's text run, above every row index.
+const ACCESSIBILITY_MODAL_TEXT_RUN_INDEX: usize = 0xffff;
+
+/// Give a modal text input its text as a text run, with the caret or the
+/// selection when `field` is that input's projection. AT-SPI exposes text
+/// only through text ranges, so without the run Orca announces the field as
+/// an empty "entry" whatever it holds.
+fn push_text_input_run(
+    nodes: &mut Vec<(NodeId, Node)>,
+    input: &mut Node,
+    run_id: NodeId,
+    text: &str,
+    field: Option<&kettle_render::TextFieldOverlay>,
+) {
+    let mut run = Node::new(Role::TextRun);
+    run.set_value(text);
+    run.set_character_lengths(
+        text.chars()
+            .map(|character| character.len_utf8() as u8)
+            .collect::<Vec<_>>(),
+    );
+    input.set_children([run_id]);
+    if let Some(field) = field.filter(|field| field.text == text) {
+        let character_index =
+            |byte: usize| text.char_indices().take_while(|(at, _)| *at < byte).count();
+        let focus = field.cursor_byte;
+        let anchor = match field.selection {
+            Some((start, end)) if start != end => {
+                if focus == start {
+                    end
+                } else {
+                    start
+                }
+            }
+            _ => focus,
+        };
+        input.set_text_selection(TextSelection {
+            anchor: TextPosition {
+                node: run_id,
+                character_index: character_index(anchor),
+            },
+            focus: TextPosition {
+                node: run_id,
+                character_index: character_index(focus),
+            },
+        });
+    }
+    nodes.push((run_id, run));
+}
+
 fn push_picker_accessibility(
     projection: &mut ModalAccessibilityProjection,
-    menu: Option<&ContextMenu>,
+    overlay: &Overlay,
     kind: u64,
     label: &str,
     query: &str,
     full_bounds: accesskit::Rect,
     tr: &kettle_i18n::Translator,
 ) {
+    let menu = overlay.context_menu.as_ref();
+    let field = overlay.text_field.as_ref();
     let container_id = accessibility_modal_id(kind, 0);
     let input_id = accessibility_modal_id(kind, 1);
     let list_id = accessibility_modal_id(kind, 2);
     let mut input = Node::new(Role::TextInput);
     input.set_label(label);
     input.set_value(query);
+    push_text_input_run(
+        &mut projection.nodes,
+        &mut input,
+        accessibility_modal_id(kind, ACCESSIBILITY_MODAL_TEXT_RUN_INDEX),
+        query,
+        field,
+    );
     projection.nodes.push((input_id, input));
 
     let mut list_children = Vec::new();
@@ -1655,7 +1720,7 @@ pub(super) fn modal_accessibility_projection(
     if let Some(query) = overlay.palette_query.as_deref() {
         push_picker_accessibility(
             &mut projection,
-            overlay.context_menu.as_ref(),
+            overlay,
             4,
             tr.text(kettle_i18n::Text::PickerA11yPalette),
             query,
@@ -1666,7 +1731,7 @@ pub(super) fn modal_accessibility_projection(
     if let Some(query) = overlay.theme_picker_query.as_deref() {
         push_picker_accessibility(
             &mut projection,
-            overlay.context_menu.as_ref(),
+            overlay,
             10,
             tr.text(kettle_i18n::Text::PickerA11yThemes),
             query,
@@ -1684,6 +1749,12 @@ pub(super) fn modal_accessibility_projection(
             let mut node = Node::new(Role::ListBoxOption);
             node.set_label(row.label.clone());
             node.set_value(row.value.clone());
+            // AT-SPI exposes a string value only through text ranges, so Orca
+            // would read the row's name alone; there the value is also the
+            // description, which Orca speaks after the name. macOS and
+            // Windows read the value itself.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            node.set_description(row.value.clone());
             if row.disabled {
                 node.set_disabled();
             }
@@ -1715,7 +1786,7 @@ pub(super) fn modal_accessibility_projection(
     if let Some(query) = overlay.layout_picker_query.as_deref() {
         push_picker_accessibility(
             &mut projection,
-            overlay.context_menu.as_ref(),
+            overlay,
             6,
             tr.text(kettle_i18n::Text::PickerA11yLayouts),
             query,
@@ -1726,7 +1797,7 @@ pub(super) fn modal_accessibility_projection(
     if let Some(query) = overlay.ssh_query.as_deref() {
         push_picker_accessibility(
             &mut projection,
-            overlay.context_menu.as_ref(),
+            overlay,
             7,
             tr.text(kettle_i18n::Text::PickerA11ySsh),
             query,
@@ -1741,6 +1812,13 @@ pub(super) fn modal_accessibility_projection(
         let mut input = Node::new(Role::TextInput);
         input.set_label(edit.label.clone());
         input.set_value(edit.input.clone());
+        push_text_input_run(
+            &mut projection.nodes,
+            &mut input,
+            accessibility_modal_id(8, ACCESSIBILITY_MODAL_TEXT_RUN_INDEX),
+            &edit.input,
+            overlay.text_field.as_ref(),
+        );
         projection.nodes.push((input_id, input));
         let mut dialog = Node::new(Role::Dialog);
         dialog.set_label(edit.label.clone());
