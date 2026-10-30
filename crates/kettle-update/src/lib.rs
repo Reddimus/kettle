@@ -15,6 +15,8 @@ pub mod fuzzing;
 mod install;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(target_os = "macos", all(test, unix)))]
+mod macos_provenance;
 mod snapshot;
 pub mod worker_package;
 

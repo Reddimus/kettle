@@ -1,7 +1,5 @@
 //! iTerm2 inline image protocol: `OSC 1337 ; File=<args> : <base64> ST`.
 
-use base64::Engine;
-
 use crate::graphics_limits::GraphicsBudget;
 use crate::image::ImageData;
 
@@ -31,23 +29,7 @@ pub(crate) fn decode_with_budget(body: &str, budget: &GraphicsBudget) -> Option<
     if !inline {
         return None;
     }
-    // STANDARD base64 rejects embedded whitespace, and `.trim()` only strips
-    // the ends. A line-wrapped OSC-1337 body keeps its raw newlines because
-    // they aren't ST, so strip all ASCII whitespace first.
-    let _cleaned_reservation = budget.reserve_transient_cpu(b64.len().max(1))?;
-    let mut cleaned = Vec::new();
-    cleaned.try_reserve_exact(b64.len()).ok()?;
-    cleaned.extend(b64.bytes().filter(|b| !b.is_ascii_whitespace()));
-    let decoded_cap = cleaned
-        .len()
-        .checked_add(3)?
-        .checked_div(4)?
-        .checked_mul(3)?
-        .max(1);
-    let _decoded_reservation = budget.reserve_transient_cpu(decoded_cap)?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&cleaned)
-        .ok()?;
+    let (bytes, _decoded_reservation) = crate::decode_base64::decode(b64, budget)?;
     ImageData::from_encoded_with_budget(&bytes, budget)
 }
 
@@ -66,6 +48,32 @@ mod tests {
         let budget =
             GraphicsBudget::isolated(GraphicsLimits::default()).expect("isolated graphics budget");
         decode_with_budget(body, &budget)
+    }
+
+    #[test]
+    fn transient_peak_keeps_only_base64_output_and_decoder_scratch() {
+        let limits = GraphicsLimits {
+            image_bytes: 1024,
+            ..GraphicsLimits::default()
+        };
+        let budget = GraphicsBudget::isolated(limits).unwrap();
+        let mut bytes = png(4, 4);
+        bytes.resize(4096, 0);
+        let mut payload = base64::engine::general_purpose::STANDARD.encode(bytes);
+        payload.insert(4, '\n');
+        let body = format!("1337;File=inline=1:{payload}");
+        let image = decode_with_budget(&body, &budget).expect("line-wrapped PNG");
+        assert_eq!((image.width, image.height), (4, 4));
+        assert_eq!(budget.transient_usage(), (0, 4098 + 1024));
+        drop(image);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+        let held = budget
+            .reserve_transient_cpu(limits.transient_cpu_bytes)
+            .unwrap();
+        assert!(decode_with_budget(&body, &budget).is_none());
+        assert_eq!(budget.transient_usage().0, held.bytes());
+        drop(held);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
     }
 
     /// Encode a solid `w`×`h` RGBA PNG (the wire format an iTerm2 client

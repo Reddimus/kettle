@@ -80,6 +80,8 @@ pub(crate) fn card_caption(
     let kind = kind.into();
     let (width, height) = size;
     let mut detail = match (kind.file(), duration_ms) {
+        _ if matches!(kind, super::ItemKind::CheckingFile(_)) => "file checking".to_owned(),
+        _ if kind == super::ItemKind::FailedFile => "file unavailable".to_owned(),
         (Some(facts), _) => format!(
             "{} {}",
             kind.as_str(),
@@ -98,13 +100,12 @@ pub(crate) fn card_caption(
     let caption = match name.map(caption_name).filter(|name| !name.is_empty()) {
         Some(name) => {
             let detail = format!(" - {detail}");
-            let room =
-                columns.saturating_sub(unicode_width::UnicodeWidthStr::width(detail.as_str()));
+            let room = columns.saturating_sub(cell_width(detail.as_str()));
             format!("{}{detail}", fit(&name, room))
         }
         None => detail,
     };
-    if unicode_width::UnicodeWidthStr::width(caption.as_str()) > columns {
+    if cell_width(caption.as_str()) > columns {
         fit(&caption, columns)
     } else {
         caption
@@ -133,11 +134,17 @@ pub(crate) fn caption_name(name: &str) -> String {
     kept
 }
 
+fn cell_width(text: &str) -> usize {
+    text.chars()
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
+}
+
 /// `text` cut to `columns` display columns, ending with an ellipsis when
 /// anything was cut.
 fn fit(text: &str, columns: usize) -> String {
     use unicode_width::UnicodeWidthChar as _;
-    if unicode_width::UnicodeWidthStr::width(text) <= columns {
+    if cell_width(text) <= columns {
         return text.to_owned();
     }
     let mut kept = String::new();
@@ -405,6 +412,81 @@ mod tests {
             unicode_width::UnicodeWidthStr::width(tight.as_str()) <= 8,
             "{tight}"
         );
+    }
+
+    #[test]
+    fn a_ligature_filename_fits_terminal_cells() {
+        let name = format!("{}.png", "\u{0644}\u{0627}".repeat(30));
+        let caption = card_caption(Some(&name), MediaKind::Raster, (1, 1), None, None, 75);
+        let cells: usize = caption
+            .chars()
+            .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum();
+        assert!(
+            cells <= 75,
+            "caption occupies {cells} terminal cells, exceeding 75"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_ligature_filename_is_recognized_after_terminal_parsing() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let terminal = kettle_core::Terminal::new(
+            &["/bin/cat".into()],
+            None,
+            0,
+            80,
+            20,
+            8,
+            16,
+            false,
+            Default::default(),
+            None,
+            tx,
+            std::sync::Arc::new(|| {}),
+        )
+        .unwrap();
+        let name = format!("{}.png", "\u{0644}\u{0627}".repeat(30));
+        let caption = card_caption(Some(&name), MediaKind::Raster, (1, 1), None, None, 75);
+        let nonce = InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let text = kettle_render::cli_card_text(nonce, (3, 12), &caption, 0).unwrap();
+        let mut cards = kettle_render::InlineCards::default();
+        cards
+            .insert(
+                nonce,
+                kettle_render::CardSpec {
+                    rows: 3,
+                    columns: 12,
+                    harness: kettle_render::CardHarness::Cli,
+                    caption,
+                    poster: None,
+                    duration_ms: None,
+                },
+            )
+            .unwrap();
+        assert!(terminal.apply_local_output(text.as_bytes()));
+        let mut snapshot = kettle_render::PaneSnapshot::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            snapshot.capture_with_card_marks(&terminal.term.lock().unwrap(), true);
+            if snapshot.cells.iter().any(|cell| cell.c == 'r') {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "terminal did not parse the card"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let placements = cards.placements(&snapshot);
+        terminal.kill().unwrap();
+        assert_eq!(
+            placements.len(),
+            1,
+            "wrapped caption prevented card recognition"
+        );
+        assert_eq!(placements[0].nonce, nonce);
     }
 
     #[test]

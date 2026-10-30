@@ -11,7 +11,7 @@
 use std::sync::OnceLock;
 
 use kettle_core::ImageData;
-use kettle_media::{Authorization, FailureCode, JobKind, PathIdentity};
+use kettle_media::{FailureCode, JobKind, PathIdentity};
 
 /// Why a file was not drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,46 +70,143 @@ pub(crate) struct FileFacts {
     pub why: FileWhy,
 }
 
-/// The facts of the file at `path`, opened as the worker opens a source,
-/// when it is a regular file and, for a request that named it by its
-/// device and inode, still that file. `None` otherwise: the request's own
-/// failure then stands.
-#[cfg(unix)]
-pub(crate) fn facts(
-    path: &std::path::Path,
-    authorization: &Authorization,
-    why: FileWhy,
-) -> Option<FileFacts> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
-        .open(path)
-        .ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
-    let identity = PathIdentity::of(&metadata)?;
-    if let Authorization::ExternalAttested(attested) = authorization
-        && (attested.dev, attested.ino) != (identity.dev, identity.ino)
-    {
-        return None;
-    }
-    Some(FileFacts {
-        bytes: identity.size,
-        identity,
-        why,
-    })
+pub(crate) struct FactsQuery {
+    pub window: u64,
+    pub pane: u64,
+    pub item: u64,
+    pub generation: u64,
+    pub control: kettle_media::client::RenderControl,
+    pub source: kettle_media::Source,
+    pub why: FileWhy,
+    pub reply: Option<Box<FileReply>>,
 }
 
-#[cfg(not(unix))]
-pub(crate) fn facts(
-    _path: &std::path::Path,
-    _authorization: &Authorization,
-    _why: FileWhy,
-) -> Option<FileFacts> {
-    None
+pub(crate) struct FileReply {
+    pub origin: super::Origin,
+    pub result: kettle_ctl::show::ShowResult,
+    pub inline: Option<FileInline>,
+}
+
+pub(crate) struct FileInline {
+    pub draft: super::InlineDraft,
+}
+
+pub(crate) struct FactsAnswer {
+    pub query: FactsQuery,
+    pub identity: Option<PathIdentity>,
+}
+
+const MAX_WAITING_FACTS: usize = 32;
+
+pub(crate) struct FactsLane {
+    work: crossbeam_channel::Sender<(u64, FactsQuery)>,
+    done: crossbeam_channel::Receiver<(u64, Option<PathIdentity>)>,
+    pending: std::collections::BTreeMap<u64, FactsQuery>,
+    last_id: u64,
+}
+
+impl FactsQuery {
+    pub(crate) fn failure(&self, now: std::time::Instant) -> Option<FailureCode> {
+        if self.control.is_cancelled() {
+            Some(FailureCode::NotInKettlePane)
+        } else if self
+            .control
+            .deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            Some(FailureCode::RenderTimeout)
+        } else {
+            None
+        }
+    }
+}
+
+impl FactsLane {
+    pub(crate) fn start(
+        source: impl Fn(&FactsQuery) -> Option<PathIdentity> + Send + 'static,
+        wake: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) -> Option<Self> {
+        let (work, jobs) = crossbeam_channel::bounded::<(u64, FactsQuery)>(MAX_WAITING_FACTS);
+        let (finished, done) = crossbeam_channel::bounded(MAX_WAITING_FACTS);
+        std::thread::Builder::new()
+            .name("kettle-file-facts".into())
+            .spawn(move || {
+                for (id, query) in jobs {
+                    let identity = if query.failure(std::time::Instant::now()).is_none() {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source(&query)))
+                            .ok()
+                            .flatten()
+                    } else {
+                        None
+                    };
+                    if finished.send((id, identity)).is_err() {
+                        break;
+                    }
+                    wake();
+                }
+            })
+            .ok()?;
+        Some(Self {
+            work,
+            done,
+            pending: Default::default(),
+            last_id: 0,
+        })
+    }
+
+    pub(crate) fn request(&mut self, query: FactsQuery) -> Option<FactsQuery> {
+        // Keep the reply on the UI thread so a blocked worker cannot delay expiry.
+        let Some(id) = self
+            .last_id
+            .checked_add(1)
+            .filter(|_| self.pending.len() <= MAX_WAITING_FACTS)
+        else {
+            return Some(query);
+        };
+        let job = FactsQuery {
+            window: query.window,
+            pane: query.pane,
+            item: query.item,
+            generation: query.generation,
+            control: query.control.clone(),
+            source: query.source.clone(),
+            why: query.why,
+            reply: None,
+        };
+        if self.work.try_send((id, job)).is_err() {
+            return Some(query);
+        }
+        self.last_id = id;
+        self.pending.insert(id, query);
+        None
+    }
+
+    pub(crate) fn next_deadline(&self) -> Option<std::time::Instant> {
+        self.pending
+            .values()
+            .filter_map(|query| query.control.deadline())
+            .min()
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Option<FactsAnswer> {
+        let now = std::time::Instant::now();
+        if let Some(id) = self
+            .pending
+            .iter()
+            .find_map(|(&id, query)| query.failure(now).map(|_| id))
+        {
+            return Some(FactsAnswer {
+                query: self.pending.remove(&id)?,
+                identity: None,
+            });
+        }
+        while let Ok((id, identity)) = self.done.try_recv() {
+            if let Some(query) = self.pending.remove(&id) {
+                return Some(FactsAnswer { query, identity });
+            }
+        }
+        None
+    }
 }
 
 /// The picture a file's card shows: a page with its corner turned down,
@@ -224,6 +321,86 @@ fn page_color((x, y): (f32, f32)) -> Option<[u8; 3]> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn stalled_file_facts_leave_the_ui_free_to_show_a_placeholder() {
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let (returned, received) = std::sync::mpsc::channel();
+        let ui = std::thread::spawn(move || {
+            let mut lane = FactsLane::start(
+                move |_| {
+                    entered.send(()).unwrap();
+                    let _ = waiting.recv();
+                    None
+                },
+                std::sync::Arc::new(|| {}),
+            )
+            .unwrap();
+            let _ = lane.request(FactsQuery {
+                window: 1,
+                pane: 2,
+                item: 3,
+                generation: 4,
+                control: Default::default(),
+                source: kettle_media::Source::Bytes(Vec::new()),
+                why: FileWhy::Unsupported,
+                reply: None,
+            });
+            returned.send(lane).ok();
+        });
+        started
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let responsive = received
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_ok();
+        release.send(()).unwrap();
+        ui.join().unwrap();
+        assert!(
+            responsive,
+            "file facts must not hold the UI while the source is checking"
+        );
+        assert_eq!(
+            crate::media::card_caption(
+                None,
+                crate::media::ItemKind::CheckingFile(FileWhy::Unsupported),
+                (0, 0),
+                None,
+                None,
+                80
+            ),
+            "file checking"
+        );
+    }
+
+    #[test]
+    fn panicking_facts_source_completes_with_failure() {
+        let (wake, woke) = std::sync::mpsc::channel();
+        let mut lane = FactsLane::start(
+            |_| panic!("metadata source failed"),
+            std::sync::Arc::new(move || {
+                let _ = wake.send(());
+            }),
+        )
+        .unwrap();
+        assert!(
+            lane.request(FactsQuery {
+                window: 1,
+                pane: 2,
+                item: 3,
+                generation: 4,
+                control: Default::default(),
+                source: kettle_media::Source::Bytes(Vec::new()),
+                why: FileWhy::Unsupported,
+                reply: None,
+            })
+            .is_none()
+        );
+        woke.recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(lane.try_recv().unwrap().identity.is_none());
+    }
+
     /// A poster an account had no room for is drawn again once it has room,
     /// and kept from then on: no room once is not no card for good.
     #[test]
@@ -234,6 +411,7 @@ mod tests {
             image_bytes: bytes,
             retained_bytes: bytes,
             process_cpu_bytes: bytes,
+            transient_cpu_bytes: bytes,
             process_gpu_bytes: bytes,
             ..kettle_core::GraphicsLimits::default()
         })
@@ -341,34 +519,5 @@ mod tests {
             &poster.rgba,
             &self::poster().unwrap().rgba
         ));
-    }
-
-    /// The facts are the file's own: its length and identity, read from a
-    /// descriptor Kettle opened; a directory, a missing file, or another
-    /// file than the one a request named by device and inode give none.
-    #[cfg(unix)]
-    #[test]
-    fn facts_are_read_from_the_named_file() {
-        use std::os::unix::fs::MetadataExt as _;
-        let dir = kettle_test_support::private_tempdir("kettle-file-card-");
-        let path = dir.path().join("report.docx");
-        std::fs::write(&path, [7; 1234]).unwrap();
-        let meta = std::fs::metadata(&path).unwrap();
-        let named = Authorization::ExternalAttested(kettle_media::ExternalAttested {
-            dev: meta.dev(),
-            ino: meta.ino(),
-        });
-        let facts = facts(&path, &named, FileWhy::Unsupported).expect("facts");
-        assert_eq!(facts.bytes, 1234);
-        assert_eq!(facts.identity, PathIdentity::of(&meta).unwrap());
-        assert_eq!(facts.why, FileWhy::Unsupported);
-        let other = Authorization::ExternalAttested(kettle_media::ExternalAttested {
-            dev: meta.dev(),
-            ino: meta.ino() + 1,
-        });
-        assert_eq!(super::facts(&path, &other, FileWhy::Unsupported), None);
-        assert_eq!(super::facts(dir.path(), &named, FileWhy::Unsupported), None);
-        let gone = dir.path().join("gone.docx");
-        assert_eq!(super::facts(&gone, &named, FileWhy::Unsupported), None);
     }
 }

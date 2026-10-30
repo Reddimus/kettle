@@ -1,3 +1,4 @@
+use crate::waiter::WaiterShared;
 use crate::{Child, ChildKiller, ExitStatus};
 use anyhow::Context as _;
 use std::io::{Error as IoError, Result as IoResult};
@@ -232,32 +233,6 @@ impl Child for WinChild {
     }
 }
 
-/// State shared with the single waiter thread for one child.
-///
-/// The waiter OWNS its handle for the whole wait, and the waker is replaced in
-/// place across polls, so neither of the previous hazards can recur.
-#[derive(Debug, Default)]
-struct WaiterShared {
-    waker: Mutex<Option<std::task::Waker>>,
-}
-
-impl WaiterShared {
-    fn store(&self, waker: &std::task::Waker) {
-        if let Ok(mut slot) = self.waker.lock() {
-            // Replace rather than accumulate: an executor may poll with a
-            // different waker each time, and only the latest one is valid.
-            *slot = Some(waker.clone());
-        }
-    }
-
-    fn wake(&self) {
-        let waker = self.waker.lock().ok().and_then(|mut slot| slot.take());
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-    }
-}
-
 impl std::future::Future for WinChild {
     type Output = anyhow::Result<ExitStatus>;
 
@@ -304,12 +279,9 @@ impl std::future::Future for WinChild {
 
 #[cfg(test)]
 mod waiter_tests {
-    use super::{WaiterShared, WinChild};
+    use super::WinChild;
     use crate::Child as _;
     use filedescriptor::OwnedHandle;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use std::task::{Wake, Waker};
 
     /// `STILL_ACTIVE` is the numeric value 259, and Windows permits a process
     /// to exit with it. Liveness must come from the process handle, not from
@@ -340,62 +312,5 @@ mod waiter_tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
         assert_eq!(status.exit_code(), 259);
-    }
-
-    struct CountingWaker(AtomicUsize);
-
-    impl Wake for CountingWaker {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::AcqRel);
-        }
-
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.0.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-
-    /// An executor may poll with a different waker each time, and only the
-    /// latest is valid. Storing must REPLACE, so a stale waker is never the one
-    /// woken — and so repeated polls cannot accumulate state per poll, which is
-    /// what previously grew a thread population without bound.
-    #[test]
-    fn storing_a_waker_replaces_the_previous_one() {
-        let shared = WaiterShared::default();
-
-        let first = Arc::new(CountingWaker(AtomicUsize::new(0)));
-        let second = Arc::new(CountingWaker(AtomicUsize::new(0)));
-        shared.store(&Waker::from(Arc::clone(&first)));
-        shared.store(&Waker::from(Arc::clone(&second)));
-
-        shared.wake();
-
-        assert_eq!(
-            first.0.load(Ordering::Acquire),
-            0,
-            "a superseded waker must not be woken"
-        );
-        assert_eq!(
-            second.0.load(Ordering::Acquire),
-            1,
-            "the most recent waker must be the one woken"
-        );
-    }
-
-    /// The waiter fires once. A second wake with nothing stored must be a
-    /// no-op rather than re-waking a consumed waker.
-    #[test]
-    fn waking_twice_does_not_rewake_a_consumed_waker() {
-        let shared = WaiterShared::default();
-        let waker = Arc::new(CountingWaker(AtomicUsize::new(0)));
-        shared.store(&Waker::from(Arc::clone(&waker)));
-
-        shared.wake();
-        shared.wake();
-
-        assert_eq!(
-            waker.0.load(Ordering::Acquire),
-            1,
-            "the waker must be consumed by the first wake"
-        );
     }
 }

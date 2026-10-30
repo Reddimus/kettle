@@ -16,10 +16,13 @@ from typing import Any, Dict, Iterator, List, NoReturn, Optional, Sequence, Tupl
 
 
 MANIFEST_RELATIVE = "share/kettle/install-files.json"
-# What an install is about to write, kept until its provenance is committed.
+# What an install is about to write, or uninstall's final recovery helpers.
+# Kept until install provenance is committed or uninstall removes the helpers.
 # A retry trusts a file that differs from its record only when this receipt
 # shows the interrupted install wrote it; equal bytes alone prove nothing.
 PENDING_RELATIVE = "share/kettle/install-pending.json"
+UNINSTALL_RELATIVE = "share/kettle/uninstall-pending.json"
+RECOVERY_PATHS = ("share/kettle/install.sh", "share/kettle/install-unix.py")
 MANIFEST_SCHEMA = 1
 MAX_ENTRIES = 128
 # Every provenance record names these. A partial first install has no record
@@ -262,7 +265,7 @@ def _validate_file_record(record: Any) -> Dict[str, Any]:
     size = record.get("size")
     digest = record.get("sha256")
     mode = record.get("mode")
-    if not isinstance(path, str) or path in (MANIFEST_RELATIVE, PENDING_RELATIVE):
+    if not isinstance(path, str) or path in (MANIFEST_RELATIVE, PENDING_RELATIVE, UNINSTALL_RELATIVE):
         _fail("install provenance contains an invalid file path")
     _relative_parts(path)
     if not _is_int(size) or size < 0 or size > MAX_FILE_BYTES:
@@ -324,8 +327,8 @@ def _read_owned_json(root_fd: int, relative: str, mode: int, label: str) -> Opti
 
 
 def _read_pending(root_fd: int, prefix: str) -> Dict[str, List[Dict[str, Any]]]:
-    """The files an interrupted install was writing, by path; empty when no
-    install was interrupted."""
+    """Files an interrupted install was writing or uninstall was removing last,
+    by path; empty when there is no pending receipt."""
     document = _read_owned_json(root_fd, PENDING_RELATIVE, 0o600, "install receipt")
     if document is None:
         return {}
@@ -377,8 +380,11 @@ def _publish_pending(
     _publish_bytes(root_fd, PENDING_RELATIVE, encoded, 0o600, created)
 
 
-def _read_manifest(root_fd: int, prefix: str) -> Optional[Dict[str, Any]]:
-    document = _read_owned_json(root_fd, MANIFEST_RELATIVE, 0o644, "install provenance")
+def _read_manifest(
+    root_fd: int, prefix: str, *, uninstall: bool = False
+) -> Optional[Dict[str, Any]]:
+    relative = UNINSTALL_RELATIVE if uninstall else MANIFEST_RELATIVE
+    document = _read_owned_json(root_fd, relative, 0o600 if uninstall else 0o644, "install provenance")
     if document is None:
         return None
     expected = {
@@ -402,7 +408,7 @@ def _read_manifest(root_fd: int, prefix: str) -> Optional[Dict[str, Any]]:
         or document["owner_uid"] != os.geteuid()
         or not isinstance(document["files"], list)
         or not isinstance(document["directories"], list)
-        or not 1 <= len(document["files"]) <= MAX_ENTRIES
+        or not 1 <= len(document["files"]) <= (3 * MAX_ENTRIES if uninstall else MAX_ENTRIES)
         or len(document["directories"]) > MAX_ENTRIES
     ):
         _fail("install provenance does not identify this installation")
@@ -752,7 +758,7 @@ def _install(arguments: argparse.Namespace) -> None:
     total_size = 0
     for relative, mode_text, source in arguments.file:
         _relative_parts(relative)
-        if relative in (MANIFEST_RELATIVE, PENDING_RELATIVE) or relative in seen:
+        if relative in (MANIFEST_RELATIVE, PENDING_RELATIVE, UNINSTALL_RELATIVE) or relative in seen:
             _fail(f"duplicate or reserved managed path: {relative}")
         seen.add(relative)
         mode = _parse_mode(mode_text)
@@ -809,6 +815,8 @@ def _install(arguments: argparse.Namespace) -> None:
     root_fd = _open_absolute_directory(prefix, create=True)
     try:
         with _update_lock(root_fd):
+            if _read_manifest(root_fd, prefix, uninstall=True) is not None:
+                _fail("an interrupted uninstall must be completed before installing")
             existing = _read_manifest(root_fd, prefix)
             pending = _read_pending(root_fd, prefix)
             planned = {spec["path"]: _planned_record(spec) for spec in specs}
@@ -980,53 +988,85 @@ def _uninstall(arguments: argparse.Namespace) -> None:
     prefix = arguments.prefix
     root_fd = _open_absolute_directory(prefix, create=False)
     try:
-        manifest = _read_manifest(root_fd, prefix)
-        if manifest is None:
-            if _read_pending(root_fd, prefix):
-                _fail(
-                    "an interrupted install left files here; run the installer "
-                    "again to finish it, then uninstall"
-                )
-            _fail(
-                "no Kettle install provenance was found; refusing to guess which "
-                "paths belong to this installation"
-            )
         with _update_lock(root_fd) as lock:
-            manifest = _read_manifest(root_fd, prefix)
-            if manifest is None:
-                _fail("installation changed before uninstall acquired its lock")
-            # Nothing is removed until every recorded object proves its identity:
-            # it matches its record, or the receipt of an interrupted install
-            # shows that install wrote it.
-            pending = _read_pending(root_fd, prefix)
-
-            def written_by_interrupted_install(path: str) -> bool:
-                return any(_file_matches(root_fd, record) for record in pending.get(path, []))
-
-            for directory in manifest["directories"]:
-                _verify_directory(root_fd, directory)
-            recorded = {record["path"] for record in manifest["files"]}
-            for record in manifest["files"]:
-                if not written_by_interrupted_install(record["path"]):
+            journal = _read_manifest(root_fd, prefix, uninstall=True)
+            if journal is None:
+                manifest = _read_manifest(root_fd, prefix)
+                if manifest is None:
+                    if _read_pending(root_fd, prefix):
+                        _fail(
+                            "an interrupted install left files here; run the installer "
+                            "again to finish it, then uninstall"
+                        )
+                    _fail(
+                        "no Kettle install provenance was found; refusing to guess which "
+                        "paths belong to this installation"
+                    )
+                pending = _read_pending(root_fd, prefix)
+                for directory in manifest["directories"]:
+                    _verify_directory(root_fd, directory)
+                records = {record["path"]: record for record in manifest["files"]}
+                for path, candidates in pending.items():
+                    for record in candidates:
+                        if _file_matches(root_fd, record):
+                            records[path] = record
+                            break
+                for record in records.values():
                     _verify_file(root_fd, record)
-            unrecorded = [
-                path
-                for path in pending
-                if path not in recorded and written_by_interrupted_install(path)
-            ]
+                journal = dict(manifest, files=[records[path] for path in sorted(records)])
+                encoded = (json.dumps(journal, indent=2) + "\n").encode("utf-8")
+                if len(encoded) > MAX_MANIFEST_BYTES:
+                    _fail("uninstall journal exceeds its bounded size")
+                _publish_bytes(root_fd, UNINSTALL_RELATIVE, encoded, 0o600, {})
+            # Missing journaled objects have already been removed. Every remaining
+            # object must still prove its identity before any deletion resumes.
+            for directory in journal["directories"]:
+                if _destination_exists(root_fd, directory["path"]):
+                    _verify_directory(root_fd, directory)
+            remaining = []
+            for record in journal["files"]:
+                if _destination_exists(root_fd, record["path"]):
+                    _verify_file(root_fd, record)
+                    remaining.append(record["path"])
             for path in sorted(
-                [*recorded, *unrecorded], key=lambda path: (path.count("/"), path), reverse=True
+                set(remaining).difference(RECOVERY_PATHS),
+                key=lambda path: (path.count("/"), path), reverse=True,
             ):
                 _unlink_recorded(root_fd, path)
-            if pending:
-                _unlink_recorded(root_fd, PENDING_RELATIVE)
-            _unlink_recorded(root_fd, MANIFEST_RELATIVE)
-            for record in sorted(
-                manifest["directories"],
+            for path in (PENDING_RELATIVE, MANIFEST_RELATIVE):
+                if _destination_exists(root_fd, path):
+                    _unlink_recorded(root_fd, path)
+            directories = sorted(
+                journal["directories"],
                 key=lambda item: (item["path"].count("/"), item["path"]),
                 reverse=True,
-            ):
-                _remove_recorded_directory(root_fd, record["path"])
+            )
+            for record in directories:
+                try:
+                    _remove_recorded_directory(root_fd, record["path"])
+                except FileNotFoundError:
+                    pass
+            # Hand off the last helpers to an install receipt before dropping the
+            # journal. While installation is blocked, both recovery entry points
+            # remain runnable; after this point reinstall can recognize leftovers.
+            recovery = {
+                record["path"]: [record] for record in journal["files"]
+                if record["path"] in RECOVERY_PATHS and record["path"] in remaining
+            }
+            if recovery:
+                _publish_pending(root_fd, prefix, recovery, {})
+            _unlink_recorded(root_fd, UNINSTALL_RELATIVE)
+            for path in RECOVERY_PATHS:
+                if _destination_exists(root_fd, path):
+                    _unlink_recorded(root_fd, path)
+            if recovery:
+                _unlink_recorded(root_fd, PENDING_RELATIVE)
+            # The receipts and helpers kept their ancestors nonempty until now.
+            for record in directories:
+                try:
+                    _remove_recorded_directory(root_fd, record["path"])
+                except FileNotFoundError:
+                    pass
             _lock_identity(root_fd, lock)
             os.unlink(UPDATE_LOCK, dir_fd=root_fd)
             os.fsync(root_fd)

@@ -1,4 +1,8 @@
 use super::*;
+#[cfg(target_os = "windows")]
+use crate::gpu::{
+    gpu_instance_for_backends, preferred_adapter_key, request_direct_adapter, resolve_adapters,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1135,7 +1139,7 @@ fn windows_stale_auto_pin_preserves_dx12_platform_preference() {
             eprintln!("DX12 adapter unavailable on this Windows host; skipped");
             return;
         };
-        let chosen = resolve_adapter(
+        let chosen = resolve_adapters(
             &instance,
             None,
             &cfg,
@@ -1145,8 +1149,9 @@ fn windows_stale_auto_pin_preserves_dx12_platform_preference() {
         )
         .await
         .expect("stale pin must fall back to the Auto power policy");
+        assert_eq!(chosen.len(), 1, "startup must select exactly one adapter");
         assert_eq!(
-            GpuAdapterKey::from_info(&chosen.get_info()),
+            GpuAdapterKey::from_info(&chosen[0].get_info()),
             expected,
             "stale Auto pin fallback must preserve wgpu's physical adapter"
         );
@@ -1284,7 +1289,7 @@ fn screenshot_grid_emits_cell_locked_glyphs() {
             &mut instances,
             &buf,
             (12.0, 12.0),
-            cw,
+            Some(cw),
             default_color,
             &mut glyph_pipe,
             &mut swash,
@@ -1482,7 +1487,7 @@ fn grid_prompt_blink_frames_for(
             &mut instances,
             &buf,
             origin,
-            cw,
+            Some(cw),
             default_color,
             &mut glyph_pipe,
             &mut swash,

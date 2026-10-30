@@ -216,7 +216,15 @@ pub fn run_mcp(selection: ToolSelection) -> i32 {
         }
     };
     let stdin = std::io::BufReader::new(std::io::stdin());
-    let status = run_mcp_with(stdin, std::io::stdout(), selection);
+    let output = match crate::exec::stdout_sink() {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("kettle mcp: cannot prepare stdout: {error}");
+            crate::mcp_display::close_session();
+            return 1;
+        }
+    };
+    let status = run_mcp_with(stdin, output, selection);
     crate::mcp_display::close_session();
     status
 }
@@ -256,11 +264,19 @@ pub fn run_mcp_with(
     let writer = match std::thread::Builder::new()
         .name("kettle-mcp-writer".into())
         .spawn(move || {
+            if let Err(error) = crate::exec::block_sigpipe_for_current_thread() {
+                *writer_progress
+                    .failure
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+                return;
+            }
             let mut output = output;
             while let Ok(message) = responses_rx.recv() {
                 writer_progress.in_write.store(true, Ordering::Release);
                 let wrote = write_message(&mut output, &message);
                 if let Err(error) = &wrote {
+                    crate::exec::consume_pending_sigpipe(error);
                     *writer_progress
                         .failure
                         .lock()
@@ -2187,7 +2203,9 @@ mod tests {
     /// A stdout failure ends the server, but not under a running tool: the
     /// `kettle_run` is cancelled and its child, which ignores SIGHUP and so
     /// would survive the process exiting, is stopped first.
-    #[cfg(unix)]
+    // Linux exercises the real supervisor binary in mcp_supervisor.rs instead;
+    // current_exe() inside this unit-test binary would name the test harness.
+    #[cfg(all(unix, not(target_os = "linux")))]
     #[test]
     fn a_stdout_failure_stops_running_tools_before_exiting() {
         /// Accepts the initialize response, then fails every write.

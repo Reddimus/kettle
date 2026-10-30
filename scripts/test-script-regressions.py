@@ -28,6 +28,72 @@ def load(name):
 
 
 class ScriptRegressionTests(unittest.TestCase):
+    def test_modal_startup_failure_preserves_clipboard(self):
+        modal = load('check-modal-shortcuts')
+        with tempfile.TemporaryDirectory() as raw, \
+             patch.object(modal, 'RecordedLive', side_effect=RuntimeError('startup')), \
+             patch.object(modal.subprocess, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'startup'):
+                modal.check('kettle', Path(raw) / 'out')
+        run.assert_not_called()
+
+    def test_modal_probe_restores_snapshot_on_failure_and_declines_unsafe_snapshot(self):
+        modal = load('check-modal-shortcuts')
+        snapshot = {'ok': True, 'count': 42, 'items': [
+            [['public.utf8-plain-text', 'aGk='], ['public.rtf', 'AP8=']],
+            [['public.png', 'AQI=']]]}
+        with patch.object(modal, 'pasteboard', side_effect=[snapshot, {'ok': True}]) as board:
+            with self.assertRaisesRegex(RuntimeError, 'probe'):
+                with modal.clipboard_probe('hint') as enabled:
+                    self.assertTrue(enabled)
+                    raise RuntimeError('probe')
+        self.assertEqual(board.call_args.args[0],
+                         {'op': 'restore', 'snapshot': snapshot, 'text': 'hint'})
+        with patch.object(modal, 'pasteboard', return_value={'ok': False, 'reason': 'unreadable type'}) as board, \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            with modal.clipboard_probe('hint') as enabled:
+                self.assertFalse(enabled)
+        self.assertEqual(board.call_count, 1)
+        self.assertIn('clipboard probe skipped: unreadable type', output.getvalue())
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'JXA pasteboard requires macOS')
+    def test_modal_native_pasteboard_restores_all_types_and_skips_foreign_changes(self):
+        modal = load('check-modal-shortcuts')
+        name = f'kettle-test-{os.getpid()}'
+        available = modal.pasteboard({'op': 'snapshot', 'name': name})
+        if not available['ok'] and available['reason'] == 'pasteboard service unavailable':
+            self.skipTest(available['reason'])
+        def write(text, probe=False):
+            # The user's contents: two items, one with a binary type. The
+            # probe's copy, like Kettle's, is a single text item.
+            extra = '' if probe else '''item.setDataForType($.NSData.alloc.initWithBase64EncodedStringOptions('AP8=', 0), 'test.binary');
+const second = $.NSPasteboardItem.alloc.init;
+second.setStringForType('second item', 'public.utf8-plain-text');
+'''
+            source = '''ObjC.import('AppKit');
+const board = $.NSPasteboard.pasteboardWithName(%s);
+board.clearContents;
+const item = $.NSPasteboardItem.alloc.init;
+item.setStringForType(%s, 'public.utf8-plain-text');
+const items = $.NSMutableArray.alloc.init;
+items.addObject(item);
+''' + extra + ('' if probe else 'items.addObject(second);\n') + 'board.writeObjects(items);\n'
+            subprocess.run(['osascript', '-l', 'JavaScript', '-e', source % (json.dumps(name), json.dumps(text))],
+                           capture_output=True, check=True, timeout=10)
+        def request(op, **values):
+            return modal.pasteboard(dict(op=op, name=name, **values))
+        write('original')
+        snapshot = request('snapshot')
+        self.assertTrue(snapshot['ok'], snapshot)
+        write('hint', probe=True)
+        restored = request('restore', snapshot=snapshot, text='hint')
+        self.assertTrue(restored['ok'], restored)
+        self.assertEqual(request('snapshot')['items'], snapshot['items'])
+        snapshot = request('snapshot')
+        write('foreign')
+        self.assertFalse(request('restore', snapshot=snapshot, text='hint')['ok'])
+        self.assertEqual(dict(request('snapshot')['items'][0])['public.utf8-plain-text'], 'Zm9yZWlnbg==')
+
     def assert_english_config(self, name):
         tree = ast.parse((SCRIPTS / (name + '.py')).read_text())
         configs = [ast.literal_eval(node.args[0]) for node in ast.walk(tree)

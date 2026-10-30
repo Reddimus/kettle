@@ -14,7 +14,7 @@ use crate::keybinds::Action;
 pub fn commands() -> Vec<(Text, Action)> {
     use Action::*;
     use Text as T;
-    vec![
+    let mut commands = vec![
         (T::PaletteNewTab, NewTab),
         (T::PaletteCloseTab, CloseTab),
         (T::PaletteUndoCloseTab, UndoCloseTab),
@@ -152,7 +152,13 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PaletteReset, Reset),
         (T::PaletteClearHistory, ClearHistory),
         (T::PaletteReloadConfig, ReloadConfig),
-    ]
+    ];
+    // Only X11 and Wayland have a primary selection. Elsewhere the action
+    // falls back to an ordinary paste, which the palette already offers.
+    if !cfg!(target_os = "linux") {
+        commands.retain(|(_, action)| *action != PastePrimary);
+    }
+    commands
 }
 
 /// Indices into `cmds` that match `query` against their labels in `tr`'s
@@ -241,7 +247,7 @@ mod tests {
         // motions (focus/resize directions — keyboard-only), parametric
         // (GotoTab(N) — can't enumerate), the palette itself (`Ctrl+
         // Shift+K` → CommandPalette would loop weirdly).
-        let excluded: &[Action] = &[
+        let mut excluded: Vec<Action> = vec![
             FocusUp,
             FocusDown,
             FocusLeft,
@@ -282,6 +288,10 @@ mod tests {
             OpenUpdate,
             DismissUpdate,
         ];
+        // Outside Linux there is no primary selection; `commands()` drops it.
+        if !cfg!(target_os = "linux") {
+            excluded.push(PastePrimary);
+        }
         // Keep this registry-coverage list in sync with the exhaustive match below.
         let every_action: Vec<Action> = vec![
             Copy,
@@ -610,6 +620,14 @@ mod tests {
 
     const EN: Translator = Translator::new(Language::En);
     const ES: Translator = Translator::new(Language::Es);
+
+    #[test]
+    fn primary_selection_paste_is_offered_only_where_it_exists() {
+        let offered = commands()
+            .iter()
+            .any(|(_, action)| *action == Action::PastePrimary);
+        assert_eq!(offered, cfg!(target_os = "linux"));
+    }
 
     #[test]
     fn empty_query_returns_all_in_registry_order() {

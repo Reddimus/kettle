@@ -2,8 +2,8 @@
 //! independent terminal; splits tile the tab area; focus moves by geometry.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -12,6 +12,13 @@ use kettle_config::{Config, CursorStyle, ModifyOtherKeysMode};
 use kettle_core::{
     CursorShape, PtyGeometry, PtyOutputSender, TermEvent, Terminal, TerminalCapabilities, Waker,
 };
+
+/// Private, in-memory settings for replaying a detected client directly.
+#[derive(Clone)]
+pub(crate) struct ReconnectLaunch {
+    pub argv0: Option<String>,
+    pub environment: kettle_remote::ConnectionEnvironment,
+}
 
 /// At the PTY reader's 64 KiB maximum chunk size, this bounds lossless recorder
 /// backlog to 512 KiB per pane. The sender blocks before taking the terminal
@@ -110,6 +117,8 @@ fn path_with_kettle(path: &str, directory: &std::path::Path) -> Option<String> {
     let runnable = |kettle: &std::path::Path| {
         std::fs::metadata(kettle).is_ok_and(|metadata| metadata.is_file())
             && std::ffi::CString::new(kettle.as_os_str().as_bytes())
+                // SAFETY: name is a live CString for this synchronous access check; X_OK is a
+                // valid mode.
                 .is_ok_and(|name| unsafe { libc::access(name.as_ptr(), libc::X_OK) } == 0)
     };
     let directory = crate::codex_shell::kettle_path(directory).ok()?;
@@ -194,6 +203,7 @@ pub enum PaneInputResult {
     ReadOnly,
     Backpressured,
     Oversize,
+    PathNotTyped,
     Failed,
 }
 
@@ -212,13 +222,29 @@ impl PaneInputResult {
     /// happened to any of its targets. `pub(crate)` because a cross-window
     /// broadcast merges results from several muxes in `App`.
     pub(crate) fn merge(self, other: Self) -> Self {
-        use PaneInputResult::{Backpressured, Failed, Oversize, Queued, ReadOnly};
+        use PaneInputResult::{Backpressured, Failed, Oversize, PathNotTyped, Queued, ReadOnly};
         match (self, other) {
             (Failed, _) | (_, Failed) => Failed,
+            (PathNotTyped, _) | (_, PathNotTyped) => PathNotTyped,
             (Oversize, _) | (_, Oversize) => Oversize,
             (Backpressured, _) | (_, Backpressured) => Backpressured,
             (ReadOnly, _) | (_, ReadOnly) => ReadOnly,
             _ => Queued,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PasteReceiptOwners {
+    pub receipt: Option<u64>,
+    pub pending: Option<u64>,
+}
+
+impl From<Option<u64>> for PasteReceiptOwners {
+    fn from(receipt: Option<u64>) -> Self {
+        Self {
+            receipt,
+            pending: None,
         }
     }
 }
@@ -231,6 +257,7 @@ pub(crate) struct PaneInputDelivery {
     /// broadcast can succeed elsewhere while that pane rejects, which must not
     /// create success chrome or dismiss a still-valid receipt there.
     pub receipt_accepted: bool,
+    pub pending_accepted: bool,
 }
 
 impl PaneInputDelivery {
@@ -239,6 +266,14 @@ impl PaneInputDelivery {
             result: PaneInputResult::Queued,
             accepted: false,
             receipt_accepted: false,
+            pending_accepted: false,
+        }
+    }
+
+    pub(crate) fn rejected(result: PaneInputResult) -> Self {
+        Self {
+            result,
+            ..Self::new()
         }
     }
 
@@ -252,11 +287,20 @@ impl PaneInputDelivery {
         self.record(result);
     }
 
-    fn record_for(&mut self, pane_id: u64, receipt_pane: Option<u64>, result: PaneInputResult) {
-        if receipt_pane == Some(pane_id) {
+    fn record_for(
+        &mut self,
+        pane_id: u64,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
+        result: PaneInputResult,
+    ) {
+        let owners = receipt_pane.into();
+        if owners.receipt == Some(pane_id) {
             self.record_receipt_target(result);
         } else {
             self.record(result);
+        }
+        if owners.pending == Some(pane_id) {
+            self.pending_accepted |= result.is_queued();
         }
     }
 }
@@ -313,6 +357,7 @@ fn run_pty_input_worker<F>(
     failed: &AtomicBool,
     stop: &AtomicBool,
     waker: &Waker,
+    user_backpressured: &AtomicBool,
     mut try_write: F,
 ) where
     F: FnMut(&[u8]) -> Result<usize>,
@@ -356,7 +401,11 @@ fn run_pty_input_worker<F>(
                         .is_some_and(|(_, pending)| pending.advance(written))
                     {
                         prefer_reply = !current.as_ref().is_some_and(|(reply, _)| *reply);
+                        let was_user = current.as_ref().is_some_and(|(reply, _)| !*reply);
                         current = None;
+                        if was_user && user_backpressured.swap(false, Ordering::AcqRel) {
+                            (waker)();
+                        }
                     }
                 }
                 Err(error) => {
@@ -405,7 +454,16 @@ fn run_pty_input_worker<F>(
     }
 }
 
+#[derive(Default)]
+struct PendingFocusReport {
+    desired: Option<bool>,
+}
+
 struct PtyInputQueue {
+    pending_focus: Mutex<PendingFocusReport>,
+    pending_key_releases:
+        Mutex<std::collections::VecDeque<(winit::keyboard::PhysicalKey, Arc<[u8]>)>>,
+    user_backpressured: Arc<AtomicBool>,
     user_tx: Sender<QueuedPtyInput>,
     reply_tx: Sender<QueuedPtyInput>,
     queued_user_bytes: Arc<AtomicUsize>,
@@ -428,6 +486,8 @@ impl PtyInputQueue {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_failed = failed.clone();
         let worker_stop = stop.clone();
+        let user_backpressured = Arc::new(AtomicBool::new(false));
+        let worker_backpressured = user_backpressured.clone();
         let worker_waker = waker.clone();
         let mut pty_stdin = term.stdin_handle()?;
         std::thread::Builder::new()
@@ -439,11 +499,15 @@ impl PtyInputQueue {
                     &worker_failed,
                     &worker_stop,
                     &worker_waker,
+                    &worker_backpressured,
                     |bytes| pty_stdin.try_write(bytes),
                 );
             })
             .context("cannot spawn PTY input worker")?;
         Ok(Self {
+            pending_focus: Mutex::default(),
+            pending_key_releases: Mutex::default(),
+            user_backpressured,
             user_tx,
             reply_tx,
             queued_user_bytes,
@@ -463,6 +527,9 @@ impl PtyInputQueue {
         drop(user_rx);
         drop(reply_rx);
         Self {
+            pending_focus: Mutex::default(),
+            pending_key_releases: Mutex::default(),
+            user_backpressured: Arc::default(),
             user_tx,
             reply_tx,
             queued_user_bytes: Arc::new(AtomicUsize::new(0)),
@@ -474,15 +541,99 @@ impl PtyInputQueue {
         }
     }
 
-    fn enqueue_user(&self, bytes: Arc<[u8]>) -> PaneInputResult {
-        self.enqueue(
+    fn enqueue_focus_report(&self, focused: bool) -> PaneInputResult {
+        let mut pending = self.pending_focus.lock().unwrap_or_else(|e| e.into_inner());
+        // The caller supplies focus transitions; only retries of the pending
+        // transition are deduplicated here. Reporting may skip a transition.
+        pending.desired = Some(focused);
+        self.flush_focus_report(&mut pending)
+    }
+
+    fn flush_focus_report(&self, pending: &mut PendingFocusReport) -> PaneInputResult {
+        let Some(focused) = pending.desired else {
+            return PaneInputResult::Queued;
+        };
+        let result = self.enqueue_user_raw(Arc::from(if focused {
+            &b"\x1b[I"[..]
+        } else {
+            &b"\x1b[O"[..]
+        }));
+        if result.is_queued() {
+            pending.desired = None;
+        }
+        result
+    }
+
+    fn enqueue_key_release(
+        &self,
+        focus_reporting: bool,
+        key: winit::keyboard::PhysicalKey,
+        bytes: Arc<[u8]>,
+    ) -> PaneInputResult {
+        {
+            let mut pending = self
+                .pending_key_releases
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !pending.iter().any(|(kept, _)| *kept == key) {
+                pending.push_back((key, bytes));
+            }
+        }
+        self.retry_pending_reports(focus_reporting)
+    }
+
+    fn retry_pending_reports(&self, focus_reporting: bool) -> PaneInputResult {
+        let mut pending = self.pending_focus.lock().unwrap_or_else(|e| e.into_inner());
+        if !focus_reporting {
+            pending.desired = None;
+        }
+        let result = self.flush_focus_report(&mut pending);
+        if !result.is_queued() {
+            return result;
+        }
+        let mut releases = self
+            .pending_key_releases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        while let Some((_, bytes)) = releases.front() {
+            let result = self.enqueue_user_raw(bytes.clone());
+            if !result.is_queued() {
+                return result;
+            }
+            releases.pop_front();
+        }
+        PaneInputResult::Queued
+    }
+
+    fn enqueue_user(&self, focus_reporting: bool, bytes: Arc<[u8]>) -> PaneInputResult {
+        let result = self.retry_pending_reports(focus_reporting);
+        if !result.is_queued() {
+            return result;
+        }
+        self.enqueue_user_raw(bytes)
+    }
+
+    fn enqueue_user_raw(&self, bytes: Arc<[u8]>) -> PaneInputResult {
+        let required = bytes.len();
+        let result = self.enqueue(
             &self.user_tx,
             &self.queued_user_bytes,
             (MAX_USER_INPUT_MESSAGE_BYTES, MAX_QUEUED_USER_INPUT_BYTES),
             PTY_INPUT_QUEUE_DEPTH,
             bytes,
             false,
-        )
+        );
+        if result == PaneInputResult::Backpressured {
+            self.user_backpressured.store(true, Ordering::Release);
+            // Capacity can return before the retry edge is published.
+            if self.user_tx.len() < PTY_INPUT_QUEUE_DEPTH
+                && self.queued_user_bytes.load(Ordering::Acquire)
+                    <= MAX_QUEUED_USER_INPUT_BYTES.saturating_sub(required)
+            {
+                (self.waker)();
+            }
+        }
+        result
     }
 
     /// Queue a mouse release on the user lane, from the room only releases
@@ -534,7 +685,8 @@ impl PtyInputQueue {
                     log::warn!("dropping terminal replies: the program is not reading its input");
                 }
             }
-            PaneInputResult::ReadOnly | PaneInputResult::Failed => {}
+            PaneInputResult::ReadOnly | PaneInputResult::PathNotTyped | PaneInputResult::Failed => {
+            }
         }
         result
     }
@@ -645,17 +797,9 @@ fn initial_pane_title(argv: &[String]) -> String {
         return "kettle".into();
     };
     if arg0 == "ssh" {
-        let host = argv
-            .iter()
-            .skip(1)
-            .find(|a| !a.starts_with('-'))
-            .cloned()
-            .unwrap_or_default();
-        return if host.is_empty() {
-            "ssh".into()
-        } else {
-            format!("ssh {host}")
-        };
+        return kettle_remote::detect_ssh(argv)
+            .map(|context| kettle_remote::format_remote_title(&context))
+            .unwrap_or_else(|| "ssh".into());
     }
     // Basename of the program path — `/usr/bin/htop` → `htop`. Falls back
     // to the raw arg if it has no path separators.
@@ -853,9 +997,11 @@ pub struct Pane {
     pub last_output_generation: Option<u64>,
     /// Launching argv ([] means the configured shell). Kept so
     /// `Action::UndoCloseTab` reopens SSH and `-e PROG` tabs as the same
-    /// connection or TUI, not a generic shell. It does not track environment
-    /// or later cwd changes; the closed-tab snapshot records the cwd itself.
+    /// connection or TUI, not a generic shell. The closed-tab snapshot records
+    /// later cwd changes itself.
     pub argv: Vec<String>,
+    /// Captured connection settings never enter session files.
+    pub(crate) reconnect_launch: Option<ReconnectLaunch>,
     /// Most recently detected SSH/container context, updated by the background
     /// process scanner. `None` means no context was detected or the scanner has
     /// not run yet. A detected context supplies the pane title prefix. The
@@ -996,8 +1142,9 @@ impl Pane {
             return result;
         }
         let input = bytes.as_ref();
+        let focus_reporting = self.focus_reporting_enabled();
         self.term.with_completion_input_admission(&[input], || {
-            let result = self.pty_input.enqueue_user(bytes.clone());
+            let result = self.pty_input.enqueue_user(focus_reporting, bytes.clone());
             self.record_user_input(result, !bytes.is_empty());
             (result, result.is_queued())
         })
@@ -1023,9 +1170,12 @@ impl Pane {
             joined.extend_from_slice(input);
         }
         let boundaries: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
+        let focus_reporting = self.focus_reporting_enabled();
         self.term.with_completion_input_admission(&boundaries, || {
             let nonempty = !joined.is_empty();
-            let result = self.pty_input.enqueue_user(Arc::from(joined));
+            let result = self
+                .pty_input
+                .enqueue_user(focus_reporting, Arc::from(joined));
             self.record_user_input(result, nonempty);
             (result, result.is_queued())
         })
@@ -1047,11 +1197,32 @@ impl Pane {
         if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
             return result;
         }
-        self.pty_input.enqueue_user(Arc::from(if focused {
-            &b"\x1b[I"[..]
-        } else {
-            &b"\x1b[O"[..]
-        }))
+        self.pty_input.enqueue_focus_report(focused)
+    }
+
+    pub(crate) fn retry_pending_reports(&self) -> PaneInputResult {
+        self.pty_input
+            .retry_pending_reports(self.focus_reporting_enabled())
+    }
+
+    fn focus_reporting_enabled(&self) -> bool {
+        self.term
+            .term
+            .lock()
+            .ok()
+            .is_some_and(|term| term.mode().contains(kettle_core::TermMode::FOCUS_IN_OUT))
+    }
+
+    pub(crate) fn feed_key_release(
+        &self,
+        key: winit::keyboard::PhysicalKey,
+        bytes: Arc<[u8]>,
+    ) -> PaneInputResult {
+        let result = self
+            .pty_input
+            .enqueue_key_release(self.focus_reporting_enabled(), key, bytes);
+        self.record_user_input(result, true);
+        result
     }
 
     /// Queue a terminal-protocol reply or report irrespective of read-only
@@ -1156,6 +1327,7 @@ pub(crate) fn split_falls_back_to_shell(argv: &[String], always_with_profile: bo
     argv.is_empty() || (!always_with_profile && direct_launch_splits_to_shell(argv))
 }
 
+#[derive(Clone)]
 pub enum Node {
     Leaf(u64),
     Split {
@@ -1269,6 +1441,16 @@ impl Node {
         walk(self, n, &mut idx).unwrap_or_else(|| self.first_leaf())
     }
 
+    fn leaf_depth(&self, id: u64) -> Option<usize> {
+        match self {
+            Self::Leaf(leaf) => (*leaf == id).then_some(0),
+            Self::Split { a, b, .. } => a
+                .leaf_depth(id)
+                .or_else(|| b.leaf_depth(id))
+                .map(|depth| depth + 1),
+        }
+    }
+
     /// Replace the leaf `id` with a split of itself and `new_id`.
     #[cfg(test)]
     fn split_leaf(&mut self, id: u64, new_id: u64, dir: Dir) -> bool {
@@ -1282,6 +1464,16 @@ impl Node {
     /// target, where appending would put it on the other side of the pane the
     /// user aimed at.
     fn split_leaf_ordered(&mut self, id: u64, new_id: u64, dir: Dir, new_first: bool) -> bool {
+        if !self
+            .leaf_depth(id)
+            .is_some_and(|depth| depth < crate::session::MAX_SPLIT_DEPTH)
+        {
+            return false;
+        }
+        self.split_leaf_at(id, new_id, dir, new_first)
+    }
+
+    fn split_leaf_at(&mut self, id: u64, new_id: u64, dir: Dir, new_first: bool) -> bool {
         match self {
             Node::Leaf(x) if *x == id => {
                 let (a, b) = if new_first {
@@ -1299,8 +1491,8 @@ impl Node {
             }
             Node::Leaf(_) => false,
             Node::Split { a, b, .. } => {
-                a.split_leaf_ordered(id, new_id, dir, new_first)
-                    || b.split_leaf_ordered(id, new_id, dir, new_first)
+                a.split_leaf_at(id, new_id, dir, new_first)
+                    || b.split_leaf_at(id, new_id, dir, new_first)
             }
         }
     }
@@ -1730,8 +1922,29 @@ pub struct ClosedTab {
     /// Argv of the first leaf — empty means the configured shell.
     pub argv: Vec<String>,
     /// OSC-7 cwd of the first leaf at the moment of close, or `None`
-    /// if no usable cwd was reported.
+    /// if no cwd was reported.
     pub cwd: Option<String>,
+    reconnect_launch: Option<ReconnectLaunch>,
+}
+
+impl ClosedTab {
+    fn capture(
+        original_index: usize,
+        argv: Vec<String>,
+        raw_cwd: Option<String>,
+        reconnect_launch: Option<ReconnectLaunch>,
+    ) -> Self {
+        Self {
+            original_index,
+            argv,
+            cwd: raw_cwd,
+            reconnect_launch,
+        }
+    }
+
+    fn launch(&self) -> (Vec<String>, Option<String>) {
+        launch_cwd(self.argv.clone(), self.cwd.clone())
+    }
 }
 
 /// Max closed-tab snapshots held for `Action::UndoCloseTab`. Browser-
@@ -2019,6 +2232,23 @@ impl Mux {
         cwd: Option<&str>,
         argv: &[String],
     ) -> Result<u64> {
+        self.spawn_pane_with_launch(cfg, geometry, waker, cwd, argv, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_pane_with_launch(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        cwd: Option<&str>,
+        argv: &[String],
+        launch: Option<&ReconnectLaunch>,
+    ) -> Result<u64> {
+        #[cfg(windows)]
+        let launch_argv = pane_launch_argv(argv, default_wsl_distribution);
+        #[cfg(windows)]
+        let argv = launch_argv.as_slice();
         let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) =
             crossbeam_channel::bounded(TERM_EVENT_QUEUE_DEPTH);
         // Terminator plugin parity: optional output sidechannel for
@@ -2047,7 +2277,17 @@ impl Mux {
         // Allocated before the spawn so the child's environment can name its
         // pane. A failed spawn leaves a harmless gap; ids are never reused.
         let id = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let pane_env = pane_environment(cfg, id, std::process::id());
+        let mut pane_env = pane_environment(cfg, id, std::process::id());
+        let mut remove_env = Vec::new();
+        if let Some(launch) = launch {
+            for (name, value) in launch.environment.iter() {
+                pane_env.retain(|(key, _)| key != name);
+                match value {
+                    Some(value) => pane_env.push((name.to_owned(), value.to_owned())),
+                    None => remove_env.push(name.to_owned()),
+                }
+            }
+        }
         // Kettle's Codex integration for the pane's shell, offered while
         // `agent-display-codex` and agent previews are on, checked again now.
         #[cfg(unix)]
@@ -2058,9 +2298,9 @@ impl Mux {
         // cfg.term / cfg.colorterm / cfg.login_shell take effect at
         // PTY spawn. The legacy `Terminal::new` shim still exists
         // for non-Mux callers (currently none in-tree).
-        let mut term = Terminal::new_with_env_and_output_geometry_and_capabilities(
+        let mut term = Terminal::new_with_launch_environment(
             argv,
-            cwd,
+            cwd.map(std::path::Path::new),
             cfg.scrollback,
             cfg.scrollback_bytes,
             geometry,
@@ -2070,16 +2310,22 @@ impl Mux {
             &cfg.term,
             &cfg.colorterm,
             &pane_env,
-            cfg.login_shell,
-            cfg.shell_integration,
+            &kettle_core::LaunchOverrides {
+                argv0: launch.and_then(|settings| settings.argv0.as_deref()),
+                remove_env: &remove_env,
+            },
+            launch.is_none() && cfg.login_shell,
+            launch.is_none() && cfg.shell_integration,
             &shell_startup,
             TerminalCapabilities {
                 osc52_copy: self.osc52_copy_allowed,
+                osc52_read: true,
                 unnegotiated_modified_enter: unnegotiated_modified_enter(cfg.modify_other_keys),
                 contain_process_tree: false,
                 observe_child_exit: true,
                 color_scheme_dark: self.color_scheme_dark,
             },
+            kettle_core::WorkingDirectoryPolicy::FallbackToHome,
             tx,
             waker.clone(),
             output_tx,
@@ -2130,6 +2376,7 @@ impl Mux {
                 pty_output_close_phase: PtyOutputClosePhase::NotStarted,
                 last_output_generation: None,
                 argv: argv.to_vec(),
+                reconnect_launch: launch.cloned(),
                 remote_context: None,
                 foreground_process: None,
                 agent_attached: false,
@@ -2152,6 +2399,10 @@ impl Mux {
                 cmd: self
                     .panes
                     .get(id)
+                    // A session cannot reproduce private connection settings.
+                    // Empty cmd restores the configured shell, including when
+                    // an older Kettle reads this snapshot.
+                    .filter(|p| p.reconnect_launch.is_none())
                     .map(|p| p.term.argv.clone())
                     .unwrap_or_default(),
                 // Persist broadcast-group membership so a restored pane rejoins
@@ -2319,6 +2570,10 @@ impl Mux {
         // real layout) and surface why.
         let mut spawned = 0usize;
         for (i, st) in s.tabs.iter().enumerate() {
+            if !st.root.within_split_depth() {
+                log::warn!("session restore: split depth exceeds the session limit");
+                break;
+            }
             let Some(tab_leaves) = st
                 .root
                 .bounded_leaf_count(MAX_RESTORE_PANES.saturating_sub(spawned))
@@ -2447,7 +2702,20 @@ impl Mux {
         argv: &[String],
         cwd: Option<&str>,
     ) -> Result<()> {
-        let id = self.spawn_pane(cfg, geometry, waker, cwd, argv)?;
+        self.new_tab_with_overrides(cfg, geometry, waker, argv, cwd, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_tab_with_overrides(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        argv: &[String],
+        cwd: Option<&str>,
+        launch: Option<&ReconnectLaunch>,
+    ) -> Result<()> {
+        let id = self.spawn_pane_with_launch(cfg, geometry, waker, cwd, argv, launch)?;
         let new_tab = Tab {
             root: Node::Leaf(id),
             focus: id,
@@ -2510,8 +2778,21 @@ impl Mux {
         argv: Vec<String>,
         raw_cwd: Option<String>,
     ) -> Result<()> {
+        self.new_tab_with_launch_settings_geometry(cfg, geometry, waker, argv, raw_cwd, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_tab_with_launch_settings_geometry(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        argv: Vec<String>,
+        raw_cwd: Option<String>,
+        launch: Option<&ReconnectLaunch>,
+    ) -> Result<()> {
         let (argv, cwd) = launch_cwd(argv, raw_cwd);
-        self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref())
+        self.new_tab_with_overrides(cfg, geometry, waker, &argv, cwd.as_deref(), launch)
     }
 
     /// Open a new tab running `ssh -t <target>` (SSH multiplexing).
@@ -2573,15 +2854,24 @@ impl Mux {
     /// via `wsl --cd <dir>` (which accepts both Windows and Linux paths) and the
     /// Windows spawn cwd is left unset. Otherwise the new pane would open in the
     /// home dir.
-    fn clone_focused_launch(&self, cfg: &Config) -> (Vec<String>, Option<String>) {
-        let (mut argv, raw_cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
-            Some(pane) => (pane.argv.clone(), pane.term.current_dir_or_native()),
-            None => (Vec::new(), None),
-        };
+    fn clone_focused_launch(
+        &self,
+        cfg: &Config,
+    ) -> (Vec<String>, Option<String>, Option<ReconnectLaunch>) {
+        let (mut argv, raw_cwd, launch) =
+            match self.active_focus().and_then(|id| self.panes.get(&id)) {
+                Some(pane) => (
+                    pane.argv.clone(),
+                    pane.term.current_dir_or_native(),
+                    pane.reconnect_launch.clone(),
+                ),
+                None => (Vec::new(), None, None),
+            };
         if argv.is_empty() {
             argv = shell_argv(cfg);
         }
-        launch_cwd(argv, raw_cwd)
+        let (argv, cwd) = launch_cwd(argv, raw_cwd);
+        (argv, cwd, launch)
     }
 
     /// Resolve the command a split should spawn when no interactive foreground
@@ -2593,15 +2883,25 @@ impl Mux {
     /// full-screen app instead of becoming a prompt. Use the configured shell in
     /// the focused cwd for those direct launchers, while preserving exact cloning
     /// for shells, WSL, SSH, and ordinary explicit commands.
-    fn split_focused_launch(&self, cfg: &Config) -> (Vec<String>, Option<String>) {
-        let (mut argv, raw_cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
-            Some(pane) => (pane.argv.clone(), pane.term.current_dir_or_native()),
-            None => (Vec::new(), None),
-        };
+    fn split_focused_launch(
+        &self,
+        cfg: &Config,
+    ) -> (Vec<String>, Option<String>, Option<ReconnectLaunch>) {
+        let (mut argv, raw_cwd, mut launch) =
+            match self.active_focus().and_then(|id| self.panes.get(&id)) {
+                Some(pane) => (
+                    pane.argv.clone(),
+                    pane.term.current_dir_or_native(),
+                    pane.reconnect_launch.clone(),
+                ),
+                None => (Vec::new(), None, None),
+            };
         if split_falls_back_to_shell(&argv, cfg.always_split_with_profile) {
             argv = shell_argv(cfg);
+            launch = None;
         }
-        launch_cwd(argv, raw_cwd)
+        let (argv, cwd) = launch_cwd(argv, raw_cwd);
+        (argv, cwd, launch)
     }
 
     /// Terminator's `split_to_group` (`paned.py`: `if widget.group and
@@ -2647,6 +2947,24 @@ impl Mux {
         )
     }
 
+    fn check_split_depth(&self) -> Result<()> {
+        if let Some(tab) = self.tabs.get(self.active) {
+            let focus = if tab.root.contains(tab.focus) {
+                tab.focus
+            } else {
+                tab.root.first_leaf()
+            };
+            if !tab
+                .root
+                .leaf_depth(focus)
+                .is_some_and(|depth| depth < crate::session::MAX_SPLIT_DEPTH)
+            {
+                anyhow::bail!("split failed: session tree depth limit reached");
+            }
+        }
+        Ok(())
+    }
+
     /// Split the focused pane along `dir`. The new pane goes first (left or
     /// above) when `new_first`, and second otherwise.
     pub fn split_geometry(
@@ -2663,8 +2981,16 @@ impl Mux {
         // Clone shell-like launches, but keep direct agent/editor panes
         // split-friendly by falling back to a shell in the focused cwd. See
         // `split_focused_launch`.
-        let (argv, cwd) = self.split_focused_launch(cfg);
-        let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
+        let (argv, cwd, launch) = self.split_focused_launch(cfg);
+        self.check_split_depth()?;
+        let new_id = self.spawn_pane_with_launch(
+            cfg,
+            geometry,
+            waker,
+            cwd.as_deref(),
+            &argv,
+            launch.as_ref(),
+        )?;
         self.inherit_split_group(cfg, new_id);
         let a = self.active;
         let grafted = self
@@ -2722,11 +3048,35 @@ impl Mux {
         argv: Vec<String>,
         raw_cwd: Option<String>,
     ) -> Result<()> {
+        self.split_with_launch(dir, new_first, cfg, geometry, waker, argv, raw_cwd, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn split_with_launch(
+        &mut self,
+        dir: Dir,
+        new_first: bool,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        argv: Vec<String>,
+        raw_cwd: Option<String>,
+        launch: Option<&ReconnectLaunch>,
+    ) -> Result<()> {
         let (argv, cwd) = launch_cwd(argv, raw_cwd);
         if self.tabs.is_empty() {
-            return self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref());
+            return self.new_tab_with_overrides(
+                cfg,
+                geometry,
+                waker,
+                &argv,
+                cwd.as_deref(),
+                launch,
+            );
         }
-        let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
+        self.check_split_depth()?;
+        let new_id =
+            self.spawn_pane_with_launch(cfg, geometry, waker, cwd.as_deref(), &argv, launch)?;
         self.inherit_split_group(cfg, new_id);
         let a = self.active;
         let grafted = self
@@ -3037,7 +3387,7 @@ impl Mux {
         if !tab.root.contains(moving) || !tab.root.contains(target) {
             return false;
         }
-        let root = std::mem::replace(&mut tab.root, Node::Leaf(moving));
+        let root = tab.root.clone();
         // `remove_leaf` reports three outcomes, and two of them are ordinary:
         //   `Ok(tree)`       the pane sat somewhere below the root; the tree
         //                    comes back with its parent split collapsed.
@@ -3050,19 +3400,15 @@ impl Mux {
         //                    the `contains` guards above already excluded it —
         //                    so it is unreachable here. Refuse rather than
         //                    leave the tab holding the placeholder.
-        let lifted = match root.remove_leaf(moving) {
+        let mut lifted = match root.remove_leaf(moving) {
             Ok(tree) => tree,
             Err(Some(rest)) => rest,
             Err(None) => return false,
         };
-        tab.root = lifted;
-        if !tab.root.split_leaf_ordered(target, moving, dir, before) {
-            // The target vanished with the lift (it cannot, given the guards
-            // above) — put the pane back beside the first leaf rather than
-            // dropping it out of the tree entirely.
-            let anchor = tab.root.first_leaf();
-            tab.root.split_leaf_ordered(anchor, moving, dir, before);
+        if !lifted.split_leaf_ordered(target, moving, dir, before) {
+            return false;
         }
+        tab.root = lifted;
         tab.focus = moving;
         tab.zoomed = false;
         true
@@ -3581,11 +3927,12 @@ impl Mux {
             // we undo evicts the oldest.
             let first_leaf = self.tabs[idx].root.first_leaf();
             if let Some(pane) = self.panes.get(&first_leaf) {
-                let snap = ClosedTab {
-                    original_index: idx,
-                    argv: pane.argv.clone(),
-                    cwd: usable_cwd(pane.term.current_dir_or_native()),
-                };
+                let snap = ClosedTab::capture(
+                    idx,
+                    pane.argv.clone(),
+                    pane.term.current_dir_or_native(),
+                    pane.reconnect_launch.clone(),
+                );
                 if self.closed_tabs.len() >= CLOSED_TAB_RING_CAP {
                     self.closed_tabs.pop_front();
                 }
@@ -3645,8 +3992,8 @@ impl Mux {
         }
         // Clone via the shared helper so a WSL tab duplicates
         // with `wsl --cd <dir>` instead of falling back to the home dir.
-        let (argv, cwd) = self.clone_focused_launch(cfg);
-        self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref())
+        let (argv, cwd, launch) = self.clone_focused_launch(cfg);
+        self.new_tab_with_overrides(cfg, geometry, waker, &argv, cwd.as_deref(), launch.as_ref())
     }
 
     /// Split the focused pane and run the *same* program in the new
@@ -3686,8 +4033,16 @@ impl Mux {
         }
         // Clone the focused pane's argv + cwd, WSL-aware, as
         // `duplicate_focused_tab` does.
-        let (argv, cwd) = self.clone_focused_launch(cfg);
-        let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
+        let (argv, cwd, launch) = self.clone_focused_launch(cfg);
+        self.check_split_depth()?;
+        let new_id = self.spawn_pane_with_launch(
+            cfg,
+            geometry,
+            waker,
+            cwd.as_deref(),
+            &argv,
+            launch.as_ref(),
+        )?;
         let a = self.active;
         let grafted = self
             .tabs
@@ -3732,7 +4087,15 @@ impl Mux {
         };
         // Re-spawn the same argv + cwd. Empty argv → configured shell
         // (matches `new_tab_with`'s contract).
-        let id = self.spawn_pane(cfg, geometry, waker, snap.cwd.as_deref(), &snap.argv)?;
+        let (argv, cwd) = snap.launch();
+        let id = self.spawn_pane_with_launch(
+            cfg,
+            geometry,
+            waker,
+            cwd.as_deref(),
+            &argv,
+            snap.reconnect_launch.as_ref(),
+        )?;
         self.closed_tabs.pop_back();
         let insert_at = snap.original_index.min(self.tabs.len());
         self.tabs.insert(
@@ -3860,7 +4223,7 @@ impl Mux {
         &mut self,
         bytes: &[u8],
         scroll_to_bottom: bool,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         self.broadcast_write_inner(bytes, scroll_to_bottom, receipt_pane)
     }
@@ -3869,7 +4232,7 @@ impl Mux {
         &mut self,
         bytes: &[u8],
         scroll_to_bottom: bool,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         // Respect the `BroadcastScope` enum. Off short-circuits; Tab keeps the
         // active-tab behavior; All targets every pane window-wide; Group(name)
@@ -3910,7 +4273,7 @@ impl Mux {
         scope: &BroadcastScope,
         bytes: &[u8],
         scroll_to_bottom: bool,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         let mut delivery = PaneInputDelivery::new();
         for id in self.foreign_target_ids(scope) {
@@ -3933,11 +4296,11 @@ impl Mux {
         policy: ModifyOtherKeysMode,
         sample_automatic_context: bool,
         scroll_to_bottom: bool,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
         encode: F,
     ) -> (PaneInputDelivery, Vec<u64>)
     where
-        F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+        F: FnMut(u64, kettle_core::TermMode) -> Option<Vec<u8>>,
     {
         let ids = self.broadcast_target_ids();
         self.write_encoded_into(
@@ -3956,11 +4319,11 @@ impl Mux {
         policy: ModifyOtherKeysMode,
         sample_automatic_context: bool,
         scroll_to_bottom: bool,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
         encode: F,
     ) -> (PaneInputDelivery, Vec<u64>)
     where
-        F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+        F: FnMut(u64, kettle_core::TermMode) -> Option<Vec<u8>>,
     {
         let ids = self.foreign_target_ids(scope);
         self.write_encoded_into(
@@ -3979,11 +4342,11 @@ impl Mux {
         policy: ModifyOtherKeysMode,
         sample_automatic_context: bool,
         scroll_to_bottom: bool,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
         encode: F,
     ) -> (PaneInputDelivery, Vec<u64>)
     where
-        F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+        F: FnMut(u64, kettle_core::TermMode) -> Option<Vec<u8>>,
     {
         let target_modes = ids.into_iter().filter_map(|id| {
             let pane = self.panes.get(&id)?;
@@ -4014,19 +4377,17 @@ impl Mux {
 
     pub(crate) fn release_key_to(
         &self,
-        recipients: &std::collections::HashSet<u64>,
-        policy: ModifyOtherKeysMode,
-        sample_automatic_context: bool,
-        mut encode: impl FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+        releases: &[(u64, winit::keyboard::PhysicalKey, Arc<[u8]>)],
     ) -> PaneInputResult {
         let mut result = PaneInputResult::Queued;
-        for id in recipients {
-            let Some(pane) = self.panes.get(id) else {
-                continue;
-            };
-            let mode = pane.effective_key_mode(policy, sample_automatic_context);
-            if let Some(bytes) = encode(mode) {
-                result = result.merge(pane.feed_input(&bytes));
+        for (id, key, bytes) in releases {
+            if let Some(pane) = self.panes.get(id)
+                && pane.term.term.lock().ok().is_some_and(|term| {
+                    term.mode()
+                        .contains(kettle_core::TermMode::REPORT_EVENT_TYPES)
+                })
+            {
+                result = result.merge(pane.feed_key_release(*key, bytes.clone()));
             }
         }
         result
@@ -4105,7 +4466,7 @@ impl Mux {
     pub(crate) fn broadcast_paste_delivery(
         &mut self,
         text: &str,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         let ids = self.broadcast_target_ids();
         self.paste_into(ids, text, receipt_pane)
@@ -4119,7 +4480,7 @@ impl Mux {
         &mut self,
         scope: &BroadcastScope,
         text: &str,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         let ids = self.foreign_target_ids(scope);
         self.paste_into(ids, text, receipt_pane)
@@ -4130,7 +4491,7 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         let ids = self.broadcast_target_ids();
         self.paste_paths_into(ids, paths, trailing_space, max_text_bytes, receipt_pane)
@@ -4141,7 +4502,7 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-    ) -> bool {
+    ) -> Result<bool, PaneInputResult> {
         self.paste_paths_within_limit(
             self.broadcast_target_ids(),
             paths,
@@ -4156,7 +4517,7 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         let ids = self.foreign_target_ids(scope);
         self.paste_paths_into(ids, paths, trailing_space, max_text_bytes, receipt_pane)
@@ -4168,7 +4529,7 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-    ) -> bool {
+    ) -> Result<bool, PaneInputResult> {
         self.paste_paths_within_limit(
             self.foreign_target_ids(scope),
             paths,
@@ -4196,7 +4557,7 @@ impl Mux {
         &mut self,
         ids: Vec<u64>,
         text: &str,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         if ids.is_empty() {
             return PaneInputDelivery::new();
@@ -4246,12 +4607,15 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-        receipt_pane: Option<u64>,
+        receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
         let targets = ids
             .iter()
             .filter_map(|id| self.panes.get(id).map(|pane| (*id, pane.argv.as_slice())));
-        let formatted = format_paths_for_targets(targets, paths, trailing_space);
+        let formatted = match format_paths_for_targets(targets, paths, trailing_space) {
+            Ok(formatted) => formatted,
+            Err(error) => return PaneInputDelivery::rejected(error),
+        };
         if formatted.iter().any(|(id, text)| {
             self.panes.get(id).is_some_and(|pane| {
                 !pane.read_only && !pane.pty_input_failed() && text.len() > max_text_bytes
@@ -4261,6 +4625,7 @@ impl Mux {
                 result: PaneInputResult::Oversize,
                 accepted: false,
                 receipt_accepted: false,
+                pending_accepted: false,
             };
         }
 
@@ -4297,17 +4662,17 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-    ) -> bool {
+    ) -> Result<bool, PaneInputResult> {
         let targets = ids
             .iter()
             .filter_map(|id| self.panes.get(id).map(|pane| (*id, pane.argv.as_slice())));
-        format_paths_for_targets(targets, paths, trailing_space)
+        Ok(format_paths_for_targets(targets, paths, trailing_space)?
             .iter()
             .all(|(id, text)| {
                 self.panes.get(id).is_none_or(|pane| {
                     pane.read_only || pane.pty_input_failed() || text.len() <= max_text_bytes
                 })
-            })
+            }))
     }
 
     pub fn tab_titles(&self) -> Vec<String> {
@@ -4578,25 +4943,17 @@ fn rotate_tree(node: &mut Node, clockwise: bool) {
 /// UX after `split-window`, WezTerm's `SplitHorizontal/Vertical`). Pure so
 /// the contract is unit-testable without a real spawn.
 fn insert_split(tab: &mut Tab, new_id: u64, dir: Dir, new_first: bool) -> bool {
-    let focus = tab.focus;
-    if tab.root.split_leaf_ordered(focus, new_id, dir, new_first) {
-        tab.focus = new_id;
-        tab.zoomed = false;
-        return true;
+    let focus = if tab.root.contains(tab.focus) {
+        tab.focus
+    } else {
+        tab.root.first_leaf()
+    };
+    if !tab.root.split_leaf_ordered(focus, new_id, dir, new_first) {
+        return false;
     }
-    // `tab.focus` was stale (not a leaf in this tree, a focus-desync class of
-    // bug). Repair focus to a real leaf and retry; if even this fails, the
-    // caller reaps the new pane instead of leaking its PTY + child.
-    let repaired = tab.root.first_leaf();
-    if tab
-        .root
-        .split_leaf_ordered(repaired, new_id, dir, new_first)
-    {
-        tab.focus = new_id;
-        tab.zoomed = false;
-        return true;
-    }
-    false
+    tab.focus = new_id;
+    tab.zoomed = false;
+    true
 }
 
 fn shell_argv(cfg: &Config) -> Vec<String> {
@@ -4719,36 +5076,260 @@ pub(crate) fn shell_kind_for_argv(argv: &[String]) -> PaneShellKind {
     }
 }
 
-/// Translate a Windows path to the WSL path a Linux shell can open, or `None`
-/// if it is not a Windows-style path (already POSIX / unrecognized). Handles
-/// drive paths (`C:\Users\me\v.mp4` → `/mnt/c/Users/me/v.mp4`) and the WSL UNC
-/// shares Explorer produces for in-distro files (`\\wsl.localhost\Ubuntu\home\
-/// me\v` and the legacy `\\wsl$\…` → `/home/me/v`). Pure.
-pub(crate) fn windows_path_to_wsl(p: &std::path::Path) -> Option<String> {
-    let s = p.to_string_lossy();
-    // `\\wsl.localhost\<distro>\rest` or `\\wsl$\<distro>\rest` → `/rest`
-    // (drop the distro component; the pane's own distro is what matters).
-    for prefix in [
-        r"\\wsl.localhost\",
-        r"\\wsl$\",
-        "//wsl.localhost/",
-        "//wsl$/",
-    ] {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            let rest = rest.replace('\\', "/");
-            let after_distro = rest.split_once('/').map(|(_, r)| r).unwrap_or("");
-            return Some(format!("/{after_distro}"));
+fn wsl_unc_parts(path: &std::path::Path) -> Option<(String, String)> {
+    let text = path.to_string_lossy().replace('\\', "/");
+    for prefix in ["//wsl.localhost/", "//wsl$/"] {
+        if text
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
+            let rest = &text[prefix.len()..];
+            let (distro, tail) = rest.split_once('/').unwrap_or((rest, ""));
+            return Some((distro.to_owned(), tail.to_owned()));
         }
     }
-    // Drive-letter path `X:\…` / `X:/…`.
-    let b = s.as_bytes();
-    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
-        let drive = (b[0] as char).to_ascii_lowercase();
-        let rest = s[2..].replace('\\', "/");
-        let rest = rest.strip_prefix('/').unwrap_or(&rest);
-        return Some(format!("/mnt/{drive}/{rest}"));
+    None
+}
+
+#[cfg(any(windows, test))]
+fn pane_launch_argv(
+    argv: &[String],
+    default_distribution: impl FnOnce() -> Option<String>,
+) -> Vec<String> {
+    let mut resolved = argv.to_vec();
+    if argv_is_wsl(argv)
+        && wsl_distribution(argv).is_none()
+        && let Some(distro) = default_distribution().filter(|name| valid_wsl_distribution(name))
+    {
+        // Resolve once and launch that distribution explicitly. Querying the
+        // default during paste could name a different distribution by then.
+        resolved.splice(1..1, ["--distribution".into(), distro]);
+    }
+    resolved
+}
+
+#[cfg(any(windows, test))]
+fn valid_wsl_distribution(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && !matches!(name, "." | "..")
+        && !name.starts_with('-')
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\'))
+}
+
+#[cfg(windows)]
+fn default_wsl_distribution() -> Option<String> {
+    use windows::Win32::System::Registry::{
+        HKEY_CURRENT_USER, RRF_NOEXPAND, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY, RegGetValueW,
+    };
+    use windows::core::PCWSTR;
+
+    fn read_string(key: &str, value: &str) -> Option<String> {
+        let key: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
+        let value: Vec<u16> = value.encode_utf16().chain(Some(0)).collect();
+        let mut buffer = [0u16; 512];
+        let mut bytes = std::mem::size_of_val(&buffer) as u32;
+        // SAFETY: both names are NUL terminated and buffer holds `bytes`
+        // writable bytes. Oversized or non-string registry values fail closed.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key.as_ptr()),
+                PCWSTR(value.as_ptr()),
+                RRF_RT_REG_SZ | RRF_NOEXPAND | RRF_SUBKEY_WOW6464KEY,
+                None,
+                Some(buffer.as_mut_ptr().cast()),
+                Some(&mut bytes),
+            )
+        };
+        if status.is_err()
+            || bytes < 2
+            || bytes as usize > std::mem::size_of_val(&buffer)
+            || !bytes.is_multiple_of(2)
+        {
+            return None;
+        }
+        let units = &buffer[..bytes as usize / 2];
+        if units.last() != Some(&0) || units[..units.len() - 1].contains(&0) {
+            return None;
+        }
+        String::from_utf16(&units[..units.len() - 1]).ok()
+    }
+
+    const LXSS: &str = r"Software\Microsoft\Windows\CurrentVersion\Lxss";
+    let id = read_string(LXSS, "DefaultDistribution")?;
+    if id.len() != 38
+        || !id.starts_with('{')
+        || !id.ends_with('}')
+        || !id[1..37]
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() || b == b'-')
+    {
+        return None;
+    }
+    read_string(&format!(r"{LXSS}\{id}"), "DistributionName")
+}
+
+fn wsl_distribution(argv: &[String]) -> Option<&str> {
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--" | "-e" | "--exec" => break,
+            "-d" | "--distribution" => {
+                return args
+                    .next()
+                    .map(String::as_str)
+                    .filter(|s| !s.is_empty() && !s.starts_with('-'));
+            }
+            "--cd" | "-u" | "--user" | "--shell-type" => {
+                args.next();
+            }
+            _ if arg.starts_with("--distribution=") => {
+                return arg
+                    .split_once('=')
+                    .map(|(_, distro)| distro)
+                    .filter(|s| !s.is_empty());
+            }
+            _ if !arg.starts_with('-') => break,
+            _ => {}
+        }
     }
     None
+}
+
+fn windows_path_for_wsl(
+    path: &std::path::Path,
+    target: Option<&str>,
+    mounted: impl Fn(&str) -> bool,
+) -> Option<String> {
+    if let Some((distro, tail)) = wsl_unc_parts(path) {
+        if distro.is_empty() || matches!(distro.as_str(), "." | "..") {
+            return None;
+        }
+        if target.is_some_and(|target| target.eq_ignore_ascii_case(&distro)) {
+            return Some(format!("/{tail}"));
+        }
+        let path = format!("/mnt/wsl/{distro}/{tail}");
+        return mounted(&path).then_some(path);
+    }
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = text[2..].replace('\\', "/");
+        return Some(format!(
+            "/mnt/{drive}/{}",
+            rest.strip_prefix('/').unwrap_or(&rest)
+        ));
+    }
+    None
+}
+
+#[cfg(any(windows, test))]
+struct WslMountVerification {
+    source: std::fs::File,
+    mounted: std::path::PathBuf,
+}
+
+#[cfg(any(windows, test))]
+impl WslMountVerification {
+    fn verify(source: &std::path::Path, mounted: &std::path::Path) -> Option<Self> {
+        let source = std::fs::File::open(source).ok()?;
+        kettle_state::path_matches_file(&source, mounted)
+            .ok()?
+            .then(|| Self {
+                source,
+                mounted: mounted.to_owned(),
+            })
+    }
+
+    fn is_current(&self, source: &std::path::Path) -> bool {
+        kettle_state::path_matches_file(&self.source, source).unwrap_or(false)
+            && kettle_state::path_matches_file(&self.source, &self.mounted).unwrap_or(false)
+    }
+}
+
+#[cfg(windows)]
+fn wsl_mount_verified(target: Option<&str>, source: &std::path::Path, candidate: &str) -> bool {
+    type Key = (String, std::path::PathBuf, String);
+    type Cache =
+        std::collections::VecDeque<(Key, Option<Arc<WslMountVerification>>, std::time::Instant)>;
+    static CACHE: std::sync::OnceLock<Arc<std::sync::Mutex<Cache>>> = std::sync::OnceLock::new();
+    static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(target) = target else { return false };
+    if target.contains(['/', '\\'])
+        || matches!(target, "." | "..")
+        || target.len() > 256
+        || source.as_os_str().len() > 32 * 1024
+        || candidate.len() > 32 * 1024
+    {
+        return false;
+    }
+    let key = (target.to_owned(), source.to_owned(), candidate.to_owned());
+    let cache = CACHE.get_or_init(Default::default);
+    let cached = cache.lock().ok().and_then(|cache| {
+        cache
+            .iter()
+            .find(|(saved, _, at)| {
+                saved == &key && at.elapsed() < std::time::Duration::from_secs(5)
+            })
+            .map(|(_, verified, _)| verified.clone())
+    });
+    if matches!(cached, Some(None)) {
+        return false;
+    }
+    // Even a cached success must recheck both names. Keep UNC lookups on one
+    // helper: a stalled share cannot hold the UI or accumulate checking threads.
+    if CHECKING.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    let cache = cache.clone();
+    let (ready, answer) = std::sync::mpsc::sync_channel(1);
+    if std::thread::Builder::new()
+        .name("kettle-wsl-mount".into())
+        .spawn(move || {
+            let verified = match cached {
+                Some(Some(verified)) => verified.is_current(&key.1).then_some(verified),
+                _ => {
+                    let mounted =
+                        format!("\\\\wsl.localhost\\{}{}", key.0, key.2.replace('/', "\\"));
+                    WslMountVerification::verify(&key.1, std::path::Path::new(&mounted))
+                        .map(Arc::new)
+                }
+            };
+            let current = verified.is_some();
+            if let Ok(mut cache) = cache.lock() {
+                cache.retain(|(saved, _, _)| saved != &key);
+                if cache.len() >= 32 {
+                    cache.pop_front();
+                }
+                cache.push_back((key, verified, std::time::Instant::now()));
+            }
+            CHECKING.store(false, Ordering::Release);
+            let _ = ready.try_send(current);
+        })
+        .is_err()
+    {
+        CHECKING.store(false, Ordering::Release);
+        return false;
+    }
+    answer
+        .recv_timeout(std::time::Duration::from_millis(5))
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn wsl_mount_verified(_target: Option<&str>, _source: &std::path::Path, _candidate: &str) -> bool {
+    false
+}
+
+fn path_for_wsl(argv: &[String], path: &std::path::Path) -> Option<String> {
+    let target = wsl_distribution(argv);
+    windows_path_for_wsl(path, target, |candidate| {
+        wsl_mount_verified(target, path, candidate)
+    })
 }
 
 /// Quote a single path string for one shell family so the user can press Enter
@@ -4775,11 +5356,10 @@ pub(crate) fn quote_path_for(kind: PaneShellKind, s: &str) -> String {
             let mut out = String::with_capacity(s.len() + 2);
             out.push('\'');
             for ch in s.chars() {
-                if ch == '\'' {
-                    out.push_str("''");
-                } else {
+                if matches!(ch, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
                     out.push(ch);
                 }
+                out.push(ch);
             }
             out.push('\'');
             out
@@ -4798,6 +5378,9 @@ pub(crate) fn path_types_exactly(argv: &[String], path: &std::path::Path) -> boo
         return false;
     };
     !text.chars().any(char::is_control)
+        && !(argv_is_wsl(argv)
+            && wsl_unc_parts(path).is_some()
+            && path_for_wsl(argv, path).is_none())
         && !(shell_kind_for_argv(argv) == PaneShellKind::Cmd && text.contains(['%', '!']))
 }
 
@@ -4805,47 +5388,56 @@ pub(crate) fn path_types_exactly(argv: &[String], path: &std::path::Path) -> boo
 /// to feed the focused pane: translate to the pane's WSL path when it runs
 /// WSL, quote each for the pane's shell family, and space-join multiple paths.
 /// Pure so the whole rule is unit-tested.
-pub(crate) fn format_paths_for_paste(argv: &[String], paths: &[std::path::PathBuf]) -> String {
+pub(crate) fn format_paths_for_paste(
+    argv: &[String],
+    paths: &[std::path::PathBuf],
+) -> Result<String, PaneInputResult> {
     let wsl = argv_is_wsl(argv);
     let kind = shell_kind_for_argv(argv);
-    paths
+    let translated: Option<Vec<_>> = paths
         .iter()
-        .map(|p| {
-            let s = if wsl {
-                windows_path_to_wsl(p).unwrap_or_else(|| p.to_string_lossy().into_owned())
+        .map(|path| {
+            let text = if wsl {
+                match path_for_wsl(argv, path) {
+                    Some(text) => text,
+                    None if wsl_unc_parts(path).is_some() => return None,
+                    None => path.to_string_lossy().into_owned(),
+                }
             } else {
-                p.to_string_lossy().into_owned()
+                path.to_string_lossy().into_owned()
             };
-            quote_path_for(kind, &s)
+            Some(quote_path_for(kind, &text))
         })
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect();
+    translated
+        .map(|paths| paths.join(" "))
+        .ok_or(PaneInputResult::PathNotTyped)
 }
 
 pub(crate) fn format_paths_for_targets<'a>(
     targets: impl IntoIterator<Item = (u64, &'a [String])>,
     paths: &[std::path::PathBuf],
     trailing_space: bool,
-) -> Vec<(u64, String)> {
+) -> Result<Vec<(u64, String)>, PaneInputResult> {
     targets
         .into_iter()
         .map(|(id, argv)| {
-            let mut text = format_paths_for_paste(argv, paths);
+            let mut text = format_paths_for_paste(argv, paths)?;
             if trailing_space {
                 text.push(' ');
             }
-            (id, text)
+            Ok((id, text))
         })
         .collect()
 }
 
 pub(crate) fn encode_target_modes(
     targets: impl IntoIterator<Item = (u64, kettle_core::TermMode)>,
-    mut encode: impl FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+    mut encode: impl FnMut(u64, kettle_core::TermMode) -> Option<Vec<u8>>,
 ) -> Vec<(u64, Vec<u8>)> {
     targets
         .into_iter()
-        .filter_map(|(id, mode)| encode(mode).map(|bytes| (id, bytes)))
+        .filter_map(|(id, mode)| encode(id, mode).map(|bytes| (id, bytes)))
         .collect()
 }
 
@@ -4983,6 +5575,20 @@ mod node_tests {
     }
 
     #[test]
+    fn docked_paste_owners_keep_separate_broadcast_results() {
+        let owners = PasteReceiptOwners {
+            receipt: Some(9),
+            pending: Some(7),
+        };
+        let mut delivery = PaneInputDelivery::new();
+        delivery.record_for(9, owners, PaneInputResult::Backpressured);
+        delivery.record_for(7, owners, PaneInputResult::Queued);
+        assert!(delivery.pending_accepted);
+        assert!(!delivery.receipt_accepted);
+        assert!(delivery.accepted);
+    }
+
+    #[test]
     fn pane_input_outcome_precedence_is_explicit() {
         use PaneInputResult::{Backpressured, Failed, Oversize, Queued, ReadOnly};
 
@@ -5058,7 +5664,7 @@ mod node_tests {
         let kitty = kettle_core::TermMode::REPORT_ALL_KEYS_AS_ESC
             | kettle_core::TermMode::REPORT_EVENT_TYPES;
         let targets = [(10, kettle_core::TermMode::empty()), (20, kitty)];
-        let press = encode_target_modes(targets, |mode| {
+        let press = encode_target_modes(targets, |_, mode| {
             Some(
                 if mode.contains(kettle_core::TermMode::REPORT_ALL_KEYS_AS_ESC) {
                     b"\x1b[97;1u".to_vec()
@@ -5069,7 +5675,7 @@ mod node_tests {
         });
         assert_eq!(press, [(10, b"a".to_vec()), (20, b"\x1b[97;1u".to_vec())]);
 
-        let release = encode_target_modes(targets, |mode| {
+        let release = encode_target_modes(targets, |_, mode| {
             mode.contains(kettle_core::TermMode::REPORT_EVENT_TYPES)
                 .then(|| b"\x1b[97;1:3u".to_vec())
         });
@@ -5099,11 +5705,21 @@ mod node_tests {
             ids.push(mux.active_focus().unwrap());
         }
         let (a, b, c) = (ids[0], ids[1], ids[2]);
+        for id in [a, b] {
+            use alacritty_terminal::vte::ansi::{Handler, KeyboardModes};
+            mux.panes[&id]
+                .term
+                .term
+                .lock()
+                .unwrap()
+                .push_keyboard_mode(KeyboardModes::REPORT_EVENT_TYPES);
+        }
         assert!(mux.focus_pane(a));
         mux.broadcast = BroadcastScope::Tab;
-        let (_, pressed) = mux.broadcast_encoded(cfg.modify_other_keys, false, false, None, |_| {
-            Some(b"\x1b[97;1u".to_vec())
-        });
+        let (_, pressed) =
+            mux.broadcast_encoded(cfg.modify_other_keys, false, false, None, |_, _| {
+                Some(b"\x1b[97;1u".to_vec())
+            });
         let mut recipients: std::collections::HashSet<_> = pressed.into_iter().collect();
         assert_eq!(recipients, std::collections::HashSet::from([a]));
 
@@ -5111,7 +5727,7 @@ mod node_tests {
         mux.broadcast = BroadcastScope::All;
         mux.panes.get_mut(&c).unwrap().read_only = true;
         let (_, repeated) =
-            mux.broadcast_encoded(cfg.modify_other_keys, false, false, None, |_| {
+            mux.broadcast_encoded(cfg.modify_other_keys, false, false, None, |_, _| {
                 Some(b"\x1b[97;1:2u".to_vec())
             });
         recipients.extend(repeated);
@@ -5125,9 +5741,16 @@ mod node_tests {
             .map(|id| mux.panes[id].input_generation())
             .collect();
         assert_eq!(
-            mux.release_key_to(&recipients, cfg.modify_other_keys, false, |_| {
-                Some(b"\x1b[97;1:3u".to_vec())
-            }),
+            mux.release_key_to(
+                &recipients
+                    .iter()
+                    .map(|id| (
+                        *id,
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA),
+                        Arc::from(&b"\x1b[97;1:3u"[..])
+                    ))
+                    .collect::<Vec<_>>()
+            ),
             PaneInputResult::Queued
         );
         assert_eq!(mux.panes[&a].input_generation(), before[0] + 1);
@@ -5136,12 +5759,380 @@ mod node_tests {
         mux.kill_children();
     }
 
+    fn input_queue_fixture() -> (PtyInputQueue, Receiver<QueuedPtyInput>) {
+        let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        let (reply_tx, _) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        (
+            PtyInputQueue {
+                pending_focus: Mutex::default(),
+                pending_key_releases: Mutex::default(),
+                user_backpressured: Arc::default(),
+                user_tx,
+                reply_tx,
+                queued_user_bytes: Arc::new(AtomicUsize::new(0)),
+                queued_reply_bytes: Arc::new(AtomicUsize::new(0)),
+                dropped_replies: AtomicUsize::new(0),
+                failed: Arc::new(AtomicBool::new(false)),
+                stop: Arc::new(AtomicBool::new(false)),
+                waker: Arc::new(|| {}),
+            },
+            user_rx,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_key_release_is_dropped_after_keyboard_reporting_resets() {
+        use alacritty_terminal::vte::ansi::{Handler, KeyboardModes};
+
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &["/bin/cat".into()],
+            None,
+        )
+        .expect("PTY fixture");
+        let id = mux.active_focus().unwrap();
+        let (queue, rx) = input_queue_fixture();
+        let pane = mux.panes.get_mut(&id).unwrap();
+        pane.pty_input = queue;
+        {
+            let mut term = pane.term.term.lock().unwrap();
+            term.push_keyboard_mode(KeyboardModes::REPORT_EVENT_TYPES);
+            term.pop_keyboard_modes(1);
+        }
+        let releases = [(
+            id,
+            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA),
+            Arc::from(&b"\x1b[97;1:3u"[..]),
+        )];
+        assert_eq!(mux.release_key_to(&releases), PaneInputResult::Queued);
+        let after_reset: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+        mux.panes[&id]
+            .term
+            .term
+            .lock()
+            .unwrap()
+            .push_keyboard_mode(KeyboardModes::REPORT_EVENT_TYPES);
+        assert_eq!(mux.release_key_to(&releases), PaneInputResult::Queued);
+        let while_reporting: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+        mux.kill_children();
+        assert!(
+            after_reset.is_empty(),
+            "a saved release must not reach the shell"
+        );
+        assert_eq!(while_reporting, [b"\x1b[97;1:3u".to_vec()]);
+    }
+
+    #[test]
+    fn focus_in_after_unreported_focus_out_is_delivered() {
+        let (queue, rx) = input_queue_fixture();
+        assert_eq!(queue.enqueue_focus_report(true), PaneInputResult::Queued);
+        assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[I");
+        // Focus-out occurred with reporting disabled, so the caller sent nothing.
+        assert_eq!(queue.enqueue_focus_report(true), PaneInputResult::Queued);
+        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+        let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+        assert_eq!(delivered, [b"\x1b[I".to_vec()]);
+    }
+
+    #[test]
+    fn disabled_focus_retry_discards_report_while_input_is_still_full() {
+        for focused in [false, true] {
+            let (queue, rx) = input_queue_fixture();
+            for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+                assert_eq!(
+                    queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                    PaneInputResult::Queued
+                );
+            }
+            assert_eq!(
+                queue.enqueue_focus_report(focused),
+                PaneInputResult::Backpressured
+            );
+            assert_eq!(queue.retry_pending_reports(false), PaneInputResult::Queued);
+            assert_eq!(queue.retry_pending_reports(false), PaneInputResult::Queued);
+            let old: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+            assert_eq!(old, vec![b"old".to_vec(); PTY_INPUT_QUEUE_DEPTH]);
+            assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+            assert!(rx.is_empty(), "discarded reports must not return");
+            assert_eq!(queue.enqueue_focus_report(focused), PaneInputResult::Queued);
+            assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+            assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+            assert_eq!(
+                rx.try_recv().unwrap().bytes.as_ref(),
+                if focused {
+                    &b"\x1b[I"[..]
+                } else {
+                    &b"\x1b[O"[..]
+                }
+            );
+            assert!(rx.is_empty(), "retries must not duplicate a new transition");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disabled_focus_reporting_discards_backpressured_reports_on_every_retry_path() {
+        use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &["/bin/cat".into()],
+            None,
+        )
+        .expect("PTY fixture");
+        let pane = mux.panes.values_mut().next().unwrap();
+        let mode = PrivateMode::Named(NamedPrivateMode::ReportFocusInOut);
+        let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
+        for focused in [false, true] {
+            for path in ["wakeup", "input", "key batch", "key release"] {
+                let (queue, rx) = input_queue_fixture();
+                pane.pty_input = queue;
+                pane.term.term.lock().unwrap().set_private_mode(mode);
+                for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+                    assert_eq!(pane.feed_input(b"old"), PaneInputResult::Queued);
+                }
+                assert_eq!(
+                    pane.feed_focus_report(focused),
+                    PaneInputResult::Backpressured
+                );
+                pane.term.term.lock().unwrap().unset_private_mode(mode);
+                while rx.try_recv().is_ok() {}
+                let result = match path {
+                    "wakeup" => pane.retry_pending_reports(),
+                    "input" => pane.feed_input(b"typed"),
+                    "key batch" => pane.feed_key_inputs(&[b"typed".to_vec()]),
+                    "key release" => pane.feed_key_release(key, Arc::from(&b"release"[..])),
+                    _ => unreachable!(),
+                };
+                assert_eq!(result, PaneInputResult::Queued);
+                let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+                let expected = match path {
+                    "wakeup" => vec![],
+                    "key release" => vec![b"release".to_vec()],
+                    _ => vec![b"typed".to_vec()],
+                };
+                assert_eq!(delivered, expected, "focus={focused}, retry={path}");
+
+                pane.term.term.lock().unwrap().set_private_mode(mode);
+                assert_eq!(pane.retry_pending_reports(), PaneInputResult::Queued);
+                assert!(rx.is_empty(), "discarded reports must not return");
+                assert_eq!(pane.feed_focus_report(focused), PaneInputResult::Queued);
+                assert_eq!(pane.retry_pending_reports(), PaneInputResult::Queued);
+                assert_eq!(pane.retry_pending_reports(), PaneInputResult::Queued);
+                assert_eq!(
+                    rx.try_recv().unwrap().bytes.as_ref(),
+                    if focused {
+                        &b"\x1b[I"[..]
+                    } else {
+                        &b"\x1b[O"[..]
+                    }
+                );
+                assert!(rx.is_empty(), "retries must not duplicate a new transition");
+            }
+        }
+        mux.kill_children();
+    }
+
+    #[test]
+    fn backpressured_key_release_precedes_later_authored_input() {
+        let (queue, rx) = input_queue_fixture();
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
+        for _ in 0..2 {
+            assert_eq!(
+                queue.enqueue_key_release(true, key, Arc::from(&b"\x1b[1;1:3A"[..])),
+                PaneInputResult::Backpressured
+            );
+        }
+        while rx.try_recv().is_ok() {}
+        assert_eq!(
+            queue.enqueue_user(true, Arc::from(&b"typed"[..])),
+            PaneInputResult::Queued
+        );
+        let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+        assert_eq!(delivered, [b"\x1b[1;1:3A".to_vec(), b"typed".to_vec()]);
+    }
+
+    #[test]
+    fn backpressured_focus_coalesces_latest_state() {
+        let (queue, rx) = input_queue_fixture();
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        assert_eq!(
+            queue.enqueue_focus_report(false),
+            PaneInputResult::Backpressured
+        );
+        assert_eq!(
+            queue.enqueue_focus_report(true),
+            PaneInputResult::Backpressured
+        );
+        while rx.try_recv().is_ok() {}
+        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+        assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[I");
+        assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn input_worker_wakes_when_user_capacity_returns() {
+        let (mut queue, rx) = input_queue_fixture();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let count = wakes.clone();
+        let waker: Waker = Arc::new(move || {
+            count.fetch_add(1, Ordering::AcqRel);
+        });
+        queue.waker = waker.clone();
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        assert_eq!(
+            queue.enqueue_focus_report(false),
+            PaneInputResult::Backpressured
+        );
+        assert_eq!(wakes.load(Ordering::Acquire), 0);
+        let stop = AtomicBool::new(false);
+        let mut written = 0;
+        run_pty_input_worker(
+            crossbeam_channel::never(),
+            rx.clone(),
+            &queue.failed,
+            &stop,
+            &waker,
+            &queue.user_backpressured,
+            |bytes| {
+                written += 1;
+                if written == PTY_INPUT_QUEUE_DEPTH {
+                    stop.store(true, Ordering::Release);
+                }
+                Ok(bytes.len())
+            },
+        );
+        assert_eq!(
+            wakes.load(Ordering::Acquire),
+            1,
+            "restored capacity must wake the event loop once"
+        );
+        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+        assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[O");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_focus_follows_a_pane_to_another_window() {
+        use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut source = Mux::new();
+        source
+            .new_tab_with_geometry(
+                &cfg,
+                PtyGeometry::from_cell_size(80, 24, 8, 16),
+                Arc::new(|| {}),
+                &["/bin/cat".into()],
+                None,
+            )
+            .unwrap();
+        let id = source.active_focus().unwrap();
+        let (queue, rx) = input_queue_fixture();
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        source.panes.get_mut(&id).unwrap().pty_input = queue;
+        source.panes[&id]
+            .term
+            .term
+            .lock()
+            .unwrap()
+            .set_private_mode(PrivateMode::Named(NamedPrivateMode::ReportFocusInOut));
+        assert_eq!(
+            source.panes[&id].feed_focus_report(false),
+            PaneInputResult::Backpressured
+        );
+        let tab = source.detach_tab(0).unwrap();
+        let mut target = Mux::new();
+        target.attach_tab(tab, None);
+        while rx.try_recv().is_ok() {}
+        assert_eq!(
+            target.panes[&id].retry_pending_reports(),
+            PaneInputResult::Queued
+        );
+        assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[O");
+        assert!(rx.is_empty());
+        target.kill_children();
+    }
+
+    #[test]
+    fn backpressured_focus_precedes_later_authored_input() {
+        let (queue, rx) = input_queue_fixture();
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        assert_eq!(
+            queue.enqueue_focus_report(false),
+            PaneInputResult::Backpressured
+        );
+        while rx.try_recv().is_ok() {}
+        assert_eq!(
+            queue.enqueue_user(true, Arc::from(&b"typed"[..])),
+            PaneInputResult::Queued
+        );
+        let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+        assert_eq!(
+            delivered,
+            [b"\x1b[O".to_vec(), b"typed".to_vec()],
+            "refused focus must precede later input"
+        );
+    }
+
     #[test]
     fn full_user_channel_is_backpressure_and_releases_failed_reservation() {
         let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
         let (reply_tx, _reply_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
         let queued_user_bytes = Arc::new(AtomicUsize::new(0));
         let queue = PtyInputQueue {
+            pending_focus: Mutex::default(),
+            pending_key_releases: Mutex::default(),
+            user_backpressured: Arc::default(),
             user_tx,
             reply_tx,
             queued_user_bytes: queued_user_bytes.clone(),
@@ -5154,7 +6145,7 @@ mod node_tests {
 
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(Arc::from(&b"x"[..])),
+                queue.enqueue_user(true, Arc::from(&b"x"[..])),
                 PaneInputResult::Queued
             );
         }
@@ -5163,7 +6154,7 @@ mod node_tests {
             PTY_INPUT_QUEUE_DEPTH
         );
         assert_eq!(
-            queue.enqueue_user(Arc::from(&b"y"[..])),
+            queue.enqueue_user(true, Arc::from(&b"y"[..])),
             PaneInputResult::Backpressured
         );
         assert_eq!(
@@ -5195,6 +6186,9 @@ mod node_tests {
         let (reply_tx, _reply_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
         let queued_user_bytes = Arc::new(AtomicUsize::new(0));
         let queue = PtyInputQueue {
+            pending_focus: Mutex::default(),
+            pending_key_releases: Mutex::default(),
+            user_backpressured: Arc::default(),
             user_tx,
             reply_tx,
             queued_user_bytes: queued_user_bytes.clone(),
@@ -5207,12 +6201,12 @@ mod node_tests {
         let release = || Arc::<[u8]>::from(&b"\x1b[<0;1;1m"[..]);
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(Arc::from(&b"a"[..])),
+                queue.enqueue_user(true, Arc::from(&b"a"[..])),
                 PaneInputResult::Queued
             );
         }
         assert_eq!(
-            queue.enqueue_user(Arc::from(&b"a"[..])),
+            queue.enqueue_user(true, Arc::from(&b"a"[..])),
             PaneInputResult::Backpressured,
             "ordinary input stops at the lane's depth"
         );
@@ -5246,16 +6240,16 @@ mod node_tests {
 
         // A lane full by bytes still takes a release.
         assert_eq!(
-            queue.enqueue_user(Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES])),
+            queue.enqueue_user(true, Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES])),
             PaneInputResult::Queued
         );
         let rest = MAX_QUEUED_USER_INPUT_BYTES - queued_user_bytes.load(Ordering::Acquire);
         assert_eq!(
-            queue.enqueue_user(Arc::from(vec![b'y'; rest])),
+            queue.enqueue_user(true, Arc::from(vec![b'y'; rest])),
             PaneInputResult::Queued
         );
         assert_eq!(
-            queue.enqueue_user(Arc::from(&b"z"[..])),
+            queue.enqueue_user(true, Arc::from(&b"z"[..])),
             PaneInputResult::Backpressured
         );
         assert_eq!(
@@ -5280,6 +6274,9 @@ mod node_tests {
         let wakes = Arc::new(AtomicUsize::new(0));
         let wakes_for_callback = wakes.clone();
         let queue = PtyInputQueue {
+            pending_focus: Mutex::default(),
+            pending_key_releases: Mutex::default(),
+            user_backpressured: Arc::default(),
             user_tx,
             reply_tx,
             queued_user_bytes: queued_user_bytes.clone(),
@@ -5293,7 +6290,7 @@ mod node_tests {
         };
 
         assert_eq!(
-            queue.enqueue_user(Arc::from(vec![b'x'; 4 * 1024 * 1024 + 12])),
+            queue.enqueue_user(true, Arc::from(vec![b'x'; 4 * 1024 * 1024 + 12])),
             PaneInputResult::Queued
         );
         assert_eq!(
@@ -5303,7 +6300,7 @@ mod node_tests {
         let aggregate_headroom =
             MAX_QUEUED_USER_INPUT_BYTES - queued_user_bytes.load(Ordering::Acquire);
         assert_eq!(
-            queue.enqueue_user(Arc::from(vec![b'b'; aggregate_headroom])),
+            queue.enqueue_user(true, Arc::from(vec![b'b'; aggregate_headroom])),
             PaneInputResult::Queued,
             "the exact aggregate byte budget must remain admissible"
         );
@@ -5312,13 +6309,16 @@ mod node_tests {
             MAX_QUEUED_USER_INPUT_BYTES
         );
         assert_eq!(
-            queue.enqueue_user(Arc::from(&b"b"[..])),
+            queue.enqueue_user(true, Arc::from(&b"b"[..])),
             PaneInputResult::Backpressured,
             "one byte over the bounded user-input budget is retryable, not read-only or failed"
         );
         assert!(!failed.load(Ordering::Acquire));
         assert_eq!(
-            queue.enqueue_user(Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES + 1])),
+            queue.enqueue_user(
+                true,
+                Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES + 1])
+            ),
             PaneInputResult::Oversize,
             "oversized user input must be distinct and must not kill the pane"
         );
@@ -5394,23 +6394,31 @@ mod node_tests {
         let mut reply_tx = Some(reply_tx);
         let mut written = Vec::new();
         let mut writes = 0usize;
-        run_pty_input_worker(reply_rx, user_rx, &failed, &stop, &waker, |bytes| {
-            let count = bytes.len().min(97);
-            written.extend_from_slice(&bytes[..count]);
-            writes += 1;
-            if writes == 1 {
-                queued_reply_bytes.store(reply_bytes.len(), Ordering::Release);
-                reply_tx
-                    .take()
-                    .unwrap()
-                    .send(QueuedPtyInput {
-                        bytes: reply_bytes.clone(),
-                        queued_bytes: queued_reply_bytes.clone(),
-                    })
-                    .unwrap();
-            }
-            Ok(count)
-        });
+        run_pty_input_worker(
+            reply_rx,
+            user_rx,
+            &failed,
+            &stop,
+            &waker,
+            &AtomicBool::new(false),
+            |bytes| {
+                let count = bytes.len().min(97);
+                written.extend_from_slice(&bytes[..count]);
+                writes += 1;
+                if writes == 1 {
+                    queued_reply_bytes.store(reply_bytes.len(), Ordering::Release);
+                    reply_tx
+                        .take()
+                        .unwrap()
+                        .send(QueuedPtyInput {
+                            bytes: reply_bytes.clone(),
+                            queued_bytes: queued_reply_bytes.clone(),
+                        })
+                        .unwrap();
+                }
+                Ok(count)
+            },
+        );
 
         let mut expected = user_bytes.to_vec();
         expected.extend_from_slice(&reply_bytes);
@@ -5447,10 +6455,18 @@ mod node_tests {
         let stop = AtomicBool::new(false);
         let waker: Waker = Arc::new(|| {});
         let mut written = Vec::new();
-        run_pty_input_worker(reply_rx, user_rx, &failed, &stop, &waker, |bytes| {
-            written.extend_from_slice(bytes);
-            Ok(bytes.len())
-        });
+        run_pty_input_worker(
+            reply_rx,
+            user_rx,
+            &failed,
+            &stop,
+            &waker,
+            &AtomicBool::new(false),
+            |bytes| {
+                written.extend_from_slice(bytes);
+                Ok(bytes.len())
+            },
+        );
 
         assert_eq!(written, b"1u2");
         assert_eq!(queued_user_bytes.load(Ordering::Acquire), 0);
@@ -5470,7 +6486,7 @@ mod node_tests {
             PaneInputResult::Failed
         );
         assert_eq!(
-            queue.enqueue_user(Arc::from(&b"user"[..])),
+            queue.enqueue_user(true, Arc::from(&b"user"[..])),
             PaneInputResult::Failed,
             "a disconnected user-input worker is terminal rather than retryable"
         );
@@ -7045,6 +8061,30 @@ mod node_tests {
     }
 
     #[test]
+    fn initial_ssh_title_retains_uri_destination() {
+        assert_eq!(
+            initial_pane_title(&["ssh".into(), "ssh://alice@server:2222".into()]),
+            "ssh alice@server"
+        );
+    }
+
+    #[test]
+    fn initial_ssh_title_skips_option_operands() {
+        for args in [
+            vec!["ssh", "-p", "2222", "alice@server"],
+            vec!["ssh", "-J", "bastion", "alice@server"],
+            vec!["ssh", "-i", "/tmp/key", "alice@server"],
+        ] {
+            let argv: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert_eq!(
+                initial_pane_title(&argv),
+                "ssh alice@server",
+                "title must name the destination"
+            );
+        }
+    }
+
+    #[test]
     fn initial_pane_title_seeds_ssh_with_target_else_kettle() {
         // Plain shell (or empty argv) → "kettle" placeholder; the
         // cwd-basename fallback fills it in once OSC 7 arrives.
@@ -7506,28 +8546,133 @@ mod node_tests {
     }
 
     #[test]
+    fn followup_default_wsl_launch_pins_distribution_for_file_pastes() {
+        let argv = pane_launch_argv(&["wsl.exe".into()], || Some("Ubuntu".into()));
+        let path = std::path::PathBuf::from(r"\\wsl.localhost\Ubuntu\home\me\report.pdf");
+        assert!(
+            path_types_exactly(&argv, &path),
+            "the pane must accept its own distribution"
+        );
+        assert_eq!(
+            format_paths_for_paste(&argv, &[path]).unwrap(),
+            "'/home/me/report.pdf'"
+        );
+        let foreign = std::path::Path::new(r"\\wsl.localhost\Debian\home\me\report.pdf");
+        assert_eq!(
+            windows_path_for_wsl(foreign, wsl_distribution(&argv), |_| false),
+            None
+        );
+        // A later default change must not change the running pane's identity.
+        assert_eq!(pane_launch_argv(&argv, || panic!("already pinned")), argv);
+    }
+
+    #[test]
+    fn wsl_unc_paths_preserve_the_source_distribution() {
+        let source = std::path::Path::new(r"\\wsl.localhost\Debian\etc\hosts");
+        for (target, mounted, expected) in [
+            (Some("Debian"), false, Some("/etc/hosts")),
+            (Some("Ubuntu"), false, None),
+            (None, false, None),
+            (Some("Ubuntu"), true, Some("/mnt/wsl/Debian/etc/hosts")),
+            (None, true, Some("/mnt/wsl/Debian/etc/hosts")),
+        ] {
+            let actual = windows_path_for_wsl(source, target, |path| {
+                assert_eq!(path, "/mnt/wsl/Debian/etc/hosts");
+                mounted
+            });
+            assert_eq!(
+                actual.as_deref(),
+                expected,
+                "target {target:?}, mounted {mounted}: source distribution must survive"
+            );
+        }
+    }
+
+    #[test]
+    fn review_wsl_cached_verification_rejects_replaced_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let mounted = dir.path().join("mounted");
+        std::fs::write(&source, b"old inode").unwrap();
+        std::fs::hard_link(&source, &mounted).unwrap();
+        let verified = WslMountVerification::verify(&source, &mounted).unwrap();
+        assert!(verified.is_current(&source));
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"new inode").unwrap();
+        std::fs::rename(&replacement, &source).unwrap();
+        assert!(
+            !verified.is_current(&source),
+            "a file bind mount still refers to the old inode"
+        );
+    }
+
+    #[test]
+    fn wsl_cached_verification_rejects_replaced_mount() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let mounted = dir.path().join("mounted");
+        std::fs::write(&source, b"source inode").unwrap();
+        std::fs::hard_link(&source, &mounted).unwrap();
+        let verified = WslMountVerification::verify(&source, &mounted).unwrap();
+        assert!(verified.is_current(&source));
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"another inode").unwrap();
+        std::fs::rename(&replacement, &mounted).unwrap();
+        assert!(!verified.is_current(&source));
+    }
+
+    #[test]
     fn windows_path_to_wsl_translates_drive_and_unc() {
         use std::path::Path;
         assert_eq!(
-            windows_path_to_wsl(Path::new(r"C:\Users\me\v.mp4")).as_deref(),
+            windows_path_for_wsl(Path::new(r"C:\Users\me\v.mp4"), None, |_| false).as_deref(),
             Some("/mnt/c/Users/me/v.mp4")
         );
         // Lowercased drive, forward-slash input also accepted.
         assert_eq!(
-            windows_path_to_wsl(Path::new("D:/data/x")).as_deref(),
+            windows_path_for_wsl(Path::new("D:/data/x"), None, |_| false).as_deref(),
             Some("/mnt/d/data/x")
         );
         // WSL UNC share → in-distro absolute path (distro component dropped).
         assert_eq!(
-            windows_path_to_wsl(Path::new(r"\\wsl.localhost\Ubuntu\home\me\v.mp4")).as_deref(),
+            windows_path_for_wsl(
+                Path::new(r"\\wsl.localhost\Ubuntu\home\me\v.mp4"),
+                Some("Ubuntu"),
+                |_| false
+            )
+            .as_deref(),
             Some("/home/me/v.mp4")
         );
         assert_eq!(
-            windows_path_to_wsl(Path::new(r"\\wsl$\Debian\etc\hosts")).as_deref(),
+            windows_path_for_wsl(
+                Path::new(r"\\wsl$\Debian\etc\hosts"),
+                Some("Debian"),
+                |_| false
+            )
+            .as_deref(),
             Some("/etc/hosts")
         );
         // Already-POSIX / unrecognized → None (caller keeps the original).
-        assert_eq!(windows_path_to_wsl(Path::new("/home/me/v.mp4")), None);
+        assert_eq!(
+            windows_path_for_wsl(Path::new("/home/me/v.mp4"), None, |_| false),
+            None
+        );
+    }
+
+    #[test]
+    fn powershell_paths_escape_typographic_single_quotes() {
+        for quote in ['\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}'] {
+            let path = format!("C:\\tmp\\x{quote}; whoami; #.txt");
+            assert!(path_types_exactly(
+                &["pwsh".into()],
+                std::path::Path::new(&path)
+            ));
+            assert_eq!(
+                quote_path_for(PaneShellKind::PowerShell, &path),
+                format!("'C:\\tmp\\x{quote}{quote}; whoami; #.txt'"),
+                "PowerShell quote delimiters must be doubled"
+            );
+        }
     }
 
     #[test]
@@ -7564,12 +8709,14 @@ mod node_tests {
         let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         // WSL pane: Windows path → /mnt/c and POSIX-quoted.
         assert_eq!(
-            format_paths_for_paste(&s(&["wsl.exe"]), &[PathBuf::from(r"C:\Users\me\clip.mp4")]),
+            format_paths_for_paste(&s(&["wsl.exe"]), &[PathBuf::from(r"C:\Users\me\clip.mp4")])
+                .unwrap(),
             "'/mnt/c/Users/me/clip.mp4'"
         );
         // Native PowerShell pane: no translation, PowerShell quoting.
         assert_eq!(
-            format_paths_for_paste(&s(&["pwsh.exe"]), &[PathBuf::from(r"C:\Users\me\clip.mp4")]),
+            format_paths_for_paste(&s(&["pwsh.exe"]), &[PathBuf::from(r"C:\Users\me\clip.mp4")])
+                .unwrap(),
             "'C:\\Users\\me\\clip.mp4'"
         );
         // Multiple paths (CF_HDROP multi-select) → space-joined.
@@ -7577,7 +8724,8 @@ mod node_tests {
             format_paths_for_paste(
                 &s(&["bash"]),
                 &[PathBuf::from("/a/one.txt"), PathBuf::from("/a/two.txt")]
-            ),
+            )
+            .unwrap(),
             "'/a/one.txt' '/a/two.txt'"
         );
     }
@@ -7592,7 +8740,8 @@ mod node_tests {
             [(10, powershell.as_slice()), (20, wsl.as_slice())],
             &[PathBuf::from(r"C:\Users\me\a b.txt")],
             true,
-        );
+        )
+        .unwrap();
         assert_eq!(
             formatted,
             [
@@ -8578,6 +9727,29 @@ mod node_tests {
     }
 
     #[test]
+    fn closed_wsl_tabs_restore_the_reported_linux_directory() {
+        let snap = ClosedTab::capture(
+            0,
+            vec!["wsl.exe".into(), "-d".into(), "Ubuntu".into()],
+            Some("/home/kettle-undo-close-regression/project".into()),
+            None,
+        );
+        let (argv, cwd) = snap.launch();
+        assert_eq!(
+            argv,
+            [
+                "wsl.exe",
+                "--cd",
+                "/home/kettle-undo-close-regression/project",
+                "-d",
+                "Ubuntu"
+            ],
+            "undo close must restore WSL cwd through its launcher"
+        );
+        assert_eq!(cwd, None);
+    }
+
+    #[test]
     fn undo_close_tab_preserves_snapshot_on_spawn_failure() {
         let root = tempfile::tempdir().expect("temp dir");
         let argv = vec![root.path().join("missing-shell").display().to_string()];
@@ -8588,6 +9760,7 @@ mod node_tests {
                 original_index,
                 argv: argv.clone(),
                 cwd: cwd.clone(),
+                reconnect_launch: None,
             });
         }
         let cfg = Config {
@@ -8626,6 +9799,7 @@ mod node_tests {
                 original_index: i,
                 argv: vec![format!("argv-{i}")],
                 cwd: Some(format!("/tmp/{i}")),
+                reconnect_launch: None,
             });
         }
         // Cap honored: oldest 3 entries fell off the front.
@@ -8746,6 +9920,52 @@ mod node_tests {
         assert!(m.tabs.is_empty(), "all tabs gone");
         assert!(m.panes.is_empty(), "all panes gone");
         assert_eq!(m.active, 0, "active reset to 0");
+    }
+
+    #[test]
+    fn skewed_live_split_tree_round_trips_at_the_session_depth_limit() {
+        let mut tab = Tab {
+            root: Node::Leaf(1),
+            focus: 1,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+            title_override: None,
+            lanes: HashMap::new(),
+        };
+        for id in 2..=60 {
+            assert!(insert_split(&mut tab, id, Dir::Horizontal, false));
+        }
+        let mux = Mux::new();
+        let saved = crate::session::STab {
+            root: mux.snap(&tab.root),
+            focus: 59,
+            title_override: None,
+            zoomed: false,
+        };
+        let session = crate::session::Session {
+            tabs: vec![saved.clone()],
+            active: 0,
+            theme: None,
+            windows: vec![crate::session::SWindow {
+                tabs: vec![saved],
+                active: 0,
+                geometry: None,
+            }],
+        };
+        let directory = kettle_test_support::private_tempdir("kettle-split-depth-");
+        let path = directory.path().join("session.json");
+        crate::session::save_to_path(&session, &path).unwrap();
+        assert!(
+            crate::session::load_from_path(&path).is_some(),
+            "the deepest supported skewed tree must load"
+        );
+        assert!(
+            !insert_split(&mut tab, 61, Dir::Horizontal, false),
+            "one more split must be refused before making an unloadable session"
+        );
+        assert_eq!(tab.focus, 60, "refusal must preserve focus and tree");
     }
 
     #[test]
@@ -9077,6 +10297,7 @@ mod node_tests {
         );
         // Run by others but not by its owner, this user: none for the pane.
         std::fs::set_permissions(&kettle, std::fs::Permissions::from_mode(0o011)).unwrap();
+        // SAFETY: geteuid takes no pointers and only queries the effective process identity.
         if unsafe { libc::geteuid() } != 0 {
             assert!(
                 super::path_with_kettle(&path, &app).is_some(),
@@ -9327,7 +10548,7 @@ mod node_tests {
             .find("pane_environment(cfg, id, std::process::id())")
             .expect("pane environment names the pane");
         let spawned = spawn
-            .find("Terminal::new_with_env_and_output_geometry_and_capabilities(")
+            .find("Terminal::new_with_launch_environment(")
             .expect("terminal spawn");
         assert!(allocated < environment && environment < spawned);
         assert_eq!(spawn.matches("NEXT_PANE_ID.fetch_add(").count(), 1);

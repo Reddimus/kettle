@@ -375,11 +375,15 @@ enum WordEraseMode {
 
 #[cfg(unix)]
 fn live_canonical_eof_rules(fd: RawFd) -> Result<(CanonicalEofRules, u8, u8)> {
+    // SAFETY: termios contains only integer fields and arrays, for which all-zero bits are valid.
     let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
+    // SAFETY: attrs is exclusively writable termios storage for the call; fd is borrowed from
+    // the PTY.
     if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
         return Err(std::io::Error::last_os_error())
             .context("cannot read live PTY termios for stdin forwarding");
     }
+    // SAFETY: _PC_VDISABLE is a valid fpathconf query and takes no pointer arguments.
     let disabled = unsafe { libc::fpathconf(fd, libc::_PC_VDISABLE) };
     if !(0..=u8::MAX as libc::c_long).contains(&disabled) {
         anyhow::bail!("cannot determine the PTY's disabled control-character value");
@@ -669,11 +673,11 @@ fn unix_child_exit_code_unreaped(pid: u32) -> io::Result<Option<u32>> {
     let pid = libc::pid_t::try_from(pid)
         .map_err(|_| io::Error::other("PTY child process id is out of range"))?;
 
-    // SAFETY: `info` is initialized for the kernel, `pid` identifies this
-    // process's direct child, and WNOWAIT explicitly leaves its wait status
-    // available to portable-pty's later `try_wait`.
+    // SAFETY: siginfo_t contains only integer/raw-pointer fields; zero bits are valid.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     loop {
+        // SAFETY: info is writable siginfo_t storage; pid selects the direct child and WNOWAIT
+        // preserves its status.
         let result = unsafe {
             libc::waitid(
                 libc::P_PID,
@@ -685,9 +689,13 @@ fn unix_child_exit_code_unreaped(pid: u32) -> io::Result<Option<u32>> {
         if result == 0 {
             // POSIX reports a successful WNOHANG probe with si_pid == 0 while
             // the selected child is still running.
+            // SAFETY: Successful waitid initialized the child-status layout, or left the
+            // zero-initialized no-event value.
             if unsafe { info.si_pid() } == 0 {
                 return Ok(None);
             }
+            // SAFETY: waitid returned a nonzero child PID, so the child-status union fields are
+            // initialized.
             let status = unsafe { info.si_status() };
             let code = match info.si_code {
                 libc::CLD_EXITED => status as u32,
@@ -741,6 +749,8 @@ impl UnixPtyWatcher {
     fn new(pid: u32, _master_fd: RawFd) -> Self {
         #[cfg(target_os = "linux")]
         let pidfd = {
+            // SAFETY: SYS_pidfd_open takes the integer PID and zero flags, with no pointer
+            // arguments.
             let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
             if raw < 0 {
                 log::debug!(
@@ -778,6 +788,8 @@ impl UnixPtyWatcher {
 
     #[cfg(target_os = "macos")]
     fn macos_kqueue(pid: u32, master_fd: RawFd) -> io::Result<OwnedFd> {
+        // SAFETY: kqueue takes no arguments and transfers ownership of any returned descriptor
+        // to the caller.
         let raw = unsafe { libc::kqueue() };
         if raw < 0 {
             return Err(io::Error::last_os_error());
@@ -802,6 +814,8 @@ impl UnixPtyWatcher {
                 udata: std::ptr::null_mut(),
             },
         ];
+        // SAFETY: queue is owned; changes contains two initialized records and no event output
+        // buffer is requested.
         let registered = unsafe {
             libc::kevent(
                 queue.as_raw_fd(),
@@ -839,6 +853,8 @@ impl UnixPtyWatcher {
             ];
             loop {
                 let timeout = deadline.map(poll_timeout_ms_until).unwrap_or(-1);
+                // SAFETY: fds is exclusively writable for exactly fds.len() pollfd entries
+                // throughout the call.
                 let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) };
                 if result == 0 {
                     return Ok(None);
@@ -869,9 +885,13 @@ impl UnixPtyWatcher {
 
         #[cfg(target_os = "macos")]
         if let Some(queue) = &self.kqueue {
+            // SAFETY: kevent contains integer and raw-pointer fields; zero is a valid initial
+            // value for each.
             let mut events: [libc::kevent; 2] = unsafe { std::mem::zeroed() };
             loop {
                 let timeout = deadline.map(kqueue_timeout_until);
+                // SAFETY: queue is owned; events has room for two records and timeout, if
+                // present, lives through the call.
                 let count = unsafe {
                     libc::kevent(
                         queue.as_raw_fd(),
@@ -944,6 +964,7 @@ impl UnixPtyWatcher {
                 .map_or(self.fallback_timeout_ms, |remaining| {
                     remaining.min(self.fallback_timeout_ms)
                 });
+            // SAFETY: poll_fd is a live, exclusively writable pollfd and the count is one.
             let result = unsafe { libc::poll(&mut poll_fd, 1, timeout) };
             if result < 0 {
                 let error = io::Error::last_os_error();
@@ -1003,6 +1024,7 @@ fn wait_for_master_until(master_fd: RawFd, deadline: std::time::Instant) -> io::
             events: libc::POLLIN,
             revents: 0,
         };
+        // SAFETY: fd is a live, exclusively writable pollfd and the count is one.
         let result = unsafe { libc::poll(&mut fd, 1, poll_timeout_ms_until(deadline)) };
         if result == 0 || std::time::Instant::now() >= deadline {
             return Ok(false);
@@ -1051,8 +1073,12 @@ fn spawn_windows_child_exit_observer(
     let source = child
         .as_raw_handle()
         .ok_or_else(|| io::Error::other("ConPTY child has no process handle"))?;
+    // SAFETY: GetCurrentProcess takes no pointers and returns a borrowed pseudo-handle, which
+    // is not closed.
     let process = unsafe { GetCurrentProcess() };
     let mut duplicate: HANDLE = std::ptr::null_mut();
+    // SAFETY: child keeps source live; both process handles denote this process and duplicate
+    // is writable HANDLE storage.
     let duplicated = unsafe {
         DuplicateHandle(
             process,
@@ -1072,6 +1098,8 @@ fn spawn_windows_child_exit_observer(
     std::thread::Builder::new()
         .name("kettle-child-observer".into())
         .spawn(move || {
+            // SAFETY: handle owns the duplicated process handle throughout the wait; INFINITE
+            // is a valid timeout.
             let result = unsafe { WaitForSingleObject(handle.as_raw_handle() as HANDLE, INFINITE) };
             match result {
                 WAIT_OBJECT_0 => {
@@ -1127,6 +1155,15 @@ pub struct PtyGeometry {
     pub pixel_height: u16,
 }
 
+/// Overrides needed when reproducing an existing direct client launch.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LaunchOverrides<'a> {
+    /// Unix invocation name, independent of the executable path.
+    pub argv0: Option<&'a str>,
+    /// Variables absent from the original client, removed after pane env.
+    pub remove_env: &'a [String],
+}
+
 /// Runtime capabilities that influence terminal protocol replies.
 ///
 /// These are separate from the parser's compiled feature set: a capability
@@ -1135,6 +1172,8 @@ pub struct PtyGeometry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalCapabilities {
     pub osc52_copy: bool,
+    /// Forward clipboard reads to an owner that enforces the live policy.
+    pub osc52_read: bool,
     pub unnegotiated_modified_enter: bool,
     /// Spawn the command inside an OS-owned descendant containment boundary.
     /// Currently meaningful for headless automation on Windows.
@@ -1153,6 +1192,7 @@ impl Default for TerminalCapabilities {
     fn default() -> Self {
         Self {
             osc52_copy: true,
+            osc52_read: false,
             unnegotiated_modified_enter: true,
             contain_process_tree: false,
             observe_child_exit: false,
@@ -1382,10 +1422,10 @@ fn resolve_kitty_placement(
         || source_width != image.width
         || source_height != image.height)
         .then_some(ImageSourceRect {
-            x: source_x,
-            y: source_y,
-            width: source_width,
-            height: source_height,
+            x: source_x as f32,
+            y: source_y as f32,
+            width: source_width as f32,
+            height: source_height as f32,
         });
     Some(ResolvedKittyPlacement {
         source_rect,
@@ -2643,7 +2683,7 @@ fn apply_sync_marker(
 
     extractor.set_graphics_deferred(false);
     let mut replay_failed = false;
-    extractor.feed_with(graphics.as_bytes(), |extractor, chunk| {
+    extractor.replay_graphics_with(graphics, |extractor, chunk| {
         if replay_failed {
             return;
         }
@@ -2810,6 +2850,15 @@ fn publish_output_if_ready(
     if processor.sync_timeout().sync_timeout().is_some() {
         return false;
     }
+    // This is an invalidation counter, not a version paired with the grid.
+    // Frame/cache readers sample it before reading the locked grid (navigation
+    // samples while locked), so an unpublished mutation can only leave them
+    // tagged with an older generation. This increment and wake invalidate that
+    // state again. Frames retain a cutoff from before all grid-dependent cache
+    // checks and captures, then recheck after presenting; snapshot reuse keeps
+    // that same tag. Sampling after cache checks could consume this increment
+    // while keeping stale results. Search also checks saved haystack contents
+    // before resuming work, even when this counter has not advanced yet.
     out_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
     output_wake.request();
     true
@@ -3550,6 +3599,8 @@ mod foreground_job_tests {
                 .ok()
                 .and_then(|foreground| {
                     let child_pid = terminal.child_pid()? as libc::pid_t;
+                    // SAFETY: getpgid only queries the integer child PID; a child that has
+                    // exited may return an error.
                     let child_group = unsafe { libc::getpgid(child_pid) };
                     (child_group >= 0).then_some(foreground != child_group as u32)
                 });
@@ -3708,10 +3759,10 @@ mod local_output_tests {
         assert_eq!(
             tiles[0].source_rect,
             Some(ImageSourceRect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
             })
         );
     }
@@ -4053,6 +4104,10 @@ fn child_wslenv(parent: &str, extra_env: &[(String, String)]) -> String {
 /// the argv to spawn for it.
 pub type ShellChoice = (String, Vec<String>);
 
+static SHELL_CACHE: std::sync::OnceLock<Vec<ShellChoice>> = std::sync::OnceLock::new();
+// Keep the fallback separate: publishing it must not wait on a running probe.
+static SHELL_FALLBACK: std::sync::OnceLock<Vec<ShellChoice>> = std::sync::OnceLock::new();
+
 /// Auto-detect the shells to offer in
 /// the new-tab dropdown, Windows-Terminal style (and in WT's order). Always
 /// returns at least one entry.
@@ -4070,8 +4125,7 @@ pub type ShellChoice = (String, Vec<String>);
 /// `Ctrl+Shift+N` press. Detection is injected into the inner helpers so
 /// they are unit-testable without depending on what is installed.
 pub fn detect_shells() -> Vec<ShellChoice> {
-    static CACHE: std::sync::OnceLock<Vec<ShellChoice>> = std::sync::OnceLock::new();
-    CACHE
+    SHELL_CACHE
         .get_or_init(|| {
             #[cfg(windows)]
             {
@@ -4090,15 +4144,44 @@ pub fn detect_shells() -> Vec<ShellChoice> {
         .clone()
 }
 
+/// Return cached choices while shell detection runs in the background.
+pub fn cached_shells() -> Option<Vec<ShellChoice>> {
+    cached_shells_from(&SHELL_CACHE).or_else(|| cached_shells_from(&SHELL_FALLBACK))
+}
+
+fn cached_shells_from(cache: &std::sync::OnceLock<Vec<ShellChoice>>) -> Option<Vec<ShellChoice>> {
+    cache.get().cloned()
+}
+
 /// Dropdown parity: warm the `detect_shells` cache off the UI thread
 /// (the probes can block up to ~4s worst-case on a wedged WSL service + a
 /// slow vswhere). Spawned once from `App::resumed`.
-pub fn prewarm_shell_detection() {
-    let _ = std::thread::Builder::new()
-        .name("kettle-shell-probe".into())
-        .spawn(|| {
-            let _ = detect_shells();
-        });
+pub fn prewarm_shell_detection(waker: crate::Waker) {
+    prewarm_shell_detection_with(&SHELL_FALLBACK, waker, |waker| {
+        std::thread::Builder::new()
+            .name("kettle-shell-probe".into())
+            .spawn(move || {
+                let _ = detect_shells();
+                waker();
+            })
+            .map(|_| ())
+    });
+}
+
+fn prewarm_shell_detection_with(
+    fallback_cache: &std::sync::OnceLock<Vec<ShellChoice>>,
+    waker: crate::Waker,
+    spawn: impl FnOnce(crate::Waker) -> std::io::Result<()>,
+) {
+    if let Err(error) = spawn(waker.clone()) {
+        log::warn!("cannot spawn shell detector: {error}");
+        #[cfg(windows)]
+        let fallback = ("Command Prompt", "cmd.exe");
+        #[cfg(not(windows))]
+        let fallback = ("Shell", "/bin/sh");
+        let _ = fallback_cache.set(vec![(fallback.0.into(), vec![fallback.1.into()])]);
+        waker();
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -5245,6 +5328,55 @@ impl Terminal {
         waker: Waker,
         output_tx: Option<PtyOutputSender>,
     ) -> Result<Terminal> {
+        Self::new_with_launch_environment(
+            argv,
+            cwd,
+            scrollback,
+            scrollback_bytes,
+            geometry,
+            cursor_blink,
+            cursor_shape,
+            word_delimiters,
+            term_env,
+            colorterm_env,
+            extra_env,
+            &LaunchOverrides::default(),
+            login_shell,
+            shell_integration,
+            shell_startup,
+            capabilities,
+            cwd_policy,
+            event_tx,
+            waker,
+            output_tx,
+        )
+    }
+
+    /// Spawn a direct client with its invocation name and absent environment
+    /// variables preserved. Removals apply after the pane environment.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_launch_environment(
+        argv: &[String],
+        cwd: Option<&std::path::Path>,
+        scrollback: usize,
+        scrollback_bytes: usize,
+        geometry: PtyGeometry,
+        cursor_blink: bool,
+        cursor_shape: CursorShape,
+        word_delimiters: Option<&str>,
+        term_env: &str,
+        colorterm_env: &str,
+        extra_env: &[(String, String)],
+        launch: &LaunchOverrides<'_>,
+        login_shell: bool,
+        shell_integration: bool,
+        shell_startup: &ShellStartup,
+        capabilities: TerminalCapabilities,
+        cwd_policy: WorkingDirectoryPolicy,
+        event_tx: crossbeam_channel::Sender<TermEvent>,
+        waker: Waker,
+        output_tx: Option<PtyOutputSender>,
+    ) -> Result<Terminal> {
         let cols = geometry.columns;
         let rows = geometry.rows;
         let pty = portable_pty::native_pty_system();
@@ -5267,6 +5399,13 @@ impl Terminal {
         // `colorterm` stay authoritative for those protocol-critical values.
         for (name, value) in extra_env {
             cmd.env(name, value);
+        }
+        #[cfg(unix)]
+        if let Some(argv0) = launch.argv0 {
+            cmd.set_argv0(argv0);
+        }
+        for name in launch.remove_env {
+            cmd.env_remove(name);
         }
         // Honor cfg.term + cfg.colorterm (empty preserves
         // kettle's default).
@@ -5350,6 +5489,12 @@ impl Terminal {
         };
         let history_limit = effective_scrollback_lines(scrollback, scrollback_bytes, cols, rows);
         let mut tconf = TermConfig {
+            // Live OSC 52 permissions are enforced by the UI at journal drain.
+            osc52: if capabilities.osc52_read {
+                alacritty_terminal::term::Osc52::CopyPaste
+            } else {
+                alacritty_terminal::term::Osc52::OnlyCopy
+            },
             scrolling_history: history_limit,
             // Kettle's winit input path implements Kitty's negotiated CSI-u
             // protocol (including repeat/release, keypad identities, alternate
@@ -5652,6 +5797,8 @@ impl Terminal {
                                                 // exec writer arbiter has the
                                                 // shared master description in
                                                 // nonblocking mode.
+                                                // SAFETY: poll_fd is a live, exclusively
+                                                // writable pollfd and the count is one.
                                                 let _ = unsafe { libc::poll(&mut poll_fd, 1, 250) };
                                             }
                                             #[cfg(not(unix))]
@@ -6607,6 +6754,11 @@ impl Terminal {
     /// since?" without draining the event channel (plain text emits no
     /// `TermEvent`). Bumped with `Release` before the wakeup fires; read with
     /// `Acquire`.
+    ///
+    /// This invalidates cached state; it is not an exact grid revision. Sample
+    /// before any dependent cache checks or grid captures, and retain that
+    /// sample with the cache or candidate frame. Recheck after presenting so
+    /// publication coalesced into an earlier wake still gets a retry.
     pub fn output_generation(&self) -> u64 {
         self.out_gen.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -6691,7 +6843,11 @@ impl Terminal {
             .context("PTY master is unavailable")?
             .as_raw_fd()
             .context("PTY master has no Unix file descriptor")?;
+        // SAFETY: termios contains only integer fields and arrays, for which all-zero bits are
+        // valid.
         let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
+        // SAFETY: The borrowed master keeps fd live and attrs is writable termios storage for
+        // this call.
         if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
             return Err(std::io::Error::last_os_error())
                 .context("cannot read live PTY termios for key encoding");
@@ -6720,6 +6876,8 @@ impl Terminal {
             .context("PTY master is unavailable")?
             .as_raw_fd()
             .context("PTY master has no Unix file descriptor")?;
+        // SAFETY: The borrowed master keeps fd live; tcgetpgrp only queries its terminal
+        // process group.
         let foreground = unsafe { libc::tcgetpgrp(fd) };
         if foreground < 0 {
             return Err(std::io::Error::last_os_error())
@@ -7934,9 +8092,9 @@ impl Terminal {
         self.latched.take_cursor_blinking_changed()
     }
 
-    /// The newest OSC 52 write for each target since the last call.
-    pub fn take_clipboard_stores(&self) -> Vec<(crate::ClipboardType, String)> {
-        self.latched.take_clipboard_stores()
+    /// OSC 52 stores and loads in arrival order since the last call.
+    pub fn take_clipboard_events(&self) -> Vec<TermEvent> {
+        self.latched.take_clipboard_events()
     }
 
     /// Whether the reader finished: the PTY closed after the last of its
@@ -8547,6 +8705,8 @@ fn fcntl_retry(
     argument: libc::c_int,
 ) -> std::io::Result<libc::c_int> {
     loop {
+        // SAFETY: All callers use F_GETFL, F_SETFL or F_DUPFD_CLOEXEC on borrowed descriptors;
+        // these commands accept the integer argument supplied here, never a pointer.
         let result = unsafe { libc::fcntl(fd, command, argument) };
         if result >= 0 {
             return Ok(result);
@@ -8582,6 +8742,8 @@ impl UnixPtyStdinLease {
         let acquired = (|| {
             let duplicated = fcntl_retry(master_fd, libc::F_DUPFD_CLOEXEC, 0)
                 .context("cannot duplicate PTY descriptor for stdin termios")?;
+            // SAFETY: F_DUPFD_CLOEXEC returned a new owned descriptor, transferred exactly once
+            // into OwnedFd.
             let termios_fd = unsafe { OwnedFd::from_raw_fd(duplicated) };
             let original_status_flags = fcntl_retry(termios_fd.as_raw_fd(), libc::F_GETFL, 0)
                 .context("cannot read PTY status flags for stdin arbitration")?;
@@ -8790,219 +8952,10 @@ impl PtyStdin {
     }
 }
 
-/// Parser state for [`AnsiStripper`], carried across calls so a CSI/OSC
-/// sequence split across two PTY-read chunks (each capped at
-/// `PTY_READ_BUFFER_BYTES`) is still recognized as a single sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum StripState {
-    /// Not inside any escape sequence; plain bytes pass through.
-    #[default]
-    Plain,
-    /// Just saw a bare ESC; the next byte decides CSI (`[`), OSC (`]`), or a
-    /// single-char escape (anything else).
-    EscSeen,
-    /// Inside an ESC sequence whose intermediates are `0x20..=0x2f`, waiting
-    /// for its `0x30..=0x7e` final byte.
-    EscapeIntermediate,
-    /// Inside `ESC [ params...`, scanning for the CSI final byte
-    /// (`0x40..=0x7e`).
-    Csi,
-    /// Inside `ESC ] ...`, scanning for BEL (`0x07`) or ST.
-    Osc,
-    /// Inside a DCS/APC/PM/SOS control string (`ESC P`, `ESC _`, `ESC ^`,
-    /// `ESC X`), scanning for ST.
-    ///
-    /// The whole body is dropped. It can hold Sixel pixel data or Kitty
-    /// graphics payloads, which carry encoded file paths and shared-memory
-    /// names and must not reach the session log as text.
-    String,
-}
+pub use kettle_vt::AnsiStripper;
 
-/// Longest unterminated control sequence the log stripper drops before it
-/// resynchronizes to plain text.
-///
-/// Every terminator the state machine honors is one the writer chooses to
-/// send. A child that simply never sends one would otherwise suppress the
-/// whole remaining log. `kettle exec`'s stripper draws the same line at the
-/// same place.
-const MAX_LOGGED_CONTROL_SEQUENCE_BYTES: usize = 64 * 1024;
-
-/// Terminator parity (`plugins/logger.py` extension): a persistent-state
-/// stripper for ANSI/OSC escape sequences, used by the per-pane session-log
-/// path (`log_strip_ansi`). Recognizes:
-///   - CSI (Control Sequence Introducer): `ESC [ params final`
-///     where final is in `0x40..=0x7e`.
-///   - OSC (Operating System Command): `ESC ] ... terminator`
-///     where terminator is BEL (0x07) or ST (`ESC \\`).
-///   - DCS/SOS/PM/APC strings: `ESC P`, `ESC X`, `ESC ^`, or `ESC _`, with
-///     the body dropped up to ST.
-///   - Other escapes: `ESC`, any `0x20..=0x2f` intermediates, then one final
-///     byte.
-///
-/// Unlike a stateless scan, `AnsiStripper` carries its FSM state across
-/// `strip` calls: a CSI/OSC sequence whose terminator lands in the *next*
-/// 64 KiB PTY read is still tracked as "mid-sequence" and its continuation
-/// bytes (raw SGR parameters, the tail of an OSC 8 URI, a window title) are
-/// dropped rather than leaking into the log as literal text. Plain
-/// printable bytes + newlines pass through unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct AnsiStripper {
-    state: StripState,
-    /// UTF-8 continuation bytes still owed by the character being decoded.
-    ///
-    /// `0x9c` is both the 8-bit ST and a UTF-8 continuation byte. Without this
-    /// count, a payload containing `末` (`e6 9c ab`) would end the control
-    /// string mid-character and leak the rest into the log. The VT extractor
-    /// draws the same distinction.
-    utf8_continuation: u8,
-    /// Whether the lead byte of the current UTF-8 scalar reached the log.
-    /// Continuations follow their lead across parser-state transitions.
-    utf8_emitted: bool,
-    /// Bytes consumed since the `ESC` that opened the current sequence.
-    ///
-    /// Counted in every non-plain state, reset when a fresh `ESC` arrives, and
-    /// compared against [`MAX_LOGGED_CONTROL_SEQUENCE_BYTES`].
-    control_bytes: usize,
-}
-
-impl AnsiStripper {
-    /// A fresh stripper, starting outside any escape sequence.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Strip ANSI escape sequences from `input`, resuming any sequence left
-    /// in progress by a previous call on `self`. See the type docs for the
-    /// sequence forms recognized.
-    pub fn strip(&mut self, input: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(input.len());
-        for &b in input {
-            // Mid-character: this byte belongs to the character being decoded
-            // and cannot be a control, in any state. A byte that is not a
-            // continuation means the lead was malformed, so stop shielding at
-            // once rather than swallowing what follows.
-            if self.utf8_continuation > 0 {
-                if matches!(b, 0x80..=0xbf) {
-                    self.utf8_continuation -= 1;
-                    if !matches!(self.state, StripState::Plain) {
-                        self.control_bytes += 1;
-                        if self.control_bytes > MAX_LOGGED_CONTROL_SEQUENCE_BYTES {
-                            self.state = StripState::Plain;
-                        }
-                    }
-                    if self.utf8_emitted {
-                        out.push(b);
-                    }
-                    continue;
-                }
-                self.utf8_continuation = 0;
-            }
-            // Track leads in every state. A malformed escape can contain one,
-            // and consuming its lead while emitting continuations after the
-            // state returns to Plain would manufacture invalid UTF-8.
-            self.utf8_continuation = match b {
-                0xc2..=0xdf => 1,
-                0xe0..=0xef => 2,
-                0xf0..=0xf4 => 3,
-                _ => 0,
-            };
-            self.utf8_emitted = matches!(self.state, StripState::Plain);
-            if b == 0x1b {
-                self.control_bytes = 0;
-            } else if !matches!(self.state, StripState::Plain) {
-                self.control_bytes += 1;
-                if self.control_bytes > MAX_LOGGED_CONTROL_SEQUENCE_BYTES {
-                    // Give up on the terminator and resume logging. The byte
-                    // that tripped the bound is dropped with the sequence it
-                    // belongs to; `utf8_emitted` is already false, so if it was
-                    // a UTF-8 lead its continuations go with it rather than
-                    // reaching the log alone.
-                    self.state = StripState::Plain;
-                    continue;
-                }
-            }
-            match self.state {
-                StripState::Plain => {
-                    if b == 0x1b {
-                        self.state = StripState::EscSeen;
-                        self.control_bytes = 0;
-                    } else {
-                        out.push(b);
-                    }
-                }
-                StripState::EscSeen => {
-                    if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
-                        out.push(b);
-                    }
-                    self.state = Self::escape_follower(b);
-                }
-                StripState::EscapeIntermediate => {
-                    if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
-                        out.push(b);
-                    }
-                    if b == 0x1b {
-                        self.state = StripState::EscSeen;
-                    } else if b == 0x18 || b == 0x1a || (0x30..=0x7e).contains(&b) {
-                        self.state = StripState::Plain;
-                    }
-                }
-                StripState::Csi => {
-                    if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
-                        out.push(b);
-                    }
-                    if b == 0x1b {
-                        self.state = StripState::EscSeen;
-                    } else if b == 0x18 || b == 0x1a {
-                        // CAN/SUB cancel the sequence. Otherwise the next
-                        // ordinary character is eaten as the CSI final byte,
-                        // and `ESC [ 31 CAN hello` logs `ello` while the
-                        // terminal renders `hello`.
-                        self.state = StripState::Plain;
-                    } else if (0x40..=0x7e).contains(&b) {
-                        self.state = StripState::Plain;
-                    }
-                    // Else still inside CSI params — keep scanning.
-                }
-                StripState::Osc => {
-                    if b == 0x07 || b == 0x9c {
-                        self.state = StripState::Plain; // BEL or 8-bit ST
-                    } else if b == 0x18 || b == 0x1a {
-                        // CAN/SUB cancel the string (DEC). Otherwise the text
-                        // after a cancelled OSC is dropped from the log.
-                        self.state = StripState::Plain;
-                    } else if b == 0x1b {
-                        // ESC terminates OSC and begins a fresh escape. This is
-                        // also how ESC \ represents ST.
-                        self.state = StripState::EscSeen;
-                    }
-                    // Else still inside the OSC payload — keep scanning.
-                }
-                StripState::String => {
-                    if b == 0x9c {
-                        self.state = StripState::Plain; // 8-bit ST
-                    } else if b == 0x18 || b == 0x1a {
-                        self.state = StripState::Plain; // cancelled
-                    } else if b == 0x1b {
-                        self.state = StripState::EscSeen;
-                    }
-                    // Else still inside the payload — dropped, not logged.
-                }
-            }
-        }
-        out
-    }
-
-    fn escape_follower(b: u8) -> StripState {
-        match b {
-            b'[' => StripState::Csi,
-            b']' => StripState::Osc,
-            b'P' | b'X' | b'^' | b'_' => StripState::String,
-            0x20..=0x2f => StripState::EscapeIntermediate,
-            0x00..=0x17 | 0x19 | 0x1b..=0x1f | 0x7f => StripState::EscSeen,
-            _ => StripState::Plain,
-        }
-    }
-}
+#[cfg(test)]
+const MAX_LOGGED_CONTROL_SEQUENCE_BYTES: usize = kettle_vt::control::MAX_CONTROL_SEQUENCE_BYTES;
 
 #[derive(Default)]
 struct SessionLogFilter {
@@ -9389,7 +9342,13 @@ fn apply_animation_snapshot(
                 return;
             }
             let started = match animations.get(&id) {
-                Some(previous) if previous.state.running == state.running => previous.started,
+                Some(previous)
+                    if previous.state.running == state.running
+                        && previous.state.selection_serial == state.selection_serial
+                        && (!state.running || previous.state.current == state.current) =>
+                {
+                    previous.started
+                }
                 _ => std::time::Instant::now(),
             };
             animations.insert(

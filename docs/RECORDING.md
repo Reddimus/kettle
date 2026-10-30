@@ -148,10 +148,11 @@ needed.
 > the GUI reads `record-max-bytes` — `kettle exec` loads no config file.
 > `kettle exec` fails closed with status 125 if the requested file cannot be
 > secured before the child is started; a later disk/write failure stops
-> capture without killing an already running child. Ordinary completion polls
-> and joins the recording worker within a fixed bound; timeout and
-> cancellation perform only a zero-duration safe completion probe, report an
-> unfinished trace, and never wait in a join. See [AGENT.md](AGENT.md) for
+> capture without killing an already running child. Completion, timeout and
+> cancellation give the recording worker up to two seconds to flush and close.
+> A healthy worker is joined and releases the cast's lock before exec returns;
+> a worker that fails or exceeds this grace reports an incomplete trace and is
+> detached. This can add up to two seconds to stop teardown. See [AGENT.md](AGENT.md) for
 > `kettle exec`.
 
 ## What it captures

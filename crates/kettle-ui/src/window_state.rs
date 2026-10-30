@@ -701,7 +701,7 @@ impl MediaPasteReceiptState {
 /// ticked, and is what Esc restores.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ThemePickerState {
-    pub(crate) query: String,
+    pub(crate) query: crate::text_editor::TextEditor,
     pub(crate) selected: usize,
     pub(crate) opened_on: String,
 }
@@ -897,6 +897,8 @@ pub(crate) struct WindowState {
     /// prevents a later geometry or modal transition from swallowing the
     /// matching release and leaving a Kitty-protocol client with a stuck key.
     pub(crate) terminal_owned_key_releases: std::collections::HashSet<winit::keyboard::PhysicalKey>,
+    pub(crate) terminal_key_release_bytes:
+        std::collections::HashMap<(PhysicalKey, u64), crate::app::TerminalKeyRelease>,
     pub(crate) terminal_key_recipients:
         std::collections::HashMap<PhysicalKey, std::collections::HashSet<u64>>,
     /// Keys whose press closed or replaced a Kettle modal (the search bar,
@@ -992,9 +994,9 @@ pub(crate) struct WindowState {
     /// `Some((query, selected))` while the SSH launcher is open. Selection is
     /// over the fuzzy-ranked configured-host list; a query with no match still
     /// connects to the typed target on Enter.
-    pub(crate) ssh_input: Option<(String, usize)>,
+    pub(crate) ssh_input: Option<(crate::text_editor::TextEditor, usize)>,
     /// `Some((query, selected))` while the command palette is open.
-    pub(crate) palette_input: Option<(String, usize)>,
+    pub(crate) palette_input: Option<(crate::text_editor::TextEditor, usize)>,
     /// `Action::OpenSettings` overlay navigation. `Some` while the
     /// in-app settings panel is open.
     pub(crate) settings_nav: Option<crate::settings::SettingsNav>,
@@ -1015,7 +1017,7 @@ pub(crate) struct WindowState {
     pub(crate) last_bg_frame: Option<usize>,
     /// Terminator parity: `Action::OpenLayoutPicker` modal state —
     /// (typed query, selected index) against `Session::list_layouts`.
-    pub(crate) layout_picker_input: Option<(String, usize)>,
+    pub(crate) layout_picker_input: Option<(crate::text_editor::TextEditor, usize)>,
     /// Saved-layout names captured when the picker opens. The directory is
     /// refreshed for each opening, never on every painted frame.
     pub(crate) layout_picker_entries: Vec<String>,
@@ -1065,6 +1067,7 @@ pub(crate) struct WindowState {
     /// When `Some`, the user is editing a window/tab/pane title via
     /// an inline overlay.
     pub(crate) editing_title: Option<TitleEditState>,
+    pub(crate) dragging_modal_editor: bool,
     /// Set when something changed the layout the PTYs are sized against, so
     /// they need re-sizing before the next frame.
     ///
@@ -1090,7 +1093,7 @@ pub(crate) struct WindowState {
     /// reconciliation (DEC mode 1004), whether or not it asked for reports,
     /// or `None` while the window lacks OS focus. See
     /// `App::sync_pane_focus_reports`.
-    pub(crate) focus_reported_pane: Option<u64>,
+    pub(crate) focus_observed_pane: Option<u64>,
     /// The OS has reported this window's focus at least once.
     /// `window_focused` starts optimistically `true`; a focus report waits
     /// for the real answer, or a new window would claim focus-in before the
@@ -1507,6 +1510,7 @@ impl WindowState {
             macos_right_option_pressed: false,
             suppressed_key_releases: std::collections::HashSet::new(),
             terminal_owned_key_releases: std::collections::HashSet::new(),
+            terminal_key_release_bytes: std::collections::HashMap::new(),
             terminal_key_recipients: std::collections::HashMap::new(),
             closing_keys: std::collections::HashSet::new(),
             ime_preedit: None,
@@ -1558,11 +1562,12 @@ impl WindowState {
             card_hover_stale: false,
             native_pointer: None,
             editing_title: None,
+            dragging_modal_editor: false,
             pending_resize: false,
             confirm_dialog: None,
             confirm_pointer_release: false,
             window_focused: true,
-            focus_reported_pane: None,
+            focus_observed_pane: None,
             os_focus_known: false,
             window_occluded: false,
             mouse_hidden: false,

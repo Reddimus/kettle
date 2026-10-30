@@ -1051,9 +1051,36 @@ impl VideoPlayer for Ffmpeg {
             })
             .unwrap_or(info.duration_ms)
             .min(info.duration_ms);
-        let start_ms = request
+        let mut start_ms = request
             .start_ms
             .min(video_end_ms.saturating_sub(probe.frame_ms()));
+        if start_ms > 0
+            && let Some(clock) = clock
+        {
+            // The final frame can start far before the nominal last interval.
+            // The bounded seek window includes the preceding keyframe.
+            if scanned.is_none() {
+                let at = clock.micros(clock.tick_at(start_ms));
+                let window = i64::try_from(probe.frame_ms() * WINDOW_FRAMES * 1000)
+                    .unwrap_or(i64::MAX)
+                    .max(WINDOW_US);
+                scanned = self.packets(
+                    &input,
+                    index,
+                    &[format!(
+                        "{}%{}",
+                        seconds(at),
+                        seconds(at.saturating_add(window))
+                    )],
+                    deadline,
+                )?;
+            }
+            if let Some(last) = scanned.as_ref().and_then(|timeline| timeline.starts.last()) {
+                let last_ms =
+                    (i128::from(clock.micros(*last)) - i128::from(probe.start_us)).max(0) / 1000;
+                start_ms = start_ms.min(u64::try_from(last_ms).unwrap_or(u64::MAX));
+            }
+        }
         let mut opened = Opened {
             info,
             width,

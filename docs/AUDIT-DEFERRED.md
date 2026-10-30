@@ -6,71 +6,102 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
 ## Security and boundaries
 
 - **D-Bus maintenance notices.** The product graph accepts the informational
-  unmaintained notices RUSTSEC-2026-0370/0371/0372 for `zvariant 5.15.0`,
-  `zvariant_derive 5.15.0` and `zbus_names 4.3.4`. The all-target exact reverse
+  unmaintained notices RUSTSEC-2026-0370/0371/0372 for `zvariant 5.15.1`,
+  `zvariant_derive 5.15.1` and `zbus_names 4.3.5`. The all-target exact reverse
   graph and registry sources are guarded by `scripts/check-dbus-scope.py`;
   `cargo audit --deny warnings` remains enforced for every other notice and
   vulnerability. Reassess these exceptions when the guarded Linux desktop
   integration dependencies change. The vendor-validation graph has no waiver.
+  Moving to zbus 6 is blocked upstream: the newest `accesskit_unix` (0.24.1)
+  requires zbus 5.19 and `atspi` 0.29, and `atspi` 0.30 still requires zbus 5.
 
 - **Upstream `lru` advisory.** `Cargo.lock` still pins `lru 0.16.4` through
   `glyphon 0.12.0`; `deny.toml` ignores RUSTSEC-2026-0253. Deferred because the
   reviewed glyphon path does not call the affected `pop()` method, and a fork
   adds supply-chain surface. Close #207 when upstream accepts `lru >=0.18.2`;
   remove the audit ignores and `scripts/check-lru-scope.py` together.
-- **Per-terminal graphics decode ceiling.** Control strings up to 64 KiB no
-  longer charge the shared graphics account, and a string refused for memory
-  is discarded through its limit, so one pane's images cannot break another
-  pane's titles, prompt marks or clipboard writes. Images still compete for
-  the 512 MiB process account: one maximum kitty transmission can transiently
-  hold about 390 MiB (accumulated payload, whitespace-free copy, decoded and
-  inflated bytes, decoder scratch) in `crates/kettle-vt/src/kitty.rs`, so a
-  per-terminal ceiling below that would refuse legitimate images. Deferred
-  until decoding streams from the accumulated payload. Close by releasing each
-  stage before the next, then adding a per-terminal transient ceiling.
-- **`setsid()` descendants outside the Linux command line.** The Linux
-  `kettle exec` command line adopts descendants that leave the PTY session and
-  stops them on timeout or cancellation (`crates/kettle/src/exec.rs`). macOS
-  has no child-subreaper, and the MCP `kettle_run` tool runs concurrent
-  commands in one process, where an adopted orphan cannot be attributed to one
-  command. Deferred because both need a per-command supervisor process. Close
-  by running each MCP command under a supervising `kettle exec` child, and on
-  macOS by a supervisor that tracks its descendants.
+- **`setsid()` descendants on macOS.** macOS has no child subreaper, so
+  `kettle exec` and the in-process MCP `kettle_run` path cannot adopt
+  descendants that leave the PTY session, and a timeout or cancellation can
+  leave them running. Linux runs each MCP command under its own supervising
+  `kettle exec` child, whose subreaper stops escaped descendants on timeout,
+  cancellation and termination signals (`crates/kettle/src/exec_supervisor.rs`;
+  native tests in `crates/kettle/tests/mcp_supervisor.rs`). On every platform a
+  normal exit deliberately leaves detached daemons running. Deferred until a
+  macOS supervisor can track descendants across session changes. Close with
+  native macOS timeout, cancellation and concurrent-command isolation tests.
+- **D-Bus messages sized before they are read.** `zbus` 5.19 resizes its
+  receive buffer to a message's declared length (up to 128 MiB) before
+  reading the body, and the settings-portal subscription keeps the default
+  64-message queue whatever `max_queued` asks, so a hostile session-bus peer
+  can make Kettle allocate up to that much per message. Deferred because the
+  fix belongs in zbus's transport; Kettle cannot bound it from outside without
+  vendoring zbus, which is also blocked on the zbus 6 migration (#633–#635).
+  Close by moving to a zbus release that reads incrementally against a cap, or
+  vendoring the transport fix.
 
 ## Terminal and protocol
 
-- **One streaming control-state kernel for three ANSI parsers.**
-  `crates/kettle/src/exec.rs`, `crates/kettle-core/src/term.rs` and
-  `crates/kettle-vt/src/extract.rs` still implement separate state machines.
-  Deferred because concurrent parser repairs would collide with a shared
-  refactor. Close with shared ESC/CSI/string/C1, cancellation, split UTF-8 and
-  bounded-recovery semantics, policy hooks for each consumer, and a state/event
-  conformance matrix. Until then, check each parser fix against all three.
-- **Grid/generation publication ordering.** `publish_output_if_ready` in
-  `crates/kettle-core/src/term.rs` publishes after the grid lock is released;
-  readers can pair a new grid with an old generation. Deferred because review
-  rejected the proposed consequences and fix. Close with a demonstrated reader
-  impact and ordering regression, or an analysis proving the pairing harmless.
+- **Extractor policy hooks for the streaming control kernel.**
+  Exec/MCP and session logs now share `kettle-vt::control` and its stripper,
+  with frozen differential oracles and a state/event conformance matrix.
+  `Extractor` and `PrivateOutputFilter` retain their bulk scanners: C1 refusal,
+  high-byte escape prefixes, private non-ST ESC handling, and recovery after
+  a whole over-cap bulk run differ from the stripper. The private recovery
+  boundary depends on feed chunking, so a byte-only transition replacement
+  changes existing output. Close with run-aware policy hooks and a frozen
+  extractor oracle comparing emitted chunks exactly across existing vectors,
+  edge splits and random bytes.
+- **`kettle exec` JSON exit event after a late stop.** Once the final
+  `Finish` event is queued, a timeout or cancellation can still pick a stop
+  status while the blocking final write is in progress
+  (`crates/kettle/src/exec.rs`, `WorkerOutput`), so a complete exit event can
+  report the child's status while the process returns 124/130/74. Deferred
+  because a blocking `write` to an inherited stdout cannot be cancelled
+  portably: non-blocking mode is shared with every holder of the pipe, and
+  reopening it as a separate description works only on Linux. Close with a
+  cancellable writer (bounded writes after readiness on a descriptor Kettle
+  owns) and a JSON regression in which the event and the returned status
+  agree under a blocked stdout.
+- **Activation claimed just before its confirmation times out.** When a
+  launch hands its request to a running window, the window can claim it just
+  as the launcher's five-second wait ends; the launcher then treats the
+  primary as busy and opens standalone, so two windows appear
+  (`crates/kettle-ui/src/activation_server.rs`, `crates/kettle-ctl/src/activation.rs`).
+  An "in progress" reply would fix new launchers, but launchers already
+  installed stop reading after five seconds and cannot decode it. Deferred
+  for a protocol decision: acknowledge the claim immediately (and give up the
+  completion guarantee), or accept a rare duplicate window from old launchers.
+- **`run_command` completion correlation.** `kettle ctl run_command`
+  accepts a pane only when the shell looks idle, then takes the next command
+  completion as its own. Text queued earlier with `send_text` can hold more
+  than one command, so per-write bookkeeping cannot tell whose completion
+  arrives first (`crates/kettle-ui/src/app/ctl.rs`). Deferred because
+  reliable correlation needs the shell integration to echo a request token
+  for each run. Close with a token in the command-start mark that
+  `run_command` matches.
 
 ## UX
 
-- **Full editing in modal text fields.** `crates/kettle-ui/src/modal_input.rs`
-  still appends to strings; title, command, SSH, layout and Settings path fields
-  lack a caret, selection, Home/End and word movement. Deferred because editor
-  state also needs renderer and IME changes. Close by sharing `SearchEditor`
-  behavior with `crates/kettle-render/src/lib.rs` overlays and testing caret,
-  selection, horizontal scrolling and mid-string preedit.
-- **Consistent outside-click dismissal.** `crates/kettle-ui/src/app.rs` closes
-  context menus on outside clicks but swallows clicks for palettes and pickers.
-  Deferred for per-modal hit-testing and a deliberate click-through policy.
-  Close with consistent dismissal, documented click consumption and regressions.
-- **Intermittent macOS page-up failure.** `scroll_page_up` in
-  `crates/kettle-ui/src/app.rs` and `scripts/check-live-ui-smoke.py` needs
-  investigation: earlier runs stayed at display offset zero after 1,600 lines,
+- **Intermittent macOS page-up failure.** The page-up action in
+  `crates/kettle-ui/src/app/actions.rs` and `scripts/check-live-ui-smoke.py`
+  need investigation: earlier runs stayed at display offset zero after 1,600 lines,
   while later runs passed without an explained fix or retained build hashes.
   Deferred because the failure is intermittent. Close with a root-cause fix or
   bounded stress results for identified artifacts; retain executable/harness
   hashes, before/after screen JSON, visible PNGs and system load on failure.
+
+## Media
+
+- **Audio after an interior gap waits for video.** In FFmpeg playback
+  (`crates/kettle-media-native/src/ffmpeg/playback.rs`), the packet splitter
+  blocks on video delivery before it reads the next audio packet's
+  timestamp, so audio that resumes after a multi-second gap is held until
+  video catches up. Filling the gap with silence when that packet arrives is
+  too late, and inferring gaps from video timestamps is unsound because the
+  streams interleave freely. Close with a demuxer that reads audio ahead
+  independently of video delivery (separate bounded queues), then fills
+  interior gaps with bounded silence.
 
 ## Performance
 
@@ -94,16 +125,14 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
 
 ## Testing
 
-- **App testability and remaining module split.**
-  `crates/kettle-ui/src/app.rs` has sibling modules but still holds substantial
-  dispatch, frame and lifecycle logic. Deferred as a multi-session refactor.
-  Close by extracting the remaining subsystems, using typed per-event outcomes
-  with thin application code, and replacing source-text guards with behavioral
-  tests where possible.
-- **Renderer module split.** `crates/kettle-render/src/lib.rs` still combines
-  the frame pipeline, adapter selection, screenshot capture, overlay types and
-  text-fit helpers. Deferred as a large refactor. Close by extracting GPU,
-  screenshot, overlay and pure geometry modules with focused coverage.
+- **App testability.** `crates/kettle-ui/src/app.rs` is now split into
+  subsystem modules under `app/`, but event handlers still act on `App` and
+  `WindowState` directly, and many guards read source text. Deferred because
+  typed per-event outcomes change behaviour-bearing code paths, unlike the
+  pure-move split. Close by returning typed outcomes from the input, frame and
+  lifecycle handlers, keeping application code thin, and replacing
+  source-text guards with behavioural tests where an outcome makes them
+  observable.
 - **Live UI gate coverage and quarantine.** `scripts/check-live-ui-smoke.py`
   has manual cases beyond CI's selection; `.github/workflows/ci.yml` still makes
   Linux search-history and several other live checks advisory. Deferred until
@@ -133,3 +162,13 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   remain outside that proof. Deferred for installed credentials/configuration
   and native interaction. Close with identified clients/configurations and
   captured real-session results beyond deterministic markers.
+- **Two Windows state-file races.** `ExclusiveFileLock::remove` releases the
+  lock before deleting its file on Windows, so another process can open the
+  file in between (`crates/kettle-state`, used by kettle-ctl activation
+  cleanup), and `open_existing_private_file` requests `WRITE_OWNER` before
+  hardening the DACL, which an account with only Modify permission is refused.
+  Deferred because both need a native Windows reproduction to prove the fix
+  and its regression. Close with handle-based retirement (delete-on-close
+  while held) and a conditional `WRITE_OWNER` request limited to the
+  ownership-migration branch, each with a Windows test.
+

@@ -35,6 +35,12 @@ use crate::persistence::{
     AsyncFileWriter, AsyncWriterStatus, MAX_PERSISTENCE_ITEM_BYTES, PersistenceLimits,
 };
 
+/// Test-only control of the next persistence worker started on this thread.
+#[cfg(feature = "test-recording")]
+pub mod testing {
+    pub use crate::persistence::with_test_final_flush_hook;
+}
+
 /// Decode as much of `bytes` as possible: valid UTF-8 as is and each invalid
 /// run as one U+FFFD, leaving only an incomplete trailing sequence for the next
 /// read. Returns the text and the number of bytes it consumed.

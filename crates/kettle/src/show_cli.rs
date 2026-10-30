@@ -629,6 +629,7 @@ mod tests {
         );
         let pipe = directory.path().join("pipe.png");
         let name = std::ffi::CString::new(pipe.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a NUL-terminated CString retained throughout mkfifo.
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         let (sent, opened) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -641,6 +642,7 @@ mod tests {
             opened.unwrap_err(),
             Refusal::Kettle(FailureCode::FileNotRegular)
         );
+        // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } == 0 {
             eprintln!("skipped the unreadable-file case: root reads past mode bits");
             return;

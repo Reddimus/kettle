@@ -262,6 +262,7 @@ menu_set_group = "Set Group…"
 menu_set_pane_title = "Set Pane Title…"
 menu_set_tab_title = "Set Tab Title…"
 menu_set_window_title = "Set Window Title…"
+menu_detecting_shells = "Detecting shells…"
 menu_settings = "Settings…"
 menu_split_auto = "Split Auto"
 menu_split_down = "Split Down"
@@ -694,6 +695,9 @@ media_viewer_fullscreen = "Toggle fullscreen (F)"
 
 update_toast_details = "Details"
 update_toast_installed = "Kettle {tag} is installed"
+
+theme_builtin_dark = "Builtin Dark"
+theme_builtin_light = "Builtin Light"
 
 [completion_matches]
 one = "{count} match"

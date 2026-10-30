@@ -15,3 +15,9 @@ pub use windows::*;
 mod osx;
 #[cfg(target_os = "macos")]
 pub use osx::*;
+
+#[cfg(any(
+	test,
+	all(unix, not(any(target_os = "macos", target_os = "android", target_os = "emscripten")))
+))]
+mod x11_incr;

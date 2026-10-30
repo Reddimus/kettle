@@ -49,3 +49,13 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 [[bench]]
 name = "extract"
 harness = false
+
+# The control kernel's frozen differential oracles are spliced into test
+# modules here, in kettle-core and in kettle with `include!`, which
+# cargo-shear's module scan cannot follow.
+[package.metadata.cargo-shear]
+ignored-paths = [
+    "src/control/differential.rs",
+    "src/control/legacy_exec.rs",
+    "src/control/legacy_log.rs",
+]

@@ -11,7 +11,8 @@ mod digest;
 pub mod fuzzing;
 mod lifecycle;
 pub mod pcm;
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod pcm_client;
 pub mod session;
 pub mod video;
@@ -1372,7 +1373,9 @@ impl FailureCode {
             Self::FileNotRegular => "Media must be a regular file.",
             Self::FileTooLarge => "Media file exceeds the permitted size.",
             Self::Changed => "Media changed while being read. The user can Reload.",
-            Self::IndexOutOfRange => "The requested diagram index is outside this file's gallery.",
+            Self::IndexOutOfRange => {
+                "The requested page or diagram index is outside this file's range."
+            }
             Self::UnsupportedMedia => {
                 "This media type is not supported. Keep the text/path version."
             }
@@ -1439,6 +1442,19 @@ impl Warning {
         }
     }
 }
+/// Metadata-only work, bound to the shelf generation which requested it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileFactsRequest {
+    pub generation: u64,
+    pub source: Source,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileFactsReply {
+    pub generation: u64,
+    pub identity: Option<PathIdentity>,
+}
+
 /// Open-file identity included in content digests. Timestamps are seconds + nanoseconds
 /// relative to the Unix epoch; callers provide metadata from the held source descriptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

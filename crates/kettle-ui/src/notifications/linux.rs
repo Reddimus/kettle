@@ -29,7 +29,7 @@ impl Backend {
 
     pub(super) fn show(&mut self, notification: DesktopNotification) {
         if let Err(error) = self.send(&notification) {
-            self.connection = None;
+            super::discard_closed_sender(&mut self.connection, Connection::is_closed);
             log::warn!("kettle.notify: notification send failed: {error}");
         }
     }
@@ -89,14 +89,17 @@ mod tests {
             _hints: HashMap<String, zbus::zvariant::OwnedValue>,
             _timeout: i32,
             #[zbus(header)] header: Header<'_>,
-        ) -> u32 {
+        ) -> zbus::fdo::Result<u32> {
             let mut received = self.0.lock().unwrap();
             received.push((
                 header.sender().unwrap().to_string(),
                 summary.into(),
                 body.into(),
             ));
-            received.len() as u32
+            if summary == "fail" {
+                return Err(zbus::fdo::Error::Failed("notification refused".into()));
+            }
+            Ok(received.len() as u32)
         }
     }
 
@@ -148,6 +151,43 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn method_errors_preserve_and_reuse_the_live_sender() {
+        let bus = crate::test_bus::Bus::start();
+        let received = Received::default();
+        let server = Builder::address(bus.address.as_str())
+            .unwrap()
+            .name(SERVICE)
+            .unwrap()
+            .serve_at(OBJECT, Service(received.clone()))
+            .unwrap()
+            .build()
+            .unwrap();
+        let dbus = zbus::blocking::fdo::DBusProxy::new(&server).unwrap();
+        let mut backend = Backend {
+            address: Some(bus.address.clone()),
+            ..Backend::default()
+        };
+        for title in ["first", "fail", "second"] {
+            backend.show(DesktopNotification {
+                title: title.into(),
+                body: String::new(),
+            });
+            let sender = received.lock().unwrap()[0].0.clone();
+            assert!(
+                dbus.name_has_owner(zbus::names::BusName::try_from(sender.as_str()).unwrap())
+                    .unwrap(),
+                "call failure disconnected the sender"
+            );
+        }
+        let records = received.lock().unwrap();
+        assert_eq!(records.len(), 3);
+        assert!(
+            records.iter().all(|record| record.0 == records[0].0),
+            "sender was replaced after a method error"
+        );
     }
 
     #[test]

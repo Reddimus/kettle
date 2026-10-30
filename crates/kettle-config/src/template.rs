@@ -8,11 +8,22 @@
 //!   emits the original `{…}` text.
 
 /// Substitute `{name}` placeholders in `template` from `vars`. Order in
-/// `vars` is preserved (first match wins).
+/// `vars` is preserved (first match wins). Output is limited to 4096 bytes,
+/// ending at a UTF-8 boundary.
 pub fn fill(template: &str, vars: &[(&str, &str)]) -> String {
-    let mut out = String::with_capacity(template.len());
+    const MAX_OUTPUT_BYTES: usize = 4096;
+    fn append(out: &mut String, value: &str) -> bool {
+        let len = value.floor_char_boundary(MAX_OUTPUT_BYTES - out.len());
+        out.push_str(&value[..len]);
+        len == value.len()
+    }
+
+    let mut out = String::with_capacity(template.len().min(MAX_OUTPUT_BYTES));
     let mut it = template.chars().peekable();
     while let Some(c) = it.next() {
+        if c.len_utf8() > MAX_OUTPUT_BYTES - out.len() {
+            break;
+        }
         match c {
             '{' => {
                 if it.peek() == Some(&'{') {
@@ -39,12 +50,16 @@ pub fn fill(template: &str, vars: &[(&str, &str)]) -> String {
                     && !name.is_empty()
                     && let Some(&(_, v)) = vars.iter().find(|(k, _)| *k == name)
                 {
-                    out.push_str(v);
+                    if !append(&mut out, v) {
+                        break;
+                    }
                 } else {
                     // Unknown / malformed → echo the original `{…}`.
                     out.push('{');
-                    out.push_str(&name);
-                    if ok {
+                    if !append(&mut out, &name) {
+                        break;
+                    }
+                    if ok && out.len() < MAX_OUTPUT_BYTES {
                         out.push('}');
                     }
                 }
@@ -99,5 +114,23 @@ mod tests {
         let v = [("title", "vim")];
         assert_eq!(fill("{{not a var}}", &v), "{not a var}");
         assert_eq!(fill("{{{title}}}", &v), "{vim}");
+    }
+
+    #[test]
+    fn expansion_is_bounded_for_repeated_maximum_length_titles() {
+        let template = "{title}".repeat(100_000);
+        let title = "\u{1f600}".repeat(512);
+        let out = fill(&template, &[("title", &title)]);
+        assert_eq!(out.len(), 4096, "expanded title exceeded its byte budget");
+        assert_eq!(out, "\u{1f600}".repeat(1024));
+        assert_eq!(fill(&"x".repeat(5000), &[]), "x".repeat(4096));
+        assert_eq!(
+            fill(
+                &format!("{}{{title}}tail", "x".repeat(4095)),
+                &[("title", &title)]
+            ),
+            "x".repeat(4095)
+        );
+        assert_eq!(fill(&format!("{{{}", "x".repeat(5000)), &[]).len(), 4096);
     }
 }

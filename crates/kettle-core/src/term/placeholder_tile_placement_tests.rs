@@ -30,10 +30,52 @@ fn placeholder_tile_shares_pixels_and_records_source_rect() {
     assert_eq!(
         placement.source_rect,
         Some(crate::ImageSourceRect {
-            x: 2,
-            y: 0,
-            width: 2,
-            height: 2,
+            x: 2.0,
+            y: 0.0,
+            width: 2.0,
+            height: 2.0,
         })
+    );
+}
+
+#[test]
+fn enlarged_placeholder_preserves_four_fractional_rectangles() {
+    let image = ImageData::new(1, 1, vec![1, 2, 3, 255]).unwrap();
+    let virtual_image = VirtualEntry {
+        img: image.clone(),
+        placement_id: 0,
+        cols: 2,
+        rows: 2,
+        z: 0,
+    };
+    let mut rects = Vec::new();
+    for row in 0..2 {
+        for col in 0..2 {
+            let tile = placeholder_tile_placement(
+                0,
+                col as usize,
+                ResolvedCell {
+                    image_id: 7,
+                    placement_id: 0,
+                    row,
+                    col,
+                },
+                &virtual_image,
+            )
+            .unwrap();
+            assert_eq!(tile.img.allocation_key(), image.allocation_key());
+            let rect = tile.source_rect.unwrap();
+            assert!(rect.width > 0.0 && rect.height > 0.0);
+            rects.push((rect.x, rect.y, rect.width, rect.height));
+        }
+    }
+    assert_eq!(
+        rects,
+        [
+            (0.0, 0.0, 0.5, 0.5),
+            (0.5, 0.0, 0.5, 0.5),
+            (0.0, 0.5, 0.5, 0.5),
+            (0.5, 0.5, 0.5, 0.5)
+        ]
     );
 }

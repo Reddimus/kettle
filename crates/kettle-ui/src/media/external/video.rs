@@ -305,10 +305,10 @@ pub(crate) fn open(
         failed(OpenFailure::Busy);
         return;
     };
-    // A thread that cannot start drops the slot with its closure.
-    let _ = std::thread::Builder::new()
-        .name("kettle-ui-open-video".into())
-        .spawn(move || match hand_over(&copies, &video, player) {
+    super::start_open(
+        "kettle-ui-open-video",
+        failed,
+        move |failed| match hand_over(&copies, &video, player) {
             Ok(child) => {
                 // The slot bounds the work of opening, not how long the
                 // player stays up.
@@ -319,7 +319,8 @@ pub(crate) fn open(
                 drop(slot);
                 failed(why);
             }
-        });
+        },
+    );
 }
 
 /// Check the player and what it can play, copy the video, and start the

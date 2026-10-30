@@ -518,6 +518,7 @@ fn remove_own_socket(path: &Path) {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return;
     };
+    // SAFETY: geteuid has no preconditions.
     if meta.file_type().is_socket() && meta.uid() == unsafe { libc::geteuid() } {
         let _ = std::fs::remove_file(path);
     }
@@ -1561,6 +1562,7 @@ mod tests {
             unix_socket_path_fits(&endpoint),
             "completed activation endpoint must fit sun_path: {endpoint:?}"
         );
+        // SAFETY: geteuid has no preconditions.
         let fixed = Path::new("/tmp").join(format!("kettle-{}", unsafe { libc::geteuid() }));
         assert!(endpoint.starts_with(&fixed));
         assert_eq!(paths.endpoint_dir.as_deref(), endpoint.parent());
@@ -1666,7 +1668,9 @@ mod tests {
         let endpoint = PathBuf::from(&paths.endpoint);
         assert!(unix_socket_path_fits(&endpoint));
         assert!(
+            // Lossy UTF-8 expansion also exhausts the TMPDIR fallback's path budget.
             endpoint.starts_with(
+                // SAFETY: geteuid has no preconditions.
                 Path::new("/tmp").join(format!("kettle-{}", unsafe { libc::geteuid() }))
             )
         );

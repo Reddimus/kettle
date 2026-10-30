@@ -2,7 +2,388 @@
 
 use super::*;
 
+pub(super) fn begin_settings_text_edit(
+    key: &'static str,
+    cur: &str,
+) -> Option<crate::settings::SettingsTextEdit> {
+    if cur.len() > crate::modal_input::MAX_MODAL_INPUT_BYTES {
+        log::warn!("setting exceeds the modal editor byte limit; leaving the value unchanged");
+        return None;
+    }
+    Some(crate::settings::SettingsTextEdit {
+        key,
+        buf: cur.into(),
+    })
+}
+
+pub(super) fn cancel_modal_pointer_composition(
+    ws: &mut WindowState,
+    mut set_ime_allowed: impl FnMut(bool),
+    discard_marked_text: impl FnOnce(),
+) {
+    if ws.ime_preedit.is_some() {
+        end_modal_composition(ws);
+        // Moving the caret must also discard the platform's unfinished phrase;
+        // otherwise another Preedit would restart it at the new insertion point.
+        set_ime_allowed(false);
+        discard_marked_text();
+        set_ime_allowed(true);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn discard_native_marked_text(window: &winit::window::Window) {
+    use objc2_app_kit::NSView;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Some(_main_thread) = objc2_foundation::MainThreadMarker::new() else {
+        return;
+    };
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: winit lends a live NSView for this window, and the marker above
+    // ensures AppKit is called on the main thread.
+    let view = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
+    if let Some(context) = view.inputContext() {
+        // winit 0.30.13's IME toggle only clears its own marked-text buffer.
+        context.discardMarkedText();
+    }
+}
+
+pub(super) fn edit_modal_text(
+    ws: &mut WindowState,
+    key: &Key,
+    read: impl FnMut() -> Option<String>,
+    write: impl FnMut(&str) -> bool,
+) -> bool {
+    let mut mods = ws.mods;
+    // Option-as-Alt governs composition, not the editor's word commands.
+    if matches!(
+        key,
+        Key::Named(
+            NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::Backspace | NamedKey::Delete
+        )
+    ) && option_physically_held(ws)
+    {
+        mods.insert(ModifiersState::ALT);
+    }
+    let Some(editor) = modal_editor_mut(ws) else {
+        return false;
+    };
+    crate::modal_input::edit_key(editor, key, mods, read, write)
+}
+
 impl App {
+    /// Shared native/control press dispatch. Returning true owns the entire click.
+    pub(super) fn dismiss_modal_outside(&mut self, ws: &mut WindowState, button: u8) -> bool {
+        let Some((kind, inside)) = self.modal_press_target(ws) else {
+            return false;
+        };
+        let consumed = dispatch_modal_press(ws, kind, inside, button);
+        if kind == ModalKind::Theme && !inside {
+            self.sync_theme_preview(ws);
+        }
+        consumed
+    }
+
+    fn modal_press_target(&self, ws: &WindowState) -> Option<(ModalKind, bool)> {
+        let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if ws.confirm_dialog.is_some() {
+            return Some((ModalKind::Confirmation, false));
+        }
+        if ws.context_menu.is_some() {
+            let inside = self.context_menu_overlay(ws).is_some_and(|menu| {
+                rect_contains(
+                    (
+                        menu.anchor.0,
+                        menu.anchor.1,
+                        menu.panel_w_clamped,
+                        menu.panel_h_clamped,
+                    ),
+                    x,
+                    y,
+                )
+            });
+            return Some((ModalKind::ContextMenu, inside));
+        }
+        let kind = if ws.palette_input.is_some() {
+            ModalKind::Palette
+        } else if ws.theme_picker_input.is_some() {
+            ModalKind::Theme
+        } else if ws.settings_text_edit.is_some()
+            || ws.settings_nav.as_ref().is_some_and(|nav| nav.capturing)
+        {
+            ModalKind::SettingsCapture
+        } else if ws.settings_nav.is_some() {
+            ModalKind::Settings
+        } else if ws.layout_picker_input.is_some() {
+            ModalKind::Layout
+        } else if ws.ssh_input.is_some() {
+            ModalKind::Ssh
+        } else if ws.editing_title.is_some() {
+            ModalKind::Title
+        } else if ws.hint_state.is_some() {
+            ModalKind::Hint
+        } else {
+            return None;
+        };
+        let field_hit = self
+            .modal_text_projection(ws)
+            .is_some_and(|field| rect_contains(field.rect, x, y));
+        let (cw, ch) = self.menu_cell(ws);
+        let surface = ws
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let (w, h) = r.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0));
+        let inside = if matches!(kind, ModalKind::Settings | ModalKind::SettingsCapture) {
+            self.settings_overlay_projection(ws).is_some_and(|set| {
+                let geometry =
+                    kettle_render::settings_panel_geometry(&set, cw, ch, surface.0, surface.1);
+                rect_contains(
+                    if kind == ModalKind::Settings {
+                        geometry.rect
+                    } else {
+                        geometry.focused_rect
+                    },
+                    x,
+                    y,
+                )
+            })
+        } else {
+            field_hit
+                || open_picker_list(ws, &self.cfg, &self.ui_text, self.update_notice().as_ref())
+                    .and_then(|list| picker_context_menu(list, surface, (cw, ch)))
+                    .is_some_and(|menu| {
+                        rect_contains(
+                            (
+                                menu.anchor.0,
+                                menu.anchor.1,
+                                menu.panel_w_clamped,
+                                menu.panel_h_clamped,
+                            ),
+                            x,
+                            y,
+                        )
+                    })
+        };
+        Some((kind, inside))
+    }
+
+    pub(super) fn modal_text_projection(
+        &self,
+        ws: &WindowState,
+    ) -> Option<kettle_render::TextFieldOverlay> {
+        let editor = modal_editor(ws)?;
+        let (sw, sh) = ws
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let (w, h) = r.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0));
+        let (cw, ch) = self.menu_cell(ws);
+        let mut rect = (0.0, (sh - ch - 10.0).max(0.0), sw, ch + 10.0);
+        let mut hint = String::new();
+        let prefix = if ws.palette_input.is_some() {
+            "  \u{2318} ".to_string()
+        } else if ws.theme_picker_input.is_some() {
+            kettle_render::theme_picker_prefix(&self.ui_text)
+        } else if ws.settings_text_edit.is_some() {
+            let set = self.settings_overlay_projection(ws)?;
+            rect = kettle_render::settings_value_rect(
+                &set,
+                cw,
+                ch,
+                sw,
+                sh,
+                self.overlay_text_cell_width(ws),
+            );
+            String::new()
+        } else if ws.layout_picker_input.is_some() {
+            format!(
+                "  \u{25a4} {} ",
+                self.ui_text.text(kettle_i18n::Text::PickerLayoutPrompt)
+            )
+        } else if ws.ssh_input.is_some() {
+            "  ssh \u{276f} ".to_string()
+        } else {
+            let state = ws.editing_title.as_ref()?;
+            rect = self.title_edit_rect(ws);
+            kettle_render::title_edit_prefix(title_edit_label(state.scope, &self.ui_text))
+        };
+        if ws.settings_text_edit.is_none() {
+            use kettle_i18n::Text as T;
+            let hints: &[(&str, T)] = if ws.palette_input.is_some() {
+                &[
+                    ("Enter", T::PickerHintRun),
+                    ("Tab/↑↓", T::PickerHintSelect),
+                    ("Esc", T::PickerHintCancel),
+                ]
+            } else if ws.theme_picker_input.is_some() {
+                &[
+                    ("Enter", T::PickerHintKeep),
+                    ("↑↓", T::PickerHintSelect),
+                    ("Esc", T::PickerHintRestore),
+                ]
+            } else if ws.layout_picker_input.is_some() {
+                &[
+                    ("Enter", T::PickerHintSpawn),
+                    ("Tab/↑↓", T::PickerHintSelect),
+                    ("Esc", T::PickerHintCancel),
+                ]
+            } else if ws.ssh_input.is_some() {
+                &[
+                    ("Enter", T::PickerHintConnect),
+                    ("Tab", T::PickerHintComplete),
+                    ("↑↓", T::PickerHintSelect),
+                    ("Esc", T::PickerHintCancel),
+                ]
+            } else {
+                &[("Enter", T::EditHintApply), ("Esc", T::PickerHintCancel)]
+            };
+            hint = picker_hint(&self.ui_text, hints);
+        }
+        let (text, cursor_byte, selection) = project_modal_editor(editor, ws.ime_preedit.as_ref());
+        let mut field = kettle_render::TextFieldOverlay {
+            text,
+            cursor_byte,
+            selection,
+            rect,
+            prefix,
+            hint,
+            horizontal_scroll: 0,
+            accent_palette: if ws.ssh_input.is_some() {
+                4
+            } else if ws.layout_picker_input.is_some() {
+                6
+            } else if ws.editing_title.is_some() {
+                3
+            } else {
+                5
+            },
+        };
+        let width = kettle_render::text_field_rects(&field, self.overlay_text_cell_width(ws))[1].2;
+        field.horizontal_scroll = crate::text_editor::TextEditor::visible_scroll_for(
+            &field.text,
+            field.cursor_byte,
+            editor.horizontal_scroll(),
+            (width / self.overlay_text_cell_width(ws)).floor().max(1.0) as usize,
+        );
+        Some(field)
+    }
+
+    pub(super) fn sync_modal_editor_scroll(&self, ws: &mut WindowState) {
+        let Some(field) = self.modal_text_projection(ws) else {
+            return;
+        };
+        let cw = self.overlay_text_cell_width(ws);
+        let width = kettle_render::text_field_rects(&field, self.overlay_text_cell_width(ws))[1].2;
+        if let Some(editor) = modal_editor_mut(ws) {
+            editor.ensure_cursor_visible((width / cw).floor().max(1.0) as usize);
+        }
+    }
+
+    pub(super) fn modal_text_pointer(&self, ws: &mut WindowState, press: bool) -> bool {
+        if !press && !ws.dragging_modal_editor {
+            return false;
+        }
+        let Some(mut field) = self.modal_text_projection(ws) else {
+            ws.dragging_modal_editor = false;
+            return false;
+        };
+        let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let slot = kettle_render::text_field_rects(&field, self.overlay_text_cell_width(ws))[1];
+        if press && !rect_contains(slot, x, y) {
+            return false;
+        }
+        if ws.ime_preedit.is_some() {
+            let window = ws.window.clone();
+            cancel_modal_pointer_composition(
+                ws,
+                |allowed| {
+                    if let Some(window) = &window {
+                        window.set_ime_allowed(allowed);
+                    }
+                },
+                || {
+                    #[cfg(target_os = "macos")]
+                    if let Some(window) = &window {
+                        discard_native_marked_text(window);
+                    }
+                },
+            );
+            let Some(committed) = self.modal_text_projection(ws) else {
+                return false;
+            };
+            field = committed;
+        }
+        let Some(renderer) = ws.renderer.as_mut() else {
+            return false;
+        };
+        let layout = renderer.measure_text_field(&field);
+        let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let (ex, ey, ew, eh) = layout.editor;
+        if press && !(x >= ex && x < ex + ew && y >= ey && y < ey + eh) {
+            return false;
+        }
+        let byte = crate::text_editor::nearest_stop_byte(&layout.stops, x).unwrap_or(0);
+        let selecting = !press || ws.mods.shift_key();
+        if let Some(editor) = modal_editor_mut(ws) {
+            editor.set_cursor_at(crate::text_editor::QueryPoint::Byte(byte), selecting);
+        }
+        ws.dragging_modal_editor = true;
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        true
+    }
+
+    fn modal_editor_key(&mut self, ws: &mut WindowState, key: &Key) -> bool {
+        let Some(editor) = modal_editor(ws) else {
+            return false;
+        };
+        let before = editor.text().to_string();
+        let clipboard = std::cell::RefCell::new(self.clipboard.as_mut());
+        let handled = edit_modal_text(
+            ws,
+            key,
+            || {
+                clipboard
+                    .borrow_mut()
+                    .as_mut()
+                    .and_then(|cb| cb.get_text().ok())
+            },
+            |text| {
+                clipboard
+                    .borrow_mut()
+                    .as_mut()
+                    .is_some_and(|cb| cb.set_text(text.to_string()).is_ok())
+            },
+        );
+        if handled {
+            let changed = modal_editor(ws).is_some_and(|editor| editor.text() != before);
+            if changed {
+                reset_modal_results(ws);
+            }
+            ws.accessibility_pending = true;
+            self.update_ime_cursor_area(ws);
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        handled
+    }
+
     pub(super) fn confirmation_layout(
         &self,
         ws: &WindowState,
@@ -290,13 +671,12 @@ impl App {
                 .map(|(i, f)| {
                     // An open inline text edit for this field shows its
                     // editable buffer + a caret instead of the stored value.
-                    let editing = ws.settings_text_edit.as_ref().filter(|e| e.key == f.key);
-                    let value = if let Some(e) = editing {
-                        let mut input = settings_edit_display(&e.buf);
-                        if let Some((preedit, _)) = &ws.ime_preedit {
-                            input.push_str(preedit);
-                        }
-                        format!("{input}\u{258f}")
+                    let editing = ws
+                        .settings_text_edit
+                        .as_ref()
+                        .is_some_and(|e| e.key == f.key);
+                    let value = if editing {
+                        String::new()
                     } else if i == fld && nav.capturing {
                         // Capture prompt on the focused keybind row.
                         tr.text(kettle_i18n::Text::SettingsPressChord).to_string()
@@ -369,10 +749,9 @@ impl App {
         if ws.settings_nav.is_none() {
             return false;
         }
-        // A mouse interaction while the inline path prompt is open cancels it
-        // (the typed value is discarded; re-open to edit again).
-        if ws.settings_text_edit.is_some() {
-            ws.settings_text_edit = None;
+        if ws.settings_text_edit.is_some()
+            || ws.settings_nav.as_ref().is_some_and(|nav| nav.capturing)
+        {
             if let Some(w) = &ws.window {
                 w.request_redraw();
             }
@@ -757,13 +1136,15 @@ impl App {
 
     /// Key handling for the title-edit overlay (`Edit tab/window/pane title`
     /// and `Edit pane group`). Esc cancels, Enter applies via
-    /// [`Self::apply_title_edit`], Backspace deletes one grapheme cluster, the
-    /// platform paste chord inserts the clipboard, and everything else that is
-    /// real text entry appends.
+    /// [`Self::apply_title_edit`]; editing and clipboard commands use the shared
+    /// editor, and printable input replaces the selection or inserts at the caret.
     ///
     /// Shared by the `KeyboardInput` arm and `dispatch_ui_key`, so end-to-end
     /// tests type into this modal through the same rules as a real keystroke.
     pub(super) fn title_edit_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
+        if self.modal_editor_key(ws, key) {
+            return;
+        }
         match key {
             Key::Named(NamedKey::Escape) => {
                 // The chrome strip `tab_bar_h` materialised for this modal
@@ -797,19 +1178,7 @@ impl App {
         }
     }
 
-    /// Clipboard text for a modal field, or `None` when the clipboard is empty
-    /// or unreadable.
-    ///
-    /// This does **not** sanitize: a clipboard holding only control characters
-    /// still returns `Some`. Callers pair it with `modal_input::push_text`,
-    /// which drops control characters and applies the byte cap — so a
-    /// control-only paste ends up a no-op there rather than here.
-    ///
-    /// The overlays that own a plain `String` paste through this.
-    ///
-    /// The search bar keeps its own paste path: it inserts at a cursor and
-    /// reports truncation through `SearchStatus::TooLong`, neither of which
-    /// these fields can express.
+    /// Clipboard text for a modal field. The shared editor bounds and normalizes it.
     pub(super) fn modal_clipboard_text(&mut self) -> Option<String> {
         let clipboard = self.clipboard.as_mut()?;
         match clipboard.get_text() {
@@ -1078,6 +1447,9 @@ impl App {
         text: Option<&str>,
         event_loop: &ActiveEventLoop,
     ) {
+        if self.modal_editor_key(ws, key) {
+            return;
+        }
         let cmds = palette_entries(self.update_notice().as_ref(), &self.ui_text);
         let Some((q, sel)) = ws.palette_input.as_mut() else {
             return;
@@ -1551,21 +1923,23 @@ impl App {
             "background-image" => self.cfg.background_image.clone(),
             _ => String::new(),
         };
-        ws.settings_text_edit = Some(crate::settings::SettingsTextEdit { key, buf: cur });
+        ws.settings_text_edit = begin_settings_text_edit(key, &cur);
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
     }
 
     /// Keyboard routing while the settings inline text prompt is open.
-    /// Esc cancels, Enter persists + live-reloads, Backspace deletes, printable
-    /// text appends (control chars filtered, like the ssh/palette inputs).
+    /// Esc cancels, Enter persists and reloads; editing commands use the shared editor.
     pub(super) fn settings_text_key(
         &mut self,
         ws: &mut WindowState,
         key: &Key,
         text: Option<&str>,
     ) {
+        if self.modal_editor_key(ws, key) {
+            return;
+        }
         match key {
             Key::Named(NamedKey::Escape) => {
                 ws.settings_text_edit = None;
@@ -1628,6 +2002,9 @@ impl App {
         key: &Key,
         text: Option<&str>,
     ) {
+        if self.modal_editor_key(ws, key) {
+            return;
+        }
         let layouts = &ws.layout_picker_entries;
         let Some((q, sel)) = ws.layout_picker_input.as_mut() else {
             return;
@@ -1746,11 +2123,14 @@ impl App {
     /// `sync_theme_preview`); Enter keeps it and Esc restores the theme the
     /// picker opened on.
     pub(super) fn theme_picker_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
+        if self.modal_editor_key(ws, key) {
+            return;
+        }
         let Some(state) = ws.theme_picker_input.as_mut() else {
             return;
         };
         let count = |state: &crate::window_state::ThemePickerState| {
-            theme_picker_matches(&state.query, &state.opened_on).len()
+            theme_picker_matches(&state.query, &state.opened_on, &self.ui_text).len()
         };
         let step = |state: &mut crate::window_state::ThemePickerState, forward: bool, n: usize| {
             if n > 0 {
@@ -1788,7 +2168,7 @@ impl App {
                 step(state, matches!(s.as_str(), "j" | "n"), n);
             }
             Key::Named(NamedKey::Enter) => {
-                let pick = theme_picker_selection(state);
+                let pick = theme_picker_selection(state, &self.ui_text);
                 ws.theme_picker_input = None;
                 if let Some(name) = pick {
                     self.commit_theme(ws, name);
@@ -1833,6 +2213,9 @@ impl App {
     }
 
     pub(super) fn ssh_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
+        if self.modal_editor_key(ws, key) {
+            return;
+        }
         match key {
             Key::Named(NamedKey::Escape) => {
                 ws.ssh_input = None;
@@ -1867,7 +2250,10 @@ impl App {
                 if let Some((query, selected)) = ws.ssh_input.as_mut() {
                     let ranked = rank_ssh_hosts(query, &self.cfg.ssh_hosts);
                     if let Some(&index) = ranked.get(*selected) {
-                        query.clone_from(&self.cfg.ssh_hosts[index].0);
+                        query.replace_all(
+                            &self.cfg.ssh_hosts[index].0,
+                            crate::modal_input::MAX_MODAL_INPUT_BYTES,
+                        );
                         *selected = 0;
                     }
                 }
@@ -1925,5 +2311,677 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// Named keys handled by the confirmation-dialog state machine. Lifted out
+/// of winit's `NamedKey` so the pure helper isn't coupled to a UI
+/// framework type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmKey {
+    Escape,
+    Enter,
+    Tab,
+    ShiftTab,
+    Left,
+    Right,
+    /// `y` (with `vim-menu-nav`): answer the dialog's QUESTION with yes,
+    /// regardless of which button is focused.
+    Yes,
+    /// `n` (with `vim-menu-nav`): dismiss without dispatching.
+    No,
+}
+
+/// Outcome of a key press in the confirm dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmKeyResult {
+    /// Update `focus_idx` to the new value + redraw.
+    Move(usize),
+    /// Dispatch `on_confirm` + close the modal.
+    Confirm,
+    /// Close the modal without dispatching.
+    Cancel,
+    /// Key wasn't a nav key for the modal — caller can pass through
+    /// or ignore (we suppress non-nav input while a modal is open).
+    Ignore,
+}
+
+/// How much a close of the tab at `idx` would take: `(panes, busy)`.
+///
+/// `busy` counts only panes that are NOT sitting idle at an integrated-shell
+/// prompt — an idle prompt has no work to lose. A pane with no shell
+/// integration cannot prove it is idle, so it reports busy and the prompt
+/// still fires; the same goes for a missing tab, where prompting is the
+/// conservative answer.
+pub(super) fn tab_close_scope(ws: &WindowState, idx: usize) -> (usize, usize) {
+    let Some(tab) = ws.mux.tabs.get(idx) else {
+        return (1, 1);
+    };
+    let ids = tab.root.leaf_ids();
+    let busy = ids
+        .iter()
+        .filter(|id| {
+            ws.mux
+                .panes
+                .get(id)
+                .map(|p| !p.term.shell_idle())
+                .unwrap_or(true)
+        })
+        .count();
+    (ids.len(), busy)
+}
+
+/// How much closing this whole window would take: `(panes, busy)` across
+/// every tab. Same idle rule as [`tab_close_scope`].
+pub(super) fn window_close_scope(ws: &WindowState) -> (usize, usize) {
+    (
+        ws.mux.panes.len(),
+        ws.mux
+            .panes
+            .values()
+            .filter(|p| !p.term.shell_idle())
+            .count(),
+    )
+}
+
+/// Pure helper that maps a (current_focus, num_buttons,
+/// key) tuple to the next action for the confirm-dialog state
+/// machine, wired to the App's winit key handler.
+pub(super) fn confirm_dialog_keypress(
+    current_focus: usize,
+    num_buttons: usize,
+    key: ConfirmKey,
+) -> ConfirmKeyResult {
+    if num_buttons == 0 {
+        return ConfirmKeyResult::Cancel;
+    }
+    match key {
+        ConfirmKey::Escape => ConfirmKeyResult::Cancel,
+        // Enter activates the FOCUSED button, not always Confirm. The
+        // close-confirm dialogs open focused on `Cancel` (index 0, the safe
+        // default the renderer highlights), so firing the destructive action
+        // regardless of focus would contradict that highlight and risk data
+        // loss. Buttons are `[Cancel, Confirm]`, so only the last button
+        // confirms; any other focused button (Cancel) cancels.
+        ConfirmKey::Enter => {
+            if current_focus + 1 == num_buttons {
+                ConfirmKeyResult::Confirm
+            } else {
+                ConfirmKeyResult::Cancel
+            }
+        }
+        ConfirmKey::Tab => ConfirmKeyResult::Move((current_focus + 1) % num_buttons),
+        ConfirmKey::ShiftTab => {
+            ConfirmKeyResult::Move((current_focus + num_buttons - 1) % num_buttons)
+        }
+        ConfirmKey::Left => {
+            if current_focus == 0 {
+                ConfirmKeyResult::Ignore
+            } else {
+                ConfirmKeyResult::Move(current_focus - 1)
+            }
+        }
+        ConfirmKey::Right => {
+            if current_focus + 1 >= num_buttons {
+                ConfirmKeyResult::Ignore
+            } else {
+                ConfirmKeyResult::Move(current_focus + 1)
+            }
+        }
+        // `y`/`n` (`vim-menu-nav`) answer the dialog directly. Unlike Enter,
+        // which fires the FOCUSED button, `y` is an explicit answer to the
+        // question, so focus is irrelevant.
+        ConfirmKey::Yes => ConfirmKeyResult::Confirm,
+        ConfirmKey::No => ConfirmKeyResult::Cancel,
+    }
+}
+
+/// The text a confirmation button shows. Painting and hit testing both use it,
+/// so a click lands on what is drawn in every language.
+fn confirm_button_label<'a>(button: &'a ConfirmButton, tr: &kettle_i18n::Translator) -> &'a str {
+    match button {
+        ConfirmButton::Cancel => tr.text(kettle_i18n::Text::ConfirmButtonCancel),
+        ConfirmButton::Confirm { label, .. } => label.as_str(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConfirmAccessibilityAction {
+    Focus(usize),
+    Activate(usize),
+    Scroll(isize),
+}
+
+pub(super) fn confirmation_accessibility_action(
+    target: NodeId,
+    action: AccessibilityAction,
+    count: usize,
+) -> Option<ConfirmAccessibilityAction> {
+    if let Some(index) = accessibility_confirm_button_index(target) {
+        if index >= count {
+            return None;
+        }
+        return match action {
+            AccessibilityAction::Focus => Some(ConfirmAccessibilityAction::Focus(index)),
+            AccessibilityAction::Click => Some(ConfirmAccessibilityAction::Activate(index)),
+            _ => None,
+        };
+    }
+    if target == accessibility_modal_id(1, 0) {
+        return match action {
+            AccessibilityAction::ScrollUp => Some(ConfirmAccessibilityAction::Scroll(-1)),
+            AccessibilityAction::ScrollDown => Some(ConfirmAccessibilityAction::Scroll(1)),
+            _ => None,
+        };
+    }
+    None
+}
+
+pub(super) fn confirm_dialog_overlay(
+    dialog: &ConfirmDialogState,
+    tr: &kettle_i18n::Translator,
+) -> kettle_render::ConfirmDialogOverlay {
+    kettle_render::ConfirmDialogOverlay {
+        heading: dialog.heading.clone(),
+        body: dialog.body.clone(),
+        buttons: dialog
+            .buttons
+            .iter()
+            .map(|button| kettle_render::ConfirmDialogButton {
+                label: confirm_button_label(button, tr).to_string(),
+                destructive: matches!(
+                    button,
+                    ConfirmButton::Confirm {
+                        destructive: true,
+                        ..
+                    }
+                ),
+            })
+            .collect(),
+        focus_idx: dialog.focus_idx,
+        hover_idx: None,
+        pressed_idx: dialog.space_pressed,
+        scroll: dialog.scroll,
+    }
+}
+
+pub(super) fn confirm_dialog_button_hit(
+    layout: &kettle_render::ConfirmDialogLayout,
+    px: f32,
+    py: f32,
+) -> Option<usize> {
+    layout
+        .buttons
+        .iter()
+        .position(|&rect| rect_contains(rect, px, py))
+}
+
+pub(super) fn confirmation_space_key(key: &Key) -> bool {
+    key == &Key::Named(NamedKey::Space) || matches!(key, Key::Character(text) if text == " ")
+}
+
+pub(super) fn confirmation_space_release_target(
+    armed: &mut Option<usize>,
+    focused: usize,
+    ui_owned: bool,
+) -> Option<usize> {
+    armed.take().filter(|index| ui_owned && *index == focused)
+}
+
+pub(super) fn confirm_release_target(
+    armed: Option<(usize, (f32, f32, f32, f32))>,
+    layout: &kettle_render::ConfirmDialogLayout,
+    px: f32,
+    py: f32,
+) -> Option<usize> {
+    let (index, original_rect) = armed?;
+    (layout.buttons.get(index) == Some(&original_rect)
+        && confirm_dialog_button_hit(layout, px, py) == Some(index))
+    .then_some(index)
+}
+
+/// Vi-mode UI ownership. Cursor, viewport following, and selection coordinates
+/// live in alacritty_terminal's `Term`; that engine rotates them with output,
+/// history eviction, and reflow. Keeping only the owning pane id and visual
+/// state here prevents a second coordinate model from drifting.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ViState {
+    pub(super) pane_id: u64,
+    pub(super) visual: bool,
+}
+
+/// Whether a window close should also empty the mux before the session is
+/// saved.
+///
+/// `close_window` means "this window is finished" and saves an empty session so
+/// the next launch starts fresh. The titlebar ✕ / Alt+F4 means "put this away"
+/// and leaves the session restorable. Both close the window and differ only in
+/// what the next launch shows. That must not depend on whether the
+/// `ask-before-closing` prompt appeared in between, so the confirm action
+/// carries this choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropPanes {
+    Yes,
+    No,
+}
+
+/// Deferred actions for close confirmation and keybind conflicts.
+#[allow(clippy::enum_variant_names)] // close-family prefix is intentional
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    /// Close the entire window (every tab + every pane).
+    ///
+    /// `drop_panes` carries the requester's intent through the prompt, so
+    /// confirming does what the gesture would have done unprompted.
+    CloseWindow { drop_panes: DropPanes },
+    /// Close whichever tab holds any of these panes.
+    ///
+    /// Every tab close routes through here, including the focused-tab one.
+    /// A prompt can sit unanswered for as long as the user takes, and in that
+    /// time a shell exiting renumbers the tabs — so "the tab at index N" and
+    /// "the focused tab" both stop meaning what they meant when the prompt
+    /// went up. Naming the tab by the panes it held is stable across that; an
+    /// empty resolution means the tab is already gone.
+    CloseTabHolding(Vec<u64>),
+    /// Close this specific pane.
+    ///
+    /// Carries the id for the same reason: while the prompt is up, the
+    /// focused pane can change — the target's own shell exiting promotes a
+    /// sibling into focus — and confirming would then close the sibling, which
+    /// may be a tmux or agent session the user never selected.
+    ClosePane(u64),
+    /// Finish a Settings keybind rebind that would otherwise silently steal
+    /// a chord already bound to a different action. Once the user confirms
+    /// the reassignment, applies via `App::apply_keybind_rebind`, the same
+    /// call as the direct (no-conflict) rebind path.
+    RebindKeybind {
+        trig: Trigger,
+        act: Action,
+        action_name: &'static str,
+    },
+}
+
+/// Which buttons a confirm modal shows. v1 is just
+/// the two-button [Cancel] / [Confirm] shape; future additions can
+/// add a third "Apply to all" or similar without rippling.
+#[derive(Debug, Clone)]
+pub enum ConfirmButton {
+    /// Dismiss the modal without action. Always the safe default.
+    Cancel,
+    /// Dispatch the dialog's action using destructive or ordinary styling.
+    Confirm { label: String, destructive: bool },
+}
+
+/// Live state for an open confirm dialog. `focus_idx`
+/// points into `buttons` and the renderer / keyboard nav follow it.
+#[derive(Debug, Clone)]
+pub struct ConfirmDialogState {
+    pub heading: String,
+    pub body: String,
+    pub buttons: Vec<ConfirmButton>,
+    pub focus_idx: usize,
+    pub on_confirm: ConfirmAction,
+    pub scroll: usize,
+    pub armed_press: Option<(usize, (f32, f32, f32, f32))>,
+    pub space_pressed: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ModalKind {
+    ContextMenu,
+    Palette,
+    Theme,
+    Layout,
+    Ssh,
+    Title,
+    Hint,
+    SettingsCapture,
+    Settings,
+    Confirmation,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutsidePress {
+    Keep,
+    DismissConsume,
+    DismissForward,
+}
+fn outside_press_policy(kind: ModalKind, inside: bool, button: u8) -> OutsidePress {
+    if inside || kind == ModalKind::Confirmation {
+        OutsidePress::Keep
+    } else if kind == ModalKind::ContextMenu && button == 2 {
+        OutsidePress::DismissForward
+    } else {
+        OutsidePress::DismissConsume
+    }
+}
+
+/// Mutation sink shared by native and control pointer dispatch.
+pub(super) fn dispatch_modal_press(
+    ws: &mut WindowState,
+    kind: ModalKind,
+    inside: bool,
+    button: u8,
+) -> bool {
+    if kind == ModalKind::Confirmation {
+        return true;
+    }
+    let action = outside_press_policy(kind, inside, button);
+    if action == OutsidePress::Keep {
+        return false;
+    }
+    match kind {
+        ModalKind::ContextMenu => ws.context_menu = None,
+        ModalKind::Palette => ws.palette_input = None,
+        ModalKind::Theme => ws.theme_picker_input = None,
+        ModalKind::Layout => ws.layout_picker_input = None,
+        ModalKind::Ssh => ws.ssh_input = None,
+        ModalKind::Title => {
+            ws.editing_title = None;
+            ws.pending_resize = true;
+        }
+        ModalKind::Hint => ws.hint_state = None,
+        ModalKind::SettingsCapture => {
+            ws.settings_text_edit = None;
+            if let Some(nav) = &mut ws.settings_nav {
+                nav.capturing = false;
+            }
+        }
+        ModalKind::Settings => ws.settings_nav = None,
+        ModalKind::Confirmation => return false,
+    }
+    ws.dragging_modal_editor = false;
+    end_modal_composition(ws);
+    ws.accessibility_pending = true;
+    if let Some(window) = &ws.window {
+        window.request_redraw();
+    }
+    action == OutsidePress::DismissConsume
+}
+
+pub(super) fn project_modal_editor(
+    editor: &crate::text_editor::TextEditor,
+    preedit: Option<&(String, Option<(usize, usize)>)>,
+) -> (String, usize, Option<(usize, usize)>) {
+    let mut text = editor.text().to_string();
+    let mut cursor = editor.cursor();
+    let mut selection = editor.selection().map(|r| (r.start, r.end));
+    if let Some((preedit, focus)) = preedit {
+        let range = editor.selection().unwrap_or(cursor..cursor);
+        text.replace_range(range.clone(), preedit);
+        cursor = range.start + ime_preedit_focus(preedit, *focus);
+        selection = None;
+    }
+    (text, cursor, selection)
+}
+
+pub(super) fn modal_editor(ws: &WindowState) -> Option<&crate::text_editor::TextEditor> {
+    if ws.confirm_dialog.is_some() || ws.context_menu.is_some() {
+        return None;
+    }
+    if let Some((editor, _)) = &ws.palette_input {
+        Some(editor)
+    } else if let Some(state) = &ws.theme_picker_input {
+        Some(&state.query)
+    } else if let Some(state) = &ws.settings_text_edit {
+        Some(&state.buf)
+    } else if let Some((editor, _)) = &ws.layout_picker_input {
+        Some(editor)
+    } else if let Some((editor, _)) = &ws.ssh_input {
+        Some(editor)
+    } else {
+        ws.editing_title.as_ref().map(|state| &state.input)
+    }
+}
+
+pub(super) fn modal_editor_mut(
+    ws: &mut WindowState,
+) -> Option<&mut crate::text_editor::TextEditor> {
+    if ws.confirm_dialog.is_some() || ws.context_menu.is_some() {
+        return None;
+    }
+    if let Some((editor, _)) = &mut ws.palette_input {
+        Some(editor)
+    } else if let Some(state) = &mut ws.theme_picker_input {
+        Some(&mut state.query)
+    } else if let Some(state) = &mut ws.settings_text_edit {
+        Some(&mut state.buf)
+    } else if let Some((editor, _)) = &mut ws.layout_picker_input {
+        Some(editor)
+    } else if let Some((editor, _)) = &mut ws.ssh_input {
+        Some(editor)
+    } else {
+        ws.editing_title.as_mut().map(|state| &mut state.input)
+    }
+}
+
+fn reset_modal_results(ws: &mut WindowState) {
+    if let Some((_, selected)) = ws.palette_input.as_mut() {
+        *selected = 0;
+    }
+    if let Some(state) = ws.theme_picker_input.as_mut() {
+        state.selected = 0;
+    }
+    if let Some((_, selected)) = ws.layout_picker_input.as_mut() {
+        *selected = 0;
+    }
+    if let Some((_, selected)) = ws.ssh_input.as_mut() {
+        *selected = 0;
+    }
+}
+
+pub(super) fn persist_keybind_rebind(
+    path: Option<&std::path::Path>,
+    stale: &[String],
+    label: &str,
+    action_name: &str,
+) -> bool {
+    let Some(path) = path else {
+        log::warn!(
+            "apply_keybind_rebind: no config path resolved \
+             (set $XDG_CONFIG_HOME or pass --config)"
+        );
+        return false;
+    };
+
+    match kettle_config::rebind_keybind(path, stale, label, action_name) {
+        Ok(_) => true,
+        Err(e) => {
+            log::warn!("rebind_keybind({label}={action_name}) failed: {e}");
+            false
+        }
+    }
+}
+
+/// The modal text fields `dispatch_ui_key` can drive, in the precedence the
+/// real `KeyboardInput` arm applies.
+///
+/// An enum rather than strings so the dispatch `match` is exhaustive: adding a
+/// variant without routing it fails to compile. That is *not* a guarantee that
+/// a new modal added to the key handler reaches this enum at all — nothing
+/// forces that, which is what
+/// `the_control_plane_modal_order_matches_the_real_key_handler` is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TextModal {
+    Confirm,
+    Hint,
+    Palette,
+    ThemePicker,
+    SettingsText,
+    Settings,
+    LayoutPicker,
+    Ssh,
+    TitleEdit,
+    Search,
+    Preview,
+}
+
+impl TextModal {
+    /// Stable wire spelling, reported by `dispatch_ui_key`.
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirm => "confirm",
+            Self::Hint => "hint_mode",
+            Self::Palette => "palette",
+            Self::ThemePicker => "theme_picker",
+            Self::SettingsText => "settings_text",
+            Self::Settings => "settings",
+            Self::LayoutPicker => "layout_picker",
+            Self::Ssh => "ssh",
+            Self::TitleEdit => "title_edit",
+            Self::Search => "search",
+            Self::Preview => "preview",
+        }
+    }
+}
+
+/// The supported text surface owned by the same modal as a real key event.
+pub(super) fn open_text_modal(ws: &WindowState) -> Option<TextModal> {
+    Some(match top_modal(ws)? {
+        KeyModal::ConfirmDialog => TextModal::Confirm,
+        KeyModal::ContextMenu | KeyModal::ViMode => return None,
+        KeyModal::Hint => TextModal::Hint,
+        KeyModal::Palette => TextModal::Palette,
+        KeyModal::ThemePicker => TextModal::ThemePicker,
+        KeyModal::SettingsText => TextModal::SettingsText,
+        KeyModal::SettingsCapture | KeyModal::Settings => TextModal::Settings,
+        KeyModal::LayoutPicker => TextModal::LayoutPicker,
+        KeyModal::Ssh => TextModal::Ssh,
+        KeyModal::TitleEdit => TextModal::TitleEdit,
+        KeyModal::Search => TextModal::Search,
+        KeyModal::Preview => TextModal::Preview,
+    })
+}
+
+impl App {
+    pub(super) fn exit_vi_mode(&mut self, ws: &mut WindowState) {
+        let Some(state) = ws.vi_mode.take() else {
+            return;
+        };
+        if let Some(pane) = ws.mux.panes.get(&state.pane_id) {
+            let mut term = pane
+                .term
+                .term
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            term.selection = None;
+            if term.mode().contains(kettle_core::TermMode::VI) {
+                term.toggle_vi_mode();
+            }
+        }
+    }
+
+    pub(super) fn enter_vi_mode(&mut self, ws: &mut WindowState) {
+        self.close_all_modals(ws);
+        let Some(pane_id) = ws.mux.active_focus() else {
+            return;
+        };
+        let Some(pane) = ws.mux.panes.get(&pane_id) else {
+            return;
+        };
+        let mut term = pane
+            .term
+            .term
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        term.selection = None;
+        if !term.mode().contains(kettle_core::TermMode::VI) {
+            term.toggle_vi_mode();
+        }
+        drop(term);
+        ws.vi_mode = Some(ViState {
+            pane_id,
+            visual: false,
+        });
+    }
+
+    /// Close every modal overlay (search bar, command palette, settings,
+    /// layout picker, hint mode, SSH launcher, context menu, title edit,
+    /// vi mode, confirm dialog). Modal-opening actions call it first to avoid
+    /// stacking two visible modals. A palette opened over the SSH launcher
+    /// would render both, with only the palette capturing keys.
+    pub(super) fn close_all_modals(&mut self, ws: &mut WindowState) {
+        if let Some(open) = ws.preview_overlay {
+            self.close_preview(ws, open.pane);
+        }
+        // Opening or switching a modal takes pointer ownership. End a terminal
+        // selection drag here so later motion cannot keep extending or
+        // autoscrolling behind Command Palette, Settings, SSH, or title edit.
+        self.finish_selection_gesture(ws);
+        // A card held under a modal that opened is not clicked, even if the
+        // modal is gone by the release.
+        ws.card_press = None;
+        ws.dragging_split = None;
+        // The modal that opens takes the keyboard from a preview lane, even
+        // if it closes again before the event loop looks.
+        self.exit_preview_focus(ws);
+        // A live title edit materialises a chrome strip (see `tab_bar_h`), so
+        // dropping it here changes the content rectangle. Resize only when it
+        // was actually open -- this runs before every other modal opens, and an
+        // unconditional resize would fire on all 17 call sites for nothing.
+        let title_edit_was_open = ws.editing_title.is_some();
+        self.close_search(ws);
+        end_modal_composition(ws);
+        ws.palette_input = None;
+        ws.settings_nav = None;
+        // Also drop any open inline settings text prompt (the image-path
+        // editor) so it can't linger after the panel closes / reopens.
+        ws.settings_text_edit = None;
+        ws.layout_picker_input = None;
+        ws.theme_picker_input = None;
+        ws.hint_state = None;
+        ws.ssh_input = None;
+        ws.context_menu = None;
+        ws.editing_title = None;
+        ws.dragging_modal_editor = false;
+        // Vi mode is backed by per-terminal engine state, so closing the modal
+        // must clear both the UI owner and TermMode::VI.
+        self.exit_vi_mode(ws);
+        // The confirm dialog ("Close this pane?", "Quit?") is a modal too.
+        // Leaving it up would render two overlays with ambiguous key focus.
+        // Clearing it here is safe because no confirm opener calls
+        // close_all_modals after installing its dialog.
+        self.cancel_confirm_dialog(ws);
+        if title_edit_was_open {
+            ws.pending_resize = true;
+        }
+    }
+
+    /// `true` while a modal owns the whole pointer surface. This is
+    /// `any_modal_open` minus the search bar: the bar reserves its own lane
+    /// below the grid and leaves the grid mouse-interactive, so it must not
+    /// swallow pointer events the way the palette, settings, hints, SSH
+    /// launcher, title editor, vi mode, or a confirm dialog do. Keyboard
+    /// routing, focus-follows-mouse, and file drops keep using
+    /// `any_modal_open`, because search does own the keyboard.
+    pub(super) fn pointer_modal_open(&self, ws: &WindowState) -> bool {
+        self.non_search_modal_open(ws) || ws.preview_overlay.is_some()
+    }
+
+    /// Every modal that owns the keyboard and more: the search bar as well
+    /// as those that own the pointer too. A preview lane holding the
+    /// keyboard is not one: the pointer, the wheel and file drops still work
+    /// everywhere else.
+    pub(super) fn any_modal_open(&self, ws: &WindowState) -> bool {
+        ws.search.open || self.pointer_modal_open(ws)
+    }
+
+    /// Every modal except the search bar. The one list both
+    /// `any_modal_open` and `pointer_modal_open` derive from, so the two
+    /// cannot drift apart on anything but search.
+    pub(super) fn non_search_modal_open(&self, ws: &WindowState) -> bool {
+        ws.palette_input.is_some()
+            || ws.settings_nav.is_some()
+            || ws.layout_picker_input.is_some()
+            || ws.theme_picker_input.is_some()
+            || ws.hint_state.is_some()
+            || ws.ssh_input.is_some()
+            || ws.context_menu.is_some()
+            || ws.editing_title.is_some()
+            || ws.vi_mode.is_some()
+            // The confirm dialog is a modal too. Its keys have a dedicated
+            // priority branch, but mouse, scroll, and cursor gating read this
+            // list. Without it, clicks fall through to the terminal behind a
+            // "Quit?" / "Close pane?" prompt.
+            || ws.confirm_dialog.is_some()
     }
 }

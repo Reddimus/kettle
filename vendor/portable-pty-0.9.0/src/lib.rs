@@ -53,6 +53,13 @@ pub mod unix;
 #[cfg(windows)]
 pub mod win;
 
+#[cfg(any(windows, test))]
+mod waiter;
+
+#[cfg(test)]
+#[path = "win/descendant_pid.rs"]
+mod descendant_pid;
+
 pub mod serial;
 
 /// Represents the size of the visible display area in the pty

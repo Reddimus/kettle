@@ -93,6 +93,8 @@ reading, Kettle waits up to 250 ms for its last write, so `--json` output ends
 with the exit event and no warning. A collected child status cannot turn
 incomplete lossless PTY delivery into success. MCP cancellation takes precedence at every lifecycle stage and returns
 130 when teardown is verified; either path returns 125 when it is not.
+On Unix, SIGTERM and SIGINT received by `kettle exec` use that same cancellation
+path instead of terminating Kettle before it can stop the command tree.
 
 Kettle owns the PTY-created process group on macOS and the PTY-created session
 on Linux. A Unix descendant that deliberately calls `setsid()` leaves that
@@ -102,11 +104,18 @@ cancellation kills and reaps it too. Where the kernel refuses a subreaper or
 has no per-thread child lists, such a timeout or cancellation reports 125,
 since an escaped descendant could still be running. That ownership is the kernel's, not an
 inference from ancestry or an open PTY descriptor, so it cannot reach an
-unrelated same-user process. macOS has no equivalent, and the MCP `kettle_run`
-tool runs concurrent commands in one server process, where an adopted process
-cannot be attributed to one command; in both, a `setsid()` descendant can
-outlive the run. When Kettle cannot verify the scope it did own was terminated,
-timeout/cancellation reports 125 rather than a misleading 124/130.
+unrelated same-user process. Normal completion preserves descendants that
+deliberately left the PTY session, including detached daemons. Linux MCP runs each
+command in its own supervising `kettle exec` child, located through
+`current_exe()`; cancellation sends SIGTERM, with a five-second teardown grace
+before SIGKILL and internal failure (125). The child enforces the command's
+timeout; an outer timeout plus ten seconds bounds a wedged supervisor. Both
+supervisor pipes are drained concurrently into bounded buffers. Server death
+also requests supervisor cancellation, including during startup. macOS has no
+subreaper and keeps the in-process MCP path, so its `setsid()` descendants can
+still outlive a run. Windows retains its in-process Job Object containment.
+When Kettle cannot verify the scope it owned was terminated, teardown reports
+125 rather than a misleading success, 124 or 130.
 
 A real stdout write or flush failure is different from deadline abandonment.
 Kettle reports it on stderr, stops and reaps the owned process scope, and
@@ -131,8 +140,11 @@ without running the command. Capture stops at a complete event boundary before
 512 MiB. Events cross a bounded persistence queue; overload or a later
 write/flush failure stops capture, reports the incomplete trace on stderr, and
 does not kill a child that is already running. Normal completion flushes and
-joins the worker within a fixed bound. Timeout and cancellation retain their
-own deadline and never wait in a blocking writer join.
+joins the worker within a two-second bound. Timeout and cancellation use the
+same recorder grace after stopping the process scope, adding up to two seconds
+to teardown. A healthy writer closes and unlocks the cast before returning;
+a writer that fails or misses the grace reports an incomplete trace and is
+detached. Joins only occur after the worker has exited.
 
 ### ConPTY caveats (Windows)
 

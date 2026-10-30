@@ -5,16 +5,23 @@
 //! codes, while GUI launches still return immediately. Start Menu shortcuts
 //! continue to target the GUI-subsystem `kettle.exe` directly.
 
-use std::ffi::OsStr;
+use clap::Parser;
+
+#[path = "../cli.rs"]
+#[allow(dead_code)]
+mod cli;
 use std::path::PathBuf;
 
 fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let parsed = cli::Cli::parse_from(
+        std::iter::once(std::ffi::OsString::from("kettle")).chain(arguments.iter().cloned()),
+    );
     let target = target_executable();
     let mut command = std::process::Command::new(&target);
     command.args(&arguments);
 
-    if should_wait(&arguments) {
+    if should_wait(&parsed) {
         match command.status() {
             Ok(status) => std::process::exit(status.code().unwrap_or(1)),
             Err(error) => {
@@ -40,156 +47,54 @@ fn target_executable() -> PathBuf {
     }
 }
 
-fn should_wait<I, S>(arguments: I) -> bool
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let arguments = arguments
-        .into_iter()
-        .flat_map(|argument| {
-            let argument = argument.as_ref().to_string_lossy().into_owned();
-            let mut expanded = Vec::new();
-            if argument.starts_with('-') && !argument.starts_with("--") && argument.len() > 2 {
-                for (offset, flag) in argument[1..].char_indices() {
-                    if matches!(flag, 'm' | 'f' | 'b' | 'H') {
-                        expanded.push(format!("-{flag}"));
-                    } else {
-                        expanded.push(format!("-{}", &argument[offset + 1..]));
-                        return expanded;
-                    }
-                }
-            } else {
-                expanded.push(argument);
-            }
-            expanded
-        })
-        .collect::<Vec<_>>();
-    if arguments.is_empty() {
-        return false;
-    }
-
-    let mut index = 0;
-    while index < arguments.len() {
-        let argument = arguments[index].as_str();
-        if matches!(argument, "-e" | "--exec")
-            || argument.starts_with("--exec=")
-            || (argument.starts_with("-e") && argument.len() > 2)
-        {
-            // The GUI `--exec` option consumes every remaining token as the
-            // first pane's command, including words such as `update`.
-            return false;
-        }
-        if matches!(argument, "exec" | "ctl" | "mcp" | "update") || is_console_operation(argument) {
-            return true;
-        }
-        if takes_one_value(argument) {
-            if argument.contains('=') || has_attached_short_value(argument) {
-                index += 1;
-            } else if index + 1 < arguments.len() {
-                index += 2;
-            } else {
-                // Let clap's missing-value diagnostic remain visible.
-                return true;
-            }
-            continue;
-        }
-        if is_gui_flag(argument) {
-            index += 1;
-            continue;
-        }
-
-        // Unknown options and positionals are clap errors. Waiting preserves
-        // their diagnostics and non-zero exit codes in PowerShell and cmd.
-        return true;
-    }
-    false
-}
-
-// `is_console_operation`, `takes_one_value`, and `is_gui_flag` below mirror
-// the `Cli` struct in `crates/kettle/src/main.rs` by hand. Nothing
-// cross-checks them. `kettle-console` and `kettle` are two `[[bin]]` targets
-// in the same `Cargo.toml` with no shared `[lib]` crate, so this file cannot
-// use `Cli` or walk `Cli::command().get_arguments()`. A `Cli` flag missing
-// here silently falls through to the final `return true` in `should_wait`.
-// Waiting is safe for an unknown token but wrong for a new no-value GUI flag.
-// The durable fix is a shared `kettle` lib target exposing `Cli`, so a
-// `#[test]` here (or in `main.rs`) can walk `get_arguments()` and assert
-// every flag is classified by exactly one of these three functions. Until
-// then, when you add a flag to `Cli`, add it here too, and extend
-// `waits_for_cli_but_not_window_launches` /
-// `recording_directory_is_classified_as_a_gui_value_option` below.
-fn is_console_operation(argument: &str) -> bool {
-    matches!(
-        argument,
-        "-h" | "--help"
-            | "-V"
-            | "--version"
-            | "--config-path"
-            | "--gpu-info"
-            | "--check-update"
-            | "--update"
-            | "--check-config"
-            | "--write-default-config"
-            | "--toggle"
-            | "--remote-send"
-    ) || argument.starts_with("--remote-send=")
-        || argument.starts_with("--list-")
-        || argument.starts_with("--print-")
-        || argument.starts_with("--shell-integration")
-        || argument.starts_with("--screenshot")
-}
-
-fn takes_one_value(argument: &str) -> bool {
-    let name = argument.split_once('=').map_or(argument, |(name, _)| name);
-    matches!(
-        name,
-        "--annotate"
-            | "--cols"
-            | "--rows"
-            | "--config"
-            | "--working-directory"
-            | "-d"
-            | "--layout"
-            | "--agent-server"
-            | "--agent-display"
-            | "--tab-handoff"
-            | "--tab-handoff-fd"
-            | "--profile"
-            | "--accent"
-            | "--title"
-            | "-T"
-            | "--remote-file"
-            | "--lua-script"
-    ) || matches!(name, "--record" | "--record-dir")
-        || (name.starts_with("-d") && name.len() > 2)
-        || (name.starts_with("-T") && name.len() > 2)
-}
-
-fn has_attached_short_value(argument: &str) -> bool {
-    (argument.starts_with("-d") || argument.starts_with("-T")) && argument.len() > 2
-}
-
-fn is_gui_flag(argument: &str) -> bool {
-    matches!(
-        argument,
-        "--restore"
-            | "--maximise"
-            | "--maximize"
-            | "-m"
-            | "--fullscreen"
-            | "-f"
-            | "--borderless"
-            | "-b"
-            | "--hidden"
-            | "-H"
-            | "--new-process"
-    ) || argument == "--record-raw-input"
+fn should_wait(cli: &cli::Cli) -> bool {
+    cli.cmd.is_some()
+        || cli.list_themes
+        || cli.list_keybinds
+        || cli.list_actions
+        || cli.list_ssh_hosts
+        || cli.list_layouts
+        || cli.list_profiles
+        || cli.config_path
+        || cli.gpu_info
+        || cli.check_update
+        || cli.update
+        || cli.check_config
+        || cli.print_default_config
+        || cli.write_default_config
+        || cli.shell_integration.is_some()
+        || cli.print_completions.is_some()
+        || cli.screenshot.is_some()
+        || cli.screenshot_menu.is_some()
+        || cli.toggle
+        || cli.remote_send.is_some()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::should_wait;
+    use clap::Parser;
+
+    fn should_wait<I, S>(arguments: I) -> bool
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let arguments = arguments.into_iter().map(|arg| arg.as_ref().to_owned());
+        super::cli::Cli::try_parse_from(
+            std::iter::once(std::ffi::OsString::from("kettle")).chain(arguments),
+        )
+        .map_or(true, |cli| super::should_wait(&cli))
+    }
+
+    #[test]
+    fn invalid_gui_arguments_and_help_are_synchronous() {
+        for arguments in [vec!["--agent-display", "yes"], vec!["-e"], vec!["--help"]] {
+            assert!(
+                should_wait(&arguments),
+                "must finish synchronously: {arguments:?}"
+            );
+        }
+    }
 
     #[test]
     fn waits_for_cli_but_not_window_launches() {

@@ -57,7 +57,7 @@ pub(crate) use external::{
 };
 #[cfg(test)]
 pub(crate) use file_card::FileFacts;
-pub(crate) use file_card::{FileWhy, facts as file_facts};
+pub(crate) use file_card::{FactsAnswer, FactsLane, FactsQuery, FileInline, FileReply, FileWhy};
 pub(crate) use focus::{PageStep, PreviewFocus, PreviewKey, ViewerKey, preview_key, viewer_key};
 pub(crate) use inline::{card_caption, card_message, card_size};
 pub(crate) use playback::{
@@ -238,8 +238,14 @@ impl Push {
 
     /// Who waits for it, where it goes, what its item will say, and the
     /// job that rendered it.
-    pub(crate) fn into_parts(self) -> (Requester, Route, Draft, JobSpec) {
-        (self.requester, self.route, self.draft, self.spec)
+    pub(crate) fn into_parts(self) -> (Requester, Route, Draft, JobSpec, RenderControl) {
+        (
+            self.requester,
+            self.route,
+            self.draft,
+            self.spec,
+            self.control,
+        )
     }
 }
 
@@ -320,6 +326,7 @@ pub(crate) struct MediaService {
     /// in each lane; as bounded.
     lane_failures: Vec<LaneRender>,
     lane: Option<Lane>,
+    facts: Option<FactsLane>,
     /// The push being rendered.
     active: Option<Push>,
     /// The last item id handed out; ids are unique for the process's life.
@@ -329,6 +336,43 @@ pub(crate) struct MediaService {
 }
 
 impl MediaService {
+    #[cfg(test)]
+    pub(crate) fn set_facts_lane(&mut self, lane: FactsLane) {
+        self.facts = Some(lane);
+    }
+
+    pub(crate) fn request_facts(
+        &mut self,
+        query: FactsQuery,
+        client: Option<&Arc<WorkerClient>>,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<(), Box<FactsQuery>> {
+        if self.facts.is_none()
+            && let Some(client) = client
+        {
+            let client = client.clone();
+            self.facts = FactsLane::start(
+                move |query| {
+                    let request = kettle_media::FileFactsRequest {
+                        generation: query.generation,
+                        source: query.source.clone(),
+                    };
+                    client.file_facts(&request, &query.control).ok()?.identity
+                },
+                wake,
+            );
+        }
+        let rejected = match &mut self.facts {
+            Some(facts) => facts.request(query),
+            None => Some(query),
+        };
+        rejected.map_or(Ok(()), |query| Err(Box::new(query)))
+    }
+
+    pub(crate) fn take_facts(&mut self) -> Option<FactsAnswer> {
+        self.facts.as_mut()?.try_recv()
+    }
+
     /// A fresh item id.
     pub(crate) fn next_item(&mut self) -> u64 {
         self.last_item += 1;
@@ -487,9 +531,13 @@ impl MediaService {
         });
     }
 
-    /// When a waiting push next expires, if one is waiting.
+    /// When a waiting push or pending file-facts request next expires.
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
-        self.queue.next_deadline()
+        self.queue
+            .next_deadline()
+            .into_iter()
+            .chain(self.facts.as_ref().and_then(FactsLane::next_deadline))
+            .min()
     }
 
     /// Nothing waits or renders.

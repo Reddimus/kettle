@@ -416,3 +416,28 @@ fn jobs_other_than_raster_svg_and_mermaid_are_unsupported_for_now() {
         assert_eq!(render(&job).unwrap_err(), FailureCode::UnsupportedMedia);
     }
 }
+
+#[test]
+fn jpeg_exif_orientation_precedes_fitting() {
+    let image = RgbaImage::from_fn(32, 16, |x, _| {
+        if x < 16 {
+            Rgba([255, 0, 0, 255])
+        } else {
+            Rgba([0, 0, 255, 255])
+        }
+    });
+    let encoded = encode(&image, ImageFormat::Jpeg);
+    // Little-endian TIFF with a single SHORT Orientation entry.
+    let mut exif =
+        b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0".to_vec();
+    let mut bytes = encoded[..2].to_vec();
+    bytes.extend([0xff, 0xe1]);
+    bytes.extend(u16::try_from(exif.len() + 2).unwrap().to_be_bytes());
+    bytes.append(&mut exif);
+    bytes.extend_from_slice(&encoded[2..]);
+    let rendered = render(&job(Source::Bytes(bytes), target(16, 16, None))).unwrap();
+    assert_eq!((rendered.width, rendered.height), (8, 16));
+    assert!(rendered.rgba[0] > 240 && rendered.rgba[2] < 15);
+    let bottom = rendered.rgba.len() - 4;
+    assert!(rendered.rgba[bottom] < 15 && rendered.rgba[bottom + 2] > 240);
+}

@@ -101,7 +101,15 @@ fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
         a11y_label: None,
     };
     let theme = kettle_config::Theme::default();
-    let quads = menu_chrome_quads(&menu, &theme, kettle_config::Rgb::new(1, 2, 3), 8.0, 16.0);
+    let quads = menu_chrome_quads(
+        &menu,
+        &theme,
+        kettle_config::Rgb::new(1, 2, 3),
+        8.0,
+        16.0,
+        &mut crate::chrome::Colors::default(),
+        true,
+    );
     assert!(!quads.is_empty());
     assert!(quads.iter().all(|quad| {
         quad.pos.iter().all(|value| value.is_finite())
@@ -121,8 +129,114 @@ fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
             &theme,
             kettle_config::Rgb::new(1, 2, 3),
             8.0,
-            16.0
+            16.0,
+            &mut crate::chrome::Colors::default(),
+            true,
         )
         .is_empty()
     );
+}
+
+#[test]
+fn cut_menu_reserves_scroll_targets_and_fitting_menu_has_none() {
+    let (inset, content) = menu::scroll_content(600.0, 200.0, 28.0);
+    assert!(
+        inset >= 18.0,
+        "cut menu has no scroll target: inset={inset}"
+    );
+    assert_eq!(content + 2.0 * inset, 200.0);
+    assert_eq!(menu::scroll_content(140.0, 140.0, 28.0), (0.0, 140.0));
+}
+
+#[test]
+fn cut_menu_paints_arrow_inside_reserved_strip() {
+    let theme = kettle_config::Theme::by_name("Builtin Light");
+    let mut menu = ContextMenu {
+        anchor: (10.0, 10.0),
+        rows: (0..20)
+            .map(|_| ContextMenuRow {
+                label: "Command".into(),
+                hint: String::new(),
+                separator: false,
+                enabled: true,
+            })
+            .collect(),
+        highlight: 0,
+        scroll_offset: 0,
+        panel_w_clamped: 200.0,
+        panel_h_clamped: 200.0,
+        a11y_label: None,
+    };
+    let arrows = |menu: &ContextMenu| {
+        menu_chrome_quads(
+            menu,
+            &theme,
+            theme.accent,
+            8.0,
+            16.0,
+            &mut crate::chrome::Colors::default(),
+            true,
+        )
+        .into_iter()
+        .filter(|quad| quad.size[1] == 2.0 && quad.size[0] < 20.0 && quad.color[3] == 1.0)
+        .collect::<Vec<_>>()
+    };
+    let cut = arrows(&menu);
+    assert_eq!(cut.len(), 3);
+    assert!(
+        cut.iter()
+            .all(|quad| quad.pos[1] >= 10.0 + 200.0 - menu::SCROLL_H
+                && quad.pos[1] + quad.size[1] <= 210.0)
+    );
+    menu.panel_h_clamped = 0.0;
+    assert!(arrows(&menu).is_empty());
+}
+
+#[test]
+fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
+    let theme = kettle_config::Theme::default();
+    for panel_h in [28.25, 29.0, 32.0, 40.0, 64.0] {
+        let menu = ContextMenu {
+            anchor: (10.0, 10.0),
+            rows: (0..10)
+                .map(|_| ContextMenuRow {
+                    label: "row".into(),
+                    separator: false,
+                    enabled: true,
+                    hint: String::new(),
+                })
+                .collect(),
+            highlight: usize::MAX,
+            scroll_offset: 1,
+            panel_w_clamped: 200.0,
+            panel_h_clamped: panel_h,
+            a11y_label: None,
+        };
+        let (inset, _) = menu::scroll_content(280.0, panel_h, 28.0);
+        // Shadow, panel and four border quads precede the two arrows.
+        let quads = menu_chrome_quads(
+            &menu,
+            &theme,
+            theme.accent,
+            8.0,
+            16.0,
+            &mut crate::chrome::Colors::default(),
+            true,
+        );
+        assert_eq!(quads.len(), 12);
+        for (arrow, top) in [
+            (&quads[6..9], 10.0),
+            (&quads[9..12], 10.0 + panel_h - inset),
+        ] {
+            for q in arrow {
+                assert!(
+                    q.pos[1] >= top && q.pos[1] + q.size[1] <= top + inset + 0.0001,
+                    "panel {panel_h}, strip {top}..{}, quad {}..{}",
+                    top + inset,
+                    q.pos[1],
+                    q.pos[1] + q.size[1]
+                );
+            }
+        }
+    }
 }

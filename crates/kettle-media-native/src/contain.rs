@@ -215,9 +215,9 @@ mod linux {
         if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, one, zero, zero, zero) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
+        let mode = libc::SECCOMP_MODE_FILTER as libc::c_ulong;
         // SAFETY: `program` points at `filter`, which outlives the call; the
         // kernel copies the program before it returns.
-        let mode = libc::SECCOMP_MODE_FILTER as libc::c_ulong;
         if unsafe { libc::prctl(libc::PR_SET_SECCOMP, mode, &program as *const _, zero, zero) } != 0
         {
             return Err(std::io::Error::last_os_error());
@@ -308,28 +308,28 @@ mod tests {
         };
         let zero: libc::c_long = 0;
         match check {
-            // SAFETY: a null argument block of size zero is refused before
-            // anything is read.
             "clone3-enosys" => {
+                // SAFETY: a null argument block of size zero is refused before
+                // anything is read.
                 errno(unsafe { libc::syscall(libc::SYS_clone3, zero, zero) }) == Some(libc::ENOSYS)
             }
-            // SAFETY: CLONE_SIGHAND without CLONE_VM is refused before any
-            // process is made.
             "clone-eperm" => {
                 let flags = libc::CLONE_SIGHAND as libc::c_long;
+                // SAFETY: CLONE_SIGHAND without CLONE_VM is refused before any
+                // process is made.
                 errno(unsafe { libc::syscall(libc::SYS_clone, flags, zero, zero, zero, zero) })
                     == Some(libc::EPERM)
             }
-            // SAFETY: CLONE_THREAD without CLONE_SIGHAND is refused before
-            // any thread is made; the filter lets it reach the kernel.
             "clone-thread-einval" => {
                 let flags = libc::CLONE_THREAD as libc::c_long;
+                // SAFETY: CLONE_THREAD without CLONE_SIGHAND is refused before
+                // any thread is made; the filter lets it reach the kernel.
                 errno(unsafe { libc::syscall(libc::SYS_clone, flags, zero, zero, zero, zero) })
                     == Some(libc::EINVAL)
             }
-            // SAFETY: getpid in the x32 numbering takes no arguments.
             #[cfg(target_arch = "x86_64")]
             "x32-eperm" => {
+                // SAFETY: getpid in the x32 numbering takes no arguments.
                 errno(unsafe { libc::syscall(0x4000_0000 | libc::SYS_getpid) }) == Some(libc::EPERM)
             }
             _ => false,

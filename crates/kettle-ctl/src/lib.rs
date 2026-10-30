@@ -50,6 +50,7 @@ pub(crate) fn unix_socket_path_fits(path: &std::path::Path) -> bool {
 
 #[cfg(unix)]
 pub(crate) fn private_temp_socket_dir() -> std::path::PathBuf {
+    // SAFETY: geteuid has no preconditions.
     std::env::temp_dir().join(format!("kettle-{}", unsafe { libc::geteuid() }))
 }
 
@@ -66,6 +67,7 @@ pub(crate) fn length_safe_unix_socket_path(
     // TMPDIR is user-controlled and can itself be too long. Both activation
     // and discovery use this fixed, uid-private second fallback.
     let short = std::path::PathBuf::from("/tmp")
+        // SAFETY: geteuid has no preconditions.
         .join(format!("kettle-{}", unsafe { libc::geteuid() }))
         .join(file);
     assert!(
@@ -103,6 +105,7 @@ pub(crate) fn unix_dir_is_safe_for_endpoint(is_dir: bool, uid: u32, mode: u32) -
         return false;
     }
     const S_ISVTX: u32 = 0o1000;
+    // SAFETY: geteuid has no preconditions.
     if uid == unsafe { libc::geteuid() } {
         return mode & 0o022 == 0 || mode & S_ISVTX != 0;
     }
@@ -188,6 +191,7 @@ pub(crate) fn private_dir_is_valid(dir: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
+        // SAFETY: geteuid has no preconditions.
         metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0
     }
     #[cfg(windows)]
@@ -546,6 +550,7 @@ mod endpoint_dir_safety_tests {
 
     #[test]
     fn a_directory_we_own_is_safe() {
+        // SAFETY: geteuid has no preconditions.
         let us = unsafe { libc::geteuid() };
         assert!(unix_dir_is_safe_for_endpoint(true, us, 0o40700));
         assert!(!unix_dir_is_safe_for_endpoint(
@@ -572,6 +577,7 @@ mod endpoint_dir_safety_tests {
     // predictable, uid-derived endpoint directory.
     #[test]
     fn a_directory_another_user_owns_is_rejected() {
+        // SAFETY: geteuid has no preconditions.
         let squatter = unsafe { libc::geteuid() }.wrapping_add(1);
         assert!(!unix_dir_is_safe_for_endpoint(true, squatter, 0o40700));
         assert!(!unix_dir_is_safe_for_endpoint(
@@ -593,6 +599,7 @@ mod endpoint_dir_safety_tests {
 
     #[test]
     fn a_symlink_or_file_is_rejected() {
+        // SAFETY: geteuid has no preconditions.
         let us = unsafe { libc::geteuid() };
         assert!(!unix_dir_is_safe_for_endpoint(false, us, 0o40700));
         assert!(!unix_dir_is_safe_for_endpoint(

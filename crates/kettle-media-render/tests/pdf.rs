@@ -216,3 +216,23 @@ fn a_broken_pdf_is_a_parse_failure() {
         );
     }
 }
+
+#[test]
+fn an_out_of_range_pdf_page_has_page_wording() {
+    let error = render_with_kind(
+        &job(
+            JobKind::PdfPage { index: 1 },
+            pdf(100, 100, &[&fill("1 0 0")]),
+            64,
+            64,
+            None,
+        ),
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(error, FailureCode::IndexOutOfRange);
+    assert_eq!(
+        error.model_message(),
+        "The requested page or diagram index is outside this file's range."
+    );
+}

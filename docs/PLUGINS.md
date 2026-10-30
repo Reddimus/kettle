@@ -71,9 +71,11 @@ and returns:
 | Menu rows | 256, labels up to 1 KiB |
 | URL handlers | 256, names up to 256 bytes, patterns up to 4 KiB |
 | Pattern matching for one URL | about 2 million steps across all handlers |
+| `string.find`, `match`, `gmatch`, `gsub` in safe/restricted modes | 20 million work steps per callback or top-level invocation, shared across calls, iterations, replacement scans, and expanded bytes |
 | Lua memory | 256 MiB |
 
-A callback that runs for about 128 million Lua instructions is stopped.
+A callback that runs for about 128 million Lua instructions or exhausts its
+pattern work budget is stopped, including inside protected calls.
 An event callback stopped that way is removed until Kettle restarts; one
 that raises an error is logged and kept.
 
@@ -83,6 +85,7 @@ that raises an error is logged and kept.
 
 - `safe` (the default) removes the Lua functions that run programs or touch
   files: `os.execute`, `os.remove`, `os.rename`, `io.open`, `io.popen`,
+  `io.tmpfile` (raises an error naming the sandbox mode),
   `loadfile`, `dofile` and the like. `os.time` and `os.date` stay.
   `require` loads only preloaded modules and modules at absolute paths.
 - `restricted` is `safe`, and `send_text` and `exec_action` return false.

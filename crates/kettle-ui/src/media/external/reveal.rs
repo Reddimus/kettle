@@ -89,6 +89,14 @@ impl RevealTarget {
         })
     }
 
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn path_for_handoff(&self) -> Result<&Path, OpenFailure> {
+        if !self.still_shown() {
+            return Err(OpenFailure::Changed);
+        }
+        Ok(&self.path)
+    }
+
     /// Whether the path still names the file shown: the same device and
     /// inode, a regular file. A file written in place since is still it.
     fn still_shown(&self) -> bool {
@@ -114,18 +122,15 @@ pub(crate) fn reveal(
         failed(OpenFailure::Busy);
         return;
     };
-    // A thread that cannot start drops the slot with its closure.
-    let _ = std::thread::Builder::new()
-        .name("kettle-ui-reveal".into())
-        .spawn(move || {
-            let shown = hand_over(&target, revealer);
-            drop(slot);
-            match shown {
-                Ok(Some(child)) => super::watch(child, failed),
-                Ok(None) => {}
-                Err(why) => failed(why),
-            }
-        });
+    super::start_open("kettle-ui-reveal", failed, move |failed| {
+        let shown = hand_over(&target, revealer);
+        drop(slot);
+        match shown {
+            Ok(Some(child)) => super::watch(child, failed),
+            Ok(None) => {}
+            Err(why) => failed(why),
+        }
+    });
 }
 
 /// Check the file is still the one shown, then reveal it: what was started,
@@ -140,7 +145,7 @@ fn hand_over(target: &RevealTarget, revealer: Revealer) -> Result<Option<Child>,
             .map(Some)
             .map_err(|_| OpenFailure::Viewer),
         #[cfg(target_os = "linux")]
-        Revealer::FileManager => file_manager::show(&target.path).map(|()| None),
+        Revealer::FileManager => file_manager::show(target).map(|()| None),
         #[cfg(not(target_os = "linux"))]
         Revealer::FileManager => Err(OpenFailure::Viewer),
     }
@@ -170,7 +175,7 @@ mod file_manager {
     use zbus::connection::Builder;
 
     use super::super::loupe::{CALL_TIMEOUT, OPEN_TIMEOUT, bounded, bus_query, owner};
-    use super::OpenFailure;
+    use super::{OpenFailure, RevealTarget};
 
     const NAME: &str = "org.freedesktop.FileManager1";
     const OBJECT: &str = "/org/freedesktop/FileManager1";
@@ -196,8 +201,8 @@ mod file_manager {
 
     /// Show `file` in its folder through the file manager that owns the
     /// bus name, started by the bus when none runs, once that owner checks.
-    pub(super) fn show(file: &Path) -> Result<(), OpenFailure> {
-        let uri = url::Url::from_file_path(file).map_err(|_| OpenFailure::Changed)?;
+    pub(super) fn show(target: &RevealTarget) -> Result<(), OpenFailure> {
+        let uri = url::Url::from_file_path(&target.path).map_err(|_| OpenFailure::Changed)?;
         if uri.as_str().len() > 16384 {
             return Err(OpenFailure::Changed);
         }
@@ -251,6 +256,7 @@ mod file_manager {
                 if process::identity(pid).ok() != Some(identity) {
                     return Err(OpenFailure::Viewer);
                 }
+                target.path_for_handoff()?;
                 let reply = connection
                     .call_method(
                         Some(name.as_str()),
@@ -357,6 +363,32 @@ mod tests {
             identity: PathIdentity::of(&std::fs::metadata(dir.path()).unwrap()).unwrap(),
         };
         assert!(!folder.still_shown(), "a directory");
+    }
+
+    #[test]
+    fn reveal_rechecks_the_target_after_delayed_startup() {
+        let dir = kettle_test_support::private_tempdir("kettle-reveal-startup-");
+        let path = dir.path().join("shown.docx");
+        let replacement = dir.path().join("replacement.docx");
+        std::fs::write(&path, b"shown").unwrap();
+        std::fs::write(&replacement, b"replacement").unwrap();
+        let target = RevealTarget {
+            identity: PathIdentity::of(&std::fs::metadata(&path).unwrap()).unwrap(),
+            path: path.clone(),
+        };
+        assert!(target.still_shown(), "the target matched before startup");
+        let (started, startup) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            std::fs::rename(replacement, path).unwrap();
+            started.send(()).unwrap();
+        });
+        startup.recv().unwrap();
+        assert_eq!(
+            target.path_for_handoff(),
+            Err(OpenFailure::Changed),
+            "replacement reached the handoff after startup"
+        );
+        worker.join().unwrap();
     }
 
     /// Finder's reveal is a fixed program that selects the absolute path.

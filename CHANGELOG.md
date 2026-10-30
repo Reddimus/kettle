@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- Edit every modal text field like the search bar: titles, the command
+  palette, SSH, the layout and theme pickers and Settings paths now have a
+  caret, selection, Home/End, word movement and deletion, cut/copy/paste,
+  mouse placement and drag selection, horizontal scrolling, and IME
+  composition anywhere in the text.
+
 ### Changed
 
 - Check workflows, standalone shell scripts, Python scripts, spelling and
@@ -16,6 +24,34 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Run weekly advisory coverage, mutation-testing and AddressSanitizer jobs.
 - Never let an older release become latest once a newer one is published,
   whatever order their release runs finish in.
+- Make secondary text and icons readable in every bundled theme: shortcut
+  hints, About and update details, empty states, theme labels, tab titles,
+  tab and toolbar buttons, search labels and completion details now meet
+  WCAG AA contrast (4.5:1 for text, 3:1 for icons) against what they are
+  drawn on.
+- Keep dimmed text in inactive panes readable, without making text a
+  program drew faintly any clearer than in the active pane.
+- Show scroll arrows on a menu that is too tall for its window.
+- Spanish: "Editar grupo de paneles:", the shorter "Atajos" Settings tab
+  where the full label cannot fit, and translated names for the built-in
+  themes.
+- Share one streaming control-sequence stripper between `kettle exec`
+  (including MCP `kettle_run`) and session logs. Session logs now also drop
+  8-bit C1 sequences and a stray string terminator, which exec already did.
+  Exec now counts UTF-8 continuation bytes and escape-prefix bytes toward its
+  64 KiB recovery bound, and a fresh ESC at the bound starts a new sequence
+  instead of showing its payload as text.
+- Update dependencies within their existing version requirements, including
+  wgpu 30.0.1 and notify 8.2.1.
+- Decode kitty and iTerm2 images in stages, cutting the peak memory of a
+  maximum-size transmission from about 392 MiB to 168 MiB, and hold each
+  terminal to a 192 MiB transient decode ceiling so one pane's images
+  cannot make another pane's fail.
+- Dismiss pickers, editors, hints and the Settings panel consistently when
+  clicking outside them, without the click also acting on what is under it;
+  confirmation dialogs stay open. Shorten long field labels with an ellipsis
+  instead of clipping them.
+- List "Paste primary selection" in the command palette only on Linux.
 
 ### Fixed
 
@@ -181,6 +217,139 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   sticky, saying how to fix it, and remove only a socket you own when binding.
 - Stop advertising a control server whose process has exited but not yet
   been reaped.
+- Never enqueue an audio buffer twice or write one already queued, and keep
+  playback from seeking past the last frame.
+- Refuse GIF frames larger than the image's screen before decoding, keep
+  fractional frame delays, and apply image orientation before fitting.
+- Render SVG text kerning, filters, stylesheets and trailing whitespace as
+  browsers do, within the memory budget.
+- Keep a video's presentation clock honest while frames are pending, and end
+  the audio-tail allowance when the sound ends.
+- Bound the Linux audio relay's queue before admitting blocks.
+- Keep the Linux media sandbox from reading or changing other processes'
+  resource limits or aiming I/O signals at them.
+- Bound the control inbox and each UI drain, so a flood of control requests
+  cannot stall the window.
+- Keep runtime incident logs within their size cap after a write failure, and
+  record exit incidents without raw error text.
+- Send application-keypad sequences for Num Lock-off numpad navigation, use
+  the layout's character for shifted keys, and keep wheel scrolling smooth
+  in both directions.
+- Name new SSH tabs from their destination, quote curly single quotes for
+  PowerShell, and reopen closed WSL tabs in their directory.
+- Repair read-only owned directories during cleanup through held
+  descriptors.
+- Keep every selected cell in split preview lanes.
+- Keep the caret on character boundaries after edits, and collapse a
+  selection with plain Left or Right.
+- Refuse a session save larger than the limit instead of replacing the file.
+- Keep Settings numbers within what the config accepts, and show pinned
+  devices consistently.
+- Clear a failed update's installing state and refresh update status when an
+  install finishes; count artifact download errors as request errors.
+- Dismiss a paste receipt and a pending preview independently.
+- Stop a Lua plugin's runaway `string.find`, `match`, `gmatch` or `gsub` in
+  the safe and restricted sandboxes, which could freeze the window; the
+  instruction limit now covers pattern matching too.
+- Refuse `io.tmpfile` in the safe and restricted sandboxes, as `io.open`
+  already is.
+- Give each URL handler callback its own instruction budget.
+- Make `kettle-console` reject invalid options and show help or errors
+  before returning, exactly as `kettle` does.
+- Include config-file recording settings when deciding whether a launch can
+  reuse a running window, so a launch never joins a window recording
+  differently.
+- On Unix, export video frames through the output directory checked at the
+  start, so a directory swapped meanwhile cannot redirect the file.
+- Reconnect a remote pane by running its client with literal arguments
+  instead of a shell command line, so no shell parses host names or values.
+- Refuse a JPEG image whose decode would exceed the graphics budget before
+  decoding it, using a bounded header scan.
+- Start kitty animation playback from the selected frame, and restart it
+  when the same frame is selected again.
+- Keep every cell of an image stretched across more Unicode placeholder
+  cells than it has pixels.
+- Fail the build, naming the file, when a bundled theme cannot be read,
+  instead of leaving it out.
+- Bound title templates to 4 KiB.
+- Reset modes, character sets and the saved cursor on a soft terminal reset
+  (DECSTR), and report terminfo capabilities with real escape bytes, so
+  programs that probe for undercurl get it.
+- Keep scrollback anchors when the window grows.
+- Stop a clipboard owner that keeps sending refused data from holding a paste
+  on X11.
+- Remove a pasted image whose handoff fails after it was saved.
+- Report an external viewer that cannot start instead of leaving its action
+  waiting.
+- Stop PDF verification promptly when it is cancelled or runs out of time.
+- Fit wide and right-to-left file names on file cards, and keep text aligned
+  after a wide character clipped at the left edge.
+- Keep desktop notifications working after one fails on Linux.
+- Return a cancelled Wayland tab drag to its own window.
+- Check a WebP wallpaper's chunk sizes, frame dimensions and memory budget
+  before decoding it.
+- Try other GPUs of the same model during device-loss recovery instead of
+  excluding every one of them.
+- Draw IME composition text on its own opaque layer above terminal text and
+  inline cards, keeping the cursor and composed characters visible.
+- Keep the paste receipt clear of the update toast.
+- Restore the whole clipboard after the modal-shortcut smoke test, or skip
+  the test, instead of overwriting the user's clipboard.
+- Make an interrupted Unix uninstall resumable through a private journal of
+  verified files.
+- Reject audio that arrives a full second late in the A/V sync check.
+- Check a process's start time before `macos-compare` signals it, so a
+  reused process ID is never signalled.
+- Answer OSC 52 clipboard reads in order with the writes before them.
+- Show a "Detecting shells…" row in the shell menu instead of waiting for
+  detection, then run a held New Tab With Shell action when it finishes.
+- Deliver focus reports that arrive while terminal input is backed up,
+  once and in order.
+- Release keys held in a terminal when its window loses focus.
+- Let the control API drag panes the same way the pointer does.
+- Remove only staging directories that an update recorded next to the macOS
+  app, never other directories whose names match the pattern.
+- Bound the control server's request queue per connection and the work each
+  UI frame takes from it, so a busy client cannot stall the window.
+- Never drop a key release owed to a terminal when the paste queue is full
+  or the window loses focus.
+- Read file-card metadata in the media worker instead of on the UI thread.
+- Translate a pasted path for another WSL distribution only through a
+  verified mount of the same file.
+- Stop Wayland blur discovery from blocking the UI.
+- Keep split layouts within the depth that saved sessions can load.
+- Keep a concurrently saved session when a backup is recovered.
+- Finish a file card whose metadata cannot be read instead of leaving it
+  checking, and keep size and explanation in `kettle show` replies for files.
+- Leave a saved layout unchanged when another process holds its lock at
+  startup, instead of replacing it on the next save.
+- Refresh links and search highlights when terminal output lands while a
+  frame is being prepared, instead of keeping stale ones until the next
+  output.
+- Align the control-message buffers of the legacy tab handoff and bound the
+  Windows access-control entry checks to each entry's size.
+- Finish a `kettle exec` recording before returning from a timeout or
+  cancellation, instead of reporting a healthy recording as incomplete and
+  leaving the file locked.
+- Keep a media render whose worker answered and exited cleanly when the
+  waiting thread resumes late on a loaded machine, instead of reporting
+  the worker as unavailable.
+
+### Security
+
+- Stop PTY children from inheriting open descriptors numbered above a
+  lowered `RLIMIT_NOFILE` soft limit, and fail the spawn rather than leave
+  any descriptor unchecked.
+- On Linux, run each MCP `kettle_run` in its own supervising
+  `kettle exec` process, so descendants that leave the terminal session are
+  stopped with the command on timeout or cancellation, and one command's
+  cancellation never touches another's. `kettle exec` now treats SIGTERM and
+  SIGINT as a bounded cancellation (exit 130).
+
+### Maintenance
+
+- Make the recorder stop, media cancellation and session handoff tests
+  independent of thread and ConPTY scheduling.
 
 ## [5.6.0] — 2026-10-28
 

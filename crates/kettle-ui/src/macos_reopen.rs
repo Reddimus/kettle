@@ -54,7 +54,8 @@ mod imp {
     fn bundle_version(bytes: &[u8]) -> Option<String> {
         use objc2_foundation_03::{NSDictionary, NSString, ns_string};
         let data = NSData::with_bytes(bytes);
-        // Immutable decoding owns its input and supports both XML and binary plists.
+        // SAFETY: data owns its bytes for synchronous immutable decoding; the optional format
+        // output is null.
         let value = unsafe {
             NSPropertyListSerialization::propertyListWithData_options_format_error(
                 &data,
@@ -143,6 +144,8 @@ mod imp {
                 let _ = proxy.send_event(UserEvent::DockReopenFinished(opened));
             });
         // Force this bundle's executable instead of substituting the old running app.
+        // SAFETY: path is a live NUL-terminated filesystem string; launch runs on the UI thread.
+        // Foundation copies the URL and workspace retains the configuration and completion block.
         unsafe {
             let url = NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
                 std::ptr::NonNull::new(path.as_ptr().cast_mut())
@@ -215,6 +218,7 @@ mod tests {
         {
             let fifo = root.path().join("fifo");
             let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: name is a live NUL-terminated path for this synchronous mkfifo call.
             assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
             assert!(read_metadata(&fifo).is_err());
         }

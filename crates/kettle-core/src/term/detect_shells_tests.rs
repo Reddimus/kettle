@@ -1,3 +1,64 @@
+#[test]
+fn shell_probe_spawn_failure_publishes_usable_choices_and_wakes_ui() {
+    use std::sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let cache = OnceLock::new();
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let count = wakes.clone();
+    super::prewarm_shell_detection_with(
+        &cache,
+        Arc::new(move || {
+            count.fetch_add(1, Ordering::Relaxed);
+        }),
+        |_| Err(std::io::Error::other("thread limit reached")),
+    );
+    let choices = super::cached_shells_from(&cache).expect("spawn failure must end loading");
+    #[cfg(windows)]
+    assert_eq!(choices, [("Command Prompt".into(), vec!["cmd.exe".into()])]);
+    #[cfg(not(windows))]
+    assert_eq!(choices, [("Shell".into(), vec!["/bin/sh".into()])]);
+    assert_eq!(wakes.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn shell_cache_lookup_never_waits_for_a_pending_detector() {
+    use std::sync::{Arc, OnceLock, mpsc};
+    use std::time::Duration;
+    let cache = Arc::new(OnceLock::new());
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finish_tx, finish_rx) = mpsc::channel();
+    let detecting = cache.clone();
+    let detector = std::thread::spawn(move || {
+        detecting.get_or_init(|| {
+            started_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+            vec![("Test shell".into(), vec!["test-shell".into()])]
+        });
+    });
+    started_rx.recv().unwrap();
+    let (lookup_tx, lookup_rx) = mpsc::channel();
+    let looking = cache.clone();
+    let lookup = std::thread::spawn(move || {
+        lookup_tx.send(super::cached_shells_from(&looking)).unwrap();
+    });
+    let pending = lookup_rx.recv_timeout(Duration::from_millis(100));
+    finish_tx.send(()).unwrap();
+    detector.join().unwrap();
+    lookup.join().unwrap();
+    assert_eq!(
+        pending,
+        Ok(None),
+        "UI cache lookup must return while detection is pending"
+    );
+    assert_eq!(
+        super::cached_shells_from(&cache).unwrap()[0].0,
+        "Test shell"
+    );
+}
+
 /// Drift guard: both Windows probes use the bounded runner with the same
 /// two-second deadline. The runner's tests exercise timeout cleanup and capture.
 #[test]

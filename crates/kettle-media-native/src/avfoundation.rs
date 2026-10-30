@@ -773,6 +773,8 @@ impl AudioFrames {
             return match unsafe { AVAssetReader::status(&self.reader) } {
                 AVAssetReaderStatus::Completed => Ok(false),
                 AVAssetReaderStatus::Failed => {
+                    // SAFETY: reading the failed reader's error property on the
+                    // only thread that uses this reader.
                     Err(failure(unsafe { self.reader.error() }.as_deref()))
                 }
                 _ => Err(FailureCode::RenderParse),
@@ -1008,6 +1010,8 @@ impl Frames {
             return match unsafe { AVAssetReader::status(&self.reader) } {
                 AVAssetReaderStatus::Completed => Ok(Taken::End),
                 AVAssetReaderStatus::Failed => {
+                    // SAFETY: reading the failed reader's error property on the
+                    // only thread that uses this reader.
                     Err(failure(unsafe { self.reader.error() }.as_deref()))
                 }
                 _ => Err(FailureCode::RenderParse),

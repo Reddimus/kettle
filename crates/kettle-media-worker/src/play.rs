@@ -797,11 +797,15 @@ impl<W: Write> Session<'_, W> {
                     EXIT_PROTOCOL
                 };
             }
+            // A decoded frame waiting for presentation is not a decoder stall.
+            if !pending.is_empty() {
+                last_frame = now;
+            }
             // Past the video's last frame only its sound plays: no stall.
             if shown_first
                 && playing
                 && !decoded_all
-                && !audio_tail(self.video_end_ms, last_pts, frame_ms, self.sound.is_some())
+                && !audio_tail(self.video_end_ms, last_pts, frame_ms, sounding)
                 && now.duration_since(last_frame) > stall
             {
                 return self.fail(FailureCode::RenderTimeout);
@@ -1623,6 +1627,85 @@ mod tests {
     }
 
     #[test]
+    fn future_frames_do_not_count_as_a_decoder_stall() {
+        let mut opened = opened(30_000, 4, 2);
+        opened.info.duration_ms = 20_000;
+        let read = run(
+            opened,
+            &Held::Bytes(&[]),
+            vec![
+                Step::Ask(PlayCommand::Play),
+                Step::Send(frame(&opened, 0)),
+                Step::Send(frame(&opened, 33)),
+                Step::Send(frame(&opened, 10_000)),
+                Step::Send(frame(&opened, 10_033)),
+                Step::Send(frame(&opened, 10_066)),
+            ],
+            |_| {},
+            |parent| {
+                std::thread::sleep(STALL + SECOND);
+                parent.ask(PlayCommand::Close);
+            },
+        );
+        assert!(
+            said(&read)
+                .iter()
+                .all(|frame| !matches!(frame, Frame::Failure(_))),
+            "{read:?}"
+        );
+        assert_eq!(shown(&read).len(), 2);
+    }
+
+    #[test]
+    fn a_finished_audio_tail_restores_the_decoder_deadline() {
+        use crate::sound::testing::{Blocks, stand};
+        let (speaker, told) = stand(3);
+        told.lock().unwrap().played = Some(192_000.0);
+        let sound = Sound::start(
+            speaker,
+            Box::new(Blocks(VecDeque::new())),
+            0,
+            SoundWish::new(false),
+        )
+        .unwrap();
+        let mut opened = opened(30_000, 4, 2);
+        opened.info.duration_ms = 4000;
+        opened.info.has_audio = true;
+        opened.audio = AudioStatus::Ready;
+        let read = run_with(
+            opened,
+            &Held::Bytes(&[]),
+            Some(sound),
+            Some(4000),
+            vec![
+                Step::Ask(PlayCommand::Play),
+                Step::Send(frame(&opened, 3966)),
+            ],
+            |_| {},
+            |parent| {
+                let started = Instant::now();
+                let until = started + STALL + SECOND;
+                while Instant::now() < until {
+                    told.lock().unwrap().played =
+                        Some(192_000.0 + started.elapsed().as_secs_f64() * 48_000.0);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                parent.ask(PlayCommand::Close);
+            },
+        );
+        assert!(
+            said(&read).iter().any(|frame| matches!(
+                frame,
+                Frame::Failure(kettle_media::Failure {
+                    code: FailureCode::RenderTimeout,
+                    ..
+                })
+            )),
+            "{read:?}"
+        );
+    }
+
+    #[test]
     fn only_completed_video_with_live_sound_can_wait_past_a_video_stall() {
         assert!(audio_tail(Some(4000), Some(3900), 100, true));
         assert!(!audio_tail(Some(4000), Some(3800), 100, true));
@@ -1663,7 +1746,12 @@ mod tests {
                 while !shown_last.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                std::thread::sleep(STALL + SECOND);
+                let started = Instant::now();
+                while started.elapsed() < STALL + SECOND {
+                    told.lock().unwrap().played =
+                        Some(192_000.0 + started.elapsed().as_secs_f64() * 48_000.0);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 told.lock().unwrap().played = Some(960_000.0);
                 parent.send(Event::End);
             },

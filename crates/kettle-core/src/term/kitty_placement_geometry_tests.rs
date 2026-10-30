@@ -29,10 +29,10 @@ fn crop_is_intersected_with_the_source_before_auto_sizing() {
     assert_eq!(
         resolved.source_rect,
         Some(ImageSourceRect {
-            x: 80,
-            y: 10,
-            width: 20,
-            height: 40,
+            x: 80.0,
+            y: 10.0,
+            width: 20.0,
+            height: 40.0,
         })
     );
     assert_eq!((resolved.cell_cols, resolved.cell_rows), (2, 4));
@@ -227,10 +227,10 @@ fn cropped_one_axis_auto_recomputes_width_but_preserves_scrolled_y_offset() {
     assert_eq!(
         retained.source_rect,
         Some(ImageSourceRect {
-            x: 10,
-            y: 20,
-            width: 80,
-            height: 60,
+            x: 10.0,
+            y: 20.0,
+            width: 80.0,
+            height: 60.0,
         })
     );
     assert_eq!(retained.source_crop, Some(crop));

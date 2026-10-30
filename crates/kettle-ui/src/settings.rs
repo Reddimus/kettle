@@ -137,12 +137,11 @@ pub struct SettingsNav {
 
 /// State for the inline text prompt opened by a [`FieldKind::Text`] row (the
 /// in-settings image-path entry). `key` is the config key to persist on submit;
-/// `buf` is the editable string (append / backspace only; the cursor is always
-/// at the end, plenty for a path). Enter persists + reloads, Esc cancels.
+/// `buf` is the shared grapheme-aware editor. Enter persists + reloads, Esc cancels.
 #[derive(Debug, Clone)]
 pub struct SettingsTextEdit {
     pub key: &'static str,
-    pub buf: String,
+    pub(crate) buf: crate::text_editor::TextEditor,
 }
 
 fn toggle(label: Text, key: &'static str) -> Field {
@@ -572,12 +571,34 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
     ]
 }
 
+fn owned_choice_index(cfg: &Config, key: &str, values: &[String]) -> Option<usize> {
+    let current = read_choice(cfg, key);
+    if key != "gpu" || current == "auto" {
+        return values.iter().position(|value| *value == current);
+    }
+    values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            let mut fields = value.splitn(3, ':');
+            let vendor = u32::from_str_radix(fields.next()?, 16).ok()?;
+            let device = u32::from_str_radix(fields.next()?, 16).ok()?;
+            let rank = kettle_render::pin_match_rank_fields(vendor, device, fields.next()?, cfg);
+            (rank != u8::MAX).then_some((rank, index))
+        })
+        .min()
+        .map(|(_, index)| index)
+}
+
 /// Read a field's current value from `cfg`, formatted for display next to its
 /// label (e.g. `"14 pt"`, `"Automatic"`, `"On"`) in `tr`'s language. Returns a
 /// best-effort string; an unknown key (catalogue/Config drift) yields a
 /// fallback such as `"Off"`, `""`, or `"—"` rather than panicking.
 pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
     use Text as T;
+    if field.key == "theme" {
+        return tr.theme_name(&cfg.theme_name).to_string();
+    }
     match &field.kind {
         FieldKind::Toggle => {
             let state = if read_bool(cfg, field.key) {
@@ -608,23 +629,21 @@ pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
                 },
             }
         }
-        FieldKind::ChoiceOwned { values, labels } => {
-            let cur = read_choice(cfg, field.key);
-            values
-                .iter()
-                .position(|v| *v == cur)
-                .and_then(|i| labels.get(i))
-                .map(|label| label.show(tr).to_string())
-                // No match (e.g. a pinned GPU that no longer enumerates) →
-                // show the saved name if any, else "Automatic".
-                .unwrap_or_else(|| {
-                    if cfg.gpu_name.trim().is_empty() {
-                        tr.text(T::SettingsValueAutomatic).to_string()
+        FieldKind::ChoiceOwned { values, labels } => owned_choice_index(cfg, field.key, values)
+            .and_then(|index| labels.get(index))
+            .map(|label| label.show(tr).to_string())
+            .unwrap_or_else(|| {
+                if read_choice(cfg, field.key) == "auto" {
+                    tr.text(T::SettingsValueAutomatic).to_string()
+                } else {
+                    let identity = if cfg.gpu_name.trim().is_empty() {
+                        format!("{:04x}:{:04x}", cfg.gpu_vendor_id, cfg.gpu_device_id)
                     } else {
-                        tr.settings_value_not_detected(&cfg.gpu_name)
-                    }
-                })
-        }
+                        cfg.gpu_name.clone()
+                    };
+                    tr.settings_value_not_detected(&identity)
+                }
+            }),
         FieldKind::Number { suffix, .. } => {
             let value = read_number(cfg, field.key);
             // Both scrollback rows have a zero sentinel. Showing it as a
@@ -739,8 +758,7 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
             if values.is_empty() {
                 return String::new();
             }
-            let cur = read_choice(cfg, field.key);
-            let idx = values.iter().position(|v| *v == cur).unwrap_or(0) as i32;
+            let idx = owned_choice_index(cfg, field.key, values).unwrap_or(0) as i32;
             let n = values.len() as i32;
             let step = if dir == 0 { 1 } else { dir };
             let next = (idx + step).rem_euclid(n) as usize;
@@ -1050,6 +1068,20 @@ fn read_number(cfg: &Config, key: &str) -> i64 {
 /// Convert the stepped integer back into the on-disk string form for `key`.
 /// Most keys are plain integers; opacity round-trips through a 0.0–1.0 float.
 fn write_number(key: &str, value: i64, _suffix: &str) -> String {
+    let value = match key {
+        "font-size" => value.clamp(5, 72),
+        "background-opacity" => value.clamp(0, 100),
+        "window-padding-x" => value.max(0),
+        "scrollback" => value.clamp(0, kettle_config::INFINITE_SCROLLBACK as i64),
+        "scrollback-bytes" => {
+            value.clamp(0, (kettle_config::MAX_SCROLLBACK_BYTES / 1_000_000) as i64)
+        }
+        "tab-min-width" => value.clamp(40, 600),
+        "scrollbar-width" => value.clamp(2, 40),
+        "update-check-interval-hours" => value.clamp(1, u32::MAX as i64),
+        "cursor-blink-timeout" => value.clamp(0, 3600),
+        _ => value,
+    };
     match key {
         "background-opacity" => format!("{:.2}", value as f64 / 100.0),
         "scrollback-bytes" => format!("{}MB", value.max(0)),
@@ -1349,6 +1381,60 @@ mod tests {
                     field.key
                 );
             }
+        }
+    }
+
+    #[test]
+    fn stepping_outside_catalogue_ranges_respects_config_domains() {
+        let cats = categories(&[]);
+        for (key, config, expected) in [
+            ("font-size", "font-size = 5", "5"),
+            ("background-opacity", "background-opacity = 0", "0.00"),
+        ] {
+            let cfg = Config::parse_text(config);
+            let field = cats
+                .iter()
+                .flat_map(|cat| &cat.fields)
+                .find(|field| field.key == key)
+                .unwrap();
+            let value = next_value(&cfg, field, -1);
+            assert_eq!(
+                value, expected,
+                "Settings must respect the parser's lower bound for {key}"
+            );
+            assert!(Config::detect_malformed_values(&format!("{key} = {value}")).is_empty());
+        }
+    }
+
+    #[test]
+    fn gpu_labels_resolve_id_only_and_name_only_pins() {
+        let gpus = [(
+            "10de:2191:NVIDIA GeForce GTX 1660 Ti".into(),
+            "NVIDIA GeForce GTX 1660 Ti (Discrete)".into(),
+        )];
+        let cats = categories(&gpus);
+        let field = cats
+            .iter()
+            .flat_map(|cat| &cat.fields)
+            .find(|field| field.key == "gpu")
+            .unwrap();
+        for cfg in [
+            Config {
+                gpu_vendor_id: 0x10de,
+                gpu_device_id: 0x2191,
+                ..Config::default()
+            },
+            Config {
+                gpu_name: "geforce gtx".into(),
+                ..Config::default()
+            },
+        ] {
+            assert_eq!(
+                read(&cfg, field, &EN),
+                "NVIDIA GeForce GTX 1660 Ti (Discrete)",
+                "a detected pin must display the resolved adapter"
+            );
+            assert_eq!(next_value(&cfg, field, 1), "auto");
         }
     }
 
@@ -1949,5 +2035,24 @@ mod tests {
 
         cfg.background_opacity = 1.0;
         assert_eq!(next_value(&cfg, &f, -1), "0.99");
+    }
+    #[test]
+    fn builtin_theme_settings_display_keeps_configuration_identifiers() {
+        let field = categories(&[])
+            .into_iter()
+            .flat_map(|category| category.fields)
+            .find(|field| field.key == "theme")
+            .unwrap();
+        for (identifier, label) in [
+            ("Builtin Dark", "Oscuro integrado"),
+            ("Builtin Light", "Claro integrado"),
+        ] {
+            let cfg = Config {
+                theme_name: identifier.to_string(),
+                ..Config::default()
+            };
+            assert_eq!(read(&cfg, &field, &ES), label);
+            assert_eq!(read_choice(&cfg, "theme"), identifier);
+        }
     }
 }

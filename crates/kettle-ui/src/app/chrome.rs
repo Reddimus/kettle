@@ -472,7 +472,7 @@ impl App {
         let title_capped = cap_title_for_status_bar(&title, 60);
         let text = format!(
             "{hh:02}:{mm:02}:{ss:02}  ·  {}  ·  {title_capped}",
-            self.cfg.theme_name
+            self.ui_text.theme_name(&self.cfg.theme_name)
         );
         kettle_render::StatusBar { height: h, y, text }
     }
@@ -578,4 +578,396 @@ impl App {
         self.redraw_for_update_notice(ws);
         true
     }
+}
+
+/// Horizontal tab-bar layout. Tabs divide `strip` evenly and **fill the bar**
+/// (two tabs each take half). There is intentionally no max width; tabs always
+/// maximize width. When `scroll` is on and they would shrink below `min_w`, the
+/// bar overflows: tabs stay at `min_w`, `‹ ›` arrow buttons (each `arrow_w`
+/// wide) reserve the strip ends, and only whole tabs that fit between them are
+/// shown, chosen so the active tab is visible (pinned to the trailing edge once
+/// it scrolls past the first page). Pure (no `&self`, renderer, or winit), so
+/// it is unit-testable.
+pub(super) struct TabStripLayout {
+    /// Per-tab width for every tab EXCEPT the last one.
+    pub(super) width: f32,
+    /// Width of the LAST tab. Equal to `width` in every layout except the
+    /// full-width-aligned one, where the last tab yields the trailing `▾`/`+`
+    /// button reservation so the other tab boundaries land on the same grid as
+    /// vertical pane splits.
+    pub(super) last_width: f32,
+    /// On-screen left x per tab, or `None` when scrolled out of view.
+    pub(super) xs: Vec<Option<f32>>,
+    /// Left x of the `‹` / `›` scroll buttons when the bar overflows.
+    pub(super) arrow_left: Option<f32>,
+    pub(super) arrow_right: Option<f32>,
+}
+
+pub(super) fn tab_strip_layout(
+    n: usize,
+    active: usize,
+    strip: f32,
+    trailing_reserve: f32,
+    arrow_w: f32,
+    min_w: f32,
+    scroll: bool,
+) -> TabStripLayout {
+    let n = n.max(1);
+    let strip = strip.max(1.0);
+    let min_w = min_w.max(1.0);
+    let reserve = trailing_reserve.max(0.0);
+    // Preferred layout: divide the FULL bar width (the button-trimmed `strip`
+    // PLUS the trailing `▾`/`+` reservation) evenly, so tab boundaries fall on
+    // the same grid as vertical pane splits — with 2 tabs the tab1/tab2
+    // boundary lands at the window centre, in line with a 50/50 split's
+    // divider. Only the LAST tab is shortened to yield the button reservation
+    // (its right edge stops at `strip`); every other tab is `even_full` wide.
+    // Used whenever the shortened last tab still clears `min_w` (so no tab is
+    // driven below the floor). `reserve == 0` degrades to plain even fill.
+    let full = strip + reserve;
+    let even_full = full / n as f32;
+    let last_full = even_full - reserve;
+    if last_full >= min_w {
+        let xs = (0..n).map(|i| Some(i as f32 * even_full)).collect();
+        return TabStripLayout {
+            width: even_full,
+            last_width: last_full,
+            xs,
+            arrow_left: None,
+            arrow_right: None,
+        };
+    }
+    let even = strip / n as f32;
+    if !scroll || even >= min_w {
+        // Full-width alignment would shrink the last tab below `min_w`, so fall
+        // back to the original behavior: tabs divide the button-trimmed `strip`
+        // evenly and fill it, left-packed. (With scrolling off and many tabs,
+        // width may fall below min_w — they just keep shrinking, no overflow.)
+        let width = even;
+        let xs = (0..n).map(|i| Some(i as f32 * width)).collect();
+        return TabStripLayout {
+            width,
+            last_width: width,
+            xs,
+            arrow_left: None,
+            arrow_right: None,
+        };
+    }
+    // Overflow: tabs at `min_w`, arrows reserve both ends, whole tabs only. A
+    // strip with less than `min_w` between its arrows still shows the active
+    // tab, narrowed to that room, rather than drawn over the arrows and buttons.
+    let arrow_w = arrow_w.clamp(1.0, strip / 2.0);
+    let room = (strip - 2.0 * arrow_w).max(0.0);
+    let width = min_w.min(room);
+    let count = if width > 0.0 {
+        ((room / width).floor() as usize).clamp(1, n)
+    } else {
+        1
+    };
+    let first = first_shown_tab(n, active, count);
+    let x0 = arrow_w;
+    let xs = (0..n)
+        .map(|i| {
+            if i >= first && i < first + count {
+                Some(x0 + (i - first) as f32 * width)
+            } else {
+                None
+            }
+        })
+        .collect();
+    TabStripLayout {
+        width,
+        last_width: width,
+        xs,
+        arrow_left: Some(0.0),
+        arrow_right: Some(strip - arrow_w),
+    }
+}
+
+/// The first of `count` consecutive tabs, out of `n`, that an overflowing tab
+/// bar shows: page one while it holds the active tab, else the window that
+/// ends at the active tab. Both bar directions scroll this way, so moving the
+/// selection is how a bar scrolls.
+fn first_shown_tab(n: usize, active: usize, count: usize) -> usize {
+    let count = count.clamp(1, n.max(1));
+    if active < count {
+        0
+    } else {
+        (active + 1 - count).min(n.max(1) - count)
+    }
+}
+
+/// Where a tab bar parks the tabs it does not show: far off-screen on its
+/// main axis, kept in the segment list so indices stay put.
+pub(super) const PARKED_TAB: f32 = -100_000.0;
+
+/// Whether a rendered tab segment is on screen rather than parked.
+pub(super) fn tab_shown(seg: &kettle_render::TabSeg) -> bool {
+    seg.rect.0 > PARKED_TAB / 2.0 && seg.rect.1 > PARKED_TAB / 2.0
+}
+
+/// Rows of a side tab bar with `rows` rows for its tabs and `+` (the update
+/// chip's row not counted). While every tab and `+` fit, the tabs stack from
+/// the top and `+` follows the last. Otherwise `⌃` and `⌄` rows bracket as
+/// many whole tabs as fit, chosen by [`first_shown_tab`] so the active tab is
+/// always shown, with `+` below `⌄`. A strip too short for the arrows shows
+/// the active tab and `+` alone, and one with a single row (or less) the
+/// active tab alone: `plus` is then `rows` or more, a row the strip lacks.
+/// Pure, like [`tab_strip_layout`].
+#[derive(Debug, PartialEq)]
+pub(super) struct SideTabRows {
+    /// The first tab shown, and how many are shown from it.
+    pub(super) first: usize,
+    pub(super) shown: usize,
+    /// The row of the first tab shown: 1 below `⌃`, else 0.
+    pub(super) top: usize,
+    /// The row of `+`; `⌄` is the row above it when `arrows`.
+    pub(super) plus: usize,
+    pub(super) arrows: bool,
+}
+
+pub(super) fn side_tab_rows(n: usize, active: usize, rows: usize) -> SideTabRows {
+    let n = n.max(1);
+    if n < rows {
+        return SideTabRows {
+            first: 0,
+            shown: n,
+            top: 0,
+            plus: n,
+            arrows: false,
+        };
+    }
+    if rows < 4 {
+        let shown = rows.saturating_sub(1).clamp(1, n);
+        return SideTabRows {
+            first: first_shown_tab(n, active, shown),
+            shown,
+            top: 0,
+            plus: shown,
+            arrows: false,
+        };
+    }
+    let shown = rows - 3;
+    SideTabRows {
+        first: first_shown_tab(n, active, shown),
+        shown,
+        top: 1,
+        plus: shown + 2,
+        arrows: true,
+    }
+}
+
+/// Split the trailing new-tab button into `(arrow_left, plus_right)`
+/// hit-rects — the `▾` dropdown on the LEFT, the `+` on the RIGHT. `arrow_w` is
+/// clamped to the button width so a degenerate (tiny) button can't yield a
+/// negative `+` width. Pure → unit-tested and shared by the renderer geometry
+/// + the click hit-test (single source of truth).
+pub(super) fn split_new_tab_button(
+    button: kettle_render::Rect4,
+    arrow_w: f32,
+) -> (kettle_render::Rect4, kettle_render::Rect4) {
+    let (x, y, w, h) = button;
+    let aw = arrow_w.clamp(0.0, w);
+    ((x, y, aw, h), (x + aw, y, (w - aw).max(0.0), h))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NewTabHoverTarget {
+    Menu,
+    Plus,
+}
+
+pub(super) fn new_tab_hover_target(bar: &TabBar, x: f32, y: f32) -> Option<NewTabHoverTarget> {
+    if bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, x, y) {
+        Some(NewTabHoverTarget::Menu)
+    } else if rect_contains(bar.new_tab, x, y) {
+        Some(NewTabHoverTarget::Plus)
+    } else {
+        None
+    }
+}
+
+/// Whether a pointer event belongs to the tab-bar chrome. `bar.height` is the
+/// row height, not the full extent of a vertical strip, so using
+/// `bar.y..bar.y + bar.height` silently makes every vertical row after the
+/// first (including the new-tab button) non-interactive. `band` is the layout's
+/// actual horizontal row or vertical column and is shared with rendering.
+pub(super) fn tab_bar_pointer_region_contains(bar: &TabBar, x: f32, y: f32) -> bool {
+    bar.height > 0.0 && rect_contains(bar.band, x, y)
+}
+
+/// Pure: when the mouse is over chrome (tab bar, status bar, update banner, or
+/// any modal overlay), the OS cursor should be the standard arrow rather than
+/// the text I-beam. Matches iTerm2 / WezTerm / Ghostty / kitty: chrome surfaces
+/// are clickable, not selectable, so the I-beam is visually misleading there.
+/// Returns `Some(Default)` for chrome, `None` to let the content-area caller
+/// decide between `Pointer` (URL-hover) and `Text`.
+pub(super) fn chrome_cursor_icon(in_chrome_band: bool, modal_open: bool) -> Option<CursorIcon> {
+    if in_chrome_band || modal_open {
+        Some(CursorIcon::Default)
+    } else {
+        None
+    }
+}
+
+/// Pure: when the cursor is over a tab's `✕` close-button zone, override the
+/// chrome `Default` with `Pointer` — the same "hand" icon every browser
+/// (Chrome / Firefox / Safari) uses to telegraph "this glyph is clickable."
+/// Composes with `chrome_cursor_icon`: close-hover wins over the bar's
+/// `Default` so the affordance is visible the moment the cursor lands on
+/// the close zone. Returns `None` when not over a close button so the
+/// content-area decision still gets a chance.
+pub(super) fn tab_close_hover_icon(over_close: bool) -> Option<CursorIcon> {
+    if over_close {
+        Some(CursorIcon::Pointer)
+    } else {
+        None
+    }
+}
+
+/// Pure: while a tab-drag gesture is armed or in
+/// progress, override every other cursor decision with the "holding
+/// something" hand: `Grab` the moment a press arms the FSM (the gesture
+/// could still resolve to a plain click), `Grabbing` once movement promotes
+/// it to a real drag. In-window reorder and cross-window tear share
+/// `detach::DragState`, so one helper covers both. `None` from `Idle`
+/// defers to every other rule. No `detachable-tabs` re-check needed: the
+/// press handler only arms the FSM when the config gate is on, so a
+/// non-`Idle` state already implies it (see
+/// `detachable_tabs_config_gates_all_detach_paths`).
+pub(super) fn tab_drag_cursor_icon(state: &crate::detach::DragState) -> Option<CursorIcon> {
+    match state {
+        crate::detach::DragState::Idle => None,
+        crate::detach::DragState::ArmedInside { .. } => Some(CursorIcon::Grab),
+        crate::detach::DragState::DraggingInside { .. }
+        | crate::detach::DragState::DraggingOutside { .. } => Some(CursorIcon::Grabbing),
+    }
+}
+
+/// Pure: which tab segment's close-button (`✕`) rect contains the cursor,
+/// if any. Walks `segments` once and returns the first hit (segments don't
+/// overlap in the tab bar layout; cycle-tab-bar invariant). Used both to
+/// drive the OS pointer-cursor swap and the renderer's hover-background
+/// quad — the visual affordance that makes the `✕` read as a button rather
+/// than a trailing character in the title text.
+pub(super) fn hovered_close_button(
+    segments: &[kettle_render::TabSeg],
+    px: f32,
+    py: f32,
+) -> Option<usize> {
+    let in_rect = |(rx, ry, rw, rh): (f32, f32, f32, f32)| {
+        px >= rx && px < rx + rw && py >= ry && py < ry + rh
+    };
+    segments.iter().find(|s| in_rect(s.close)).map(|s| s.idx)
+}
+
+#[cfg(test)]
+pub(super) fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) -> bool {
+    if bar_h <= 0.0 {
+        return false;
+    }
+    // Left/Right strips span the full window height, so every in-window y is in
+    // the band. `cursor_in_tab_bar` checks x against the strip's edge.
+    match pos {
+        TabBarPos::Top => y >= 0.0 && y < bar_h,
+        TabBarPos::Bottom => y >= (surface_h - bar_h) && y <= surface_h,
+        TabBarPos::Left | TabBarPos::Right => y >= 0.0 && y <= surface_h,
+    }
+}
+
+pub(super) fn status_bar_y(
+    surface_h: f32,
+    bar_h: f32,
+    pos: kettle_config::StatusBarMode,
+    tab_top_h: f32,
+    search_h: f32,
+) -> f32 {
+    match pos {
+        kettle_config::StatusBarMode::Top => tab_top_h,
+        kettle_config::StatusBarMode::Bottom => surface_h - search_h - bar_h,
+        kettle_config::StatusBarMode::Off => 0.0,
+    }
+}
+
+/// Sibling of `cursor_in_tab_bar_band` for the status bar, so the
+/// chrome-cursor logic treats both bars uniformly. The status strip is outside
+/// every pane rect and the tab-bar band, so without this check hovering it
+/// falls through to the "over a pane" branch and shows the I-beam.
+pub(super) fn cursor_in_status_bar_band(
+    y: f32,
+    bar_h: f32,
+    surface_h: f32,
+    pos: kettle_config::StatusBarMode,
+    tab_top_h: f32,
+    search_h: f32,
+) -> bool {
+    if bar_h <= 0.0 {
+        return false;
+    }
+    let bar_y = status_bar_y(surface_h, bar_h, pos, tab_top_h, search_h);
+    match pos {
+        kettle_config::StatusBarMode::Off => false,
+        kettle_config::StatusBarMode::Top => y >= bar_y && y < bar_y + bar_h,
+        kettle_config::StatusBarMode::Bottom => y >= bar_y && y <= bar_y + bar_h,
+    }
+}
+
+/// Width of the strip that horizontal tab segments tile across, given the
+/// surface width and the trailing new-tab button geometry.
+///
+/// `tab_bar()` lays segments out across this width, and the drag-to-reorder
+/// handler hit-tests those rendered segments, so the drag target can't drift
+/// from what is drawn. `arrow_w` is `0.0` when the dropdown is absent
+/// (vertical bars). Floored at `plus_w` so a very narrow bar still reserves room
+/// for the `+` button.
+pub(super) fn tab_segment_strip_width(surface_w: f32, plus_w: f32, arrow_w: f32) -> f32 {
+    (surface_w - plus_w - arrow_w).max(plus_w)
+}
+
+/// The shortest a focus change waits before reading the update facts again.
+const UPDATE_FACTS_THROTTLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The ✕ hit zone for one tab segment, or an EMPTY rect when the button is
+/// configured off.
+///
+/// With `close-button-on-tab = false`, a full-size hit rect would still be
+/// probed by the press handler, the `ctl` press handler, and the pointer-cursor
+/// hover test. Clicking a tab's trailing square would then close it through an
+/// invisible button, killing every pane in that tab. A zero-size rect fixes all
+/// three, because every consumer tests with a strict `px < rx + rw`, which no
+/// zero-width rect can satisfy. `tab_title_rect` reads `close.0` only when the
+/// button is visible, so the reclaimed label space is unaffected.
+pub(super) fn tab_close_rect(
+    trailing_x: f32,
+    y: f32,
+    height: f32,
+    close_visible: bool,
+) -> kettle_render::Rect4 {
+    if close_visible {
+        (trailing_x, y, height, height)
+    } else {
+        (trailing_x, y, 0.0, 0.0)
+    }
+}
+
+/// Text lane inside a tab segment. The close button is visible chrome, so the
+/// label must be centered in the lane that remains before that button rather
+/// than centered against the full segment and visually drifting under `✕`.
+pub(super) fn tab_title_rect(
+    segment: kettle_render::Rect4,
+    close: kettle_render::Rect4,
+    close_visible: bool,
+) -> kettle_render::Rect4 {
+    let (x, y, w, h) = segment;
+    let left = x + 8.0;
+    let right = if close_visible { close.0 } else { x + w - 8.0 };
+    (left, y, (right - left).max(0.0), h)
+}
+
+/// Should the new-tab `▾` dropdown arrow be shown? Always yes. Besides the
+/// shells, the dropdown carries Settings / Command palette / About rows
+/// (Windows Terminal's bottom section), so it is never a pointless one-item
+/// menu, even on a bash-only Ubuntu.
+fn new_tab_dropdown_visible() -> bool {
+    true
 }

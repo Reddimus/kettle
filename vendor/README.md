@@ -130,6 +130,15 @@ date. Recheck that before upgrading a crate or dropping a patch.
   - ED 1 with the cursor on the second row clears the first row too.
 
   Upstream `master` still had all seven of these bugs on 2026-10-16.
+  Three more from the 5.7.0 audit, not yet checked against upstream:
+  - Growing the grid keeps `history_origin` when the synthetic padding it
+    scrolls in is not history.
+  - The terminfo capability values the terminal reports for XTGETTCAP carry
+    a real ESC byte where they start with one, so a decoded `Smulx` enables
+    undercurl.
+  - DECSTR (soft reset) resets SGR, insert, origin and application modes,
+    character sets and the saved cursor, and restores cursor visibility and
+    autowrap, keeping contents, history, title and the cursor's position.
 - Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
   is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
   from 2026-08-31, is `0.26.1-dev`. Since
@@ -312,6 +321,10 @@ the `Restore` and `Disable` variants, so it does not build against an upstream
   the arguments follow. Upstream panics on any argument for the default
   program, so Kettle could not hand the user's fish its `-C` startup without
   naming the shell itself and losing that login `argv[0]`.
+  On Unix, `CommandBuilder::set_argv0` preserves a client's original invocation
+  name independently of its executable path, so reconnect can launch multicall
+  clients outside Kettle's PATH in the correct mode. Serialized builders without
+  the new field retain their existing invocation behavior.
   On Unix, `CommandBuilder::resolve_program` names the executable a spawn
   would run, through the same `PATH` search, child working directory and
   access checks, so Kettle's shell startup inspects that same file. Relative
@@ -324,16 +337,32 @@ the `Restore` and `Disable` variants, so it does not build against an upstream
   descriptors close-on-exec instead of closing them, so std's exec-error
   channel still reports a failed `exec`, and the public
   `unix::close_random_fds`, which closed them, is gone. Linux uses one
-  `close_range(CLOSE_RANGE_CLOEXEC)` call when the kernel accepts it. macOS 11
+  `close_range(3, ~0U, CLOSE_RANGE_CLOEXEC)` call when the kernel accepts it.
+  ENOSYS, EINVAL, or EPERM falls back to opening `/proc/self/fd` in the child
+  and reading it with raw `getdents64` into a fixed stack buffer. Each checked
+  numeric entry is marked close-on-exec except the directory's own descriptor,
+  which is opened close-on-exec and closed after enumeration. Open, read,
+  malformed-record, and descriptor-marking failures fail the spawn rather than
+  accept a partial sweep. There is no parent descriptor snapshot: another
+  thread can open a descriptor between such a snapshot and `fork`. macOS 11
   and later mark the descriptors the kernel lists through
   `proc_pidinfo(PROC_PIDLISTFDS)` into a buffer the parent allocates before
   `fork`; older macOS kernels can omit high descriptors from that list, so
-  they are not asked. Every other case falls back to one `fcntl` per
-  descriptor number below the soft limit, capped at 1,048,576: other Unix
-  systems, Linux when `close_range` is rejected, and macOS when the list is
-  unreadable or fills the buffer. The macOS list keeps pane spawns from paying
-  that loop under the 1,048,576 soft limit that Node-based launchers such as
-  VS Code set.
+  they are not asked. When that list is unreadable or fills its buffer, macOS
+  walks descriptor numbers below `kern.maxfilesperproc`, read in the parent
+  before `fork`, independently of either process limit: lowering the hard
+  limit does not close descriptors already open above it. An unreadable,
+  unusable, or over-1,048,576 bound fails the spawn instead of silently missing
+  descriptors or hanging. Other Unix systems use the finite hard limit when
+  it is at most 1,048,576; otherwise they retain the capped soft-limit walk.
+  These fallbacks cover descriptors left above a later-lowered soft limit
+  (audit finding v004). The macOS list still avoids the full walk on normal
+  pane spawns. Tests isolate limit changes in a subprocess, leak fd 5000 (or
+  the highest available lower number), lower the soft limit below it, and
+  probe it with `fcntl` in the executed child. A test-only flag captured before
+  `fork` forces the Linux enumeration and macOS walk; synthetic `getdents64`
+  records test unaligned reads, malformed lengths/names, and numeric overflow
+  on every Unix test host.
   On Unix the passwd lookup for the login shell and home directory calls
   `getpwuid_r` with a buffer it owns and checks each field for NULL. Upstream
   calls `getpwuid`, whose buffer the whole process shares, so two panes
@@ -360,7 +389,10 @@ the `Restore` and `Disable` variants, so it does not build against an upstream
   required by Kettle's warnings-denied direct-package clippy gate. Five
   additional Unix-only cleanups apply Rust 1.97's suggestions for redundant imports,
   borrows, conversions, and `Option` dereferencing. Drop those cleanups if a
-  later upstream release already carries them.
+  later upstream release already carries them. From the 5.7.0 audit (not yet
+  checked upstream): the waiter keeps completion and the registered waker
+  under one lock, so a waker registered after completion is woken at once
+  instead of never.
 - Upstream status, checked 2026-09-30: crates.io's newest `portable-pty` is
   still 0.9.0, published 2025-02-11. WezTerm develops it in the `pty/`
   directory of wezterm/wezterm, whose `main` is at `cab25161` from 2026-09-29.
@@ -422,7 +454,9 @@ them.
   for a file list first, as a paste does, its 1 MiB+ transfer was left waiting
   on an undeleted segment, and the text read after it timed out (4 s for each
   of six formats). A transfer of another type is drained, then refused. Upstream
-  `master` reads segments the same old way (checked 2026-10-16).
+  `master` reads segments the same old way (checked 2026-10-16). The drain of a
+  refused transfer is bounded (four seconds and 4,096 segments, not renewed by
+  each segment), so an owner that keeps sending cannot hold a read forever.
 - Upstream: backport the decoder line from
   [b4e0616](https://github.com/1Password/arboard/commit/b4e061622caa1356425f81073d9685166017c7f9).
   On 2026-10-14 the latest published version was still 3.6.1. The upstream

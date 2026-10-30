@@ -490,9 +490,9 @@ mod imp {
         use std::os::unix::ffi::OsStrExt as _;
         let os_pid = libc::pid_t::try_from(pid).map_err(|_| InspectError::Unavailable)?;
         let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-        // SAFETY: `path` is a live buffer of the length passed; the call
-        // writes at most that many bytes and returns how many it wrote.
         let written =
+            // SAFETY: `path` is a live buffer of the length passed; the call
+            // writes at most that many bytes and returns how many it wrote.
             unsafe { libc::proc_pidpath(os_pid, path.as_mut_ptr().cast(), path.len() as u32) };
         let written = usize::try_from(written).map_err(|_| InspectError::Unavailable)?;
         if written == 0 {

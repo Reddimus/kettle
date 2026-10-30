@@ -13,6 +13,20 @@ use std::os::unix::net::UnixStream;
 // including NetBSD, OpenBSD, DragonFly, illumos, and Android.
 use libc::SCM_RIGHTS;
 
+/// Zeroed ancillary-data storage for `fd_count` descriptors, and its length in
+/// bytes. `u64` words give the buffer `cmsghdr` alignment on every Unix target,
+/// which a byte vector does not guarantee.
+fn cmsg_buffer(fd_count: usize) -> io::Result<(Vec<u64>, u32, usize)> {
+    let fd_bytes = fd_count
+        .checked_mul(std::mem::size_of::<RawFd>())
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "too many descriptors"))?;
+    // SAFETY: CMSG_SPACE only computes a padded size; it dereferences nothing.
+    let space = unsafe { libc::CMSG_SPACE(fd_bytes) } as usize;
+    let words = space.div_ceil(std::mem::size_of::<u64>());
+    Ok((vec![0; words], fd_bytes, space))
+}
+
 /// Send the full payload and duplicate `fds` for the receiver, retaining ownership
 /// of the originals. I/O errors propagate; an error may follow a partial send.
 pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Result<usize> {
@@ -31,22 +45,27 @@ pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Resul
         return Ok(payload.len());
     }
     // Build ancillary cmsg buffer carrying the SCM_RIGHTS payload.
-    let fd_bytes = std::mem::size_of_val(fds);
+    let (mut cmsg_buf, fd_bytes, cmsg_space) = cmsg_buffer(fds.len())?;
     // CMSG_SPACE (the buffer size) adds the cmsghdr and rounds up to
     // alignment; CMSG_LEN is the unpadded length for `cmsg_len`.
-    let cmsg_len = unsafe { libc::CMSG_LEN(fd_bytes as u32) } as usize;
-    let cmsg_space = unsafe { libc::CMSG_SPACE(fd_bytes as u32) } as usize;
-    let mut cmsg_buf: Vec<u8> = vec![0u8; cmsg_space];
+    // SAFETY: CMSG_LEN only computes a size from the byte count; it does not dereference pointers.
+    let cmsg_len = unsafe { libc::CMSG_LEN(fd_bytes) } as usize;
     let mut iov = libc::iovec {
         iov_base: payload.as_ptr() as *mut libc::c_void,
         iov_len: payload.len(),
     };
+    // SAFETY: An all-zero msghdr contains valid null pointers and integer fields; buffers are
+    // assigned below.
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_control = cmsg_buf.as_mut_ptr().cast::<libc::c_void>();
     msg.msg_controllen = cmsg_space as _;
     // Populate the cmsghdr at the front of cmsg_buf.
+    // SAFETY: msg_control points at `cmsg_space` zeroed, u64-aligned bytes, enough
+    // for one cmsghdr and `fd_bytes` of data (CMSG_SPACE), so CMSG_FIRSTHDR returns
+    // an aligned header inside it. The descriptors are copied as bytes, which
+    // needs no alignment.
     unsafe {
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         if cmsg.is_null() {
@@ -55,9 +74,14 @@ pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Resul
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = SCM_RIGHTS;
         (*cmsg).cmsg_len = cmsg_len as _;
-        let fd_ptr = libc::CMSG_DATA(cmsg) as *mut RawFd;
-        std::ptr::copy_nonoverlapping(fds.as_ptr(), fd_ptr, fds.len());
+        std::ptr::copy_nonoverlapping(
+            fds.as_ptr().cast::<u8>(),
+            libc::CMSG_DATA(cmsg),
+            fd_bytes as usize,
+        );
     }
+    // SAFETY: msg and its iovec, payload and ancillary buffers stay live through this
+    // synchronous call.
     let sent = unsafe { libc::sendmsg(socket.as_raw_fd(), &msg, 0) };
     if sent < 0 {
         return Err(io::Error::last_os_error());
@@ -86,17 +110,17 @@ pub fn recv_fds(
     max_fds: usize,
 ) -> io::Result<(usize, Vec<RawFd>)> {
     use std::os::unix::io::AsRawFd;
-    let cmsg_space =
-        unsafe { libc::CMSG_SPACE((max_fds * std::mem::size_of::<RawFd>()) as u32) } as usize;
-    let mut cmsg_buf: Vec<u8> = vec![0u8; cmsg_space];
+    let (mut cmsg_buf, _, cmsg_space) = cmsg_buffer(max_fds)?;
     let mut iov = libc::iovec {
         iov_base: payload_buf.as_mut_ptr() as *mut libc::c_void,
         iov_len: payload_buf.len(),
     };
+    // SAFETY: All-zero msghdr fields are valid; the writable buffers and lengths are assigned
+    // below.
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_control = cmsg_buf.as_mut_ptr().cast::<libc::c_void>();
     msg.msg_controllen = cmsg_space as _;
     // Linux/Android set CLOEXEC atomically; other Unix platforms use fcntl below.
     // Atomic delivery prevents inheritance by a concurrently spawned child.
@@ -104,11 +128,17 @@ pub fn recv_fds(
     let recv_flags: libc::c_int = libc::MSG_CMSG_CLOEXEC;
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     let recv_flags: libc::c_int = 0;
+    // SAFETY: The iovec and ancillary buffer are exclusively writable for their advertised
+    // lengths during the call.
     let n = unsafe { libc::recvmsg(socket.as_raw_fd(), &mut msg, recv_flags) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
     let mut out: Vec<RawFd> = Vec::new();
+    // SAFETY: msg_control is the u64-aligned buffer the kernel filled, and
+    // CMSG_FIRSTHDR/CMSG_NXTHDR only return headers whose lengths stay inside
+    // msg_controllen. Descriptors are read unaligned, so their placement after
+    // the header needs no alignment argument.
     unsafe {
         let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
         while !cmsg.is_null() {
@@ -120,10 +150,10 @@ pub fn recv_fds(
                 // `unsafe` path.
                 let base = libc::CMSG_LEN(0) as usize;
                 if (*cmsg).cmsg_len as usize >= base {
-                    let data = libc::CMSG_DATA(cmsg) as *const RawFd;
+                    let data = libc::CMSG_DATA(cmsg).cast::<RawFd>();
                     let n_fds = ((*cmsg).cmsg_len as usize - base) / std::mem::size_of::<RawFd>();
                     for i in 0..n_fds {
-                        out.push(*data.add(i));
+                        out.push(data.add(i).read_unaligned());
                     }
                 }
             }
@@ -132,12 +162,16 @@ pub fn recv_fds(
     }
     // Best-effort CLOEXEC fallback; the legacy receiver closes every returned fd.
     for &fd in &out {
+        // SAFETY: fd is a newly received descriptor still owned by out; F_SETFD takes an
+        // integer argument.
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
     // Reject incomplete descriptor sets and close every descriptor we received.
     // The kernel closes descriptors that did not fit the ancillary buffer.
     if msg.msg_flags & libc::MSG_CTRUNC != 0 {
         for &fd in &out {
+            // SAFETY: Each received descriptor is owned here and is closed once before
+            // returning the error.
             unsafe { libc::close(fd) };
         }
         return Err(io::Error::new(
@@ -193,6 +227,7 @@ mod tests {
         let (s1, s2) = std::os::unix::net::UnixStream::pair().expect("socketpair");
         // Shrink the send buffer so a large payload can't fit in one write.
         let small: libc::c_int = 4096;
+        // SAFETY: s1 owns the socket; small is live c_int storage of the size SO_SNDBUF expects.
         unsafe {
             libc::setsockopt(
                 s1.as_raw_fd(),
@@ -230,6 +265,7 @@ mod tests {
         let (s1, s2) = std::os::unix::net::UnixStream::pair().expect("socketpair");
         // A concrete fd to pass: the read end of a fresh pipe.
         let mut pipe_fds = [0 as RawFd; 2];
+        // SAFETY: pipe_fds has writable space for the two descriptors pipe returns.
         assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0, "pipe");
         let (rd, wr) = (pipe_fds[0], pipe_fds[1]);
 
@@ -241,6 +277,8 @@ mod tests {
         assert_eq!(n, 1, "payload byte received");
         assert_eq!(got.len(), 1, "exactly one fd received");
 
+        // SAFETY: got owns this received descriptor, which has not yet been closed; F_GETFD
+        // takes no extra argument.
         let flags = unsafe { libc::fcntl(got[0], libc::F_GETFD) };
         assert!(flags >= 0, "F_GETFD on received fd");
         assert!(
@@ -249,6 +287,8 @@ mod tests {
         );
 
         for fd in [rd, wr, got[0]] {
+            // SAFETY: The two pipe ends and received duplicate are distinct owned descriptors,
+            // each closed once.
             unsafe { libc::close(fd) };
         }
     }

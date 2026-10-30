@@ -461,11 +461,11 @@ mod tests {
     fn every_phase_is_marked_in_startup_order() {
         let main_rs = include_str!("../../kettle/src/main.rs");
         let app_rs = &crate::app::app_source();
-        let production = app_rs.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let production = &kettle_test_support::production_source(app_rs);
         let resumed = production.split_once("fn resumed_inner(").unwrap().1;
-        let resumed = resumed.split_once("\n    fn ").unwrap().0;
+        let resumed = resumed.split_once("\n    }\n").unwrap().0;
         let run_with = production.split_once("pub fn run_with(").unwrap().1;
-        let run_with = run_with.split_once("\n    fn ").unwrap().0;
+        let run_with = run_with.split_once("\n    }\n").unwrap().0;
         // Every call spells the full path, so this matches `crate::` and
         // `kettle_ui::` calls alike and nothing else.
         let needle =
@@ -517,7 +517,7 @@ mod tests {
             .split_once("fn start_first_pane_before_launch(")
             .unwrap()
             .1
-            .split_once("\n    fn ")
+            .split_once("\n    }\n")
             .unwrap()
             .0;
         let pre_flat = flat(pre_launch);

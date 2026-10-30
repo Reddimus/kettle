@@ -21,6 +21,60 @@ fn selection_point_to_grid(
 }
 
 impl App {
+    pub(super) fn press_pane_drag(&mut self, ws: &mut WindowState, button: u8) -> bool {
+        if button != 0 {
+            return false;
+        }
+        let Some(pane) = self.pane_at_titlebar_click(ws, ws.cursor.x as f32, ws.cursor.y as f32)
+        else {
+            return false;
+        };
+        let pre = self.focus_key(ws);
+        arm_pane_drag(ws, pane);
+        self.note_focus_change(ws, pre);
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn drag_pane(&self, ws: &mut WindowState) -> bool {
+        if ws.pane_drag.is_none() {
+            return false;
+        }
+        let area = self.area(ws);
+        if update_pane_drag(ws, area)
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn release_pane_drag(
+        &mut self,
+        ws: &mut WindowState,
+        button: u8,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
+        if button != 0 {
+            return false;
+        }
+        let Some((moved, rename)) = finish_pane_drag(ws) else {
+            return false;
+        };
+        if moved {
+            self.resize_all(ws);
+            self.save_session(ws);
+        } else if rename {
+            self.handle_action(ws, Action::EditPaneTitle, event_loop);
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        true
+    }
+
     /// Clear the focused pane's selection (called when the user types —
     /// every modern terminal does this so a stale highlight doesn't
     /// confuse the next copy/paste). No-op when nothing is selected.
@@ -756,6 +810,9 @@ impl App {
             }
             return true;
         }
+        if self.picker_pointer(ws, PickerPointer::Wheel(-(steps.notches as isize))) {
+            return true;
+        }
         // A wheel over a lane is the lane's: it pans a rendered item or
         // scrolls a source, and reaches nothing behind it.
         if self.lane_takes_wheel(ws) {
@@ -969,5 +1026,814 @@ mod selection_point_tests {
             selection_point_to_grid(Point::new(Line(30), Column(3)), Side::Left, &grid, 0),
             (Point::new(Line(23), Column(3)), Side::Left)
         );
+    }
+}
+
+/// Live state for a split-divider mouse drag — the addressed
+/// split (`path`) and its orientation. The split's rect is re-fetched from
+/// `split_seams` on every move (keyed by `path`) so a layout change mid-drag
+/// (another pane closing) can't desync the ratio math.
+pub(crate) struct SplitDrag {
+    pub(super) path: Vec<bool>,
+    pub(super) dir: Dir,
+}
+
+/// Terminator parity: live state for dragging a terminal to another position
+/// inside its tab, armed by a left-press on that pane's own titlebar.
+///
+/// The press is deliberately ambiguous until the pointer moves. A titlebar
+/// click means "focus this pane" and a second click on the focused pane means
+/// "edit its title"; both must keep working. So the press records what it
+/// *would* do, `live` records whether movement has since turned it into a drag,
+/// and the RELEASE picks between the two. Opening the title editor on press
+/// would put an editor over the pane the user just started dragging.
+pub(crate) struct PaneDrag {
+    /// The pane being moved.
+    pub(crate) pane: u64,
+    /// Surface position of the press, the origin the slop radius is measured
+    /// from.
+    pub(crate) origin: (f32, f32),
+    /// Movement has cleared the slop radius: this is a drag, not a click.
+    pub(crate) live: bool,
+    /// A release that never became a drag opens the title editor. True only
+    /// when the press landed on the ALREADY-focused pane: a press that merely
+    /// moved focus is not by itself a request to rename anything.
+    pub(crate) rename_on_click: bool,
+    /// Latched drop target while `live`: the pane under the cursor, the half of
+    /// it the drop would take, and the `(dir, before)` pair that describes that
+    /// half to `Mux::move_pane_beside`. `None` while the cursor is over no pane
+    /// — over a seam, or outside the content area.
+    pub(crate) target: Option<(u64, Rect, Dir, bool)>,
+}
+
+/// Grab tolerance (px) for the thin split divider line, so
+/// it's easy to hit with the mouse without pixel-perfect aim.
+const SPLIT_SEAM_TOL: f32 = 5.0;
+
+/// Per-pane titlebar hit test (Terminator parity): returns the id of the pane
+/// whose titlebar band contains the click, or `None`. Pure so the hit test
+/// behind `App::pane_at_titlebar_click` can be drift-guarded.
+#[allow(clippy::type_complexity)]
+pub(crate) fn pane_titlebar_hit(
+    px: f32,
+    py: f32,
+    pane_rects: &[(u64, (f32, f32, f32, f32))],
+    title_at_bottom: bool,
+    bar_h: f32,
+) -> Option<u64> {
+    for (id, (rx, ry, rw, rh)) in pane_rects {
+        let (bar_top, bar_bot) = if title_at_bottom {
+            (*ry + *rh - bar_h, *ry + *rh)
+        } else {
+            (*ry + 1.0, *ry + 1.0 + bar_h)
+        };
+        if px >= *rx && px < *rx + *rw && py >= bar_top && py < bar_bot {
+            return Some(*id);
+        }
+    }
+    None
+}
+
+/// SGR mouse base code for the extra "side" mouse buttons, or `None` for any
+/// button kettle handles locally (left/middle/right) or doesn't forward.
+///
+/// Forwarding these lets a 5-button mouse's Back / Forward reach a
+/// mouse-tracking TUI (tmux/vim bindings, pagers). xterm encodes buttons 8–11
+/// as `128 + (button - 8)`; winit's `Back` is XBUTTON1 (button 8 → 128) and
+/// `Forward` is XBUTTON2 (button 9 → 129). These have no local UI meaning, so
+/// they only do anything while mouse tracking is on.
+pub(super) fn extra_mouse_sgr(button: MouseButton) -> Option<u8> {
+    match button {
+        MouseButton::Back => Some(MOUSE_BACK),
+        MouseButton::Forward => Some(MOUSE_FORWARD),
+        _ => None,
+    }
+}
+
+/// The report code of xterm's button 8, the Back button.
+pub(super) const MOUSE_BACK: u8 = 128;
+/// The report code of xterm's button 9, the Forward button.
+pub(super) const MOUSE_FORWARD: u8 = 129;
+
+/// What a mouse event did on its way to a pane's terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MouseReport {
+    /// A report went to the terminal.
+    Written,
+    /// Kettle kept the event from the terminal, and nothing else handles it.
+    Swallowed,
+    /// No report was due; Kettle handles the event itself.
+    Declined,
+}
+
+impl MouseReport {
+    /// Whether nothing else should handle the event.
+    pub(super) fn consumed(self) -> bool {
+        self != Self::Declined
+    }
+}
+
+/// Where a mouse report lands in its pane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum MouseAt {
+    /// The pointer's cell in the pane's rect.
+    Pointer(Rect),
+    /// The drag or release of a held button whose press the pane's program
+    /// got: the pointer's cell in its rect while it is on screen, else the
+    /// cell it was last told of.
+    Held {
+        rect: Option<Rect>,
+        cell: (usize, usize),
+    },
+}
+
+/// Pure pointer → `(col, line, side)` math for a pane, shared by `px_to_point` so
+/// the per-pane-titlebar inset is drift-tested.
+///
+/// The renderer and hit testing share [`kettle_render::pane_grid_origin`] (a top
+/// titlebar moves row zero down; a bottom one leaves it at the pane padding), so
+/// selection, link targeting, mouse reporting, and IME projection never drift a
+/// row from the drawn grid. Col/line clamp to ≥ 0 so a click in the
+/// chrome/padding doesn't underflow.
+///
+/// `side` is which half of the hit cell the pointer sits in, derived from the
+/// sub-cell x offset: the left half is `Side::Left`, the right half (and the
+/// exact midpoint) is `Side::Right`. This matches xterm / Alacritty / iTerm2 and
+/// is exactly what alacritty's `Selection::to_range` (`range_simple`/`range_block`)
+/// needs to decide whether each boundary cell is included. Without it a drag is
+/// biased one cell wide. The side is computed from the SAME clamped non-negative
+/// offset as `col`, so a pointer left of the content origin maps to
+/// `(col 0, Side::Left)` and the first cell is included, never trimmed. NOTE:
+/// only Simple/Block *drag* selections consume this side; word / line /
+/// smart-select snap to token boundaries and ignore it (see `begin_selection` /
+/// `apply_smart_selection`).
+pub(super) fn px_to_cell(
+    px: f32,
+    py: f32,
+    terminal: Rect,
+    cell: (f32, f32),
+    pad: (f32, f32),
+) -> (usize, i32, kettle_core::Side) {
+    let (cw, ch) = cell;
+    let (ox, oy) = (terminal.0 + pad.0, terminal.1 + pad.1);
+    // Derive BOTH col and side from the same non-negative offset so they agree at
+    // the left clamp: a pointer in the left padding (offset < 0) maps to
+    // (col 0, Side::Left) — the first cell is included, not trimmed. Computing the
+    // side from the raw (negative) offset via `rem_euclid` would wrap it into the
+    // cell's right half and wrongly drop column 0 from a drag.
+    let offx = (px - ox).max(0.0);
+    let col = (offx / cw).floor() as usize;
+    let line = ((py - oy) / ch).floor().max(0.0) as i32;
+    let side = if offx.rem_euclid(cw) < cw / 2.0 {
+        kettle_core::Side::Left
+    } else {
+        kettle_core::Side::Right
+    };
+    (col, line, side)
+}
+
+/// Map a VIEWPORT-relative point (line 0 = top visible row, what `px_to_point`
+/// returns) to the GRID-ABSOLUTE point that alacritty's `Selection` /
+/// `selection_to_string` / `to_range` and `grid[..]` indexing expect, by
+/// subtracting the focused pane's `display_offset` via alacritty's own
+/// `viewport_to_point`. Without it, a selection or grid-row read taken while
+/// scrolled into history addresses the active-screen row instead of the
+/// scrolled-to row, so the copy returns wrong or empty text and the highlight
+/// slips down by the scroll amount. The bug is invisible at the bottom, where
+/// `display_offset == 0` makes viewport and absolute coincide. Pure
+/// (drift-tested in `viewport_point_to_grid_applies_display_offset`).
+pub(super) fn viewport_point_to_grid(
+    viewport: kettle_core::Point,
+    display_offset: usize,
+) -> kettle_core::Point {
+    let line = viewport.line.0.max(0) as usize;
+    kettle_core::viewport_to_point(
+        display_offset,
+        kettle_core::Point::new(line, viewport.column),
+    )
+}
+
+/// Grid-absolute `(top-left, bottom-right)` points spanning the whole buffer —
+/// scrollback included — for keyboard "select to top/bottom" and "select all".
+/// Alacritty's convention: the active screen is `Line(0)..Line(screen_lines)` and
+/// history is *negative* down to `Line(-history_size)`, so the oldest line is
+/// `Line(-(history_size))` col 0 and the last cell is `Line(screen_lines-1)` at the
+/// final column. Pure so the boundary math is unit-testable without a GPU/Term.
+pub(super) fn selection_buffer_bounds(
+    history_size: usize,
+    screen_lines: usize,
+    columns: usize,
+) -> (kettle_core::Point, kettle_core::Point) {
+    let top = kettle_core::Point::new(
+        kettle_core::Line(-(history_size as i32)),
+        kettle_core::Column(0),
+    );
+    let bottom = kettle_core::Point::new(
+        kettle_core::Line(screen_lines.saturating_sub(1) as i32),
+        kettle_core::Column(columns.saturating_sub(1)),
+    );
+    (top, bottom)
+}
+
+/// Auto-scroll rate when a selection reaches or passes a pane's vertical edge.
+/// A six-point inner drag zone keeps full-height panes scrollable even though
+/// the pointer cannot move below their client area.
+///
+/// Speed scales with how far past the edge the cursor sits — a small
+/// overshoot crawls (1 line/frame), a big one (40+ px) chases at 3 lines
+/// per frame. Pure so the cadence is unit-tested without spinning up a
+/// renderer or PTY.
+pub(super) fn selection_autoscroll_lines(
+    y: f32,
+    rect_top: f32,
+    rect_bottom: f32,
+    scale_factor: f32,
+    selection_dragged: bool,
+) -> i32 {
+    const EDGE_ZONE_PT: f32 = 6.0;
+
+    let pane_height = rect_bottom - rect_top;
+    if !selection_dragged || pane_height <= 0.0 {
+        return 0;
+    }
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let edge_zone = (EDGE_ZONE_PT * scale_factor).min(pane_height * 0.25);
+    let (overshoot, direction) = if y < rect_top || y <= rect_top + edge_zone {
+        ((rect_top - y).max(0.0), 1)
+    } else if y > rect_bottom || y >= rect_bottom - edge_zone {
+        ((y - rect_bottom).max(0.0), -1)
+    } else {
+        return 0;
+    };
+    // Magnitude → 1..=3 lines/frame ladder.
+    let mag = if overshoot >= 40.0 {
+        3
+    } else if overshoot >= 10.0 {
+        2
+    } else {
+        1
+    };
+    direction * mag
+}
+
+/// Whether pointer travel since the selection press is large enough to count
+/// as a drag. Native backends may emit a cursor-moved event after mouse-down at
+/// the same (or fractionally rounded) coordinate, so event arrival alone is
+/// not evidence that the user dragged. The threshold is in logical points and
+/// converted to physical pixels for the addressed window.
+pub(super) fn selection_drag_motion_started(
+    origin: Option<winit::dpi::PhysicalPosition<f64>>,
+    cursor: winit::dpi::PhysicalPosition<f64>,
+    scale_factor: f64,
+) -> bool {
+    const DRAG_START_PT: f64 = 2.0;
+
+    let Some(origin) = origin else {
+        return false;
+    };
+    if !(origin.x.is_finite()
+        && origin.y.is_finite()
+        && cursor.x.is_finite()
+        && cursor.y.is_finite())
+    {
+        return false;
+    }
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let threshold = DRAG_START_PT * scale_factor;
+    let dx = cursor.x - origin.x;
+    let dy = cursor.y - origin.y;
+    dx * dx + dy * dy >= threshold * threshold
+}
+
+pub(super) fn note_selection_drag_motion(ws: &mut WindowState) {
+    if ws.selection_dragged {
+        return;
+    }
+    let scale_factor = ws
+        .window
+        .as_ref()
+        .map_or(1.0, |window| window.scale_factor());
+    ws.selection_dragged =
+        selection_drag_motion_started(ws.selection_drag_origin, ws.cursor, scale_factor);
+}
+
+/// Which vertical edge an in-progress selection most likely crossed when the
+/// backend reports `CursorLeft` without an out-of-client coordinate. Corners
+/// resolve vertically on ties because horizontal selection overflow does not
+/// scroll, while losing the vertical intent freezes the gesture entirely. A
+/// window exit only latches after measured drag travel; otherwise a press on
+/// the last client pixel plus sub-threshold outward jitter could scroll.
+pub(super) fn selection_leave_edge(
+    selection_dragged: bool,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> i8 {
+    if !selection_dragged || !(x.is_finite() && y.is_finite() && width > 0.0 && height > 0.0) {
+        return 0;
+    }
+    let top = y.max(0.0);
+    let bottom = (height - y).max(0.0);
+    let left = x.max(0.0);
+    let right = (width - x).max(0.0);
+    if top <= bottom && top <= left && top <= right {
+        1
+    } else if bottom <= top && bottom <= left && bottom <= right {
+        -1
+    } else {
+        0
+    }
+}
+
+pub(super) fn arm_selection_gesture(ws: &mut WindowState, pane_id: u64, button: u8) {
+    // A fresh grid gesture owns Copy, including Shift+right-click extension.
+    if ws.search.open {
+        ws.search.editor.clear_selection();
+    }
+    ws.selecting = true;
+    ws.selecting_pane = Some(pane_id);
+    ws.selection_autoscroll_edge = 0;
+    ws.selection_dragged = false;
+    ws.selection_drag_origin = Some(ws.cursor);
+    ws.selection_button = Some(button);
+}
+
+pub(super) fn selection_release_matches(owner: Option<u8>, button: u8) -> bool {
+    owner == Some(button)
+}
+
+pub(super) fn selection_copy_owner(selecting: bool, pane_id: Option<u64>) -> Option<u64> {
+    if selecting { pane_id } else { None }
+}
+
+pub(super) fn clear_selection_gesture(ws: &mut WindowState) {
+    ws.selecting = false;
+    ws.selecting_pane = None;
+    ws.selection_autoscroll_edge = 0;
+    ws.selection_dragged = false;
+    ws.selection_drag_origin = None;
+    ws.selection_button = None;
+}
+
+/// Select the terminal pane addressed by a wheel event without mutating
+/// keyboard focus. A pane under the pointer wins; chrome, gaps and coordinates
+/// outside the client area fall back to the focused pane.
+pub(super) fn wheel_target_at(
+    layout: &[(u64, Rect)],
+    focused: Option<u64>,
+    x: f32,
+    y: f32,
+) -> Option<(u64, Rect)> {
+    layout
+        .iter()
+        .copied()
+        .find(|&(_, (rx, ry, rw, rh))| x >= rx && x < rx + rw && y >= ry && y < ry + rh)
+        .or_else(|| {
+            let focused = focused?;
+            layout.iter().copied().find(|(pane, _)| *pane == focused)
+        })
+}
+
+/// Map a click count + the Alt modifier to a selection type: double =
+/// word, triple = line, single = a normal drag, and Alt+single =
+/// rectangular/block selection (iTerm2/Alacritty/WezTerm parity).
+pub(super) fn selection_kind(clicks: u8, alt: bool) -> kettle_core::SelectionType {
+    use kettle_core::SelectionType::*;
+    match clicks {
+        2 => Semantic,
+        3 => Lines,
+        _ if alt => Block,
+        _ => Simple,
+    }
+}
+
+/// Pixel distance a held per-pane-titlebar press must move before it becomes a
+/// pane drag rather than a click.
+///
+/// A flat constant, unlike [`tab_reorder_drag_threshold_px`], because the
+/// competing gesture is different: a tab press competes with a reorder along a
+/// strip whose height sets the natural scale, while a titlebar press competes
+/// with "click again to rename". Renaming is the destructive-to-undo one, so the
+/// slop is generous enough that ordinary hand jitter during a double click never
+/// picks the pane up.
+const PANE_DRAG_THRESHOLD_PX: f32 = 12.0;
+
+pub(super) fn update_pane_drag(ws: &mut WindowState, area: Rect) -> bool {
+    if ws.pane_drag.is_none() {
+        return false;
+    }
+    let (cx, cy) = (ws.cursor.x as f32, ws.cursor.y as f32);
+    let (ox, oy) = ws.pane_drag.as_ref().map(|d| d.origin).unwrap_or((cx, cy));
+    let (dx, dy) = (cx - ox, cy - oy);
+    let live = ws.pane_drag.as_ref().is_some_and(|d| d.live)
+        || (dx * dx + dy * dy).sqrt() > PANE_DRAG_THRESHOLD_PX;
+    let moving = ws.pane_drag.as_ref().map(|d| d.pane);
+    // Computed before the &mut borrow below: `pane_rect_at`
+    // needs `&ws.mux` and the write needs `&mut ws.pane_drag`.
+    let target = if live {
+        ws.mux.pane_rect_at(area, cx, cy).and_then(|(id, rect)| {
+            // A pane cannot be dropped onto itself: the tree
+            // half refuses it, so offering the hint would
+            // promise a move that never happens.
+            (Some(id) != moving)
+                .then(|| {
+                    crate::mux::pane_drop_zone(rect, cx, cy)
+                        .map(|(dir, before)| (id, rect, dir, before))
+                })
+                .flatten()
+        })
+    } else {
+        None
+    };
+    if let Some(drag) = ws.pane_drag.as_mut() {
+        let changed = drag.live != live
+            || drag.target.map(|t| t.0) != target.map(|t| t.0)
+            || drag.target.map(|t| (t.2, t.3)) != target.map(|t| (t.2, t.3));
+        drag.live = live;
+        drag.target = target;
+        return changed;
+    }
+    false
+}
+
+pub(super) fn arm_pane_drag(ws: &mut WindowState, pane: u64) {
+    let rename_on_click = ws.mux.active_focus() == Some(pane);
+    ws.mux.focus_pane(pane);
+    ws.pane_drag = Some(PaneDrag {
+        pane,
+        origin: (ws.cursor.x as f32, ws.cursor.y as f32),
+        live: false,
+        rename_on_click,
+        target: None,
+    });
+}
+
+pub(super) fn finish_pane_drag(ws: &mut WindowState) -> Option<(bool, bool)> {
+    let drag = ws.pane_drag.take()?;
+    let moved = drag.live
+        && drag.target.is_some_and(|(target, _, dir, before)| {
+            ws.mux.move_pane_beside(drag.pane, target, dir, before)
+        });
+    Some((moved, !drag.live && drag.rename_on_click))
+}
+
+/// Should an open modal swallow a pointer event (mouse press / wheel)
+/// instead of letting it fall through to the tab bar, pane focus, or
+/// mouse-tracking *behind* the dialog? Otherwise a click could switch tabs or
+/// focus a pane, and a wheel could zoom the font or scroll the pane, while a
+/// dialog that seems to capture input sits on top. True whenever
+/// `any_modal_open` is set, *except* for a lone context menu, which owns its
+/// own click/scroll paths and is re-opened (relocated) by a right-click, so
+/// gating it here would break that.
+pub(super) fn modal_swallows_pointer(any_modal_open: bool, context_menu_open: bool) -> bool {
+    any_modal_open && !context_menu_open
+}
+
+impl App {
+    /// Hide the OS mouse cursor; idempotent. Called when the user starts
+    /// typing if `mouse-hide-while-typing` is on. The cursor reappears on
+    /// the next mouse move or window-enter event.
+    pub(super) fn hide_mouse_cursor(&mut self, ws: &mut WindowState) {
+        if ws.mouse_hidden || !self.cfg.mouse_hide_while_typing {
+            return;
+        }
+        if let Some(w) = &ws.window {
+            w.set_cursor_visible(false);
+            ws.mouse_hidden = true;
+        }
+    }
+
+    /// Show the OS mouse cursor; idempotent. Called whenever the mouse
+    /// moves or re-enters the window.
+    pub(super) fn show_mouse_cursor(&mut self, ws: &mut WindowState) {
+        if !ws.mouse_hidden {
+            return;
+        }
+        if let Some(w) = &ws.window {
+            w.set_cursor_visible(true);
+            ws.mouse_hidden = false;
+        }
+    }
+
+    /// The resize cursor for a split of the given
+    /// orientation. A Horizontal split places panes side-by-side (a vertical
+    /// divider you drag left/right → column resize); a Vertical split stacks
+    /// them (a horizontal divider you drag up/down → row resize).
+    fn resize_cursor_for(dir: Dir) -> CursorIcon {
+        match dir {
+            Dir::Horizontal => CursorIcon::ColResize,
+            Dir::Vertical => CursorIcon::RowResize,
+        }
+    }
+
+    /// A SplitDrag for the divider seam under content-area pixel
+    /// `(px, py)`, or None. Used to start a drag-to-resize on left-press.
+    fn split_drag_at(&self, ws: &WindowState, area: Rect, px: f32, py: f32) -> Option<SplitDrag> {
+        let seams = ws.mux.split_seams(ws.mux.active, area);
+        let i = crate::mux::seam_at(&seams, px, py, SPLIT_SEAM_TOL)?;
+        let s = &seams[i];
+        Some(SplitDrag {
+            path: s.path.clone(),
+            dir: s.dir,
+        })
+    }
+
+    pub(super) fn press_split_divider(&self, ws: &mut WindowState, button: u8) -> bool {
+        if button != 0 || self.pointer_modal_open(ws) {
+            return false;
+        }
+        let Some(drag) =
+            self.split_drag_at(ws, self.area(ws), ws.cursor.x as f32, ws.cursor.y as f32)
+        else {
+            return false;
+        };
+        let dir = drag.dir;
+        ws.dragging_split = Some(drag);
+        if let Some(window) = &ws.window {
+            window.set_cursor(Self::resize_cursor_for(dir));
+            window.request_redraw();
+        }
+        true
+    }
+
+    pub(super) fn drag_split_divider(&mut self, ws: &mut WindowState) -> bool {
+        if ws.dragging_split.is_none() {
+            return false;
+        }
+        let (path, dir) = {
+            let d = ws.dragging_split.as_ref().unwrap();
+            (d.path.clone(), d.dir)
+        };
+        let area = self.area(ws);
+        let seams = ws.mux.split_seams(ws.mux.active, area);
+        match seams.iter().find(|s| s.path == path).map(|s| s.rect) {
+            Some(rect) => {
+                let ratio =
+                    crate::mux::ratio_from_pos(rect, dir, ws.cursor.x as f32, ws.cursor.y as f32);
+                ws.mux.set_split_ratio(ws.mux.active, &path, ratio);
+                // The layout-tree
+                // ratio changed, but each pane's PTY grid is resized
+                // only by resize_all (the keyboard resize path reaches
+                // it via handle_action's tail). Without this the child
+                // TUIs keep their old cols/rows — rendering clipped —
+                // until some unrelated event fires a resize.
+                self.resize_all(ws);
+                if let Some(w) = &ws.window {
+                    w.set_cursor(Self::resize_cursor_for(dir));
+                    w.request_redraw();
+                }
+            }
+            None => ws.dragging_split = None,
+        }
+        true
+    }
+
+    /// The resize cursor to show while merely HOVERING a divider
+    /// seam (no drag yet), or None when the cursor isn't over one. Suppressed
+    /// while a modal owns the pointer. Cheap in the common single-pane case —
+    /// `split_seams` returns empty when the tab root is a lone leaf.
+    fn split_seam_hover_icon(&self, ws: &WindowState) -> Option<CursorIcon> {
+        if self.any_modal_open(ws) {
+            return None;
+        }
+        let area = self.area(ws);
+        let seams = ws.mux.split_seams(ws.mux.active, area);
+        let i = crate::mux::seam_at(
+            &seams,
+            ws.cursor.x as f32,
+            ws.cursor.y as f32,
+            SPLIT_SEAM_TOL,
+        )?;
+        Some(Self::resize_cursor_for(seams[i].dir))
+    }
+
+    /// Set the OS mouse-cursor icon, deduped against the last value pushed
+    /// to the window. Called on CursorMoved (position changes the
+    /// hit-test) and on ModifiersChanged (the modifier state gates the
+    /// click-to-open affordance). The icon, and the hover state these hit
+    /// tests set, are the physical pointer's: every hit test reads where it
+    /// is, not where a control client last moved the cursor, and with the
+    /// pointer outside the window there is nothing to set.
+    pub(super) fn sync_cursor_icon(&mut self, ws: &mut WindowState) {
+        let Some(pointer) = ws.native_pointer else {
+            return;
+        };
+        let control = std::mem::replace(&mut ws.cursor, pointer);
+        let media_receipt_hovered = self.media_paste_receipt_hovered(ws);
+        self.sync_cursor_icon_with_media_receipt_hover(ws, media_receipt_hovered);
+        ws.cursor = control;
+    }
+
+    /// CursorMoved already computed the receipt hit test to update its hover
+    /// timer. Reuse that answer instead of building a second full overlay for
+    /// the same physical event.
+    pub(super) fn sync_cursor_icon_with_media_receipt_hover(
+        &mut self,
+        ws: &mut WindowState,
+        media_receipt_action_hovered: bool,
+    ) {
+        // Browser / iTerm2 / Ghostty convention: the OS cursor turns into
+        // a "pointing hand" while the user holds the same modifier that
+        // would open a URL on click (Ctrl on Linux/Windows, Cmd on
+        // macOS — winit's `super_key` maps Cmd) and the pointer sits on
+        // a clickable link. Otherwise show the standard text-I-beam, the
+        // affordance every modern terminal uses for "this surface accepts
+        // mouse selection."
+        //
+        // Chrome surfaces (tab bar, open modal overlays) override that —
+        // they're clickable, not selectable, so the I-beam there is
+        // visually misleading. `chrome_cursor_icon` is the pure decision.
+        //
+        // Tab close-buttons (`✕`) override the chrome `Default` with
+        // `Pointer` so the trailing glyph reads as a clickable
+        // affordance rather than a character in the title. Recomputed
+        // here every cursor-move so the chip-hover state in the
+        // renderer stays in sync (the renderer reads
+        // `tabbar.hovered_close_idx`, which we pass through in
+        // `tab_bar()`).
+        let bar = self.tab_bar(ws);
+        let prior_hover = (
+            ws.hovered_close_idx,
+            ws.hovered_new_tab,
+            ws.hovered_new_tab_menu,
+        );
+        ws.hovered_close_idx =
+            hovered_close_button(&bar.segments, ws.cursor.x as f32, ws.cursor.y as f32);
+        let (cursor_x, cursor_y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let new_tab_hover = new_tab_hover_target(&bar, cursor_x, cursor_y);
+        ws.hovered_new_tab = new_tab_hover == Some(NewTabHoverTarget::Plus);
+        ws.hovered_new_tab_menu = new_tab_hover == Some(NewTabHoverTarget::Menu);
+        if prior_hover
+            != (
+                ws.hovered_close_idx,
+                ws.hovered_new_tab,
+                ws.hovered_new_tab_menu,
+            )
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
+        let close_hover = tab_close_hover_icon(ws.hovered_close_idx.is_some());
+        let new_tab_hover_icon =
+            (ws.hovered_new_tab || ws.hovered_new_tab_menu).then_some(CursorIcon::Pointer);
+        let confirm_hover = if self.confirm_button_hovered(ws) {
+            Some(CursorIcon::Pointer)
+        } else {
+            None
+        };
+        let search_hover = self.search_geometry(ws).and_then(|geometry| {
+            let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+            geometry
+                .hit_test(x, y)
+                .map(|control| {
+                    if control == kettle_render::SearchControl::Editor {
+                        CursorIcon::Text
+                    } else {
+                        CursorIcon::Pointer
+                    }
+                })
+                .or_else(|| rect_contains(geometry.rect, x, y).then_some(CursorIcon::Default))
+        });
+        let media_receipt_hover = media_receipt_action_hovered.then_some(CursorIcon::Pointer);
+        // A settled card under the pointer takes a click: the pointing hand.
+        let card_hover = self.note_card_hover(ws).then_some(CursorIcon::Pointer);
+        let chrome =
+            chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.pointer_modal_open(ws));
+        // A live tab-drag owns the cursor, FIRST in the chain. Mid-drag the
+        // pointer can briefly cross another tab's ✕ hit-zone or a split seam,
+        // and without the priority the icon would flicker Pointer/resize while
+        // the user is holding a tab. Restore is automatic because `want` is
+        // recomputed from live state on every cursor move, so the next event
+        // after the FSM returns to `Idle` falls through to the rules below.
+        let drag_icon = tab_drag_cursor_icon(&ws.detach_drag);
+        // A split divider under the cursor shows the resize cursor
+        // (after chrome/close-button, before the link-pointer / I-beam default).
+        let toast_hover = self.update_toast_projection(ws).and_then(|toast| {
+            let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+            rect_contains(toast.geometry.rect, x, y).then(|| {
+                if rect_contains(toast.geometry.details, x, y)
+                    || rect_contains(toast.geometry.close, x, y)
+                {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Default
+                }
+            })
+        });
+        let want = drag_icon
+            .or(toast_hover)
+            .or(close_hover)
+            .or(new_tab_hover_icon)
+            .or(confirm_hover)
+            .or(search_hover)
+            .or(media_receipt_hover)
+            .or(chrome)
+            // A card takes a press before a split seam does, so its hand
+            // wins where the two overlap.
+            .or(card_hover)
+            // A lane takes every press over it.
+            .or_else(|| self.lane_cursor_icon(ws))
+            .or_else(|| self.split_seam_hover_icon(ws))
+            .unwrap_or_else(|| {
+                let want_pointer = (ws.mods.control_key() || ws.mods.super_key())
+                    && self.link_at_cursor(ws).is_some();
+                if want_pointer {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Text
+                }
+            });
+        let want = if ws.preview_overlay.is_some() && !self.non_search_modal_open(ws) {
+            self.lane_cursor_icon(ws).unwrap_or(CursorIcon::Default)
+        } else {
+            want
+        };
+        if ws.last_cursor_icon != Some(want)
+            && let Some(w) = &ws.window
+        {
+            w.set_cursor(want);
+            ws.last_cursor_icon = Some(want);
+        }
+    }
+
+    /// Content area for panes (excludes the tab bar, status bar, and
+    /// passive update banner), in physical pixels.
+    /// Terminator parity: hit-test for a click in any pane's per-pane titlebar region.
+    /// Returns the pane id whose titlebar was clicked, or None if
+    /// the click fell outside titlebar regions. Honors the
+    /// `cfg.show_titlebar` gate + the `cfg.title_at_bottom` flip.
+    /// Used by the click handler to dispatch EditPaneTitle on the
+    /// clicked pane.
+    fn pane_at_titlebar_click(&self, ws: &WindowState, px: f32, py: f32) -> Option<u64> {
+        if !self.cfg.show_titlebar {
+            return None;
+        }
+        let active = ws.mux.active;
+        let rects = ws.mux.leaves(active, self.area(ws));
+        if rects.len() < 2 {
+            // Single-pane tab: titlebar isn't rendered (the renderer's
+            // titlebar gate requires `show_titlebar` and more than one pane).
+            return None;
+        }
+        let bar_h = ws.renderer.as_ref().map(|r| r.cell_h + 6.0).unwrap_or(20.0);
+        pane_titlebar_hit(px, py, &rects, self.cfg.title_at_bottom, bar_h)
+    }
+
+    /// `(row, col)` of the mouse within `rect`.
+    ///
+    /// Clamped to the focused pane's live grid: a click in the right/bottom
+    /// padding (the rect rounds up past an exact cell multiple) must report the
+    /// LAST cell, never one past the edge. A mouse-tracking app that sees
+    /// `col == cols` or `row == rows` mis-renders — xterm
+    /// itself clamps the reported coordinate to the window.
+    fn cursor_cell_in_rect(&self, ws: &WindowState, rect: Rect) -> (usize, usize) {
+        // Mouse-tracking reports a cell, not a selection boundary — the sub-cell
+        // side is irrelevant here, so discard it.
+        let (p, _) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
+        let (row, col) = (p.line.0.max(0) as usize, p.column.0);
+        // Clamp to the terminal's grid, the size `resize_all` gave the pane's
+        // PTY.
+        let (cols, rows) = self.grid_of(ws, rect);
+        (
+            row.min(rows.saturating_sub(1)),
+            col.min(cols.saturating_sub(1)),
+        )
+    }
+
+    /// `(row, col)` of the mouse within the focused pane, if any.
+    fn cursor_cell(&self, ws: &WindowState) -> Option<(usize, usize)> {
+        let rect = self.focused_terminal(ws, self.area(ws))?;
+        Some(self.cursor_cell_in_rect(ws, rect))
+    }
+
+    pub(super) fn link_at_cursor<'a>(&self, ws: &'a WindowState) -> Option<&'a kettle_core::Link> {
+        let rect = self.focused_terminal(ws, self.area(ws))?;
+        if !rect_contains(rect, ws.cursor.x as f32, ws.cursor.y as f32) {
+            return None;
+        }
+        let (row, col) = self.cursor_cell_in_rect(ws, rect);
+        ws.links
+            .iter()
+            .find(|l| l.row == row && col >= l.start_col && col <= l.end_col)
+    }
+
+    pub(super) fn pane_mode(
+        &self,
+        ws: &WindowState,
+        pane_id: u64,
+    ) -> Option<kettle_core::TermMode> {
+        ws.mux
+            .panes
+            .get(&pane_id)
+            .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
     }
 }

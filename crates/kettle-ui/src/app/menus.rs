@@ -453,7 +453,6 @@ impl App {
             items.push(ContextMenuItem::ConfigItem {
                 label: mi.label.clone(),
                 command: mi.command.clone(),
-                new_pane: false,
             });
         }
     }
@@ -658,10 +657,8 @@ impl App {
         let Some(ctx) = &pane.remote_context else {
             return;
         };
-        // clone_session_command returns None when a host/user/container token
-        // is unsafe (control chars / shell metachars that can't be
-        // neutralized). Drop the menu item and its separator rather than type
-        // an unsafe line into the PTY.
+        // Unreproducible argv suppresses the action. A failed environment
+        // capture keeps a refusal action that uses the existing failure notice.
         if let Some(item) = remote_reconnect_item(ctx, &self.ui_text) {
             items.push(ContextMenuItem::Separator);
             items.push(item);
@@ -858,6 +855,7 @@ impl App {
                 | ContextMenuItem::DynamicItem { .. }
                 | ContextMenuItem::LuaItem { .. }
                 | ContextMenuItem::ConfigItem { .. }
+                | ContextMenuItem::ReconnectItem { .. }
                 | ContextMenuItem::Submenu { .. }
                 | ContextMenuItem::WindowChoice { .. }
                 | ContextMenuItem::ProfileChoice { .. }
@@ -1055,13 +1053,33 @@ impl App {
         self.show_context_menu(ws, items, sw * 0.5 - 140.0, sh * 0.4);
     }
 
+    pub(super) fn shell_menu_items(
+        shells: Option<&[kettle_core::term::ShellChoice]>,
+        tr: &kettle_i18n::Translator,
+    ) -> Vec<ContextMenuItem> {
+        match shells {
+            Some(shells) => Self::new_tab_menu_items(shells, tr),
+            None => vec![ContextMenuItem::Info {
+                label: tr.text(kettle_i18n::Text::MenuDetectingShells).to_string(),
+            }],
+        }
+    }
+
+    pub(super) fn shell_menu_is_loading(
+        items: &[ContextMenuItem],
+        tr: &kettle_i18n::Translator,
+    ) -> bool {
+        matches!(items, [ContextMenuItem::Info { label }]
+            if label == tr.text(kettle_i18n::Text::MenuDetectingShells))
+    }
+
     /// Open the new-tab `▾` dropdown at
     /// `(px, py)` — detected shells (process-cached in kettle-core, prewarmed
     /// at startup) plus the Settings / Command palette / About bottom rows.
     pub(super) fn open_new_tab_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
         self.close_all_modals(ws);
-        let shells = kettle_core::term::detect_shells();
-        let items = Self::new_tab_menu_items(&shells, &self.ui_text);
+        let shells = kettle_core::term::cached_shells();
+        let items = Self::shell_menu_items(shells.as_deref(), &self.ui_text);
         self.show_context_menu(ws, items, px, py);
     }
 
@@ -1094,6 +1112,7 @@ impl App {
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
+        let (_, panel_h) = context_menu_content_geometry(&menu.items, panel_h, row_h, sep_h);
         menu.highlight = next;
         menu.scroll_offset = context_menu_scroll_for_highlight(
             &menu.items,
@@ -1122,7 +1141,8 @@ impl App {
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
-        let new_off = (menu.scroll_offset as isize + delta).max(0) as usize;
+        let (_, panel_h) = context_menu_content_geometry(&menu.items, panel_h, row_h, sep_h);
+        let new_off = menu.scroll_offset.saturating_add_signed(delta);
         // Clamp: never scroll past the point where the last visible
         // row is the final item.
         let max_off = context_menu_max_scroll_offset(&menu.items, panel_h, row_h, sep_h);
@@ -1160,7 +1180,8 @@ impl App {
         let kinds = menu.items[start..]
             .iter()
             .map(|it| matches!(it, ContextMenuItem::Separator));
-        find_menu_row_y(py, ay, panel_h, row_h, sep_h, kinds).map(|i| i + start)
+        let (inset, content_h) = context_menu_content_geometry(&menu.items, panel_h, row_h, sep_h);
+        find_menu_row_y(py, ay + inset, content_h, row_h, sep_h, kinds).map(|i| i + start)
     }
 
     /// Set `menu.highlight` to whichever row the cursor is
@@ -1169,6 +1190,10 @@ impl App {
     /// only when the highlight actually changed so we don't churn the
     /// GPU on every sub-pixel motion event.
     pub(super) fn update_menu_highlight_from_cursor(&mut self, ws: &mut WindowState) {
+        if let Some(delta) = self.context_menu_scroll_edge(ws) {
+            self.scroll_context_menu(ws, delta);
+            return;
+        }
         let Some(idx) = self.menu_row_at_cursor(ws) else {
             return;
         };
@@ -1260,8 +1285,7 @@ impl App {
                 let geometry = self.prospective_split_geometry(ws, Dir::Horizontal, false);
                 let waker = self.waker();
                 match reconnect_remote_session(&mut ws.mux, &self.cfg, geometry, waker, command) {
-                    Ok(result) => {
-                        self.report_input_result(result);
+                    Ok(()) => {
                         self.hoover_groups(ws);
                         self.note_focus_change(ws, pre_focus);
                         if ws.window.is_some() {
@@ -1313,6 +1337,35 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    pub(super) fn context_menu_scroll_edge(&self, ws: &WindowState) -> Option<isize> {
+        let menu = ws.context_menu.as_ref()?;
+        let ((x, y), (w, h)) = self.context_menu_geometry(ws)?;
+        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if px < x || px >= x + w || py < y || py >= y + h {
+            return None;
+        }
+        let (_, ch) = self.menu_cell(ws);
+        let row_h = ch + kettle_render::menu::ROW_PAD;
+        let (inset, content_h) =
+            context_menu_content_geometry(&menu.items, h, row_h, kettle_render::menu::SEP_H);
+        if inset <= 0.0 {
+            return None;
+        }
+        if py < y + inset {
+            Some(if menu.scroll_offset > 0 { -1 } else { 0 })
+        } else if py >= y + inset + content_h {
+            let max = context_menu_max_scroll_offset(
+                &menu.items,
+                content_h,
+                row_h,
+                kettle_render::menu::SEP_H,
+            );
+            Some(if menu.scroll_offset < max { 1 } else { 0 })
+        } else {
+            None
         }
     }
 
@@ -1418,13 +1471,14 @@ impl App {
         let row_h = cell_h + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
         if let Some(menu) = ws.context_menu.as_mut() {
+            let (_, content_h) = context_menu_content_geometry(&menu.items, panel.1, row_h, sep_h);
             menu.anchor = anchor;
             menu.anchor_scale = current_scale;
             menu.scroll_offset = context_menu_scroll_for_highlight(
                 &menu.items,
                 menu.scroll_offset,
                 menu.highlight,
-                panel.1,
+                content_h,
                 row_h,
                 sep_h,
             );
@@ -1468,7 +1522,8 @@ impl App {
                         enabled: true,
                         hint: String::new(),
                     },
-                    ContextMenuItem::ConfigItem { label, .. } => ContextMenuRow {
+                    ContextMenuItem::ConfigItem { label, .. }
+                    | ContextMenuItem::ReconnectItem { label, .. } => ContextMenuRow {
                         label: label.clone(),
                         separator: false,
                         enabled: true,
@@ -1661,6 +1716,8 @@ impl App {
                 let row_h = ch + kettle_render::menu::ROW_PAD;
                 let sep_h = kettle_render::menu::SEP_H;
                 let next = ws.context_menu.as_ref().map(|m| {
+                    let (_, panel_h) =
+                        context_menu_content_geometry(&m.items, panel_h, row_h, sep_h);
                     let visible =
                         count_rows_fitting(&m.items, m.scroll_offset, panel_h, row_h, sep_h);
                     half_page_menu_target(&m.items, m.highlight, (visible / 2).max(1), dir)
@@ -1771,12 +1828,13 @@ impl App {
                 // Typeahead path: accumulate into the buffer, find
                 // the first row whose label has this prefix, advance
                 // highlight without dispatching.
-                if let Some(menu) = ws.context_menu.as_mut() {
+                let next = ws.context_menu.as_mut().and_then(|menu| {
                     menu.typeahead_buf.push(lower);
                     menu.typeahead_until = Some(now + std::time::Duration::from_millis(750));
-                    if let Some(idx) = typeahead_match(&menu.items, &menu.typeahead_buf) {
-                        menu.highlight = idx;
-                    }
+                    typeahead_match(&menu.items, &menu.typeahead_buf)
+                });
+                if let Some(idx) = next {
+                    self.set_context_menu_highlight(ws, idx);
                 }
             }
         }
@@ -1878,5 +1936,901 @@ mod tests {
             assert_eq!(menu.typeahead_buf, "parent");
             assert!(menu.drill_stack.is_empty());
         }
+    }
+    #[test]
+    fn scroll_strip_viewport_keeps_keyboard_selection_visible() {
+        let items = rows(30);
+        let (inset, content_h) = context_menu_content_geometry(&items, 200.0, 28.0, 8.0);
+        assert_eq!((inset, content_h), (18.0, 164.0));
+        for selected in 0..items.len() {
+            let offset =
+                context_menu_scroll_for_highlight(&items, 0, selected, content_h, 28.0, 8.0);
+            let visible = count_rows_fitting(&items, offset, content_h, 28.0, 8.0);
+            assert!((offset..offset + visible).contains(&selected));
+        }
+    }
+}
+
+/// What a context-menu click dispatches, such as a kettle Action (built-in
+/// items) or a Lua callback index (kettle.add_menu_item entries).
+/// The rows a right-click on the link `url` from pane `pane`'s output leads
+/// the menu with: open it, preview it in Kettle when it is a local file a lane
+/// can show from a pane still known, copy its address, then a separator.
+pub(super) fn link_menu_rows(
+    url: &str,
+    pane: Option<u64>,
+    tr: kettle_i18n::Translator,
+) -> Vec<ContextMenuItem> {
+    use kettle_i18n::Text as T;
+    let row = |label: T, how: UrlHow| ContextMenuItem::UrlItem {
+        label: tr.text(label),
+        url: url.to_string(),
+        how,
+        pane,
+    };
+    let previewable = pane.is_some()
+        && kettle_core::links::local_file_path(url)
+            .is_some_and(|path| previewable_name(&path.to_string_lossy()));
+    let mut rows = vec![row(T::MenuOpenLink, UrlHow::Open)];
+    if previewable {
+        rows.push(row(T::MenuPreviewInKettle, UrlHow::Preview));
+    }
+    rows.push(row(T::MenuCopyLink, UrlHow::Copy));
+    rows.push(ContextMenuItem::Separator);
+    rows
+}
+
+/// What a link row of the context menu does with its address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UrlHow {
+    Open,
+    Copy,
+    /// Preview the local file it names in the pane's lane.
+    Preview,
+}
+
+#[derive(Clone)]
+pub(super) enum ContextMenuClick {
+    Action(Action),
+    Preview {
+        target: PreviewMenuTarget,
+        action: PreviewMenuAction,
+    },
+    /// A media row: what it does, and to which shelf item.
+    Media {
+        target: MediaTarget,
+        action: MediaMenuAction,
+    },
+    LuaMenuItem(usize),
+    /// Terminator parity (`custom_commands.py`): a
+    /// `menu-item = LABEL = CMD` config entry. Dispatch writes
+    /// `CMD\n` to the focused pane's PTY.
+    ConfigCommand(String),
+    /// Reopen a detected session in a fresh local pane.
+    ReconnectRemote(Option<kettle_remote::SessionCommand>),
+    /// Profile picked from the right-click "Profile ▸" submenu.
+    /// Dispatch sets `App::config_path` via the profile-path
+    /// resolution helper and calls `reload_config`.
+    SetProfile(String),
+    MoveTabToWindow {
+        window: u64,
+        panes: Arc<[u64]>,
+    },
+    /// Drill into a `Submenu` row by index. The click handler pushes
+    /// the current items onto `drill_stack` + replaces them
+    /// with the submenu's items.
+    DrillIntoSubmenu(usize),
+    /// Open a new tab running an explicit argv (a shell picked from
+    /// the new-tab `▾` dropdown). Dispatch calls `Mux::new_tab_with` with the
+    /// focused tab's current working directory.
+    NewTabWithArgv(Vec<String>),
+    /// Terminator parity (terminal_popup_menu.py "Open link" /
+    /// "Copy address"): a click on one of the URL-aware leading rows.
+    /// `how` says what the row does with the address: open it through the
+    /// `open_url` chain (Lua handler → custom_url_handler → system open,
+    /// `is_safe_url`-guarded), copy it, or preview the local file it names
+    /// in the pane's lane.
+    Url {
+        url: String,
+        how: UrlHow,
+        /// The pane whose output held the link; `None` for Kettle's own
+        /// links (About).
+        pane: Option<u64>,
+    },
+}
+
+/// One entry in the right-click context menu. `Separator` rows render
+/// as a thin divider in the menu and are skipped during keyboard nav
+/// and click dispatch; `Item` rows carry the action to fire.
+#[derive(Clone)]
+pub(super) enum ContextMenuItem {
+    Item {
+        label: &'static str,
+        action: Action,
+        enabled: bool,
+    },
+    /// Like `Item` but with an owned `String` label, so dynamic state
+    /// markers (radio `● / ○`, check `✓ /  `) can be baked into the
+    /// label at build time without leaking memory via `Box::leak`.
+    /// Same dispatch surface as `Item` (typed `Action`).
+    DynamicItem {
+        label: String,
+        action: Action,
+        enabled: bool,
+    },
+    Separator,
+    /// Terminator plugin parity:
+    /// menu item supplied by a Lua plugin via `kettle.add_menu_item(
+    /// label, callback)`. Dispatch invokes the registered Lua
+    /// callback (looked up by `lua_idx` in the kettle_menu_items
+    /// table) instead of an Action.
+    LuaItem {
+        label: String,
+        lua_idx: usize,
+    },
+    /// Terminator parity (`custom_commands.py`): user-
+    /// defined menu entry from a config-file `menu-item = LABEL =
+    /// CMD` line. Dispatch writes `command + "\n"` to the focused
+    /// PTY. Simpler than `LuaItem` — no callback, just literal
+    /// text. Use this for "Run `clear`" / "Open `~/.bashrc` in
+    /// `$EDITOR`" / etc.
+    ConfigItem {
+        label: String,
+        command: String,
+    },
+    ReconnectItem {
+        label: String,
+        // None keeps an unreadable-environment action available to explain
+        // the refusal through the existing split-failure notice.
+        command: Option<kettle_remote::SessionCommand>,
+    },
+    /// A submenu row carries a nested item list; activation replaces the visible
+    /// menu level.
+    Submenu {
+        label: String,
+        // Consumed by the drill-in dispatch
+        // (`ContextMenuClick::DrillIntoSubmenu`), which pushes the
+        // parent items onto `drill_stack` and replaces them with
+        // these.
+        items: Vec<ContextMenuItem>,
+    },
+    WindowChoice {
+        label: String,
+        window: u64,
+        panes: Arc<[u64]>,
+    },
+    /// A profile-choice leaf row used inside a
+    /// `Submenu { label: "Profile", … }`. Clicking dispatches
+    /// `ContextMenuClick::SetProfile(profile)` which switches the
+    /// active profile (`App::config_path` + reload_config).
+    ProfileChoice {
+        label: String,
+        profile: String,
+    },
+    /// A shell-choice leaf in the new-tab `▾` dropdown. Clicking
+    /// dispatches `ContextMenuClick::NewTabWithArgv(argv)` to open a tab
+    /// running that shell.
+    NewTabShell {
+        label: String,
+        argv: Vec<String>,
+    },
+    /// Terminator parity (terminal_popup_menu.py "Open link" /
+    /// "Copy address"): URL-aware leading rows, present only when the
+    /// right-click landed on a detected hyperlink. The URL is captured at
+    /// menu-open time so a subsequent output scroll can't retarget the click.
+    /// Clicking dispatches `ContextMenuClick::Url { url, how }`.
+    UrlItem {
+        label: &'static str,
+        url: String,
+        how: UrlHow,
+        /// The pane whose output held the link, captured with it.
+        pane: Option<u64>,
+    },
+    /// A row of an inline card's menu: open its item in Kettle, or a copy of
+    /// it in the permitted image viewer. The card and its item, with the
+    /// item's generation, are captured when the menu opens.
+    Media {
+        label: &'static str,
+        target: MediaTarget,
+        action: MediaMenuAction,
+    },
+    /// Actions bound to the preview that opened the menu.
+    Preview {
+        label: &'static str,
+        target: PreviewMenuTarget,
+        action: PreviewMenuAction,
+    },
+    /// A static, non-dispatchable information line
+    /// (the About panel's version/update rows). Rendered like a disabled row
+    /// (dimmed), survives `filter_disabled`, never highlighted, claims no
+    /// mnemonic, and maps to no click.
+    Info {
+        label: String,
+    },
+}
+
+/// The card a media menu row acts on, and the shelf item it showed when the
+/// menu opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct MediaTarget {
+    pub(super) pane: u64,
+    pub(super) nonce: kettle_core::InlineNonce,
+    pub(super) item: u64,
+    pub(super) generation: u64,
+}
+
+/// What a media menu row does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MediaMenuAction {
+    /// Open the item in Kettle's viewer.
+    View,
+    /// Open a copy of it in the permitted image viewer, or of a video in
+    /// the permitted video player.
+    OpenOutside(crate::media::Outside),
+}
+
+/// Replacements and mode changes invalidate this menu's actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PreviewMenuTarget {
+    pub(super) pane: u64,
+    pub(super) item: u64,
+    pub(super) generation: u64,
+    pub(super) mode: kettle_render::MediaLaneMode,
+}
+
+impl PreviewMenuTarget {
+    pub(super) fn matches(
+        self,
+        item: &crate::media::ShelfItem,
+        panel: &crate::window_state::PreviewPanel,
+    ) -> bool {
+        panel.item == self.item
+            && item.id == self.item
+            && item.generation == self.generation
+            && lane_mode(item, panel) == self.mode
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PreviewMenuAction {
+    Copy(kettle_render::MediaLaneMode),
+    Control(kettle_render::MediaLaneHit),
+    Expanded(bool),
+    Play(kettle_render::MediaLanePlay),
+    Sound(kettle_render::MediaLaneSound),
+    OpenOutside(crate::media::Outside),
+}
+
+/// UI-side context-menu state (Terminator / GNOME / iTerm2 parity).
+/// Anchor is the post-clamp panel top-left; rows mirror the renderer's
+/// `ContextMenu` slice but carry the live `Action` for dispatch.
+pub(crate) struct ContextMenuState {
+    pub(super) anchor: (f32, f32),
+    /// DPI scale at which `anchor` was captured. Anchors are physical pixels;
+    /// rescale them across monitor transitions before clamping so the menu
+    /// keeps the same logical relationship to the pointer.
+    pub(super) anchor_scale: f64,
+    pub(super) items: Vec<ContextMenuItem>,
+    /// Selected dispatchable row; never a separator or disabled row.
+    pub(super) highlight: usize,
+    /// Parent levels, including the selected submenu and scroll position.
+    pub(super) drill_stack: Vec<ContextMenuLevel>,
+    /// First visible item in a height-clamped menu.
+    pub(super) scroll_offset: usize,
+    /// Pending keyboard prefix, cleared after 750ms of inactivity.
+    pub(super) typeahead_buf: String,
+    /// Deadline after which `typeahead_buf` is cleared
+    /// on the next key. `None` when the buffer is empty.
+    pub(super) typeahead_until: Option<std::time::Instant>,
+}
+
+pub(super) struct ContextMenuLevel {
+    items: Vec<ContextMenuItem>,
+    highlight: usize,
+    scroll_offset: usize,
+}
+
+/// Letters the menu's vim navigation layer (`vim-menu-nav`) consumes
+/// (`g`/`G` first/last, `h` back, `j`/`k` move, `l` activate). While the
+/// setting is on, `assign_mnemonics` must not hand any of these to a row.
+/// The nav layer intercepts them before mnemonic dispatch, so a row keyed on
+/// one would silently lose its hotkey.
+pub(super) const VIM_NAV_RESERVED: &[char] = &['g', 'h', 'j', 'k', 'l'];
+
+/// Display-column budget for one context-menu item, kept in lockstep with the
+/// row constructed by `context_menu_overlay` and the renderer's
+/// `menu_row_chars`. Centralizing this prevents the initial anchor clamp,
+/// resize/DPI reclamp, hit testing, ellipsis, and draw width from disagreeing.
+pub(super) fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> usize {
+    let (label, suffix, shows_hint): (&str, &str, bool) = match item {
+        ContextMenuItem::Item { label, .. } => (label, "", true),
+        ContextMenuItem::DynamicItem { label, .. } => (label, "", true),
+        ContextMenuItem::LuaItem { label, .. } => (label, "", false),
+        ContextMenuItem::ConfigItem { label, .. }
+        | ContextMenuItem::ReconnectItem { label, .. } => (label, "", false),
+        ContextMenuItem::Submenu { label, .. } => (label, " ▸", false),
+        ContextMenuItem::ProfileChoice { label, .. }
+        | ContextMenuItem::WindowChoice { label, .. } => (label, "", false),
+        ContextMenuItem::NewTabShell { label, .. } => (label, "", true),
+        ContextMenuItem::UrlItem { label, .. } => (label, "", false),
+        ContextMenuItem::Media { label, .. } | ContextMenuItem::Preview { label, .. } => {
+            (label, "", false)
+        }
+        ContextMenuItem::Info { label } => (label, "", false),
+        ContextMenuItem::Separator => return 0,
+    };
+    label.width()
+        + suffix.width()
+        + if shows_hint && !hint.is_empty() {
+            hint.width() + 2
+        } else {
+            0
+        }
+}
+
+/// Compute mnemonics for the context-menu rows. For each row, returns
+/// `Some((byte_index, char))` where `char` is the first lowercase A-Z
+/// letter in the label that hasn't already been claimed by an earlier row,
+/// or `None` for rows without any A-Z (separators, choice rows with no
+/// label letters, etc.).
+///
+/// First-letter is the canonical priority (matches GTK / Win32);
+/// fall through to subsequent letters only if the first letter is
+/// already taken by an earlier row. Pure so the collision rules
+/// are unit-tested without spinning up App.
+pub(super) fn assign_mnemonics(
+    items: &[ContextMenuItem],
+    reserved: &[char],
+) -> Vec<Option<(usize, char)>> {
+    let labels: Vec<&str> = items
+        .iter()
+        .map(|it| match it {
+            ContextMenuItem::Item { label, .. } => *label,
+            ContextMenuItem::DynamicItem { label, .. } => label.as_str(),
+            ContextMenuItem::LuaItem { label, .. } => label.as_str(),
+            ContextMenuItem::ConfigItem { label, .. }
+            | ContextMenuItem::ReconnectItem { label, .. } => label.as_str(),
+            ContextMenuItem::Submenu { label, .. } => label.as_str(),
+            ContextMenuItem::ProfileChoice { label, .. }
+            | ContextMenuItem::WindowChoice { label, .. } => label.as_str(),
+            ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
+            ContextMenuItem::UrlItem { label, .. } => *label,
+            ContextMenuItem::Media { label, .. } | ContextMenuItem::Preview { label, .. } => *label,
+            // Info rows are non-dispatchable — no mnemonic to claim.
+            ContextMenuItem::Info { .. } => "",
+            ContextMenuItem::Separator => "",
+        })
+        .collect();
+    let mut claimed: std::collections::HashSet<char> = std::collections::HashSet::new();
+    let mut out: Vec<Option<(usize, char)>> = vec![None; labels.len()];
+    // Two rounds. The stable core rows claim their letters first, then the
+    // context-dependent UrlItem rows (present only when the right-click landed
+    // on a link) claim from what's left. Otherwise "Open Link" / "Copy Link
+    // Address", which lead the menu, would take 'o'/'c' and silently remap
+    // muscle-memory mnemonics ('p' would fire Copy instead of Paste).
+    let round = |items: &[ContextMenuItem], idx: usize| -> usize {
+        usize::from(matches!(
+            items[idx],
+            ContextMenuItem::UrlItem { .. }
+                | ContextMenuItem::Media { .. }
+                | ContextMenuItem::Preview { .. }
+        ))
+    };
+    for pass in 0..2 {
+        for (i, label) in labels.iter().enumerate() {
+            if round(items, i) != pass {
+                continue;
+            }
+            let mut chosen: Option<(usize, char)> = None;
+            for (bi, c) in label.char_indices() {
+                if !c.is_ascii_alphabetic() {
+                    continue;
+                }
+                let low = c.to_ascii_lowercase();
+                // Letters owned by vim-menu-nav are never assignable.
+                if reserved.contains(&low) {
+                    continue;
+                }
+                if !claimed.contains(&low) {
+                    claimed.insert(low);
+                    chosen = Some((bi, low));
+                    break;
+                }
+            }
+            out[i] = chosen;
+        }
+    }
+    out
+}
+
+/// Match the user's typeahead buffer to a row by
+/// case-insensitive prefix on the label. Returns the first
+/// dispatchable row whose label (lowercased) starts with `buf`
+/// (also lowercased). Separators/empty labels are skipped.
+pub(super) fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
+    if buf.is_empty() {
+        return None;
+    }
+    let needle = buf.to_ascii_lowercase();
+    items.iter().position(|it| match it {
+        ContextMenuItem::Item {
+            label,
+            enabled: true,
+            ..
+        } => label.to_ascii_lowercase().starts_with(&needle),
+        ContextMenuItem::DynamicItem {
+            label,
+            enabled: true,
+            ..
+        } => label.to_ascii_lowercase().starts_with(&needle),
+        ContextMenuItem::LuaItem { label, .. }
+        | ContextMenuItem::ConfigItem { label, .. }
+        | ContextMenuItem::ReconnectItem { label, .. }
+        | ContextMenuItem::Submenu { label, .. }
+        | ContextMenuItem::WindowChoice { label, .. }
+        | ContextMenuItem::ProfileChoice { label, .. }
+        | ContextMenuItem::NewTabShell { label, .. } => {
+            label.to_ascii_lowercase().starts_with(&needle)
+        }
+        ContextMenuItem::UrlItem { label, .. }
+        | ContextMenuItem::Media { label, .. }
+        | ContextMenuItem::Preview { label, .. } => label.to_ascii_lowercase().starts_with(&needle),
+        // Info rows aren't dispatchable, so typeahead skips them.
+        _ => false,
+    })
+}
+
+pub(super) fn context_menu_content_geometry(
+    items: &[ContextMenuItem],
+    panel_h: f32,
+    row_h: f32,
+    sep_h: f32,
+) -> (f32, f32) {
+    let natural_h = items
+        .iter()
+        .map(|item| context_menu_item_height(item, row_h, sep_h))
+        .sum();
+    kettle_render::menu::scroll_content(natural_h, panel_h, row_h)
+}
+
+/// How many context-menu rows starting at
+/// `start` fit within `panel_h` pixels. Separators take `sep_h`,
+/// every other row takes `row_h`. Used by `step_context_menu_highlight`
+/// and `scroll_context_menu` to keep `scroll_offset` honest when the
+/// panel is height-clamped by `context_menu_geometry`. Pure so the
+/// arithmetic is drift-guarded without standing up the App.
+pub(super) fn count_rows_fitting(
+    items: &[ContextMenuItem],
+    start: usize,
+    panel_h: f32,
+    row_h: f32,
+    sep_h: f32,
+) -> usize {
+    let mut used = 0.0_f32;
+    let mut count = 0;
+    for it in items.iter().skip(start) {
+        let h = context_menu_item_height(it, row_h, sep_h);
+        if used + h > panel_h {
+            break;
+        }
+        used += h;
+        count += 1;
+    }
+    count
+}
+
+fn context_menu_item_height(item: &ContextMenuItem, row_h: f32, sep_h: f32) -> f32 {
+    if matches!(item, ContextMenuItem::Separator) {
+        sep_h
+    } else {
+        row_h
+    }
+}
+
+/// Earliest suffix that fits through the final row. Scrolling past it would
+/// leave avoidable blank space below the menu. This is O(items) even for the
+/// 512-entry theme submenu.
+pub(super) fn context_menu_max_scroll_offset(
+    items: &[ContextMenuItem],
+    panel_h: f32,
+    row_h: f32,
+    sep_h: f32,
+) -> usize {
+    if items.is_empty() {
+        return 0;
+    }
+    let mut suffix_height = 0.0;
+    let mut max_offset = items.len() - 1;
+    for candidate in (0..items.len()).rev() {
+        let next = suffix_height + context_menu_item_height(&items[candidate], row_h, sep_h);
+        if next > panel_h {
+            break;
+        }
+        suffix_height = next;
+        max_offset = candidate;
+    }
+    max_offset
+}
+
+pub(super) fn context_menu_scroll_for_highlight(
+    items: &[ContextMenuItem],
+    current_offset: usize,
+    highlight: usize,
+    panel_h: f32,
+    row_h: f32,
+    sep_h: f32,
+) -> usize {
+    if items.is_empty() {
+        return 0;
+    }
+    let highlight = highlight.min(items.len() - 1);
+    let max_offset = context_menu_max_scroll_offset(items, panel_h, row_h, sep_h);
+    let mut offset = current_offset.min(max_offset);
+    let visible = count_rows_fitting(items, offset, panel_h, row_h, sep_h);
+    if highlight < offset {
+        offset = highlight;
+    } else if highlight >= offset.saturating_add(visible) {
+        // Pull back until the highlight is the last fully visible row. This
+        // keeps Enter bound to a visible choice after a window/DPI shrink.
+        let mut used = 0.0;
+        offset = highlight;
+        for candidate in (0..=highlight).rev() {
+            let next = used + context_menu_item_height(&items[candidate], row_h, sep_h);
+            if next > panel_h {
+                break;
+            }
+            used = next;
+            offset = candidate;
+        }
+    }
+    offset.min(max_offset)
+}
+
+pub(super) fn ellipsize_menu_label(label: &str, max_columns: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation as _;
+
+    if label.width() <= max_columns {
+        return label.to_string();
+    }
+    if max_columns == 0 {
+        return String::new();
+    }
+    if max_columns == 1 {
+        return "…".to_string();
+    }
+    let content_columns = max_columns - 1;
+    let mut used: usize = 0;
+    let mut output = String::new();
+    for grapheme in label.graphemes(true) {
+        let width = grapheme.width();
+        if used.saturating_add(width) > content_columns {
+            break;
+        }
+        output.push_str(grapheme);
+        used += width;
+    }
+    output.push('…');
+    output
+}
+
+/// Drop disabled rows from the context menu and collapse the separators
+/// they would orphan. Hiding them instead of greying them out matches
+/// Terminator / GNOME Terminal, which show only what you can click.
+///
+/// Three passes:
+///   1. drop any disabled `Item` or `DynamicItem`. Other variants (LuaItem,
+///      ConfigItem, Submenu, Theme/ProfileChoice, Separator) stay.
+///   2. collapse runs of `Separator` to a single one.
+///   3. trim leading + trailing separators (orphaned by step 1).
+///
+/// Pure so the contract is unit-tested without spinning up App.
+pub(super) fn filter_disabled(items: Vec<ContextMenuItem>) -> Vec<ContextMenuItem> {
+    // Step 1: drop disabled Items.
+    let kept: Vec<ContextMenuItem> = items
+        .into_iter()
+        .filter(|it| {
+            !matches!(
+                it,
+                ContextMenuItem::Item { enabled: false, .. }
+                    | ContextMenuItem::DynamicItem { enabled: false, .. }
+            )
+        })
+        .collect();
+    // Step 2: collapse separator runs. Walk linearly; only push a
+    // Separator when the previous pushed item wasn't already one.
+    let mut collapsed: Vec<ContextMenuItem> = Vec::with_capacity(kept.len());
+    let mut last_was_sep = true; // pretend the "before-start" was a sep so leading sep gets dropped
+    for it in kept {
+        let is_sep = matches!(it, ContextMenuItem::Separator);
+        if is_sep && last_was_sep {
+            continue;
+        }
+        last_was_sep = is_sep;
+        collapsed.push(it);
+    }
+    // Step 3: trim a trailing separator (orphan).
+    if let Some(ContextMenuItem::Separator) = collapsed.last() {
+        collapsed.pop();
+    }
+    collapsed
+}
+
+/// Terminator menu UX, hover-to-highlight. Walk the
+/// vertical pixel layout of a context-menu's rows and return the
+/// row index containing `cursor_y`, or `None` if the cursor landed
+/// on a separator (visual gap) or beyond the last row. Pure so the
+/// arithmetic + the separator-skip contract is unit-tested without
+/// standing up an App + a winit window. A `true` item flags a separator (uses
+/// `sep_h` instead of `row_h`). Accepting an iterator lets the live pointer path
+/// project item kinds without allocating a temporary vector.
+pub(crate) fn find_menu_row_y(
+    cursor_y: f32,
+    anchor_y: f32,
+    panel_h: f32,
+    row_h: f32,
+    sep_h: f32,
+    kinds: impl IntoIterator<Item = bool>,
+) -> Option<usize> {
+    let mut row_y = anchor_y;
+    let panel_bottom = anchor_y + panel_h.max(0.0);
+    for (idx, is_sep) in kinds.into_iter().enumerate() {
+        let h = if is_sep { sep_h } else { row_h };
+        // The renderer draws only complete rows. A clamped panel can leave a
+        // short blank strip at the bottom; never dispatch the next invisible
+        // row through that strip.
+        if row_y + h > panel_bottom {
+            break;
+        }
+        if cursor_y >= row_y && cursor_y < row_y + h {
+            return if is_sep { None } else { Some(idx) };
+        }
+        row_y += h;
+    }
+    None
+}
+
+/// The `vim-menu-nav` `Ctrl+d`/`Ctrl+u` half-page target. Moves
+/// `current` by `rows` items in `dir` (no wrap — vim half-page semantics
+/// clamp at the ends), then snaps to the nearest dispatchable row in the
+/// direction of travel (falling back to the other direction so a
+/// trailing separator can't strand the highlight). Pure so the
+/// clamp+snap math is unit-testable without App state.
+pub(super) fn half_page_menu_target(
+    items: &[ContextMenuItem],
+    current: usize,
+    rows: usize,
+    dir: isize,
+) -> usize {
+    if items.is_empty() {
+        return current;
+    }
+    let n = items.len() as isize;
+    let step = rows.max(1) as isize;
+    let raw = (current as isize + dir * step).clamp(0, n - 1) as usize;
+    let scan_down = |from: usize| (from..items.len()).find(|&i| item_is_dispatchable(&items[i]));
+    let scan_up = |from: usize| (0..=from).rev().find(|&i| item_is_dispatchable(&items[i]));
+    let snapped = if dir > 0 {
+        scan_down(raw).or_else(|| scan_up(raw))
+    } else {
+        scan_up(raw).or_else(|| scan_down(raw))
+    };
+    snapped.unwrap_or(current)
+}
+
+/// Whether keyboard nav can land on `item` and Enter / click can dispatch it.
+pub(super) fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
+    matches!(
+        item,
+        ContextMenuItem::Item { enabled: true, .. }
+            | ContextMenuItem::DynamicItem { enabled: true, .. }
+            | ContextMenuItem::LuaItem { .. }
+            | ContextMenuItem::ConfigItem { .. }
+            | ContextMenuItem::ReconnectItem { .. }
+            // Submenu rows are dispatchable for keyboard
+            // nav (↑↓ lands on them); click / Enter drills in.
+            | ContextMenuItem::Submenu { .. }
+            // Profile choice leaves are the *contents* of a drilled-in
+            // Profile ▸ submenu. Without them, keyboard nav inside that
+            // submenu could not land on any row or pick a profile.
+            | ContextMenuItem::WindowChoice { .. }
+            | ContextMenuItem::ProfileChoice { .. }
+            // New-tab ▾ shell choices are always clickable + keyboard-
+            // navigable.
+            | ContextMenuItem::NewTabShell { .. }
+            // The URL-aware "Open Link" / "Copy Link Address" rows.
+            | ContextMenuItem::UrlItem { .. }
+            // A card's or the viewer's media rows.
+            | ContextMenuItem::Media { .. }
+            | ContextMenuItem::Preview { .. } // ContextMenuItem::Info is deliberately absent: a static info line
+                                              // (About panel) is not highlightable or clickable.
+    )
+}
+
+/// Map a context-menu row at position `idx` (within the current level)
+/// to the click it dispatches. Shared by the mouse hit-test
+/// ([`App::context_menu_click_action`]) and the keyboard Enter / Space and
+/// mnemonic paths so every dispatchable row type (submenu, Lua,
+/// config-command, theme/profile choice, new-tab shell) is reachable
+/// identically from mouse and keyboard. One mapper keeps the three input
+/// paths from drifting apart.
+pub(super) fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick> {
+    match item {
+        ContextMenuItem::Item {
+            action,
+            enabled: true,
+            ..
+        }
+        | ContextMenuItem::DynamicItem {
+            action,
+            enabled: true,
+            ..
+        } => Some(ContextMenuClick::Action(action.clone())),
+        ContextMenuItem::LuaItem { lua_idx, .. } => Some(ContextMenuClick::LuaMenuItem(*lua_idx)),
+        ContextMenuItem::ConfigItem { command, .. } => {
+            Some(ContextMenuClick::ConfigCommand(command.clone()))
+        }
+        ContextMenuItem::ReconnectItem { command, .. } => {
+            Some(ContextMenuClick::ReconnectRemote(command.clone()))
+        }
+        ContextMenuItem::Submenu { .. } => Some(ContextMenuClick::DrillIntoSubmenu(idx)),
+        ContextMenuItem::WindowChoice { window, panes, .. } => {
+            Some(ContextMenuClick::MoveTabToWindow {
+                window: *window,
+                panes: Arc::clone(panes),
+            })
+        }
+        ContextMenuItem::ProfileChoice { profile, .. } => {
+            Some(ContextMenuClick::SetProfile(profile.clone()))
+        }
+        ContextMenuItem::NewTabShell { argv, .. } => {
+            Some(ContextMenuClick::NewTabWithArgv(argv.clone()))
+        }
+        ContextMenuItem::UrlItem { url, how, pane, .. } => Some(ContextMenuClick::Url {
+            url: url.clone(),
+            how: *how,
+            pane: *pane,
+        }),
+        ContextMenuItem::Media { target, action, .. } => Some(ContextMenuClick::Media {
+            target: *target,
+            action: *action,
+        }),
+        ContextMenuItem::Preview { target, action, .. } => Some(ContextMenuClick::Preview {
+            target: *target,
+            action: *action,
+        }),
+        ContextMenuItem::Item { enabled: false, .. }
+        | ContextMenuItem::DynamicItem { enabled: false, .. }
+        | ContextMenuItem::Info { .. }
+        | ContextMenuItem::Separator => None,
+    }
+}
+
+/// Pure: walk the menu item list to find the next enabled, non-
+/// separator row index, given a `delta` (±1) and a wrap-around at the
+/// list ends. Used by both `↑` and `↓` keyboard nav. Returns `current`
+/// unchanged if no enabled rows exist at all (defensive; the menu
+/// shouldn't have been opened with zero actionable rows).
+pub(super) fn next_context_menu_highlight(
+    items: &[ContextMenuItem],
+    current: usize,
+    delta: isize,
+) -> usize {
+    if items.is_empty() {
+        return current;
+    }
+    let len = items.len() as isize;
+    let step = if delta >= 0 { 1 } else { -1 };
+    let mut i = current as isize;
+    for _ in 0..len {
+        i = (i + step).rem_euclid(len);
+        if item_is_dispatchable(&items[i as usize]) {
+            return i as usize;
+        }
+    }
+    current
+}
+
+/// Pure: clamp the requested panel anchor so the panel of size
+/// `(panel_w, panel_h)` stays fully inside a surface of size
+/// `(surface_w, surface_h)`. A 4-px screen-edge margin so the panel
+/// reads as floating rather than glued to the edge. Right-click near
+/// the bottom-right corner therefore flips the menu up-and-left
+/// instead of rendering off-screen.
+pub(super) fn clamp_context_menu_anchor(
+    (req_x, req_y): (f32, f32),
+    (panel_w, panel_h): (f32, f32),
+    (surface_w, surface_h): (f32, f32),
+) -> (f32, f32) {
+    let margin = 4.0_f32;
+    let max_x = (surface_w - panel_w - margin).max(margin);
+    let max_y = (surface_h - panel_h - margin).max(margin);
+    let x = req_x.clamp(margin, max_x);
+    let y = req_y.clamp(margin, max_y);
+    (x, y)
+}
+
+pub(super) fn clamp_context_menu_panel(
+    (panel_w, panel_h): (f32, f32),
+    (surface_w, surface_h): (f32, f32),
+) -> (f32, f32) {
+    let available_w = (surface_w - 8.0).max(1.0);
+    let available_h = (surface_h - 8.0).max(1.0);
+    (panel_w.min(available_w), panel_h.min(available_h))
+}
+
+pub(super) fn context_menu_surface_can_fit_row(
+    (surface_w, surface_h): (f32, f32),
+    (cell_w, cell_h): (f32, f32),
+) -> bool {
+    surface_w.is_finite()
+        && surface_h.is_finite()
+        && cell_w.is_finite()
+        && cell_h.is_finite()
+        && surface_w >= 8.0 + kettle_render::menu::H_PAD + cell_w.max(1.0)
+        && surface_h >= 8.0 + cell_h.max(1.0) + kettle_render::menu::ROW_PAD
+}
+
+pub(super) fn fit_context_menu_row(row: &mut ContextMenuRow, max_columns: usize) {
+    if row.separator {
+        return;
+    }
+    let hint_columns = if row.hint.is_empty() {
+        0
+    } else {
+        row.hint.width().saturating_add(2)
+    };
+    let hint_columns = if hint_columns >= max_columns {
+        row.hint.clear();
+        0
+    } else {
+        hint_columns
+    };
+    row.label = ellipsize_menu_label(&row.label, max_columns.saturating_sub(hint_columns));
+}
+
+pub(super) fn scale_context_menu_anchor(
+    (x, y): (f32, f32),
+    previous_scale: f64,
+    current_scale: f64,
+) -> (f32, f32) {
+    if !previous_scale.is_finite()
+        || previous_scale <= 0.0
+        || !current_scale.is_finite()
+        || current_scale <= 0.0
+    {
+        return (x, y);
+    }
+    let ratio = (current_scale / previous_scale) as f32;
+    (x * ratio, y * ratio)
+}
+
+#[derive(Default)]
+pub(super) struct PendingShellAction(Option<(u64, usize)>);
+
+impl PendingShellAction {
+    pub(super) fn request(
+        &mut self,
+        window: u64,
+        index: usize,
+        shells: Option<&[kettle_core::term::ShellChoice]>,
+    ) -> Option<Vec<String>> {
+        match shells {
+            Some(shells) => {
+                self.0 = None;
+                shells.get(index).map(|(_, argv)| argv.clone())
+            }
+            None => {
+                self.0 = Some((window, index));
+                None
+            }
+        }
+    }
+
+    pub(super) fn complete(
+        &mut self,
+        shells: &[kettle_core::term::ShellChoice],
+    ) -> Option<(u64, Vec<String>)> {
+        let (window, index) = self.0.take()?;
+        shells.get(index).map(|(_, argv)| (window, argv.clone()))
     }
 }

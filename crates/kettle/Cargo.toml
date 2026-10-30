@@ -39,6 +39,7 @@ kettle-config.workspace = true
 # `asciicast` enables `kettle exec --record` (the session recorder,
 # output-only here) in release builds — it's an audit feature, not dev-only.
 kettle-core = { workspace = true, features = ["asciicast"] }
+kettle-vt.workspace = true
 crossbeam-channel = "0.5.15"
 # The `kettle ctl` client + `kettle mcp` bridge connect
 # to a running kettle's control server over this crate's protocol + transport.
@@ -109,6 +110,8 @@ winresource = "0.1"
 
 [dev-dependencies]
 kettle-test-support.workspace = true
+kettle-core = { workspace = true, features = ["test-recording"] }
+fs4 = "1.1"
 # Short client budgets for the media platform's end-to-end tests.
 kettle-media = { workspace = true, features = ["test-worker"] }
 # Reads back the TOML `agent-setup` writes for Codex.

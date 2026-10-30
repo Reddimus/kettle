@@ -40,6 +40,7 @@ fn small_limits() -> GraphicsLimits {
         in_flight_bytes: 128 * KIB,
         image_bytes: 64 * KIB,
         retained_bytes: 256 * KIB,
+        transient_cpu_bytes: 192 * KIB,
         process_cpu_bytes: 512 * KIB,
         process_gpu_bytes: 512 * KIB,
         animation_frames: 4,

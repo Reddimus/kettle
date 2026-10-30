@@ -163,6 +163,7 @@ accessibility user focuses a toast button. Reduced motion disables fading.
 
 **Details** opens About; the close button dismisses the toast. About and the
 command palette retain update status and release notes after it disappears.
+About leaves the Installing state when an attempt ends, even when no failure notice is due.
 Notices never take keyboard focus or change the terminal grid.
 The palette's **Dismiss update notice** action dismisses that state persistently;
 the toast's close button only hides the popup.

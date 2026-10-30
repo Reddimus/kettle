@@ -309,6 +309,7 @@ fn font(value: &str) -> Result<Vec<(String, String)>, FailureCode> {
         ("font-variant", "normal".to_owned()),
         ("font-weight", "normal".to_owned()),
         ("font-stretch", "normal".to_owned()),
+        ("font-kerning", "auto".to_owned()),
     ];
     let mut rest = value.trim();
     loop {

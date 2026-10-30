@@ -246,6 +246,38 @@ fn inline_edits_keep_the_tail_and_caret_when_the_value_is_ellipsized() {
 }
 
 #[test]
+fn review_value_slot_matches_painted_row_at_scaled_cell_widths() {
+    let mut set = overlay();
+    set.rows[0].value = "V".into();
+    for label in ["Background image", "\u{754c}\u{754c}\u{754c}"] {
+        set.rows[0].label = label.into();
+        for scale in [0.5, 1.0, 2.0] {
+            for sw in [208.0, 800.0, 1600.0] {
+                let (cw, text_cw, ch, sh) = (10.0 * scale, 10.0, 20.0, 600.0);
+                let lines = settings_display_lines(&set);
+                let layout = settings_panel_layout(&set, &lines, cw, ch, sw, sh);
+                let row = super::settings_fit_display_line(
+                    &set,
+                    SETTINGS_FIELD_START,
+                    &lines[SETTINGS_FIELD_START],
+                    layout.panel_w,
+                    text_cw,
+                );
+                let prefix = row.split_once('V').unwrap().0;
+                let value = super::settings_value_rect(&set, cw, ch, sw, sh, text_cw);
+                assert_eq!(
+                    value.0,
+                    layout.px + 16.0 + super::display_width(prefix) as f32 * text_cw,
+                    "scale {scale}, surface {sw}, row {row}"
+                );
+                assert!(value.0 + value.2 <= layout.px + layout.panel_w - 16.0);
+                assert!(value.2 > 0.0);
+            }
+        }
+    }
+}
+
+#[test]
 fn a_clipped_tab_ellipsis_cannot_switch_categories() {
     let set = overlay();
     let (px, py, row_h) = geom(&set, 8.0, 16.0, 208.0, 600.0);

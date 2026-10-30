@@ -151,7 +151,10 @@ impl IncidentLog {
     ) -> io::Result<Self> {
         let dir = diagnostic_dir(cache_dir);
         let (path, file) = create_incident_file(&dir, unix_ms, pid)?;
-        prune_incidents(&dir, &path)?;
+        if let Err(error) = prune_incidents(&dir, &path) {
+            kettle_state::discard_created_private_file(file, &path);
+            return Err(error);
+        }
 
         let mut log = Self {
             path,
@@ -162,7 +165,7 @@ impl IncidentLog {
             capped: false,
         };
         let fault = fault.map(FaultIdentity::from);
-        log.write_event(
+        let initialized = log.write_event(
             "fault",
             &log.initial_adapter.clone(),
             fault.as_ref(),
@@ -170,7 +173,11 @@ impl IncidentLog {
             None,
             None,
             None,
-        )?;
+        );
+        if let Err(error) = initialized {
+            kettle_state::discard_created_private_file(log.file, &log.path);
+            return Err(error);
+        }
         Ok(log)
     }
 
@@ -268,11 +275,30 @@ impl IncidentLog {
             self.capped = true;
             return Ok(());
         }
-        self.file.write_all(&line)?;
-        self.file.flush()?;
-        self.bytes_written += line.len() as u64;
-        Ok(())
+        append_record(
+            &mut self.file,
+            &line,
+            &mut self.bytes_written,
+            &mut self.capped,
+        )
     }
+}
+
+fn append_record(
+    file: &mut impl Write,
+    line: &[u8],
+    bytes_written: &mut u64,
+    capped: &mut bool,
+) -> io::Result<()> {
+    if *capped {
+        return Ok(());
+    }
+    if let Err(error) = file.write_all(line).and_then(|()| file.flush()) {
+        *capped = true;
+        return Err(error);
+    }
+    *bytes_written += line.len() as u64;
+    Ok(())
 }
 
 fn diagnostic_dir(cache_dir: Option<&Path>) -> PathBuf {
@@ -302,6 +328,14 @@ fn create_incident_file(dir: &Path, unix_ms: u128, pid: u32) -> io::Result<(Path
 }
 
 fn prune_incidents(dir: &Path, preserve: &Path) -> io::Result<()> {
+    prune_incidents_with(dir, preserve, |path| std::fs::remove_file(path))
+}
+
+fn prune_incidents_with(
+    dir: &Path,
+    preserve: &Path,
+    mut remove: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -312,17 +346,24 @@ fn prune_incidents(dir: &Path, preserve: &Path) -> io::Result<()> {
         })
         .collect();
     files.sort();
-    while files.len() > RETAINED_INCIDENTS {
-        let index = files.iter().position(|path| path != preserve);
-        let Some(index) = index else { break };
-        let stale = files.remove(index);
-        match std::fs::remove_file(stale) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+    let mut excess = files.len().saturating_sub(RETAINED_INCIDENTS);
+    for stale in files.iter().filter(|path| *path != preserve) {
+        if excess == 0 {
+            break;
+        }
+        match remove(stale) {
+            Ok(()) => excess -= 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => excess -= 1,
+            Err(error) if incident_in_use(&error) => {}
             Err(error) => return Err(error),
         }
     }
     Ok(())
+}
+
+fn incident_in_use(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || (cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33)))
 }
 
 fn unix_millis() -> u128 {
@@ -472,6 +513,132 @@ mod tests {
         let count = std::fs::read_dir(&diagnostics).unwrap().count();
         assert_eq!(count, RETAINED_INCIDENTS);
         assert!(log.path().exists());
+    }
+
+    #[test]
+    fn diagnostic_rotation_skips_an_active_incident() {
+        let dir = TestDir::new("active-rotation");
+        let diagnostics = diagnostic_dir(Some(dir.0.path()));
+        kettle_state::create_private_dirs(&diagnostics).unwrap();
+        for index in 0..12 {
+            std::fs::write(diagnostics.join(format!("gpu-{index:04}-1.jsonl")), b"{}\n").unwrap();
+        }
+        let active = diagnostics.join("gpu-0000-1.jsonl");
+        let preserve = diagnostics.join("gpu-0011-1.jsonl");
+        let result = prune_incidents_with(&diagnostics, &preserve, |path| {
+            if path == active {
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            } else {
+                std::fs::remove_file(path)
+            }
+        });
+        assert!(
+            result.is_ok(),
+            "an active incident must not stop rotation: {result:?}"
+        );
+        assert!(active.exists());
+        assert!(preserve.exists());
+        assert_eq!(
+            std::fs::read_dir(&diagnostics).unwrap().count(),
+            RETAINED_INCIDENTS
+        );
+    }
+
+    #[test]
+    fn a_partial_record_failure_disables_later_writes() {
+        struct PartialWriter {
+            bytes: Vec<u8>,
+            fail: bool,
+        }
+        impl Write for PartialWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.fail && !self.bytes.is_empty() {
+                    return Err(io::Error::from(io::ErrorKind::StorageFull));
+                }
+                let count = if self.fail {
+                    2.min(bytes.len())
+                } else {
+                    bytes.len()
+                };
+                self.bytes.extend_from_slice(&bytes[..count]);
+                Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = PartialWriter {
+            bytes: Vec::new(),
+            fail: true,
+        };
+        let mut bytes_written = 0;
+        let mut capped = false;
+        assert!(
+            append_record(&mut writer, b"{\"a\":1}\n", &mut bytes_written, &mut capped).is_err()
+        );
+        let partial = writer.bytes.clone();
+        writer.fail = false;
+        append_record(&mut writer, b"{\"b\":2}\n", &mut bytes_written, &mut capped).unwrap();
+        assert_eq!(
+            writer.bytes, partial,
+            "a failed record must never be followed by another append"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn diagnostic_rotation_keeps_new_logs_usable_with_an_open_windows_incident() {
+        let dir = TestDir::new("windows-active");
+        let active =
+            IncidentLog::start_at(Some(dir.0.path()), 0, 1, "test", adapter(), None).unwrap();
+        for timestamp in 1..13 {
+            let log =
+                IncidentLog::start_at(Some(dir.0.path()), timestamp, 1, "test", adapter(), None)
+                    .unwrap();
+            assert!(!std::fs::read(log.path()).unwrap().is_empty());
+        }
+        assert!(active.path().exists());
+        assert_eq!(
+            std::fs::read_dir(diagnostic_dir(Some(dir.0.path())))
+                .unwrap()
+                .count(),
+            RETAINED_INCIDENTS
+        );
+    }
+
+    #[test]
+    fn diagnostic_initialization_failure_removes_the_new_file() {
+        let dir = TestDir::new("initialization-cleanup");
+        let diagnostics = diagnostic_dir(Some(dir.0.path()));
+        kettle_state::create_private_dirs(&diagnostics).unwrap();
+        std::fs::create_dir(diagnostics.join("gpu-0000-1.jsonl")).unwrap();
+        for index in 1..11 {
+            std::fs::write(diagnostics.join(format!("gpu-{index:04}-1.jsonl")), b"{}\n").unwrap();
+        }
+        assert!(
+            IncidentLog::start_at(Some(dir.0.path()), 9999, 1, "test", adapter(), None).is_err()
+        );
+        assert!(!diagnostics.join("gpu-9999-1.jsonl").exists());
+    }
+
+    #[test]
+    fn a_flush_failure_disables_later_record_writes() {
+        struct FlushFailure(Vec<u8>);
+        impl Write for FlushFailure {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::from(io::ErrorKind::StorageFull))
+            }
+        }
+        let mut writer = FlushFailure(Vec::new());
+        let mut bytes_written = 0;
+        let mut capped = false;
+        assert!(append_record(&mut writer, b"{}\n", &mut bytes_written, &mut capped).is_err());
+        append_record(&mut writer, b"{}\n", &mut bytes_written, &mut capped).unwrap();
+        assert_eq!(writer.0, b"{}\n");
     }
 
     #[test]

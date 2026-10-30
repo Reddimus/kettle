@@ -102,22 +102,15 @@ impl App {
     /// replies + a connection table.
     pub(super) fn drain_ctl(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
         use crate::ctl_server::CtlServerMsg;
-        // Pull all pending messages first so we don't hold a `&self.ctl` borrow
-        // while calling `&mut self` handlers.
-        let mut msgs = Vec::new();
-        if let Some(ctl) = &self.ctl {
-            while let Some(m) = ctl.try_recv() {
-                msgs.push(m);
-            }
-        }
-        if msgs.is_empty() {
-            return;
-        }
+        let mut budget = crate::ctl_server::DrainBudget::new();
         // Only repaint when the batch could have changed visible state.
         // `wait_for` probes are pure reads arriving at up to 20/s for the
         // whole wait, and repainting an idle window for each one wastes CPU.
         let mut needs_redraw = false;
-        for msg in msgs {
+        while budget.take() {
+            let Some(msg) = self.ctl.as_ref().and_then(|ctl| ctl.try_recv()) else {
+                break;
+            };
             match msg {
                 CtlServerMsg::NewConn { conn_id, event_tx } => {
                     if let Some(ctl) = &mut self.ctl {
@@ -130,6 +123,9 @@ impl App {
                     request,
                     reply,
                 } => {
+                    if !self.ctl.as_ref().is_some_and(|ctl| ctl.connected(conn_id)) {
+                        continue;
+                    }
                     // Mutations + first-time attaches change visible state
                     // (pane content, agent badge); wait_for's internal
                     // probes and `ui_geometry` reads never do.
@@ -170,6 +166,12 @@ impl App {
                 }
             }
         }
+        budget.finish(
+            self.ctl.as_ref().is_some_and(|ctl| ctl.has_pending()),
+            || {
+                let _ = self.proxy.send_event(UserEvent::Ctl);
+            },
+        );
         if needs_redraw && let Some(w) = &ws.window {
             w.request_redraw();
         }
@@ -1027,9 +1029,11 @@ impl App {
             let (_, ch) = self.menu_cell(target);
             let row_h = ch + kettle_render::menu::ROW_PAD;
             let sep_h = kettle_render::menu::SEP_H;
-            let mut row_y = ay;
+            let (inset, content_h) =
+                context_menu_content_geometry(&menu.items, panel_h, row_h, sep_h);
+            let mut row_y = ay + inset;
             let start = menu.scroll_offset.min(menu.items.len());
-            let visible = count_rows_fitting(&menu.items, start, panel_h, row_h, sep_h);
+            let visible = count_rows_fitting(&menu.items, start, content_h, row_h, sep_h);
             let rows: Vec<serde_json::Value> = menu
                 .items
                 .iter()
@@ -1043,7 +1047,8 @@ impl App {
                         ContextMenuItem::Item { label, .. } => *label,
                         ContextMenuItem::DynamicItem { label, .. } => label.as_str(),
                         ContextMenuItem::LuaItem { label, .. } => label.as_str(),
-                        ContextMenuItem::ConfigItem { label, .. } => label.as_str(),
+                        ContextMenuItem::ConfigItem { label, .. }
+                        | ContextMenuItem::ReconnectItem { label, .. } => label.as_str(),
                         ContextMenuItem::Submenu { label, .. } => label.as_str(),
                         ContextMenuItem::ProfileChoice { label, .. }
                         | ContextMenuItem::WindowChoice { label, .. } => label.as_str(),
@@ -2065,12 +2070,12 @@ impl App {
                 handled = self.ctl_mouse_press(ws, event_loop, button.expect("validated button"));
             }
             "release" => {
-                handled = self.ctl_mouse_release(ws, button.expect("validated button"));
+                handled = self.ctl_mouse_release(ws, event_loop, button.expect("validated button"));
             }
             "click" => {
                 let bcode = button.expect("validated button");
                 let pressed = self.ctl_mouse_press(ws, event_loop, bcode);
-                let released = self.ctl_mouse_release(ws, bcode);
+                let released = self.ctl_mouse_release(ws, event_loop, bcode);
                 handled = pressed || released;
             }
             "wheel" => {
@@ -2108,6 +2113,9 @@ impl App {
         }
         // Like the media receipt below, the search lane's hover follows
         // control input so automation can exercise it.
+        if ws.dragging_modal_editor && self.modal_text_pointer(ws, false) {
+            return;
+        }
         self.update_search_hover(ws);
         if search_pointer_route(ws.search.open, None, ws.search.pointer_captured())
             == SearchPointerRoute::Bar
@@ -2115,7 +2123,13 @@ impl App {
             self.search_mouse_drag(ws);
             return;
         }
+        if self.drag_pane(ws) {
+            return;
+        }
         if self.drag_split_divider(ws) {
+            return;
+        }
+        if self.picker_pointer(ws, PickerPointer::Hover) {
             return;
         }
         self.promote_tab_drag_if_needed(ws);
@@ -2166,8 +2180,23 @@ impl App {
         if self.confirm_mouse_press(ws, event_loop, bcode) {
             return true;
         }
+        if self.dismiss_modal_outside(ws, bcode) {
+            return true;
+        }
+        if bcode == 0 && self.modal_text_pointer(ws, true) {
+            return true;
+        }
         let bar = self.tab_bar(ws);
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if bcode == 0 && self.picker_pointer(ws, PickerPointer::Press) {
+            return true;
+        }
+        if bcode == 0
+            && let Some(delta) = self.context_menu_scroll_edge(ws)
+        {
+            self.scroll_context_menu(ws, delta);
+            return true;
+        }
         if ws.context_menu.is_some()
             && let Some(click) = self.context_menu_click_action(ws, bcode)
         {
@@ -2293,6 +2322,9 @@ impl App {
         if self.activate_media_paste_receipt_at(ws, px, py, bcode) {
             return true;
         }
+        if self.press_pane_drag(ws, bcode) {
+            return true;
+        }
         if self.press_split_divider(ws, bcode) {
             return true;
         }
@@ -2314,7 +2346,12 @@ impl App {
         false
     }
 
-    pub(super) fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
+    pub(super) fn ctl_mouse_release(
+        &mut self,
+        ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
+        bcode: u8,
+    ) -> bool {
         // As natively: a gesture of Kettle's own ends with its release.
         ws.held_buttons.end_own(bcode);
         if bcode == 0 {
@@ -2333,6 +2370,9 @@ impl App {
             self.end_lane_drag(ws, drag);
             return true;
         }
+        if bcode == 0 && std::mem::take(&mut ws.dragging_modal_editor) {
+            return true;
+        }
         if bcode == 0
             && search_pointer_route(ws.search.open, None, ws.search.pointer_captured())
                 == SearchPointerRoute::Bar
@@ -2343,6 +2383,9 @@ impl App {
         }
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
         if self.release_card(ws, px, py, bcode) {
+            return true;
+        }
+        if self.release_pane_drag(ws, bcode, event_loop) {
             return true;
         }
         // The release goes where its press did, if a program got it.
@@ -2358,7 +2401,6 @@ impl App {
             ws.tab_pressed_idx = None;
             ws.detach_drag = std::mem::take(&mut ws.detach_drag).on_mouse_up();
             ws.drag_press = None;
-            ws.pane_drag = None;
             handled = true;
         }
         handled
@@ -3242,5 +3284,169 @@ mod screen_page_tests {
             "self.ctl_read_screen(ws, req, ",
             "request.internal_probe())"
         )));
+    }
+}
+
+/// A control request that only reads UI state, so it needs no frame. A
+/// frame would also end the Core Animation cursor blink `ui_geometry` is
+/// there to observe.
+/// `get_state`'s `caller`: whether the caller runs in one of this Kettle's
+/// panes. Verified means the pane's own child process is an ancestor of the
+/// connecting process; the nearest such pane wins. A hint from the caller's
+/// environment is reported separately and never makes it verified.
+pub(super) fn ctl_caller_report(
+    caller: &crate::ctl_server::CallerEvidence,
+    roots: &[crate::media::PaneRoot],
+    panes: &[(u64, u64)],
+    kettle_pid: u32,
+) -> serde_json::Value {
+    use kettle_ctl::identity::UnverifiedReason;
+    let hint = caller
+        .hint()
+        .filter(|hint| hint.kettle_pid == kettle_pid)
+        .and_then(|hint| panes.iter().find(|(pane, _)| *pane == hint.pane))
+        .map(|(pane, window)| serde_json::json!({"pane": pane, "window": window}));
+    let (chain, reason) = match caller.chain() {
+        Some(Ok(chain)) => (Some(chain), None),
+        Some(Err(reason)) => (None, Some(reason)),
+        // Not checked: only requests that report their caller are.
+        None => (None, Some(UnverifiedReason::MissingClaim)),
+    };
+    let found = chain.and_then(|chain| crate::media::nearest_pane(chain, roots));
+    let reason = reason.or_else(|| found.is_none().then_some(UnverifiedReason::NoPane));
+    let peer = chain.and_then(|chain| chain.first()).map(|peer| {
+        serde_json::json!({
+            "pid": peer.pid(),
+            "start_token": peer.start().to_string(),
+        })
+    });
+    serde_json::json!({
+        "verified": found.is_some(),
+        "reason": reason.map(UnverifiedReason::as_str),
+        "pane": found.map(|(pane, _)| pane),
+        "window": found.map(|(_, window)| window),
+        "peer": peer,
+        "hint": hint,
+    })
+}
+
+/// The control-server launch flags.
+pub(super) fn ctl_overrides(startup: &crate::Options) -> kettle_ctl::CtlOverrides {
+    kettle_ctl::CtlOverrides {
+        server: startup.agent_server,
+        display: startup.agent_display,
+    }
+}
+
+/// Where the control server's start stands. It may start once the first pane
+/// exists, and tries at most once unless display is newly turned on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CtlStart {
+    NotReady,
+    Ready,
+    Attempted,
+}
+
+pub(super) fn ctl_method_is_pure_read(method: kettle_ctl::protocol::Method) -> bool {
+    matches!(
+        method,
+        kettle_ctl::protocol::Method::UiGeometry
+            | kettle_ctl::protocol::Method::AgentLaunch
+            | kettle_ctl::protocol::Method::CardPickup
+    )
+}
+
+/// An in-flight `run_command` awaiting its OSC-133
+/// completion. The control server wrote `cmd\r` to the pane; the matching
+/// `CommandFinished` generation resolves the request with the exit code,
+/// duration, and the output captured since `start_line`. A deadline guards the
+/// no-shell-integration case (the command runs but no `CommandEnd` ever fires).
+pub(super) struct PendingRun {
+    /// Connection that issued the run (for disconnect cleanup).
+    pub(super) conn_id: u64,
+    /// Request id, echoed in the completion response.
+    pub(super) req_id: u64,
+    /// Absolute line, counted from the first row ever written (evicted history
+    /// included), where the command's output begins, so the reply can slice
+    /// just this command's output out of the grid even after the ring wraps.
+    pub(super) start_line: u64,
+    /// Command-start generation observed before submitting input.
+    pub(super) command_generation: u64,
+    /// When the request gives up waiting for OSC-133 and replies `timed_out`.
+    pub(super) deadline: std::time::Instant,
+    /// Where the completion response is sent (the connection thread is blocked
+    /// reading this until the command finishes or the deadline fires).
+    pub(super) reply: crate::ctl_server::ReplyTx,
+}
+
+pub(super) fn take_pending_run(
+    runs: &mut std::collections::HashMap<u64, PendingRun>,
+    pane: u64,
+    event: &kettle_core::CommandFinished,
+) -> Option<PendingRun> {
+    if event.generation != runs.get(&pane)?.command_generation.wrapping_add(1) {
+        return None;
+    }
+    runs.remove(&pane)
+}
+
+/// The window holding `pane`: `ws` or one of `windows`.
+pub(super) fn window_with_pane<'a>(
+    ws: &'a mut WindowState,
+    windows: &'a mut std::collections::BTreeMap<u64, WindowState>,
+    pane: u64,
+) -> Option<&'a mut WindowState> {
+    if ws.mux.panes.contains_key(&pane) {
+        return Some(ws);
+    }
+    windows
+        .values_mut()
+        .find(|window| window.mux.panes.contains_key(&pane))
+}
+
+pub(super) fn ctl_mouse_button(params: &serde_json::Value) -> std::result::Result<u8, String> {
+    let button = params
+        .get("button")
+        .and_then(|v| v.as_str())
+        .unwrap_or("left")
+        .to_ascii_lowercase();
+    match button.as_str() {
+        "left" => Ok(0),
+        "middle" => Ok(1),
+        "right" => Ok(2),
+        // The report codes the physical buttons send, not xterm's button
+        // numbers: 8 and 9 would encode as a modified left or middle press.
+        "back" => Ok(MOUSE_BACK),
+        "forward" => Ok(MOUSE_FORWARD),
+        other => Err(format!(
+            "unknown button '{other}' (expected left, middle, right, back, or forward)"
+        )),
+    }
+}
+
+pub(super) fn ctl_input_error(result: PaneInputResult) -> Option<(&'static str, &'static str)> {
+    use kettle_ctl::protocol::error_codes as ec;
+    match result {
+        PaneInputResult::Queued => None,
+        PaneInputResult::ReadOnly => Some((
+            ec::READ_ONLY,
+            "pane is read-only (user toggled 'Read only')",
+        )),
+        PaneInputResult::Backpressured => Some((
+            ec::BUSY,
+            "pane input is backpressured; no bytes were sent (retry later)",
+        )),
+        PaneInputResult::Oversize => Some((
+            ec::BAD_PARAMS,
+            "input exceeds the per-message safety limit; no bytes were sent",
+        )),
+        PaneInputResult::PathNotTyped => Some((
+            ec::BAD_PARAMS,
+            "file path cannot be typed exactly; no bytes were sent",
+        )),
+        PaneInputResult::Failed => Some((
+            ec::INTERNAL,
+            "pane input transport failed; the pane is being closed",
+        )),
     }
 }

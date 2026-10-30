@@ -1021,7 +1021,7 @@ fn a_lanes_wheel_motion_goes_with_its_gesture() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     assert!(
@@ -1269,7 +1269,7 @@ fn videos_keep_what_they_are() {
         "let video = rendered.video.as_ref().map(|video| video.info);",
         "item.layout = Some(layout); item.video = video;",
         ".with_pages(page);",
-        "self.publish_show(ws, (origin, route), item, (inline, inline_refused), page);",
+        "self.publish_show( ws, (origin, route, control), item, (inline, inline_refused), page, );",
     ] {
         assert!(finish.contains(needle), "finish_show: {needle}");
     }
@@ -1864,7 +1864,7 @@ fn viewer_retains_keyboard_ownership_until_it_closes() {
         .split("fn exit_preview_focus(")
         .nth(1)
         .unwrap()
-        .split("\n    fn ")
+        .split("\n    }\n")
         .next()
         .unwrap();
     let flat = release.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1876,7 +1876,7 @@ fn viewer_retains_keyboard_ownership_until_it_closes() {
         .split("fn restore_overlay_origin(")
         .nth(1)
         .unwrap()
-        .split("\n    fn ")
+        .split("\n    }\n")
         .next()
         .unwrap();
     assert!(
@@ -1984,7 +1984,7 @@ fn a_lane_holding_the_keyboard_is_wired_as_a_modal() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     let focus = body("focus_preview");
@@ -2039,7 +2039,7 @@ fn copied_diagrams_are_wired() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     let preview = body("preview_copied_diagram");
@@ -2118,7 +2118,7 @@ fn lane_content_actions_are_wired() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     let wrapper = body("copy_preview");
@@ -2249,7 +2249,7 @@ fn reload_is_a_pull_of_the_items_file_under_its_key() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     let reload = body("reload_preview");
@@ -2292,7 +2292,7 @@ fn a_lane_without_a_source_shows_and_copies_rendered() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     assert!(body("copy_preview").contains("lane_mode(item, panel)"));
@@ -2358,12 +2358,16 @@ fn an_undrawable_file_goes_on_the_shelf_as_itself() {
             .to_owned()
     };
     let finish = body("finish_show");
+    assert!(
+        !finish.contains("file_facts("),
+        "filesystem metadata must stay off the UI thread"
+    );
     let steps = [
-        "Err(RenderError::Failure(failure)) => { let why = crate::media::FileWhy::of_job(&spec.kind, failure); let facts = why.and_then(|why| match &spec.input { crate::media::SourceInput::Path { path, authorization, } => super::native_path_buf(path) .and_then(|path| crate::media::file_facts(&path, authorization, why)), _ => None, });",
-        "let Some(facts) = facts else { return notify_preview_failure(tr, origin.refuse(failure)); };",
-        "let item = crate::media::ShelfItem::file( self.media.next_item(), key, title, provenance, facts, crate::media::ItemSource::undrawn(spec, facts.identity), );",
-        "return self.publish_show( ws, (origin, route), item, (inline, inline_refused), None, );",
-        "self.publish_show(ws, (origin, route), item, (inline, inline_refused), page);",
+        "let why = crate::media::FileWhy::of_job(&spec.kind, failure);",
+        "let Some(why) = why.filter(|_| matches!(spec.input, crate::media::SourceInput::Path { .. })) else { return notify_preview_failure(tr, origin.refuse(failure)); };",
+        "let item = crate::media::ShelfItem::checking_file( self.media.next_item(), key, title, provenance, why, crate::media::ItemSource::checking_file(spec), );",
+        "return self.publish_show( ws, (origin, route, control), item, (inline, inline_refused), None, );",
+        "self.publish_show( ws, (origin, route, control), item, (inline, inline_refused), page, );",
     ];
     let at: Vec<_> = steps
         .iter()

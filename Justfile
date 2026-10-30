@@ -979,9 +979,7 @@ tabbar-click-smoke: release
 # the tree -- the pure drop-zone geometry is unit-tested in mux.rs, but only a
 # live window shows that a titlebar press ever gets there.
 #
-# KNOWN BROKEN: the gesture arms only on a native pointer press, so
-# `ctl send_mouse` cannot reach it and this stops at "did not arm the gesture".
-# See the script header for the two ways out.
+# Drive the shared pane-drag gesture through ctl send_mouse and verify the layout.
 [unix]
 pane-drag-smoke: release
     KETTLE_BIN=./target/release/kettle ./scripts/check-pane-drag-smoke.sh

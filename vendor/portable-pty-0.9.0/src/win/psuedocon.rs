@@ -419,7 +419,7 @@ mod tests {
                             let _ = writer.write_all(b"\x1b[1;1R");
                             let _ = writer.flush();
                         }
-                        if String::from_utf8_lossy(&bytes).contains("JOB_DESCENDANT ") {
+                        if crate::descendant_pid::descendant_pid(&bytes).is_some() {
                             break;
                         }
                     }
@@ -430,17 +430,12 @@ mod tests {
         let output = output_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("fixture announces its descendant");
-        let output = String::from_utf8_lossy(&output);
-        let pid = output
-            .split("JOB_DESCENDANT ")
-            .nth(1)
-            .map(|tail| {
-                tail.chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect::<String>()
-            })
-            .and_then(|digits| digits.parse::<u32>().ok())
-            .unwrap_or_else(|| panic!("missing descendant pid in {:?}", output));
+        let pid = crate::descendant_pid::descendant_pid(&output).unwrap_or_else(|| {
+            panic!(
+                "missing descendant pid in {:?}",
+                String::from_utf8_lossy(&output)
+            )
+        });
 
         let process =
             unsafe { OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };

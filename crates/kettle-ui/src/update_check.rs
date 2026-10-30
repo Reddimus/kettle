@@ -236,6 +236,12 @@ impl UpdateCache {
         self.last_outcome = Some(LastOutcome::Installing);
     }
 
+    fn note_attempt_finished(&mut self) {
+        if self.last_outcome == Some(LastOutcome::Installing) {
+            self.last_outcome = Some(LastOutcome::Available);
+        }
+    }
+
     /// Records a finished install: `(notify, first_time)`. Success clears
     /// the failure count.
     fn note_installed(&mut self, tag: &str) -> (bool, bool) {
@@ -251,6 +257,7 @@ impl UpdateCache {
     /// the release, such as a dropped connection. Returns `Some(notify)` once
     /// the failures are worth a notice; a new tag starts the count again.
     fn note_failure(&mut self, tag: &str, counts: bool) -> Option<bool> {
+        self.note_attempt_finished();
         if counts {
             if self.failure_tag.as_deref() == Some(tag) {
                 self.failure_count = self.failure_count.saturating_add(1);
@@ -362,6 +369,9 @@ fn save_cache_at(path: &std::path::Path, cache: &UpdateCache) -> bool {
     let Ok(json) = serde_json::to_vec_pretty(cache) else {
         return false;
     };
+    if json.len() > MAX_CACHE_BYTES {
+        return false;
+    }
     match kettle_update::write_atomic_file(path, &json) {
         Ok(()) => true,
         Err(error) => {
@@ -374,18 +384,24 @@ fn save_cache_at(path: &std::path::Path, cache: &UpdateCache) -> bool {
 /// Reads, changes and writes the record. Callers hold `update-check.lock`, so
 /// reading again right before the write keeps another process's change, such
 /// as a dismissal, instead of overwriting it with an older copy.
-fn mutate_cache<T>(change: impl FnOnce(&mut UpdateCache) -> T) -> T {
+fn mutate_cache<T: Default>(change: impl FnOnce(&mut UpdateCache) -> T) -> T {
     match cache_path() {
         Some(path) => mutate_cache_at(&path, change),
-        None => change(&mut UpdateCache::default()),
+        None => T::default(),
     }
 }
 
-fn mutate_cache_at<T>(path: &std::path::Path, change: impl FnOnce(&mut UpdateCache) -> T) -> T {
+fn mutate_cache_at<T: Default>(
+    path: &std::path::Path,
+    change: impl FnOnce(&mut UpdateCache) -> T,
+) -> T {
     let mut cache = load_cache_at(path).unwrap_or_default();
     let result = change(&mut cache);
-    save_cache_at(path, &cache);
-    result
+    if save_cache_at(path, &cache) {
+        result
+    } else {
+        T::default()
+    }
 }
 
 /// Runs `change` on the record under `update-check.lock`, waiting up to
@@ -404,10 +420,10 @@ fn with_locked_cache(change: impl FnOnce(&mut UpdateCache)) -> bool {
         &parent.join("update-check.lock"),
         RECORD_LOCK_WAIT,
     ) {
-        Ok(_lock) => {
-            mutate_cache_at(&path, change);
+        Ok(_lock) => mutate_cache_at(&path, |cache| {
+            change(cache);
             true
-        }
+        }),
         Err(error) => {
             log::warn!("update-check: could not record a change: {error}");
             false
@@ -565,6 +581,7 @@ pub fn maybe_spawn_check(
                             });
                         }
                         Err(error) => {
+                            mutate_cache(UpdateCache::note_attempt_finished);
                             match classify(&error, &running, install.proven_at_startup()) {
                                 InstallFailure::RestartPending(installed) => {
                                     log::info!("update {}: {error}", update.tag);
@@ -597,6 +614,7 @@ pub fn maybe_spawn_check(
                                     }
                                 }
                             }
+                            let _ = proxy.send_event(UserEvent::UpdateCheckFinished);
                         }
                     }
                 }
@@ -978,6 +996,55 @@ mod tests {
     }
 
     #[test]
+    fn every_failed_install_clears_the_installing_state() {
+        for counts in [true, false] {
+            let mut cache = UpdateCache::default();
+            cache.note_installing("v5.2.0");
+            assert_eq!(cache.note_failure("v5.2.0", counts), None);
+            assert_eq!(
+                cache.last_outcome,
+                Some(LastOutcome::Available),
+                "a completed failed attempt must not remain Installing (counts={counts})"
+            );
+            assert_eq!(cache.failure_count, u32::from(counts));
+        }
+    }
+
+    #[test]
+    fn cache_growth_preserves_the_last_readable_record() {
+        let root = crate::test_tempdir();
+        let path = root.path().join("update-check.json");
+        let original = serde_json::to_vec(&serde_json::json!({
+            "last_check": 42, "dismissed_version": "v5.1.0",
+            "future": "x".repeat(super::MAX_CACHE_BYTES - 128)
+        }))
+        .unwrap();
+        assert!(original.len() < super::MAX_CACHE_BYTES);
+        // Private, as the app writes it: a umask of 002 would leave a plain
+        // write group-writable, and the trusted reader refuses that.
+        kettle_state::atomic_replace(&path, &original, kettle_state::AtomicWriteOptions::PRIVATE)
+            .unwrap();
+        assert!(super::load_cache_at(&path).is_some());
+        let persisted = super::mutate_cache_at(&path, |cache| cache.note_available("v5.2.0"));
+        assert!(
+            !persisted,
+            "an oversized cache mutation must report persistence failure"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "preserve the previous cache bytes"
+        );
+        assert_eq!(
+            super::load_cache_at(&path)
+                .unwrap()
+                .dismissed_version
+                .as_deref(),
+            Some("v5.1.0")
+        );
+    }
+
+    #[test]
     fn locked_feed_and_network_errors_do_not_count() {
         assert!(!super::failure_counts(&UpdateError::Request(
             "timed out".into()
@@ -1018,7 +1085,7 @@ mod tests {
     /// An update is never urgent enough to ask for the user's attention.
     #[test]
     fn no_update_event_requests_attention() {
-        let source = kettle_test_support::production_source(include_str!("app.rs"));
+        let source = kettle_test_support::production_source(include_str!("app/output.rs"));
         for event in [
             "UserEvent::UpdateAvailable {",
             "UserEvent::UpdateInstalled {",

@@ -20,6 +20,8 @@
 
 #[cfg(target_os = "macos")]
 pub mod acl;
+#[cfg(any(test, all(target_os = "macos", feature = "avfoundation")))]
+mod audio_buffers;
 #[cfg(all(target_os = "macos", feature = "avfoundation"))]
 pub mod audio_out;
 #[cfg(all(target_os = "macos", feature = "avfoundation"))]

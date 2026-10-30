@@ -254,7 +254,7 @@ impl FeedClient {
             });
         }
         let mut reader = response.into_body().into_reader().take(asset.size + 1);
-        let actual = std::io::copy(&mut reader, &mut output)?;
+        let actual = copy_artifact_body(&mut reader, &mut output)?;
         if actual != asset.size {
             return Err(UpdateError::SizeMismatch {
                 expected: asset.size,
@@ -443,6 +443,25 @@ pub(crate) fn require_strict_upgrade(
         });
     }
     Ok(())
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
+fn copy_artifact_body(
+    reader: &mut impl Read,
+    output: &mut impl std::io::Write,
+) -> Result<u64, UpdateError> {
+    let mut buffer = [0u8; 8192];
+    let mut total = 0;
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(0) => return Ok(total),
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(UpdateError::Request(error.to_string())),
+        };
+        output.write_all(&buffer[..count])?;
+        total += count as u64;
+    }
 }
 
 fn user_agent() -> &'static str {
@@ -921,6 +940,45 @@ mod tests {
         });
         check(FeedClient::for_test(&base, [0; 32]), base);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn artifact_body_preserves_local_filesystem_errors() {
+        struct FullDisk;
+        impl std::io::Write for FullDisk {
+            fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = copy_artifact_body(&mut &b"body"[..], &mut FullDisk).unwrap_err();
+        assert!(
+            matches!(error, UpdateError::Io(error) if error.kind() == std::io::ErrorKind::StorageFull)
+        );
+    }
+
+    #[test]
+    fn interrupted_artifact_bodies_are_transport_errors() {
+        struct Body(bool);
+        impl Read for Body {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 {
+                    return Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+                }
+                self.0 = true;
+                out[..2].copy_from_slice(b"12");
+                Ok(2)
+            }
+        }
+        let mut output = Vec::new();
+        let error = copy_artifact_body(&mut Body(false), &mut output).unwrap_err();
+        assert_eq!(output, b"12");
+        assert!(
+            matches!(error, UpdateError::Request(_)),
+            "interrupted response bodies must be transport failures: {error:?}"
+        );
     }
 
     #[test]

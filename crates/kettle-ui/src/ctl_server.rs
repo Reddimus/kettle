@@ -23,7 +23,7 @@
 //! dispatch. The threat model (same local user, off-by-default, logged,
 //! dev-record-annotated) is in docs/AGENT.md.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,6 +40,8 @@ use kettle_ctl::{CtlPolicy, SharedCtlPolicy};
 
 /// Max concurrent connections; excess are dropped immediately.
 const MAX_CONNECTIONS: usize = 8;
+pub(crate) const INBOX_CAP: usize = 4 * MAX_CONNECTIONS;
+const REQUESTS_PER_CONNECTION: usize = INBOX_CAP / MAX_CONNECTIONS;
 /// Per-connection event queue cap (subscribers only). On overflow we drop +
 /// flag `lag` so a slow client can't make the App allocate without bound.
 const EVENT_QUEUE_CAP: usize = 256;
@@ -89,6 +91,265 @@ const DEFAULT_CONNECTION_POLICY: ConnectionPolicy = ConnectionPolicy {
     subscriber_keepalive: SUBSCRIBER_KEEPALIVE,
 };
 
+#[derive(Clone)]
+struct InboxSender {
+    requests: Sender<QueuedRequest>,
+    lifecycle: Sender<Lifecycle>,
+    quotas: Arc<std::sync::Mutex<HashMap<u64, RequestQuota>>>,
+}
+
+#[derive(Clone)]
+struct RequestQuota {
+    reserve: Sender<()>,
+    release: Receiver<()>,
+}
+
+impl RequestQuota {
+    fn new() -> Self {
+        let (reserve, release) = crossbeam_channel::bounded(REQUESTS_PER_CONNECTION);
+        Self { reserve, release }
+    }
+}
+
+struct RequestPermit(Receiver<()>);
+
+impl Drop for RequestPermit {
+    fn drop(&mut self) {
+        let _ = self.0.try_recv();
+    }
+}
+
+struct QueuedRequest {
+    message: CtlServerMsg,
+    _permit: RequestPermit,
+}
+
+struct Lifecycle {
+    message: Option<CtlServerMsg>,
+    admission: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+impl Drop for Lifecycle {
+    fn drop(&mut self) {
+        if let Some(active) = self.admission.take() {
+            active.fetch_sub(1, Ordering::Release);
+        }
+    }
+}
+
+struct InboxReceiver {
+    requests: Receiver<QueuedRequest>,
+    lifecycle: Receiver<Lifecycle>,
+    waiting: std::cell::RefCell<VecDeque<QueuedRequest>>,
+    quotas: Arc<std::sync::Mutex<HashMap<u64, RequestQuota>>>,
+    live: std::cell::RefCell<HashSet<u64>>,
+    lifecycle_streak: std::cell::Cell<usize>,
+}
+
+fn inbox_channel() -> (InboxSender, InboxReceiver) {
+    let (requests, request_rx) = crossbeam_channel::bounded(INBOX_CAP);
+    let (lifecycle, lifecycle_rx) = crossbeam_channel::bounded(2 * MAX_CONNECTIONS);
+    let quotas = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    (
+        InboxSender {
+            requests,
+            lifecycle,
+            quotas: quotas.clone(),
+        },
+        InboxReceiver {
+            requests: request_rx,
+            lifecycle: lifecycle_rx,
+            waiting: std::cell::RefCell::new(VecDeque::new()),
+            quotas,
+            live: std::cell::RefCell::new(HashSet::new()),
+            lifecycle_streak: std::cell::Cell::new(0),
+        },
+    )
+}
+
+impl InboxSender {
+    fn send(&self, message: CtlServerMsg) -> Result<(), ()> {
+        if let Some(conn_id) = message.request_conn_id() {
+            let quota = self
+                .quotas
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&conn_id)
+                .cloned()
+                .ok_or(())?;
+            // Timed-out probes may still be queued. Reserve this connection's
+            // share until the UI consumes or discards each request.
+            quota.reserve.send(()).map_err(drop)?;
+            self.requests
+                .send(QueuedRequest {
+                    message,
+                    _permit: RequestPermit(quota.release),
+                })
+                .map_err(drop)
+        } else {
+            let registered = if let CtlServerMsg::NewConn { conn_id, .. } = &message {
+                self.quotas
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(*conn_id, RequestQuota::new());
+                Some(*conn_id)
+            } else {
+                None
+            };
+            let sent = self
+                .lifecycle
+                .try_send(Lifecycle {
+                    message: Some(message),
+                    admission: None,
+                })
+                .map_err(drop);
+            if sent.is_err()
+                && let Some(conn_id) = registered
+            {
+                self.quotas
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&conn_id);
+            }
+            sent
+        }
+    }
+
+    fn disconnect(&self, conn_id: u64, active: Arc<std::sync::atomic::AtomicUsize>) {
+        // Admission lasts until the UI takes this message. Together with the
+        // per-connection request/reply handshake this reserves lifecycle room.
+        if self
+            .lifecycle
+            .try_send(Lifecycle {
+                message: Some(CtlServerMsg::Disconnect { conn_id }),
+                admission: Some(active),
+            })
+            .is_err()
+        {
+            self.quotas
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&conn_id);
+        }
+    }
+}
+
+impl InboxReceiver {
+    fn take_lifecycle(&self, mut lifecycle: Lifecycle) -> CtlServerMsg {
+        let message = lifecycle
+            .message
+            .take()
+            .expect("lifecycle message is delivered once");
+        match &message {
+            CtlServerMsg::NewConn { conn_id, .. } => {
+                self.live.borrow_mut().insert(*conn_id);
+            }
+            CtlServerMsg::Disconnect { conn_id } => {
+                self.live.borrow_mut().remove(conn_id);
+                let mut waiting = self.waiting.borrow_mut();
+                waiting.extend(self.requests.try_iter());
+                waiting.retain(|request| request.message.request_conn_id() != Some(*conn_id));
+                self.quotas
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(conn_id);
+            }
+            _ => unreachable!(),
+        }
+        if let Some(active) = lifecycle.admission.take() {
+            active.fetch_sub(1, Ordering::Release);
+        }
+        self.lifecycle_streak.set(self.lifecycle_streak.get() + 1);
+        message
+    }
+
+    fn take_request(&self) -> Option<CtlServerMsg> {
+        let mut waiting = self.waiting.borrow_mut();
+        waiting.extend(self.requests.try_iter());
+        let live = self.live.borrow();
+        let index = waiting.iter().position(|request| {
+            request
+                .message
+                .request_conn_id()
+                .is_some_and(|id| live.contains(&id))
+        })?;
+        self.lifecycle_streak.set(0);
+        waiting.remove(index).map(|request| request.message)
+    }
+
+    fn try_recv(&self) -> Result<CtlServerMsg, crossbeam_channel::TryRecvError> {
+        if self.lifecycle_streak.get() >= 2 * MAX_CONNECTIONS
+            && let Some(message) = self.take_request()
+        {
+            return Ok(message);
+        }
+        if let Ok(message) = self.lifecycle.try_recv() {
+            return Ok(self.take_lifecycle(message));
+        }
+        self.take_request()
+            .ok_or(crossbeam_channel::TryRecvError::Empty)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.requests.is_empty() && self.lifecycle.is_empty() && self.waiting.borrow().is_empty()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.requests.len() + self.lifecycle.len() + self.waiting.borrow().len()
+    }
+
+    #[cfg(test)]
+    fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<CtlServerMsg, crossbeam_channel::RecvTimeoutError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(message) = self.try_recv() {
+                return Ok(message);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(crossbeam_channel::RecvTimeoutError::Timeout);
+            }
+            crossbeam_channel::select_biased! {
+                recv(self.lifecycle) -> message => return message.map(|message| self.take_lifecycle(message)).map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected),
+                recv(self.requests) -> message => self.waiting.borrow_mut().push_back(message.map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected)?),
+                default(remaining) => return Err(crossbeam_channel::RecvTimeoutError::Timeout),
+            }
+        }
+    }
+}
+
+pub(crate) struct DrainBudget {
+    started: Instant,
+    count: usize,
+}
+
+impl DrainBudget {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            count: 0,
+        }
+    }
+
+    pub(crate) fn take(&mut self) -> bool {
+        if self.count >= INBOX_CAP || self.started.elapsed() >= Duration::from_millis(4) {
+            return false;
+        }
+        self.count += 1;
+        true
+    }
+
+    pub(crate) fn finish(self, pending: bool, wake: impl FnOnce()) {
+        if pending {
+            wake();
+        }
+    }
+}
+
 /// A reply channel for one request (a 1-slot oneshot).
 pub type ReplyTx = Sender<Response>;
 
@@ -110,6 +371,15 @@ pub enum CtlServerMsg {
     },
     /// The connection closed.
     Disconnect { conn_id: u64 },
+}
+
+impl CtlServerMsg {
+    fn request_conn_id(&self) -> Option<u64> {
+        match self {
+            Self::Request { conn_id, .. } => Some(*conn_id),
+            _ => None,
+        }
+    }
 }
 
 /// Per-connection state the App owns (main thread only).
@@ -613,7 +883,7 @@ fn prepare_agent(
 /// accept + per-connection threads run in the background.
 pub struct CtlServer {
     policy: SharedCtlPolicy,
-    rx: Receiver<CtlServerMsg>,
+    rx: InboxReceiver,
     conns: HashMap<u64, ConnState>,
     registry_dir: PathBuf,
     /// Where this server left an alias to its entry, if anywhere.
@@ -678,7 +948,7 @@ impl CtlServer {
         let policy = SharedCtlPolicy::new(policy);
         let access = policy.clone();
 
-        let (tx, rx) = crossbeam_channel::unbounded::<CtlServerMsg>();
+        let (tx, rx) = inbox_channel();
         let accept = match std::thread::Builder::new()
             .name("kettle-ctl-accept".into())
             .spawn(move || accept_loop(listener, tx, wake, access, DEFAULT_CONNECTION_POLICY))
@@ -720,6 +990,14 @@ impl CtlServer {
     /// Drain one pending message (App calls this in a loop on `UserEvent::Ctl`).
     pub fn try_recv(&self) -> Option<CtlServerMsg> {
         self.rx.try_recv().ok()
+    }
+
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.rx.is_empty()
+    }
+
+    pub(crate) fn connected(&self, conn_id: u64) -> bool {
+        self.conns.contains_key(&conn_id)
     }
 
     /// Register a freshly-accepted connection.
@@ -837,7 +1115,7 @@ impl Drop for CtlServer {
 /// than spawning a live thread that would sit idle holding the endpoint.
 fn accept_loop(
     listener: CtlListener,
-    tx: Sender<CtlServerMsg>,
+    tx: InboxSender,
     wake: Arc<dyn Fn() + Send + Sync>,
     access: SharedCtlPolicy,
     policy: ConnectionPolicy,
@@ -850,7 +1128,7 @@ fn accept_loop(
 /// read.
 fn accept_loop_counting(
     listener: CtlListener,
-    tx: Sender<CtlServerMsg>,
+    tx: InboxSender,
     wake: Arc<dyn Fn() + Send + Sync>,
     access: SharedCtlPolicy,
     policy: ConnectionPolicy,
@@ -927,7 +1205,7 @@ fn finish_worker_spawn(
     spawned: std::io::Result<std::thread::JoinHandle<()>>,
     conn_id: u64,
     event_tx: Sender<Event>,
-    tx: &Sender<CtlServerMsg>,
+    tx: &InboxSender,
     wake: &Arc<dyn Fn() + Send + Sync>,
     start_tx: std::sync::mpsc::SyncSender<()>,
     active: &Arc<std::sync::atomic::AtomicUsize>,
@@ -946,26 +1224,17 @@ fn finish_worker_spawn(
     }
 }
 
-/// Ends a connection, however [`connection_loop`] returns, in the order its
-/// observers need. First its place under `MAX_CONNECTIONS` is freed, then the
-/// App hears `Disconnect`, and only then does the handle close (a parameter,
-/// it drops after this guard, a local). A client that reconnects on seeing
-/// EOF, or a test that does on seeing `Disconnect`, therefore finds the place
-/// free; announcing first let such a reconnect reach the cap check while the
-/// old place was still counted, and at the cap it was refused.
+/// Keeps admission until the UI receives the connection's reserved disconnect.
 struct ConnectionExit {
     active: Arc<std::sync::atomic::AtomicUsize>,
     conn_id: u64,
-    tx: Sender<CtlServerMsg>,
+    tx: InboxSender,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl Drop for ConnectionExit {
     fn drop(&mut self) {
-        self.active.fetch_sub(1, Ordering::Release);
-        let _ = self.tx.send(CtlServerMsg::Disconnect {
-            conn_id: self.conn_id,
-        });
+        self.tx.disconnect(self.conn_id, self.active.clone());
         (self.wake)();
     }
 }
@@ -981,7 +1250,7 @@ fn connection_loop(
     mut conn: CtlStream,
     capture: PeerCapture,
     conn_id: u64,
-    tx: Sender<CtlServerMsg>,
+    tx: InboxSender,
     wake: Arc<dyn Fn() + Send + Sync>,
     event_rx: Receiver<Event>,
     access: SharedCtlPolicy,
@@ -1275,7 +1544,7 @@ fn write_serialized_line(
 /// what a non-appearance means; it is not a transport error).
 fn wait_for_poll(
     conn: &mut CtlStream,
-    tx: &Sender<CtlServerMsg>,
+    tx: &InboxSender,
     wake: &Arc<dyn Fn() + Send + Sync>,
     conn_id: u64,
     wait: &AdmittedRequest,
@@ -1475,10 +1744,7 @@ mod tests {
         SharedCtlPolicy::new(CtlPolicy::new(kettle_config::AgentServer::Full, false))
     }
 
-    fn start_test_accept_loop(
-        tag: &str,
-        policy: ConnectionPolicy,
-    ) -> (String, Receiver<CtlServerMsg>) {
+    fn start_test_accept_loop(tag: &str, policy: ConnectionPolicy) -> (String, InboxReceiver) {
         start_test_accept_loop_with(tag, full_access(), policy)
     }
 
@@ -1486,87 +1752,282 @@ mod tests {
         tag: &str,
         access: SharedCtlPolicy,
         policy: ConnectionPolicy,
-    ) -> (String, Receiver<CtlServerMsg>) {
+    ) -> (String, InboxReceiver) {
         let endpoint = test_endpoint(tag);
         let listener = CtlListener::bind(&endpoint).expect("bind test control listener");
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = inbox_channel();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
         std::thread::spawn(move || accept_loop(listener, tx, wake, access, policy));
         (endpoint, rx)
     }
 
-    /// A connection that ends frees its place under `MAX_CONNECTIONS` before
-    /// the App hears `Disconnect`, and the App hears it before the client sees
-    /// EOF. A client reconnecting on either signal must never find its old
-    /// place still counted: at the cap the server refuses it.
     #[test]
-    fn an_ended_connection_frees_its_place_before_anyone_hears_it_ended() {
-        let policy = ConnectionPolicy {
-            request_idle: Duration::from_millis(100),
-            frame_assembly: Duration::from_millis(200),
-            write: Duration::from_millis(200),
-            response_wait: Duration::from_secs(1),
-            subscriber_keepalive: Duration::from_millis(200),
-        };
-        let endpoint = test_endpoint("exit-order");
-        let listener = CtlListener::bind(&endpoint).expect("bind test control listener");
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        // `wake` runs right after each message is sent, on the sending
-        // thread: after `NewConn` on the accept thread, after `Disconnect` on
-        // the connection's own.
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let wake: Arc<dyn Fn() + Send + Sync> = {
-            let (active, seen) = (active.clone(), seen.clone());
-            Arc::new(move || seen.lock().unwrap().push(active.load(Ordering::Acquire)))
-        };
-        let counted = active.clone();
-        std::thread::spawn(move || {
-            accept_loop_counting(listener, tx, wake, full_access(), policy, counted)
+    fn one_reader_cannot_consume_another_readers_request_capacity() {
+        fn send(tx: &InboxSender, conn_id: u64) {
+            let request =
+                serde_json::from_str(r#"{"v":1,"id":1,"method":"get_state","params":{}}"#).unwrap();
+            let (reply, _) = crossbeam_channel::bounded(1);
+            tx.send(CtlServerMsg::Request {
+                conn_id,
+                request: Box::new(admit(full_access().current(), request).unwrap()),
+                reply,
+            })
+            .unwrap();
+        }
+        let (tx, rx) = inbox_channel();
+        for conn_id in [1, 2] {
+            tx.send(CtlServerMsg::NewConn {
+                conn_id,
+                event_tx: dummy_event_tx(),
+            })
+            .unwrap();
+            rx.try_recv().unwrap();
+        }
+        for _ in 0..4 {
+            send(&tx, 1);
+        }
+        let (done, finished) = std::sync::mpsc::channel();
+        let flood = tx.clone();
+        let reader = std::thread::spawn(move || {
+            send(&flood, 1);
+            done.send(()).unwrap();
         });
-
-        let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect control peer");
-        let (conn_id, _) = recv_new_conn(&rx, Duration::from_secs(2));
-        // The server closes the idle connection; wait for its EOF.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut byte = [0u8; 1];
-        loop {
-            assert!(
-                Instant::now() < deadline,
-                "the idle connection never closed"
-            );
-            match client.wait_readable(Duration::from_millis(50)) {
-                Ok(false) => {}
-                Ok(true) => match std::io::Read::read(&mut client, &mut byte) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                },
-                // A Windows named pipe reports the server's close as a failed
-                // peek (ERROR_BROKEN_PIPE), not as readable.
-                Err(_) => break,
+        let backpressured = finished.recv_timeout(Duration::from_millis(100)).is_err();
+        send(&tx, 2);
+        let mut served = false;
+        for _ in 0..5 {
+            if let CtlServerMsg::Request { conn_id: 2, .. } =
+                rx.recv_timeout(Duration::from_secs(2)).unwrap()
+            {
+                served = true;
+                break;
             }
         }
-        assert!(
-            matches!(
-                rx.try_recv(),
-                Ok(CtlServerMsg::Disconnect { conn_id: ended }) if ended == conn_id
-            ),
-            "the client saw EOF before the App heard Disconnect"
-        );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while seen.lock().unwrap().len() < 2 {
-            assert!(Instant::now() < deadline, "Disconnect never woke the App");
-            std::thread::sleep(Duration::from_millis(5));
+        assert!(served, "another reader must keep its request capacity");
+        if backpressured {
+            finished.recv_timeout(Duration::from_secs(2)).unwrap();
         }
-        assert_eq!(
-            *seen.lock().unwrap(),
-            [1, 0],
-            "the connection was counted as it was admitted, and no longer counted \
-             when the App heard it ended"
+        tx.disconnect(2, Arc::new(std::sync::atomic::AtomicUsize::new(1)));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(CtlServerMsg::Disconnect { conn_id: 2 })
+        ));
+        drop(rx);
+        reader.join().unwrap();
+        assert!(
+            backpressured,
+            "one reader must backpressure before consuming another reader's capacity"
         );
     }
 
-    fn recv_new_conn(rx: &Receiver<CtlServerMsg>, timeout: Duration) -> (u64, Sender<Event>) {
+    #[test]
+    fn connection_churn_does_not_starve_another_connections_request() {
+        let (tx, rx) = inbox_channel();
+        for conn_id in [1, 2] {
+            tx.send(CtlServerMsg::NewConn {
+                conn_id,
+                event_tx: dummy_event_tx(),
+            })
+            .unwrap();
+            rx.try_recv().unwrap();
+        }
+        let request =
+            serde_json::from_str(r#"{"v":1,"id":2,"method":"get_state","params":{}}"#).unwrap();
+        let (reply, _) = crossbeam_channel::bounded(1);
+        tx.send(CtlServerMsg::Request {
+            conn_id: 2,
+            request: Box::new(admit(full_access().current(), request).unwrap()),
+            reply,
+        })
+        .unwrap();
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let mut served = false;
+        for index in 0..2 * MAX_CONNECTIONS as u64 {
+            let conn_id = if index == 0 { 1 } else { index + 9 };
+            tx.disconnect(conn_id, active.clone());
+            match rx.try_recv().unwrap() {
+                CtlServerMsg::Request { conn_id, .. } => {
+                    assert_eq!(conn_id, 2);
+                    served = true;
+                    break;
+                }
+                CtlServerMsg::Disconnect { .. } => {}
+                _ => panic!("unexpected lifecycle message"),
+            }
+            // Keep one churn slot occupied while connection 2 remains live.
+            let replacement = index + 10;
+            active.fetch_add(1, Ordering::Relaxed);
+            tx.send(CtlServerMsg::NewConn {
+                conn_id: replacement,
+                event_tx: dummy_event_tx(),
+            })
+            .unwrap();
+            if let CtlServerMsg::Request { conn_id, .. } = rx.try_recv().unwrap() {
+                assert_eq!(conn_id, 2);
+                served = true;
+                break;
+            }
+        }
+        assert!(served, "lifecycle traffic must not starve a live request");
+    }
+
+    #[test]
+    fn control_drain_obeys_count_and_time_and_schedules_continuation() {
+        let mut budget = DrainBudget::new();
+        for _ in 0..INBOX_CAP {
+            assert!(budget.take());
+        }
+        assert!(!budget.take(), "count budget must stop the drain");
+        let woke = std::cell::Cell::new(false);
+        budget.finish(true, || woke.set(true));
+        assert!(woke.get(), "remaining messages must schedule another wake");
+        let mut budget = DrainBudget::new();
+        budget.started -= Duration::from_millis(5);
+        assert!(!budget.take(), "elapsed time must stop the drain");
+        woke.set(false);
+        budget.finish(false, || woke.set(true));
+        assert!(!woke.get());
+    }
+
+    #[test]
+    fn a_full_request_inbox_does_not_delay_disconnect() {
+        let (tx, rx) = inbox_channel();
+        for index in 0..INBOX_CAP {
+            let conn_id = 1 + (index / REQUESTS_PER_CONNECTION) as u64;
+            if index % REQUESTS_PER_CONNECTION == 0 {
+                tx.send(CtlServerMsg::NewConn {
+                    conn_id,
+                    event_tx: dummy_event_tx(),
+                })
+                .unwrap();
+            }
+            let request =
+                serde_json::from_str(r#"{"v":1,"id":1,"method":"get_state","params":{}}"#).unwrap();
+            let (reply, _) = crossbeam_channel::bounded(1);
+            tx.send(CtlServerMsg::Request {
+                conn_id,
+                request: Box::new(admit(full_access().current(), request).unwrap()),
+                reply,
+            })
+            .unwrap();
+        }
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            drop(ConnectionExit {
+                active,
+                conn_id: 1,
+                tx,
+                wake: Arc::new(|| {}),
+            });
+            let _ = done_tx.send(());
+        });
+        let delivered = done_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        drop(rx);
+        worker.join().unwrap();
+        assert!(delivered, "a full request inbox must not block Disconnect");
+    }
+
+    #[test]
+    fn connection_churn_keeps_the_app_inbox_bounded() {
+        let (tx, rx) = inbox_channel();
+        let (progress, advanced) = std::sync::mpsc::channel();
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = active.clone();
+        let producer = std::thread::spawn(move || {
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+            for conn_id in 0..96 {
+                while counted.load(Ordering::Acquire) >= MAX_CONNECTIONS {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                counted.fetch_add(1, Ordering::Relaxed);
+                let (event_tx, _events) = crossbeam_channel::bounded(EVENT_CHANNEL_CAP);
+                let (start_tx, start_rx) = std::sync::mpsc::sync_channel(0);
+                let (ended, finished) = std::sync::mpsc::channel();
+                let exit = ConnectionExit {
+                    active: counted.clone(),
+                    conn_id,
+                    tx: tx.clone(),
+                    wake: wake.clone(),
+                };
+                let worker = std::thread::spawn(move || {
+                    let _ = start_rx.recv();
+                    drop(exit);
+                    ended.send(()).unwrap();
+                });
+                finish_worker_spawn(
+                    Ok(worker),
+                    conn_id,
+                    event_tx,
+                    &tx,
+                    &wake,
+                    start_tx,
+                    &counted,
+                );
+                finished.recv().unwrap();
+                progress.send(()).unwrap();
+            }
+        });
+        for _ in 0..MAX_CONNECTIONS {
+            advanced.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        assert!(advanced.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(
+            rx.len() <= 32,
+            "connection churn retained {} messages",
+            rx.len()
+        );
+        let mut opened = HashSet::new();
+        let mut closed = HashSet::new();
+        while closed.len() < 96 {
+            match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+                CtlServerMsg::NewConn { conn_id, .. } => {
+                    assert!(opened.insert(conn_id));
+                }
+                CtlServerMsg::Disconnect { conn_id } => {
+                    assert!(opened.contains(&conn_id));
+                    assert!(closed.insert(conn_id));
+                }
+                _ => panic!("unexpected request in churn fixture"),
+            }
+            assert!(rx.len() <= 32);
+        }
+        producer.join().unwrap();
+        assert_eq!(
+            opened, closed,
+            "every admitted connection must deliver its lifecycle"
+        );
+        assert_eq!(active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn connection_admission_is_released_only_when_disconnect_is_delivered() {
+        let (tx, rx) = inbox_channel();
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(MAX_CONNECTIONS));
+        for conn_id in 0..MAX_CONNECTIONS as u64 {
+            tx.send(CtlServerMsg::NewConn {
+                conn_id,
+                event_tx: dummy_event_tx(),
+            })
+            .unwrap();
+            drop(ConnectionExit {
+                active: active.clone(),
+                conn_id,
+                tx: tx.clone(),
+                wake: Arc::new(|| {}),
+            });
+        }
+        assert_eq!(active.load(Ordering::Acquire), MAX_CONNECTIONS);
+        assert_eq!(rx.len(), 2 * MAX_CONNECTIONS);
+        for _ in 0..MAX_CONNECTIONS {
+            assert!(matches!(rx.try_recv(), Ok(CtlServerMsg::NewConn { .. })));
+            assert!(matches!(rx.try_recv(), Ok(CtlServerMsg::Disconnect { .. })));
+        }
+        assert_eq!(active.load(Ordering::Acquire), 0);
+        assert!(rx.is_empty());
+    }
+
+    fn recv_new_conn(rx: &InboxReceiver, timeout: Duration) -> (u64, Sender<Event>) {
         let deadline = Instant::now() + timeout;
         loop {
             match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
@@ -1582,7 +2043,7 @@ mod tests {
         }
     }
 
-    fn prove_fresh_request_is_served(endpoint: &str, rx: &Receiver<CtlServerMsg>) {
+    fn prove_fresh_request_is_served(endpoint: &str, rx: &InboxReceiver) {
         let mut client = kettle_ctl::transport::connect(endpoint).expect("connect fresh client");
         let (conn_id, _event_tx) = recv_new_conn(rx, Duration::from_secs(2));
         client
@@ -1761,7 +2222,7 @@ mod tests {
             .expect("send line");
     }
 
-    fn assert_nothing_dispatched(rx: &Receiver<CtlServerMsg>, conn_id: u64) {
+    fn assert_nothing_dispatched(rx: &InboxReceiver, conn_id: u64) {
         while let Ok(message) = rx.try_recv() {
             assert!(
                 !matches!(message, CtlServerMsg::Request { conn_id: c, .. } if c == conn_id),
@@ -2325,8 +2786,8 @@ mod tests {
     /// an empty conn table, a temp registry dir (so `Drop`'s `unregister`
     /// remove_file is a harmless no-op). Returns the server plus the inbound
     /// channel's sender, kept alive so the receiver in `rx` stays open.
-    fn test_server() -> (CtlServer, Sender<CtlServerMsg>) {
-        let (tx, rx) = crossbeam_channel::unbounded::<CtlServerMsg>();
+    fn test_server() -> (CtlServer, InboxSender) {
+        let (tx, rx) = inbox_channel();
         let accept = std::thread::Builder::new()
             .spawn(|| {})
             .expect("spawn noop");
@@ -2425,7 +2886,7 @@ mod tests {
 
     #[test]
     fn spawn_failure_rolls_back_without_registering_connection() {
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = inbox_channel();
         let (event_tx, _event_rx) = crossbeam_channel::bounded(1);
         let (start_tx, _start_rx) = std::sync::mpsc::sync_channel(0);
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(1));

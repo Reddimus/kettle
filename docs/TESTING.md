@@ -29,6 +29,75 @@ Replace `<crate>` with the package you changed. Format only that crate while
 iterating. The workspace check catches formatting drift elsewhere.
 A focused test helps during development, but does not replace the gate.
 
+`kettle-vt::control` has a 14-state by 25-byte-class transition/event matrix,
+UTF-8 shielding checks across all 64 continuation values and three outstanding
+lengths, and bound checks for every open state. Its differential harness retains
+both former strippers as test-only source snapshots. Existing exec and session
+log stripping vectors run the shared implementation and both originals; ordinary
+output must match an original exactly. A second log oracle adapts only ground C1
+recognition, allowing cumulative intentional differences to be checked too.
+The edge table sweeps every two-chunk split. A 65,545-byte bound case splits
+at every offset near its introducer and its bound and at a prime stride
+between them; other long cases use one-byte feeds and sweep the restart
+boundary. One deterministic 1 MiB arbitrary-byte
+stream uses random chunks of 1 through 8192 bytes and matches the unmodified
+exec oracle over the whole stream. Stage 2 probes pin the extractor's distinct
+C1, private-ESC and bulk-recovery policies. Run these with
+`cargo test --locked --offline -p kettle-vt control::` and the consumer vectors
+with the full `kettle-core` and `kettle` suites. The extractor benchmarks remain
+in `crates/kettle-vt/benches/extract.rs`.
+
+The `kettle-ui` tests selected by `sandbox_pattern_` cover safe and restricted
+Lua pattern budgets: empty replacement expansions, expanded output bytes,
+separate calls and iterators, protected calls, callback retirement, and budget
+resets. `lua_pattern::tests::differential_lua54_patterns` compares ordinary
+matching and replacement behavior against native Lua. For an offline run, use
+`cargo test -j 2 --locked --offline -p kettle-ui sandbox_pattern_`, followed by
+`cargo test -j 2 --locked --offline -p kettle-ui` for the full crate suite.
+
+The renderer's `ime_preedit_` tests cover a single composition glyph with a
+nonblinking block cursor and composition over existing terminal text with
+`cell-width = 0.5`, in both grid and legacy modes. A portable shaping test also
+checks that `cell-height = 0.5` retains the full composition line height in its
+opaque background and text clip. The headless screenshots
+require a GPU adapter and report a skip when none is available. Run
+`cargo test -j 2 --locked --offline -p kettle-render -p kettle-ui ime_preedit_ -- --nocapture`
+to see those skips, then run the same command without the filter for both full
+crate suites.
+
+The renderer recovery tests include successful device creation on a backend
+that failed while drawing, checking that another backend is tried first.
+`python3 scripts/test-install-media.py` interrupts uninstall after each recovery
+helper deletion and retries through installed helpers or a fresh package install.
+`python3 scripts/perf/macos-compare-score-self-test.py` forces process identity
+probes to time out during registration and after successful registration. It
+verifies that the benchmark wrapper reaps a child that ignores SIGTERM on
+timeout, payload completion, and a shutdown signal, preserving exit statuses
+and removing the registry entry and completion marker.
+
+`cargo test -j 2 --locked --offline -p kettle-core
+search_tolerates_grid_commit_before_output_publication` uses the terminal's
+commit hook to run a search after the grid mutex is released and before output
+publication. It retains yielded forward/reverse regex work, rewrites the row
+without changing its layout or generation, checks results against the new
+cells, then verifies that the real publication helper invalidates the old token
+and wakes once. It needs no PTY, GPU, sleeps or scheduler timing.
+`cargo test -j 2 --locked --offline -p kettle-ui
+output_frame_preserves_publication_after_cached_grid_reads` pauses frame
+preparation with new grid text and the old generation, exercises the real link
+cache, then drives the real publication helper with a no-text local parser
+turn. The pre-fix order consumes the invalidation while retaining old links;
+the fixed frame cutoff retains a retry. It also checks snapshot-reuse tags and
+the late-wake/presentation recheck. This Unix fixture needs a local PTY, but no
+GPU or control socket. The UI tests
+`hover_generation_candidate_preserves_racing_output_as_pending`,
+`pane_snapshot_reuse_fails_closed_on_output_layout_or_order_changes`, and
+`stale_presented_output_wakeup_rearms_without_losing_a_race` protect the
+corresponding frame/reuse/wake invalidation rules. See
+[output generation and grid reads](ARCHITECTURE.md#output-generation-and-grid-reads)
+for the reader analysis. Finish with full `kettle-core` and `kettle-ui` tests and
+Clippy for both crates with `--all-targets -- -D warnings`.
+
 ### Main gates
 
 The MCP stdio integration suite exercises Codex guidance, turn-end-only fallback,
@@ -116,6 +185,72 @@ Linux CI must also run the native exec teardown tests. The `kettle-state` test
 `private_create_falls_back_without_clobbering_or_relaxing_permissions` injects
 unsupported hard links and exercises the native atomic rename fallback,
 no-clobber behavior, and private-directory checks.
+
+The Linux MCP supervisor regressions must run on a native Linux runner with
+`setsid`, `sh`, `sleep`, procfs and pidfds available:
+
+```sh
+cargo test -p kettle --test mcp_supervisor
+cargo test -p kettle --test exec exec_sigterm_and_sigint_follow_bounded_cancellation
+```
+
+`mcp_supervisor_preserves_setsid_on_exit_and_stops_on_timeout_and_cancel` launches `sleep 300`
+under `setsid`, uses the PID the fixture prints (pinned with a pidfd), and checks
+daemon survival on normal exit, and containment on timeout and cancellation
+separately. The fixture redirects daemon stdio away from the PTY. Cancellation
+still emits no MCP reply. `cancelling_one_mcp_supervisor_preserves_the_other_tree_and_output`
+keeps two commands alive together, cancels one, verifies the other's exact PID
+is alive, then checks its complete output and normal-exit daemon survival.
+`exec_normal_exit_preserves_escaped_daemon` also checks the real CLI. The
+SIGTERM regression checks that real `kettle exec` exits 130 and leaves no escaped sleep process;
+the stdout-failure regression checks server shutdown cancels supervised tools.
+`server_death_stops_supervisor_and_escaped_command` kills the MCP server with
+SIGTERM and SIGKILL and requires both its supervisor and the escaped command
+to stop without waiting for the 600-second timeout.
+These are native Linux tests, not soft skips on failure. On the former
+in-process implementation the escaped sleep survives timeout and cancellation;
+the former CLI signal disposition also exits by SIGTERM instead of returning
+130. Those pre-change Linux failures require Linux execution to demonstrate.
+
+Portable Unix coverage includes `exec_internal_capture_preserves_raw_strip_tail_and_status`,
+`exec_sigterm_and_sigint_follow_bounded_cancellation`, and
+`mcp_capture_matches_internal_in_process_capture`. They pin the byte tail cap,
+raw/stripped output, nonzero status, cwd, geometry, startup diagnostics and exact
+MCP text/structured content, including existing truncation semantics. The
+internal-capture regression was run before implementation on macOS and failed
+with 125 instead of 7: the CLI tried to spawn the unknown internal switch as
+the command. The portable signal regression also failed against the original
+source: SIGTERM produced no numeric exit code instead of 130.
+`exec::supervisor::tests::supervisor_*` also run on Unix: both pipes
+under pressure, ignored SIGTERM escalation, outer timeout, inherited writers,
+argument boundaries, and refusal to spawn with autoreaping SIGCHLD.
+`supervisor_reaps_a_child_that_exits_after_kill_grace` injects delayed
+termination after the bounded wait and uses WNOWAIT to require the background
+owner to reap the eventual exit. `process_tree_teardown_is_idempotent_after_direct_child_reap`
+requires repeated teardown to retain its original verified result.
+`real_mcp_stdout_failure_returns_failure_status` closes a real stdout pipe and
+requires numeric exit 1 rather than SIGPIPE on every Unix host.
+`normal_completion_reserves_pid_until_output_acknowledgement` runs in an
+isolated Unix process (with adoption enabled on Linux) and verifies the child is
+still waitable at final output submission, then exercises acknowledgement,
+cancellation, timeout and output failure. The Linux parent-death startup-race
+unit test requires SIGTERM pending when registration discovers a lost parent.
+
+`supervisor_command_uses_stable_linux_executable` checks the generated Linux
+launch command on every Unix host. Native Linux coverage in
+`mcp_supervisor_runs_after_server_executable_is_replaced` copies and starts an
+MCP server, atomically replaces its executable with a different program, and
+requires two later commands to run through the server's original image.
+`exec_internal_capture_cancels_during_tail_delivery` waits for captured bytes
+to reach an unread pipe after command exit, then requires SIGTERM to produce
+exit 130 without reading the tail. The native Linux test
+`internal_capture_tail_delivery_keeps_setsid_contained` adds a detached daemon
+and checks containment during cancellation, timeout, and broken-pipe failure.
+
+Linux runtime containment cannot be certified by these portable tests. If the Linux target standard library is installed, try
+`cargo check --locked --offline -p kettle --target x86_64-unknown-linux-gnu`;
+a missing cross C compiler can still block dependency build scripts. Record
+that limitation and run the native suite in Linux CI.
 
 Use these to isolate a failure or validate the area you changed:
 
@@ -240,7 +375,7 @@ All paths below are relative to the repository root.
 | `kettle-media-worker` | `crates/kettle-media-worker/src/`, `crates/kettle-media-worker/tests/` | Process boundary, playback, native audio |
 | `kettle-media-native` | `crates/kettle-media-native/src/`, `crates/kettle-media-native/tests/` | Decoders, sandboxing, audio output |
 | `kettle-media-render` | `crates/kettle-media-render/src/`, `crates/kettle-media-render/tests/` | Raster, SVG, Mermaid, PDF, hostile inputs |
-| `kettle-render` | `crates/kettle-render/src/lib.rs`, `crates/kettle-render/src/headless_tests.rs`, `crates/kettle-render/tests/` | Text, geometry, GPU pixels, menus |
+| `kettle-render` | `crates/kettle-render/src/geometry.rs`, `crates/kettle-render/src/*_tests.rs`, `crates/kettle-render/tests/` | Text, geometry, GPU pixels, menus |
 | `kettle-ui` | `crates/kettle-ui/src/app.rs`, `crates/kettle-ui/src/app/`, `crates/kettle-ui/src/` | Input routing, windows, settings, control actions |
 | `kettle-i18n` | `crates/kettle-i18n/src/`, `crates/kettle-i18n/tests/` | Locale selection and catalogue/build rules |
 | `kettle-state` | `crates/kettle-state/src/` | Private state and filesystem policy |
@@ -257,6 +392,71 @@ GPU. In `kettle-core`, `shell_probe::cleanup_tests` uses a controllable child
 on every platform to cover failed termination, polling errors, bounded cleanup,
 and eventual background reaping. The Windows pipe tests still require a native
 Windows runner.
+
+The remote reconnect tests run offline without a remote daemon or cluster:
+
+```sh
+cargo test -j 2 --locked --offline -p kettle-remote reconnect_
+cargo test -j 2 --locked --offline -p kettle-remote connection_environment_preserves_absence_and_rejects_incomplete_data
+cargo test -j 2 --locked --offline -p kettle-remote reads_connection_environment_after_exactly_argc_arguments
+cargo test -j 2 --locked --offline -p kettle-remote environments_share_the_scan_budget
+cargo test -j 2 --locked --offline -p kettle-remote the_final_argument_area_read_obeys_the_scan_deadline
+cargo test -j 2 --locked --offline -p kettle-remote deleted_client_fixture_has_no_descendants
+cargo test -j 2 --locked --offline -p kettle-ui remote_reconnect_
+cargo test -j 2 --locked --offline --manifest-path vendor/Cargo.toml -p portable-pty --features serde_support
+cargo test -j 2 --locked --offline -p kettle-remote
+```
+
+`reconnect_refuses_unavailable_client_environment`,
+`reconnect_falls_back_from_deleted_executable`, and
+`reconnect_preserves_multicall_client_invocation` cover the three reconnect
+regressions. Native Linux/macOS subprocess probes read the client's environment
+through procfs or KERN_PROCARGS2, and portable fixtures cover filtering,
+explicit absence, size limits, malformed values, relative connection paths,
+and debug redaction. The macOS tests reject unreadable and SIP-redacted
+captures. Both environment parser fixtures use Unix path semantics on every
+host. Linux and macOS tests cover multiple clients sharing the aggregate byte
+ceiling; a macOS clock fixture covers expiry during the final argument-area
+read. Native capture also remains available from the snapshot after the client
+exits. Linux exercises a running executable replaced on disk with bare `ssh`
+as its invocation, while portable Unix fixtures cover replacement resolution
+and preserved `argv[0]`. The copied Bash fixture blocks in a builtin on an open
+pipe; a Linux/macOS regression checks that it creates no descendants. The UI
+PTY probe checks the captured environment and original invocation in both a
+split and an empty mux, without a window or GPU.
+`remote_reconnect_replays_preserve_environment_and_invocation` repeats the
+probe after duplicate pane/tab, split, undo-close, and a live tab move, then
+checks another replay from each result. Session round-trip tests
+`remote_reconnect_session_restore_falls_back_to_configured_shell` and
+`remote_reconnect_environment_session_restore_omits_private_values` verify
+shell fallback for invocation-only and environment-only settings and ensure
+private values stay out of JSON. A separate UI regression
+checks that an unavailable environment routes to the existing failure notice
+without creating a pane. Ignored probe functions run only as subprocess fixtures. Native branches run on their respective CI hosts;
+a macOS pass does not verify procfs or Windows. Windows keeps its existing
+environment behavior.
+
+The graphics decode accounting regressions run with
+`cargo test -j 2 --locked --offline -p kettle-vt transient_ -- --nocapture`.
+The maximum-transmission tests feed a 96 MiB Kitty upload that inflates to
+the 64 MiB cap and decodes a 4096x4096 RGBA image. Extractor cases exercise
+1-byte, 4 KiB and maximum-size protocol chunks, plus seven 11 MiB chunks,
+a 15 MiB chunk and the remainder. The final sequence decodes while its lease
+is still live. The synchronized case queues the entire maximum upload before
+replaying it with a full 16 MiB final sequence; it verifies saved-buffer reuse
+with a peak of 192,937,970 bytes, four bytes above the immediate path.
+`deferred_graphics_replay_` tests check protocol parity, terminators, and
+preservation of an unrelated partial PTY sequence and graphics deferral.
+Each maximum-upload case prints and asserts the transient high-water charge,
+verifies idle-terminal admission, and releases all leases. The 1-byte case
+processes about 100 million APC sequences and takes substantially longer.
+`chunked_upload_segments_never_move_and_are_charged` checks stable segment
+addresses and exact capacity charges. `segmented_` tests cover base64 quartets,
+whitespace and padding across segment boundaries.
+Other cases cover a full terminal while a second terminal decodes under
+the same process account, failed decode/growth rollback, shared query/staging
+ceilings, and iTerm2's bounded base64 stage. These are CPU accounting checks;
+they do not require a GPU or live UI.
 
 ### Drift guards and source scans
 
@@ -287,6 +487,13 @@ When moving a function, read the guard's invariant before changing its matcher.
 Do not make the scan pass by letting it match its own assertion or a comment.
 Keep a behavioral regression when the contract can be exercised directly.
 
+The renderer's `production_source()` joins `lib.rs` and its extracted modules,
+stripping test-only items from each file before joining. Its existing test
+modules stay at the crate root to preserve test names. The UI text-sink guard
+also scans each extracted renderer file; extend both source lists when moving
+production code into another module. Function-order guards bound a method by
+its closing brace so moving the following method does not widen their scan.
+
 The tracked audit protects repository files rather than runtime behavior.
 It checks path/case collisions, object identity, text hygiene, TOML/JSON,
 local Markdown targets, and bounded font/image structures.
@@ -308,6 +515,11 @@ The media stub worker and panic injection are test-only feature legs.
 Run `just media-protocol-test` after changing their boundaries.
 Do not enable those features in a shipped binary to make a test pass.
 
+`cargo test --locked --offline -p kettle-media --lib exit_grace` models a
+caller resuming after an observed worker exit's grace period with a reply
+already queued. The tests backdate the recorded exit without sleeping and
+check clean versus crashing exits, missing events, deadlines and cancellation.
+
 The fuzz workspace has its own manifest and lockfile.
 The vendor validation workspace also has its own manifest and lockfile.
 Root workspace tests do not run those package-owned suites.
@@ -328,6 +540,20 @@ CI runs parser patches on Linux and portable-pty on all three native hosts.
 Only Windows executes its ConPTY-specific code.
 Only Unix executes its descriptor and process-group paths.
 A local vendor pass covers only the current platform.
+
+The PTY descriptor regressions run a separate harness process so lowering
+`RLIMIT_NOFILE` cannot affect concurrent tests. They open a non-close-on-exec
+descriptor at 5000 (or the highest usable lower number), lower the soft limit
+below it, and execute a child that verifies `fcntl(F_GETFD)` returns `EBADF`.
+Another forced-fallback case lowers both the soft and hard limits below the
+open descriptor. On macOS, setup caps the raised soft limit by
+`kern.maxfilesperproc` before calling `setrlimit`; a portable calculation test
+covers an unlimited hard limit with a 10240 kernel ceiling.
+Both normal cleanup and a test-only forced fallback run: Linux's fallback
+enumerates `/proc/self/fd` in the child with raw `getdents64`, while macOS's
+fallback walks to the parent-read `kern.maxfilesperproc`, independently of
+lowered process limits. Synthetic directory-record tests run on every Unix
+host; the Linux enumeration itself requires the native Linux vendor gate.
 
 `cosmic-text` stays outside the vendor validation workspace.
 The product build and audit cover it; renderer paragraph-separator tests cover
@@ -363,6 +589,16 @@ The `.cast` test parses asciicast v2 output events and replays their bytes.
 It checks grid text and SGR state. The neighboring recorder round-trip test
 also writes a trace through the real recorder before reading it back.
 See [RECORDING.md](RECORDING.md) for the recording format and user controls.
+
+The `exec::` tests also exercise timeout and cancellation with a real locked
+cast file. The dev-only `kettle-core/test-recording` feature supplies a
+thread-scoped hook before the persistence worker's final flush. A 100 ms delay
+checks that capture returns with a complete, newline-terminated trace and an
+immediately available exclusive lock, without a finalization warning. A gated
+flush checks that a stuck writer receives the two-second grace, then detaches
+with a warning within that bound (plus scheduling tolerance). Subprocesses
+capture stderr without redirecting handles shared by parallel tests. These
+portable tests run on Windows CI too, where the active file lock blocks reads.
 
 To turn an interactive failure into a regression:
 
@@ -709,6 +945,20 @@ Prerequisites beyond the desktop are included in the proof column.
 | Centered media viewer | - | Worker-backed viewer routing and live pixels through native X11 input | Linux X11 |
 | Centered confirmations | `just confirmation-smoke` | Two-pane close, safe Cancel, pointer/Space release, scrolling, retained Settings, visible text, and input isolation | Linux X11 |
 
+The portable `kettle-ui` regressions below exercise queued facts expiry behind a
+blocked check, card placement after a pane narrows during the wait, pickup
+issuance after a wait longer than its lifetime, and failed WSL translation at
+delivery. Each failed before its corresponding fix. Run them without a desktop:
+
+```sh
+cargo test -j 2 --locked --offline -p kettle-ui regression_waiting_file_facts_expire_while_another_check_is_stalled
+cargo test -j 2 --locked --offline -p kettle-ui regression_waiting_file_card_uses_current_pane_geometry
+cargo test -j 2 --locked --offline -p kettle-ui regression_file_pickup_lifetime_starts_at_publication
+cargo test -j 2 --locked --offline -p kettle-ui regression_failed_wsl_translation_does_not_deliver_a_space
+```
+
+These fixtures do not replace native Linux pickup or Windows WSL mount checks.
+
 S9 checks held pixels for good media, refusals for broken inputs, and metadata-only
 cards for unsupported or oversized files. The worker and its parent directory
 must not allow group or other writes; stage a private executable copy if the
@@ -807,6 +1057,22 @@ Inline-card GPU tests print `INLINE_CARD_GPU_ACCEPTANCE` for actual acceptance
 and `INLINE_CARD_GPU_SKIPPED` when the adapter cannot exercise it.
 Require acceptance for both Grid and Legacy cases you claim to have tested.
 Headless readbacks still do not prove native input or installed-package behavior.
+
+The `regression_` tests in `kettle-render` and `kettle-ui` cover close-chip
+contrast with an overridden chrome background, pane and lane dimming order,
+single dimming of terminal decorations, inactive color emoji dimming with an
+ordinary-text contrast floor in Grid and Legacy, picker pointer routing, translated
+theme queries and scroll-arrow containment in subpixel strips. The headless
+pixel cases print a skip when no GPU adapter is available; portable colour,
+geometry, draw-order and picker interaction tests still run. Report those
+skips separately from pixel acceptance. Picker interaction tests exercise
+all four modal projections without a native window.
+The emoji pixel cases also skip explicitly when no color emoji font is available.
+
+Portable renderer checks cover color-glyph dimming material, shader inputs and
+cache invalidation on focus or dimming changes. Animation stills tests use
+distinct APNG frame colors and fractional delays to verify that selection keeps
+frame starts unrounded while returned timestamps use milliseconds.
 
 ### Authenticated agent and configured editor checks
 
@@ -1445,3 +1711,35 @@ reopen from the actual Dock. Verify the new version and PID, repeat without
 adding windows, and run a command in the old PTY. A metadata-only version
 fixture does not prove this behavior. Portable activation tests cover the
 focus-or-open request, recording identity and default-launch compatibility.
+
+### Shared modal editing and dismissal
+
+`kettle-ui` tests exercise the shared editor on ASCII, combining marks, emoji
+ZWJ sequences and CJK, then wire title, command, SSH, layout, theme and Settings
+path state through the same editor accessors. They cover keyboard commands,
+clipboard failure, selection replacement and mid-string IME projections. Native
+macOS modifier tests apply every Option-as-Alt policy before word commands in
+each modal field. Title and Settings path initialization tests reject oversized
+ASCII and UTF-8 values and accept values at the byte cap. Pointer composition
+tests model an AppKit phrase surviving winit's IME toggle and require explicit
+native cancellation between disable and enable before caret movement. They reject
+a queued old commit and accept fresh composition at the new caret. Run
+`cargo test -j 2 --locked --offline -p kettle-ui review_pointer_cancels_platform_composition_before_moving_caret`
+for this regression. These tests inject the toggle and native cancellation; they
+do not run a native IME. For native verification, compose a phrase, click elsewhere
+in each modal field, and continue composing; only the new phrase should commit at
+the clicked position. The shared outside-press mutation sink is exercised for
+every transient popup,
+Settings capture and confirmation, including the context menu's right-click
+exception. Native and control input both use this sink.
+
+`kettle-render::text_field` tests load the bundled fonts without a GPU and
+compare caret and selection placement with the shaped pointer stops, including
+long scrolled inputs, grapheme clusters, CJK and RTL. Fitting RTL text must keep
+all shaped clusters visible and retain its full selection width at every caret
+boundary, including Home and stale logical scroll offsets. Localized prefix/hint slot
+tests cover English and Spanish at narrow widths. Settings value-slot tests compare
+the editor's start with the fitted label and gap at terminal cell-width scales
+0.5, 1 and 2, including narrow panels and wide labels. These unit checks do not
+replace native IME candidate-window, pointer drag, clipboard and live-GPU checks
+on macOS and Linux; record those separately when run.

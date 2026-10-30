@@ -149,8 +149,8 @@ fn attempt(dir: &Path, held: &File) {
             }
         }),
     );
-    // SAFETY: setsid has no preconditions; the probe ends soon after.
     report("setsid", {
+        // SAFETY: setsid has no preconditions; the probe ends soon after.
         if unsafe { libc::setsid() } == -1 {
             Err(std::io::Error::last_os_error())
         } else {
@@ -161,12 +161,13 @@ fn attempt(dir: &Path, held: &File) {
         "spawn",
         Command::new("/bin/sh").arg("-c").arg("true").status(),
     );
-    // SAFETY: a private segment, removed at once if it was made.
     report("sysv_shm", {
+        // SAFETY: shmget takes no pointers; this makes a private segment.
         let id = unsafe { libc::shmget(libc::IPC_PRIVATE, 4096, libc::IPC_CREAT | 0o600) };
         if id == -1 {
             Err(std::io::Error::last_os_error())
         } else {
+            // SAFETY: id is the segment just made; IPC_RMID takes no buffer.
             unsafe { libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut()) };
             Ok(())
         }
@@ -188,14 +189,56 @@ fn attempt(dir: &Path, held: &File) {
         }
     });
     // Signal 0 only asks whether a signal could be sent.
-    // SAFETY: kill with signal 0 sends nothing.
     report("signal_parent", {
+        // SAFETY: kill with signal 0 sends nothing.
         if unsafe { libc::kill(libc::getppid(), 0) } == -1 {
             Err(std::io::Error::last_os_error())
         } else {
             Ok(())
         }
     });
+    // Resource limits only for the job itself, and no asynchronous I/O
+    // signals aimed at another process.
+    #[cfg(target_os = "linux")]
+    {
+        let limits = |pid: libc::pid_t| {
+            let mut old = std::mem::MaybeUninit::<libc::rlimit64>::uninit();
+            // SAFETY: a null new limit only reads; `old` is writable.
+            if unsafe {
+                libc::syscall(
+                    libc::SYS_prlimit64,
+                    pid,
+                    libc::RLIMIT_NOFILE,
+                    std::ptr::null::<libc::rlimit64>(),
+                    old.as_mut_ptr(),
+                )
+            } == -1
+            {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        };
+        report("prlimit_self", limits(0));
+        // SAFETY: getppid has no preconditions.
+        report("prlimit_parent", limits(unsafe { libc::getppid() }));
+        let fcntl = |command: libc::c_int, argument: libc::c_int| {
+            // SAFETY: `held_fd` is open for the probe's life; these commands
+            // take an integer argument.
+            if unsafe { libc::fcntl(held_fd, command, argument) } == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        };
+        // SAFETY: getppid has no preconditions.
+        report(
+            "fcntl_setown",
+            fcntl(libc::F_SETOWN, unsafe { libc::getppid() }),
+        );
+        // F_SETSIG, which the libc crate does not name on every target.
+        report("fcntl_setsig", fcntl(10, libc::SIGUSR1));
+    }
     let sibling = dir.join("sibling.bin");
     report(
         "thread_sibling",
@@ -352,8 +395,8 @@ fn past_its_deadline(dir: &Path, held: &File) {
         programs,
         ..Policy::default()
     };
-    // SAFETY: setpgid takes no pointers.
     assert_eq!(
+        // SAFETY: setpgid takes no pointers.
         unsafe { libc::setpgid(0, 0) },
         0,
         "the probe leads no group"
@@ -371,6 +414,9 @@ fn past_its_deadline(dir: &Path, held: &File) {
         &mut |_| unreachable!("the decoder never describes the video"),
         started + std::time::Duration::from_millis(300),
     );
+    // SAFETY: signal zero only queries permission to target this process.
+    let can_reap = unsafe { libc::kill(libc::getpid(), 0) } == 0;
+    println!("probe:can_reap={can_reap}");
     println!("probe:deadline_result={:?}", result.err());
     println!("probe:deadline_ms={}", started.elapsed().as_millis());
 }
@@ -444,6 +490,14 @@ fn every_refused_operation_works_without_the_sandbox() {
         "sysv_shm",
         "signal_parent",
         "thread_sibling",
+        #[cfg(target_os = "linux")]
+        "prlimit_self",
+        #[cfg(target_os = "linux")]
+        "prlimit_parent",
+        #[cfg(target_os = "linux")]
+        "fcntl_setown",
+        #[cfg(target_os = "linux")]
+        "fcntl_setsig",
     ] {
         assert_eq!(
             result.get(name).map(String::as_str),
@@ -527,6 +581,13 @@ fn holds_only_its_file(result: &BTreeMap<String, String>) {
     };
     for name in ["confine", "read_held", "reopen_held", "open_held_path"] {
         ok(name);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ok("prlimit_self");
+        for name in ["prlimit_parent", "fcntl_setown", "fcntl_setsig"] {
+            denied(name);
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -644,7 +705,7 @@ fn a_decoder_past_its_deadline_does_not_hold_the_job() {
     );
     assert_eq!(
         result.get("deadline_result").map(String::as_str),
-        Some("Some(RenderTimeout)"),
+        Some(deadline_failure(result["can_reap"] == "true")),
         "{result:?}"
     );
     let elapsed: u64 = result["deadline_ms"].parse().unwrap();
@@ -652,4 +713,18 @@ fn a_decoder_past_its_deadline_does_not_hold_the_job() {
         elapsed < 2_000,
         "answered after {elapsed} ms: it waited for the decoder"
     );
+}
+
+fn deadline_failure(can_reap: bool) -> &'static str {
+    if can_reap {
+        "Some(RenderTimeout)"
+    } else {
+        "Some(RenderResource)"
+    }
+}
+
+#[test]
+fn deadline_failure_accounts_for_a_denied_child_kill() {
+    assert_eq!(deadline_failure(false), "Some(RenderResource)");
+    assert_eq!(deadline_failure(true), "Some(RenderTimeout)");
 }

@@ -141,6 +141,76 @@ apple_window_log="$tmp_dir/apple-windows.tsv"
 : > "$idle_stop_log"
 : > "$apple_window_log"
 
+process_registry="$tmp_dir/process_registry.py"
+export PROCESS_REGISTRY="$process_registry"
+cat > "$process_registry" <<'PY'
+#!/usr/bin/env python3
+"""Track benchmark processes by PID and creation time under one log lock."""
+import fcntl
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+
+
+def process_start(pid):
+    result = subprocess.run(
+        ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True,
+        text=True, timeout=2, check=False, env=dict(os.environ, LC_ALL="C", TZ="UTC"),
+    )
+    start = result.stdout.strip()
+    return start if result.returncode == 0 and start and "\n" not in start and "\t" not in start else ""
+
+
+def update(log, action, pid=0, start="", sig="TERM"):
+    with Path(log).open("a+", encoding="utf-8") as output:
+        fcntl.flock(output, fcntl.LOCK_EX)
+        output.seek(0)
+        entries = []
+        for line in output:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) == 2 and fields[0].isdigit() and int(fields[0]) > 0 and fields[1]:
+                entries.append((int(fields[0]), fields[1]))
+        if action == "register":
+            start = process_start(pid)
+            if start and (pid, start) not in entries:
+                entries.append((pid, start))
+        elif action == "unregister":
+            entries = [entry for entry in entries if entry != (pid, start)]
+        else:
+            for owned_pid, owned_start in entries:
+                if action == "signal" and (owned_pid, owned_start) != (pid, start):
+                    continue
+                try:
+                    if process_start(owned_pid) == owned_start:
+                        os.kill(owned_pid, getattr(signal, "SIG" + sig))
+                except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
+                    pass
+            return ""
+        output.seek(0)
+        output.truncate()
+        output.write("".join(f"{pid}\t{start}\n" for pid, start in entries))
+        return start
+
+
+def register(log, pid):
+    return update(log, "register", pid)
+
+
+if __name__ == "__main__":
+    action, log, *args = sys.argv[1:]
+    if action == "signal-all":
+        update(log, action, sig=args[0])
+    else:
+        pid = int(args[0])
+        if pid <= 0:
+            raise ValueError("invalid process id")
+        result = update(log, action, pid, *args[1:])
+        if action == "register":
+            print(result)
+PY
+
 # Invoked indirectly by the EXIT trap.
 # shellcheck disable=SC2329
 cleanup() {
@@ -194,23 +264,9 @@ PY
   fi
 
   if [ -f "$peer_pid_log" ]; then
-    while IFS= read -r peer_pid; do
-      case "$peer_pid" in
-        ''|*[!0-9]*) continue ;;
-      esac
-      if kill -0 "$peer_pid" 2>/dev/null; then
-        kill -TERM "$peer_pid" 2>/dev/null || true
-      fi
-    done < "$peer_pid_log"
+    python3 "$process_registry" signal-all "$peer_pid_log" TERM || true
     sleep 1
-    while IFS= read -r peer_pid; do
-      case "$peer_pid" in
-        ''|*[!0-9]*) continue ;;
-      esac
-      if kill -0 "$peer_pid" 2>/dev/null; then
-        kill -KILL "$peer_pid" 2>/dev/null || true
-      fi
-    done < "$peer_pid_log"
+    python3 "$process_registry" signal-all "$peer_pid_log" KILL || true
   fi
 
   rm -rf "$tmp_dir"
@@ -253,14 +309,29 @@ rm -f "$completion_marker"
 export COMPLETION_MARKER="$completion_marker"
 "$@" &
 child_pid=$!
-printf '%s\n' "$child_pid" >> "$pid_log"
 
-terminate_child() {
-  if kill -0 "$child_pid" 2>/dev/null; then
-    kill -TERM "$child_pid" 2>/dev/null || true
-  fi
+signal_child() {
+  # This wrapper owns job 1. Its jobspec stays safe if identity probes fail
+  # or the child exits and its PID is reused before a signal is sent.
+  kill "-$1" %1 2>/dev/null || true
 }
-trap terminate_child HUP INT TERM
+
+registration_failed() {
+  trap - HUP INT TERM
+  signal_child TERM
+  sleep 0.2
+  signal_child KILL
+  wait "$child_pid" 2>/dev/null || true
+  rm -f "$completion_marker"
+  echo "macos-compare.sh: could not register terminal process: $1" >&2
+  exit 1
+}
+trap 'registration_failed "$1"' HUP INT TERM
+if ! child_start="$(python3 "$PROCESS_REGISTRY" register "$pid_log" "$child_pid")" || [ -z "$child_start" ]; then
+  registration_failed "$1"
+fi
+
+trap 'signal_child TERM' HUP INT TERM
 
 ticks=0
 max_ticks=$((timeout_seconds * 10))
@@ -286,7 +357,7 @@ if [ -s "$completion_marker" ]; then
     close_ticks=$((close_ticks + 1))
   done
   if kill -0 "$child_pid" 2>/dev/null; then
-    kill -TERM "$child_pid" 2>/dev/null || true
+    signal_child TERM
   fi
   term_ticks=0
   while kill -0 "$child_pid" 2>/dev/null && [ "$term_ticks" -lt 20 ]; do
@@ -294,11 +365,12 @@ if [ -s "$completion_marker" ]; then
     term_ticks=$((term_ticks + 1))
   done
   if kill -0 "$child_pid" 2>/dev/null; then
-    kill -KILL "$child_pid" 2>/dev/null || true
+    signal_child KILL
   fi
   if wait "$child_pid" 2>/dev/null; then
     :
   fi
+  python3 "$PROCESS_REGISTRY" unregister "$pid_log" "$child_pid" "$child_start"
   trap - HUP INT TERM
   exit "$payload_status"
 fi
@@ -309,6 +381,7 @@ if ! kill -0 "$child_pid" 2>/dev/null; then
   else
     child_status=$?
   fi
+  python3 "$PROCESS_REGISTRY" unregister "$pid_log" "$child_pid" "$child_start"
   trap - HUP INT TERM
   echo "macos-compare.sh: terminal exited before its payload completion marker: $1" >&2
   if [ "$child_status" -eq 0 ]; then
@@ -317,10 +390,11 @@ if ! kill -0 "$child_pid" 2>/dev/null; then
   exit "$child_status"
 fi
 
-kill -TERM "$child_pid" 2>/dev/null || true
+signal_child TERM
 sleep 2
-kill -KILL "$child_pid" 2>/dev/null || true
+signal_child KILL
 wait "$child_pid" 2>/dev/null || true
+python3 "$PROCESS_REGISTRY" unregister "$pid_log" "$child_pid" "$child_start"
 trap - HUP INT TERM
 rm -f "$completion_marker"
 echo "macos-compare.sh: command timed out after ${timeout_seconds}s: $1" >&2
@@ -367,9 +441,9 @@ def process_ids(name: str) -> Set[int]:
 
 
 def append_pids(pid_log: Path, pids: Iterable[int]) -> None:
-    with pid_log.open("a", encoding="utf-8") as output:
-        for pid in sorted(pids):
-            output.write(f"{pid}\n")
+    for pid in sorted(pids):
+        from process_registry import register
+        register(pid_log, pid)
 
 
 def apple_string(value: str) -> str:
@@ -856,11 +930,12 @@ for name in "${terminal_names[@]}"; do
 
   "$tmp_dir/$name-idle" >"$idle_log" 2>&1 &
   idle_wrapper_pid=$!
-  printf '%s\n' "$idle_wrapper_pid" >> "$peer_pid_log"
+  idle_wrapper_start="$(python3 "$process_registry" register "$peer_pid_log" "$idle_wrapper_pid")"
   if ! wait_for_file "$idle_pid_file" "$idle_start_timeout_seconds"; then
     : > "$idle_stop_file"
-    kill -TERM "$idle_wrapper_pid" 2>/dev/null || true
+    python3 "$process_registry" signal "$peer_pid_log" "$idle_wrapper_pid" "$idle_wrapper_start" TERM || true
     wait "$idle_wrapper_pid" 2>/dev/null || true
+    python3 "$process_registry" unregister "$peer_pid_log" "$idle_wrapper_pid" "$idle_wrapper_start"
     reason="$(tail -n 1 "$idle_log")"
     if [ -z "$reason" ]; then
       reason="idle shell did not report a terminal PID within ${idle_start_timeout_seconds}s"
@@ -873,6 +948,7 @@ for name in "${terminal_names[@]}"; do
   if [ -z "$terminal_pid" ] || ! kill -0 "$terminal_pid" 2>/dev/null; then
     : > "$idle_stop_file"
     wait "$idle_wrapper_pid" 2>/dev/null || true
+    python3 "$process_registry" unregister "$peer_pid_log" "$idle_wrapper_pid" "$idle_wrapper_start"
     add_metric_skip idle_cpu "$name" "idle shell reported a terminal PID that was not running"
     continue
   fi
@@ -902,7 +978,7 @@ for name in "${terminal_names[@]}"; do
 
   : > "$idle_stop_file"
   if ! wait_for_process_exit "$idle_wrapper_pid" "$idle_exit_timeout_seconds"; then
-    kill -TERM "$idle_wrapper_pid" 2>/dev/null || true
+    python3 "$process_registry" signal "$peer_pid_log" "$idle_wrapper_pid" "$idle_wrapper_start" TERM || true
     wait "$idle_wrapper_pid" 2>/dev/null || true
     if [ "$idle_ok" -eq 1 ]; then
       add_metric_skip idle_cpu "$name" "idle terminal did not close within ${idle_exit_timeout_seconds}s"
@@ -920,6 +996,7 @@ for name in "${terminal_names[@]}"; do
       idle_ok=0
     fi
   fi
+  python3 "$process_registry" unregister "$peer_pid_log" "$idle_wrapper_pid" "$idle_wrapper_start"
   if [ "$idle_ok" -eq 1 ]; then
     cat "$peer_idle_tsv" >> "$idle_tsv"
   fi

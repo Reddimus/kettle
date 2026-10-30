@@ -719,6 +719,13 @@ impl SeqTerminator {
     }
 }
 
+struct SequenceContext {
+    mode: Mode,
+    terminator: SeqTerminator,
+    prefix: Vec<u8>,
+    defer_graphics: bool,
+}
+
 pub struct Extractor {
     mode: Mode,
     pass: Vec<u8>,
@@ -930,6 +937,43 @@ impl Extractor {
     /// buffer-local stores.
     pub fn set_graphics_deferred(&mut self, deferred: bool) {
         self.defer_graphics = deferred;
+    }
+
+    /// Consume a saved graphics control at its synchronized-output marker.
+    /// Reuse its allocation and lease without disturbing the live PTY parser.
+    pub fn replay_graphics_with<F>(&mut self, graphics: DeferredGraphics, mut handle: F)
+    where
+        F: FnMut(&mut Self, Chunk),
+    {
+        let DeferredGraphics {
+            mut bytes,
+            _reservation: reservation,
+        } = graphics;
+        // DeferredGraphics is constructed only by finish_seq, with a normalized
+        // ESC introducer and either BEL or ESC ST around a complete payload.
+        let mode = match bytes[1] {
+            b'P' => Mode::Dcs,
+            b'_' => Mode::Apc,
+            b']' => Mode::Osc,
+            _ => unreachable!("deferred graphics introducer"),
+        };
+        let terminator = if mode == Mode::Osc && bytes.last() == Some(&0x07) {
+            SeqTerminator::Bel
+        } else {
+            SeqTerminator::EscSt
+        };
+        let payload_end = bytes.len() - terminator.bytes(mode).len();
+        bytes.copy_within(2..payload_end, 0);
+        bytes.truncate(payload_end - 2);
+        let context = SequenceContext {
+            mode,
+            terminator,
+            prefix: Vec::new(),
+            defer_graphics: false,
+        };
+        let mut out = Vec::with_capacity(1);
+        self.dispatch_seq(bytes, Some(reservation), context, &mut out, &mut handle);
+        self.handle_pending_chunks(&mut out, &mut handle);
     }
 
     /// Apply a metadata-only quota plan to both screen namespaces. The core
@@ -1574,18 +1618,37 @@ impl Extractor {
             self.reset_discard();
             return;
         }
-        let mut seq = std::mem::take(&mut self.seq);
-        let _seq_reservation = self.seq_reservation.take();
-        let mode = std::mem::replace(&mut self.mode, Mode::Pass);
-        let terminator = self.term;
+        let seq = std::mem::take(&mut self.seq);
+        let reservation = self.seq_reservation.take();
+        let context = SequenceContext {
+            mode: std::mem::replace(&mut self.mode, Mode::Pass),
+            terminator: self.term,
+            prefix: std::mem::take(&mut self.seq_prefix),
+            defer_graphics: self.defer_graphics,
+        };
         self.private_completion = false;
+        self.dispatch_seq(seq, reservation, context, out, handle);
+    }
+
+    fn dispatch_seq<F>(
+        &mut self,
+        mut seq: Vec<u8>,
+        _seq_reservation: Option<GraphicsReservation>,
+        mut context: SequenceContext,
+        out: &mut Vec<Chunk>,
+        handle: &mut F,
+    ) where
+        F: FnMut(&mut Self, Chunk),
+    {
+        let mode = context.mode;
+        let terminator = context.terminator;
 
         // Kettle completion messages are private UI metadata. Consume every
         // namespaced message, including malformed or unsupported versions, so
         // candidates and paths never reach the grid, session logs, recordings,
         // or plugin output hooks.
         if mode == Mode::Osc && seq.starts_with(completion::PREFIX) {
-            let mut controls = std::mem::take(&mut self.seq_prefix);
+            let mut controls = std::mem::take(&mut context.prefix);
             controls.retain(|byte| escape_executes(*byte));
             if self.raw_tap && !controls.is_empty() {
                 out.push(Chunk::Raw(controls));
@@ -1598,7 +1661,7 @@ impl Extractor {
 
         // OSC 133 shell-integration marks are consumed (not forwarded).
         if mode == Mode::Osc && seq.starts_with(b"133;") {
-            self.emit_raw_control(mode, &seq, out);
+            self.emit_raw_control(&context, &seq, out);
             if let Some(kind) = parse_prompt(&seq[4..]) {
                 out.push(Chunk::Prompt(kind));
             }
@@ -1606,7 +1669,7 @@ impl Extractor {
         }
         // OSC 7 cwd report (`7;file://host/abs/path`).
         if mode == Mode::Osc && seq.starts_with(b"7;") {
-            self.emit_raw_control(mode, &seq, out);
+            self.emit_raw_control(&context, &seq, out);
             let body = &seq[2..];
             if body.len() <= MAX_CWD_REPORT_BYTES
                 && let Some(path) = parse_osc7(
@@ -1624,7 +1687,7 @@ impl Extractor {
         // engine ignores it, so consume it here and surface a Progress chunk
         // the UI maps onto the OS taskbar indicator.
         if mode == Mode::Osc && seq.starts_with(b"9;4;") {
-            self.emit_raw_control(mode, &seq, out);
+            self.emit_raw_control(&context, &seq, out);
             if let Some(p) = parse_osc9_4(&seq) {
                 out.push(Chunk::Progress(p));
             }
@@ -1636,7 +1699,7 @@ impl Extractor {
         // Surfaces the same Chunk::Cwd as OSC 7 (last-writer-wins; both are
         // shell-volunteered truth).
         if mode == Mode::Osc && seq.starts_with(b"9;9;") {
-            self.emit_raw_control(mode, &seq, out);
+            self.emit_raw_control(&context, &seq, out);
             let body = &seq[4..];
             if body.len() <= MAX_CWD_REPORT_BYTES
                 && let Some(path) = parse_osc9_9(body).and_then(safe_reported_cwd)
@@ -1652,7 +1715,7 @@ impl Extractor {
         if mode == Mode::Osc
             && let Some((title, body)) = parse_protocol_notification(&seq)
         {
-            self.emit_raw_control(mode, &seq, out);
+            self.emit_raw_control(&context, &seq, out);
             out.push(Chunk::Notification { title, body });
             return;
         }
@@ -1667,7 +1730,7 @@ impl Extractor {
         // first byte of the payload from `1` to `2` so VTE picks it
         // up; everything downstream then behaves identically.
         if mode == Mode::Osc && seq.starts_with(b"1;") {
-            self.emit_raw_control(mode, &seq, out);
+            self.emit_raw_control(&context, &seq, out);
             seq[0] = b'2';
             // Engine-only exactly when a raw consumer already received the
             // untouched original. With nobody tapping, this stays the ordinary
@@ -1675,15 +1738,19 @@ impl Extractor {
             terminal_only = self.raw_tap;
         }
 
-        let immediate_query = self.defer_graphics
+        let immediate_query = context.defer_graphics
             && mode == Mode::Apc
             && seq.first() == Some(&b'G')
             && std::str::from_utf8(&seq[1..])
                 .ok()
                 .is_some_and(|body| self.kitty().is_query(body));
-        if self.defer_graphics && !immediate_query && is_graphics_sequence(mode, &seq) {
-            self.emit_raw_control(mode, &seq, out);
-            let terminator_len = if self.term_is_bel(mode) { 1 } else { 2 };
+        if context.defer_graphics && !immediate_query && is_graphics_sequence(mode, &seq) {
+            self.emit_raw_control(&context, &seq, out);
+            let terminator_len = if terminator == SeqTerminator::Bel && mode == Mode::Osc {
+                1
+            } else {
+                2
+            };
             let Some(raw_len) = seq
                 .len()
                 .checked_add(2)
@@ -1795,7 +1862,7 @@ impl Extractor {
                             self.advance_graphics_epoch();
                         }
                         if let Some(delete) = self.kitty_mut().retire_retransmission(&command) {
-                            self.emit_raw_control(mode, &seq, out);
+                            self.emit_raw_control(&context, &seq, out);
                             raw_emitted = true;
                             terminal_only = self.raw_tap;
                             out.push(Chunk::DeleteImages(delete));
@@ -1819,7 +1886,7 @@ impl Extractor {
                                     }
                                 }
                                 if !raw_emitted {
-                                    self.emit_raw_control(mode, &seq, out);
+                                    self.emit_raw_control(&context, &seq, out);
                                     raw_emitted = true;
                                     terminal_only = self.raw_tap;
                                 }
@@ -1955,19 +2022,19 @@ impl Extractor {
         match result {
             R::Reply(reply) => {
                 if !raw_emitted {
-                    self.emit_raw_control(mode, &seq, out);
+                    self.emit_raw_control(&context, &seq, out);
                 }
                 out.push(Chunk::GraphicsReply(reply));
             }
             R::Img(data) => {
                 if !raw_emitted {
-                    self.emit_raw_control(mode, &seq, out);
+                    self.emit_raw_control(&context, &seq, out);
                 }
                 out.push(Chunk::Image(data));
             }
             R::Del(delete) => {
                 if !raw_emitted {
-                    self.emit_raw_control(mode, &seq, out);
+                    self.emit_raw_control(&context, &seq, out);
                 }
                 out.push(Chunk::DeleteImages(delete));
             }
@@ -1981,7 +2048,7 @@ impl Extractor {
                 completion,
             } => {
                 if !raw_emitted {
-                    self.emit_raw_control(mode, &seq, out);
+                    self.emit_raw_control(&context, &seq, out);
                 }
                 out.push(Chunk::VirtualImage {
                     id,
@@ -2000,7 +2067,7 @@ impl Extractor {
                 state,
             } => {
                 if !raw_emitted {
-                    self.emit_raw_control(mode, &seq, out);
+                    self.emit_raw_control(&context, &seq, out);
                 }
                 out.push(Chunk::Animation {
                     id,
@@ -2022,7 +2089,7 @@ impl Extractor {
                 completion,
             } => {
                 if !raw_emitted {
-                    self.emit_raw_control(mode, &seq, out);
+                    self.emit_raw_control(&context, &seq, out);
                 }
                 out.push(Chunk::RelativePlacement {
                     id,
@@ -2038,9 +2105,9 @@ impl Extractor {
                 });
             }
             R::None => {
-                if self.raw_tap && !terminal_only && !self.seq_prefix.is_empty() {
+                if self.raw_tap && !terminal_only && !context.prefix.is_empty() {
                     if !raw_emitted {
-                        self.emit_raw_control(mode, &seq, out);
+                        self.emit_raw_control(&context, &seq, out);
                     }
                     terminal_only = true;
                 }
@@ -2054,7 +2121,7 @@ impl Extractor {
                 // normalized copy terminal-only.
                 if self.raw_tap && !terminal_only && terminator == SeqTerminator::C1St {
                     if !raw_emitted {
-                        self.emit_raw_control(mode, &seq, out);
+                        self.emit_raw_control(&context, &seq, out);
                     }
                     terminal_only = true;
                 }
@@ -2094,16 +2161,12 @@ impl Extractor {
         }
     }
 
-    fn term_is_bel(&self, mode: Mode) -> bool {
-        self.term == SeqTerminator::Bel && mode == Mode::Osc
-    }
-
     /// Hand raw output consumers the sequence exactly as it arrived.
     ///
     /// Byte identity holds because every field is reproduced, not re-derived:
     /// the introducer is always the two-byte `ESC` form (the extractor never
     /// enters a control string on a C1 introducer, so no 8-bit form can be
-    /// normalized away), `seq` is the payload appended verbatim, and `term`
+    /// normalized away), `seq` is the payload appended verbatim, and the context
     /// records which of BEL / `ESC \` / C1 ST actually closed it.
     ///
     /// A sequence that exceeded the sequence-byte budget was discarded before
@@ -2111,21 +2174,21 @@ impl Extractor {
     /// payload remains buffered until its terminator, a tap enabled on a later
     /// PTY read receives that in-flight sequence in full rather than a corrupt
     /// suffix.
-    fn emit_raw_control(&self, mode: Mode, seq: &[u8], out: &mut Vec<Chunk>) {
+    fn emit_raw_control(&self, context: &SequenceContext, seq: &[u8], out: &mut Vec<Chunk>) {
         if !self.raw_tap {
             return;
         }
-        let introducer = match mode {
+        let introducer = match context.mode {
             Mode::Dcs => b'P',
             Mode::Apc => b'_',
             Mode::Osc => b']',
             Mode::Pass => return,
         };
-        let terminator = self.term.bytes(mode);
-        let prefix: &[u8] = if self.seq_prefix.is_empty() {
+        let terminator = context.terminator.bytes(context.mode);
+        let prefix: &[u8] = if context.prefix.is_empty() {
             &[0x1b]
         } else {
-            &self.seq_prefix
+            &context.prefix
         };
         let Some(capacity) = seq.len().checked_add(prefix.len() + 1 + terminator.len()) else {
             return;
@@ -3230,6 +3293,65 @@ mod tests {
                 Chunk::DeferredGraphics(graphics) => assert_eq!(graphics.as_bytes(), raw),
                 other => panic!("expected deferred graphics for {raw:?}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn deferred_graphics_replay_preserves_partial_parser_and_deferral() {
+        let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+        let mut ex = Extractor::with_budget(budget.clone());
+        ex.set_graphics_deferred(true);
+        let mut deferred = ex.feed(b"\x1b_Ga=t,i=7,f=32,s=1,v=1;AQIDBA==\x1b\\");
+        let Chunk::DeferredGraphics(graphics) = deferred.pop().unwrap() else {
+            panic!("expected a deferred upload");
+        };
+        ex.set_raw_tap(true);
+        assert!(ex.feed(b"\x1b]2;partial").is_empty());
+        let mut replayed = Vec::new();
+        ex.replay_graphics_with(graphics, |_, chunk| replayed.push(chunk));
+        assert!(
+            replayed
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::GraphicsReply(_)))
+        );
+        let title = ex.feed(b" title\x07");
+        assert_eq!(tapped(&title), b"\x1b]2;partial title\x07");
+        assert!(ex.defer_graphics, "replay must not disable later deferral");
+        ex.set_graphics_deferred(false);
+        assert!(ex.feed(b"\x1b_Ga=p,i=7;\x1b\\").iter().any(|chunk| {
+            matches!(chunk, Chunk::Image(placed) if placed.img.rgba[..] == [1, 2, 3, 4])
+        }));
+        drop((ex, replayed, title));
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn deferred_graphics_replay_matches_wire_replay_for_all_protocols() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png(1, 1));
+        let iterm_bel = format!("\x1b]1337;File=inline=1:{encoded}\x07");
+        let iterm_st = format!("\x1b]1337;File=inline=1:{encoded}\x1b\\");
+        for raw in [
+            &b"\x1bPq~\x1b\\"[..],
+            &b"\x1b_Ga=d,d=A\x1b\\"[..],
+            &b"\x1b_Ga=t,i=7,f=32,s=1,v=1;AQIDBA==\x9c"[..],
+            &b"\x1b]1337;File=inline=1:AAAA\x07"[..],
+            &b"\x1b]1337;File=inline=1:AAAA\x1b\\"[..],
+            iterm_bel.as_bytes(),
+            iterm_st.as_bytes(),
+        ] {
+            let mut ex = Extractor::isolated();
+            ex.set_graphics_deferred(true);
+            let mut chunks = ex.feed(raw);
+            let Chunk::DeferredGraphics(graphics) = chunks.pop().unwrap() else {
+                panic!("expected deferred graphics");
+            };
+            let mut immediate = Extractor::isolated();
+            immediate.set_raw_tap(true);
+            let expected = immediate.feed(graphics.as_bytes());
+            ex.set_raw_tap(true);
+            let mut replayed = Vec::new();
+            ex.replay_graphics_with(graphics, |_, chunk| replayed.push(chunk));
+            assert_eq!(format!("{replayed:?}"), format!("{expected:?}"));
         }
     }
 
@@ -4611,6 +4733,7 @@ mod ordinary_graphics_reply_tests {
             image_bytes: 4,
             retained_bytes: 4,
             process_cpu_bytes: 64 * 1024,
+            transient_cpu_bytes: 64 * 1024,
             ..crate::GraphicsLimits::default()
         };
         let budget = crate::GraphicsBudget::isolated(limits).expect("small valid retained limit");
@@ -5130,6 +5253,7 @@ mod animation_graphics_reply_tests {
             image_bytes: 8,
             retained_bytes: 16,
             process_cpu_bytes: 64 * 1024,
+            transient_cpu_bytes: 64 * 1024,
             ..crate::GraphicsLimits::default()
         };
         let budget = crate::GraphicsBudget::isolated(limits).expect("small valid retained limit");
@@ -5354,6 +5478,7 @@ mod animation_graphics_reply_tests {
             image_bytes: 8,
             retained_bytes: 16,
             process_cpu_bytes: 64 * 1024,
+            transient_cpu_bytes: 64 * 1024,
             ..crate::GraphicsLimits::default()
         })
         .expect("two retained frames fit");

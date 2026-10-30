@@ -17,6 +17,8 @@ pub struct GraphicsLimits {
     pub in_flight_bytes: usize,
     pub image_bytes: usize,
     pub retained_bytes: usize,
+    /// Short-lived CPU storage shared by this terminal and its decode scopes.
+    pub transient_cpu_bytes: usize,
     pub process_cpu_bytes: usize,
     pub process_gpu_bytes: usize,
     pub animation_frames: usize,
@@ -35,6 +37,13 @@ impl Default for GraphicsLimits {
             in_flight_bytes: 128 * MIB,
             image_bytes: 64 * MIB,
             retained_bytes: 256 * MIB,
+            // Maximum-transmission extractor regressions (1-byte, 4 KiB,
+            // uneven 11/15 MiB, full-sequence chunks, and synchronized replay)
+            // peak at 192,937,970 bytes, just under 184 MiB: 96 MiB segmented
+            // payload + 72 MiB base64 output + 16 MiB sequence (+4 wire bytes).
+            // Replay consumes the saved allocation. Segments never reallocate;
+            // rounding up to 184 MiB + 8 MiB headroom gives 192 MiB.
+            transient_cpu_bytes: 192 * MIB,
             process_cpu_bytes: 512 * MIB,
             process_gpu_bytes: 512 * MIB,
             animation_frames: 128,
@@ -56,6 +65,7 @@ impl GraphicsLimits {
             || self.in_flight_bytes == 0
             || self.image_bytes == 0
             || self.retained_bytes == 0
+            || self.transient_cpu_bytes == 0
             || self.process_cpu_bytes == 0
             || self.process_gpu_bytes == 0
             || self.animation_frames == 0
@@ -75,6 +85,9 @@ impl GraphicsLimits {
             || self.process_gpu_bytes < self.retained_bytes
         {
             return Err("process limits must be at least one retained scope");
+        }
+        if self.transient_cpu_bytes > self.process_cpu_bytes {
+            return Err("process CPU limit must hold one transient scope");
         }
         if self.animation_bytes < self.image_bytes {
             return Err("animation byte limit must hold one image");
@@ -128,12 +141,20 @@ fn subtract(counter: &AtomicUsize, bytes: usize) {
     debug_assert!(previous >= bytes, "graphics reservation counter underflow");
 }
 
-/// A process-wide account plus one terminal/window retained-resource scope.
+/// A process-wide account plus terminal/window retained and transient scopes.
 #[derive(Clone)]
 pub struct GraphicsBudget {
     limits: GraphicsLimits,
     process: Arc<Counters>,
     scope: Arc<Counters>,
+    transient: Arc<TransientCounters>,
+}
+
+#[derive(Default)]
+struct TransientCounters {
+    bytes: AtomicUsize,
+    #[cfg(test)]
+    peak: AtomicUsize,
 }
 
 impl Default for GraphicsBudget {
@@ -145,6 +166,7 @@ impl Default for GraphicsBudget {
                 .get_or_init(|| Arc::new(Counters::default()))
                 .clone(),
             scope: Arc::new(Counters::default()),
+            transient: Arc::new(TransientCounters::default()),
         }
     }
 }
@@ -204,6 +226,7 @@ impl GraphicsBudget {
             limits: limits.validate()?,
             process: Arc::new(Counters::default()),
             scope: Arc::new(Counters::default()),
+            transient: Arc::new(TransientCounters::default()),
         })
     }
 
@@ -215,12 +238,14 @@ impl GraphicsBudget {
             .get_or_init(|| Self {
                 limits: GraphicsLimits {
                     retained_bytes: 128 * MIB,
+                    transient_cpu_bytes: 128 * MIB,
                     process_cpu_bytes: 128 * MIB,
                     process_gpu_bytes: 128 * MIB,
                     ..GraphicsLimits::default()
                 },
                 process: Arc::new(Counters::default()),
                 scope: Arc::new(Counters::default()),
+                transient: Arc::new(TransientCounters::default()),
             })
             .clone()
     }
@@ -232,17 +257,28 @@ impl GraphicsBudget {
             limits: limits.validate()?,
             process: Arc::new(Counters::default()),
             scope: Arc::new(Counters::default()),
+            transient: Arc::new(TransientCounters::default()),
         })
     }
 
     /// A temporary decode scope charged to the same process account. Capability
     /// probes release it after decoding; uploads transfer their pixel reservation
-    /// into the terminal scope only after admission.
+    /// into the terminal scope only after admission. Transient reservations
+    /// continue to share the originating terminal ceiling.
     pub(crate) fn query_scope(&self) -> Self {
         Self {
             limits: self.limits,
             process: self.process.clone(),
             scope: Arc::new(Counters::default()),
+            transient: self.transient.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_scope(&self) -> Self {
+        Self {
+            transient: Arc::new(TransientCounters::default()),
+            ..self.query_scope()
         }
     }
 
@@ -264,7 +300,7 @@ impl GraphicsBudget {
         self.reserve(Resource::Cpu, bytes, true)
     }
 
-    /// Reserve short-lived decode/escape storage in the process account only.
+    /// Reserve short-lived decode/escape storage in this terminal and process.
     pub fn reserve_transient_cpu(&self, bytes: usize) -> Option<GraphicsReservation> {
         if bytes == 0 {
             return None;
@@ -315,12 +351,35 @@ impl GraphicsBudget {
                 return None;
             }
         }
+        if matches!(resource, Resource::Cpu) && !retained {
+            if !try_add(
+                &self.transient.bytes,
+                bytes,
+                self.limits.transient_cpu_bytes,
+            ) {
+                subtract(process_counter, bytes);
+                return None;
+            }
+            #[cfg(test)]
+            self.transient.peak.fetch_max(
+                self.transient.bytes.load(Ordering::Acquire),
+                Ordering::AcqRel,
+            );
+        }
         Some(GraphicsReservation {
             budget: self.clone(),
             resource,
             bytes,
             retained,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transient_usage(&self) -> (usize, usize) {
+        (
+            self.transient.bytes.load(Ordering::Acquire),
+            self.transient.peak.load(Ordering::Acquire),
+        )
     }
 
     #[cfg(any(test, feature = "fuzzing"))]
@@ -416,6 +475,9 @@ impl GraphicsReservation {
             if self.retained {
                 subtract(counter(&self.budget.scope, self.resource), released);
             }
+            if matches!(self.resource, Resource::Cpu) && !self.retained {
+                subtract(&self.budget.transient.bytes, released);
+            }
             self.bytes = bytes;
         }
         true
@@ -445,6 +507,8 @@ impl Drop for GraphicsReservation {
         subtract(counter(&self.budget.process, self.resource), self.bytes);
         if self.retained {
             subtract(counter(&self.budget.scope, self.resource), self.bytes);
+        } else if matches!(self.resource, Resource::Cpu) {
+            subtract(&self.budget.transient.bytes, self.bytes);
         }
     }
 }
@@ -499,6 +563,7 @@ mod tests {
             in_flight_bytes: 32,
             image_bytes: 16,
             retained_bytes: 32,
+            transient_cpu_bytes: 64,
             process_cpu_bytes: 64,
             process_gpu_bytes: 64,
             animation_frames: 2,
@@ -512,6 +577,7 @@ mod tests {
     fn defaults_match_the_security_envelope() {
         let l = GraphicsLimits::default().validate().unwrap();
         assert_eq!(l.sequence_bytes, 16 * MIB);
+        assert_eq!(l.transient_cpu_bytes, 192 * MIB);
         assert_eq!(l.transmission_bytes, 96 * MIB);
         assert_eq!((l.in_flight_slots, l.in_flight_bytes), (8, 128 * MIB));
         assert_eq!((l.image_bytes, l.retained_bytes), (64 * MIB, 256 * MIB));
@@ -561,6 +627,54 @@ mod tests {
         let _r = b.reserve_transient_cpu(48).unwrap();
         assert_eq!(b.usage(), (48, 0, 0, 0));
         assert!(b.reserve_transient_cpu(17).is_none());
+    }
+
+    #[test]
+    fn transient_ceiling_validates_and_rolls_back_growth_across_decode_scopes() {
+        let limits = GraphicsLimits {
+            transient_cpu_bytes: 48,
+            ..tiny_limits()
+        };
+        let budget = GraphicsBudget::isolated(limits).unwrap();
+        let mut lease = budget.reserve_transient_cpu(40).unwrap();
+        let staged = budget.query_scope();
+        let second = budget.terminal_scope();
+        let extra = staged.reserve_transient_cpu(8).unwrap();
+        assert!(budget.clone().reserve_transient_cpu(1).is_none());
+        assert!(staged.query_scope().reserve_transient_cpu(1).is_none());
+        assert!(!lease.try_grow_to(41));
+        assert_eq!(budget.usage(), (48, 0, 0, 0));
+        assert_eq!(budget.transient_usage().0, 48);
+        let other = second.reserve_transient_cpu(16).unwrap();
+        assert!(
+            second.reserve_transient_cpu(1).is_none(),
+            "process account is full"
+        );
+        assert_eq!(second.transient_usage().0, 16);
+        drop(other);
+        drop(extra);
+        assert!(lease.shrink_to(24));
+        assert!(lease.try_grow_to(48));
+        assert_eq!(budget.transient_usage().0, 48);
+        drop(lease);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+        assert_eq!(staged.transient_usage().0, 0);
+        assert!(
+            GraphicsLimits {
+                transient_cpu_bytes: 0,
+                ..limits
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            GraphicsLimits {
+                transient_cpu_bytes: 65,
+                ..limits
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]

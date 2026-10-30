@@ -154,7 +154,7 @@ fn shift_right_click_and_lane_actions_are_wired() {
     let body = |name: &str| {
         src.split(&format!("fn {name}("))
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
+            .and_then(|rest| rest.split("\n    }\n").next())
             .unwrap_or_else(|| panic!("{name}"))
     };
     assert!(src.contains(
@@ -321,7 +321,7 @@ fn www_hints_are_normalized_only_for_opening() {
     let open = src
         .split("fn open_pane_link(")
         .nth(1)
-        .and_then(|body| body.split("\n    fn ").next())
+        .and_then(|body| body.split("\n    }\n").next())
         .expect("pane link opener");
     let normalized = open
         .find("normalize_url(uri)")
@@ -360,14 +360,14 @@ fn shift_swaps_open_and_copy() {
     let handler = src
         .split("fn hint_key(")
         .nth(1)
-        .and_then(|body| body.split("\n    fn ").next())
+        .and_then(|body| body.split("\n    }\n").next())
         .expect("hint key handler");
     assert!(handler.contains("let alternate = ws.mods.shift_key();"));
     assert!(!handler.contains("is_ascii_uppercase"));
     let act = src
         .split("fn act_hint(")
         .nth(1)
-        .and_then(|body| body.split("\n    fn ").next())
+        .and_then(|body| body.split("\n    }\n").next())
         .expect("act_hint");
     for needle in [
         "ws.mux.panes.get(&h.pane)",
@@ -682,7 +682,7 @@ fn terminal_links_open_through_their_pane() {
     let open_url = src
         .split("fn open_url(&mut self, ws: &WindowState, uri: &str, source: LinkSource) {")
         .nth(1)
-        .and_then(|rest| rest.split("\n    fn ").next())
+        .and_then(|rest| rest.split("\n    }\n").next())
         .expect("open_url");
     let safe = open_url
         .find("if !kettle_core::links::is_safe_url(target)")
@@ -735,7 +735,7 @@ fn terminal_links_open_through_their_pane() {
     let pull = src
         .split("fn pull_preview(")
         .nth(1)
-        .and_then(|rest| rest.split("\n    fn ").next())
+        .and_then(|rest| rest.split("\n    }\n").next())
         .expect("pull_preview");
     let refused = pull
         .find("if self.ctl_driving {")
@@ -754,7 +754,7 @@ fn terminal_links_open_through_their_pane() {
     let show = src
         .split("fn show_media_item(")
         .nth(1)
-        .and_then(|rest| rest.split("\n    fn ").next())
+        .and_then(|rest| rest.split("\n    }\n").next())
         .expect("show_media_item");
     assert!(show.contains(".partition_of(pane, self.area(ws), self.layout_style(ws))"));
     assert!(!show.contains("self.pane_partition("));

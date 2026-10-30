@@ -426,7 +426,13 @@ impl App {
     pub(super) fn media_tick(&mut self, ws: &mut WindowState) {
         self.retire_cards(ws);
         self.tell_preview_failures(ws);
-        if self.media.is_idle() {
+        if !media_tick_ready(
+            &mut self.media,
+            ws,
+            &mut self.windows,
+            #[cfg(target_os = "linux")]
+            &mut self.agent_launches,
+        ) {
             return;
         }
         let live: std::collections::HashSet<u64> = self
@@ -1292,7 +1298,7 @@ impl App {
         use kettle_media::client::RenderError;
         let crate::media::Finished { push, result } = finished;
         let tr = self.ui_text;
-        let (origin, route, draft, spec) = push.into_parts();
+        let (origin, route, draft, spec, control) = push.into_parts();
         if let crate::media::Requester::Lane(render) = origin {
             return self.finish_lane_render(ws, render, spec, result);
         }
@@ -1310,15 +1316,9 @@ impl App {
             // failure it was.
             Err(RenderError::Failure(failure)) => {
                 let why = crate::media::FileWhy::of_job(&spec.kind, failure);
-                let facts = why.and_then(|why| match &spec.input {
-                    crate::media::SourceInput::Path {
-                        path,
-                        authorization,
-                    } => super::native_path_buf(path)
-                        .and_then(|path| crate::media::file_facts(&path, authorization, why)),
-                    _ => None,
-                });
-                let Some(facts) = facts else {
+                let Some(why) =
+                    why.filter(|_| matches!(spec.input, crate::media::SourceInput::Path { .. }))
+                else {
                     return notify_preview_failure(tr, origin.refuse(failure));
                 };
                 let crate::media::Draft {
@@ -1329,17 +1329,17 @@ impl App {
                     inline_refused,
                     gallery: _,
                 } = draft;
-                let item = crate::media::ShelfItem::file(
+                let item = crate::media::ShelfItem::checking_file(
                     self.media.next_item(),
                     key,
                     title,
                     provenance,
-                    facts,
-                    crate::media::ItemSource::undrawn(spec, facts.identity),
+                    why,
+                    crate::media::ItemSource::checking_file(spec),
                 );
                 return self.publish_show(
                     ws,
-                    (origin, route),
+                    (origin, route, control),
                     item,
                     (inline, inline_refused),
                     None,
@@ -1410,7 +1410,13 @@ impl App {
         );
         item.layout = Some(layout);
         item.video = video;
-        self.publish_show(ws, (origin, route), item, (inline, inline_refused), page);
+        self.publish_show(
+            ws,
+            (origin, route, control),
+            item,
+            (inline, inline_refused),
+            page,
+        );
     }
 
     /// Put `item`, made for a `show` or a user's preview by `origin` for
@@ -1420,7 +1426,11 @@ impl App {
     fn publish_show(
         &mut self,
         ws: &mut WindowState,
-        (origin, route): (crate::media::Requester, crate::media::Route),
+        (origin, route, control): (
+            crate::media::Requester,
+            crate::media::Route,
+            kettle_media::client::RenderControl,
+        ),
         item: crate::media::ShelfItem,
         (inline, mut inline_refused): (
             Option<crate::media::InlineDraft>,
@@ -1517,9 +1527,9 @@ impl App {
                 grid.cursor.point.column.0,
             )
         });
-        let delivery = match (inline, current, cell, grid) {
+        let (delivery, pending_inline) = match (inline, current, cell, grid) {
             (Some(inline), Some((generation, Some(image))), Some(cell), Some((grid, column))) => {
-                match register_card(
+                match prepare_card(
                     cards,
                     (route.pane, &mut pane.inline_cards, grid, column),
                     cell,
@@ -1529,39 +1539,66 @@ impl App {
                     inline,
                     std::time::Instant::now(),
                 ) {
-                    Ok(delivery) => Some(delivery),
+                    Ok(publication) => publication,
                     Err(refusal) => {
                         inline_refused = cli.then_some(refusal).or(inline_refused);
-                        None
+                        (None, None)
                     }
                 }
             }
-            _ => None,
+            _ => (None, None),
         };
         #[cfg(target_os = "linux")]
-        let delivery = delivery.and_then(|mut delivery| {
-            // The command prints its own card: there is nothing to pick up.
-            if cli {
-                return Some(delivery);
-            }
-            let (grant, root) = native_pickup?;
-            delivery.permit = Some(self.agent_launches.issue(
-                grant,
-                root,
-                std::time::Instant::now(),
-                |bytes| getrandom::fill(bytes).is_ok(),
-            )?);
-            Some(delivery)
-        });
+        let (delivery, pending_inline) = if cli {
+            (delivery, pending_inline)
+        } else {
+            publish_pickup(delivery, pending_inline, || {
+                native_pickup.and_then(|(grant, root)| {
+                    self.agent_launches
+                        .issue(grant, root, std::time::Instant::now(), |bytes| {
+                            getrandom::fill(bytes).is_ok()
+                        })
+                })
+            })
+        };
         let seq = window.seq;
         if let Some(handle) = &window.window {
             handle.request_redraw();
         }
+        let mut facts_query = if let crate::media::ItemKind::CheckingFile(why) = kind
+            && let Some(item) = self
+                .window_by_seq(ws, seq)
+                .and_then(|window| window.mux.panes.get(&route.pane))
+                .and_then(|pane| pane.media_shelf.get(published.id))
+            && let crate::media::SourceInput::Path {
+                path,
+                authorization,
+            } = &item.source.spec.input
+        {
+            Some(crate::media::FactsQuery {
+                window: seq,
+                pane: route.pane,
+                item: item.id,
+                generation: item.generation,
+                control,
+                why,
+                reply: None,
+                source: kettle_media::Source::Path {
+                    path: path.clone(),
+                    authorization: authorization.clone(),
+                },
+            })
+        } else {
+            None
+        };
         let origin = match origin {
             crate::media::Requester::Ctl(origin) => origin,
             // What the user asked to preview opens in its pane's lane, from
             // that pane's window's next pass of the event loop.
             crate::media::Requester::User => {
+                if let Some(query) = facts_query.take() {
+                    self.submit_facts(ws, query);
+                }
                 if self.previews_ready.len() < MAX_PREVIEWS_READY {
                     self.previews_ready.push((seq, route.pane, published.id));
                 }
@@ -1579,6 +1616,21 @@ impl App {
                 (width, height),
                 &warnings,
             ),
+            crate::media::ItemKind::FailedFile => {
+                origin.refuse(kettle_media::FailureCode::WorkerUnavailable);
+                return;
+            }
+            crate::media::ItemKind::CheckingFile(_) => {
+                let mut result = kettle_ctl::show::ShowResult::new(
+                    target,
+                    published.id,
+                    kettle_media::MediaKind::Raster,
+                    (0, 0),
+                    &[],
+                );
+                result.kind = kettle_ctl::show::FILE_KIND.into();
+                result
+            }
             crate::media::ItemKind::File(facts) => kettle_ctl::show::ShowResult::file(
                 target,
                 published.id,
@@ -1590,11 +1642,38 @@ impl App {
         result.inline_refused = inline_refused;
         result.page = page.map(kettle_ctl::show::ShowPage::from);
         result.video = video.map(kettle_ctl::show::ShowVideo::from);
-        let id = origin.request_id;
-        origin.answer(kettle_ctl::protocol::Response::ok(
-            id,
-            serde_json::to_value(result).unwrap_or_default(),
-        ));
+        if let Some(mut query) = facts_query {
+            prepare_file_reply(&mut query, origin, result);
+            if let Some(reply) = &mut query.reply {
+                reply.inline = pending_inline;
+            }
+            self.submit_facts(ws, query);
+        } else {
+            answer_show(origin, result);
+        }
+    }
+
+    fn submit_facts(&mut self, ws: &mut WindowState, query: crate::media::FactsQuery) {
+        let proxy = self.proxy.clone();
+        if let Err(query) = self.media.request_facts(
+            query,
+            self.startup.media.as_ref(),
+            std::sync::Arc::new(move || {
+                let _ = proxy.send_event(UserEvent::MediaRendered);
+            }),
+        ) {
+            finish_file_facts(
+                crate::media::FactsAnswer {
+                    query: *query,
+                    identity: None,
+                },
+                ws,
+                &mut self.windows,
+                &mut self.media.cards,
+                #[cfg(target_os = "linux")]
+                &mut self.agent_launches,
+            );
+        }
     }
 
     /// Release the pixels of the least recently viewed shelf item in any
@@ -1676,4 +1755,579 @@ pub(super) fn cli_card_owner(
     _: Option<crate::ctl_server::CliTerminal>,
 ) -> Result<kettle_ctl::process::ProcessIdentity, kettle_ctl::show::InlineRefusal> {
     Err(kettle_ctl::show::InlineRefusal::Unsupported)
+}
+
+/// A checking file keeps its card draft until its caption can include facts.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_card(
+    cards: &mut crate::media::CardLedger,
+    (pane, pane_cards, grid, column): (u64, &mut kettle_render::InlineCards, (usize, usize), usize),
+    cell: (f32, f32),
+    item: (u64, u64),
+    (kind, video, page): (
+        crate::media::ItemKind,
+        Option<&kettle_media::VideoInfo>,
+        Option<kettle_media::PageOf>,
+    ),
+    image: &kettle_core::ImageData,
+    draft: crate::media::InlineDraft,
+    now: std::time::Instant,
+) -> Result<
+    (
+        Option<kettle_ctl::show::InlineDelivery>,
+        Option<crate::media::FileInline>,
+    ),
+    kettle_ctl::show::InlineRefusal,
+> {
+    if matches!(kind, crate::media::ItemKind::CheckingFile(_)) {
+        return Ok((None, Some(crate::media::FileInline { draft })));
+    }
+    register_card(
+        cards,
+        (pane, pane_cards, grid, column),
+        cell,
+        item,
+        (kind, video, page),
+        image,
+        draft,
+        now,
+    )
+    .map(|delivery| (Some(delivery), None))
+}
+
+/// Facts complete independently of the render queue, including while it is idle.
+pub(super) fn media_tick_ready(
+    media: &mut crate::media::MediaService,
+    ws: &mut WindowState,
+    windows: &mut std::collections::BTreeMap<u64, WindowState>,
+    #[cfg(target_os = "linux")] launches: &mut kettle_ctl::agent_launch::LaunchScopes,
+) -> bool {
+    while let Some(answer) = media.take_facts() {
+        finish_file_facts(
+            answer,
+            ws,
+            windows,
+            &mut media.cards,
+            #[cfg(target_os = "linux")]
+            launches,
+        );
+    }
+    !media.is_idle()
+}
+
+fn finish_file_facts(
+    answer: crate::media::FactsAnswer,
+    ws: &mut WindowState,
+    windows: &mut std::collections::BTreeMap<u64, WindowState>,
+    cards: &mut crate::media::CardLedger,
+    #[cfg(target_os = "linux")] launches: &mut kettle_ctl::agent_launch::LaunchScopes,
+) {
+    let query = answer.query;
+    let interrupted = query.failure(std::time::Instant::now());
+    let identity = answer.identity.filter(|_| interrupted.is_none());
+    let owner = std::iter::once(&*ws)
+        .chain(windows.values())
+        .find(|window| window.seq == query.window && window.mux.panes.contains_key(&query.pane))
+        .or_else(|| {
+            std::iter::once(&*ws)
+                .chain(windows.values())
+                .find(|window| window.mux.panes.contains_key(&query.pane))
+        })
+        .map(|window| window.seq);
+    let mut window = owner.and_then(|seq| {
+        if ws.seq == seq {
+            Some(&mut *ws)
+        } else {
+            windows.get_mut(&seq)
+        }
+    });
+    let mut failure = kettle_media::FailureCode::NotInKettlePane;
+    let accepted = if let Some(window) = window.as_deref_mut() {
+        failure = kettle_media::FailureCode::Changed;
+        let accepted = window
+            .mux
+            .panes
+            .get_mut(&query.pane)
+            .and_then(|pane| pane.media_shelf.get_mut(query.item))
+            .is_some_and(|item| match identity {
+                Some(identity) => item.accept_file_facts(query.generation, query.why, identity),
+                None => item.fail_file_facts(query.generation, query.why),
+            });
+        if accepted && let Some(handle) = &window.window {
+            handle.request_redraw();
+        }
+        accepted
+    } else {
+        false
+    };
+    if let Some(reply) = query.reply {
+        let crate::media::FileReply {
+            origin,
+            mut result,
+            inline,
+        } = *reply;
+        if !accepted {
+            origin.refuse(failure);
+        } else if let Some(identity) = identity {
+            result.file = Some(kettle_ctl::show::ShowFile {
+                bytes: identity.size,
+                reason: query.why.as_str().into(),
+            });
+            if let (Some(inline), Some(window)) = (inline, window) {
+                let cell = window
+                    .renderer
+                    .as_ref()
+                    .map(|renderer| (renderer.cell_w, renderer.cell_h));
+                let pane = window
+                    .mux
+                    .panes
+                    .get_mut(&query.pane)
+                    .expect("accepted file pane");
+                let refusal = inline.draft.printer.and_then(|printer| {
+                    crate::ctl_server::CliTerminal::of(printer)
+                        .ok_or(kettle_ctl::show::InlineRefusal::NotTerminal)
+                        .and_then(|terminal| cli_card_owner(pane, result.verified, Some(terminal)))
+                        .err()
+                });
+                if let Some(refusal) = refusal {
+                    result.inline_refused = Some(refusal);
+                } else if let Some(item) = pane.media_shelf.get(query.item)
+                    && let Some(image) = item.card_image()
+                {
+                    let kind = item.kind;
+                    let cli = inline.draft.harness == kettle_render::CardHarness::Cli;
+                    let geometry = pane.term.term.lock().ok().map(|term| {
+                        let grid = term.grid();
+                        let dimensions = (grid.columns(), grid.screen_lines());
+                        let pixels = pane.term.pty_pixel_size();
+                        let cell = cell.unwrap_or((
+                            f32::from(pixels.0) / dimensions.0.max(1) as f32,
+                            f32::from(pixels.1) / dimensions.1.max(1) as f32,
+                        ));
+                        (dimensions, grid.cursor.point.column.0, cell)
+                    });
+                    #[cfg(target_os = "linux")]
+                    let native_pickup = inline.draft.launch.clone().zip(pane.caller_root);
+                    let registration = geometry
+                        .ok_or(kettle_ctl::show::InlineRefusal::TooSmall)
+                        .and_then(|(grid, column, cell)| {
+                            register_card(
+                                cards,
+                                (query.pane, &mut pane.inline_cards, grid, column),
+                                cell,
+                                (query.item, query.generation),
+                                (kind, None, None),
+                                &image,
+                                inline.draft,
+                                std::time::Instant::now(),
+                            )
+                        });
+                    match registration {
+                        Ok(delivery) => {
+                            #[cfg(target_os = "linux")]
+                            let delivery = if cli {
+                                Some(delivery)
+                            } else {
+                                publish_pickup(Some(delivery), None, || {
+                                    native_pickup.and_then(|(grant, root)| {
+                                        launches.issue(
+                                            grant,
+                                            root,
+                                            std::time::Instant::now(),
+                                            |bytes| getrandom::fill(bytes).is_ok(),
+                                        )
+                                    })
+                                })
+                                .0
+                            };
+                            #[cfg(not(target_os = "linux"))]
+                            let delivery = Some(delivery);
+                            result.inline = delivery;
+                        }
+                        Err(refusal) if cli => result.inline_refused = Some(refusal),
+                        Err(_) => {}
+                    }
+                }
+            }
+            answer_show(origin, result);
+        } else {
+            origin.refuse(interrupted.unwrap_or(kettle_media::FailureCode::WorkerUnavailable));
+        }
+    }
+}
+
+fn answer_show(origin: crate::media::Origin, result: kettle_ctl::show::ShowResult) {
+    let id = origin.request_id;
+    origin.answer(kettle_ctl::protocol::Response::ok(
+        id,
+        serde_json::to_value(result).unwrap_or_default(),
+    ));
+}
+
+pub(super) fn prepare_file_reply(
+    query: &mut crate::media::FactsQuery,
+    origin: crate::media::Origin,
+    result: kettle_ctl::show::ShowResult,
+) {
+    query.reply = Some(Box::new(crate::media::FileReply {
+        origin,
+        result,
+        inline: None,
+    }));
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn publish_pickup(
+    delivery: Option<kettle_ctl::show::InlineDelivery>,
+    pending: Option<crate::media::FileInline>,
+    issue: impl FnOnce() -> Option<kettle_ctl::agent_launch::PickupPermit>,
+) -> (
+    Option<kettle_ctl::show::InlineDelivery>,
+    Option<crate::media::FileInline>,
+) {
+    if pending.is_some() {
+        return (delivery, pending);
+    }
+    let delivery = delivery.and_then(|mut delivery| {
+        delivery.permit = Some(issue()?);
+        Some(delivery)
+    });
+    (delivery, None)
+}
+
+/// `get_state`'s `media` field: whether media previews are available, and a
+/// fixed reason code when they are not. Asking never waits on a check.
+/// Why `show` cannot render now, if it cannot: no worker, or one that
+/// failed its checks. A worker still being checked is waited for.
+fn media_unavailable(
+    media: Option<&kettle_media::client::WorkerClient>,
+) -> Option<kettle_media::FailureCode> {
+    use kettle_media::FailureCode;
+    use kettle_media::client::{MediaAvailability, UnavailableCause};
+    match media.map(kettle_media::client::WorkerClient::availability) {
+        None => Some(FailureCode::WorkerUnavailable),
+        Some(MediaAvailability::Checking | MediaAvailability::Available) => None,
+        Some(MediaAvailability::Unavailable(UnavailableCause::UnsupportedPlatform)) => {
+            Some(FailureCode::UnsupportedPlatform)
+        }
+        Some(MediaAvailability::Unavailable(_)) => Some(FailureCode::WorkerUnavailable),
+    }
+}
+
+/// The shelf items on screen in any window, whose pixels eviction spares:
+/// each preview lane's, and each item whose card the last frame drew.
+fn media_visible_items<'a>(
+    windows: impl Iterator<Item = &'a WindowState>,
+    cards: &crate::media::CardLedger,
+) -> Vec<u64> {
+    let mut visible = Vec::new();
+    for window in windows {
+        visible.extend(window.preview_panels.values().map(|panel| panel.item));
+        if let Some(renderer) = &window.renderer {
+            visible.extend(
+                renderer
+                    .drawn_cards()
+                    .iter()
+                    .filter_map(|card| cards.item(card.pane, card.nonce)),
+            );
+        }
+    }
+    visible
+}
+
+/// Whether the release of a press card `pressed` took opens it: only over the
+/// very card it pressed, and only while nothing that owns the pointer (a
+/// dialog, a menu, the viewer) has opened over it since the press.
+pub(super) fn card_release_opens(
+    pressed: (u64, kettle_core::InlineNonce),
+    over: Option<kettle_render::PaintedCard>,
+    covered: bool,
+) -> bool {
+    !covered && over.is_some_and(|card| (card.pane, card.nonce) == pressed)
+}
+
+/// What an item is, in a lane's detail line or a card's screen-reader label:
+/// its kind and size, and for a video its own size (not its poster's),
+/// codec, length and whether it has sound.
+pub(super) fn media_item_detail(
+    tr: kettle_i18n::Translator,
+    kind: &str,
+    item: &crate::media::ShelfItem,
+) -> String {
+    if matches!(item.kind, crate::media::ItemKind::CheckingFile(_)) {
+        return format!("{kind} {}", tr.text(kettle_i18n::Text::InlineCardPending));
+    }
+    if item.kind == crate::media::ItemKind::FailedFile {
+        return format!(
+            "{kind} {}",
+            tr.text(kettle_i18n::Text::MediaLaneNoticePreviewFailed)
+        );
+    }
+    if let Some(facts) = item.kind.file() {
+        return format!("{kind} · {}", kettle_ctl::show::size_label(facts.bytes));
+    }
+    let Some(video) = &item.video else {
+        let (width, height) = item.size;
+        return format!("{kind} · {width}×{height}");
+    };
+    let mut detail = format!("{kind} · {}×{}", video.width, video.height);
+    if let Some(codec) = video.codec.name() {
+        detail.push_str(" · ");
+        detail.push_str(codec);
+    }
+    detail.push_str(" · ");
+    detail.push_str(&kettle_render::duration_label(video.duration_ms));
+    detail.push_str(" · ");
+    detail.push_str(tr.text(if video.has_audio {
+        kettle_i18n::Text::MediaVideoWithAudio
+    } else {
+        kettle_i18n::Text::MediaVideoNoAudio
+    }));
+    detail
+}
+
+/// Register an inline card for a published item and build the message its
+/// harness prints, or `kettle show --inline` prints itself. Refused when the
+/// owner is over its limits, the pane cannot hold a card, no nonce could be
+/// had, or a harness's message would not print whole: the item stays on the
+/// shelf either way.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn register_card(
+    cards: &mut crate::media::CardLedger,
+    (pane_id, pane_cards, grid, column): (
+        u64,
+        &mut kettle_render::InlineCards,
+        (usize, usize),
+        usize,
+    ),
+    cell: (f32, f32),
+    item: (u64, u64),
+    (kind, video, page): (
+        crate::media::ItemKind,
+        Option<&kettle_media::VideoInfo>,
+        Option<kettle_media::PageOf>,
+    ),
+    image: &kettle_core::ImageData,
+    inline: crate::media::InlineDraft,
+    now: std::time::Instant,
+) -> Result<kettle_ctl::show::InlineDelivery, kettle_ctl::show::InlineRefusal> {
+    use kettle_ctl::show::InlineRefusal;
+    cards
+        .admit(inline.owner, now)
+        .map_err(|_| InlineRefusal::Limit)?;
+    let size = crate::media::card_size(inline.harness, grid, cell, (image.width, image.height))
+        .ok_or(InlineRefusal::TooSmall)?;
+    let nonce = cards
+        .mint(|pool| getrandom::fill(pool).is_ok())
+        .ok_or(InlineRefusal::Limit)?;
+    let room = grid.0.saturating_sub(inline.harness.left() + 1);
+    let caption = crate::media::card_caption(
+        inline.name.as_deref(),
+        kind,
+        video.map_or((image.width, image.height), |video| {
+            (video.width, video.height)
+        }),
+        video.map(|video| video.duration_ms),
+        page,
+        room,
+    );
+    let cli = inline.harness == kettle_render::CardHarness::Cli;
+    let message = if cli {
+        kettle_render::cli_card_text(nonce, size, &caption, column)
+    } else {
+        crate::media::card_message(nonce, size, &caption)
+    };
+    let delivery = kettle_ctl::show::InlineDelivery {
+        permit: None,
+        message: message.ok_or(InlineRefusal::TooSmall)?,
+    };
+    // Only a harness turns a long message into a stub; the command line
+    // prints whatever the renderer's largest card takes.
+    if !cli && !delivery.fits() {
+        return Err(InlineRefusal::TooSmall);
+    }
+    pane_cards
+        .insert(
+            nonce,
+            kettle_render::CardSpec {
+                rows: size.0,
+                columns: size.1,
+                harness: inline.harness,
+                caption,
+                poster: Some(kettle_render::CardPoster::new(image)),
+                duration_ms: video.map(|video| video.duration_ms),
+            },
+        )
+        .map_err(|refusal| match refusal {
+            kettle_render::CardRefusal::BadSize => InlineRefusal::TooSmall,
+            kettle_render::CardRefusal::Full | kettle_render::CardRefusal::Duplicate => {
+                InlineRefusal::Limit
+            }
+        })?;
+    cards.record(
+        nonce,
+        crate::media::CardRecord {
+            pane: pane_id,
+            item,
+            owner: inline.owner,
+            launched: !cli,
+        },
+        now,
+    );
+    Ok(delivery)
+}
+
+/// `get_state`'s `media`: whether the worker is there, and which video
+/// decoders a worker here has, which is release policy, not a search: the
+/// user's ffmpeg is looked for when a worker starts, and no GStreamer is used.
+pub(super) fn ctl_media_state(
+    media: Option<&kettle_media::client::WorkerClient>,
+) -> serde_json::Value {
+    use kettle_media::client::MediaAvailability;
+    let mut state = match media.map(kettle_media::client::WorkerClient::availability) {
+        None => serde_json::json!({ "availability": "unavailable", "reason": "not_configured" }),
+        Some(MediaAvailability::Checking) => serde_json::json!({ "availability": "checking" }),
+        Some(MediaAvailability::Available) => serde_json::json!({ "availability": "available" }),
+        Some(MediaAvailability::Unavailable(cause)) => {
+            serde_json::json!({ "availability": "unavailable", "reason": cause.code() })
+        }
+    };
+    state["video"] = serde_json::json!({
+        "decoders": kettle_media::video::DECODERS,
+        "gstreamer": "not_used",
+    });
+    state
+}
+
+/// Longest copied text read as a path, in bytes.
+pub(super) const MAX_COPIED_PATH: usize = 4096;
+
+/// The file the clipboard names for a lane to show: the first of `files`, as
+/// a file manager copies them, that a lane can show, or else the one path or
+/// `file://` link `text` holds. A path is resolved from the pane's `cwd` as
+/// quick select resolves one, after one pair of quotes around it, or a
+/// shell's backslash escapes, are undone. `None` when neither names one.
+pub(super) fn copied_preview(
+    files: &[std::path::PathBuf],
+    text: Option<&str>,
+    cwd: Option<&str>,
+    home: Option<&str>,
+) -> Option<CopiedPreview> {
+    let shows = |path: &std::path::Path| previewable_name(&path.to_string_lossy());
+    if !files.is_empty() {
+        // Through a file URL and back, so a listed file meets the checks a
+        // link does: absolute, on this computer (no `\\host\share`), no `..`.
+        // It must come back as itself: a Linux file list can name `C:/x`,
+        // which is relative there. The CR a CRLF list leaves on a line is no
+        // part of the name.
+        return files.iter().find_map(|file| {
+            let name = file.to_str()?;
+            let file = std::path::Path::new(name.strip_suffix('\r').unwrap_or(name));
+            kettle_core::links::file_url_for_path(file)
+                .and_then(|url| kettle_core::links::local_file_path(&url))
+                .filter(|path| path == file && shows(path))
+                .map(CopiedPreview::File)
+        });
+    }
+    // Two lines are no one path: a line break decodes to a control
+    // character, which `local_file_path` refuses below. A path longer than
+    // any URL Kettle accepts is dropped before it is unescaped and encoded.
+    let text = text?.trim();
+    if text.len() > MAX_COPIED_PATH {
+        return None;
+    }
+    let url = if text
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file://"))
+    {
+        text.to_string()
+    } else if text.contains("://") {
+        return None;
+    } else {
+        copied_path_url(&unquote_copied_path(text), cwd, home)?
+    };
+    kettle_core::links::local_file_path(&url)
+        .is_some_and(|path| shows(&path))
+        .then_some(CopiedPreview::Link(url))
+}
+
+/// A copied path without one pair of matching quotes around it or, off
+/// Windows, without a shell's backslash escapes (`my\ plot.png`).
+pub(super) fn unquote_copied_path(text: &str) -> String {
+    for quote in ['"', '\''] {
+        if let Some(inner) = text
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner.to_string();
+        }
+    }
+    if cfg!(windows) {
+        return text.to_string();
+    }
+    let mut unescaped = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        unescaped.push(match c {
+            '\\' => chars.next().unwrap_or(c),
+            _ => c,
+        });
+    }
+    unescaped
+}
+
+/// The `file://` URL a copied path names: off Windows as quick select
+/// resolves a path (`hint_path_url`); on Windows only a drive path, never a
+/// share or a relative path.
+fn copied_path_url(text: &str, cwd: Option<&str>, home: Option<&str>) -> Option<String> {
+    if cfg!(windows) {
+        let bytes = text.as_bytes();
+        let drive = bytes.len() > 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/');
+        return drive
+            .then(|| kettle_core::links::file_url_for_path(std::path::Path::new(text)))
+            .flatten();
+    }
+    hint_path_url(text, cwd, home)
+}
+
+/// Most previews the user asked for that wait for their window to open them.
+const MAX_PREVIEWS_READY: usize = 8;
+
+/// Tell the user why a preview they asked for did not open; nothing for a
+/// request that answers a control client (`None`).
+fn notify_preview_failure(tr: kettle_i18n::Translator, failure: Option<kettle_media::FailureCode>) {
+    let Some(failure) = failure else {
+        return;
+    };
+    fire_notify(
+        tr.text(kettle_i18n::Text::NotifyTitlePreviewFailed),
+        tr.text(preview_failure_body(failure)),
+    );
+}
+
+/// What a failed preview's notice says, by its failure.
+pub(super) fn preview_failure_body(failure: kettle_media::FailureCode) -> kettle_i18n::Text {
+    use kettle_i18n::Text as T;
+    use kettle_media::FailureCode as F;
+    match failure {
+        F::FileNotFound => T::NotifyBodyPreviewMissing,
+        F::FilePermission | F::FileNotRegular | F::Changed => T::NotifyBodyPreviewUnreadable,
+        F::TooLarge | F::FileTooLarge => T::NotifyBodyPreviewTooLarge,
+        // Only a video's decoders answer these: which one a user can install.
+        F::UnsupportedContainer | F::CodecUnavailable | F::BackendUnavailable => {
+            T::NotifyBodyPreviewNeedsDecoder
+        }
+        // Installing anything would not help: the system has no sandbox.
+        F::SandboxUnavailable => T::NotifyBodyPreviewNeedsSandbox,
+        F::UnsupportedMedia | F::RenderParse | F::IndexOutOfRange => {
+            T::NotifyBodyPreviewUnsupported
+        }
+        F::WorkerUnavailable | F::RestartRequired | F::UnsupportedPlatform => {
+            T::NotifyBodyPreviewUnavailable
+        }
+        _ => T::NotifyBodyPreviewFailed,
+    }
 }

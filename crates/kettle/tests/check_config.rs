@@ -79,6 +79,7 @@ fn check_config_rejects_fifo_at_resolved_default_path_without_blocking() {
     std::fs::create_dir(&config_dir).expect("config dir");
     let path = config_dir.join("config");
     let path_c = CString::new(path.as_os_str().as_bytes()).expect("path has no NUL");
+    // SAFETY: path_c is a NUL-terminated CString retained throughout mkfifo.
     assert_eq!(unsafe { libc::mkfifo(path_c.as_ptr(), 0o600) }, 0);
 
     let output = wait_bounded(
@@ -150,6 +151,7 @@ fn check_config_decodes_utf16_bom_at_resolved_default_path() {
 #[test]
 fn inaccessible_default_config_is_an_error() {
     use std::os::unix::fs::PermissionsExt as _;
+    // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } == 0 {
         return;
     }

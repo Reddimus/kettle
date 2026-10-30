@@ -339,6 +339,7 @@ impl CtlStream {
             #[cfg(any(target_os = "linux", target_os = "android"))]
             CtlStream::Unix(stream) => {
                 use std::os::fd::AsRawFd as _;
+                // SAFETY: ucred contains only integer fields, so an all-zero value is valid.
                 let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
                 let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
                 // SAFETY: `credentials` and `len` are valid writable buffers and
@@ -355,6 +356,7 @@ impl CtlStream {
                 if rc != 0 {
                     return Err(io::Error::last_os_error());
                 }
+                // SAFETY: geteuid has no preconditions.
                 Ok(credentials.uid == unsafe { libc::geteuid() })
             }
             #[cfg(any(
@@ -374,6 +376,7 @@ impl CtlStream {
                 if rc != 0 {
                     return Err(io::Error::last_os_error());
                 }
+                // SAFETY: geteuid has no preconditions.
                 Ok(uid == unsafe { libc::geteuid() })
             }
             #[cfg(all(
@@ -483,6 +486,7 @@ impl CtlStream {
                 const ERROR_PIPE_NOT_CONNECTED: u32 = 233;
                 const ERROR_INVALID_HANDLE: u32 = 6;
                 matches!(
+                    // SAFETY: GetLastError reads only the calling thread's error state.
                     unsafe { windows_sys::Win32::Foundation::GetLastError() },
                     ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED | ERROR_INVALID_HANDLE
                 )
@@ -700,6 +704,7 @@ mod windows_io {
             Some(code) if code == ERROR_IO_PENDING as i32 => {}
             _ => return Err(error),
         }
+        // SAFETY: event owns this live event handle throughout the wait.
         match unsafe { WaitForSingleObject(event.0, INFINITE) } {
             WAIT_OBJECT_0 => {
                 completed_result(handle, &mut overlapped, false)?;
@@ -806,6 +811,8 @@ mod windows_io {
                 // A completion can race this cancellation. Either way, wait
                 // for the kernel to stop touching OVERLAPPED before it drops.
                 // ERROR_NOT_FOUND means the operation already completed.
+                // SAFETY: file keeps handle open and overlapped identifies the pending
+                // operation; the completion drain below retains its buffers after cancellation.
                 let cancelled_ok = unsafe { CancelIoEx(handle, &overlapped) };
                 if cancelled_ok == 0 {
                     let error = io::Error::last_os_error();
@@ -825,6 +832,7 @@ mod windows_io {
                 ),
                 None => 50,
             };
+            // SAFETY: event owns this live event handle throughout the wait.
             match unsafe { WaitForSingleObject(event.0, wait_ms) } {
                 WAIT_OBJECT_0 => break Ok(()),
                 WAIT_TIMEOUT => continue,
@@ -843,6 +851,8 @@ mod windows_io {
             // block until the kernel has stopped referencing `overlapped`.
             // Returning before this drain would leave kernel I/O pointing at
             // stack storage that is about to be freed.
+            // SAFETY: file keeps handle open and overlapped stays allocated
+            // until the following blocking completion drain returns.
             unsafe { CancelIoEx(handle, &overlapped) };
             return completed_result(handle, &mut overlapped, true).or(Err(error));
         }
@@ -855,9 +865,9 @@ mod windows_io {
         wait: bool,
     ) -> io::Result<usize> {
         let mut transferred = 0u32;
-        // SAFETY: the handle and OVERLAPPED belong to the active operation;
-        // callers keep all referenced buffers alive through this call.
         let completed =
+            // SAFETY: the handle and OVERLAPPED belong to the active operation;
+            // callers keep all referenced buffers alive through this call.
             unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, i32::from(wait)) };
         if completed == 0 {
             Err(io::Error::last_os_error())
@@ -904,6 +914,8 @@ mod windows_io {
             |handle, overlapped| {
                 // Complete real I/O before letting the wait observe cancellation,
                 // reproducing an already-completed ERROR_IO_PENDING operation.
+                // SAFETY: handle and overlapped belong to run's active operation;
+                // the five-byte static buffer outlives the completion drain below.
                 let started = unsafe {
                     WriteFile(
                         handle,
@@ -919,12 +931,13 @@ mod windows_io {
                         Some(ERROR_IO_PENDING as i32)
                     );
                 }
-                // SAFETY: run owns this OVERLAPPED and the buffer is static.
                 assert_eq!(
+                    // SAFETY: run owns this OVERLAPPED and the buffer is static.
                     completed_result(handle, unsafe { &mut *overlapped }, true).unwrap(),
                     5
                 );
                 cancelled.store(true, Ordering::Release);
+                // SAFETY: SetLastError changes only the calling thread's error state.
                 unsafe { windows_sys::Win32::Foundation::SetLastError(ERROR_IO_PENDING) };
                 0
             },
@@ -1060,6 +1073,8 @@ mod windows_security {
             return Err(io::Error::last_os_error());
         }
         let sid_string = LocalString(sid_string);
+        // SAFETY: ConvertSidToStringSidW returned a NUL-terminated UTF-16
+        // allocation retained by sid_string for the entire scan.
         let len = unsafe {
             let mut len = 0usize;
             while *sid_string.0.add(len) != 0 {
@@ -1147,6 +1162,8 @@ mod windows_security {
         }
         let descriptor = LocalSecurityDescriptor(descriptor);
         let current = current_user_sid()?;
+        // SAFETY: owner points into the retained security descriptor and
+        // current retains its token SID buffer; null owner short-circuits.
         let matches = !owner.is_null() && unsafe { EqualSid(owner, current.sid) } != 0;
         drop(descriptor);
         Ok(matches)
@@ -1226,8 +1243,10 @@ mod imp {
 
     fn remove_owned_socket(directory: &File, name: &std::ffi::CStr) -> io::Result<()> {
         // Resolve cleanup through the validated directory even if its pathname changes.
-        // SAFETY: stat is valid output storage; directory and name live for the call.
+        // SAFETY: stat contains only integer fields, which admit all-zero bits.
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: directory stays open, name is NUL-terminated, and stat is
+        // an exclusive writable output buffer throughout fstatat.
         if unsafe {
             libc::fstatat(
                 directory.as_raw_fd(),
@@ -1245,6 +1264,7 @@ mod imp {
             };
         }
         if stat.st_mode & libc::S_IFMT != libc::S_IFSOCK
+            // SAFETY: geteuid has no preconditions.
             || stat.st_uid != unsafe { libc::geteuid() }
         {
             return Err(io::Error::new(
@@ -1433,9 +1453,9 @@ mod imp {
         pending: Cell<HANDLE>,
     }
 
-    // The raw HANDLE is owned solely by this listener and never shared, so it is
-    // sound to move the listener to the accept thread. (`Cell<HANDLE>` is not
-    // `Send` by default because `HANDLE` is a raw pointer.)
+    // SAFETY: pending is solely owned and Windows pipe handles have no thread
+    // affinity. Cell keeps this listener !Sync; accept transfers each connected
+    // handle to one File, and Drop closes only the pending instance.
     unsafe impl Send for CtlListener {}
 
     impl CtlListener {
@@ -1582,6 +1602,7 @@ pub fn connect(endpoint: &str) -> io::Result<CtlStream> {
 fn unix_peer_pid(fd: std::os::fd::RawFd) -> io::Result<libc::pid_t> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
+        // SAFETY: ucred contains only integer fields, so an all-zero value is valid.
         let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
         // SAFETY: `credentials` and `len` are valid writable buffers and the
@@ -1799,10 +1820,11 @@ pub(crate) mod tests {
         let (stream, mut peer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
         let stream = UnixStream::new(stream).expect("wrap stream");
         let bytes: libc::c_int = 4 * 1024;
-        // SAFETY: the stream owns this valid fd and `bytes` is a correctly
-        // sized SO_SNDBUF value. A small buffer forces each frame through
-        // multiple send/poll iterations, exposing interleaving without a gate.
+        // A small buffer forces each frame through multiple send/poll iterations,
+        // exposing interleaving without a gate.
         assert_eq!(
+            // SAFETY: stream owns this live fd and bytes is an initialized c_int;
+            // its address and size are valid for SO_SNDBUF throughout the call.
             unsafe {
                 libc::setsockopt(
                     stream.stream.as_raw_fd(),
@@ -2196,9 +2218,9 @@ pub(crate) mod tests {
 
                     let CtlStream::Unix(socket) = &conn;
                     let bytes: libc::c_int = 4 * 1024;
-                    // SAFETY: `socket` owns this valid fd and `bytes` is a
-                    // correctly sized SO_SNDBUF value.
                     assert_eq!(
+                        // SAFETY: `socket` owns this valid fd and `bytes` is a
+                        // correctly sized SO_SNDBUF value.
                         unsafe {
                             libc::setsockopt(
                                 socket.stream.as_raw_fd(),

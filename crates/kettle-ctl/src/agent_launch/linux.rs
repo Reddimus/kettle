@@ -234,6 +234,8 @@ fn private_group_of(owner: u32, gid: u32) -> bool {
     let mut group_buffer = vec![0 as libc::c_char; BUFFER];
     // SAFETY: zeroed POD records the reentrant lookups fill in.
     let mut user: libc::passwd = unsafe { std::mem::zeroed() };
+    // SAFETY: libc::group contains only integers and raw pointers, which
+    // permit an all-zero representation before getgrgid_r fills it.
     let mut group: libc::group = unsafe { std::mem::zeroed() };
     let mut user_found = std::ptr::null_mut();
     let mut group_found = std::ptr::null_mut();

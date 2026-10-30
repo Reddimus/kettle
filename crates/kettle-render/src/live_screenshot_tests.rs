@@ -40,7 +40,7 @@ fn cards_reach_the_screen_only_with_a_presented_frame() {
     let body = src
         .split("pub fn render_frame_with_status_and_pre_present")
         .nth(1)
-        .and_then(|rest| rest.split("\n    fn ").next())
+        .and_then(|rest| rest.split("\n    }\n").next())
         .expect("render_frame_with_status_and_pre_present body");
     let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let commit = "self.commit_painted_cards();";
@@ -87,7 +87,7 @@ fn live_capture_is_encoded_before_swapchain_acquisition() {
     let body = src
         .split("pub fn render_frame_with_status_and_pre_present")
         .nth(1)
-        .and_then(|rest| rest.split("\n    fn ").next())
+        .and_then(|rest| rest.split("\n    }\n").next())
         .expect("render_frame_with_status_and_pre_present body");
     let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let target = normalized
@@ -126,7 +126,7 @@ fn live_capture_is_encoded_before_swapchain_acquisition() {
     let creator = src
         .split("fn create_screenshot_target")
         .nth(1)
-        .and_then(|rest| rest.split("\n    fn ").next())
+        .and_then(|rest| rest.split("\n    }\n").next())
         .expect("screenshot target creator");
     let staging_reservation = creator
         .find("reserve_transient_gpu(staging_bytes)")
@@ -155,7 +155,7 @@ fn live_capture_keeps_the_advertised_6k_and_256_mib_bounds() {
     let creator = src
         .split("fn create_screenshot_target")
         .nth(1)
-        .and_then(|rest| rest.split("\n    fn ").next())
+        .and_then(|rest| rest.split("\n    }\n").next())
         .expect("screenshot target creator");
     assert!(
         creator.contains("reserve_transient_gpu(bytes)"),

@@ -72,6 +72,16 @@ pub(crate) fn capture(
     panes: &[PaneView<'_>],
     overlay: &Overlay,
 ) -> image::RgbaImage {
+    capture_with_tabs(renderer, cfg, panes, overlay, &TabBar::hidden())
+}
+
+fn capture_with_tabs(
+    renderer: &mut Renderer,
+    cfg: &Config,
+    panes: &[PaneView<'_>],
+    overlay: &Overlay,
+    tabs: &TabBar,
+) -> image::RgbaImage {
     // The capture goes through the process-wide persistence pool.
     let _pool = crate::live_screenshot_tests::shared_persistence_pool_guard();
     let dir = kettle_test_support::private_tempdir("kettle-headless-");
@@ -90,7 +100,7 @@ pub(crate) fn capture(
     let outcome = renderer
         .render_frame_with_status_and_pre_present(
             panes,
-            &TabBar::hidden(),
+            tabs,
             cfg,
             overlay,
             &StatusBar::hidden(),
@@ -1209,10 +1219,10 @@ fn blanks_at_the_end_of_a_row_are_not_shaped() {
 fn the_blink_phase_reaches_only_the_draw() {
     let src = crate::production_source();
     let build_pane = src
-        .split_once("    fn build_pane(")
+        .split_once("fn build_pane(")
         .expect("build_pane")
         .1
-        .split_once("\n    fn ")
+        .split_once("\n    }\n")
         .expect("end of build_pane")
         .0;
     assert!(
@@ -1227,10 +1237,10 @@ fn the_blink_phase_reaches_only_the_draw() {
     );
     assert!(src.contains("cursor_on: overlay.cursor_visible,"));
     let scene = src
-        .split_once("    fn encode_scene_pass(")
+        .split_once("fn encode_scene_pass(")
         .expect("encode_scene_pass")
         .1
-        .split_once("\n    fn ")
+        .split_once("\n    }\n")
         .expect("end of encode_scene_pass")
         .0;
     assert!(scene.contains("self.quads.draw_hiding(&mut pass, hidden_cursor);"));
@@ -3487,5 +3497,480 @@ fn disabled_wallpaper_discards_late_worker_frames() {
                 .is_none(),
             "disabled backgrounds retained decoded frames"
         );
+    }
+}
+
+#[test]
+fn regression_active_close_glyph_contrasts_with_its_painted_chip() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 160) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    cfg.theme = kettle_config::Theme::by_name("Builtin Dark");
+    cfg.background_type = kettle_config::BackgroundType::Starfield;
+    cfg.chrome_background = kettle_config::ChromeBackground::Black;
+    let mut tabs = TabBar::hidden();
+    tabs.height = 40.0;
+    tabs.segments.push(TabSeg {
+        idx: 0,
+        rect: (0.0, 0.0, 200.0, 40.0),
+        title_rect: (0.0, 0.0, 150.0, 40.0),
+        close: (150.0, 0.0, 40.0, 40.0),
+        title: "Tab".into(),
+        path: None,
+        active: true,
+        activity: TabActivity::Normal,
+    });
+    let shot = capture_with_tabs(&mut renderer, &cfg, &[], &focused(false), &tabs);
+    let background = shot.get_pixel(156, 6);
+    let bg = Rgb::new(background[0], background[1], background[2]);
+    let best = (155..185)
+        .flat_map(|x| (5..35).map(move |y| (x, y)))
+        .map(|(x, y)| {
+            let p = shot.get_pixel(x, y);
+            color::contrast_ratio(Rgb::new(p[0], p[1], p[2]), bg)
+        })
+        .fold(1.0_f64, f64::max);
+    assert!(best >= 2.9, "painted close glyph: {best:.3}:1");
+}
+
+#[test]
+fn regression_inactive_color_emoji_dim_grid() {
+    inactive_color_emoji_dim(TextRendererMode::Grid);
+}
+
+#[test]
+fn regression_inactive_color_emoji_dim_legacy() {
+    inactive_color_emoji_dim(TextRendererMode::Legacy);
+}
+
+fn inactive_color_emoji_dim(mode: TextRendererMode) {
+    let _serialized = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.text_renderer = mode;
+    // Per-pane titlebars sit over the first row and change color with focus.
+    cfg.show_titlebar = false;
+    cfg.theme.background = Rgb::new(0, 0, 0);
+    cfg.theme.foreground = Rgb::new(255, 255, 255);
+    cfg.unfocused_split_opacity = 1.0;
+    cfg.inactive_color_offset = 1.0;
+    cfg.inactive_bg_color_offset = 1.0;
+    let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 400, 160).unwrap() else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(20, 4, "\u{1f600}  M".as_bytes());
+    let other = snapshot_of(20, 4, b"");
+    let shot = |renderer: &mut Renderer, cfg: &Config, active| {
+        let mut view = pane(&snap, 200, 160);
+        view.focused = active;
+        let mut second = pane(&other, 200, 160);
+        second.id = 2;
+        second.rect.0 = 200.0;
+        second.terminal.0 = 200.0;
+        second.focused = !active;
+        capture(renderer, cfg, &[view, second], &focused(false))
+    };
+    let active = shot(&mut renderer, &cfg, true);
+    let color_font_available = {
+        let Renderer {
+            pane_buffers,
+            swash,
+            font_system,
+            ..
+        } = &mut renderer;
+        pane_buffers[0].layout_runs().any(|run| {
+            run.glyphs.iter().any(|glyph| {
+                swash
+                    .get_image_uncached(font_system, glyph.physical((0.0, 0.0), 1.0).cache_key)
+                    .is_some_and(|image| image.content == glyphon::cosmic_text::SwashContent::Color)
+            })
+        })
+    };
+    if !color_font_available {
+        eprintln!("no color emoji font on this host; skipped");
+        return;
+    }
+    let undimmed = shot(&mut renderer, &cfg, false);
+    let (ox, oy) = pane_grid_origin((0.0, 0.0, 200.0, 160.0), (cfg.padding_x, cfg.padding_y));
+    let (cw, ch) = (renderer.cell_w, renderer.cell_h);
+    let row = |image: &image::RgbaImage| {
+        image::imageops::crop_imm(
+            image,
+            ox as u32,
+            oy as u32,
+            (8.0 * cw).ceil() as u32,
+            ch.ceil() as u32,
+        )
+        .to_image()
+    };
+    assert_eq!(
+        row(&active),
+        row(&undimmed),
+        "zero dimming leaves the text unchanged"
+    );
+    let emoji_pixels: Vec<_> = (oy as u32..(oy + renderer.cell_h) as u32)
+        .flat_map(|y| (ox as u32..(ox + 2.0 * renderer.cell_w) as u32).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let p = active.get_pixel(x, y);
+            p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]) > 50
+        })
+        .collect();
+    assert!(emoji_pixels.len() > 10, "fixture must render a color emoji");
+    for offsets in [false, true] {
+        cfg.unfocused_split_opacity = if offsets { 1.0 } else { 0.1 };
+        cfg.inactive_color_offset = if offsets { 0.1 } else { 1.0 };
+        let inactive = shot(&mut renderer, &cfg, false);
+        let brightness = |image: &image::RgbaImage| -> u64 {
+            emoji_pixels
+                .iter()
+                .map(|&(x, y)| {
+                    image.get_pixel(x, y).0[..3]
+                        .iter()
+                        .map(|&v| u64::from(v))
+                        .sum::<u64>()
+                })
+                .sum()
+        };
+        assert!(
+            brightness(&inactive) < brightness(&active) * 3 / 4,
+            "{mode:?} offsets={offsets}: inactive color emoji must dim"
+        );
+        // Legacy's emoji advance can move the following M off the cell grid.
+        let text_x = (ox + 3.0 * cw) as u32;
+        let text_end = (ox + 8.0 * cw) as u32;
+        let best = (oy as u32..(oy + renderer.cell_h) as u32)
+            .flat_map(|y| (text_x..text_end).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let p = inactive.get_pixel(x, y);
+                color::contrast_ratio(Rgb::new(p[0], p[1], p[2]), cfg.theme.background)
+            })
+            .fold(1.0_f64, f64::max);
+        // Legacy keeps continuous glyph positions, so anti-aliasing can leave
+        // no pixel at full coverage; dimming text like a bitmap would fall far
+        // below either bound.
+        let floor = if mode == TextRendererMode::Grid {
+            4.5
+        } else {
+            4.3
+        };
+        assert!(best >= floor, "{mode:?} ordinary text: {best:.3}:1");
+        assert_eq!(
+            inactive,
+            shot(&mut renderer, &cfg, false),
+            "cached frame retains dimming"
+        );
+        assert_eq!(
+            row(&active),
+            row(&shot(&mut renderer, &cfg, true)),
+            "focus restores the color emoji"
+        );
+    }
+}
+
+#[test]
+fn regression_inactive_decorations_keep_the_glyph_contrast_floor() {
+    let _serialized = gpu_test_guard();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        let Some((probe, mut cfg)) = renderer(400, 160) else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+        drop(probe);
+        cfg.text_renderer = mode;
+        cfg.theme.background = Rgb::new(0, 0, 0);
+        cfg.theme.foreground = Rgb::new(255, 255, 255);
+        cfg.unfocused_split_opacity = 0.1;
+        let mut renderer = Renderer::headless_for_tests(&cfg, 400, 160)
+            .unwrap()
+            .unwrap();
+        let snap = snapshot_of(20, 4, b"\x1b[4;9mM");
+        let other = snapshot_of(20, 4, b"");
+        let mut view = pane(&snap, 200, 160);
+        view.focused = false;
+        let mut second = pane(&other, 200, 160);
+        second.id = 2;
+        second.rect.0 = 200.0;
+        second.terminal.0 = 200.0;
+        let shot = capture(&mut renderer, &cfg, &[view, second], &focused(false));
+        let x = (cfg.padding_x + renderer.cell_w * 0.5) as u32;
+        for (name, dy) in [
+            ("underline", renderer.cell_h - 2.0),
+            ("strikeout", renderer.cell_h * 0.5),
+        ] {
+            let y = (cfg.padding_y + dy) as u32;
+            let best = (y.saturating_sub(1)..=y + 1)
+                .map(|y| {
+                    let p = shot.get_pixel(x, y);
+                    color::contrast_ratio(Rgb::new(p[0], p[1], p[2]), cfg.theme.background)
+                })
+                .fold(1.0_f64, f64::max);
+            assert!(best >= 4.5, "{mode:?} {name}: {best:.3}:1");
+        }
+    }
+}
+
+#[test]
+fn regression_inactive_images_cards_and_preview_lanes_dim() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(1200, 600) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    cfg.theme.background = Rgb::new(0, 0, 0);
+    cfg.unfocused_split_opacity = 0.4;
+    let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+    let white = kettle_core::ImageData::new(16, 16, vec![255; 16 * 16 * 4]).unwrap();
+    cards.set_poster(nonce, Some(&white));
+    let images = [kettle_core::Placement {
+        abs_line: snap.history_origin + 6,
+        col: 30,
+        cell_cols: 4,
+        cell_rows: 1,
+        x_offset_cells: 0.0,
+        y_offset_cells: 0.0,
+        display_cols: 4.0,
+        display_rows: 1.0,
+        img: white.clone(),
+        source_rect: None,
+        source_crop: None,
+        id: None,
+        placement_id: 0,
+        kitty_params: None,
+        z: 0,
+    }];
+    let lane = MediaLanePanel {
+        focused_control: None,
+        pin_label: None,
+        play: None,
+        play_feedback: None,
+        sound: None,
+        frame: None,
+        scrubber: None,
+        pane: 1,
+        rect: (0.0, 200.0, 1200.0, 300.0),
+        collapsed: false,
+        title: "Preview".into(),
+        detail: String::new(),
+        sender: MediaLaneSender::default(),
+        hint: String::new(),
+        position: (1, 1),
+        page: None,
+        document: false,
+        image: Some(white),
+        status: String::new(),
+        canvas: MediaCanvas::Theme,
+        open_outside: false,
+        mode: MediaLaneMode::Rendered,
+        source: None,
+        copy: false,
+        reload: false,
+        notice: None,
+        view: MediaViewport::FIT,
+        tile: None,
+        edge: None,
+    };
+    let geometry = media_lane_geometry(
+        &lane,
+        (renderer.cell_w, renderer.cell_h),
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.metrics.line_height,
+        ),
+    )
+    .unwrap();
+    let (lx, ly, lw, lh) = geometry.image_area;
+    let lane_pixel = ((lx + lw * 0.5) as u32, (ly + lh * 0.5) as u32);
+    let overlay = Overlay {
+        media_lanes: vec![lane],
+        ..focused(false)
+    };
+    let other = snapshot_of(20, 4, b"");
+    let shot = |renderer: &mut Renderer, cfg: &Config, active| {
+        let mut view = pane(&snap, 1200, 500);
+        view.terminal.3 = 200.0;
+        view.inline_cards = Some(&cards);
+        view.images = &images;
+        view.focused = active;
+        let mut second = pane(&other, 1200, 100);
+        second.id = 2;
+        second.rect.1 = 500.0;
+        second.terminal.1 = 500.0;
+        second.focused = !active;
+        capture(renderer, cfg, &[view, second], &overlay)
+    };
+    let active = shot(&mut renderer, &cfg, true);
+    let card = renderer.painted_cards()[0].rect;
+    let samples = [
+        (
+            "inline image",
+            (
+                (cfg.padding_x + 32.0 * renderer.cell_w) as u32,
+                (cfg.padding_y + 6.5 * renderer.cell_h) as u32,
+            ),
+        ),
+        (
+            "card poster",
+            (
+                (card[0] + card[2] * 0.5) as u32,
+                (card[1] + card[3] * 0.5) as u32,
+            ),
+        ),
+        ("preview lane", lane_pixel),
+    ];
+    let mut failures = Vec::new();
+    for offsets in [false, true] {
+        cfg.unfocused_split_opacity = if offsets { 1.0 } else { 0.4 };
+        cfg.inactive_color_offset = if offsets { 0.4 } else { 1.0 };
+        let inactive = shot(&mut renderer, &cfg, false);
+        for (name, (x, y)) in samples {
+            let bright = active.get_pixel(x, y)[0];
+            let dim = inactive.get_pixel(x, y)[0];
+            assert!(bright > 220, "fixture {name} pixel ({x},{y}) was {bright}");
+            if dim >= bright - 20 {
+                failures.push(format!("{name} offsets={offsets}: {bright} -> {dim}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("; "));
+}
+
+#[test]
+fn ime_preedit_single_glyph_survives_solid_block_cursor() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    cfg.cursor_blink = false;
+    cfg.theme.cursor = cfg.theme.foreground;
+    let snap = snapshot_of(20, 4, b"W\r\x1b[2 q");
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        cfg.text_renderer = mode;
+        let mut overlay = focused(true);
+        overlay.ime_preedit = Some(ImePreedit {
+            text: "a".into(),
+            row: 0,
+            col: 0,
+        });
+        let glyph = capture(&mut renderer, &cfg, &[pane(&snap, 320, 120)], &overlay);
+        overlay.ime_preedit.as_mut().unwrap().text = " ".into();
+        let blank = capture(&mut renderer, &cfg, &[pane(&snap, 320, 120)], &overlay);
+        let cell = |image: &image::RgbaImage| {
+            image::imageops::crop_imm(
+                image,
+                cfg.padding_x.ceil() as u32,
+                cfg.padding_y.ceil() as u32,
+                renderer.cell_w.floor() as u32,
+                renderer.cell_h.floor() as u32,
+            )
+            .to_image()
+        };
+        assert!(
+            cell(&glyph) != cell(&blank),
+            "composition glyph hidden in {mode:?}"
+        );
+        assert!(
+            cursor_pixels(&blank, &cfg, &snap) > 0,
+            "composition caret must remain visible in {mode:?}"
+        );
+    }
+}
+
+#[test]
+fn ime_preedit_narrow_cells_cover_the_shaped_text() {
+    let _serialized = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.cell_width = 0.5;
+    let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 320, 120).unwrap() else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let first = snapshot_of(40, 4, b"WWWWWWWWWWWWWWWW\r");
+    let second = snapshot_of(40, 4, b"iiiiiiiiiiiiiiii\r");
+    let overlay = Overlay {
+        ime_preedit: Some(ImePreedit {
+            text: "abcd".into(),
+            row: 0,
+            col: 0,
+        }),
+        ..focused(false)
+    };
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        cfg.text_renderer = mode;
+        let a = capture(&mut renderer, &cfg, &[pane(&first, 320, 120)], &overlay);
+        let b = capture(&mut renderer, &cfg, &[pane(&second, 320, 120)], &overlay);
+        let shaped_width = renderer.ime_buffer.layout_runs().next().unwrap().line_w;
+        assert!(shaped_width > 4.0 * renderer.cell_w);
+        let x0 = cfg.padding_x.ceil() as u32;
+        let y0 = cfg.padding_y.ceil() as u32;
+        let x1 = (cfg.padding_x + shaped_width).floor() as u32;
+        let y1 = (cfg.padding_y + renderer.cell_h).floor() as u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                assert_eq!(
+                    a.get_pixel(x, y),
+                    b.get_pixel(x, y),
+                    "terminal text leaked through shaped IME extent at {x},{y} in {mode:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ime_preedit_screenshot_hides_existing_glyphs_and_retains_cursor() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    cfg.padding_x = 8.0;
+    cfg.padding_y = 8.0;
+    let first = snapshot_of(20, 4, b"WWWW\r");
+    let second = snapshot_of(20, 4, b"iiii\r");
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        cfg.text_renderer = mode;
+        for cursor in [false, true] {
+            let mut overlay = focused(cursor);
+            overlay.ime_preedit = Some(ImePreedit {
+                text: "abcd".into(),
+                row: 0,
+                col: 0,
+            });
+            let a = capture(&mut renderer, &cfg, &[pane(&first, 320, 120)], &overlay);
+            let b = capture(&mut renderer, &cfg, &[pane(&second, 320, 120)], &overlay);
+            let x0 = cfg.padding_x.ceil() as u32;
+            let y0 = cfg.padding_y.ceil() as u32;
+            let x1 = (cfg.padding_x + 4.0 * renderer.cell_w).floor() as u32;
+            let y1 = (cfg.padding_y + renderer.cell_h).floor() as u32;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    assert_eq!(
+                        a.get_pixel(x, y),
+                        b.get_pixel(x, y),
+                        "underlying text leaked through IME at {x},{y} in {mode:?}"
+                    );
+                }
+            }
+            assert!(
+                distinct_colors(
+                    &b,
+                    [x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32]
+                ) > 2,
+                "screenshot must include composition text"
+            );
+            if cursor {
+                assert!(
+                    cursor_pixels(&b, &cfg, &second) > 0,
+                    "cursor must remain visible over preedit"
+                );
+            }
+            overlay.ime_preedit = None;
+            let closed = capture(&mut renderer, &cfg, &[pane(&second, 320, 120)], &overlay);
+            assert_ne!(b, closed, "closing composition must repaint its row");
+            assert!(!renderer.ime_prepared);
+        }
     }
 }

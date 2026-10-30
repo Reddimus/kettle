@@ -122,6 +122,33 @@ fn history_origin_advances_only_when_rows_are_irreversibly_removed() {
     assert_eq!(grid.history_origin(), 3);
 }
 
+#[test]
+fn height_growth_preserves_retained_row_identifiers() {
+    for capacity in [0, 1, 2] {
+        let mut grid = Grid::<Cell>::new(2, 1, capacity);
+        grid[Line(0)][Column(0)] = cell('a');
+        grid[Line(1)][Column(0)] = cell('b');
+        if capacity != 0 {
+            grid.scroll_up(&(Line(0)..Line(2)), 1);
+        }
+        let anchors = [('a', 0u64), ('b', 1u64)];
+
+        grid.resize(true, 6, 1);
+
+        assert_eq!(grid.history_origin(), 0, "capacity {capacity}");
+        for (content, id) in anchors {
+            let line = (id - grid.history_origin()) as i32 - grid.history_size() as i32;
+            assert_eq!(grid[Line(line)][Column(0)].c, content);
+        }
+        grid.scroll_up(&(Line(0)..Line(6)), capacity + 1);
+        assert_eq!(
+            grid.history_origin(),
+            1,
+            "real eviction, capacity {capacity}"
+        );
+    }
+}
+
 /// Reflow is the other way rows leave the document for good. Narrowing wraps
 /// long lines into more rows than the history can hold, and the excess is
 /// dropped from the OLDEST end — so the origin has to move with it, exactly as

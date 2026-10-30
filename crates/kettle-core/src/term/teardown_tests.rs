@@ -108,6 +108,8 @@ fn animation_graphics_ack_roundtrip(synchronized: bool) {
     )
     .expect("native animation acknowledgement PTY");
     let child_pid = terminal.child_pid().expect("owned Unix animation child");
+    // SAFETY: getpgid only queries the integer PID of the terminal's child and accesses no
+    // pointers.
     let child_group = unsafe { libc::getpgid(child_pid as libc::pid_t) };
     assert!(child_group > 0);
     eprintln!("ANIMATION_ACK_PTY_OWNED_CHILD pid={child_pid} pgid={child_group}");
@@ -694,6 +696,8 @@ fn ordinary_graphics_ack_roundtrip(synchronized: bool) {
     let child_pid = terminal
         .child_pid()
         .expect("owned Unix acknowledgement child");
+    // SAFETY: getpgid only queries the integer PID of the terminal's child and accesses no
+    // pointers.
     let child_group = unsafe { libc::getpgid(child_pid as libc::pid_t) };
     assert!(child_group > 0);
     eprintln!("ACK_PTY_OWNED_CHILD pid={child_pid} pgid={child_group}");
@@ -840,10 +844,10 @@ fn selected_animation_frame_reaches_virtual_and_relative_tiles() {
             assert_eq!(
                 terminal.placeholder_tiles()[0].source_rect,
                 Some(ImageSourceRect {
-                    x: 0,
-                    y: 0,
-                    width: 1,
-                    height: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 1.0,
                 })
             );
         }
@@ -2123,6 +2127,8 @@ fn simultaneous_kqueue_output_is_read_before_the_retained_slave_is_dropped() {
     let mut master = -1;
     let mut slave = -1;
     assert_eq!(
+        // SAFETY: master and slave are writable descriptor outputs; null name, termios and
+        // winsize request defaults.
         unsafe {
             libc::openpty(
                 &mut master,
@@ -2137,10 +2143,15 @@ fn simultaneous_kqueue_output_is_read_before_the_retained_slave_is_dropped() {
         io::Error::last_os_error()
     );
     let mut gate = [-1; 2];
+    // SAFETY: gate has writable space for the two descriptors returned by pipe.
     assert_eq!(unsafe { libc::pipe(gate.as_mut_ptr()) }, 0);
+    // SAFETY: The child branch calls only async-signal-safe libc operations and _exit before
+    // any Rust cleanup.
     let child_pid = unsafe { libc::fork() };
     assert!(child_pid >= 0, "fork: {}", io::Error::last_os_error());
     if child_pid == 0 {
+        // SAFETY: This fork child owns its inherited fd copies; read/write use valid one/four-byte
+        // buffers, and only async-signal-safe calls run before _exit skips Rust destructors.
         unsafe {
             libc::close(master);
             libc::close(gate[1]);
@@ -2152,12 +2163,20 @@ fn simultaneous_kqueue_output_is_read_before_the_retained_slave_is_dropped() {
     }
     // SAFETY: the parent owns each descriptor returned above exactly once.
     let mut master = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(master) });
+    // SAFETY: openpty returned this new slave descriptor; ownership is transferred exactly once
+    // in the parent.
     let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+    // SAFETY: pipe returned this new read descriptor; ownership is transferred exactly once in
+    // the parent.
     let gate_read = unsafe { OwnedFd::from_raw_fd(gate[0]) };
+    // SAFETY: pipe returned this new write descriptor; ownership is transferred exactly once in
+    // the parent.
     let gate_write = unsafe { OwnedFd::from_raw_fd(gate[1]) };
     drop(gate_read);
     let mut watcher = UnixPtyWatcher::new(child_pid as u32, master.as_raw_fd());
     assert_eq!(
+        // SAFETY: gate_write owns the live descriptor and the byte literal remains readable for
+        // the one-byte write.
         unsafe { libc::write(gate_write.as_raw_fd(), b"x".as_ptr().cast(), 1) },
         1
     );
@@ -2184,6 +2203,8 @@ fn simultaneous_kqueue_output_is_read_before_the_retained_slave_is_dropped() {
     drop(slave);
     let mut status = 0;
     assert_eq!(
+        // SAFETY: child_pid is this test's unreaped fork child and status is writable c_int
+        // storage.
         unsafe { libc::waitpid(child_pid, &mut status, 0) },
         child_pid
     );
@@ -2240,6 +2261,8 @@ fn leaked_slave_cannot_hold_the_terminal_exit_event_forever() {
     impl Drop for KillOnDrop {
         fn drop(&mut self) {
             if let Some(pid) = self.0 {
+                // SAFETY: kill takes only integer PID/group and signal arguments; pid
+                // identifies the test fixture descendant.
                 unsafe {
                     libc::kill(-pid, libc::SIGKILL);
                     libc::kill(pid, libc::SIGKILL);

@@ -118,7 +118,7 @@ fn decoder() -> Option<PathBuf> {
 /// its own, its environment empty but for the decoder it may use.
 #[cfg(unix)]
 fn spawn(path: &Path) -> std::io::Result<SpawnedWorker> {
-    if children_reap_themselves()? {
+    if crate::exec::children_reap_themselves()? {
         return Err(std::io::Error::other(
             "SIGCHLD is ignored, so a worker could be reaped before its group is killed",
         ));
@@ -148,22 +148,6 @@ fn spawn(path: &Path) -> std::io::Result<SpawnedWorker> {
         stdin: Box::new(stdin),
         stdout: Box::new(stdout),
     })
-}
-
-/// Whether exited children reap themselves here (SIGCHLD ignored, or
-/// `SA_NOCLDWAIT`), as a parent can arrange before starting Kettle. A worker
-/// could then vanish and its process group id be reused before Kettle sees it
-/// exit, so no worker is started.
-#[cfg(unix)]
-fn children_reap_themselves() -> std::io::Result<bool> {
-    // SAFETY: an all-zero sigaction is a valid value for the query to fill,
-    // and a null new action changes nothing.
-    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
-    // SAFETY: as above.
-    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut current) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(current.sa_sigaction == libc::SIG_IGN || current.sa_flags & libc::SA_NOCLDWAIT != 0)
 }
 
 /// `F_SETNOSIGPIPE` from `<sys/fcntl.h>`, which the `libc` crate lacks for

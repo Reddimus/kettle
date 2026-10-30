@@ -26,6 +26,8 @@ use std::{
 	time::{Duration, Instant},
 };
 
+use crate::platform::x11_incr::IncrRead;
+
 use log::{error, trace, warn};
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
 use x11rb::{
@@ -98,14 +100,6 @@ thread_local! {
 
 // Some clipboard items, like images, may take a very long time to produce a
 // `SelectionNotify`. Multiple seconds long.
-/// An INCR transfer being read: the segments of the requested type, and
-/// whether any segment had another.
-#[derive(Default)]
-struct IncrRead {
-	data: Vec<u8>,
-	mismatch: bool,
-}
-
 const LONG_TIMEOUT_DUR: Duration = Duration::from_millis(4000);
 const SHORT_TIMEOUT_DUR: Duration = Duration::from_millis(10);
 
@@ -593,18 +587,8 @@ impl Inner {
 			.reply()
 			.map_err(into_unknown)?;
 
-		// Every segment, the empty last one included, carries the
-		// transfer's type (ICCCM 2.7.2).
-		if reply.type_ != target_format {
-			incr.mismatch = true;
-		}
-		// log::trace!("Received segment. value_len {}", reply.value_len,);
-		if reply.value_len == 0 {
-			// This indicates that all the data has been sent.
+		if incr.push(reply.type_ == target_format, reply.value, Instant::now())? {
 			return Ok(true);
-		}
-		if !incr.mismatch {
-			incr.data.extend(reply.value);
 		}
 
 		// Let's reset our timeout, since we received a valid chunk.

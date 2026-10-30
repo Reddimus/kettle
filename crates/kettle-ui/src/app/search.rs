@@ -1790,3 +1790,638 @@ impl App {
         true
     }
 }
+
+/// Terminator parity (`plugins/auto_theme.py`):
+/// pick the theme to switch to on `Action::ToggleLightDark`.
+///
+/// Rules (case-insensitive):
+///   - both `light` and `dark` set:
+///       - current matches `dark`  → return `light`
+///       - current matches `light` → return `dark`
+///       - otherwise               → return `dark` (default landing)
+///   - only one set: return that one (so a half-configured user
+///     still gets a one-way switch).
+///   - neither set: return `None`; dispatch logs a warn.
+///
+/// Pure — unit-testable without constructing a Config or App.
+/// Bridge from kettle-config's `SearchCaseSensitivity`
+/// to kettle-core's `CaseSensitivity`. Kept as a pure helper so
+/// the two crates don't grow a circular trait dependency.
+fn map_case_sensitivity(m: kettle_config::SearchCaseSensitivity) -> kettle_core::CaseSensitivity {
+    match m {
+        kettle_config::SearchCaseSensitivity::Smart => kettle_core::CaseSensitivity::Smart,
+        kettle_config::SearchCaseSensitivity::Always => kettle_core::CaseSensitivity::Always,
+        kettle_config::SearchCaseSensitivity::Never => kettle_core::CaseSensitivity::Never,
+    }
+}
+
+fn search_compile_error_status(
+    error: kettle_core::SearchCompileError,
+) -> kettle_render::SearchStatus {
+    match error {
+        kettle_core::SearchCompileError::QueryTooLong { .. } => {
+            kettle_render::SearchStatus::TooLong
+        }
+        kettle_core::SearchCompileError::InvalidRegex => kettle_render::SearchStatus::Invalid,
+        kettle_core::SearchCompileError::PatternTooComplex => {
+            kettle_render::SearchStatus::TooComplex
+        }
+    }
+}
+
+pub(super) fn map_search_case_mode(
+    mode: kettle_config::SearchCaseSensitivity,
+) -> kettle_render::SearchCaseMode {
+    match mode {
+        kettle_config::SearchCaseSensitivity::Smart => kettle_render::SearchCaseMode::Smart,
+        kettle_config::SearchCaseSensitivity::Always => kettle_render::SearchCaseMode::Match,
+        kettle_config::SearchCaseSensitivity::Never => kettle_render::SearchCaseMode::Ignore,
+    }
+}
+
+pub(super) fn effective_search_status(
+    search: &crate::search_input::SearchState,
+) -> kettle_render::SearchStatus {
+    if search.visible_truncated
+        && matches!(
+            search.status,
+            kettle_render::SearchStatus::Match | kettle_render::SearchStatus::Wrapped
+        )
+    {
+        kettle_render::SearchStatus::Limited
+    } else {
+        search.status
+    }
+}
+
+/// The status the bar paints. Automation reads `effective_search_status`,
+/// which reports `Searching` at once; the bar waits until a scan is actually
+/// slow (see `SearchState::searching_label_at`).
+pub(super) fn displayed_search_status(
+    search: &crate::search_input::SearchState,
+    now: std::time::Instant,
+) -> kettle_render::SearchStatus {
+    search.painted_status(effective_search_status(search), now)
+}
+
+pub(super) fn should_start_nearby_search(search: &crate::search_input::SearchState) -> bool {
+    search.typing_scanned_revision != Some(search.revision)
+        && !search.quiet_retry_pending
+        && search.background.is_none()
+}
+
+/// Synchronize a live Search surface after a global config reload.
+///
+/// Returns true when the scan direction changed and the caller must derive a fresh viewport
+/// anchor after resize. Closed windows consume these values the next time Search opens.
+pub(super) fn sync_reloaded_search_preferences(
+    search: &mut crate::search_input::SearchState,
+    wrap: bool,
+    case_mode: kettle_config::SearchCaseSensitivity,
+    invert: bool,
+    now: std::time::Instant,
+) -> bool {
+    if !search.open {
+        return false;
+    }
+    let wrap_changed = search.wrap != wrap;
+    let case_changed = search.case_mode != case_mode;
+    let direction_changed = search.invert != invert;
+    search.wrap = wrap;
+    search.case_mode = case_mode;
+    search.invert = invert;
+
+    if case_changed {
+        search.note_edit(now);
+    } else if wrap_changed || direction_changed {
+        search.restart_navigation(now);
+    }
+    direction_changed
+}
+
+pub(super) fn search_viewport_anchor(
+    display_offset: usize,
+    screen_lines: usize,
+    last_column: usize,
+    direction: kettle_core::SearchDirection,
+) -> kettle_core::SearchPoint {
+    let offset = i32::try_from(display_offset).unwrap_or(i32::MAX);
+    match direction {
+        kettle_core::SearchDirection::Forward => kettle_core::SearchPoint::new(-offset, 0),
+        kettle_core::SearchDirection::Reverse => kettle_core::SearchPoint::new(
+            i32::try_from(screen_lines.saturating_sub(1))
+                .unwrap_or(i32::MAX)
+                .saturating_sub(offset),
+            last_column,
+        ),
+    }
+}
+
+/// Wrapping changes only where the next step goes, so the match on screen
+/// stays, and a step status that described the old setting (`End reached`,
+/// `Wrapped`) is cleared. With no match, search again, so turning wrap on
+/// after a typing `No match` finds one past the end.
+pub(super) fn search_wrap_toggled(
+    search: &mut crate::search_input::SearchState,
+    now: std::time::Instant,
+) {
+    // A step that has already wrapped past the end would land on a match the
+    // user just asked not to reach. Stop it at the edge instead, with the
+    // status the step would have ended on without wrap.
+    if !search.wrap
+        && let Some(job) = search
+            .background
+            .take_if(|job| job.navigation && job.wrapped)
+    {
+        let unwrapped = crate::search_input::BackgroundSearch {
+            wrapped: false,
+            ..job
+        };
+        let (status, retry_at) = finished_background_search(&unwrapped, now);
+        search.status = status;
+        search.unlimited_retry_at = retry_at;
+        return;
+    }
+    if search.focused.is_none() {
+        search.restart_navigation(now);
+    } else if matches!(
+        search.status,
+        kettle_render::SearchStatus::Start
+            | kettle_render::SearchStatus::End
+            | kettle_render::SearchStatus::Wrapped
+    ) {
+        search.status = kettle_render::SearchStatus::Match;
+    }
+}
+
+/// Where a search restarted by a toggle begins. The match on screen, from its
+/// start (its end when `invert`), so a search that still finds it keeps it.
+/// A match scrolled out of `viewport` (display offset, screen lines, last
+/// column) is not where the user is looking, so the search starts from the
+/// viewport's edge in the current direction instead.
+pub(super) fn search_anchor_for(
+    focused: Option<kettle_core::SearchSpan>,
+    invert: bool,
+    viewport: Option<(usize, usize, usize)>,
+) -> Option<kettle_core::SearchPoint> {
+    let on_screen = |span: &kettle_core::SearchSpan| {
+        viewport.is_none_or(|(display_offset, screen_lines, _)| {
+            let top = -i32::try_from(display_offset).unwrap_or(i32::MAX);
+            let bottom = top.saturating_add(i32::try_from(screen_lines).unwrap_or(i32::MAX)) - 1;
+            span.end.line >= top && span.start.line <= bottom
+        })
+    };
+    if let Some(span) = focused.filter(on_screen) {
+        return Some(if invert { span.end } else { span.start });
+    }
+    let direction = if invert {
+        kettle_core::SearchDirection::Reverse
+    } else {
+        kettle_core::SearchDirection::Forward
+    };
+    viewport.map(|(display_offset, screen_lines, last_column)| {
+        search_viewport_anchor(display_offset, screen_lines, last_column, direction)
+    })
+}
+
+fn search_point_after(
+    point: kettle_core::SearchPoint,
+    direction: kettle_core::SearchDirection,
+    top_line: i32,
+    bottom_line: i32,
+    last_column: usize,
+) -> Option<kettle_core::SearchPoint> {
+    match direction {
+        kettle_core::SearchDirection::Forward if point.column < last_column => {
+            Some(kettle_core::SearchPoint::new(point.line, point.column + 1))
+        }
+        kettle_core::SearchDirection::Forward if point.line < bottom_line => {
+            Some(kettle_core::SearchPoint::new(point.line + 1, 0))
+        }
+        kettle_core::SearchDirection::Reverse if point.column > 0 => {
+            Some(kettle_core::SearchPoint::new(point.line, point.column - 1))
+        }
+        kettle_core::SearchDirection::Reverse if point.line > top_line => {
+            Some(kettle_core::SearchPoint::new(point.line - 1, last_column))
+        }
+        _ => None,
+    }
+}
+
+fn clamp_search_point(
+    point: kettle_core::SearchPoint,
+    top_line: i32,
+    bottom_line: i32,
+    last_column: usize,
+) -> kettle_core::SearchPoint {
+    kettle_core::SearchPoint::new(
+        point.line.clamp(top_line, bottom_line),
+        point.column.min(last_column),
+    )
+}
+
+pub(super) fn continue_background_after_output(
+    job: &mut crate::search_input::BackgroundSearch,
+    token: kettle_core::SearchScanToken,
+    top_line: i32,
+    bottom_line: i32,
+    last_column: usize,
+) {
+    job.token = token;
+    job.output_drifted = true;
+    job.cursor = clamp_search_point(job.cursor, top_line, bottom_line, last_column);
+    job.wrap_anchor = clamp_search_point(job.wrap_anchor, top_line, bottom_line, last_column);
+    job.edge = if job.wrapped {
+        clamp_search_point(job.edge, top_line, bottom_line, last_column)
+    } else {
+        match job.direction {
+            kettle_core::SearchDirection::Forward => {
+                kettle_core::SearchPoint::new(bottom_line, last_column)
+            }
+            kettle_core::SearchDirection::Reverse => kettle_core::SearchPoint::new(top_line, 0),
+        }
+    };
+}
+
+fn bounded_search_edge(
+    origin: kettle_core::SearchPoint,
+    direction: kettle_core::SearchDirection,
+    top_line: i32,
+    bottom_line: i32,
+    last_column: usize,
+    max_lines: usize,
+) -> kettle_core::SearchPoint {
+    let lines = i32::try_from(max_lines).unwrap_or(i32::MAX);
+    match direction {
+        kettle_core::SearchDirection::Forward => kettle_core::SearchPoint::new(
+            origin.line.saturating_add(lines).min(bottom_line),
+            last_column,
+        ),
+        kettle_core::SearchDirection::Reverse => {
+            kettle_core::SearchPoint::new(origin.line.saturating_sub(lines).max(top_line), 0)
+        }
+    }
+}
+
+fn wrapped_background_search(
+    token: kettle_core::SearchScanToken,
+    direction: kettle_core::SearchDirection,
+    anchor: kettle_core::SearchPoint,
+    grid_bounds: (i32, i32, usize),
+    navigation: bool,
+    had_focus: bool,
+    output_drifted: bool,
+) -> Option<crate::search_input::BackgroundSearch> {
+    let (top_line, bottom_line, last_column) = grid_bounds;
+    let (cursor, edge) = match direction {
+        kettle_core::SearchDirection::Forward => (
+            kettle_core::SearchPoint::new(top_line, 0),
+            search_point_after(
+                anchor,
+                kettle_core::SearchDirection::Reverse,
+                top_line,
+                bottom_line,
+                last_column,
+            )?,
+        ),
+        kettle_core::SearchDirection::Reverse => (
+            kettle_core::SearchPoint::new(bottom_line, last_column),
+            search_point_after(
+                anchor,
+                kettle_core::SearchDirection::Forward,
+                top_line,
+                bottom_line,
+                last_column,
+            )?,
+        ),
+    };
+    let ordered = match direction {
+        kettle_core::SearchDirection::Forward => cursor <= edge,
+        kettle_core::SearchDirection::Reverse => cursor >= edge,
+    };
+    ordered.then_some(crate::search_input::BackgroundSearch {
+        token,
+        direction,
+        cursor,
+        edge,
+        wrap_anchor: anchor,
+        wrapped: true,
+        nearby: false,
+        navigation,
+        had_focus,
+        output_drifted,
+    })
+}
+
+fn exhausted_search_status(
+    job: &crate::search_input::BackgroundSearch,
+) -> kettle_render::SearchStatus {
+    if job.navigation && job.had_focus && !job.wrapped {
+        match job.direction {
+            kettle_core::SearchDirection::Forward => kettle_render::SearchStatus::End,
+            kettle_core::SearchDirection::Reverse => kettle_render::SearchStatus::Start,
+        }
+    } else {
+        kettle_render::SearchStatus::NoMatch
+    }
+}
+
+pub(super) fn should_retry_output_drift(job: &crate::search_input::BackgroundSearch) -> bool {
+    job.output_drifted && !job.navigation
+}
+
+pub(super) fn prepare_initial_search_retry_after_output(
+    search: &mut crate::search_input::SearchState,
+    job: &crate::search_input::BackgroundSearch,
+    anchor: kettle_core::SearchPoint,
+) -> bool {
+    if job.nearby {
+        search.typing_scanned_revision = Some(search.revision);
+        if !should_retry_output_drift(job) {
+            search.unlimited_retry_at = None;
+        }
+    }
+    if !should_retry_output_drift(job) {
+        return false;
+    }
+    search.anchor = Some(anchor);
+    search.quiet_retry_pending = true;
+    true
+}
+
+pub(super) fn activate_quiet_search_retry(search: &mut crate::search_input::SearchState) -> bool {
+    if !search.quiet_retry_pending {
+        return false;
+    }
+    search.quiet_retry_pending = false;
+    search.typing_scanned_revision = None;
+    // The nearby scan runs first. If it misses, the full scan follows on the
+    // next turn instead of leaving the search at `Searching` with nothing
+    // scheduled.
+    search.unlimited_retry_at = Some(std::time::Instant::now());
+    search.set_status_at(
+        kettle_render::SearchStatus::Searching,
+        std::time::Instant::now(),
+    );
+    true
+}
+
+pub(super) fn cancel_deferred_search_retry(search: &mut crate::search_input::SearchState) {
+    search.quiet_retry_pending = false;
+    search.unlimited_retry_at = None;
+}
+
+pub(super) fn finished_background_search(
+    job: &crate::search_input::BackgroundSearch,
+    now: std::time::Instant,
+) -> (kettle_render::SearchStatus, Option<std::time::Instant>) {
+    if job.output_drifted && !should_retry_output_drift(job) {
+        // Output destroyed the stable ordering required by an explicit Previous/Next request.
+        // Re-running the default-direction typing search would verify a different operation, so
+        // keep the honest bounded result and let the user's next navigation start a fresh job.
+        (kettle_render::SearchStatus::Limited, None)
+    } else if should_retry_output_drift(job) {
+        // The retained cursor guarantees progress under a continuously-writing PTY, but rows may
+        // have shifted between chunks. Never turn that best-effort pass into a definitive miss;
+        // once output is quiet, restart the initial search from a fresh viewport anchor.
+        (
+            kettle_render::SearchStatus::Searching,
+            Some(now + std::time::Duration::from_millis(500)),
+        )
+    } else {
+        (exhausted_search_status(job), None)
+    }
+}
+
+/// Editor text and toggles that an open search bar brings along when it
+/// follows focus to another pane (`App::retarget_search_to_focus`). A fresh
+/// open fills it from the pane's remembered query and the configured defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SearchCarryOver {
+    pub(super) query: String,
+    pub(super) wrap: bool,
+    pub(super) case_mode: kettle_config::SearchCaseSensitivity,
+    pub(super) invert: bool,
+    pub(super) focused_control: kettle_render::SearchControl,
+}
+
+/// The pane an open bar must move to, if any: `None` while the bar already
+/// targets the focused pane or nothing is focused.
+pub(super) fn search_retarget(target_pane: Option<u64>, focus: Option<u64>) -> Option<u64> {
+    focus.filter(|pane| Some(*pane) != target_pane)
+}
+
+/// The bar's state for `pane_id`, scanning from `display_offset`. A non-empty
+/// query starts searching immediately; the anchor is derived by the caller
+/// once the lane's resize has settled.
+pub(super) fn fresh_search_state(
+    pane_id: u64,
+    carried: SearchCarryOver,
+    display_offset: usize,
+    now: std::time::Instant,
+) -> crate::search_input::SearchState {
+    let mut search = crate::search_input::SearchState {
+        open: true,
+        target_pane: Some(pane_id),
+        editor: crate::search_input::SearchEditor::from_text(
+            carried.query,
+            kettle_core::MAX_SEARCH_QUERY_BYTES,
+        ),
+        wrap: carried.wrap,
+        case_mode: carried.case_mode,
+        invert: carried.invert,
+        focused_control: carried.focused_control,
+        anchor: None,
+        pre_open_display_offset: Some(display_offset),
+        ..crate::search_input::SearchState::default()
+    };
+    if !search.query().is_empty() {
+        search.note_edit(now);
+    }
+    search
+}
+
+/// Whether the search bar uses a key chord itself, on macOS or elsewhere.
+/// Typed text is decided separately (`modal_input::accept_text`), and any
+/// other chord goes on to Kettle's shortcuts.
+///
+/// The bar keeps what a native find field keeps: Escape, Enter, Tab and F3
+/// without Ctrl, Cmd or Alt; Backspace and Delete, alone or with the word
+/// modifier (and Cmd on macOS); the caret keys with Shift
+/// and the word modifier (Option on macOS, Ctrl elsewhere), plus Cmd on macOS
+/// for the line ends; the shortcut key (Cmd on macOS, Ctrl elsewhere) with
+/// A, C, V, X, G and Z; and on macOS the Ctrl text-field keys. `Cmd+Opt+Arrow`
+/// and Linux's `Alt+Arrow` move focus between splits, `Ctrl+Home` / `Ctrl+End`
+/// scroll the terminal, and on Linux `Ctrl+Shift+A` and `Ctrl+Shift+X` keep
+/// their split and zoom meanings.
+pub(super) fn search_bar_claims(
+    key: &Key,
+    mods: ModifiersState,
+    macos: bool,
+    editor_focused: bool,
+    vim_menu_nav: bool,
+) -> bool {
+    let (ctrl, alt, sup, shift) = (
+        mods.control_key(),
+        mods.alt_key(),
+        mods.super_key(),
+        mods.shift_key(),
+    );
+    let shortcut_only = if macos {
+        sup && !ctrl && !alt
+    } else {
+        ctrl && !sup && !alt
+    };
+    let no_chord = !ctrl && !sup && !alt;
+    let caret_chord = if macos {
+        !ctrl && !(sup && alt)
+    } else {
+        !alt && !sup
+    };
+    match key {
+        Key::Named(NamedKey::Escape) => true,
+        // Deletion takes the word modifier, and Cmd for the line ends on
+        // macOS; any other chord is left for a shortcut.
+        Key::Named(NamedKey::Backspace | NamedKey::Delete) => {
+            if macos {
+                !ctrl
+            } else {
+                !alt && !sup
+            }
+        }
+        Key::Named(NamedKey::Enter | NamedKey::F3 | NamedKey::Tab) => no_chord,
+        Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) => editor_focused && caret_chord,
+        Key::Named(NamedKey::Home | NamedKey::End) => editor_focused && no_chord,
+        Key::Named(NamedKey::Space) => !editor_focused && no_chord,
+        Key::Character(s) => {
+            let lower = s.to_ascii_lowercase();
+            let vim = vim_menu_nav && ctrl && !alt && matches!(s.as_str(), "j" | "k" | "n" | "p");
+            let shortcut = shortcut_only
+                && match lower.as_str() {
+                    "g" | "z" | "c" | "v" => true,
+                    "a" | "x" => macos || !shift,
+                    _ => false,
+                };
+            let text_field = macos
+                && editor_focused
+                && ctrl
+                && !sup
+                && !alt
+                && !shift
+                && matches!(lower.as_str(), "a" | "e" | "b" | "f" | "d" | "h" | "k");
+            let press = s == " " && !editor_focused && no_chord;
+            vim || shortcut || text_field || press
+        }
+        _ => false,
+    }
+}
+
+/// The text a key types into the query, from what the shared modal rule
+/// accepted (`accepted`). An Alt chord that is bound to a shortcut runs the
+/// shortcut instead: Linux's `Alt+1` switches to tab 1 rather than typing `1`.
+/// On Windows AltGr arrives as Ctrl+Alt (`altgr_is_ctrl_alt`), and it keeps
+/// typing the character it composes.
+pub(super) fn search_bar_text(
+    accepted: Option<&str>,
+    mods: ModifiersState,
+    bound: bool,
+    altgr_is_ctrl_alt: bool,
+) -> Option<&str> {
+    let altgr = altgr_is_ctrl_alt && mods.control_key();
+    accepted.filter(|_| !(mods.alt_key() && !altgr && bound))
+}
+
+/// How a Kettle shortcut behaves while the search bar has the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SearchBarShortcut {
+    /// It types into the terminal, which does not have the keyboard.
+    Typing,
+    /// It copies from the query, or the grid selection under the bar.
+    Copy,
+    /// It pastes into the query.
+    Paste,
+    /// It runs as usual.
+    Run,
+}
+
+pub(super) fn search_bar_shortcut_kind(action: &Action) -> SearchBarShortcut {
+    match action {
+        Action::SendText(_)
+        | Action::SendNewline
+        | Action::InsertPaneNumber
+        | Action::InsertPanePadded
+        | Action::InsertPaneName
+        | Action::PastePrimary => SearchBarShortcut::Typing,
+        Action::Copy => SearchBarShortcut::Copy,
+        Action::Paste => SearchBarShortcut::Paste,
+        _ => SearchBarShortcut::Run,
+    }
+}
+
+/// Whether a held key's repeat is dropped in the search bar. A focused
+/// toggle or Close acts once per press, as a native button does, so holding
+/// Space or Enter does not flip a setting (and rewrite the config) at the
+/// repeat rate. Previous and Next repeat, like Enter held in the query.
+pub(super) fn search_button_ignores_repeat(
+    focused: kettle_render::SearchControl,
+    key: &Key,
+) -> bool {
+    let activates = match key {
+        Key::Named(NamedKey::Space | NamedKey::Enter) => true,
+        Key::Character(text) => text == " ",
+        _ => false,
+    };
+    activates
+        && !matches!(
+            focused,
+            kettle_render::SearchControl::Editor
+                | kettle_render::SearchControl::Previous
+                | kettle_render::SearchControl::Next
+        )
+}
+
+/// Where a pointer event goes while the search bar is open.
+///
+/// The bar is a reserved lane below the grid, not an overlay: the grid above
+/// it is fully visible and stays mouse-interactive, exactly as Terminator
+/// keeps its VTE selectable under its search bar. A press inside the bar's
+/// rectangle belongs to the bar's controls; a press anywhere else is ordinary
+/// grid input (selection, links, scrollbar, mouse reporting). Motion and
+/// release follow whichever gesture is live: an editor drag started in the
+/// bar keeps the bar, anything else keeps the grid. Keyboard focus never
+/// leaves the search editor either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SearchPointerRoute {
+    /// The bar is closed; nothing here applies.
+    Closed,
+    /// The bar's controls own the event.
+    Bar,
+    /// The grid owns the event as if the bar were closed.
+    Grid,
+}
+
+// Captured grid drags keep their motion and release when crossing the bar.
+pub(super) fn search_bar_blocks_mouse_report(
+    in_bar: bool,
+    pressed: bool,
+    motion: bool,
+    held: bool,
+) -> bool {
+    in_bar && pressed && (!motion || !held)
+}
+
+pub(super) fn search_pointer_route(
+    search_open: bool,
+    press_in_bar: Option<bool>,
+    dragging_editor: bool,
+) -> SearchPointerRoute {
+    if !search_open {
+        return SearchPointerRoute::Closed;
+    }
+    match press_in_bar {
+        Some(true) => SearchPointerRoute::Bar,
+        Some(false) => SearchPointerRoute::Grid,
+        None if dragging_editor => SearchPointerRoute::Bar,
+        None => SearchPointerRoute::Grid,
+    }
+}

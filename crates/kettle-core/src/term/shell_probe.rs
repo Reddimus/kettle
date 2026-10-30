@@ -187,6 +187,8 @@ fn stdout_ready(pipe: &std::process::ChildStdout) -> io::Result<bool> {
     use windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE;
     use windows_sys::Win32::System::Pipes::PeekNamedPipe;
     let mut available = 0;
+    // SAFETY: pipe owns the live handle; available is writable u32 storage and all unused
+    // output pointers are null.
     let result = unsafe {
         PeekNamedPipe(
             pipe.as_raw_handle(),
@@ -216,6 +218,8 @@ fn stdout_ready(pipe: &std::process::ChildStdout) -> io::Result<bool> {
         events: libc::POLLIN,
         revents: 0,
     };
+    // SAFETY: poll is writable storage for one pollfd; pipe keeps its descriptor live during
+    // the call.
     let result = unsafe { libc::poll(&mut poll, 1, 0) };
     if result < 0 {
         Err(io::Error::last_os_error())
@@ -238,6 +242,8 @@ mod tests {
                 if let Ok(text) = std::fs::read_to_string(&self.0)
                     && let Ok(pid) = text.trim().parse::<libc::pid_t>()
                 {
+                    // SAFETY: kill accepts the integer PID published by the test child and has
+                    // no pointer arguments.
                     unsafe {
                         libc::kill(pid, libc::SIGKILL);
                     }
@@ -256,6 +262,7 @@ mod tests {
             .parse()
             .unwrap();
         assert_eq!(
+            // SAFETY: Signal zero only probes the test child PID and accesses no pointers.
             unsafe { libc::kill(pid, 0) },
             -1,
             "timed-out probe remains alive"

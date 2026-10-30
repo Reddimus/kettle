@@ -32,6 +32,8 @@
 //!   diacritics) decode path for kitty `U=1` virtual placements.
 
 pub mod completion;
+pub mod control;
+mod decode_base64;
 pub mod extract;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
@@ -45,6 +47,7 @@ pub mod quota;
 pub mod sixel;
 
 pub use completion::{CompletionCandidate, CompletionKind, CompletionList, CompletionUpdate};
+pub use control::AnsiStripper;
 pub use extract::{Chunk, DeferredGraphics, Extractor, PrivateOutputFilter, Progress, PromptKind};
 pub use graphics_limits::{GraphicsBudget, GraphicsLimits, GraphicsReservation};
 pub use image::{ImageData, ImageRefusal, PixelBuffer, Placed, PlacementParams};

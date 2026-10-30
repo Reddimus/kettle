@@ -257,3 +257,28 @@ fn structured_confirmation_copy_is_localized_and_pluralized() {
         "Asignar este atajo a \"Pegar\". \"Copiar\" perderá este atajo."
     );
 }
+
+#[test]
+fn spanish_pane_group_names_multiple_panes() {
+    assert_eq!(
+        Translator::new(Language::Es).text(Text::EditTitleGroup),
+        "Editar grupo de paneles:"
+    );
+}
+
+#[test]
+fn builtin_theme_names_are_display_only_translations() {
+    let es = Translator::new(Language::Es);
+    let en = Translator::new(Language::En);
+    assert_eq!(es.theme_name("Builtin Dark"), "Oscuro integrado");
+    assert_eq!(es.theme_name("Builtin Light"), "Claro integrado");
+    for name in [
+        "Builtin Dark",
+        "Builtin Light",
+        "TokyoNight Night",
+        "custom",
+    ] {
+        assert_eq!(en.theme_name(name), name);
+    }
+    assert_eq!(es.theme_name("custom"), "custom");
+}

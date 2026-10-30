@@ -372,6 +372,40 @@ impl WorkerClient {
         }
     }
 
+    /// Read metadata in a fresh worker, with the render lane's cancellation,
+    /// startup, resource and cleanup limits and a 500 ms metadata deadline.
+    pub fn file_facts(
+        &self,
+        request: &crate::FileFactsRequest,
+        control: &RenderControl,
+    ) -> Result<crate::FileFactsReply, RenderError> {
+        let control = control
+            .clone()
+            .limit_reply(control.reply_limit().unwrap_or(64).min(64));
+        let result = (|| {
+            let _one_at_a_time = self.work_slot(Some(&control))?;
+            self.shared.reap_abandoned();
+            if self.shared.stuck.load(Ordering::Acquire) >= MAX_STUCK_WORKERS {
+                return Err(FailureCode::WorkerUnavailable);
+            }
+            lifecycle::facts_attempt(
+                &self.shared,
+                &self.build_id,
+                request,
+                self.budgets,
+                &control,
+            )
+            .unwrap_or(Err(FailureCode::RenderTimeout))
+        })();
+        if control.is_cancelled() {
+            Err(RenderError::Cancelled)
+        } else if control.interrupted(Instant::now()) {
+            Err(RenderError::Failure(FailureCode::RenderTimeout))
+        } else {
+            result.map_err(RenderError::Failure)
+        }
+    }
+
     /// Open a playback session in a fresh worker of its own, at once: the
     /// worker starts, opens the video and plays on threads of the
     /// session's, never the caller's, and never while a render waits for
@@ -392,12 +426,11 @@ impl WorkerClient {
         crate::session::PlaySession::start(&self.shared, &self.build_id, self.budgets, open, wake)
     }
 
-    fn render_inner(
+    fn work_slot(
         &self,
-        job: &Job,
         control: Option<&RenderControl>,
-    ) -> Result<RenderOutput, FailureCode> {
-        let _one_at_a_time = if let Some(control) = control {
+    ) -> Result<std::sync::MutexGuard<'_, ()>, FailureCode> {
+        Ok(if let Some(control) = control {
             loop {
                 if control.interrupted(Instant::now()) {
                     return Err(FailureCode::RenderTimeout);
@@ -412,7 +445,15 @@ impl WorkerClient {
             self.rendering
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-        };
+        })
+    }
+
+    fn render_inner(
+        &self,
+        job: &Job,
+        control: Option<&RenderControl>,
+    ) -> Result<RenderOutput, FailureCode> {
+        let _one_at_a_time = self.work_slot(control)?;
         self.shared.reap_abandoned();
         for attempt in 0..2 {
             if control.is_some_and(|control| control.interrupted(Instant::now())) {

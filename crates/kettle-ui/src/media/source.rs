@@ -319,6 +319,7 @@ impl ItemSource {
     /// The source of a file shown as itself, read from `spec`'s path: no
     /// content was read, so its digest holds only the file's `identity`,
     /// and nothing renders from it but a reload, which reads the file again.
+    #[cfg(test)]
     pub(crate) fn undrawn(spec: JobSpec, identity: kettle_media::PathIdentity) -> Self {
         Self {
             spec,
@@ -333,6 +334,18 @@ impl ItemSource {
             origin: None,
             document: None,
         }
+    }
+
+    pub(crate) fn checking_file(spec: JobSpec) -> Self {
+        Self::new(
+            spec,
+            Digest {
+                sha256: [0; 32],
+                path_identity: None,
+            },
+            false,
+            None,
+        )
     }
 
     /// This source as page `page` of a document, which pages through by
@@ -651,6 +664,12 @@ fn display_lines<'a>(
                     if column >= first_column && shown < columns {
                         row.push(glyph);
                         shown += each;
+                    } else if column < first_column {
+                        let visible = (column + each)
+                            .saturating_sub(first_column)
+                            .min(columns - shown);
+                        row.extend(std::iter::repeat_n(' ', visible));
+                        shown += visible;
                     }
                     column += each;
                 }
@@ -949,6 +968,17 @@ mod tests {
             "{} bytes",
             row.len()
         );
+    }
+
+    #[test]
+    fn scrolling_into_a_wide_character_preserves_its_visible_spacing() {
+        assert_eq!(
+            display_rows("ab\u{65e5}x", 0, 1, 3, 2),
+            [" x"],
+            "text after a clipped wide glyph shifted left"
+        );
+        assert_eq!(display_rows("ab\u{65e5}x", 0, 1, 3, 1), [" "]);
+        assert_eq!(display_rows("ab\u{65e5}x", 0, 1, 4, 2), ["x"]);
     }
 
     #[test]

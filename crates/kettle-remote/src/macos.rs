@@ -32,11 +32,12 @@ pub(crate) struct MacProcessTree {
 struct MacProcessEntry {
     parent: Option<u32>,
     argv: Option<Vec<String>>,
+    environment: Option<super::ConnectionEnvironment>,
 }
 
 #[cfg_attr(test, derive(Debug))]
 enum ArgvRead {
-    Complete(Vec<String>),
+    Complete(Vec<String>, Option<super::ConnectionEnvironment>),
     /// The process exited, is a zombie, or belongs to another user. This is
     /// normal during a walk and does not make the snapshot partial.
     Unavailable,
@@ -89,18 +90,22 @@ impl MacProcessTree {
                 complete = false;
                 continue;
             }
-            let argv = match self.read_argv(pid, &mut total_bytes) {
-                ArgvRead::Complete(argv) => Some(argv),
-                ArgvRead::Unavailable => None,
+            let (argv, environment) = match self.read_argv(pid, &mut total_bytes) {
+                ArgvRead::Complete(argv, environment) => (Some(argv), environment),
+                ArgvRead::Unavailable => (None, None),
                 ArgvRead::Truncated => {
                     self.partial_roots.insert(root);
-                    None
+                    (None, None)
                 }
                 ArgvRead::OverBudget => {
                     complete = false;
-                    None
+                    (None, None)
                 }
             };
+            if now() >= deadline {
+                complete = false;
+                break;
+            }
             // libproc reports a missing pid as having no children, so only a
             // non-empty list proves the process is structure worth keeping.
             let has_children = match self.list_children(pid, &mut children) {
@@ -124,10 +129,19 @@ impl MacProcessTree {
             if argv.is_none() && !has_children && parent.is_none() {
                 continue;
             }
-            self.entries.insert(pid, MacProcessEntry { parent, argv });
+            self.entries.insert(
+                pid,
+                MacProcessEntry {
+                    parent,
+                    argv,
+                    environment,
+                },
+            );
         }
+        let expired = now() >= deadline;
+        complete &= !expired;
         self.bytes_read = total_bytes;
-        self.timed_out = !complete && now() >= deadline;
+        self.timed_out = !complete && expired;
         complete
     }
 
@@ -166,9 +180,9 @@ impl MacProcessTree {
     /// tail, not its head, which parses as environment strings, so the read
     /// asks for the exact size first and sizes the buffer one byte larger. A
     /// read that still fills the buffer means the area grew in between (an
-    /// `exec`), and the argv is treated as incomplete. Only argv bytes count
-    /// toward the walk's byte budget, as on Linux; the environment the kernel
-    /// copies alongside is bounded by `MAX_PROC_FILE_BYTES` per process.
+    /// `exec`), and the argv is treated as incomplete. The entire copied area
+    /// counts toward the shared byte budget. Capture connection settings from
+    /// that same buffer so detection performs no further environment reads.
     fn read_argv(&mut self, pid: u32, total_bytes: &mut u64) -> ArgvRead {
         let Ok(pid) = libc::c_int::try_from(pid) else {
             return ArgvRead::Unavailable;
@@ -176,67 +190,120 @@ impl MacProcessTree {
         if MAX_PROC_TREE_TOTAL_BYTES.saturating_sub(*total_bytes) == 0 {
             return ArgvRead::OverBudget;
         }
-        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
-        let mut needed = 0_usize;
-        // SAFETY: `mib` names three integers. A null buffer asks the kernel
-        // only for the area's size, which it stores in `needed`.
-        let rc = unsafe {
-            libc::sysctl(
-                mib.as_mut_ptr(),
-                mib.len() as libc::c_uint,
-                std::ptr::null_mut(),
-                &mut needed,
-                std::ptr::null_mut(),
-                0,
-            )
+        let owned = same_user(pid);
+        let size = match read_procargs2(pid, &mut self.args, total_bytes) {
+            Ok(size) => size,
+            Err(error) => return error,
         };
-        if rc != 0 {
-            return ArgvRead::Unavailable;
-        }
-        if needed as u64 >= MAX_PROC_FILE_BYTES {
-            return ArgvRead::Truncated;
-        }
-        let capacity = needed + 1;
-        if self.args.len() < capacity {
-            self.args.resize(capacity, 0);
-        }
-        let mut size = capacity;
-        // SAFETY: `self.args` has at least `size` writable bytes, and the
-        // kernel lowers `size` to the bytes it wrote. No new value is set.
-        let rc = unsafe {
-            libc::sysctl(
-                mib.as_mut_ptr(),
-                mib.len() as libc::c_uint,
-                self.args.as_mut_ptr().cast(),
-                &mut size,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if rc != 0 {
-            return ArgvRead::Unavailable;
-        }
-        if size >= capacity {
-            return ArgvRead::Truncated;
-        }
         let Some(argv) = kern_procargs2_argv(&self.args[..size]) else {
             return ArgvRead::Truncated;
         };
-        *total_bytes = total_bytes.saturating_add(argv.len() as u64);
-        if *total_bytes > MAX_PROC_TREE_TOTAL_BYTES {
-            return ArgvRead::OverBudget;
-        }
         let parsed = parse_proc_argv(argv);
         if !parsed.complete {
             return ArgvRead::Truncated;
         }
-        ArgvRead::Complete(parsed.argv)
+        let environment = super::client_connection_environment_names(&parsed.argv)
+            .filter(|_| owned && same_user(pid))
+            .and_then(|names| super::kern_procargs2_environment(&self.args[..size], names));
+        ArgvRead::Complete(parsed.argv, environment)
     }
 
     #[cfg(test)]
     pub(crate) fn bytes_read(&self) -> u64 {
         self.bytes_read
     }
+}
+
+/// Read a whole argument area; undersized KERN_PROCARGS2 reads return its tail.
+fn read_procargs2(
+    pid: libc::c_int,
+    args: &mut Vec<u8>,
+    total_bytes: &mut u64,
+) -> Result<usize, ArgvRead> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut needed = 0_usize;
+    // SAFETY: `mib` names three integers. A null buffer asks the kernel
+    // only for the area's size, which it stores in `needed`.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            std::ptr::null_mut(),
+            &mut needed,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(ArgvRead::Unavailable);
+    }
+    if needed as u64 >= MAX_PROC_FILE_BYTES {
+        return Err(ArgvRead::Truncated);
+    }
+    let capacity = needed + 1;
+    if capacity as u64 > MAX_PROC_TREE_TOTAL_BYTES.saturating_sub(*total_bytes) {
+        return Err(ArgvRead::OverBudget);
+    }
+    if args.len() < capacity {
+        args.resize(capacity, 0);
+    }
+    let mut size = capacity;
+    // SAFETY: `args` has at least `size` writable bytes, and the
+    // kernel lowers `size` to the bytes it wrote. No new value is set.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            args.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    *total_bytes = total_bytes.saturating_add(size.min(capacity) as u64);
+    if rc != 0 {
+        return Err(ArgvRead::Unavailable);
+    }
+    if size >= capacity {
+        return Err(ArgvRead::Truncated);
+    }
+    Ok(size)
+}
+
+fn same_user(pid: libc::c_int) -> bool {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: info is writable for exactly the supplied size.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return false;
+    }
+    // SAFETY: libproc filled the whole struct; geteuid has no preconditions.
+    unsafe { info.assume_init().pbi_uid == libc::geteuid() }
+}
+
+pub(crate) fn read_connection_environment(
+    pid: u32,
+    names: &[&str],
+) -> Option<super::ConnectionEnvironment> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    if !same_user(pid) {
+        return None;
+    }
+    let mut args = Vec::new();
+    let size = read_procargs2(pid, &mut args, &mut 0).ok()?;
+    if !same_user(pid) {
+        return None;
+    }
+    super::kern_procargs2_environment(&args[..size], names)
 }
 
 impl ProcessTree for MacProcessTree {
@@ -248,6 +315,28 @@ impl ProcessTree for MacProcessTree {
 
     fn argv_of(&self, pid: u32) -> Option<Vec<String>> {
         self.entries.get(&pid)?.argv.clone()
+    }
+
+    fn executable_of(&self, pid: u32) -> Option<String> {
+        self.entries.get(&pid)?;
+        let pid = libc::c_int::try_from(pid).ok()?;
+        let mut path = [0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: path is writable for exactly the size supplied to libproc.
+        let written =
+            unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+        if written <= 0 {
+            return None;
+        }
+        let end = path.iter().position(|&byte| byte == 0)?;
+        std::str::from_utf8(&path[..end]).ok().map(String::from)
+    }
+
+    fn connection_environment_of(
+        &self,
+        pid: u32,
+        names: &[&str],
+    ) -> Option<super::ConnectionEnvironment> {
+        super::cached_connection_environment(self.entries.get(&pid)?.environment.as_ref(), names)
     }
 
     /// Read on demand, like the Linux tree, so only the shell a caller asks
@@ -378,10 +467,43 @@ mod tests {
     }
 
     #[test]
+    fn redacted_environment_does_not_become_absent_connection_settings() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .env_clear()
+            .env("KUBECONFIG", "/client/cluster")
+            .spawn()
+            .unwrap();
+        let _cleanup = KillOnDrop(vec![child.id()]);
+        let mut tree = MacProcessTree::default();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut total = 0;
+            if let ArgvRead::Complete(argv, _) = tree.read_argv(child.id(), &mut total)
+                && argv == ["/bin/sleep", "30"]
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // SIP can hide Apple's process environments. Either read the original
+        // value or refuse; an apparently empty successful capture is unsafe.
+        if let Some(environment) = read_connection_environment(child.id(), &["KUBECONFIG"]) {
+            assert_eq!(
+                environment.iter().collect::<Vec<_>>(),
+                [("KUBECONFIG", Some("/client/cluster"))]
+            );
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
     fn reads_this_process_argv_like_std_does() {
         let mut tree = MacProcessTree::default();
         let mut total = 0;
-        let ArgvRead::Complete(argv) = tree.read_argv(std::process::id(), &mut total) else {
+        let ArgvRead::Complete(argv, _) = tree.read_argv(std::process::id(), &mut total) else {
             panic!("own argv should be readable");
         };
         let expected: Vec<String> = std::env::args().collect();
@@ -425,11 +547,14 @@ mod tests {
             let mut total = 0;
             // Before exec completes the child still carries the test
             // harness's own argv, so only an exact match ends the wait.
-            if let ArgvRead::Complete(argv) = tree.read_argv(child.id(), &mut total)
+            if let ArgvRead::Complete(argv, _) = tree.read_argv(child.id(), &mut total)
                 && argv == expected
             {
                 let charged: usize = expected.iter().map(|arg| arg.len() + 1).sum();
-                assert_eq!(total, charged as u64, "only argv bytes are charged");
+                assert!(
+                    total >= (charged + 64 * 1024) as u64,
+                    "environment bytes are charged"
+                );
                 break;
             }
             assert!(
@@ -485,8 +610,8 @@ mod tests {
             matches!(&actual, ArgvRead::Truncated),
             "unexpected argv classification: {actual:?}"
         );
-        assert_eq!(total, expected as u64);
-        let mut total = MAX_PROC_TREE_TOTAL_BYTES - expected as u64 + 1;
+        assert!(total >= expected as u64);
+        let mut total = MAX_PROC_TREE_TOTAL_BYTES - total + 1;
         let actual = tree.read_argv(long, &mut total);
         assert!(
             matches!(&actual, ArgvRead::OverBudget),
@@ -524,6 +649,7 @@ mod tests {
             eprintln!("skipped: root can read launchd's argv");
             return;
         }
+        assert!(read_connection_environment(1, &["KUBECONFIG"]).is_none());
         let mut tree = MacProcessTree::default();
         let mut children = Vec::new();
         assert!(tree.list_children(1, &mut children).is_some());
@@ -532,5 +658,72 @@ mod tests {
             tree.read_argv(1, &mut total),
             ArgvRead::Unavailable
         ));
+    }
+
+    #[test]
+    fn multiple_client_environments_share_the_scan_budget() {
+        use std::os::unix::process::CommandExt;
+        struct Children(Vec<std::process::Child>);
+        impl Drop for Children {
+            fn drop(&mut self) {
+                for child in &mut self.0 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let mut children = Children(Vec::new());
+        for _ in 0..64 {
+            children.0.push(
+                Command::new(std::env::current_exe().unwrap())
+                    .arg0("docker")
+                    .args([
+                        "--exact",
+                        "tests::reconnect_environment_probe_child",
+                        "--ignored",
+                    ])
+                    .env_clear()
+                    .env("DOCKER_HOST", "x".repeat(80 * 1024))
+                    .stdout(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        let roots: Vec<_> = children.0.iter().map(std::process::Child::id).collect();
+        let mut tree = MacProcessTree::default();
+        // Command::spawn has completed exec before returning on Unix.
+        assert!(!tree.refresh_roots_within(&roots, Duration::from_secs(60)));
+        assert!(!tree.timed_out);
+        assert!(tree.bytes_read <= MAX_PROC_TREE_TOTAL_BYTES);
+        assert!(tree.bytes_read > MAX_PROC_TREE_TOTAL_BYTES - MAX_PROC_FILE_BYTES);
+        let retained: usize = tree
+            .entries
+            .values()
+            .filter_map(|entry| entry.environment.as_ref())
+            .flat_map(super::super::ConnectionEnvironment::iter)
+            .filter_map(|(_, value)| value.map(str::len))
+            .sum();
+        assert!(retained > 0);
+        assert!(retained as u64 <= tree.bytes_read);
+    }
+
+    #[test]
+    fn the_final_argument_area_read_obeys_the_scan_deadline() {
+        let mut tree = MacProcessTree::default();
+        let start = Instant::now();
+        let mut calls = 0;
+        assert!(!tree.refresh_roots_with_clock(
+            &[std::process::id()],
+            MAX_PROC_SCAN_DURATION,
+            || {
+                calls += 1;
+                if calls <= 2 {
+                    start
+                } else {
+                    start + MAX_PROC_SCAN_DURATION
+                }
+            }
+        ));
+        assert!(tree.timed_out);
     }
 }

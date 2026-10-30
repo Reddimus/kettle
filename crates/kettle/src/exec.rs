@@ -93,7 +93,8 @@ const FINAL_WRITE_GRACE: Duration = Duration::from_millis(250);
 const EVENT_SLICE_MESSAGES: usize = 256;
 /// Healthy local recording sinks finish well inside this bound. Crossing it is
 /// treated as an observable persistence failure instead of extending command
-/// completion indefinitely.
+/// completion indefinitely. Imposed stops reuse this grace, adding at most
+/// 2 s to the existing stop teardown before detaching a stalled writer.
 const RECORD_FINISH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Exit code whenever the complete `--timeout` deadline expires (coreutils
@@ -340,226 +341,12 @@ pub struct ExecOpts {
     pub forward_stdin: bool,
 }
 
-/// Maximum unterminated OSC/DCS/APC/PM/SOS payload discarded before the
-/// stripper resynchronizes. The parser stores only finite state, but a bound is
-/// still required so a malicious child cannot suppress all later plaintext.
-const MAX_CONTROL_SEQUENCE_BYTES: usize = 64 * 1024;
+pub use kettle_vt::AnsiStripper;
 
-#[derive(Debug, Default)]
-pub struct AnsiStripper {
-    state: StripState,
-    /// UTF-8 continuation bytes still owed by the character being decoded.
-    ///
-    /// Terminal output is UTF-8, and the C1 control bytes this stripper
-    /// recognizes (`0x90` DCS, `0x98` SOS, `0x9b` CSI, `0x9d` OSC, `0x9e` PM,
-    /// `0x9f` APC) are all in the `0x80..=0xbf` continuation range. Treating
-    /// them as controls wherever they appear would eat the middle of ordinary
-    /// characters and leave invalid UTF-8 behind:
-    ///
-    /// * `Û` is `c3 9b`; reading `9b` as CSI would turn `Ûh` into a lone `c3`.
-    /// * `‘` is `e2 80 98`; the `98` would read as SOS.
-    /// * `▐` is `e2 96 90`; the `90` would read as DCS.
-    ///
-    /// Box-drawing and smart quotes are exactly what a TUI emits, and MCP's
-    /// `kettle_run` strips by default, so this would corrupt the output an
-    /// agent reads. Counting the sequence keeps a continuation byte a
-    /// continuation byte; a C1 byte in ground position, where UTF-8 could not
-    /// put one, is still honored for genuinely 8-bit streams.
-    utf8_continuation: u8,
-    /// Whether the lead byte of that character reached `out`.
-    ///
-    /// A character is emitted whole or swallowed whole; the state machine may
-    /// move on between its bytes and must not get a vote. See the shield in
-    /// [`AnsiStripper::push`].
-    utf8_emitted: bool,
-}
+#[cfg(test)]
+const MAX_CONTROL_SEQUENCE_BYTES: usize = kettle_vt::control::MAX_CONTROL_SEQUENCE_BYTES;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-enum StripState {
-    #[default]
-    Ground,
-    Escape,
-    EscapeIntermediate {
-        remaining: usize,
-    },
-    Csi {
-        remaining: usize,
-    },
-    String {
-        bel_terminated: bool,
-        escaped: bool,
-        remaining: usize,
-    },
-}
-
-impl AnsiStripper {
-    /// Feed a chunk; append the stripped plaintext to `out`.
-    pub fn push(&mut self, input: &[u8], out: &mut Vec<u8>) {
-        for &b in input {
-            // Mid-character: a continuation byte belongs to the character being
-            // decoded and can never be a control, in ANY state. Otherwise `0x9c`
-            // inside an OSC reads as ST, so `ESC ] 0 ; ✳ title BEL` (`✳` is
-            // `e2 9c b3`) ends the string early and leaks the rest as visible
-            // text.
-            if self.utf8_continuation > 0 {
-                if matches!(b, 0x80..=0xbf) {
-                    self.utf8_continuation -= 1;
-                    // A continuation goes wherever its LEAD went, not wherever
-                    // the state machine has since arrived. The forced
-                    // resynchronization that ends an over-long control string
-                    // can swallow a lead byte and return to ground. Emitting
-                    // its continuations there would leave them with no lead,
-                    // and stdout would be invalid UTF-8 from then on.
-                    if self.utf8_emitted {
-                        out.push(b);
-                    }
-                    continue;
-                }
-                // Not a continuation after all: the lead was malformed or
-                // truncated. Stop shielding immediately and let this byte be
-                // interpreted normally — blindly swallowing N bytes hid real
-                // C1 controls and desynchronized on a lead-followed-by-lead.
-                self.utf8_continuation = 0;
-            }
-            // A lead byte is tracked in EVERY state, not only where text is
-            // read. `ESC [` followed by 64 KiB of parameter bytes forces a
-            // resynchronization out of `Csi`. If that bound lands on a lead
-            // byte, the lead is consumed there, and untracked continuations
-            // would then be emitted in ground with nothing in front of them.
-            // `EscapeIntermediate` has the same bound, and `ESC` followed
-            // directly by a lead byte splits a character the same way without
-            // any 64 KiB.
-            //
-            // Tracking everywhere changes only malformed streams, because a
-            // byte in `0xc2..=0xf4` is not a legal CSI parameter, intermediate,
-            // or final byte. If the bytes that follow are NOT continuations,
-            // the shield above releases them at once.
-            self.utf8_continuation = match b {
-                0xc2..=0xdf => 1,
-                0xe0..=0xef => 2,
-                0xf0..=0xf4 => 3,
-                // ASCII, a stray continuation, or an invalid lead
-                // (0xc0/0xc1/0xf5..) owes nothing and is interpreted as
-                // itself.
-                _ => 0,
-            };
-            // No lead byte is special to the ground arm below, so a lead reaches
-            // `out` exactly when the machine is in ground — and its
-            // continuations must go wherever it went.
-            self.utf8_emitted = matches!(self.state, StripState::Ground);
-            let state = std::mem::take(&mut self.state);
-            self.state = match state {
-                StripState::Ground => match b {
-                    0x1b => StripState::Escape,
-                    0x9b => Self::csi(),
-                    0x9d => Self::string(true),
-                    0x90 | 0x98 | 0x9e | 0x9f => Self::string(false),
-                    0x9c => StripState::Ground,
-                    _ => {
-                        out.push(b);
-                        StripState::Ground
-                    }
-                },
-                StripState::Escape => {
-                    if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
-                        out.push(b);
-                    }
-                    Self::after_escape(b)
-                }
-                StripState::EscapeIntermediate { remaining } => {
-                    if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
-                        out.push(b);
-                    }
-                    if matches!(b, 0x18 | 0x1a) {
-                        StripState::Ground
-                    } else if b == 0x1b {
-                        StripState::Escape
-                    } else if (0x30..=0x7e).contains(&b) || remaining <= 1 {
-                        StripState::Ground
-                    } else {
-                        StripState::EscapeIntermediate {
-                            remaining: remaining - 1,
-                        }
-                    }
-                }
-                StripState::Csi { remaining } => {
-                    if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
-                        out.push(b);
-                    }
-                    if matches!(b, 0x18 | 0x1a) {
-                        StripState::Ground
-                    } else if b == 0x1b {
-                        StripState::Escape
-                    } else if (0x40..=0x7e).contains(&b) || remaining <= 1 {
-                        StripState::Ground
-                    } else {
-                        StripState::Csi {
-                            remaining: remaining - 1,
-                        }
-                    }
-                }
-                StripState::String {
-                    bel_terminated,
-                    escaped,
-                    remaining,
-                } => {
-                    if escaped {
-                        if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
-                            out.push(b);
-                        }
-                        Self::after_escape(b)
-                    } else if matches!(b, 0x18 | 0x1a) || b == 0x9c || (bel_terminated && b == 0x07)
-                    {
-                        StripState::Ground
-                    } else if remaining <= 1 {
-                        // Forced resynchronization: an unterminated control
-                        // string cannot hold the stream hostage, so it ends
-                        // here. This byte was swallowed as part of the string —
-                        // and if it was a UTF-8 lead, `utf8_emitted` is already
-                        // false, so its continuations are swallowed with it
-                        // rather than surfacing in ground output alone.
-                        StripState::Ground
-                    } else {
-                        StripState::String {
-                            bel_terminated,
-                            escaped: b == 0x1b,
-                            remaining: remaining - 1,
-                        }
-                    }
-                }
-            };
-        }
-    }
-
-    fn csi() -> StripState {
-        StripState::Csi {
-            remaining: MAX_CONTROL_SEQUENCE_BYTES,
-        }
-    }
-
-    fn after_escape(b: u8) -> StripState {
-        match b {
-            b'[' => Self::csi(),
-            b']' => Self::string(true),
-            b'P' | b'X' | b'^' | b'_' => Self::string(false),
-            0x20..=0x2f => StripState::EscapeIntermediate {
-                remaining: MAX_CONTROL_SEQUENCE_BYTES,
-            },
-            0x00..=0x17 | 0x19 | 0x1b..=0x1f | 0x7f => StripState::Escape,
-            _ => StripState::Ground,
-        }
-    }
-
-    fn string(bel_terminated: bool) -> StripState {
-        StripState::String {
-            bel_terminated,
-            escaped: false,
-            remaining: MAX_CONTROL_SEQUENCE_BYTES,
-        }
-    }
-}
-
-/// A private handle to this process's standard output for the child stream.
+/// A private handle to this process's standard output for exec and MCP.
 ///
 /// `Outputter` flushes after every command, so the process-global
 /// `std::io::stdout()` contributes nothing but a shared lock and a second copy
@@ -567,7 +354,7 @@ impl AnsiStripper {
 /// Unix: bytes a failed write leaves in that global buffer are retried by the
 /// runtime's exit-time flush, on the main thread, where SIGPIPE is back at
 /// SIG_DFL — so a broken pipe kills the process by signal and discards the
-/// lifecycle's chosen exit code. A duplicated descriptor keeps exec's output
+/// lifecycle's chosen exit code. A duplicated descriptor keeps protocol output
 /// out of that buffer entirely.
 ///
 /// Windows keeps the standard handle deliberately: it has no SIGPIPE, and
@@ -575,23 +362,58 @@ impl AnsiStripper {
 /// would emit UTF-8 bytes for the console's active code page to misread
 /// whenever stdout is a console rather than a pipe.
 #[cfg(unix)]
-fn exec_stdout_sink() -> std::io::Result<std::fs::File> {
+pub(crate) fn stdout_sink() -> std::io::Result<std::fs::File> {
     use std::os::fd::AsFd as _;
-    Ok(std::fs::File::from(
-        std::io::stdout().as_fd().try_clone_to_owned()?,
-    ))
+    let sink = std::fs::File::from(std::io::stdout().as_fd().try_clone_to_owned()?);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd as _;
+        // Darwin delivers pipe SIGPIPE process-wide, even if the writer
+        // blocks it. Suppress it on this descriptor so EPIPE reaches cleanup.
+        // SAFETY: sink owns a live descriptor; F_SETNOSIGPIPE takes an integer.
+        if unsafe { libc::fcntl(sink.as_raw_fd(), libc::F_SETNOSIGPIPE, 1) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(sink)
 }
 
 #[cfg(not(unix))]
-fn exec_stdout_sink() -> std::io::Result<std::io::Stdout> {
+pub(crate) fn stdout_sink() -> std::io::Result<std::io::Stdout> {
     Ok(std::io::stdout())
 }
 
 /// Run `kettle exec` end to end; returns the process exit code to propagate.
-pub fn run_exec(opts: ExecOpts) -> i32 {
+pub fn run_exec(opts: ExecOpts, capture_tail: bool) -> i32 {
+    // Only a CLI process installs handlers; concurrent in-process captures must
+    // never change the MCP server's process-global signal dispositions.
+    #[cfg(unix)]
+    let signals = match ExecSignals::register() {
+        Ok(signals) => signals,
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: cannot register cancellation signals: {error}"
+            );
+            return EXIT_INTERNAL;
+        }
+    };
+    #[cfg(unix)]
+    let cancelled = Some(signals.cancelled.as_ref());
+    #[cfg(not(unix))]
+    let cancelled = None;
+
     #[cfg(target_os = "linux")]
     adopt_orphaned_descendants();
-    let sink = match exec_stdout_sink() {
+    #[cfg(target_os = "linux")]
+    if capture_tail && let Err(error) = supervisor::cancellation_mask(libc::SIG_UNBLOCK) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "kettle exec: cannot unblock supervisor cancellation: {error}"
+        );
+        return EXIT_INTERNAL;
+    }
+    let sink = match stdout_sink() {
         Ok(sink) => sink,
         Err(error) => {
             let _ = writeln!(
@@ -601,6 +423,31 @@ pub fn run_exec(opts: ExecOpts) -> i32 {
             return EXIT_INTERNAL;
         }
     };
+    if capture_tail {
+        let mut output = match CaptureOutput::spawn(opts.mode, sink) {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "kettle exec: cannot start capture writer: {error}"
+                );
+                return EXIT_INTERNAL;
+            }
+        };
+        let code = run_exec_engine(opts, &default_size_probe, &mut output, cancelled, true);
+        // Startup failures have no command tree and bypass engine completion.
+        // Give their captured diagnostic the same bounded delivery grace.
+        if output.tail.is_some()
+            && let Err(error) = output.finish(code, Duration::ZERO, OutputFinish::AbandonPending)
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "kettle exec: cannot write capture tail: {error}"
+            );
+            return EXIT_OUTPUT_DELIVERY;
+        }
+        return code;
+    }
     let mut output = match WorkerOutput::spawn(opts.mode, sink) {
         Ok(output) => output,
         Err(error) => {
@@ -611,20 +458,93 @@ pub fn run_exec(opts: ExecOpts) -> i32 {
             return EXIT_INTERNAL;
         }
     };
-    run_exec_engine(opts, &default_size_probe, &mut output, None, false)
+    run_exec_engine(opts, &default_size_probe, &mut output, cancelled, false)
+}
+
+/// Whether exited children reap themselves here (SIGCHLD ignored, or
+/// `SA_NOCLDWAIT`), as a parent can arrange before starting Kettle. Such a
+/// child could vanish and its PID/group be reused before a supervisor sees
+/// its exit; callers must refuse to spawn when ownership cannot be retained.
+#[cfg(unix)]
+pub(crate) fn children_reap_themselves() -> std::io::Result<bool> {
+    // SAFETY: an all-zero sigaction is a valid value for the query to fill,
+    // and a null new action changes nothing.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut current) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(current.sa_sigaction == libc::SIG_IGN || current.sa_flags & libc::SA_NOCLDWAIT != 0)
+}
+
+#[cfg(unix)]
+struct ExecSignals {
+    cancelled: Arc<AtomicBool>,
+    registrations: Vec<signal_hook::SigId>,
+}
+
+#[cfg(unix)]
+impl ExecSignals {
+    fn register() -> std::io::Result<Self> {
+        let mut signals = Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            registrations: Vec::new(),
+        };
+        for signal in [libc::SIGTERM, libc::SIGINT] {
+            signals.registrations.push(signal_hook::flag::register(
+                signal,
+                signals.cancelled.clone(),
+            )?);
+        }
+        Ok(signals)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ExecSignals {
+    fn drop(&mut self) {
+        for id in self.registrations.drain(..) {
+            signal_hook::low_level::unregister(id);
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+#[path = "exec_supervisor.rs"]
+mod supervisor;
+
+/// Linux isolates orphan adoption per MCP command. macOS (no subreaper) and
+/// Windows retain the in-process path and its existing platform containment.
+pub fn run_mcp_capture(opts: ExecOpts, cancelled: Option<&AtomicBool>) -> (i32, String) {
+    #[cfg(target_os = "linux")]
+    {
+        supervisor::capture(opts, cancelled)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        match cancelled {
+            Some(cancelled) => run_exec_capture_cancellable(opts, cancelled),
+            None => run_exec_capture(opts),
+        }
+    }
 }
 
 /// Run a command headlessly and CAPTURE its output in-process instead of
-/// streaming it to stdout. This is the engine behind the `kettle_run` MCP tool.
+/// streaming it to stdout. Used directly by MCP on macOS/Windows; Linux MCP
+/// invokes the same engine in a supervising CLI child.
 /// Returns `(exit_code, output)`; the output is the tail-capped (1 MiB) child
 /// output in the requested mode (strip-ansi recommended for agent assertions).
+#[cfg(any(not(target_os = "linux"), test))]
 pub fn run_exec_capture(opts: ExecOpts) -> (i32, String) {
     run_exec_capture_inner(opts, None)
 }
 
 /// Capture a headless command while observing an MCP cancellation flag. When
 /// cancellation is requested, the child is killed, output is settle-drained,
-/// and any recorder is finalized before returning [`EXIT_CANCELLED`].
+/// and any recorder gets a bounded grace to finalize before returning
+/// [`EXIT_CANCELLED`]. A writer that fails or exceeds the grace reports an
+/// incomplete trace; a stalled writer is detached.
+#[cfg(any(not(target_os = "linux"), test))]
 pub fn run_exec_capture_cancellable(opts: ExecOpts, cancelled: &AtomicBool) -> (i32, String) {
     run_exec_capture_inner(opts, Some(cancelled))
 }
@@ -686,6 +606,7 @@ impl Write for TailSink {
     }
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn run_exec_capture_inner(opts: ExecOpts, cancelled: Option<&AtomicBool>) -> (i32, String) {
     let mut sink = TailSink::new(1024 * 1024);
     let mut output = DirectOutput::new(opts.mode, &mut sink);
@@ -870,7 +791,7 @@ fn stop_after_output_failure(
     let _ = wait_for_exit_code(term);
     std::thread::sleep(SETTLE);
     drain_recording_slice(raw_output, recorder);
-    finish_recording(recorder, Duration::ZERO);
+    finish_recording(recorder, RECORD_FINISH_TIMEOUT);
     let code = if contained {
         EXIT_OUTPUT_DELIVERY
     } else {
@@ -1232,7 +1153,7 @@ fn run_exec_engine_with_recording_poll(
             // readiness again. Preserve the bounded audit tail directly from
             // the raw PTY channel, then apply the explicit abandon contract.
             drain_recording_slice(&orx, &mut recorder);
-            finish_recording(&mut recorder, Duration::ZERO);
+            finish_recording(&mut recorder, RECORD_FINISH_TIMEOUT);
             if let Err(error) = output.finish(code, started.elapsed(), OutputFinish::AbandonPending)
             {
                 commit_output_failure_exit();
@@ -1350,8 +1271,8 @@ fn run_exec_engine_with_recording_poll(
             }
         };
         // Headless exec has no clipboard sink and advertises no DA1 extension
-        // 52, so latched OSC 52 writes are discarded here.
-        drop(term.take_clipboard_stores());
+        // 52, so OSC 52 clipboard operations are discarded here.
+        drop(term.take_clipboard_events());
         // Titles are latched, the newest kept, so a run of them is one title
         // event. Held until output is ready, and counted as backlog until
         // then so completion cannot drop it.
@@ -1476,7 +1397,7 @@ fn run_exec_engine_with_recording_poll(
                 &pty_channel_disconnected,
                 &last_pty_output_at
             ));
-            finish_recording(&mut recorder, Duration::ZERO);
+            finish_recording(&mut recorder, RECORD_FINISH_TIMEOUT);
             let _ = output.finish(
                 EXIT_INTERNAL,
                 started.elapsed(),
@@ -1525,7 +1446,7 @@ fn run_exec_engine_with_recording_poll(
                 let _ = wait_for_exit_code(&term);
                 std::thread::sleep(SETTLE);
                 drain_recording_slice(&orx, &mut recorder);
-                finish_recording(&mut recorder, Duration::ZERO);
+                finish_recording(&mut recorder, RECORD_FINISH_TIMEOUT);
                 let _ = output.finish(
                     EXIT_INTERNAL,
                     started.elapsed(),
@@ -1551,7 +1472,7 @@ fn run_exec_engine_with_recording_poll(
                     &pty_channel_disconnected,
                     &last_pty_output_at
                 ));
-                finish_recording(&mut recorder, Duration::ZERO);
+                finish_recording(&mut recorder, RECORD_FINISH_TIMEOUT);
                 let _ = output.finish(
                     EXIT_INTERNAL,
                     started.elapsed(),
@@ -1692,7 +1613,7 @@ fn run_exec_engine_with_recording_poll(
             let _ = wait_for_exit_code(&term);
             std::thread::sleep(SETTLE);
             drain_recording_slice(&orx, &mut recorder);
-            finish_recording(&mut recorder, Duration::ZERO);
+            finish_recording(&mut recorder, RECORD_FINISH_TIMEOUT);
             let _ = output.finish(
                 EXIT_INTERNAL,
                 started.elapsed(),
@@ -1811,6 +1732,7 @@ fn usable_directory(cwd: &Path) -> Result<PathBuf, String> {
 /// containment is established inside the PTY backend before the suspended
 /// primary thread resumes, so the portable child kill reaches its Job Object.
 struct ExecProcessTree {
+    teardown: std::sync::OnceLock<bool>,
     root: Option<u32>,
     #[cfg(target_os = "linux")]
     session: Option<LinuxSession>,
@@ -1877,6 +1799,7 @@ impl ExecProcessTree {
         #[cfg(target_os = "linux")]
         let session = root.map(LinuxSession::attach);
         Self {
+            teardown: std::sync::OnceLock::new(),
             root,
             #[cfg(target_os = "linux")]
             session,
@@ -1887,6 +1810,12 @@ impl ExecProcessTree {
     /// proven complete. A timeout/cancellation status is meaningful only when
     /// the command cannot keep running after Kettle returns.
     fn terminate(&self, term: &Terminal) -> bool {
+        // Terminal::kill may reap the direct child. After that its numeric PID
+        // is no longer ours, so even failed teardown must never signal it again.
+        *self.teardown.get_or_init(|| self.terminate_once(term))
+    }
+
+    fn terminate_once(&self, term: &Terminal) -> bool {
         let Some(root) = self.root.or_else(|| term.child_pid()) else {
             let direct = report_failed_termination(term.kill());
             #[cfg(unix)]
@@ -2130,6 +2059,8 @@ impl LinuxPidHandle {
     fn open(identity: LinuxProcessIdentity) -> std::io::Result<Option<Self>> {
         use std::os::fd::FromRawFd as _;
 
+        // SAFETY: pidfd_open takes a numeric pid and zero flags, with no pointer
+        // arguments; success returns a new owned descriptor.
         let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, identity.pid, 0) };
         if raw < 0 {
             let error = std::io::Error::last_os_error();
@@ -2215,9 +2146,9 @@ static ADOPTION: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::
 /// session teardown. As a child subreaper, this process receives such a
 /// descendant when its own parent exits, so a timeout or cancellation can
 /// still stop it. Only the command-line path does this: it runs one command
-/// per process, so everything adopted here belongs to that command. The MCP
-/// server runs concurrent commands in one process, where an adopted orphan
-/// cannot be attributed to any one of them.
+/// per process, so everything adopted here belongs to that command. Linux MCP
+/// starts a separate CLI supervisor for each concurrent command instead of
+/// adopting orphans in the server.
 ///
 /// When that cannot be set up, a timeout or cancellation reports its teardown
 /// as unverified, since an escaped descendant could still be running.
@@ -2278,8 +2209,10 @@ fn linux_adopted_children(
         return Err(std::io::Error::last_os_error());
     }
     scan.next_batch(root, own_session, deadline, 16_384, |pid| {
-        // SAFETY: waitid receives initialized storage; WNOWAIT retains the child.
+        // SAFETY: siginfo_t is plain C data, for which all zero bytes are valid.
         let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: waitid writes into `status`, initialized storage owned here;
+        // WNOWAIT leaves the child to be reaped later.
         if unsafe {
             libc::waitid(
                 libc::P_PID,
@@ -2682,6 +2615,8 @@ fn linux_signal_process_group(group: u32, signal: libc::c_int) -> bool {
     let Ok(group) = libc::pid_t::try_from(group) else {
         return false;
     };
+    // SAFETY: kill takes numeric arguments only; the group fits pid_t and
+    // callers supply a POSIX signal for the tracked PTY session.
     let result = unsafe { libc::kill(-group, signal) };
     if result == 0 {
         true
@@ -2840,6 +2775,8 @@ fn record_chunk(recorder: &mut Option<kettle_core::record::Recorder>, bytes: &[u
         return;
     };
     recorder.record_output(bytes);
+    #[cfg(test)]
+    tests::note_recorded_output(bytes);
     report_recording_status(recorder);
 }
 
@@ -3009,11 +2946,74 @@ trait ExecOutput {
     fn finish(&mut self, code: i32, duration: Duration, mode: OutputFinish) -> OutputResult<()>;
 }
 
+/// Collect the bounded tail synchronously, then deliver it through the same
+/// worker acknowledgements as streaming output. The engine retains its tree
+/// and keeps checking cancellation/deadlines until that final write completes.
+struct CaptureOutput {
+    outputter: Outputter,
+    tail: Option<TailSink>,
+    delivery: WorkerOutput,
+}
+
+impl CaptureOutput {
+    fn spawn(mode: OutputMode, sink: impl Write + Send + 'static) -> std::io::Result<Self> {
+        Ok(Self {
+            outputter: Outputter::new(mode),
+            tail: Some(TailSink::new(1024 * 1024)),
+            delivery: WorkerOutput::spawn(OutputMode::Raw, sink)?,
+        })
+    }
+}
+
+impl ExecOutput for CaptureOutput {
+    fn ready(&mut self) -> OutputResult<bool> {
+        self.delivery.ready()
+    }
+
+    fn completion_ready(&mut self) -> OutputResult<bool> {
+        self.delivery.completion_ready()
+    }
+
+    fn start(&mut self, cols: u16, rows: u16) -> OutputResult<()> {
+        self.outputter
+            .start(
+                self.tail.as_mut().expect("capture is collecting"),
+                cols,
+                rows,
+            )
+            .map_err(Into::into)
+    }
+
+    fn output(&mut self, bytes: Vec<u8>) -> OutputResult<()> {
+        self.outputter
+            .output(self.tail.as_mut().expect("capture is collecting"), &bytes)
+            .map_err(Into::into)
+    }
+
+    fn title(&mut self, title: String) -> OutputResult<()> {
+        self.outputter
+            .title(self.tail.as_mut().expect("capture is collecting"), &title)
+            .map_err(Into::into)
+    }
+
+    fn finish(&mut self, code: i32, duration: Duration, mode: OutputFinish) -> OutputResult<()> {
+        if let Some(mut tail) = self.tail.take() {
+            self.outputter.finish(&mut tail, code, duration)?;
+            // Keep bytes intact until the MCP parent converts to lossy UTF-8,
+            // including when trimming split a multibyte sequence.
+            self.delivery.output(tail.tail().to_vec())?;
+        }
+        self.delivery.finish(code, duration, mode)
+    }
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
 struct DirectOutput<'a> {
     outputter: Outputter,
     sink: &'a mut dyn Write,
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 impl<'a> DirectOutput<'a> {
     fn new(mode: OutputMode, sink: &'a mut dyn Write) -> Self {
         Self {
@@ -3023,6 +3023,7 @@ impl<'a> DirectOutput<'a> {
     }
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 impl ExecOutput for DirectOutput<'_> {
     fn ready(&mut self) -> OutputResult<bool> {
         Ok(true)
@@ -3072,8 +3073,8 @@ struct WorkerOutput {
 }
 
 /// `main` restores the conventional Unix SIGPIPE disposition for ordinary CLI
-/// writes. The exec stdout worker is different: it must observe `EPIPE`, report
-/// exit 74, and reap the PTY child instead of letting the signal kill Kettle.
+/// writes. Exec and MCP writers must instead observe `EPIPE` so the lifecycle
+/// can stop owned commands before exiting with a numeric failure status.
 #[cfg(unix)]
 pub(crate) fn block_sigpipe_for_current_thread() -> std::io::Result<()> {
     // SAFETY: sigemptyset/sigaddset initialize and mutate only this local set;
@@ -3099,7 +3100,7 @@ pub(crate) fn block_sigpipe_for_current_thread() -> std::io::Result<()> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn consume_pending_sigpipe(error: &std::io::Error) {
+pub(crate) fn consume_pending_sigpipe(error: &std::io::Error) {
     if error.kind() != std::io::ErrorKind::BrokenPipe {
         return;
     }
@@ -3134,7 +3135,7 @@ fn consume_pending_sigpipe(error: &std::io::Error) {
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
-fn consume_pending_sigpipe(error: &std::io::Error) {
+pub(crate) fn consume_pending_sigpipe(error: &std::io::Error) {
     if error.kind() != std::io::ErrorKind::BrokenPipe {
         return;
     }
@@ -3167,7 +3168,7 @@ fn consume_pending_sigpipe(error: &std::io::Error) {
 }
 
 #[cfg(not(unix))]
-fn consume_pending_sigpipe(_error: &std::io::Error) {}
+pub(crate) fn consume_pending_sigpipe(_error: &std::io::Error) {}
 
 /// Retire one command from the stdout worker.
 ///
@@ -3995,6 +3996,8 @@ fn spawn_stdin_pump_task_with(
 pub fn stdin_is_pipe() -> bool {
     #[cfg(unix)]
     {
+        // SAFETY: stat contains only zero-valid integers; fstat writes into
+        // exclusive local storage, and an invalid stdin fd returns an error.
         unsafe {
             let mut st: libc::stat = std::mem::zeroed();
             if libc::fstat(0, &mut st) != 0 {
@@ -4012,11 +4015,15 @@ pub fn stdin_is_pipe() -> bool {
 
         const FILE_TYPE_DISK: u32 = 0x0001;
         const FILE_TYPE_PIPE: u32 = 0x0003;
+        // SAFETY: GetStdHandle accepts this standard-handle selector and returns
+        // a borrowed handle; this function does not close it.
         let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
             return false;
         }
         matches!(
+            // SAFETY: handle is the non-null, non-sentinel borrowed stdin handle;
+            // GetFileType only queries it and reports invalid handles as errors.
             unsafe { GetFileType(handle) },
             FILE_TYPE_DISK | FILE_TYPE_PIPE
         )
@@ -4055,6 +4062,9 @@ fn windows_console_size() -> Option<(u16, u16)> {
     use windows_sys::Win32::System::Console::{
         CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE,
     };
+    // SAFETY: GetStdHandle returns a borrowed handle; info contains only
+    // zero-valid integer fields and is writable for GetConsoleScreenBufferInfo.
+    // An invalid or non-console handle makes the query fail.
     unsafe {
         let h = GetStdHandle(STD_OUTPUT_HANDLE);
         if h.is_null() {
@@ -4072,11 +4082,43 @@ fn windows_console_size() -> Option<(u16, u16)> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(dead_code)]
+    mod differential {
+        use kettle_vt::AnsiStripper as SharedStripper;
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../kettle-vt/src/control/differential.rs"
+        ));
+    }
+    use differential::CheckedStripper as AnsiStripper;
+
     /// Overrides the Linux session-scan budget in milliseconds; 0 keeps the
     /// production value. See `linux_proc_scan_time`.
     #[cfg(target_os = "linux")]
     pub(super) static LINUX_PROC_SCAN_TIME_FOR_TESTS: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
+
+    /// The latest output a recorder in this process took, kept only while a
+    /// recorder stop case watches for its marker. Each case runs alone in its
+    /// own test process.
+    static RECORDED_TAIL: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+    pub(super) fn note_recorded_output(bytes: &[u8]) {
+        let mut tail = RECORDED_TAIL.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(tail) = tail.as_mut() {
+            tail.extend_from_slice(bytes);
+            let excess = tail.len().saturating_sub(4096);
+            tail.drain(..excess);
+        }
+    }
+
+    fn recorded_output_contains(needle: &[u8]) -> bool {
+        RECORDED_TAIL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|tail| tail.windows(needle.len()).any(|window| window == needle))
+    }
 
     #[test]
     fn a_blocked_writer_takes_the_pending_command_once_its_queue_has_room() {
@@ -4972,6 +5014,147 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn process_tree_teardown_is_idempotent_after_direct_child_reap() {
+        let (tx, _events) = crossbeam_channel::unbounded();
+        let term = Terminal::new(
+            &["sh".into(), "-c".into(), "exec sleep 300".into()],
+            None,
+            100,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            Arc::new(|| {}),
+        )
+        .expect("regression requires a real PTY");
+        let tree = ExecProcessTree::attach(&term);
+        assert!(tree.terminate(&term), "first teardown must be verified");
+        assert!(wait_for_exit_code(&term).is_some());
+        assert!(
+            tree.terminate(&term),
+            "completed teardown must return its cached result"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normal_completion_reserves_pid_until_output_acknowledgement() {
+        kettle_test_support::run_alone_in_child(
+            "exec::tests::normal_completion_reserves_pid_until_output_acknowledgement",
+            || {
+                #[cfg(target_os = "linux")]
+                adopt_orphaned_descendants();
+                for stop in ["ack", "cancel", "timeout", "failure"] {
+                    struct CompletionOutput<'a> {
+                        pid_file: &'a Path,
+                        stop: &'a str,
+                        cancelled: &'a AtomicBool,
+                        completed: bool,
+                    }
+                    impl ExecOutput for CompletionOutput<'_> {
+                        fn ready(&mut self) -> OutputResult<bool> {
+                            Ok(true)
+                        }
+                        fn start(&mut self, _: u16, _: u16) -> OutputResult<()> {
+                            Ok(())
+                        }
+                        fn output(&mut self, _: Vec<u8>) -> OutputResult<()> {
+                            Ok(())
+                        }
+                        fn title(&mut self, _: String) -> OutputResult<()> {
+                            Ok(())
+                        }
+                        fn finish(
+                            &mut self,
+                            _: i32,
+                            _: Duration,
+                            mode: OutputFinish,
+                        ) -> OutputResult<()> {
+                            if matches!(mode, OutputFinish::Complete) {
+                                self.completed = true;
+                                let pid: u32 = std::fs::read_to_string(self.pid_file)
+                                    .unwrap()
+                                    .trim()
+                                    .parse()
+                                    .unwrap();
+                                // SAFETY: this is our own exited PTY child. WNOWAIT
+                                // verifies its PID reservation without releasing it.
+                                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                                // SAFETY: info is writable, pid is our own child,
+                                // and WNOWAIT leaves its status reserved.
+                                let observed = unsafe {
+                                    libc::waitid(
+                                        libc::P_PID,
+                                        pid as _,
+                                        &raw mut info,
+                                        libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                                    )
+                                };
+                                assert_eq!(
+                                    observed,
+                                    0,
+                                    "normal completion reaped before output acknowledgement: {}",
+                                    std::io::Error::last_os_error()
+                                );
+                                // SAFETY: successful waitid initialized the child-status layout.
+                                assert_eq!(unsafe { info.si_pid() }, pid as i32);
+                                if self.stop == "cancel" {
+                                    self.cancelled.store(true, Ordering::Release);
+                                }
+                            }
+                            Ok(())
+                        }
+                        fn completion_ready(&mut self) -> OutputResult<bool> {
+                            if self.stop == "failure" {
+                                Err(OutputDeliveryError::unexpected("late output failure"))
+                            } else {
+                                Ok(self.stop == "ack")
+                            }
+                        }
+                    }
+                    let directory = tempfile::tempdir().unwrap();
+                    let pid = directory.path().join("pid");
+                    let cancelled = AtomicBool::new(false);
+                    let mut opts = opts_for(
+                        vec![
+                            "sh".into(),
+                            "-c".into(),
+                            "echo $$ > \"$1\"; exit 7".into(),
+                            "fixture".into(),
+                            pid.to_string_lossy().into_owned(),
+                        ],
+                        None,
+                    );
+                    opts.timeout = Some(Duration::from_secs(2));
+                    let mut output = CompletionOutput {
+                        pid_file: &pid,
+                        stop,
+                        cancelled: &cancelled,
+                        completed: false,
+                    };
+                    let code = run_exec_engine(opts, &|| None, &mut output, Some(&cancelled), true);
+                    assert!(
+                        output.completed,
+                        "fixture must reach ordinary output completion"
+                    );
+                    let expected = match stop {
+                        "ack" => 7,
+                        "cancel" => EXIT_CANCELLED,
+                        "timeout" => EXIT_TIMEOUT,
+                        _ => EXIT_OUTPUT_DELIVERY,
+                    };
+                    assert_eq!(code, expected, "{stop} after child exit");
+                }
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn completion_drains_queued_json_titles() {
         struct GatedOutput<'a> {
             direct: DirectOutput<'a>,
@@ -5612,26 +5795,14 @@ mod tests {
                 }
             }
 
-            fn state(self) -> StripState {
+            fn prefix(self) -> &'static [u8] {
                 match self {
-                    Self::Ground => StripState::Ground,
-                    Self::Escape => StripState::Escape,
-                    Self::EscapeIntermediate => StripState::EscapeIntermediate {
-                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
-                    },
-                    Self::Csi => StripState::Csi {
-                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
-                    },
-                    Self::OscString => StripState::String {
-                        bel_terminated: true,
-                        escaped: false,
-                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
-                    },
-                    Self::DcsApcString => StripState::String {
-                        bel_terminated: false,
-                        escaped: false,
-                        remaining: MAX_CONTROL_SEQUENCE_BYTES,
-                    },
+                    Self::Ground => b"",
+                    Self::Escape => b"\x1b",
+                    Self::EscapeIntermediate => b"\x1b(",
+                    Self::Csi => b"\x1b[",
+                    Self::OscString => b"\x1b]",
+                    Self::DcsApcString => b"\x1bP",
                 }
             }
         }
@@ -5680,8 +5851,8 @@ mod tests {
             )
         }
 
-        fn is_open(state: &StripState) -> bool {
-            !matches!(state, StripState::Ground)
+        fn is_open(state: &kettle_vt::control::State) -> bool {
+            !matches!(state, kettle_vt::control::State::Ground)
         }
 
         let states = [
@@ -5705,27 +5876,29 @@ mod tests {
             for event in events {
                 let bytes = event.bytes();
                 for split in 0..=bytes.len() {
-                    let mut stripper = AnsiStripper {
-                        state: state.state(),
-                        ..AnsiStripper::default()
-                    };
+                    let mut stripper = AnsiStripper::default();
+                    let mut parser = kettle_vt::control::ControlParser::new();
                     let mut out = Vec::new();
+                    stripper.push(state.prefix(), &mut out);
+                    for &byte in state.prefix().iter().chain(bytes) {
+                        parser.advance(byte);
+                    }
                     stripper.push(&bytes[..split], &mut out);
                     stripper.push(&bytes[split..], &mut out);
 
                     assert_eq!(
-                        is_open(&stripper.state),
+                        is_open(&parser.state()),
                         remains_open(state, event),
                         "{} x {} split at {split} reached {:?}",
                         state.name(),
                         event.name(),
-                        stripper.state
+                        parser.state()
                     );
 
                     // Finish the deliberately-open combinations, then prove
                     // the parser returns to visible output rather than merely
                     // reaching a superficially plausible enum variant.
-                    if is_open(&stripper.state) {
+                    if is_open(&parser.state()) {
                         stripper.push(b"\x18", &mut out);
                     }
                     stripper.push(b"VISIBLE", &mut out);
@@ -5759,7 +5932,7 @@ mod tests {
 
     #[test]
     fn ansi_stripper_has_constant_memory_and_bounded_resynchronization() {
-        assert!(std::mem::size_of::<AnsiStripper>() <= 32);
+        assert!(std::mem::size_of::<kettle_vt::AnsiStripper>() <= 32);
         let mut stripper = AnsiStripper::default();
         let mut out = Vec::new();
         stripper.push(b"prefix\x1b]unterminated", &mut out);
@@ -6165,8 +6338,8 @@ mod tests {
     fn teardown_accepts_unreaped_adopted_children() {
         const FIXTURE: &str = "exec::tests::teardown_accepts_unreaped_adopted_children";
         if invoked_as_fixture(FIXTURE) {
-            // SAFETY: only this isolated fixture adopts its orphaned descendants.
             assert_eq!(
+                // SAFETY: only this isolated fixture adopts its orphaned descendants.
                 unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
                 0
             );
@@ -6228,6 +6401,8 @@ mod tests {
             || linux_process_has_exited(pid),
             || {
                 // Avoid leaking the fixture if the assertion fails.
+                // SAFETY: kill takes numeric arguments only; pid was published by the
+                // test fixture and SIGKILL is a valid signal for its cleanup.
                 unsafe {
                     libc::kill(pid as libc::pid_t, libc::SIGKILL);
                 }
@@ -6289,6 +6464,8 @@ wait
             || linux_process_has_exited(pid),
             || {
                 // Avoid leaking the fixture if the assertion fails.
+                // SAFETY: kill takes numeric arguments only; pid was published by the
+                // test fixture and SIGKILL is a valid signal for its cleanup.
                 unsafe {
                     libc::kill(pid as libc::pid_t, libc::SIGKILL);
                 }
@@ -6377,6 +6554,8 @@ wait
         let exited = exited_before_cleanup(
             || linux_process_has_exited(pid),
             || {
+                // SAFETY: kill takes numeric arguments only; pid was published by the
+                // test fixture and SIGKILL is a valid signal for its cleanup.
                 unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
             },
         );
@@ -6681,6 +6860,8 @@ wait
         // so it deterministically retains the inherited slave; the parent test
         // owns its explicit cleanup because this is also the documented
         // containment escape that needs an OS-owned supervisor/cgroup.
+        // SAFETY: The pre_exec closure calls only setsid and last_os_error,
+        // which use no allocation or locks in the post-fork child.
         unsafe {
             command.pre_exec(|| {
                 if libc::setsid() < 0 {
@@ -6733,11 +6914,14 @@ wait
                     .ok()
             })
             .unwrap_or_else(|| panic!("fixture did not announce its descendant: {output:?}"));
+        // SAFETY: kill with signal 0 only probes the numeric pid published by the fixture.
         if unsafe { libc::kill(pid, 0) } == 0 {
             // The fixture intentionally called setsid, which is the documented
             // escape from Kettle's Unix PTY-session ownership boundary. The
             // result is about reaching the EOF timeout; clean this
             // deliberately unowned process up explicitly.
+            // SAFETY: kill takes numeric arguments only; pid was published by
+            // this fixture and SIGKILL is a valid cleanup signal.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
         assert_eq!(code, EXIT_INTERNAL);
@@ -6789,10 +6973,12 @@ wait
         }
         println!("FORK_PID {}", std::process::id());
         let _ = std::io::stdout().flush();
+        // SAFETY: getppid has no preconditions.
         let parent = unsafe { libc::getppid() };
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut children = Vec::new();
         while Instant::now() < deadline
+            // SAFETY: getppid has no preconditions.
             && unsafe { libc::getppid() } == parent
             && children.len() < 256
         {
@@ -6872,6 +7058,8 @@ wait
             .filter(|pid| !linux_process_has_exited(*pid))
             .collect::<Vec<_>>();
         for pid in &survivors {
+            // SAFETY: kill takes numeric arguments only; these pids were published
+            // by the test fixtures and SIGKILL is a valid cleanup signal.
             unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
         }
         assert!(
@@ -6996,9 +7184,182 @@ wait
         if process.is_null() {
             return; // The process object was already fully reaped.
         }
+        // SAFETY: OpenProcess returned this live synchronization handle,
+        // which remains open for the duration of the wait.
         let exited = unsafe { WaitForSingleObject(process, 1000) } == WAIT_OBJECT_0;
+        // SAFETY: OpenProcess transferred this handle to us; this is its only close.
         unsafe { CloseHandle(process) };
         assert!(exited, "Windows descendant {pid} survived Job termination");
+    }
+
+    #[cfg(any(unix, windows))]
+    fn recorder_stop_case(name: &str, timeout: bool, stalled: bool) {
+        // A subprocess captures the real stderr diagnostic without redirecting
+        // process-global handles underneath parallel tests.
+        if std::env::var("KETTLE_TEST_RECORDER_STOP").as_deref() != Ok(name) {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &format!("exec::tests::{name}"), "--nocapture"])
+                .env("KETTLE_TEST_RECORDER_STOP", name)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(
+                result.status.success(),
+                "fixture failed: {}\n{stderr}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+            assert_eq!(
+                stderr.contains("finalization exceeded"),
+                stalled,
+                "{stderr}"
+            );
+            assert_eq!(stderr.contains("trace is incomplete"), stalled, "{stderr}");
+            return;
+        }
+
+        let dir = kettle_test_support::private_tempdir("kettle-exec-recorder-stop-");
+        let record = dir.path().join("stop.cast");
+        let ready = dir.path().join("ready");
+        #[cfg(unix)]
+        let argv = vec![
+            "sh".into(),
+            "-c".into(),
+            "printf recorded-before-stop; touch ready; exec sleep 30".into(),
+        ];
+        #[cfg(windows)]
+        let argv = vec![
+            "cmd.exe".into(),
+            "/D".into(),
+            "/S".into(),
+            "/C".into(),
+            "echo recorded-before-stop & type nul > ready & ping -n 30 127.0.0.1 >NUL".into(),
+        ];
+        let opts = ExecOpts {
+            argv,
+            cwd: Some(dir.path().to_path_buf()),
+            record: Some(record.clone()),
+            timeout: Some(Duration::from_secs(if timeout { 1 } else { 30 })),
+            ..long_running_stop_test_opts(None)
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel = cancelled.clone();
+        *RECORDED_TAIL.lock().unwrap() = Some(Vec::new());
+        let trigger = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            // ConPTY renders the child's output on its own schedule, after
+            // Kettle answers its startup cursor query, so `ready` can exist
+            // before the marker reaches Kettle. A cancel waits for the
+            // recorder to take it.
+            let recorded = || timeout || recorded_output_contains(b"recorded-before-stop");
+            while !ready.exists() || !recorded() {
+                assert!(
+                    Instant::now() < deadline,
+                    "child did not announce readiness"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if !timeout {
+                cancel.store(true, Ordering::Release);
+            }
+        });
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let (code, output) = kettle_core::record::testing::with_test_final_flush_hook(
+            move || {
+                entered_tx.send(Instant::now()).unwrap();
+                if stalled {
+                    // The sender is dropped on assertion failure too.
+                    let _ = release_rx.recv();
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            },
+            || run_exec_capture_cancellable(opts, &cancelled),
+        );
+        let returned = Instant::now();
+        trigger.join().unwrap();
+        assert_eq!(
+            code,
+            if timeout {
+                EXIT_TIMEOUT
+            } else {
+                EXIT_CANCELLED
+            }
+        );
+        assert!(output.contains("recorded-before-stop"), "{output:?}");
+        let entered = entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let finishing = returned.saturating_duration_since(entered);
+        if stalled {
+            assert!(
+                finishing >= RECORD_FINISH_TIMEOUT - Duration::from_millis(500),
+                "writer was detached before receiving its grace: {finishing:?}"
+            );
+            assert!(
+                finishing < RECORD_FINISH_TIMEOUT + Duration::from_millis(500),
+                "stalled flush extended teardown past the grace: {finishing:?}"
+            );
+            release_tx.send(()).unwrap();
+            // Only the deliberately detached case needs a cleanup wait.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(file) = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&record)
+                    && fs4::FileExt::try_lock(&file).is_ok()
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "released writer retained its lock"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        } else {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&record)
+                .unwrap();
+            fs4::FileExt::try_lock(&file).expect("capture returned with the cast still locked");
+            let mut cast = String::new();
+            std::io::Read::read_to_string(&mut file, &mut cast).unwrap();
+            assert!(cast.ends_with('\n'), "final event must end in a newline");
+            let lines: Vec<serde_json::Value> = cast
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(lines[0]["version"], 2);
+            assert!(
+                lines.len() >= 2,
+                "cast must contain an event after its header"
+            );
+            assert_eq!(lines.last().unwrap()[1], "o");
+            assert!(lines.iter().skip(1).any(|event| {
+                event[2]
+                    .as_str()
+                    .is_some_and(|text| text.contains("recorded-before-stop"))
+            }));
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn cancelled_capture_joins_delayed_recorder() {
+        recorder_stop_case("cancelled_capture_joins_delayed_recorder", false, false);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn timeout_capture_joins_delayed_recorder() {
+        recorder_stop_case("timeout_capture_joins_delayed_recorder", true, false);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn cancelled_capture_bounds_stalled_recorder() {
+        recorder_stop_case("cancelled_capture_bounds_stalled_recorder", false, true);
     }
 
     #[test]
@@ -7318,7 +7679,7 @@ wait
     fn exec_stdout_sink_is_a_private_descriptor() {
         use std::os::fd::AsRawFd as _;
 
-        let sink = exec_stdout_sink().expect("duplicate stdout");
+        let sink = stdout_sink().expect("duplicate stdout");
         assert_ne!(
             sink.as_raw_fd(),
             1,

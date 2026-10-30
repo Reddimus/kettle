@@ -25,17 +25,25 @@ fn count(bytes: usize) {
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         count(layout.size());
+        // SAFETY: The GlobalAlloc caller supplies a nonzero valid layout, forwarded unchanged
+        // to System.
         unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         count(layout.size());
+        // SAFETY: The GlobalAlloc caller supplies a nonzero valid layout, forwarded unchanged
+        // to System.
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         count(new_size.saturating_sub(layout.size()));
+        // SAFETY: The caller supplies a live System allocation matching layout and a valid
+        // nonzero new_size.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: The caller supplies a live allocation from this System-backed allocator with
+        // its original layout.
         unsafe { System.dealloc(ptr, layout) }
     }
 }

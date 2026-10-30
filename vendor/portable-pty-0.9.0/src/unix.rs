@@ -133,22 +133,75 @@ fn tty_name(fd: RawFd) -> Option<PathBuf> {
 }
 
 const FIRST_INHERITED_FD: libc::c_int = 3;
+#[cfg(not(target_os = "linux"))]
 const MAX_FD_SWEEP: libc::rlim_t = 1_048_576;
 
-fn descriptor_sweep_limit() -> libc::c_int {
-    let mut limits = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    let soft_limit = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) } == 0 {
-        limits.rlim_cur
-    } else {
-        MAX_FD_SWEEP
-    };
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+thread_local! {
+    // Read only in the parent; the child receives the captured value.
+    static FORCE_FD_FALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
-    // Linux's default per-process fd ceiling is a practical fallback bound;
-    // larger or unlimited values must not make child setup effectively hang.
-    soft_limit.min(MAX_FD_SWEEP) as libc::c_int
+fn descriptor_sweep_limit() -> io::Result<libc::c_int> {
+    // Linux enumerates the child's live descriptor table on fallback.
+    #[cfg(target_os = "linux")]
+    {
+        Ok(0)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // Lowering either process limit leaves existing high descriptors open.
+        let bound = macos_descriptor_limit()?;
+        // Fail spawn rather than leave a partial sweep or an unbounded loop.
+        if bound > MAX_FD_SWEEP {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        Ok(bound as libc::c_int)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let mut limits = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Linux's default per-process fd ceiling is a practical fallback bound;
+        // larger or unlimited values must not make child setup effectively hang.
+        Ok(
+            if limits.rlim_max != libc::RLIM_INFINITY && limits.rlim_max <= MAX_FD_SWEEP {
+                limits.rlim_max
+            } else {
+                limits.rlim_cur.min(MAX_FD_SWEEP)
+            } as libc::c_int,
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_descriptor_limit() -> io::Result<libc::rlim_t> {
+    let mut per_process: libc::c_int = 0;
+    let mut len = mem::size_of::<libc::c_int>();
+    let rc = unsafe {
+        libc::sysctlbyname(
+            b"kern.maxfilesperproc\0".as_ptr().cast(),
+            (&mut per_process as *mut libc::c_int).cast(),
+            &mut len,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len != mem::size_of::<libc::c_int>() || per_process <= FIRST_INHERITED_FD {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    Ok(per_process as libc::rlim_t)
 }
 
 /// Room for the child's descriptor list on macOS. A shell normally inherits a
@@ -202,6 +255,8 @@ fn darwin_major(release: &[u8]) -> u32 {
 /// `fork` and the child writes into its own copy-on-write view of it.
 #[derive(Clone, Copy)]
 struct FdListScratch {
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    force_fallback: bool,
     #[cfg(target_os = "macos")]
     addr: usize,
     #[cfg(target_os = "macos")]
@@ -213,11 +268,15 @@ struct FdListScratch {
 /// Cocoa can leak descriptors on macOS, and gnome/mutter shell extensions can
 /// do the same on Linux. Marking them close-on-exec preserves Rust's private
 /// exec-error channel until it has reported a failed exec to the parent.
-fn mark_random_fds_cloexec(max_fd: libc::c_int, scratch: FdListScratch) {
+fn mark_random_fds_cloexec(max_fd: libc::c_int, scratch: FdListScratch) -> io::Result<()> {
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    let force_fallback = scratch.force_fallback;
+    #[cfg(all(not(test), any(target_os = "linux", target_os = "macos")))]
+    let force_fallback = false;
     #[cfg(target_os = "macos")]
     {
-        if mark_listed_fds_cloexec(scratch) {
-            return;
+        if !force_fallback && mark_listed_fds_cloexec(scratch)? {
+            return Ok(());
         }
         // An unreadable or possibly truncated list still needs the sweep
         // below or inherited descriptors would escape.
@@ -229,39 +288,159 @@ fn mark_random_fds_cloexec(max_fd: libc::c_int, scratch: FdListScratch) {
     {
         // A raw syscall avoids imposing a newer glibc symbol requirement on
         // binaries that still run on older Linux distributions.
-        if unsafe {
-            libc::syscall(
-                libc::SYS_close_range,
-                FIRST_INHERITED_FD as libc::c_uint,
-                libc::c_uint::MAX,
-                libc::CLOSE_RANGE_CLOEXEC,
-            )
-        } == 0
-        {
-            return;
+        let _ = max_fd;
+        if !force_fallback {
+            if unsafe {
+                libc::syscall(
+                    libc::SYS_close_range,
+                    FIRST_INHERITED_FD as libc::c_uint,
+                    libc::c_uint::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                )
+            } == 0
+            {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            if !matches!(
+                error.raw_os_error(),
+                Some(libc::ENOSYS | libc::EINVAL | libc::EPERM)
+            ) {
+                return Err(error);
+            }
         }
-        // Older kernels and sandboxes that reject close_range still need the
-        // portable sweep below or inherited descriptors would escape.
+        mark_proc_fds_cloexec()
     }
 
-    let mut fd = FIRST_INHERITED_FD;
-    while fd < max_fd {
-        // Invalid descriptors are expected in this sparse range; ignoring
-        // them keeps cleanup best-effort without constructing child errors.
-        unsafe {
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut fd = FIRST_INHERITED_FD;
+        while fd < max_fd {
+            mark_fd_cloexec(fd)?;
+            fd += 1;
         }
-        fd += 1;
+        Ok(())
     }
+}
+
+// Only direct syscalls and errno-backed errors are allowed in child helpers.
+fn mark_fd_cloexec(fd: RawFd) -> io::Result<()> {
+    loop {
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EBADF) => return Ok(()), // Holes in a descriptor sweep.
+            Some(libc::EINTR) => continue,
+            _ => return Err(error),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn mark_proc_fds_cloexec() -> io::Result<()> {
+    // No parent snapshot: another thread could open a descriptor before fork.
+    let directory = unsafe {
+        libc::open(
+            b"/proc/self/fd\0".as_ptr().cast(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if directory < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut buffer = [0_u8; 4096];
+    let result = loop {
+        let count = unsafe {
+            libc::syscall(
+                libc::SYS_getdents64,
+                directory,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+            )
+        };
+        if count < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break Err(error);
+        }
+        if count == 0 {
+            break Ok(());
+        }
+        let Some(records) = buffer.get(..count as usize) else {
+            break Err(io::Error::from_raw_os_error(libc::EIO));
+        };
+        if let Err(error) = for_each_proc_fd(records, |fd| {
+            if fd >= FIRST_INHERITED_FD && fd != directory {
+                mark_fd_cloexec(fd)?;
+            }
+            Ok(())
+        }) {
+            break Err(error);
+        }
+    };
+    // Preserve a read/parser error across close. Never retry close on Linux.
+    let closed = unsafe { libc::close(directory) };
+    result?;
+    if closed != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Parse linux_dirent64 without aligned loads or trusting record/name lengths.
+/// Compiled on other test hosts too, to keep portable coverage of the wire ABI.
+#[cfg(any(target_os = "linux", test))]
+fn for_each_proc_fd(
+    mut records: &[u8],
+    mut visit: impl FnMut(RawFd) -> io::Result<()>,
+) -> io::Result<()> {
+    const NAME_OFFSET: usize = 19; // u64 ino, i64 off, u16 reclen, u8 type.
+    while !records.is_empty() {
+        if records.len() <= NAME_OFFSET {
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
+        let len = u16::from_ne_bytes([records[16], records[17]]) as usize;
+        if len <= NAME_OFFSET || len > records.len() {
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
+        let name = &records[NAME_OFFSET..len];
+        let end = name
+            .iter()
+            .position(|&byte| byte == 0)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EIO))?;
+        let name = &name[..end];
+        if name != b"." && name != b".." {
+            if name.is_empty() {
+                return Err(io::Error::from_raw_os_error(libc::EIO));
+            }
+            let mut fd: RawFd = 0;
+            for &byte in name {
+                if !byte.is_ascii_digit() {
+                    return Err(io::Error::from_raw_os_error(libc::EIO));
+                }
+                fd = fd
+                    .checked_mul(10)
+                    .and_then(|n| n.checked_add((byte - b'0').into()))
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EIO))?;
+            }
+            visit(fd)?;
+        }
+        records = &records[len..];
+    }
+    Ok(())
 }
 
 /// Number of descriptor entries the kernel wrote into `scratch` for the
 /// calling process, or `None` when the list is unreadable or may be truncated.
 ///
 /// macOS has no `close_range`. The sweep costs one `fcntl` per descriptor
-/// number up to the soft limit, and a shell started under Node-based tools
-/// inherits a 1,048,576 limit, so every pane spawn waited about 100 ms for the
-/// child to reach `exec`. The kernel's own list makes the cost proportional to
+/// number up to kern.maxfilesperproc, independent of process limits. A shell
+/// started under Node-based tools can inherit a 1,048,576 limit, making every
+/// pane spawn wait about 100 ms. The kernel's list makes the cost proportional to
 /// the descriptors actually open. See `proc_pidinfo` and `PROC_PIDLISTFDS` in
 /// XNU's `bsd/kern/proc_info.c`.
 #[cfg(target_os = "macos")]
@@ -293,9 +472,9 @@ fn list_open_fds(scratch: FdListScratch) -> Option<usize> {
 /// Marks each listed descriptor from `FIRST_INHERITED_FD` up close-on-exec.
 /// Returns false when the list could not be read in full.
 #[cfg(target_os = "macos")]
-fn mark_listed_fds_cloexec(scratch: FdListScratch) -> bool {
+fn mark_listed_fds_cloexec(scratch: FdListScratch) -> io::Result<bool> {
     let Some(count) = list_open_fds(scratch) else {
-        return false;
+        return Ok(false);
     };
     // SAFETY: `list_open_fds` confirmed the kernel initialized `count` whole
     // entries at `scratch.addr`.
@@ -305,12 +484,10 @@ fn mark_listed_fds_cloexec(scratch: FdListScratch) -> bool {
         if info.proc_fd >= FIRST_INHERITED_FD {
             // SAFETY: fcntl on a descriptor number has no memory effects; a
             // descriptor closed since the list was taken just returns EBADF.
-            unsafe {
-                libc::fcntl(info.proc_fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            }
+            mark_fd_cloexec(info.proc_fd)?;
         }
     }
-    true
+    Ok(true)
 }
 
 impl PtyFd {
@@ -368,8 +545,8 @@ impl PtyFd {
         let mut cmd = builder.as_command()?;
         let controlling_tty = builder.get_controlling_tty();
         // Resolve the bound in the parent because POSIX does not require
-        // getrlimit to be async-signal-safe on every supported Unix.
-        let max_fd = descriptor_sweep_limit();
+        // getrlimit or sysctlbyname to be async-signal-safe on every Unix.
+        let max_fd = descriptor_sweep_limit()?;
         #[cfg(target_os = "macos")]
         let mut fd_list = vec![
             libc::proc_fdinfo {
@@ -382,6 +559,8 @@ impl PtyFd {
         // child has reached `exec` or failed. A zero capacity keeps kernels
         // whose list can skip descriptors on the sweep.
         let scratch = FdListScratch {
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+            force_fallback: FORCE_FD_FALLBACK.with(|force| force.get()),
             #[cfg(target_os = "macos")]
             addr: fd_list.as_mut_ptr() as usize,
             #[cfg(target_os = "macos")]
@@ -434,7 +613,7 @@ impl PtyFd {
                         }
                     }
 
-                    mark_random_fds_cloexec(max_fd, scratch);
+                    mark_random_fds_cloexec(max_fd, scratch)?;
 
                     if let Some(mask) = configured_umask {
                         libc::umask(mask);
@@ -592,6 +771,109 @@ mod tests {
         assert_leaked_descriptor_is_closed_on_exec(64)
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn descriptor_above_lowered_soft_limit_is_closed_on_exec() -> anyhow::Result<()> {
+        run_lowered_limit_probe(false, false)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn fallback_closes_descriptor_above_lowered_soft_limit() -> anyhow::Result<()> {
+        run_lowered_limit_probe(true, false)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn fallback_closes_descriptor_above_lowered_hard_limit() -> anyhow::Result<()> {
+        run_lowered_limit_probe(true, true)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn run_lowered_limit_probe(force_fallback: bool, lower_hard: bool) -> anyhow::Result<()> {
+        // Limits are process-wide, so never lower them in the main harness.
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "unix::tests::lowered_limit_probe",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(
+                "PORTABLE_PTY_TEST_FD_FALLBACK",
+                if force_fallback { "1" } else { "0" },
+            )
+            .env(
+                "PORTABLE_PTY_TEST_LOWER_HARD_LIMIT",
+                if lower_hard { "1" } else { "0" },
+            )
+            .output()?;
+        assert!(
+            output.status.success(),
+            "lowered-limit probe failed: {}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[ignore = "run in a subprocess to isolate RLIMIT_NOFILE changes"]
+    fn lowered_limit_probe() -> anyhow::Result<()> {
+        let mut original = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut original) },
+            0
+        );
+        let mut limits = original;
+        #[cfg(target_os = "macos")]
+        let platform_ceiling = macos_descriptor_limit()?;
+        #[cfg(not(target_os = "macos"))]
+        let platform_ceiling = libc::RLIM_INFINITY;
+        limits.rlim_cur = regression_soft_limit(original.rlim_max, platform_ceiling);
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limits) }, 0);
+        let target = 5_000.min(usable_descriptor_limit() - 1);
+        assert!(target >= 64, "descriptor limit too low for regression");
+        let source = File::open("/dev/null")?;
+        assert_eq!(unsafe { libc::dup2(source.as_raw_fd(), target) }, target);
+        let leaked = unsafe { FileDescriptor::from_raw_fd(target) };
+        assert_eq!(unsafe { libc::fcntl(target, libc::F_GETFD) }, 0);
+        limits.rlim_cur = target.min(1_024) as libc::rlim_t;
+        if std::env::var("PORTABLE_PTY_TEST_LOWER_HARD_LIMIT").as_deref() == Ok("1") {
+            limits.rlim_max = limits.rlim_cur;
+        }
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limits) }, 0);
+        FORCE_FD_FALLBACK.with(|force| {
+            force.set(std::env::var("PORTABLE_PTY_TEST_FD_FALLBACK").as_deref() == Ok("1"));
+        });
+        eprintln!(
+            "probing fd {target} above soft limit {} (hard limit {})",
+            limits.rlim_cur, limits.rlim_max
+        );
+        assert_descriptor_is_closed_on_exec(target)?;
+        drop(leaked);
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn regression_soft_limit(hard: libc::rlim_t, platform_ceiling: libc::rlim_t) -> libc::rlim_t {
+        hard.min(65_536).min(platform_ceiling)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn regression_soft_limit_respects_macos_ceiling() {
+        assert_eq!(regression_soft_limit(libc::RLIM_INFINITY, 10_240), 10_240);
+        assert_eq!(regression_soft_limit(4_096, 10_240), 4_096);
+        assert_eq!(regression_soft_limit(libc::RLIM_INFINITY, 131_072), 65_536);
+    }
+
     #[test]
     fn descriptor_near_the_usable_limit_is_closed_on_exec() -> anyhow::Result<()> {
         // The macOS path lists open descriptors instead of sweeping numbers,
@@ -620,23 +902,7 @@ mod tests {
         );
         let soft = limits.rlim_cur.min(libc::c_int::MAX as libc::rlim_t) as libc::c_int;
         #[cfg(target_os = "macos")]
-        {
-            let mut per_process: libc::c_int = 0;
-            let mut len = mem::size_of::<libc::c_int>();
-            let name = b"kern.maxfilesperproc\0";
-            let rc = unsafe {
-                libc::sysctlbyname(
-                    name.as_ptr().cast(),
-                    (&mut per_process as *mut libc::c_int).cast(),
-                    &mut len,
-                    ptr::null_mut(),
-                    0,
-                )
-            };
-            if rc == 0 && per_process > 0 {
-                return soft.min(per_process);
-            }
-        }
+        let soft = soft.min(macos_descriptor_limit().expect("kern.maxfilesperproc") as libc::c_int);
         soft
     }
 
@@ -647,6 +913,63 @@ mod tests {
         assert_eq!(darwin_major(b"19.6.0"), 19);
         assert_eq!(darwin_major(b""), 0);
         assert_eq!(darwin_major(b"x"), 0);
+    }
+
+    fn dirent64(name: &[u8]) -> Vec<u8> {
+        // Synthetic linux_dirent64, including a NUL and alignment padding.
+        let mut record = vec![0; (19 + name.len() + 1).next_multiple_of(8)];
+        let len = record.len() as u16;
+        record[16..18].copy_from_slice(&len.to_ne_bytes());
+        record[18] = 10; // DT_LNK, as in /proc/self/fd.
+        record[19..19 + name.len()].copy_from_slice(name);
+        record
+    }
+
+    #[test]
+    fn getdents64_parser_visits_numeric_names_and_skips_dot_entries() -> io::Result<()> {
+        // Start at an unaligned address to reject reliance on struct casts.
+        let mut records = vec![0xff];
+        for name in [b".".as_slice(), b"..", b"0", b"5000", b"2147483647"] {
+            records.extend(dirent64(name));
+        }
+        let mut fds = Vec::new();
+        for_each_proc_fd(&records[1..], |fd| {
+            fds.push(fd);
+            Ok(())
+        })?;
+        assert_eq!(fds, [0, 5000, 2_147_483_647]);
+        Ok(())
+    }
+
+    #[test]
+    fn getdents64_parser_rejects_incomplete_or_invalid_records() {
+        let valid = dirent64(b"5000");
+        for end in 1..valid.len() {
+            assert_eq!(
+                for_each_proc_fd(&valid[..end], |_| Ok(()))
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(libc::EIO),
+                "truncated at byte {end}"
+            );
+        }
+        for len in [0_u16, 19, 4096] {
+            let mut invalid = valid.clone();
+            invalid[16..18].copy_from_slice(&len.to_ne_bytes());
+            assert!(for_each_proc_fd(&invalid, |_| Ok(())).is_err());
+        }
+        let mut no_nul = valid.clone();
+        no_nul[19..].fill(b'1');
+        assert!(for_each_proc_fd(&no_nul, |_| Ok(())).is_err());
+        for name in [b"".as_slice(), b"-1", b"5x", b"2147483648"] {
+            assert!(for_each_proc_fd(&dirent64(name), |_| Ok(())).is_err());
+        }
+        assert_eq!(
+            for_each_proc_fd(&valid, |_| Err(io::Error::from_raw_os_error(libc::EPERM)))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EPERM)
+        );
     }
 
     fn assert_leaked_descriptor_is_closed_on_exec(min_fd: libc::c_int) -> anyhow::Result<()> {
@@ -662,11 +985,18 @@ mod tests {
         assert!(descriptor_flags >= 0, "read descriptor flags");
         assert_eq!(descriptor_flags & libc::FD_CLOEXEC, 0);
 
-        let (_master, slave) = openpty(PtySize::default())?;
+        assert_descriptor_is_closed_on_exec(leaked_fd)?;
+        drop(leaked);
+        Ok(())
+    }
+
+    fn assert_descriptor_is_closed_on_exec(leaked_fd: libc::c_int) -> anyhow::Result<()> {
+        let (master, slave) = openpty(PtySize::default())?;
         let mut command = CommandBuilder::new(std::env::current_exe()?);
         command.args([
             "--ignored",
             "inherited_descriptor_probe",
+            "--nocapture",
             "--test-threads=1",
         ]);
         command.env(INHERITED_FD_ENV, leaked_fd.to_string());
@@ -674,7 +1004,11 @@ mod tests {
         drop(slave);
 
         let status = child.wait()?;
-        drop(leaked);
+        if !status.success() {
+            let mut output = String::new();
+            master.try_clone_reader()?.read_to_string(&mut output)?;
+            eprintln!("descriptor probe output: {output}");
+        }
         assert!(status.success(), "descriptor probe failed: {}", status);
         Ok(())
     }
@@ -731,6 +1065,7 @@ mod tests {
             FD_LIST_CAPACITY
         ];
         let scratch = FdListScratch {
+            force_fallback: false,
             addr: list.as_mut_ptr() as usize,
             capacity: list.len(),
         };
@@ -760,6 +1095,7 @@ mod tests {
             proc_fdtype: 0,
         }];
         let scratch = FdListScratch {
+            force_fallback: false,
             addr: list.as_mut_ptr() as usize,
             capacity: list.len(),
         };

@@ -8,13 +8,15 @@ impl App {
         ws: &WindowState,
     ) -> Option<kettle_render::MediaPasteReceiptGeometry> {
         let (receipt, completion) = self.media_paste_receipt_projection(ws)?;
-        kettle_render::media_paste_receipt_geometry(
-            &receipt,
+        kettle_render::notification_geometry(
+            self.update_toast_projection(ws).map(|toast| toast.geometry),
+            Some(&receipt),
             completion.as_ref(),
             self.menu_cell(ws),
             self.overlay_text_cell_width(ws),
             self.overlay_text_line_height(ws),
         )
+        .receipt
     }
 
     pub(super) fn media_paste_receipt_hovered(&self, ws: &WindowState) -> bool {
@@ -62,13 +64,16 @@ impl App {
         {
             return false;
         }
-        let Some(geometry) = kettle_render::media_paste_receipt_geometry(
-            &receipt,
+        let Some(geometry) = kettle_render::notification_geometry(
+            self.update_toast_projection(ws).map(|toast| toast.geometry),
+            Some(&receipt),
             completion.as_ref(),
             self.menu_cell(ws),
             self.overlay_text_cell_width(ws),
             self.overlay_text_line_height(ws),
-        ) else {
+        )
+        .receipt
+        else {
             return false;
         };
         let Some(hit) = geometry.hit_test(x, y) else {
@@ -154,6 +159,33 @@ impl App {
         (previous, pending)
     }
 
+    fn dismiss_media_paste_state_for_input_pane(ws: &mut WindowState, pane_id: u64) {
+        let receipt = ws
+            .media_paste_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.pane_id == pane_id);
+        let pending = ws
+            .pending_video_paste_receipt
+            .as_ref()
+            .is_some_and(|pending| pending.pane_id == pane_id);
+        if receipt && pending {
+            Self::dismiss_media_paste_receipt_on_input(ws);
+            return;
+        }
+        if receipt {
+            ws.media_paste_receipt = None;
+        }
+        if pending {
+            ws.pending_video_paste_receipt = None;
+        }
+        if receipt || pending {
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     pub(super) fn dismiss_media_paste_receipt_for_pane(
         &mut self,
         ws: &mut WindowState,
@@ -168,7 +200,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|receipt| receipt.pane_id == pane_id)
         {
-            Self::dismiss_media_paste_receipt_on_input(ws);
+            Self::dismiss_media_paste_state_for_input_pane(ws, pane_id);
             return;
         }
         if let Some(window) = self.windows.values_mut().find(|window| {
@@ -181,19 +213,21 @@ impl App {
                     .as_ref()
                     .is_some_and(|receipt| receipt.pane_id == pane_id)
         }) {
-            Self::dismiss_media_paste_receipt_on_input(window);
+            Self::dismiss_media_paste_state_for_input_pane(window, pane_id);
         }
     }
 
-    pub(super) fn media_paste_receipt_pane(ws: &WindowState) -> Option<u64> {
-        ws.media_paste_receipt
-            .as_ref()
-            .map(|receipt| receipt.pane_id)
-            .or_else(|| {
-                ws.pending_video_paste_receipt
-                    .as_ref()
-                    .map(|receipt| receipt.pane_id)
-            })
+    pub(super) fn media_paste_receipt_owners(ws: &WindowState) -> crate::mux::PasteReceiptOwners {
+        crate::mux::PasteReceiptOwners {
+            receipt: ws
+                .media_paste_receipt
+                .as_ref()
+                .map(|receipt| receipt.pane_id),
+            pending: ws
+                .pending_video_paste_receipt
+                .as_ref()
+                .map(|pending| pending.pane_id),
+        }
     }
 
     pub(super) fn dismiss_media_paste_receipt_after_input(
@@ -201,8 +235,8 @@ impl App {
         pane_id: u64,
         result: PaneInputResult,
     ) {
-        if result.is_queued() && Self::media_paste_receipt_pane(ws) == Some(pane_id) {
-            Self::dismiss_media_paste_receipt_on_input(ws);
+        if result.is_queued() {
+            Self::dismiss_media_paste_state_for_input_pane(ws, pane_id);
         }
     }
 
@@ -210,8 +244,16 @@ impl App {
         ws: &mut WindowState,
         delivery: PaneInputDelivery,
     ) {
-        if delivery.receipt_accepted {
-            Self::dismiss_media_paste_receipt_on_input(ws);
+        let owners = Self::media_paste_receipt_owners(ws);
+        if delivery.receipt_accepted
+            && let Some(pane_id) = owners.receipt
+        {
+            Self::dismiss_media_paste_state_for_input_pane(ws, pane_id);
+        }
+        if delivery.pending_accepted
+            && let Some(pane_id) = owners.pending
+        {
+            Self::dismiss_media_paste_state_for_input_pane(ws, pane_id);
         }
     }
 
@@ -352,6 +394,7 @@ impl App {
         } else {
             ws.mux.active_focus().into_iter().collect()
         };
+        let mut release_bytes = Vec::new();
         let targets: Vec<(u64, Vec<u8>)> = ids
             .into_iter()
             .filter_map(|id| {
@@ -366,6 +409,11 @@ impl App {
                         self.cfg.modify_other_keys,
                         key_is_modified_enter(&event.logical_key, mods),
                     );
+                    if prepare_input
+                        && let Some(release) = key_release_bytes(&self.cfg, event, mods, mode)
+                    {
+                        release_bytes.push(((event.physical_key, id), release));
+                    }
                     encode_key_event_for_mode(&self.cfg, event, mods, mode)?
                 } else {
                     bytes.to_vec()
@@ -374,7 +422,24 @@ impl App {
             })
             .collect();
         let reached: Vec<u64> = targets.iter().map(|(id, _)| *id).collect();
+        release_bytes.retain(|((_, id), _)| reached.contains(id));
+        let release_bytes: Vec<_> = release_bytes
+            .into_iter()
+            .map(|(key, bytes)| {
+                let release = ws
+                    .terminal_key_release_bytes
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| TerminalKeyRelease::new(bytes, false));
+                (key, release)
+            })
+            .collect();
         let paste = QueuedPaste {
+            key_presses: release_bytes
+                .iter()
+                .map(|((_, id), release)| (*id, release.clone()))
+                .collect(),
+            key_releases: Vec::new(),
             window: ws.seq,
             target: paste_target(&ws.mux),
             receipt_pane: ws.mux.active_focus(),
@@ -386,11 +451,14 @@ impl App {
             },
         };
         let result = defer_authored_input(&mut self.queued_pastes, paste);
-        // A press queued here reaches these panes in its turn, so its
-        // release must go to them, whether it is sent at once or queued too.
+        // Keep the release with its press's admission state. Replay may
+        // reject the press after policy or queue capacity changes.
         if let Some(event) = event.filter(|_| prepare_input)
             && result.is_some_and(|result| result.is_queued())
         {
+            for (key, bytes) in release_bytes {
+                ws.terminal_key_release_bytes.entry(key).or_insert(bytes);
+            }
             ws.terminal_key_recipients
                 .entry(event.physical_key)
                 .or_default()
@@ -419,6 +487,7 @@ impl App {
     pub(super) fn deliver_deferred_input(
         ws: &mut WindowState,
         targets: &[(u64, Vec<u8>)],
+        key_presses: &[(u64, TerminalKeyRelease)],
         prepare_input: bool,
         scroll_to_bottom: bool,
     ) -> PaneInputResult {
@@ -428,6 +497,11 @@ impl App {
                 continue;
             };
             let delivered = pane.feed_input(bytes);
+            if delivered.is_queued() && !bytes.is_empty() {
+                for (_, release) in key_presses.iter().filter(|(pane, _)| pane == id) {
+                    release.mark_accepted();
+                }
+            }
             if delivered.is_queued() && prepare_input {
                 ws.last_typed = Some(std::time::Instant::now());
                 if scroll_to_bottom && let Ok(mut term) = pane.term.term.lock() {
@@ -464,6 +538,8 @@ impl App {
         }
         let recipients = self.broadcast_recipients(ws);
         self.queued_pastes.push_back(QueuedPaste {
+            key_presses: Vec::new(),
+            key_releases: Vec::new(),
             window: ws.seq,
             target: paste_target(&ws.mux),
             receipt_pane: ws.mux.active_focus(),
@@ -527,6 +603,8 @@ impl App {
             broadcast,
             recipients,
             content,
+            key_presses,
+            key_releases,
         } = paste;
         // A single-pane paste follows its pane, which may have changed window.
         let window = target
@@ -538,6 +616,7 @@ impl App {
             .unwrap_or(window);
         let Some(mut ws) = self.windows.remove(&window) else {
             self.discard_queued_paste(content);
+            self.send_key_releases(None, &key_releases);
             return;
         };
         // Broadcast goes where its scope reaches now. A different scope, or
@@ -547,6 +626,7 @@ impl App {
             && (ws.mux.broadcast != broadcast || self.broadcast_recipients(&ws) != recipients)
         {
             self.discard_queued_paste(content);
+            self.send_key_releases(Some(&ws), &key_releases);
             self.finish_window_dispatch(el, window, ws);
             return;
         }
@@ -573,6 +653,7 @@ impl App {
                 let mut result = Self::deliver_deferred_input(
                     &mut ws,
                     &targets,
+                    &key_presses,
                     prepare_input,
                     self.cfg.scroll_on_keystroke,
                 );
@@ -580,6 +661,7 @@ impl App {
                     result = result.merge(Self::deliver_deferred_input(
                         other,
                         &targets,
+                        &key_presses,
                         prepare_input,
                         self.cfg.scroll_on_keystroke,
                     ));
@@ -592,6 +674,7 @@ impl App {
                 video,
             } => self.paste_paths_to(&mut ws, target, receipt_pane, paths, trailing_space, video),
         }
+        self.send_key_releases(Some(&ws), &key_releases);
         self.finish_window_dispatch(el, window, ws);
     }
 
@@ -691,14 +774,14 @@ impl App {
             if let Some(rec) = self.recorder.as_mut() {
                 rec.record_marker(&format!("kettle:paste len={}", text.chars().count()));
             }
-            let receipt_pane = Self::media_paste_receipt_pane(ws);
+            let receipt_pane = Self::media_paste_receipt_owners(ws);
             let local = ws.mux.broadcast_paste_delivery(text, receipt_pane);
             Self::dismiss_media_paste_receipt_after_delivery(ws, local);
             let mut result = local.result;
             if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
                 let scope = ws.mux.broadcast.clone();
                 for other in self.windows.values_mut() {
-                    let receipt_pane = Self::media_paste_receipt_pane(other);
+                    let receipt_pane = Self::media_paste_receipt_owners(other);
                     let delivery =
                         other
                             .mux
@@ -779,28 +862,50 @@ impl App {
             );
             return;
         }
-        let mut preview = crate::mux::format_paths_for_paste(&argv, &paths);
+        let mut preview = match crate::mux::format_paths_for_paste(&argv, &paths) {
+            Ok(preview) => preview,
+            Err(error) => {
+                self.pasted_images.discard_previews_for_paths(&paths);
+                self.report_input_result(error);
+                return;
+            }
+        };
         if trailing_space {
             preview.push(' ');
         }
-        let within_limit = if ws.mux.is_broadcast_on() {
-            ws.mux
-                .broadcast_paste_paths_within_limit(&paths, trailing_space, LOCAL_PASTE_MAX)
-                && (!Mux::scope_crosses_windows(&ws.mux.broadcast)
-                    || self.windows.values().all(|other| {
-                        other.mux.broadcast_paste_paths_foreign_within_limit(
-                            &ws.mux.broadcast,
-                            &paths,
-                            trailing_space,
-                            LOCAL_PASTE_MAX,
-                        )
-                    }))
-        } else {
-            local_paste_within_limit(&preview)
+        let checked = (|| {
+            if !ws.mux.is_broadcast_on() {
+                return Ok(local_paste_within_limit(&preview));
+            }
+            if !ws.mux.broadcast_paste_paths_within_limit(
+                &paths,
+                trailing_space,
+                LOCAL_PASTE_MAX,
+            )? {
+                return Ok(false);
+            }
+            if Mux::scope_crosses_windows(&ws.mux.broadcast) {
+                for other in self.windows.values() {
+                    if !other.mux.broadcast_paste_paths_foreign_within_limit(
+                        &ws.mux.broadcast,
+                        &paths,
+                        trailing_space,
+                        LOCAL_PASTE_MAX,
+                    )? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(true)
+        })();
+        let rejection = match checked {
+            Ok(true) => None,
+            Ok(false) => Some(PaneInputResult::Oversize),
+            Err(error) => Some(error),
         };
-        if !within_limit {
+        if let Some(error) = rejection {
             self.pasted_images.discard_previews_for_paths(&paths);
-            self.report_input_result(PaneInputResult::Oversize);
+            self.report_input_result(error);
             return;
         }
 
@@ -914,7 +1019,7 @@ impl App {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
     ) -> PaneInputDelivery {
-        let receipt_pane = Self::media_paste_receipt_pane(ws);
+        let receipt_pane = Self::media_paste_receipt_owners(ws);
         let delivery = ws.mux.broadcast_paste_paths_foreign_delivery(
             scope,
             paths,
@@ -1148,6 +1253,16 @@ pub(super) fn defer_authored_input(
     if queue.is_empty() {
         return None;
     }
+    if !input.key_presses.is_empty() {
+        let recipients = queue
+            .iter()
+            .filter(|paste| paste.window == input.window)
+            .map(|paste| paste.key_presses.len())
+            .fold(input.key_presses.len(), usize::saturating_add);
+        if recipients > MAX_OWED_KEY_RECIPIENTS {
+            return Some(PaneInputResult::Oversize);
+        }
+    }
     let bytes = queue
         .iter()
         .map(|paste| paste.content.bytes())
@@ -1162,6 +1277,8 @@ pub(super) fn defer_authored_input(
                     targets: queued,
                     prepare_input: queued_prepare,
                 },
+            key_presses,
+            key_releases,
             ..
         }),
         QueuedPasteContent::Input {
@@ -1169,10 +1286,19 @@ pub(super) fn defer_authored_input(
             prepare_input,
         },
     ) = (queue.back_mut(), &input.content)
+        && key_releases.is_empty()
+        && input.key_releases.is_empty()
         && queued_prepare == prepare_input
         && queued.len() == targets.len()
         && queued.iter().zip(targets).all(|(a, b)| a.0 == b.0)
     {
+        for (id, press) in &input.key_presses {
+            if !key_presses.iter().any(|(kept, release)| {
+                *kept == *id && Arc::ptr_eq(&release.press_accepted, &press.press_accepted)
+            }) {
+                key_presses.push((*id, press.clone()));
+            }
+        }
         for ((_, queued), (_, bytes)) in queued.iter_mut().zip(targets) {
             queued.extend_from_slice(bytes);
         }
@@ -1185,6 +1311,22 @@ pub(super) fn defer_authored_input(
     Some(PaneInputResult::Queued)
 }
 
+const MAX_OWED_KEY_RECIPIENTS: usize = 1024;
+
+/// Releases take no new queue slot or byte admission: their presses already
+/// reserved the obligation. The tail fences later input behind each release.
+pub(super) fn defer_key_releases(
+    queue: &mut std::collections::VecDeque<QueuedPaste>,
+    releases: &mut Vec<(u64, PhysicalKey, TerminalKeyRelease)>,
+) -> bool {
+    if let Some(paste) = queue.back_mut() {
+        paste.key_releases.append(releases);
+        true
+    } else {
+        false
+    }
+}
+
 pub(super) fn pop_ready_paste(
     queue: &mut std::collections::VecDeque<QueuedPaste>,
 ) -> Option<QueuedPaste> {
@@ -1193,4 +1335,221 @@ pub(super) fn pop_ready_paste(
     } else {
         None
     }
+}
+
+/// A paste made while a clipboard image was still being encoded. It waits
+/// its turn so pastes land in the order they were made.
+pub(super) struct QueuedPaste {
+    pub(super) window: u64,
+    pub(super) target: Option<u64>,
+    pub(super) receipt_pane: Option<u64>,
+    pub(super) broadcast: crate::mux::BroadcastScope,
+    /// The panes a broadcast paste reaches, every window's, when it was made.
+    pub(super) recipients: Vec<u64>,
+    pub(super) content: QueuedPasteContent,
+    pub(super) key_presses: Vec<(u64, TerminalKeyRelease)>,
+    pub(super) key_releases: Vec<(u64, PhysicalKey, TerminalKeyRelease)>,
+}
+
+pub(super) enum QueuedPasteContent {
+    /// The PNG of encoder job `id`, once it is kept or has failed, and the
+    /// clipboard's text to paste instead if it failed.
+    Image {
+        id: u64,
+        fallback: String,
+        path: Option<std::io::Result<std::path::PathBuf>>,
+    },
+    Text(String),
+    Input {
+        targets: Vec<(u64, Vec<u8>)>,
+        prepare_input: bool,
+    },
+    Paths {
+        paths: Vec<std::path::PathBuf>,
+        trailing_space: bool,
+        video: Option<crate::video_preview::VideoPasteRequest>,
+    },
+}
+
+impl QueuedPasteContent {
+    /// The bytes it holds while it waits.
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Image { fallback, .. } => fallback.len(),
+            Self::Text(text) => text.len(),
+            Self::Input { targets, .. } => targets
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .fold(0, usize::saturating_add),
+            Self::Paths { paths, .. } => paths
+                .iter()
+                .map(|path| path.as_os_str().len())
+                .fold(0, usize::saturating_add),
+        }
+    }
+
+    /// Whether it is an image still being encoded.
+    fn encoding(&self) -> bool {
+        matches!(self, Self::Image { path: None, .. })
+    }
+}
+
+/// Most pastes that may wait behind encoding images, and their text bytes.
+pub(super) const QUEUED_PASTES_MAX: usize = 64;
+pub(super) const QUEUED_PASTE_BYTES_MAX: usize = 4 * LOCAL_PASTE_MAX;
+
+/// Terminator parity (`terminal.py:real_copy_clipboard` +
+/// `config.py:smart_copy`): what `Action::Copy` writes to the clipboard.
+///
+///   * `selection`: the selected text, or `None` when the pane has none.
+///   * `smart_copy`: `cfg.smart_copy`. With no selection, `true` (default)
+///     keeps the existing clipboard and `false` clobbers it with an empty
+///     string (Terminator's deliberate-UX-choice mode).
+///
+/// Returns the text to write, or `None` to leave the clipboard untouched.
+/// On the `Some("")` clobber path the caller writes the empty string but does
+/// not count it as a real copy, so the `clear_select_on_copy` follow-up is
+/// skipped (no selection existed to clear). Pure; unit-testable without a
+/// clipboard fixture.
+pub(super) fn copy_clipboard_decision(
+    selection: Option<String>,
+    smart_copy: bool,
+) -> Result<Option<String>, std::collections::TryReserveError> {
+    match (selection, smart_copy) {
+        (Some(s), _) => kettle_core::scrub_card_markers(s).map(Some),
+        (None, false) => Ok(Some(String::new())),
+        (None, true) => Ok(None),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PasteSource {
+    Clipboard,
+    Primary,
+}
+
+/// Terminator parity for `putty_paste_style_source_clipboard`: right-click
+/// PuTTY paste defaults to the PRIMARY selection on Linux, matching terminal
+/// mouse-paste convention. Users who expect Windows/PuTTY-style clipboard
+/// paste can opt into the regular clipboard source.
+pub(super) fn putty_paste_source(source_clipboard: bool) -> PasteSource {
+    if source_clipboard {
+        PasteSource::Clipboard
+    } else {
+        PasteSource::Primary
+    }
+}
+
+/// 4 MiB limit on a *local* clipboard paste. The OSC 52 cap above guards
+/// against a hostile remote program pushing an unbounded payload into
+/// the system clipboard; this guards the reverse direction — a user
+/// accidentally pastes a multi-GB file and kettle would otherwise feed
+/// every byte into the PTY in one shot, freezing the terminal until
+/// the program at the other end (cat? vim?) drained the pipe. 4 MiB
+/// fits any realistic code-review / log-snippet paste with room to spare.
+/// Larger payloads are rejected with visible feedback rather than truncated,
+/// since silently shortening a command, patch, or encoded file is unsafe.
+const LOCAL_PASTE_MAX: usize = 4 << 20;
+
+pub(super) fn local_paste_within_limit(text: &str) -> bool {
+    text.len() <= LOCAL_PASTE_MAX
+}
+
+/// The pane a single-pane paste goes to: the focused one. Broadcast names no
+/// pane and keeps its live group semantics.
+fn paste_target(mux: &Mux) -> Option<u64> {
+    if mux.is_broadcast_on() {
+        None
+    } else {
+        mux.active_focus()
+    }
+}
+
+/// Apply a terminal control, such as Reset's RIS or Clear Scrollback's
+/// CSI 3 J, to each target pane's terminal.
+///
+/// Nothing is written to the child, so read-only panes are included. This is
+/// VTE's model, which Terminator's Reset uses: `vte_terminal_reset` changes the
+/// terminal and ignores `input-enabled`.
+pub(super) fn apply_terminal_control(mux: &Mux, targets: &[u64], bytes: &[u8]) {
+    for id in targets {
+        if let Some(pane) = mux.panes.get(id)
+            && !pane.term.apply_local_output(bytes)
+        {
+            log::debug!("pane {id}: terminal control dropped; its reader is busy or stopped");
+        }
+    }
+}
+
+/// Deliver a confirmed non-broadcast text paste to the pane named when the
+/// prompt opened. Mode lookup and delivery use the same stable id.
+fn paste_text_into_target(
+    mux: &mut Mux,
+    target: Option<u64>,
+    text: &str,
+) -> Option<PaneInputResult> {
+    let pane = mux.panes.get_mut(&target?)?;
+    let bracketed = pane
+        .term
+        .term
+        .lock()
+        .ok()
+        .map(|term| term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
+        .unwrap_or(false);
+    let bytes = input::paste_payload(text, bracketed);
+    Some(pane.feed_input(&bytes))
+}
+
+/// Deliver a confirmed non-broadcast path paste to the pane named when the
+/// prompt opened. Shell formatting, mode lookup, and delivery all use it.
+pub(super) fn paste_paths_into_target(
+    mux: &mut Mux,
+    target: Option<u64>,
+    paths: &[std::path::PathBuf],
+    trailing_space: bool,
+) -> Option<PaneInputDelivery> {
+    let pane = mux.panes.get_mut(&target?)?;
+    let mut text = match crate::mux::format_paths_for_paste(&pane.argv, paths) {
+        Ok(text) => text,
+        Err(error) => return Some(PaneInputDelivery::rejected(error)),
+    };
+    if trailing_space {
+        text.push(' ');
+    }
+    let bracketed = pane
+        .term
+        .term
+        .lock()
+        .ok()
+        .map(|term| term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
+        .unwrap_or(false);
+    let bytes = input::paste_payload(&text, bracketed);
+    let result = pane.feed_input(&bytes);
+    Some(PaneInputDelivery {
+        result,
+        accepted: result.is_queued(),
+        receipt_accepted: result.is_queued(),
+        pending_accepted: false,
+    })
+}
+
+/// The window waiting for this pane's video preview generation: the window
+/// that requested it, or the one its tab has moved to since.
+pub(super) fn video_preview_target_window(
+    windows: &std::collections::BTreeMap<u64, WindowState>,
+    hint: u64,
+    pane: u64,
+    generation: u64,
+) -> Option<u64> {
+    if windows
+        .get(&hint)
+        .is_some_and(|window| window.expects_video_preview(pane, generation))
+    {
+        return Some(hint);
+    }
+    windows.iter().find_map(|(&seq, window)| {
+        window
+            .expects_video_preview(pane, generation)
+            .then_some(seq)
+    })
 }

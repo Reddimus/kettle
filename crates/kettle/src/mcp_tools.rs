@@ -1,6 +1,7 @@
 //! The MCP tool registry.
 //!
-//! `kettle_run` runs a command headlessly via the exec engine in-process.
+//! `kettle_run` uses a per-command exec supervisor on Linux, and the
+//! in-process exec engine on macOS/Windows.
 //! The other tools drive a running kettle via the control client; when no
 //! server is discoverable they return an `isError` result with actionable text
 //! (start `kettle --agent-server full`).
@@ -12,7 +13,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::exec::{ExecOpts, OutputMode, run_exec_capture, run_exec_capture_cancellable};
+use crate::exec::{ExecOpts, OutputMode, run_mcp_capture};
 use kettle_ctl::Client;
 use kettle_media::FailureCode;
 
@@ -1092,10 +1093,7 @@ fn tool_kettle_run(args: &Value, cancelled: Option<&std::sync::atomic::AtomicBoo
         record: None,
         forward_stdin: false,
     };
-    let (code, output) = match cancelled {
-        Some(cancelled) => run_exec_capture_cancellable(opts, cancelled),
-        None => run_exec_capture(opts),
-    };
+    let (code, output) = run_mcp_capture(opts, cancelled);
     let (text, truncated) = cap_tool_text(format!("exit code: {code}\n\n{output}"));
     json!({
         "content": [{ "type": "text", "text": text }],

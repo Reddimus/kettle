@@ -17,23 +17,27 @@ fn main() {
     println!("cargo:rerun-if-changed={}", themes_dir.display());
 
     let mut entries: Vec<(String, String)> = Vec::new();
-    if let Ok(rd) = fs::read_dir(&themes_dir) {
-        for e in rd.flatten() {
-            let path = e.path();
-            if !path.is_file() {
-                continue;
-            }
-            let name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-            if !is_bundled_theme_filename(&name) {
-                continue;
-            }
-            if let Ok(contents) = fs::read_to_string(&path) {
-                entries.push((name, contents));
-            }
+    let rd = fs::read_dir(&themes_dir)
+        .unwrap_or_else(|error| panic!("cannot enumerate {}: {error}", themes_dir.display()));
+    for entry in rd {
+        let entry = entry
+            .unwrap_or_else(|error| panic!("cannot enumerate {}: {error}", themes_dir.display()));
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if !is_bundled_theme_filename(&name) {
+            continue;
         }
+        let metadata = fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("cannot inspect {}: {error}", path.display()));
+        if !metadata.is_file() {
+            continue;
+        }
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        entries.push((name, contents));
     }
     // Case-insensitive primary sort, case-sensitive tiebreak so the order is
     // deterministic across runs. A raw `String::cmp` sorts bytewise and puts

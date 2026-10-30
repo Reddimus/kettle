@@ -702,6 +702,8 @@ fn sized_unread_pipe() -> (std::fs::File, Stdio, usize, usize) {
     }
     // SAFETY: a successful pipe2 returned two distinct owned descriptors.
     let reader = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+    // SAFETY: Successful pipe2 returned this distinct writer fd, whose
+    // sole ownership moves to OwnedFd; the reader owns the other end.
     let writer = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
 
     // Shrinking before spawn removes dependence on the host's adaptive pipe
@@ -711,8 +713,8 @@ fn sized_unread_pipe() -> (std::fs::File, Stdio, usize, usize) {
     assert!(page_size > 0, "Linux must report a positive page size");
     let requested_capacity =
         libc::c_int::try_from(page_size).expect("page size must fit Linux fcntl");
-    // SAFETY: writer is a live pipe descriptor and F_SETPIPE_SZ takes an int.
     let resized =
+        // SAFETY: writer is a live pipe descriptor and F_SETPIPE_SZ takes an int.
         unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETPIPE_SZ, requested_capacity) };
     if resized < 0 {
         panic!(
@@ -722,6 +724,8 @@ fn sized_unread_pipe() -> (std::fs::File, Stdio, usize, usize) {
     }
     // SAFETY: F_GETPIPE_SZ and fpathconf only inspect the live pipe descriptor.
     let capacity = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETPIPE_SZ) };
+    // SAFETY: reader owns a live pipe fd and _PC_PIPE_BUF is a valid
+    // fpathconf selector with no pointer arguments.
     let atomic_write = unsafe { libc::fpathconf(reader.as_raw_fd(), libc::_PC_PIPE_BUF) };
     assert!(capacity > 0, "Linux pipe capacity must be positive");
     assert!(atomic_write > 0, "Linux PIPE_BUF must be positive");
@@ -789,7 +793,10 @@ fn windows_process_has_exited(pid: u32) -> bool {
     if process.is_null() {
         return true;
     }
+    // SAFETY: OpenProcess returned this live synchronization handle,
+    // which remains open throughout the wait.
     let exited = unsafe { WaitForSingleObject(process, 0) } == WAIT_OBJECT_0;
+    // SAFETY: OpenProcess transferred this handle to us; this is its only close.
     unsafe { CloseHandle(process) };
     exited
 }
@@ -977,6 +984,8 @@ fn stdout_burst_then_exit_helper() {
     let mut remaining = burst_bytes;
     while remaining != 0 {
         let count = remaining.min(block.len());
+        // SAFETY: block is initialized and count is at most block.len(); write
+        // borrows that readable prefix only for this call on the fixture's stdout.
         let written = unsafe { libc::write(1, block.as_ptr().cast(), count) };
         if written > 0 {
             remaining -= written as usize;
@@ -1624,6 +1633,8 @@ fn windows_pipe_nowait_never_blocks_at_capacity() {
     // SAFETY: CreatePipe succeeded and transferred two unique owned handles.
     // Each is moved into exactly one File and is therefore closed exactly once.
     let mut reader = unsafe { File::from_raw_handle(read_handle) };
+    // SAFETY: CreatePipe returned this distinct writer handle, whose sole
+    // ownership moves to File; reader owns the other end.
     let mut writer = unsafe { File::from_raw_handle(write_handle) };
 
     set_pipe_nowait(&writer).expect("enable PIPE_NOWAIT");
@@ -1788,10 +1799,18 @@ fn pty_stdin_eof_then_query_helper() {
 
 #[cfg(unix)]
 fn make_stdin_raw() -> libc::termios {
+    // SAFETY: termios contains only integers and arrays of integers,
+    // all of which admit an all-zero representation.
     let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+    // SAFETY: termios is exclusive writable output storage; fd 0 is the
+    // fixture's stdin and a non-terminal fd causes an error.
     assert_eq!(unsafe { libc::tcgetattr(0, &mut termios) }, 0);
     let original = termios;
+    // SAFETY: tcgetattr initialized termios and cfmakeraw mutates only
+    // this exclusive local copy.
     unsafe { libc::cfmakeraw(&mut termios) };
+    // SAFETY: termios is initialized by tcgetattr and cfmakeraw and remains
+    // readable throughout the call; fd 0 is this fixture's PTY stdin.
     assert_eq!(unsafe { libc::tcsetattr(0, libc::TCSANOW, &termios) }, 0);
     original
 }
@@ -1802,6 +1821,8 @@ fn enable_apple_extproc(fd: libc::c_int) {
     // interface; libc does not currently expose the public ttycom.h constant.
     const TIOCEXT: libc::c_ulong = 0x8004_7460;
     let enabled: libc::c_int = 1;
+    // SAFETY: fd is the fixture's PTY descriptor and TIOCEXT expects the
+    // readable c_int stored in enabled for the duration of this call.
     let result = unsafe { libc::ioctl(fd, TIOCEXT, &enabled) };
     assert_eq!(
         result,
@@ -1825,10 +1846,14 @@ fn query_pty(query: &[u8], terminator: &[u8]) -> Vec<u8> {
             events: libc::POLLIN,
             revents: 0,
         };
+        // SAFETY: poll_fd is one exclusive, initialized pollfd; poll receives
+        // its element count and a bounded nonnegative timeout.
         if unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) } <= 0 {
             break;
         }
         let mut buf = [0u8; 64];
+        // SAFETY: buf is exclusively writable for buf.len() bytes throughout
+        // read; fd 0 is the fixture's stdin.
         let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
         if n <= 0 {
             break;
@@ -1864,6 +1889,8 @@ fn assert_post_eof_terminal_queries(context: &str) {
         kitty, b"\x1b[?0u",
         "{context}: invalid Kitty keyboard response after forwarded stdin EOF"
     );
+    // SAFETY: original was returned by tcgetattr and remains readable
+    // throughout the call restoring the fixture's stdin attributes.
     let _ = unsafe { libc::tcsetattr(0, libc::TCSANOW, &original) };
 }
 
@@ -1971,6 +1998,8 @@ fn pty_raw_eof_then_query_helper() {
     let dsr = query_pty(b"\x1b[5n", b"\x1b[0n");
     let da = query_pty(b"\x1b[c", b"c");
     let kitty = query_pty(b"\x1b[?u", b"\x1b[?0u");
+    // SAFETY: original was returned by tcgetattr and remains readable
+    // throughout the call restoring the fixture's stdin attributes.
     let _ = unsafe { libc::tcsetattr(0, libc::TCSANOW, &original) };
     assert_eq!(
         dsr, b"\x1b[0n",
@@ -2444,7 +2473,11 @@ fn pty_custom_termios_eof_helper() {
     };
     let mode = mode.to_str().unwrap();
 
+    // SAFETY: termios contains only integers and arrays of integers,
+    // all of which admit an all-zero representation.
     let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
+    // SAFETY: attrs is exclusive writable output storage for tcgetattr;
+    // fd 0 is this fixture's stdin and errors are asserted.
     assert_eq!(unsafe { libc::tcgetattr(0, &mut attrs) }, 0);
     attrs.c_lflag |= libc::ICANON | libc::IEXTEN;
     attrs.c_lflag &= !libc::ECHO;
@@ -2453,6 +2486,8 @@ fn pty_custom_termios_eof_helper() {
     {
         attrs.c_iflag &= !libc::IUCLC;
     }
+    // SAFETY: fpathconf only queries this fixture's stdin descriptor;
+    // _PC_VDISABLE requires no pointer argument.
     let disabled = unsafe { libc::fpathconf(0, libc::_PC_VDISABLE) };
     assert!((0..=u8::MAX as libc::c_long).contains(&disabled));
     attrs.c_cc[libc::VEOL] = disabled as libc::cc_t;
@@ -2524,6 +2559,8 @@ fn pty_custom_termios_eof_helper() {
         "large-unterminated" => Vec::new(),
         other => panic!("unknown termios fixture: {other}"),
     };
+    // SAFETY: attrs was initialized by tcgetattr and only its flag/control
+    // fields were modified; it remains readable while configuring the fixture PTY.
     assert_eq!(unsafe { libc::tcsetattr(0, libc::TCSANOW, &attrs) }, 0);
     #[cfg(any(
         target_os = "linux",
@@ -2538,7 +2575,11 @@ fn pty_custom_termios_eof_helper() {
     if mode == "extproc" {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         enable_apple_extproc(0);
+        // SAFETY: termios contains only integers and arrays of integers,
+        // all of which admit an all-zero representation.
         let mut live = unsafe { std::mem::zeroed::<libc::termios>() };
+        // SAFETY: live is exclusive writable output storage for tcgetattr;
+        // fd 0 is this fixture's stdin and errors are asserted.
         assert_eq!(unsafe { libc::tcgetattr(0, &mut live) }, 0);
         assert_ne!(
             live.c_lflag & libc::EXTPROC,
@@ -2827,4 +2868,151 @@ fn recording_markers_can_span_output_events() {
         recording_has_marker(recording.lines(), "recmark-9z"),
         "recording marker must be found across PTY chunks"
     );
+}
+
+/// The internal supervisor uses the in-process capture engine, including its
+/// byte-tail cap and startup diagnostics, before writing the captured bytes.
+#[cfg(unix)]
+#[test]
+fn exec_internal_capture_preserves_raw_strip_tail_and_status() {
+    for strip in [false, true] {
+        let mut flags = vec!["--internal-capture-tail", "--timeout", "10"];
+        if strip {
+            flags.push("--strip-ansi");
+        }
+        let (code, output, error) = run_exec(
+            &flags,
+            &["sh", "-c", "printf '\\033[31mred\\033[0m'; exit 7"],
+            None,
+        );
+        assert_eq!(code, 7, "{error}");
+        assert_eq!(output, if strip { "red" } else { "\x1b[31mred\x1b[0m" });
+    }
+    let (code, output, error) = run_exec(
+        &["--internal-capture-tail", "--strip-ansi", "--timeout", "10"],
+        &[
+            "sh",
+            "-c",
+            "head -c 1100000 /dev/zero | tr '\\000' x; printf TAIL; exit 9",
+        ],
+        None,
+    );
+    assert_eq!(code, 9, "{error}");
+    assert_eq!(output.len(), 1024 * 1024);
+    assert!(output.ends_with("TAIL"));
+    let (code, output, error) = run_exec(
+        &["--internal-capture-tail", "--strip-ansi"],
+        &["/kettle-test-missing-command"],
+        None,
+    );
+    assert_eq!(code, 125, "{error}");
+    assert!(output.contains("cannot start PTY"), "{output}");
+}
+
+/// Unix signal handling is also exercised on macOS; escaped-session ownership
+/// has separate native Linux coverage in mcp_supervisor.rs.
+#[cfg(unix)]
+#[test]
+fn exec_internal_capture_cancels_during_tail_delivery() {
+    use std::os::fd::AsRawFd as _;
+
+    let mut child = kettle()
+        .args([
+            "exec",
+            "--internal-capture-tail",
+            "--timeout",
+            "20",
+            "--",
+            "sh",
+            "-c",
+            "head -c 1100000 /dev/zero | tr '\\000' x; exit 7",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let unread = child.stdout.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut available: libc::c_int = 0;
+        // SAFETY: unread owns the pipe and available is writable integer storage.
+        let result = unsafe { libc::ioctl(unread.as_raw_fd(), libc::FIONREAD, &raw mut available) };
+        assert_eq!(result, 0);
+        if available > 0 {
+            // Internal capture emits nothing until the PTY command has exited.
+            break;
+        }
+        if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("capture never began delivering its final tail");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // SAFETY: the Child is ours and remains unreaped throughout cancellation.
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("cancellation stalled behind the unread capture tail");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(130));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_sigterm_and_sigint_follow_bounded_cancellation() {
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        let mut child = kettle()
+            .args([
+                "exec",
+                "--",
+                "sh",
+                "-c",
+                "trap '' HUP; echo READY; exec sleep 2",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let output = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            let mut reader = std::io::BufReader::new(output);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            let _ = tx.send(line);
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .contains("READY")
+        );
+        // SAFETY: the positive PID is our unreaped supervisor, not reusable.
+        let sent = unsafe { libc::kill(child.id() as i32, signal) };
+        assert_eq!(sent, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("signal cancellation hung");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.code(), Some(130), "signal {signal}");
+    }
 }

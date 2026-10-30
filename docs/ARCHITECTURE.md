@@ -398,29 +398,47 @@ use O(1) per guard rather than O(path depth) without weakening path-swap checks.
 ### Where the App's code lives
 
 `kettle-ui`'s `App` (`crates/kettle-ui/src/app.rs`) owns every window and
-runs the event loop: window and user events, `handle_action`, drawing and
-the per-pane output drain. Its subsystems are `impl App` blocks in
-`crates/kettle-ui/src/app/`:
+keeps the process-global state, `UserEvent`, the `ApplicationHandler` dispatch
+skeleton and small shared helpers. Per-window state remains in `window_state.rs`.
+Subsystem methods live in `impl App` blocks under `crates/kettle-ui/src/app/`,
+using `use super::*;` to share the parent scope:
 
 | Module | Holds |
 | --- | --- |
-| `ctl` | the control API's requests and replies |
-| `automation` | Lua hooks, the remote command spool, output triggers |
-| `media`, `preview` | the media shelf's jobs; lanes, the viewer and cards on screen |
-| `paste` | text, file and screenshot pastes, the paste queue, the receipt |
-| `search`, `menus`, `modals` | the search bar; context menus; Settings, the palette and other dialogs |
-| `windowing` | opening and closing windows, tear-off, docking, tab transfer |
-| `pointer`, `chrome` | mouse reporting, wheel and selection; the tab bar and status bar; update delivery and toast overlays |
-| `accessibility` | the accessibility tree and its actions |
-| `config_reload`, `sessions`, `gpu_recovery` | reloads and themes; session save and restore; GPU loss |
+| `startup` | event-loop startup, initial window/renderer setup, startup sizing and fonts |
+| `windowing` | window lifecycle, native window helpers, tear-off, docking and tab transfer |
+| `window_events` | the native window-event match, kept intact with its input dispatch order |
+| `keyboard`, `ime` | key encoding, bindings, program key ownership; composition and IME cursor geometry |
+| `pointer` | mouse reporting, wheel, selection, pane and split-divider dragging, cursor icons |
+| `actions` | action dispatch, pane/tab operations, scaled zoom and broadcast groups |
+| `layout` | content bands, pane/grid geometry, resize and PTY pixel sizes |
+| `focus` | focus transitions, focus reports and completion cleanup |
+| `output` | PTY output and lifecycle drains, wake gates, output generations and per-window user events |
+| `redraw`, `scheduling`, `cursor` | overlay/frame construction; redraw deadlines and pacing; cursor blink and native blink layer |
+| `gpu_recovery` | GPU loss, renderer recovery and initialization watchdogs |
+| `notifications`, `recording` | bell, desktop and input-rejection notices; recording output, status and shutdown |
+| `clipboard`, `paste` | OSC 52 policy and channels; text, file and screenshot pastes, queue and receipts |
+| `title`, `remote`, `links` | title editing and sanitization; remote process context and reconnect; link validation and opening |
+| `ctl`, `ctl_snapshot`, `screenshots` | control requests and replies; bounded snapshot/page helpers; screenshot policy, paths and completion |
+| `automation` | Lua hooks, the remote command spool and output triggers |
+| `media`, `preview`, `preview_model` | shelf jobs and cards; viewer/lane interaction; preview, playback and lane projection helpers |
+| `search`, `completion` | search queries, editor, background scans and pointer routing; completion projection and hit tests |
+| `menus`, `chrome` | context-menu state, geometry and navigation; tab/status chrome and update facts |
+| `modals`, `pickers`, `hints`, `settings_text` | dialog ownership and input; picker projections; hint targets; translated settings notes |
+| `accessibility` | accessibility identifiers, projections, tree and actions |
+| `config_reload`, `sessions` | config watchers, reloads and themes; session save and restore |
+| `system_opener`, `update_toast` | bounded desktop launches; transient update notifications |
 
 Session saves pass their opt-in gate before snapshotting. One worker performs
 serialization, comparison and durable replacement with one replaceable pending
 snapshot; it holds no queue lock during filesystem work. Shutdown drains the
 latest snapshot after any write already in progress and waits for completion.
 
-The other files in `app/` are its tests. Guards that read the App's source
-use `app_source()`, which joins app.rs and these modules.
+The `*_tests.rs` files sit next to their subsystems. `tests.rs` keeps shared
+fixtures and includes the tests split out of its original body, preserving their
+`app::tests` names and shared scope. Existing standalone test modules keep their
+names too. Guards that read the App's source use `app_source()`, which joins
+app.rs and all production modules, or include the specific owning module.
 
 ### Private clipboard images and video receipts
 
@@ -845,6 +863,15 @@ and shared by every file card); `card_caption` says `file` and its size
 `list_panes` says `pixels: "none"` with the same `file`. The lane shows no
 picture, only why (its status line), and offers no canvas, zoom or copy;
 its `↗` is `Outside::Reveal`.
+
+The file-facts lane retains pending replies on the UI thread and sends the
+worker a copy of the request with the original `RenderControl`. Its absolute
+deadline includes the facts queue and the shared worker slot. Pending facts
+contribute to the event-loop wake deadline; expired replies fail immediately,
+and later worker completions are discarded. A waiting inline card retains only
+its draft and launch witness. Completion reads the pane's current grid, cursor
+column and cell size, builds the caption and card, and issues any native pickup
+permit immediately before answering.
 
 `media::external::reveal` shows such a file in its folder. `RevealTarget`
 takes its path and identity from the item, and `hand_over` reopens the path
@@ -1384,7 +1411,52 @@ Two roles split cleanly across the bin and the GUI:
 one-slot channel. The dispatcher monitors stdout while waiting for input,
 so a write stalled for 30 seconds also ends a connection with stdin open.
 On that failure it detaches blocked transport threads; the CLI exits with
-status 1.
+status 1. Its writer blocks and consumes SIGPIPE and uses a private stdout
+descriptor (with F_SETNOSIGPIPE on macOS, where pipe signals are process-wide),
+so a closed pipe becomes a reported write failure and tool cancellation before
+process exit.
+
+On Linux, each MCP `kettle_run` command starts its own `kettle exec` child
+through `/proc/self/exe`, which retains the running image after an executable
+replacement. The server does not become
+a subreaper: each child adopts only its command's orphans, so concurrent commands
+cannot claim or kill each other's detached descendants. Argument boundaries are
+preserved through `Command`, with `--cwd`, `--cols`, `--rows`, `--timeout`,
+`--strip-ansi` (or default raw), and `--` before argv. The hidden internal
+`--internal-capture-tail` switch selects the existing in-process capture engine,
+disables stdin forwarding, and writes its final 1 MiB byte tail to stdout.
+Tail delivery runs through the engine's output worker and completion checks,
+so blocked delivery keeps cancellation, timeout and command-tree teardown active.
+Conversion to lossy UTF-8 happens once in the parent, just as in direct capture;
+startup diagnostics still appear in the capture. The existing MCP text cap,
+exit codes, `structuredContent.exit_code`/`truncated`, and the separate control
+command's `output_truncated` contract are unchanged.
+
+The parent multiplexes stdout and stderr using nonblocking reads with bounded
+64 KiB slices and independent 1 MiB tail buffers (at most one extra cap of
+compaction slack each). Neither pipe can block draining the other or checking
+cancellation. The child enforces the command timeout; the parent allows ten
+additional seconds for startup, teardown and tail delivery, then kills a wedged
+supervisor and returns 125 with an explicit unverified-teardown diagnostic.
+An inherited ignored SIGCHLD or SA_NOCLDWAIT is refused before spawning, using
+the same ownership check as media workers: autoreaping would allow PID reuse
+before cancellation. MCP cancellation sends SIGTERM once, allowing five seconds
+for the child's normal teardown; expiry escalates to SIGKILL and 125.
+SIGTERM/SIGINT are blocked in the fork/exec handoff until the child has installed its cancellation handlers
+and enabled adoption, so immediate cancellation cannot kill it before setup.
+The same handoff arms Linux parent-death SIGTERM and checks the parent PID
+afterwards: a server that dies before registration still queues cancellation.
+Normal completion preserves escaped daemons; only imposed stops and failures
+tear down the command tree. The direct child stays unreaped until final output
+acknowledgement, and teardown caches its result before any later cleanup call.
+Pipe EOF after supervisor exit and reaping after a forced kill each have a
+250 ms bound. A process still unreaped at that bound transfers to a shared
+background reaper, initialized before spawning a supervisor. The reaper polls
+all retained children so a process stuck in kernel sleep cannot prevent another
+from being reaped; no tool worker waits indefinitely for it. Supervisor stderr
+is drained independently and is included only on supervisor transport/watchdog failures, without duplicating
+ordinary command output. MCP still suppresses responses to cancelled calls.
+macOS (which has no subreaper) and Windows retain the in-process MCP path.
 
 The surface is multi-window aware: `get_state` reports
 `{windows, focused_window}`; `list_tabs` / `list_panes` enumerate every
@@ -1484,6 +1556,48 @@ toggling the lane. The old pane gets its remembered query and, with no result
 focused, its pre-search viewport back. The right-click menu is the one modal
 allowed to coexist with the bar; keys go to the menu while it is up because
 its arm precedes search in the key handler.
+
+Modal text fields and search share `kettle-ui::text_editor::TextEditor`: one
+bounded UTF-8 string, a caret and an optional selection anchor on extended
+grapheme boundaries, undo/redo, and a horizontal display-column offset. Title
+(window, tab, pane and group), command, SSH, layout, theme and Settings path
+fields use it. Left/Right, Home/End and Shift selection work in every field;
+Option on macOS and Ctrl elsewhere move or delete words. The platform's
+select-all, cut, copy and paste shortcuts use the existing clipboard. A failed
+clipboard write keeps a cut selection. Inputs share search's 4 KiB byte ceiling
+and single-line normalization; over-limit replacements leave the text intact.
+Title editing refuses initial values over this limit, preserving oversized
+restored titles instead of opening an empty editor.
+
+`kettle-render::text_field` shapes modal editor projections with search's
+shaping and grapheme-cluster helpers. Selection spans, caret positions,
+horizontal scrolling and pointer stops all come from that shaped buffer.
+Prefix and hint text have separate clipped slots. Settings computes the inline
+value slot from the same column budgets and scrolling layout as its row painter.
+The UI projects IME preedit over the selected range or at the caret, retains
+the suffix, and commits through the same editor. IME candidate placement shapes
+the exact same projection, including preedit, rather than estimating text widths.
+Native and control pointer routes both place the caret and extend drag selections
+from those shaped stops. A pointer press ends composition before mapping into
+committed text.
+
+Transient popups share one outside-press dispatch and consume the dismissing
+click: context menus, the command palette, theme/layout pickers, SSH, title
+editing and quick-select hints. A picker's input lane and results panel together
+count as inside. Any pointer press cancels a keyboard-only hint. Settings closes
+on a press outside its panel; an active path editor or keybinding capture instead
+cancels only that capture on a press outside its focused row. Confirmation dialogs
+keep their question and consume outside presses. The search lane and vi mode keep
+their existing pointer behavior because they are not transient popups.
+
+The context menu retains its platform convention: left/middle presses outside
+it, including in the terminal, dismiss and consume; an outside right press
+dismisses and follows the ordinary right-click route to relocate/reopen the menu.
+Changing OS windows dismisses the menu on focus loss and lets the new window
+handle its own click. Other transient popups do not pass a dismissing click into
+terminal selection, mouse reporting, pane focus or window chrome. Native and
+control presses enter the same dispatcher; dismissal also ends composition and
+editor dragging, and title dismissal schedules the chrome/PTY geometry resize.
 
 Pane-bound bytes never block the App thread. Each pane owns two bounded input
 lanes: user input (keys, mouse, focus, paste, Lua, legacy remote commands, and
@@ -2014,6 +2128,57 @@ starve the flush. EOF/disconnect flushes immediately because no terminator can
 still arrive. The parser then bumps the output generation and wakes the UI for
 the now-visible frame after releasing the terminal lock.
 
+### Output generation and grid reads
+
+`Terminal::output_generation` is a cache-invalidation and paint-scheduling
+counter, not an exact grid revision. Parsing can commit several grid chunks
+before `publish_output_if_ready` increments it once and requests an output wake.
+A reader between commit and publication can therefore see new cells with the
+old counter. Publishing under the last grid lock would not make earlier chunks
+in that read atomic, nor make a reader's separate counter and grid reads atomic.
+The reader audit found a lost invalidation at the frame boundary. Previously,
+`redraw` updated the link/search caches, then sampled a newer output generation
+for the candidate frame. A grid commit could precede a cache check while its
+publication followed that check. The cache kept its old result, but presenting
+the later generation made the queued output wake look already painted. With no
+other redraw source, the old links or search highlights could persist. The same
+late cutoff could strand an accessibility update or an output-activity edge.
+Moving only the writer's increment under a grid lock would not close the wider
+race between those separate frame phases.
+
+The frame now uses one generation cutoff before all pane maintenance and grid
+captures. Each fresh snapshot retains that same cutoff; reused snapshots retain
+their original cutoff. After presentation, a second generation check defers
+another paint if publication raced any reader. This also covers publication
+coalesced into an already-delivered wake before the late latch acknowledgement.
+It follows the normal output-paint budget instead of opening an immediate
+repaint loop. The grid itself stays protected by its mutex.
+
+The individual readers behave as follows:
+
+| Reader | Sampling and effect of an unpublished grid commit |
+| --- | --- |
+| Renderer snapshots (`App::redraw`, `PaneSnapshot::capture_with_card_marks`) | Samples the candidate generations before any pane maintenance or grid capture and commits them only for `FrameOutcome::Presented`. New cells captured under an old counter cause another paint after publication. A counter sampled before locking cannot describe cells newer than the captured grid: publication follows the corresponding grid unlock. |
+| Context-menu snapshot reuse (`pane_snapshots_match_current_layout`, `stage_output_generations_for_frame`) | Can reuse old pixels during the interval, but stages the cached generations, including the previously committed background-pane values. The full-frame cutoff leaves publication pending and invalidates reuse; sampling a live counter after reuse would violate this rule. |
+| Damage tracking (`Renderer::build_pane_cells`, grid glyph preparation) | Receives copied cells and compares row text/attributes and layout. It does not read terminal output generations or consume Alacritty damage. The UI's generation gate schedules frames; surface failures retain the prior committed generation. |
+| Search (`App::update_search`, `search_step_match`, `CompiledSearch`) | Updates sample before the grid lock; navigation samples while locked. Existing UI highlights/focus can lag during the interval, then the frame retry observes the published token, clears them and restarts or verifies work. Core regex continuations additionally compare the materialized haystack and bounds, so a same-token in-place rewrite cannot resume offsets into old text. Output-drifted background jobs retain their documented quiet-verification/Results limited policy. |
+| Links (`scan_links`) | Samples the generation before its grid reads. An unchanged key can briefly retain the previous links; a new scan can tag newer links with an old counter. The frame retry observes publication and scans again. Geometry and viewport movement have separate key fields. |
+| Recording and session logging (PTY reader raw tap, `dispatch_output_chunks`) | Consume ordered raw byte queues before grid parsing. Neither uses a grid/generation pair; drain, backpressure and final-output acknowledgement govern delivery. |
+| Control API (`ctl_read_screen`, `screen_text_of`, automation and command-result screen reads) | Copies cells, dimensions, cursor and selection under the grid mutex. No output-generation key is returned or used to suppress a read. Paging checks a content-derived snapshot identifier and rejects changed data between pages. |
+| Accessibility (`accessibility_key`, `publish_accessibility_if_due`, `accessibility_tree`) | Samples the key before `screen_text` locks the grid. An unchanged key can briefly retain the prior tree; the frame retry observes the changed key and schedules another update. The update throttle retains a pending deadline, so throttling cannot consume the final change. |
+| Output activity and scroll-on-output (`App::redraw`, `window_has_new_output`) | Compare the counter with the last observed/painted value. Publication follows mutation and precedes the wake, and the frame cutoff/recheck preserves a retry for delayed activity or scrolling. Hidden panes retain a dirty wake; GPU recovery rebuilds snapshots. |
+
+The required order is grid commit, generation increment, then gated wake.
+A frame must retain the generation sampled before any dependent cache check or
+capture, and recheck after presentation; reused snapshots retain their original
+tag. Sampling a live generation after those reads could mark older state
+current and lose an invalidation. The commit-hook search regression exercises
+matcher tolerance with saved forward and reverse regex work before the real
+publication helper runs. The UI frame regression exercises the lost link-cache
+invalidation and the post-presentation retry under that interleaving.
+
+### Synchronized graphics publication
+
 Graphics controls inside DEC 2026 use the same atomic commit boundary. While
 an update is open, the extractor retains each complete Sixel, Kitty, or iTerm2
 display control string without decoding it. Kitty capability queries and their
@@ -2047,6 +2212,8 @@ The spawned child marks every descriptor it inherited above stderr
 close-on-exec before `exec`. macOS asks the kernel which descriptors are open
 instead of trying each number up to the soft limit, so a pane opens just as
 fast when Kettle inherits a 1,048,576-descriptor limit from its launcher.
+If that list is unavailable or full, macOS sweeps to `kern.maxfilesperproc`;
+lowered process limits cannot exclude descriptors that are already open.
 Rendered stdout commands cross a second four-slot queue to a dedicated writer,
 keeping blocking OS writes off the lifecycle thread. The writer hands each
 rendered command to the sink in one `write_all`. The Unix sink is an unbuffered
@@ -2140,8 +2307,14 @@ as its ownership boundary, and the `kettle exec` command line is also a child
 subreaper: a descendant that left the session with `setsid()` is reparented to
 it when its parent exits, and teardown kills and reaps every such adopted child
 outside Kettle's own session until none remains, while a running command's
-exited adoptees are reaped every 250 ms. Setup first resets an inherited
-ignored `SIGCHLD`, so the kernel never reaps an adopted child before the sweep
+exited adoptees are reaped every 250 ms. Normal completion preserves live
+escaped descendants and retains the bounded EOF wait for inherited PTY writers.
+The direct child stays unreaped until final output acknowledgement, so a late
+timeout, cancellation or delivery failure can still authenticate teardown.
+Repeated teardown returns its cached result without signalling the child again;
+unverified cleanup returns 125. Unix `kettle exec` maps SIGTERM and SIGINT to the same
+bounded cancellation path as MCP (130 on verified teardown, otherwise 125).
+Setup first resets an inherited ignored `SIGCHLD`, so the kernel never reaps an adopted child before the sweep
 signals it, and a killed session member counts as exited only once its pidfd
 reports that every thread has; when adoption cannot be set up, teardown is
 reported unverified. Session membership survives reparenting and cannot be
@@ -2252,14 +2425,52 @@ most eight/128 MiB in flight; decoded images and individual textures at 64 MiB;
 animation payloads at 128 frames/128 MiB; and placements at 256. RAII leases
 charge Kettle-owned decoded buffers, image textures, custom glyph atlases, and
 instance buffers to a 256 MiB terminal/window scope and 512 MiB process
-accounts. Decoders reserve before allocation. Pixels and their CPU lease share
+accounts. A separate 192 MiB transient CPU ceiling is shared by each terminal's
+active/inactive screens, partial transmissions, escape storage above 64 KiB,
+queries, upload staging, and animation decode scopes. Transient leases charge
+both that ceiling and the 512 MiB process CPU account; retained pixels have
+separate scope counters. A refusal rolls back both charges and keeps the existing
+protocol refusal/reply behavior. Independent terminals share only the process
+account, so one terminal at its transient ceiling leaves room for another decode
+unless other process allocations exhaust that account.
+
+The maximum-size Kitty extractor regressions measure 176,160,750 bytes with
+1-byte and 4 KiB protocol chunks, 180,355,038 bytes with seven 11 MiB chunks,
+a 15 MiB chunk and the remainder, 192,937,966 bytes with a full 16 MiB
+final sequence, and 192,937,970 bytes when replaying that upload from a
+synchronized-output journal. Replay consumes the saved sequence allocation
+and its lease directly, keeping the live PTY parser separate from protocol
+dispatch. The worst peak is just under 184 MiB: 96 MiB accumulated
+transmission + 72 MiB base64 output + 16 MiB sequence (plus four framing bytes
+in the synchronized case).
+Rounding up to 184 MiB and adding 8 MiB headroom keeps the ceiling at 192 MiB.
+Kitty accumulates payloads in separately allocated segments that never resize.
+Small initial segments grow geometrically up to 1 MiB per new segment, keeping
+metadata bounded even with 1-byte chunks. Each segment's capacity is charged
+before allocation; the final segment is capped by the remaining transmission
+allowance. No payload reallocation retains an old and a new copy at once.
+Base64 filtering uses a fixed 4 KiB stack block, without a whitespace-free payload
+copy, reading across segment boundaries even when a base64 quartet spans
+allocations. The accumulator and its lease drop before inflation; compressed
+bytes and their lease drop before image decoding. Inflation grows geometrically
+under its cap, charging old capacity during moving reallocations. It keeps
+capacity charged and compacts any unused capacity only after releasing compressed
+input. iTerm2 uses the same bounded base64 filtering on a single bounded OSC body,
+with no separate payload accumulator. Sixel has no intermediate base64 or inflated buffer;
+its old/new canvas overlap during geometric growth and final compaction already
+uses retained image leases and remains bounded by the image and process limits.
+All transmission, inflate, image, in-flight, dimension, and work limits still
+apply; file/shm Kitty media remain unsupported. Decoder scratch remains charged:
+non-JPEG codecs use the per-image bound, while JPEG uses the existing checked
+input/geometry estimate and can refuse on either transient or process pressure.
+Decoders reserve before allocation. Pixels and their CPU lease share
 one `Arc<PixelBuffer>`; retaining a pixel handle keeps its allocation charged
 even after its last `ImageData` wrapper is dropped. Read-only access cannot
 detach the lease or resize the buffer. Copy-on-write reserves a second image
 while retaining the original snapshot's charge. Encoded images parse their headers once
 with the decoder's existing dimension and working-allocation limits, then
 reserve the actual RGBA output size before decoding pixels. The separate
-conservative scratch reservation remains bounded by the per-image ceiling;
+conservative scratch reservation follows the codec bounds above;
 unused output capacity does not consume the retained-image quota. Consuming an
 already-RGBA8 decoded buffer avoids an extra full-image copy. Partial animation
 frames compose onto a full base-sized canvas. If neither a background/edit frame
@@ -2399,8 +2610,9 @@ Unicode placeholder cells themselves are reflowed by the grid.
 Kitty capability queries (`a=q,i=`) decode direct RGB/RGBA, compressed data,
 and supported encoded images without retaining or replacing an image. Their
 separate partial accumulator shares the existing transmission ceilings;
-temporary decoded pixels use a fresh scope under the same process account,
-so a full terminal retained quota does not prevent a capability probe. All
+temporary decoded pixels use a fresh retained scope under the same process
+account while transient storage shares the terminal ceiling, so a full terminal
+retained quota does not prevent a capability probe. All
 temporary leases are released before the reply. Typed query results become
 `Chunk::GraphicsReply` and use the existing `EventProxy` PTY-write channel in
 wire order. Queries and their continuations bypass DEC 2026 graphics deferral;
@@ -2454,9 +2666,9 @@ rectangles, and unavailable storage return typed errors without changing pixels.
 Animation controls cannot create playback state before a root exists, and invalid
 current-frame selectors leave playback selection unchanged.
 
-Kitty transmission decodes once into a temporary scope under the existing process
-account. At retained-byte or active image-count pressure, extraction requests an
-admission plan before publishing the new image. The Core handler adds metadata
+Kitty transmission decodes once into a temporary retained scope under the existing
+process account, sharing its terminal's transient ceiling. At retained-byte or
+active image-count pressure, extraction requests an admission plan before publishing the new image. The Core handler adds metadata
 for physical, virtual, relative, animation, and inactive-screen owners without
 cloning pixels. Weak allocation witnesses allow planning to read current strong
 owner counts without retaining pixels; current scope usage also reflects snapshots
@@ -2584,6 +2796,41 @@ launches and 128 pickups. No permit reaches model content or geometry/state
 responses. Background registration and pickup do not draw a frame. Existing
 macOS signature admission remains separate.
 
+## kettle-render module map
+
+The crate root preserves the public API through re-exports. `lib.rs` owns the
+`Renderer` state and its three frame entry points. The main frame method still
+coordinates chrome painting, retained text preparation, uploads and presentation
+in one ordered body; extracting new helpers from that body is separate from
+moving existing items.
+
+| Module | Responsibility |
+| --- | --- |
+| `gpu` | Device/adapter selection, display-handle ownership, surface setup, constructors, resize and recovery |
+| `batching` | Shared pipelines, retained text damage keys, quad helpers, glyph emission and ordered scene encoding |
+| `terminal` | Pane projections, cell/run painting, selection/search projection, cursor glyphs, decorations and painted-card access |
+| `overlays` | Tab/status bars, menus, title editing, IME projections, toasts, receipts, confirmation projections and shared overlay state |
+| `completion` | Completion projections, card layout, visible rows, selection and scroll chrome |
+| `search` | Search projections, responsive bar layout, shaped editor clusters and pointer stops |
+| `text_field` | Modal editor projections, clipped text slots and shared shaped paint/pointer/IME geometry |
+| `settings` | Settings projections, display lines, scrolling layout and hit testing |
+| `geometry` | GPU-free rectangle, viewport, placement, selection, cell-position and size-limit helpers, with focused unit tests |
+| `labels` | Display-column measurement, fitting and title/path truncation |
+| `fonts` | Startup font preparation, fallback selection, cell measurement, metrics and runtime font changes |
+| `theme` | Chrome/terminal color derivation, contrast caching, visual bell and surface alpha policy |
+| `background` | Decoded wallpaper state, bounded decode worker and animation scheduling |
+| `screenshot` | Live capture requests, cancellation, bounded workers, readback, cropping and atomic persistence |
+| `capture` | Synthetic screenshot scenes, GPU diagnostic render fixtures and offscreen self-test |
+| `quad`, `glyphpipe`, `imgpipe`, `outline`, `rounded_surface`, `starfield`, `present`, `upload` | Existing GPU pipelines, presentation conversion and retained/mapped uploads |
+| `chrome`, `color`, `confirm` | Existing contrast policy, terminal color resolution and final confirmation layout/text |
+| `snapshot`, `cursor_policy`, `cursor_patch` | Lock-free terminal projections, cursor compatibility policy and native cursor patch rendering |
+| `card_marks`, `inline_cards`, `card_scene` | Complete card marks, registered-card recognition and card draw lists |
+| `bg_image`, `media_lane`, `media_transport`, `media_viewport` | Image decoding, preview lane layout/text, player chrome and zoom/pan |
+
+Existing test modules remain attached to the crate root so their test names stay
+stable. The renderer source-guard helper joins the production portions of the
+root and extracted modules, excluding test-only items from each file.
+
 ## Render pass order
 
 The renderer's per-pane text buffers, per-row shaping keys, style keys, and
@@ -2602,8 +2849,13 @@ family because they render a single static image and do not benefit from a later
 warm-up frame.
 
 Each frame uses the same wgpu render-pass encoder. Quads cover earlier
-text; later text covers their pixels. Card layers therefore precede terminal
-text, with owned card labels and fallback cursors afterward:
+text; later text covers their pixels. Pane dimming covers cell backgrounds,
+inline images and complete cards before terminal glyphs and decorations,
+whose inactive colours already include the text contrast floor. Active-pane
+decorations stay in the cell pass below cursor quads. Color glyphs blend their
+bitmap RGB toward the pane dimming backdrop in their shader, preserving bitmap
+alpha. Preview lanes receive
+their owning pane's dimming after all lane content is drawn:
 
 ```mermaid
 flowchart LR
@@ -2612,11 +2864,14 @@ flowchart LR
     base --> outlines["Pane outlines"]
     outlines --> images["PTY images: sixel, Kitty, iTerm2"]
     images --> cards["Card bases and letterboxed posters"]
-    cards --> glyphs["Cell-locked pane glyphs in Grid mode"]
-    glyphs --> text["Chrome text and Legacy pane text"]
-    text --> owned["Card decoration, fallback cursors and labels"]
-    owned --> cursor["Focused block cursor's inverted glyph"]
-    cursor --> overlay["Pane dimming and scrollbar"]
+    cards --> owned["Card decoration and labels"]
+    owned --> dim["Pane dimming"]
+    dim --> decorations["Inactive terminal underlines and strikeouts"]
+    decorations --> glyphs["Grid pane glyphs and inactive Legacy pane glyphs"]
+    glyphs --> text["Chrome text and active Legacy pane text"]
+    text --> cursor["Fallback cursors and focused cursor glyph"]
+    cursor --> lanes["Preview lane surfaces, images and text"]
+    lanes --> overlay["Lane dimming and scrollbar"]
     overlay --> menu["Menu chrome and receipt image"]
     menu --> labels["Menu and settings text"]
 ```
@@ -2629,7 +2884,8 @@ Alacritty / kitty / WezTerm / Ghostty model. `build_pane` still shapes each row
 with cosmic-text and reuses the per-line shaping cache, but instead of handing
 the whole `Buffer` to glyphon, `emit_pane_glyphs` walks the laid-out glyphs and
 emits one pinned instance each, rasterized through cosmic-text's own `SwashCache`
-into a private mask+color atlas. The fragment shader replicates glyphon's exactly
+into a private mask+color atlas. Without pane dimming, the fragment shader
+matches glyphon's
 (mask = `sRGB→linear(fg) · coverage`, color = straight sample of an sRGB atlas),
 so antialiasing, gamma and theme colors are identical. Only the X position
 differs. This prevents glyph drift. Without pinning, a glyph whose advance
@@ -2651,6 +2907,12 @@ only what is drawn: the cursor's quads are built and uploaded in both phases,
 and the off phase skips their instance range and the cursor-glyph pass at draw
 time. A steady frame re-draws the retained instance buffer. A blink must never
 invalidate or stale-draw ordinary pane glyphs.
+
+Inactive Legacy panes also use this glyph pipeline, retaining glyphon's
+continuous positions instead of pinning to cells. Glyphon's color shader does
+not accept a tint, so this route keeps bitmap dimming separate from the
+contrast floor applied to ordinary text. Focus and dimming settings participate
+in the glyph damage key, including when text colours stay at the contrast floor.
 
 Every GPU upload goes through `upload.rs`, which holds the renderer's only
 `write_buffer` and `write_texture` calls. Each pipeline keeps an exact CPU copy
@@ -2695,8 +2957,9 @@ about 3.6 MiB for the previous single glyph buffer. The 120x36 gate grid does
 not measure this large-window cost. `text-renderer = legacy` keeps the continuous-glyphon pane path
 (pass 4) as a rollback escape hatch; pass 3 is then an empty no-op.
 
-The five quad layers (`pane_bases`, `live_pane_bases`, `quads`,
-`overlay_quads` and `menu_quads`) differ only in blending, and the three image
+The pane and chrome quad layers (`pane_bases`, `live_pane_bases`, `quads`,
+`pane_dimming`, `text_decorations`, `overlay_quads` and `menu_quads`) differ
+only in blending, and the three image
 layers (`bg_imgs`, `imgs` and `media_receipt_img`) not at all. A renderer
 therefore compiles one replacing and one blending quad pipeline and one image
 pipeline (`SharedPipelines`), and each layer keeps only its own uniform, bind
@@ -2752,7 +3015,7 @@ rendered, it would paint over them and leave the menu blank.
 
 The cursor pass draws the inverted glyph **under a focused solid
 block cursor** in its own 1-glyph renderer, on top of the block quad and the
-pane text and card layers, and below dimming, menus and the paste receipt, so
+pane text and card layers, and below lanes, menus and the paste receipt, so
 an opaque overlay hides the whole terminal cursor. Decoupling it from the pane text buffer — rather than
 recoloring the glyph in-place — means a cursor blink leaves the pane
 buffer byte-identical, and because the cursor glyph is prepared in both blink
@@ -2944,7 +3207,12 @@ no context reads, clock queries, formatting or writes.
   server after one quiet half-period and stops waking for it (see "macOS cursor
   blink layer"). Empty `Ime::Preedit` events normalize to absent state and
   do not reposition IME or request another frame unless visible preedit state
-  actually changed. The visual bell is per pane: `drain_events` stamps each
+  actually changed. Terminal preedit has an opaque layer above terminal and card
+  text. Its background follows the larger of the terminal-cell width and shaped
+  text width, with glyphs clipped to that background and the pane. During
+  composition, a visible terminal cursor becomes a thin caret so a solid block
+  cannot hide the composition glyph. The visual bell is per pane: `drain_events`
+  stamps each
   ringing pane in `WindowState::bell_flashes`, the frame builder turns each
   stamp into a `PaneView::bell_flash` ramp (`bell_flash_ramp`: instant on,
   quadratic ease-out over `BELL_FLASH_DURATION`), the idle loop keeps the
@@ -3193,10 +3461,37 @@ no context reads, clock queries, formatting or writes.
   `CtlListener`'s owned pipe `HANDLE`, native audio `Output` handles, and
   AVFoundation `Frames` and `AudioFrames`. AVFoundation's `Keep` implements
   both `Send` and `Sync` to share asset lifetime and atomic reference counts,
-  without concurrent calls through the asset. Per-pane
+  without concurrent calls through the asset. Every unsafe block and
+  `unsafe impl` carries a `// SAFETY:` comment stating its invariant, and
+  the workspace denies `clippy::undocumented_unsafe_blocks`. Per-pane
   `Arc<Mutex<...>>` are contended only on PTY read or App snapshot; lock-hold
   times are O(bytes), designed to stay well under one frame's budget per drain
   even on fast scrolling.
+
+## Transcript control stripping
+
+`kettle-vt::control` owns the allocation-free streaming control kernel and
+`kettle_vt::AnsiStripper`. Exec (including MCP `kettle_run`) and session logs
+use that one stripper; their former public paths re-export it. `ControlParser`
+classifies each byte as text or a typed control event (start, continuation,
+end, cancellation, or bounded recovery), including executed C0 controls.
+It handles ESC intermediates, CSI, OSC, DCS/SOS/PM/APC, ground-position C1
+introducers, and unshielded ST. UTF-8 continuations cannot dispatch controls
+in any state and follow their lead's output disposition across recovery.
+The 64 KiB budget counts every byte after ESC, including its follower and
+UTF-8 continuations; a C1 introducer counts as the equivalent ESC follower.
+The overflowing byte is dropped, and a fresh ESC resets the budget. Text runs
+are appended directly to the caller's buffer without an intermediate copy.
+
+The extractor and private-output filter retain their existing bulk scanners.
+They deliberately differ from transcript stripping: C1 introducers pass
+through, high bytes keep an escape prefix pending, malformed non-ST escapes
+remain inside private completions, and private recovery begins after the
+whole bulk run that crosses its cap. That last rule depends on feed boundaries.
+Sharing their transitions still requires policy hooks for bulk admission,
+privacy, and recovery, with exact emitted-chunk differential coverage.
+Test-only probes in `kettle-vt/src/control/tests.rs` pin each of those
+differences, so a later port has to change them on purpose.
 
 ## Why the extractor sits *in front of* the VT engine
 
@@ -3358,7 +3653,8 @@ Other additions:
   argument area silently receives its tail, the environment, so the walk asks
   for the exact size first and treats a read that still fills the buffer as
   incomplete. Each scan is capped by 1 MiB per file or argument area, 4 MiB
-  aggregate argv and child-list content, 4096 nodes, 1024 Linux task-file
+  aggregate Linux argv, child-list and client environment content (whole
+  argument areas on macOS), 4096 nodes, 1024 Linux task-file
   reads, bounded argv count/decoded bytes, and a 25 ms deadline; an
   incomplete scan never replaces the last applied state. An argv past the
   per-process caps holds back only its own pane, which keeps its previous
@@ -3369,11 +3665,34 @@ Other additions:
   BFS scratch, idle windows receive explicit redraw/title events, and
   Split/Duplicate consumes the cached foreground-shell result rather than
   walking processes on the input path. The public full-snapshot API remains
-  available for one-shot callers. Treat detected process arguments as untrusted:
-  validate fields against their specific character sets and a 512-byte limit,
-  then shell-quote every dynamic value in the reconnect command. Reject control
-  characters again when building the command because the UI submits it to a live
-  shell.
+  available for one-shot callers. Reconnect launches a separate client pane
+  directly with literal arguments and shell integration disabled. The executable
+  path and original invocation name are separate: Unix preserves `argv[0]` for
+  multicall clients. Linux's ` (deleted)` marker after an update resolves to
+  the replacement at the original absolute path, preserving the invocation
+  separately; if that file is missing, the original invocation is the fallback.
+  During the bounded scan, Linux reads `/proc/<pid>/environ` and macOS reuses
+  its already-read `KERN_PROCARGS2` buffer. Detection reads cached values, so
+  environment capture shares the scan's aggregate byte and time limits.
+  Only same-user clients can supply connection variables, with a 1 MiB
+  per-process read limit. The retained allowlists are kubectl's `KUBECONFIG`; Docker's
+  `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, `DOCKER_TLS_VERIFY`, and
+  `DOCKER_CERT_PATH`; and Podman's `CONTAINER_HOST` and `CONTAINER_CONNECTION`.
+  SSH and lxc capture no extra environment. Captured values override pane
+  configuration; absent allowlisted variables are removed from the child.
+  Unreadable, oversized, invalid, or cwd-dependent connection environments refuse
+  reconnect through the existing failure notice instead of selecting defaults.
+  Debug output redacts captured values. Each reconnected pane owns its captured
+  environment and invocation name in memory. Duplicate pane/tab, splits that
+  clone the command, undo-close, and exit-action restart reuse those settings;
+  live pane/tab moves carry them into the destination window. A split that
+  falls back to the configured shell drops the client settings. Session and
+  layout snapshots save reconnected panes with an empty command, so restore
+  opens the configured shell without persisting private environment values or
+  replaying a client against a different endpoint.
+  Windows retains its current environment behavior. Treat detected process
+  arguments as untrusted: validate fields against their specific character sets
+  and a 512-byte limit, then reject controls again before direct spawning.
 - **named-broadcast-groups subsystem** (`BroadcastScope` enum with
   per-tab / per-window / cross-tab named scopes).
 - **right-click drill-in submenu UX** (Theme + Profile + Preferences).
@@ -3471,6 +3790,14 @@ Limit native Lua URL-pattern matching to a conservative work estimate of
 2,000,000 units across the handler chain because the Lua instruction hook cannot
 interrupt `string.match`. Skip malformed or over-budget patterns and continue
 considering later handlers.
+
+In safe and restricted VMs, the four public string pattern APIs use a shared
+20,000,000-step budget for each top-level invocation or callback. The engine
+resets it alongside the instruction watchdog, including for iterators retained
+across callbacks. Matching, replacement scanning, and expanded output bytes
+consume this budget. Exhaustion sets the watchdog's out-of-band flag, so
+protected calls cannot hide it and runaway event callbacks are retired.
+Trusted VMs retain Lua's native string functions.
 
 ### Settings overlay + interactive keybind editor
 
@@ -3850,7 +4177,7 @@ The hit target routes through the existing play action, including its native
 user file access guard. Controls take priority over the picture, so scrubbing
 never toggles playback. The backdrop reuses the projected viewer rectangle;
 painting and hit testing therefore share the presentation's geometry.
-Post-terminal effects (inactive-pane dimming, scrollbars and focus decoration)
+Post-terminal effects (inactive-lane dimming, scrollbars and focus decoration)
 are clipped around that rectangle. Each affected quad yields at most four
 disjoint pieces in blend order, keeping the pass count unchanged and clipping
 time and storage linear in the existing overlay count.

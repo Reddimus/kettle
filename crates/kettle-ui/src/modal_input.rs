@@ -1,6 +1,4 @@
-//! Bounded, append-only text entry for title, palette, SSH, layout and Settings
-//! path fields. The search bar uses its own [`crate::search_input::SearchEditor`]
-//! and shares only [`accept_text`] to filter unhandled shortcut chords.
+//! Shared keyboard filtering and bounded entry for modal text editors.
 
 use winit::keyboard::ModifiersState;
 
@@ -23,40 +21,20 @@ pub(crate) fn accept_text(text: Option<&str>, mods: ModifiersState) -> Option<&s
 }
 
 /// Accept an IME commit independently of latched modifiers: a composition can
-/// commit while switching input sources with `⌘Space`. [`push_text`] filters
-/// any controls mixed with printable text.
+/// commit while switching input sources with `⌘Space`. The editor normalizes
+/// committed text to one line.
 pub(crate) fn accept_committed_text(text: &str) -> Option<&str> {
     (!text.is_empty() && !text.chars().all(char::is_control)).then_some(text)
 }
 
-/// Append `text` to a modal buffer, dropping control characters and stopping at
-/// [`MAX_MODAL_INPUT_BYTES`]. Returns whether anything was added.
-///
-/// Truncation is silent because these fields have no overflow status line.
-pub(crate) fn push_text(buf: &mut String, text: &str) -> bool {
-    let mut changed = false;
-    for ch in text.chars() {
-        if ch.is_control() {
-            continue;
-        }
-        if buf.len() + ch.len_utf8() > MAX_MODAL_INPUT_BYTES {
-            break;
-        }
-        buf.push(ch);
-        changed = true;
-    }
-    changed
+/// Insert typed text at the caret, replacing the selection. The shared editor
+/// normalizes single-line input and rejects over-limit inserts atomically.
+pub(crate) fn push_text(buf: &mut crate::text_editor::TextEditor, text: &str) -> bool {
+    buf.type_text(text, MAX_MODAL_INPUT_BYTES).changed
 }
 
-/// Remove the last grapheme cluster, keeping combining marks and emoji intact.
-/// Share search's boundary helper; return whether anything was removed.
-pub(crate) fn backspace(buf: &mut String) -> bool {
-    let boundary = crate::search_input::previous_grapheme_boundary(buf, buf.len());
-    if boundary == buf.len() {
-        return false;
-    }
-    buf.truncate(boundary);
-    true
+pub(crate) fn backspace(buf: &mut crate::text_editor::TextEditor) -> bool {
+    buf.backspace()
 }
 
 /// Whether this chord is the platform's Paste shortcut — `⌘V` on macOS,
@@ -67,7 +45,92 @@ pub(crate) fn is_paste_chord(text_key: Option<&str>, mods: ModifiersState) -> bo
     } else {
         mods.control_key()
     };
-    shortcut && text_key.is_some_and(|key| key.eq_ignore_ascii_case("v"))
+    shortcut && !mods.alt_key() && text_key.is_some_and(|key| key.eq_ignore_ascii_case("v"))
+}
+
+/// Handle editing commands before the field's submit, cancel and list navigation.
+/// Clipboard failures leave a cut selection intact.
+pub(crate) fn edit_key(
+    editor: &mut crate::text_editor::TextEditor,
+    key: &winit::keyboard::Key,
+    mods: ModifiersState,
+    mut read: impl FnMut() -> Option<String>,
+    mut write: impl FnMut(&str) -> bool,
+) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+    let macos = cfg!(target_os = "macos");
+    let word = if macos {
+        mods.alt_key()
+    } else {
+        mods.control_key()
+    };
+    let shortcut = if macos {
+        mods.super_key()
+    } else {
+        mods.control_key()
+    };
+    let shift = mods.shift_key();
+    match key {
+        Key::Named(NamedKey::ArrowLeft) => {
+            if macos && shortcut {
+                editor.move_home(shift);
+            } else {
+                editor.move_left(shift, word);
+            }
+        }
+        Key::Named(NamedKey::ArrowRight) => {
+            if macos && shortcut {
+                editor.move_end(shift);
+            } else {
+                editor.move_right(shift, word);
+            }
+        }
+        Key::Named(NamedKey::Home) => editor.move_home(shift),
+        Key::Named(NamedKey::End) => editor.move_end(shift),
+        Key::Named(NamedKey::Backspace) => {
+            if macos && shortcut {
+                editor.delete_to_start();
+            } else if word {
+                editor.delete_word_backward();
+            } else {
+                editor.backspace();
+            }
+        }
+        Key::Named(NamedKey::Delete) => {
+            if macos && shortcut {
+                editor.delete_to_end();
+            } else if word {
+                editor.delete_word_forward();
+            } else {
+                editor.delete();
+            }
+        }
+        Key::Character(s) if shortcut && !mods.alt_key() => match s.to_ascii_lowercase().as_str() {
+            "a" => editor.select_all(),
+            "c" => {
+                if let Some(text) = editor.selected_text() {
+                    write(text);
+                }
+            }
+            "x" => {
+                editor.cut_selection(MAX_MODAL_INPUT_BYTES, |text| write(text));
+            }
+            "v" => {
+                if let Some(text) = read() {
+                    editor.insert(&text, MAX_MODAL_INPUT_BYTES);
+                }
+            }
+            "z" if shift => {
+                editor.redo();
+            }
+            "z" => {
+                editor.undo();
+            }
+            _ => return false,
+        },
+        _ => return false,
+    }
+    true
 }
 
 #[cfg(test)]
@@ -108,15 +171,19 @@ mod tests {
     fn backspace_removes_a_whole_grapheme_cluster() {
         // One Backspace on "👩‍🚀" must remove it whole. String::pop takes only
         // the rocket and leaves "👩\u{200d}" behind.
-        let mut buf = String::from("ab\u{1f469}\u{200d}\u{1f680}");
+        let mut buf = crate::text_editor::TextEditor::from("ab\u{1f469}\u{200d}\u{1f680}");
         assert!(backspace(&mut buf));
-        assert_eq!(buf, "ab", "no dangling zero-width joiner");
+        assert_eq!(buf.text(), "ab", "no dangling zero-width joiner");
 
-        let mut accented = String::from("cafe\u{301}");
+        let mut accented = crate::text_editor::TextEditor::from("cafe\u{301}");
         assert!(backspace(&mut accented));
-        assert_eq!(accented, "caf", "the accent leaves with its base letter");
+        assert_eq!(
+            accented.text(),
+            "caf",
+            "the accent leaves with its base letter"
+        );
 
-        let mut empty = String::new();
+        let mut empty = crate::text_editor::TextEditor::default();
         assert!(
             !backspace(&mut empty),
             "backspace on empty reports no change"
@@ -124,17 +191,34 @@ mod tests {
     }
 
     #[test]
-    fn push_text_filters_controls_and_honours_the_cap() {
-        let mut buf = String::new();
-        assert!(push_text(&mut buf, "a\tb\nc"));
-        assert_eq!(buf, "abc", "control characters are dropped, not spaced");
+    fn push_text_bounds_control_only_source_before_filtering() {
+        let mut buf = crate::text_editor::TextEditor::default();
+        let oversized = format!("{}x", "\t".repeat(MAX_MODAL_INPUT_BYTES));
+        assert!(
+            !push_text(&mut buf, &oversized),
+            "text beyond the source budget must not be scanned"
+        );
+        assert!(buf.is_empty());
+        let mut full = crate::text_editor::TextEditor::from("x".repeat(MAX_MODAL_INPUT_BYTES));
+        assert!(!push_text(&mut full, &oversized));
+    }
 
-        let mut full = "x".repeat(MAX_MODAL_INPUT_BYTES - 1);
-        assert!(push_text(&mut full, "yz"));
+    #[test]
+    fn push_text_filters_controls_and_honours_the_cap() {
+        let mut buf = crate::text_editor::TextEditor::default();
+        assert!(push_text(&mut buf, "a\tb\nc"));
+        assert_eq!(
+            buf.text(),
+            "a b c",
+            "single-line normalization matches search"
+        );
+
+        let mut full = crate::text_editor::TextEditor::from("x".repeat(MAX_MODAL_INPUT_BYTES - 1));
+        assert!(!push_text(&mut full, "yz"));
         assert_eq!(
             full.len(),
-            MAX_MODAL_INPUT_BYTES,
-            "stops exactly at the cap"
+            MAX_MODAL_INPUT_BYTES - 1,
+            "oversized insert is atomic"
         );
         assert!(
             !push_text(&mut full, "more"),
@@ -145,7 +229,7 @@ mod tests {
     #[test]
     fn push_text_never_splits_a_multibyte_character_across_the_cap() {
         // A 4-byte emoji must not be half-written when only 3 bytes remain.
-        let mut buf = "x".repeat(MAX_MODAL_INPUT_BYTES - 3);
+        let mut buf = crate::text_editor::TextEditor::from("x".repeat(MAX_MODAL_INPUT_BYTES - 3));
         push_text(&mut buf, "\u{1f680}");
         assert!(buf.is_char_boundary(buf.len()));
         assert_eq!(
@@ -215,5 +299,6 @@ mod tests {
             "bare v types"
         );
         assert!(!is_paste_chord(Some("b"), native));
+        assert!(!is_paste_chord(Some("v"), CONTROL | ALT), "AltGr types");
     }
 }

@@ -1,5 +1,7 @@
 //! Decoded image payload shared between the VT layer and the renderer.
 
+mod jpeg;
+
 use std::sync::Arc;
 
 use crate::graphics_limits::{GraphicsBudget, GraphicsReservation};
@@ -9,8 +11,7 @@ use crate::graphics_limits::{GraphicsBudget, GraphicsReservation};
 /// (same realistic-terminal envelope).
 pub const MAX_IMAGE_DIM: u32 = 8192;
 
-/// Decompression-bomb defense: max total bytes the `image`
-/// crate may allocate while decoding. The independent axis cap still rejects
+/// Decompression-bomb defense: max decoded RGBA image size. The independent axis cap still rejects
 /// pathological shapes; the byte cap limits any one retained image to 64 MiB.
 pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -98,10 +99,8 @@ pub struct ImageData {
     pub rgba: Arc<PixelBuffer>,
 }
 
-/// Limits the image decoder enforces while decoding untrusted bytes: no side
-/// above `MAX_IMAGE_DIM` and no allocation above `decode_cap`. Checks after
-/// decoding cannot stop a decompression bomb; these stop it before the buffer
-/// exists.
+/// Dimension and allocation limits passed to image codecs. JPEG working
+/// memory is reserved separately because its adapter does not enforce max_alloc.
 fn decode_limits(decode_cap: usize) -> image::Limits {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_IMAGE_DIM);
@@ -297,7 +296,15 @@ impl ImageData {
         use image::ImageDecoder;
 
         let decode_cap = budget.limits().image_bytes.min(MAX_IMAGE_BYTES as usize);
-        let _scratch = budget.reserve_transient_cpu(decode_cap)?;
+        let scratch = if bytes.starts_with(&[0xff, 0xd8]) {
+            if bytes.len() > budget.limits().transmission_bytes {
+                return None;
+            }
+            jpeg::scratch_bytes(bytes, decode_cap)?
+        } else {
+            decode_cap
+        };
+        let _scratch = budget.reserve_transient_cpu(scratch)?;
         let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
             .ok()?;
@@ -832,6 +839,36 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_decode_reserves_progressive_peak() {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits {
+            image_bytes: 1024 * 1024,
+            retained_bytes: 1024 * 1024,
+            process_cpu_bytes: 5 * 1024 * 1024 / 2,
+            transient_cpu_bytes: 5 * 1024 * 1024 / 2,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        // cjpeg -sample 1x1, with/without -progressive, from a solid 512x512 PPM.
+        let progressive = include_bytes!("../tests/fixtures/progressive-444.jpg");
+        assert!(
+            ImageData::from_encoded_with_budget(progressive, &budget).is_none(),
+            "progressive coefficients and native pixels exceed the budget"
+        );
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+        let baseline = include_bytes!("../tests/fixtures/baseline-444.jpg");
+        let image =
+            ImageData::from_encoded_with_budget(baseline, &budget).expect("baseline peak fits");
+        assert_eq!((image.width, image.height), (512, 512));
+        assert_eq!(budget.usage(), (1024 * 1024, 1024 * 1024, 0, 0));
+        drop(image);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+        assert!(
+            ImageData::from_encoded(progressive).is_some(),
+            "valid progressive fixture"
+        );
+    }
+
+    #[test]
     fn encoded_images_reserve_their_actual_rgba_size() {
         use image::ImageEncoder;
 
@@ -839,6 +876,7 @@ mod tests {
             image_bytes: 64 * 1024,
             retained_bytes: 64 * 1024,
             process_cpu_bytes: 128 * 1024,
+            transient_cpu_bytes: 128 * 1024,
             ..crate::GraphicsLimits::default()
         };
         let budget = GraphicsBudget::isolated(limits).unwrap();
@@ -1040,6 +1078,7 @@ mod transient_crop_tests {
             retained_bytes,
             animation_bytes: 8,
             process_cpu_bytes: 64,
+            transient_cpu_bytes: 64,
             process_gpu_bytes: 64,
             ..GraphicsLimits::default()
         })

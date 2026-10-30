@@ -1551,6 +1551,11 @@ fn establish_session_directory(path: &Path, kind: StoreKind) -> io::Result<Sessi
             return Err(error);
         }
     };
+    #[cfg(target_os = "macos")]
+    if let Err(error) = kettle_state::clear_inherited_acl(&directory.file) {
+        discard_private_file_in_session(&directory, creator, bootstrap_name);
+        return Err(error);
+    }
     let reopened = match open_existing_private_file_in_session(&directory, bootstrap_name) {
         Ok(reopened) => reopened,
         Err(error) => {
@@ -1644,6 +1649,7 @@ fn require_owned_session_file(file: &File) -> io::Result<std::fs::Metadata> {
 
     let metadata = file.metadata()?;
     if metadata.file_type().is_file()
+        // SAFETY: geteuid takes no pointers and only queries the effective process identity.
         && metadata.uid() == unsafe { libc::geteuid() }
         && metadata.nlink() == 1
     {
@@ -1658,18 +1664,7 @@ fn require_owned_session_file(file: &File) -> io::Result<std::fs::Metadata> {
 
 #[cfg(unix)]
 fn restrict_private_session_file(file: &File) -> io::Result<()> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
-    require_owned_session_file(file)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    if file.metadata()?.mode() & 0o777 == 0o600 {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "pasted-image mode verification failed after fchmod",
-        ))
-    }
+    kettle_state::restrict_private_file(file)
 }
 
 #[cfg(unix)]
@@ -1683,9 +1678,9 @@ fn session_entry_matches(
 
     let opened = file.metadata()?;
     let name = session_c_name(name)?;
-    // SAFETY: the held directory descriptor, NUL-terminated name, and output
-    // buffer are valid. AT_SYMLINK_NOFOLLOW compares the directory entry itself.
+    // SAFETY: stat contains integer fields and arrays, for which zero bits are valid.
     let mut current = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: The directory fd and NUL-terminated name stay live; current is writable stat storage.
     if unsafe {
         libc::fstatat(
             directory.file.as_raw_fd(),
@@ -1810,6 +1805,8 @@ fn session_directory_entry_names(
     let current = std::ffi::CString::new(".").expect("static path has no NUL");
     // Open "." relative to the retained capability to get a readable
     // descriptor with an independent directory offset on every Unix.
+    // SAFETY: directory owns the live fd and current is a NUL-terminated path; no creation mode
+    // is needed.
     let descriptor = unsafe {
         libc::openat(
             directory.file.as_raw_fd(),
@@ -1901,6 +1898,8 @@ fn discard_private_file(file: File, path: &Path) {
     // The private creator requested DELETE on this exact handle. Marking that
     // kernel object is both race-free and compatible with its intentionally
     // restrictive share mode.
+    // SAFETY: file has DELETE access; disposition and its size match FileDispositionInfo for
+    // the call.
     let result = unsafe {
         SetFileInformationByHandle(
             HANDLE(file.as_raw_handle()),
@@ -2122,8 +2121,9 @@ impl Drop for Pending<'_> {
 #[cfg(unix)]
 fn require_free(directory: &SessionDirectory, size: u64, keep: u64) -> io::Result<()> {
     use std::os::fd::AsRawFd as _;
-    // SAFETY: the descriptor is open and the buffer is the call's own type.
+    // SAFETY: statvfs contains integer fields and arrays, for which zero bits are valid.
     let mut stats = unsafe { std::mem::zeroed::<libc::statvfs>() };
+    // SAFETY: directory owns the live fd and stats is exclusively writable statvfs storage.
     if unsafe { libc::fstatvfs(directory.file.as_raw_fd(), &mut stats) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -2303,6 +2303,7 @@ fn session_directory_matches_path(directory: &SessionDirectory) -> io::Result<bo
 
     let current = std::fs::symlink_metadata(&directory.path)?;
     Ok(current.file_type().is_dir()
+        // SAFETY: geteuid takes no pointers and only queries the effective process identity.
         && current.uid() == unsafe { libc::geteuid() }
         && current.mode() & 0o777 == 0o700
         && current.dev() == directory.device
@@ -2357,6 +2358,7 @@ fn open_session_directory(path: &Path) -> io::Result<SessionDirectory> {
         .open(path)?;
     let metadata = file.metadata()?;
     if !metadata.file_type().is_dir()
+        // SAFETY: geteuid takes no pointers and only queries the effective process identity.
         || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.mode() & 0o777 != 0o700
     {
@@ -2434,6 +2436,7 @@ fn remove_session_directory(directory: SessionDirectory) -> io::Result<()> {
 
     let current = std::fs::symlink_metadata(&directory.path)?;
     if !current.file_type().is_dir()
+        // SAFETY: geteuid takes no pointers and only queries the effective process identity.
         || current.uid() != unsafe { libc::geteuid() }
         || current.mode() & 0o777 != 0o700
         || current.dev() != directory.device
@@ -2557,6 +2560,80 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(target_os = "macos")]
+    fn seed_read_acl(path: &Path) {
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args([
+                    "+a",
+                    "everyone allow read,search,file_inherit,directory_inherit"
+                ])
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn has_read_acl(path: &Path) -> bool {
+        let output = std::process::Command::new("/bin/ls")
+            .arg("-lde")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .skip(1)
+            .any(|line| line.contains(" allow "))
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn session_directories_clear_inherited_read_acls_before_content_creation() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = kettle_test_support::private_tempdir("kettle-paste-acl-");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o711)).unwrap();
+        seed_read_acl(root.path());
+        let inherited = root.path().join("inherited");
+        std::fs::create_dir(&inherited).unwrap();
+        assert!(
+            has_read_acl(&inherited),
+            "fixture did not inherit the read ACL"
+        );
+        let path = root.path().join("session");
+        let directory = establish_session_directory(&path, PASTED).unwrap();
+        assert!(
+            !has_read_acl(&path),
+            "session directory retained inherited read/search ACL grants"
+        );
+        let file = create_private_file_in_session(&directory, OsStr::new("0001.png")).unwrap();
+        assert!(
+            !has_read_acl(&path.join("0001.png")),
+            "PNG inherited a read ACL"
+        );
+        remove_open_private_file_in_session(&directory, file, OsStr::new("0001.png")).unwrap();
+        remove_session_directory(directory).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn session_files_clear_inherited_read_acls_before_writing() {
+        let root = kettle_test_support::private_tempdir("kettle-paste-file-acl-");
+        let path = root.path().join("session");
+        let directory = establish_session_directory(&path, PASTED).unwrap();
+        seed_read_acl(&path);
+        let file = create_private_file_in_session(&directory, OsStr::new("0001.png")).unwrap();
+        assert!(
+            !has_read_acl(&path.join("0001.png")),
+            "session file retained an inherited read ACL"
+        );
+        remove_open_private_file_in_session(&directory, file, OsStr::new("0001.png")).unwrap();
+        remove_session_directory(directory).unwrap();
+    }
 
     fn scratch(name: &str) -> PathBuf {
         scratch_root().join(format!(
@@ -3413,12 +3490,17 @@ mod tests {
     fn a_copy_that_is_not_what_was_asked_is_discarded() {
         let len = 4096;
         let (_source_dir, source) = video_source(len, 0o600);
-        for (size, refuse) in [(len as u64 - 1, false), (len as u64, true)] {
+        for (how, size, refuse) in [
+            (Copying::CloneFirst, len as u64 - 1, false),
+            (Copying::CloneFirst, len as u64, true),
+            (Copying::Bytes, len as u64 - 1, false),
+            (Copying::Bytes, len as u64, true),
+        ] {
             let dir = scratch("video-discard");
             let mut copies = PastedImages::of_kind_in(VIDEOS_ANY_DISK, dir.clone());
             let checked = std::cell::Cell::new(false);
             let error = copies
-                .save_copy(&source, size, "mov", &never, soon(), |copy| {
+                .save_copy_as(&source, (size, "mov"), how, (&never, soon()), |copy| {
                     checked.set(true);
                     // As the caller's check does: the copy is the source's
                     // length, and what it holds is the video.
@@ -3430,13 +3512,11 @@ mod tests {
                 })
                 .expect_err("discarded");
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-            // A clone is the whole source, so a short one fails its length
-            // before its check is asked. APFS clones; a byte copy, where a
-            // file system cannot, copies only what it was asked.
-            #[cfg(target_os = "macos")]
-            assert_eq!(checked.get(), refuse);
-            #[cfg(not(target_os = "macos"))]
-            let _ = checked;
+            // A clone rejects the wrong length before validation; a byte
+            // copy reaches validation with exactly the requested length.
+            if how == Copying::Bytes || refuse {
+                assert!(checked.get());
+            }
             assert_eq!((copies.files.len(), copies.bytes), (0, 0));
             let directory = copies.directory.as_ref().expect("session held");
             assert!(

@@ -715,6 +715,7 @@ fn repair_private_dir_mode(path: &Path) -> io::Result<()> {
 
     // Both checks now read the object we hold open, not the name.
     let metadata = directory.metadata()?;
+    // SAFETY: geteuid has no preconditions.
     if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 == 0 {
         return Ok(());
     }
@@ -901,6 +902,22 @@ pub fn truncate_private_file(file: &File, len: u64) -> io::Result<()> {
 /// Objects owned by any other principal are rejected.
 pub fn restrict_private_file(file: &File) -> io::Result<()> {
     restrict_private_object(file)
+}
+
+/// Create a new owner-only export relative to an already-open directory.
+/// The caller keeps the directory trusted through publication and cleanup.
+#[cfg(unix)]
+pub fn create_user_selected_file_new_at(parent: &File, name: &std::ffi::OsStr) -> io::Result<File> {
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(component)) if component == name)
+        || components.next().is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "export name must be one component",
+        ));
+    }
+    unix::create_user_selected_file_new_at(parent, name, Path::new(name))
 }
 
 /// Remove the private file represented by both `file` and `path`.
@@ -1734,12 +1751,12 @@ pub(crate) mod unix {
 
     fn open_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
         let name = c_name(name, "private directory name")?;
-        // SAFETY: `parent` is a live directory fd, `name` is NUL-terminated,
-        // and successful openat transfers ownership of the returned fd.
         #[cfg(any(target_os = "linux", target_os = "android"))]
         let access = libc::O_PATH;
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let access = libc::O_RDONLY;
+        // SAFETY: `parent` is a live directory fd, `name` is NUL-terminated,
+        // and successful openat transfers ownership of the returned fd.
         let fd = unsafe {
             libc::openat(
                 parent.as_raw_fd(),
@@ -1978,6 +1995,8 @@ pub(crate) mod unix {
             if created {
                 // A restrictive umask can remove owner-read on macOS before
                 // open_directory_at can obtain a readable descriptor.
+                // SAFETY: parent stays open and name_c is NUL-terminated for fchmodat;
+                // AT_SYMLINK_NOFOLLOW prevents changing a symlink target.
                 if unsafe {
                     libc::fchmodat(
                         parent.as_raw_fd(),
@@ -2075,9 +2094,10 @@ pub(crate) mod unix {
 
     fn entry_stat(parent: &File, name: &OsStr) -> io::Result<Option<libc::stat>> {
         let name = c_name(name, "private file name")?;
-        // SAFETY: a zeroed stat is a valid output buffer and all input
-        // pointers/fds are valid for fstatat.
+        // SAFETY: stat contains only integer fields, which admit all-zero bits.
         let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        // SAFETY: parent stays open, name is NUL-terminated, and stat is an exclusive
+        // writable output buffer for the duration of fstatat.
         if unsafe {
             libc::fstatat(
                 parent.as_raw_fd(),
@@ -2599,6 +2619,7 @@ pub(crate) mod unix {
         })?;
         let staging_c = c_name(staging_name, "export staging directory")?;
         // The reservation stays empty until both its mode and ACL are private.
+        // SAFETY: parent stays open and staging_c is NUL-terminated for mkdirat.
         if unsafe { libc::mkdirat(parent.as_raw_fd(), staging_c.as_ptr(), 0o700) } != 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::AlreadyExists {
@@ -2618,6 +2639,7 @@ pub(crate) mod unix {
                 libc::AT_SYMLINK_NOFOLLOW,
             )
         };
+        // SAFETY: parent stays open and staging_c is NUL-terminated for openat.
         let fd = unsafe {
             libc::openat(
                 parent.as_raw_fd(),
@@ -2628,6 +2650,7 @@ pub(crate) mod unix {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: Successful openat returned a new fd, whose sole ownership moves to File.
         let directory = unsafe { File::from_raw_fd(fd) };
         if directory.metadata()?.uid() != current_user() {
             return Err(io::Error::new(
@@ -2635,6 +2658,7 @@ pub(crate) mod unix {
                 "export staging directory has the wrong owner",
             ));
         }
+        // SAFETY: directory owns this live fd throughout fchmod.
         if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -2653,6 +2677,7 @@ pub(crate) mod unix {
         let staging_name = staging_name.to_os_string();
         let cleanup: CreatedFileCleanup = Box::new(move |_| {
             let payload = c_name(OsStr::new("payload"), "staging payload")?;
+            // SAFETY: cleanup_directory stays open and payload is NUL-terminated for unlinkat.
             if unsafe { libc::unlinkat(cleanup_directory.as_raw_fd(), payload.as_ptr(), 0) } != 0 {
                 let error = io::Error::last_os_error();
                 if error.kind() != io::ErrorKind::NotFound {
@@ -2667,6 +2692,8 @@ pub(crate) mod unix {
                 && entry_stat(guard.directory(), &staging_name)?
                     .is_some_and(|stat| FileIdentity::from_stat(&stat) == directory_identity)
             {
+                // SAFETY: guard holds the directory fd open and staging_c remains
+                // NUL-terminated for unlinkat; AT_REMOVEDIR requests directory removal.
                 if unsafe {
                     libc::unlinkat(
                         guard.directory().as_raw_fd(),
@@ -2682,6 +2709,8 @@ pub(crate) mod unix {
             Ok(())
         });
         let payload = c_name(OsStr::new("payload"), "staging payload")?;
+        // SAFETY: directory stays open and payload is NUL-terminated; O_CREAT
+        // is supplied its mode argument and O_EXCL creates a new owned fd.
         let fd = unsafe {
             libc::openat(
                 directory.as_raw_fd(),
@@ -2697,6 +2726,7 @@ pub(crate) mod unix {
                 "staged export",
             ));
         }
+        // SAFETY: Successful openat returned a new fd, whose sole ownership moves to File.
         let file = unsafe { File::from_raw_fd(fd) };
         let staged = CreatedUserSelectedFile::new(file, cleanup);
         require_user_owned_regular(&staged, staged_path)?;
@@ -2731,6 +2761,8 @@ pub(crate) mod unix {
         destination_c: &std::ffi::CStr,
     ) -> io::Result<()> {
         #[cfg(any(target_os = "linux", target_os = "android"))]
+        // SAFETY: both directory Files are borrowed for the call and both CStrs
+        // are NUL-terminated; RENAME_NOREPLACE is a valid renameat2 flag.
         let renamed = unsafe {
             libc::renameat2(
                 source_parent.as_raw_fd(),
@@ -2752,6 +2784,8 @@ pub(crate) mod unix {
                 ) -> libc::c_int;
             }
             const RENAME_EXCL: libc::c_uint = 0x0000_0004;
+            // SAFETY: both directory Files are borrowed for the call and both
+            // CStrs are NUL-terminated; RENAME_EXCL is Darwin's no-replace flag.
             unsafe {
                 renameatx_np(
                     source_parent.as_raw_fd(),
@@ -2818,6 +2852,8 @@ pub(crate) mod unix {
             let publication = publish_with_atomic_fallback(
                 || match hard_link_mode {
                     HardLinkMode::Native => {
+                        // SAFETY: Both directory Files stay open and both CStrings remain
+                        // NUL-terminated throughout linkat; no descriptor ownership is transferred.
                         if unsafe {
                             libc::linkat(
                                 source_parent.as_raw_fd(),
@@ -2917,6 +2953,7 @@ pub(crate) mod unix {
             // The directory is empty while its inherited ACL is removed. The
             // PNG is created only after this held directory object is 0700 and
             // ACL-free, then published with an atomic no-replace rename.
+            // SAFETY: parent stays open and staging_c is NUL-terminated for mkdirat.
             if unsafe {
                 libc::mkdirat(
                     parent.as_raw_fd(),
@@ -2944,6 +2981,7 @@ pub(crate) mod unix {
                 )
             };
 
+            // SAFETY: parent stays open and staging_c is NUL-terminated for openat.
             let stage_fd = unsafe {
                 libc::openat(
                     parent.as_raw_fd(),
@@ -2964,12 +3002,14 @@ pub(crate) mod unix {
                     ),
                 ));
             }
+            // SAFETY: Successful openat returned a new fd, whose sole ownership moves to File.
             let staging = unsafe { File::from_raw_fd(stage_fd) };
             let staging_identity = FileIdentity::from_metadata(&staging.metadata()?);
             let remove_staging_if_same = || -> io::Result<()> {
                 let linked = entry_stat(parent, &staging_name)?
                     .is_some_and(|stat| FileIdentity::from_stat(&stat) == staging_identity);
                 if linked
+                    // SAFETY: parent stays open and staging_c is NUL-terminated for unlinkat.
                     && unsafe {
                         libc::unlinkat(parent.as_raw_fd(), staging_c.as_ptr(), libc::AT_REMOVEDIR)
                     } != 0
@@ -2989,11 +3029,14 @@ pub(crate) mod unix {
                 }
                 // Mode bits and ACLs are independent on Darwin; both must be
                 // secured before the first content-bearing file is created.
+                // SAFETY: staging owns this live directory fd throughout fchmod.
                 if unsafe { libc::fchmod(staging.as_raw_fd(), 0o700) } != 0 {
                     return Err(io::Error::last_os_error());
                 }
                 macos_acl::clear_extended_acl(&staging)?;
 
+                // SAFETY: staging stays open and payload_c is NUL-terminated; O_CREAT
+                // is supplied its mode argument and O_EXCL creates a new owned fd.
                 let fd = unsafe {
                     libc::openat(
                         staging.as_raw_fd(),
@@ -3005,10 +3048,13 @@ pub(crate) mod unix {
                 if fd < 0 {
                     return Err(io::Error::last_os_error());
                 }
+                // SAFETY: Successful openat returned a new fd, whose sole ownership moves to File.
                 let file = unsafe { File::from_raw_fd(fd) };
                 require_user_owned_regular(&file, path)?;
                 restrict_private_object(&file)?;
 
+                // SAFETY: Both directory Files stay open and both names remain NUL-terminated
+                // throughout renameatx_np; RENAME_EXCL refuses replacement.
                 if unsafe {
                     renameatx_np(
                         staging.as_raw_fd(),
@@ -3024,6 +3070,7 @@ pub(crate) mod unix {
                 Ok(file)
             })();
             let payload_cleanup = if created.is_err() {
+                // SAFETY: staging stays open and payload_c is NUL-terminated for unlinkat.
                 if unsafe { libc::unlinkat(staging.as_raw_fd(), payload_c.as_ptr(), 0) } == 0 {
                     Ok(())
                 } else {
@@ -3060,34 +3107,15 @@ pub(crate) mod unix {
         ))
     }
 
-    pub(super) fn create_user_selected_file_new_with(
+    pub(super) fn create_user_selected_file_new_at(
+        parent: &File,
+        leaf: &OsStr,
         path: &Path,
-        after_parent_open: impl FnOnce(),
-    ) -> io::Result<(File, CreatedFileCleanup)> {
-        let path = std::path::absolute(path)?;
-        let leaf = path.file_name().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("user-selected output has no file name: {}", path.display()),
-            )
-        })?;
+    ) -> io::Result<File> {
         let leaf_c = c_name(leaf, "user-selected output file name")?;
-        let parent_path = path.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("user-selected output has no parent: {}", path.display()),
-            )
-        })?;
-        // Resolve the caller's existing parent exactly once and retain that
-        // directory capability through creation and postcondition checks.
-        // Following a parent symlink is intentional for an explicit export;
-        // the leaf itself is never followed.
-        let parent = open_user_selected_parent(parent_path)?;
-        let parent_identity = FileIdentity::from_metadata(&parent.metadata()?);
-        after_parent_open();
         #[cfg(target_os = "macos")]
         let file =
-            create_user_selected_file_without_acl_window(&parent, &leaf_c, &path, libc::O_RDWR)?;
+            create_user_selected_file_without_acl_window(parent, &leaf_c, path, libc::O_RDWR)?;
         #[cfg(not(target_os = "macos"))]
         let file = {
             // SAFETY: the held directory and NUL-terminated leaf are valid, and
@@ -3111,10 +3139,10 @@ pub(crate) mod unix {
             unsafe { File::from_raw_fd(fd) }
         };
         let result = (|| {
-            require_user_owned_regular(&file, &path)?;
+            require_user_owned_regular(&file, path)?;
             restrict_private_object(&file)?;
             let identity = FileIdentity::from_metadata(&file.metadata()?);
-            let linked = entry_stat(&parent, leaf)?
+            let linked = entry_stat(parent, leaf)?
                 .is_some_and(|stat| FileIdentity::from_stat(&stat) == identity);
             if !linked {
                 return Err(io::Error::new(
@@ -3122,16 +3150,54 @@ pub(crate) mod unix {
                     "user-selected output path no longer refers to the created file",
                 ));
             }
-            let current_parent = open_user_selected_parent(parent_path)?;
-            if FileIdentity::from_metadata(&current_parent.metadata()?) != parent_identity {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "user-selected output parent changed while the file was created",
-                ));
-            }
             Ok(())
         })();
-        result?;
+        if let Err(error) = result {
+            if file.metadata().ok().is_some_and(|metadata| {
+                entry_stat(parent, leaf).ok().flatten().is_some_and(|stat| {
+                    FileIdentity::from_stat(&stat) == FileIdentity::from_metadata(&metadata)
+                })
+            }) {
+                // SAFETY: this held directory and leaf still identify our file.
+                let _ = unsafe { libc::unlinkat(parent.as_raw_fd(), leaf_c.as_ptr(), 0) };
+            }
+            return Err(error);
+        }
+        Ok(file)
+    }
+
+    pub(super) fn create_user_selected_file_new_with(
+        path: &Path,
+        after_parent_open: impl FnOnce(),
+    ) -> io::Result<(File, CreatedFileCleanup)> {
+        let path = std::path::absolute(path)?;
+        let leaf = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("user-selected output has no file name: {}", path.display()),
+            )
+        })?;
+        let parent_path = path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("user-selected output has no parent: {}", path.display()),
+            )
+        })?;
+        // Resolve the caller's existing parent exactly once and retain that
+        // directory capability through creation and postcondition checks.
+        // Following a parent symlink is intentional for an explicit export;
+        // the leaf itself is never followed.
+        let parent = open_user_selected_parent(parent_path)?;
+        let parent_identity = FileIdentity::from_metadata(&parent.metadata()?);
+        after_parent_open();
+        let file = create_user_selected_file_new_at(&parent, leaf, &path)?;
+        let current_parent = open_user_selected_parent(parent_path)?;
+        if FileIdentity::from_metadata(&current_parent.metadata()?) != parent_identity {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "user-selected output parent changed while the file was created",
+            ));
+        }
         Ok((file, Box::new(|_| Ok(()))))
     }
 
@@ -3517,6 +3583,7 @@ pub(crate) mod unix {
                 let mut mask = 0_u64;
                 // SAFETY: the iterator returned a live ACL entry.
                 if unsafe { acl_get_tag_type(entry, &mut tag) } != 0
+                    // SAFETY: entry belongs to the retained ACL and mask is writable for this call.
                     || unsafe { acl_get_permset_mask_np(entry, &mut mask) } != 0
                 {
                     return Err(io::Error::last_os_error());
@@ -3587,15 +3654,16 @@ mod windows {
     #[cfg(test)]
     use windows_sys::Win32::Security::WinWorldSid;
     use windows_sys::Win32::Security::{
-        ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CreateWellKnownSid,
-        DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl,
-        GetTokenInformation, INHERIT_ONLY_ACE, InitializeAcl, InitializeSecurityDescriptor,
-        IsValidAcl, IsValidSid, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
-        SECURITY_MAX_SID_SIZE, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
-        SetSecurityDescriptorOwner, TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
-        TokenOwner, TokenUser, UNPROTECTED_DACL_SECURITY_INFORMATION, WELL_KNOWN_SID_TYPE,
-        WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddAccessAllowedAceEx,
+        CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid,
+        GetSecurityDescriptorControl, GetTokenInformation, INHERIT_ONLY_ACE, InitializeAcl,
+        InitializeSecurityDescriptor, IsValidAcl, IsValidSid, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+        SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE,
+        SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
+        TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser,
+        UNPROTECTED_DACL_SECURITY_INFORMATION, WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid,
+        WinLocalSystemSid,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, CreateHardLinkW,
@@ -3691,6 +3759,8 @@ mod windows {
             return Err(io::Error::last_os_error());
         }
         let sid = sid_from_buffer(buffer.as_ptr().cast());
+        // SAFETY: sid points into the retained successful token-information buffer;
+        // the null case short-circuits before IsValidSid.
         if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -3704,22 +3774,22 @@ mod windows {
     }
 
     fn token_user_sid(token: &TokenHandle) -> io::Result<TokenSid> {
-        // SAFETY: a successful TokenUser query writes a TOKEN_USER header at
-        // the start of the retained, suitably aligned buffer.
         token_information_sid(
             token,
             TokenUser,
+            // SAFETY: a successful TokenUser query writes a TOKEN_USER header at
+            // the start of the retained, suitably aligned buffer.
             |buffer| unsafe { (*buffer.cast::<TOKEN_USER>()).User.Sid },
             "user",
         )
     }
 
     fn token_owner_sid(token: &TokenHandle) -> io::Result<TokenSid> {
-        // SAFETY: a successful TokenOwner query writes a TOKEN_OWNER header at
-        // the start of the retained, suitably aligned buffer.
         token_information_sid(
             token,
             TokenOwner,
+            // SAFETY: a successful TokenOwner query writes a TOKEN_OWNER header at
+            // the start of the retained, suitably aligned buffer.
             |buffer| unsafe { (*buffer.cast::<TOKEN_OWNER>()).Owner },
             "owner",
         )
@@ -3766,6 +3836,8 @@ mod windows {
     fn private_acl(current_user: PSID) -> io::Result<Vec<u64>> {
         // One ACCESS_ALLOWED_ACE has a four-byte SID placeholder. Add the
         // actual variable-length SID and round storage up to u64 alignment.
+        // SAFETY: current_user comes from a validated TokenSid whose buffer
+        // is retained by the caller for this call.
         let sid_len = unsafe { GetLengthSid(current_user) } as usize;
         let acl_len = std::mem::size_of::<ACL>()
             .checked_add(std::mem::size_of::<ACCESS_ALLOWED_ACE>() - std::mem::size_of::<u32>())
@@ -3805,18 +3877,24 @@ mod windows {
         {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: descriptor was initialized above and current_user remains
+        // valid through the caller's use of the security descriptor.
         if unsafe {
             SetSecurityDescriptorOwner(std::ptr::addr_of_mut!(descriptor).cast(), current_user, 0)
         } == 0
         {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: descriptor was initialized above and the caller retains the
+        // initialized ACL through use of this security descriptor.
         if unsafe {
             SetSecurityDescriptorDacl(std::ptr::addr_of_mut!(descriptor).cast(), 1, acl, 0)
         } == 0
         {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: descriptor is initialized, writable, and exclusively borrowed
+        // for this call; SE_DACL_PROTECTED is a valid control bit.
         if unsafe {
             SetSecurityDescriptorControl(
                 std::ptr::addr_of_mut!(descriptor).cast(),
@@ -4004,10 +4082,10 @@ mod windows {
                 .last()
                 .expect("the verified chain always contains an existing parent");
             let child_path = stable_child_path(parent, name)?;
-            // SAFETY: the stable child path is NUL-terminated below and the
-            // descriptor storage remains alive for the call.
             let mut child_path_z = child_path;
             child_path_z.push(0);
+            // SAFETY: the stable child path is NUL-terminated below and the
+            // descriptor storage remains alive for the call.
             let created = unsafe { CreateDirectoryW(child_path_z.as_ptr(), &attributes) } != 0;
             if !created {
                 // SAFETY: GetLastError reads this thread's immediately
@@ -4196,6 +4274,8 @@ mod windows {
             let publication = publish_with_atomic_fallback(
                 || match hard_link_mode {
                     HardLinkMode::Native => {
+                        // SAFETY: Both paths are NUL-terminated UTF-16 buffers retained for
+                        // CreateHardLinkW; the reserved security-attributes argument is null.
                         if unsafe {
                             CreateHardLinkW(
                                 destination_path.as_ptr(),
@@ -4640,6 +4720,8 @@ mod windows {
         // `open_existing_private_file` shares deletion but does not request
         // DELETE itself. ReOpenFile grants that access to the same kernel file
         // object, so no pathname is resolved between validation and deletion.
+        // SAFETY: file owns the live handle for ReOpenFile; DELETE and the
+        // share/attribute flags are valid, and success returns a separately owned handle.
         let handle = unsafe {
             ReOpenFile(
                 file.as_raw_handle() as HANDLE,
@@ -4732,12 +4814,14 @@ mod windows {
             let storage = if dacl.is_null() {
                 None
             } else {
+                // SAFETY: dacl is non-null and points into the retained GetSecurityInfo descriptor.
                 if unsafe { IsValidAcl(dacl) } == 0 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "destination has an invalid DACL",
                     ));
                 }
+                // SAFETY: IsValidAcl accepted this DACL, whose descriptor is still retained.
                 let len = usize::from(unsafe { (*dacl).AclSize });
                 if len < std::mem::size_of::<ACL>() {
                     return Err(io::Error::new(
@@ -4905,9 +4989,12 @@ mod windows {
     }
 
     fn sid_is_nt_service(sid: PSID) -> bool {
+        // SAFETY: Callers pass SID storage from a retained Windows security
+        // descriptor; the null case short-circuits before IsValidSid.
         if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
             return false;
         }
+        // SAFETY: IsValidSid accepted sid and its backing descriptor is still retained.
         let len = unsafe { GetLengthSid(sid) } as usize;
         if len < 12 {
             return false;
@@ -4929,8 +5016,12 @@ mod windows {
         system: PSID,
     ) -> bool {
         !sid.is_null()
+            // SAFETY: sid is a non-null SID from the retained security descriptor;
+            // current_user is backed by the caller's live TokenSid.
             && (unsafe { EqualSid(sid, current_user) } != 0
+                // SAFETY: sid and administrators are SIDs in retained descriptor/SID buffers.
                 || unsafe { EqualSid(sid, administrators) } != 0
+                // SAFETY: sid and system are SIDs in retained descriptor/SID buffers.
                 || unsafe { EqualSid(sid, system) } != 0
                 || sid_is_nt_service(sid))
     }
@@ -5000,6 +5091,8 @@ mod windows {
                 format!("{description} has an untrusted owner: {}", path.display()),
             ));
         }
+        // SAFETY: dacl is in the retained GetSecurityInfo descriptor; the null
+        // case short-circuits before IsValidAcl.
         if dacl.is_null() || unsafe { IsValidAcl(dacl) } == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -5009,18 +5102,23 @@ mod windows {
                 ),
             ));
         }
+        // SAFETY: IsValidAcl accepted this DACL and its descriptor remains alive.
         for index in 0..unsafe { (*dacl).AceCount } {
             let mut ace = std::ptr::null_mut();
             // SAFETY: index is bounded by the validated ACL's AceCount.
             if unsafe { GetAce(dacl, u32::from(index), &mut ace) } == 0 || ace.is_null() {
                 return Err(io::Error::last_os_error());
             }
-            let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
-            // All access-allowed ACE forms begin with ACE_HEADER + ACCESS_MASK.
-            // SAFETY: GetAce returned a kernel-validated ACE.
-            let kind = u32::from(unsafe { (*allowed).Header.AceType });
-            let flags = unsafe { (*allowed).Header.AceFlags };
-            let mask = unsafe { (*allowed).Mask };
+            let header = ace.cast::<ACE_HEADER>();
+            // SAFETY: GetAce returned an ACE inside the retained, validated DACL,
+            // and every ACE starts with an ACE_HEADER.
+            let (kind, flags, size) = unsafe {
+                (
+                    u32::from((*header).AceType),
+                    (*header).AceFlags,
+                    usize::from((*header).AceSize),
+                )
+            };
             let is_allow = matches!(
                 kind,
                 ACCESS_ALLOWED_ACE_TYPE
@@ -5029,7 +5127,25 @@ mod windows {
                     | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
                     | ACCESS_ALLOWED_COMPOUND_ACE_TYPE
             );
-            if !is_allow || flags & INHERIT_ONLY_ACE as u8 != 0 || mask & dangerous_rights == 0 {
+            if !is_allow || flags & INHERIT_ONLY_ACE as u8 != 0 {
+                continue;
+            }
+            // Every access-allowed form stores its ACCESS_MASK right after the
+            // header; one too short for that, and a SID, is not trusted.
+            if size < std::mem::size_of::<ACCESS_ALLOWED_ACE>() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{description} has a malformed access-control entry: {}",
+                        path.display()
+                    ),
+                ));
+            }
+            let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
+            // SAFETY: this access-allowed ACE spans at least an ACCESS_ALLOWED_ACE,
+            // so Mask, right after the header, is inside it.
+            let mask = unsafe { (*allowed).Mask };
+            if mask & dangerous_rights == 0 {
                 continue;
             }
             if !matches!(
@@ -5044,7 +5160,22 @@ mod windows {
                     ),
                 ));
             }
+            // SAFETY: kind is an access-allowed or callback access-allowed ACE
+            // from the retained OS descriptor, both of which have SidStart at this offset.
             let sid: PSID = unsafe { std::ptr::addr_of!((*allowed).SidStart).cast_mut().cast() };
+            let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+            // SAFETY: the size check above keeps SidStart's first four bytes, which
+            // hold the SID's revision and sub-authority count, inside the ACE.
+            let sid_len = unsafe { GetLengthSid(sid) } as usize;
+            if sid_len > size - sid_offset {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{description} has a malformed access-control entry: {}",
+                        path.display()
+                    ),
+                ));
+            }
             if !trusted_windows_sid(sid, current_user, administrators, system) {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -5540,6 +5671,8 @@ mod windows {
         // New private objects are owned by TokenUser, which differs from
         // TokenOwner on an elevated administrator's token. One that is already
         // exactly private needs no change, so it needs no owner's authority.
+        // SAFETY: owner is a SID in the retained descriptor and current_user
+        // retains its validated token SID buffer; null owner short-circuits.
         let owned_by_user = !owner.is_null() && unsafe { EqualSid(owner, current_user.sid) } != 0;
         if already_private && owned_by_user {
             return Ok(());
@@ -5547,6 +5680,8 @@ mod windows {
         if !owner_authorizes_hardening(owner, current_owner.sid) {
             let administrators = builtin_administrators_sid()?;
             let legacy_elevated_owner =
+                // SAFETY: owner is a SID in the retained descriptor and administrators
+                // retains its well-known SID buffer; null owner short-circuits.
                 !owner.is_null() && unsafe { EqualSid(owner, administrators.sid) } != 0;
             if legacy_elevated_owner && already_private {
                 drop(descriptor);
@@ -5642,6 +5777,8 @@ mod windows {
     }
 
     fn owner_authorizes_hardening(owner: PSID, token_owner: PSID) -> bool {
+        // SAFETY: Callers retain the validated SID storage for owner and token_owner;
+        // null owner short-circuits.
         !owner.is_null() && unsafe { EqualSid(owner, token_owner) } != 0
     }
 
@@ -5659,6 +5796,7 @@ mod windows {
         if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: dacl is a non-null ACL in the caller's retained GetSecurityInfo descriptor.
         if control & SE_DACL_PROTECTED == 0 || unsafe { (*dacl).AceCount } != 1 {
             return Ok(false);
         }
@@ -5668,25 +5806,37 @@ mod windows {
             return Err(io::Error::last_os_error());
         }
         let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
+        const ACCESS_ALLOWED_ACE_KIND: u8 = 0;
         // SAFETY: the ACL is kernel-validated; inspect the common header before
         // interpreting the access-allowed layout.
-        const ACCESS_ALLOWED_ACE_KIND: u8 = 0;
         if unsafe { (*allowed).Header.AceType } != ACCESS_ALLOWED_ACE_KIND
+            // SAFETY: allowed refers to the retained ACE returned by GetAce;
+            // AceFlags is in its common header.
             || unsafe { (*allowed).Header.AceFlags } != 0
+            // SAFETY: The preceding type check identifies an ACCESS_ALLOWED_ACE
+            // in the retained OS descriptor, which includes Mask.
             || unsafe { (*allowed).Mask } != FILE_ALL_ACCESS
         {
             return Ok(false);
         }
+        // SAFETY: The preceding type check identifies an ACCESS_ALLOWED_ACE
+        // in the retained OS descriptor, which includes SidStart.
         let sid: PSID = unsafe { std::ptr::addr_of!((*allowed).SidStart).cast_mut().cast() };
+        // SAFETY: sid points to the SID of the access-allowed ACE in the
+        // retained Windows descriptor.
         if unsafe { IsValidSid(sid) } == 0 {
             return Ok(false);
         }
         let expected_ace_size = std::mem::size_of::<ACCESS_ALLOWED_ACE>()
             - std::mem::size_of::<u32>()
+            // SAFETY: IsValidSid accepted sid and its descriptor remains alive.
             + unsafe { GetLengthSid(sid) } as usize;
+        // SAFETY: allowed points into the retained ACE and AceSize is in its header.
         if usize::from(unsafe { (*allowed).Header.AceSize }) != expected_ace_size {
             return Ok(false);
         }
+        // SAFETY: sid is validated and current_user is backed by the caller's
+        // retained token buffer.
         Ok(unsafe { EqualSid(sid, current_user) } != 0)
     }
 
@@ -5758,6 +5908,8 @@ mod windows {
         Ok(!owner.is_null()
             && expected_owners
                 .iter()
+                // SAFETY: owner is in the retained descriptor; callers retain the
+                // validated SID buffers referenced by expected_owners.
                 .any(|expected| unsafe { EqualSid(owner, *expected) } != 0))
     }
 
@@ -5786,6 +5938,8 @@ mod windows {
         let world = well_known_sid(WinWorldSid)?;
         let ace_bytes = |sid: PSID| {
             std::mem::size_of::<ACCESS_ALLOWED_ACE>() - std::mem::size_of::<u32>()
+                // SAFETY: The closure is called only with SIDs in the live current_user
+                // and world buffers, initialized by the Windows SID APIs.
                 + unsafe { GetLengthSid(sid) } as usize
         };
         let acl_len = std::mem::size_of::<ACL>()
@@ -5796,15 +5950,22 @@ mod windows {
         let acl = storage.as_mut_ptr().cast::<ACL>();
         let capacity = u32::try_from(storage.len() * std::mem::size_of::<u64>())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "ACL is too large"))?;
+        // SAFETY: storage is aligned and writable for capacity bytes.
         if unsafe { InitializeAcl(acl, capacity, ACL_REVISION) } == 0
+            // SAFETY: InitializeAcl succeeded and capacity includes space for both
+            // ACEs; current_user retains the validated SID buffer.
             || unsafe {
                 AddAccessAllowedAceEx(acl, ACL_REVISION, 0, FILE_ALL_ACCESS, current_user.sid)
             } == 0
+            // SAFETY: The ACL is initialized with space for both ACEs and world
+            // retains its initialized SID buffer.
             || unsafe { AddAccessAllowedAceEx(acl, ACL_REVISION, 0, world_access, world.sid) } == 0
         {
             return Err(io::Error::last_os_error());
         }
         let handle = reopen_for_acl(file)?;
+        // SAFETY: handle owns a WRITE_DAC handle and the initialized ACL
+        // remains allocated throughout SetSecurityInfo.
         let status = unsafe {
             SetSecurityInfo(
                 handle.as_raw_handle() as HANDLE,
@@ -5838,6 +5999,8 @@ mod windows {
         let preserved = capture_destination_dacl(path, true)?;
         let bytes = preserved.storage.as_ref().map(|storage| {
             let acl = storage.as_ptr().cast::<ACL>();
+            // SAFETY: capture_destination_dacl retained the validated ACL in
+            // this aligned storage, including its header.
             let len = usize::from(unsafe { (*acl).AclSize });
             // SAFETY: capture_destination_dacl allocated at least AclSize
             // bytes and retained them in this aligned buffer.
@@ -5865,6 +6028,7 @@ mod windows {
             // builtin Administrators SID.
             let administrators = builtin_administrators_sid().unwrap();
             assert_eq!(
+                // SAFETY: Both SID wrappers retain their initialized buffers through EqualSid.
                 unsafe { EqualSid(current_user.sid, administrators.sid) },
                 0,
                 "TokenUser must differ from the simulated elevated TokenOwner"
@@ -5999,6 +6163,58 @@ mod tests {
             .unwrap();
         assert!(status.success(), "creating conf/sub failed: {status}");
         assert!(root.path().join("conf/sub").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_selected_file_at_stays_in_the_held_directory() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let root = crate::test_tempdir();
+        let exports = root.path().join("exports");
+        let held = root.path().join("held");
+        let other = root.path().join("other");
+        std::fs::create_dir(&exports).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let parent = File::open(&exports).unwrap();
+        std::fs::rename(&exports, &held).unwrap();
+        symlink(&other, &exports).unwrap();
+        let mut file = create_user_selected_file_new_at(&parent, OsStr::new("sheet.jpg")).unwrap();
+        file.write_all(b"jpeg").unwrap();
+        assert_eq!(std::fs::read(held.join("sheet.jpg")).unwrap(), b"jpeg");
+        assert!(!other.join("sheet.jpg").exists());
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            create_user_selected_file_new_at(&parent, OsStr::new("sheet.jpg"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        symlink(other.join("untouched"), held.join("link")).unwrap();
+        assert_eq!(
+            create_user_selected_file_new_at(&parent, OsStr::new("link"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert!(!other.join("untouched").exists());
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "sub/file",
+            "/absolute",
+            "nul\0name",
+        ] {
+            assert_eq!(
+                create_user_selected_file_new_at(&parent, OsStr::new(invalid))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput,
+                "{invalid:?}"
+            );
+        }
     }
 
     #[test]
@@ -6918,6 +7134,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_preexisting_link_requires_trusted_ownership_and_one_name() {
+        // SAFETY: geteuid has no preconditions.
         let current = unsafe { libc::geteuid() };
         let foreign = if current == 1 { 2 } else { 1 };
         let path = Path::new("/trusted-parent/config");

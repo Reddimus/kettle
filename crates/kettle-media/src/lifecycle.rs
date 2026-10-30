@@ -100,6 +100,16 @@ pub(crate) enum Stopped {
     OverFootprint,
 }
 
+enum Work<'a> {
+    Render(&'a Job),
+    Facts(&'a crate::FileFactsRequest),
+}
+
+enum WorkOutput {
+    Media(Box<RenderOutput>),
+    Facts(crate::FileFactsReply),
+}
+
 pub(crate) fn attempt(
     shared: &Arc<Shared>,
     build_id: &BuildId,
@@ -107,6 +117,43 @@ pub(crate) fn attempt(
     budgets: Budgets,
     control: Option<&RenderControl>,
 ) -> Result<Result<RenderOutput, FailureCode>, NeverReady> {
+    attempt_work(shared, build_id, Work::Render(job), budgets, control).map(|result| {
+        result.and_then(|output| match output {
+            WorkOutput::Media(output) => Ok(*output),
+            WorkOutput::Facts(_) => Err(FailureCode::WorkerUnavailable),
+        })
+    })
+}
+
+pub(crate) fn facts_attempt(
+    shared: &Arc<Shared>,
+    build_id: &BuildId,
+    request: &crate::FileFactsRequest,
+    budgets: Budgets,
+    control: &RenderControl,
+) -> Result<Result<crate::FileFactsReply, FailureCode>, NeverReady> {
+    attempt_work(
+        shared,
+        build_id,
+        Work::Facts(request),
+        budgets,
+        Some(control),
+    )
+    .map(|result| {
+        result.and_then(|output| match output {
+            WorkOutput::Facts(output) => Ok(output),
+            WorkOutput::Media(_) => Err(FailureCode::WorkerUnavailable),
+        })
+    })
+}
+
+fn attempt_work(
+    shared: &Arc<Shared>,
+    build_id: &BuildId,
+    work: Work<'_>,
+    budgets: Budgets,
+    control: Option<&RenderControl>,
+) -> Result<Result<WorkOutput, FailureCode>, NeverReady> {
     if control.is_some_and(|control| control.interrupted(Instant::now())) {
         return Ok(Err(FailureCode::RenderTimeout));
     }
@@ -115,7 +162,13 @@ pub(crate) fn attempt(
     };
     let (Ok(hello_bytes), Ok(job_bytes)) = (
         wire::encode(&Frame::Hello(hello.clone()), Direction::ParentToWorker),
-        wire::encode_job(job),
+        match work {
+            Work::Render(job) => wire::encode_job(job),
+            Work::Facts(request) => wire::encode(
+                &Frame::FileFactsRequest(request.clone()),
+                Direction::ParentToWorker,
+            ),
+        },
     ) else {
         return Ok(Err(FailureCode::BadParams));
     };
@@ -180,7 +233,11 @@ pub(crate) fn attempt(
     }
 
     // The job's deadline starts before the job is written.
-    let reply_until = Instant::now() + budgets.render_deadline(job.kind);
+    let reply_until = Instant::now()
+        + match work {
+            Work::Render(job) => budgets.render_deadline(job.kind),
+            Work::Facts(_) => Duration::from_millis(500),
+        };
     let reply_until = control.map_or(reply_until, |control| control.limit(reply_until));
     if control.is_some_and(|control| control.interrupted(Instant::now())) {
         worker.kill();
@@ -205,11 +262,31 @@ pub(crate) fn attempt(
             },
         },
         Ok(Event::Reply(Ok(Some(Frame::Rendered(rendered))), true)) => {
-            stop_rendered(&mut worker, MediaKind::for_job(job.kind), rendered)
+            let kind = match work {
+                Work::Render(job) => MediaKind::for_job(job.kind),
+                Work::Facts(_) => None,
+            };
+            stop_rendered(&mut worker, kind, rendered)
+                .map(|output| WorkOutput::Media(Box::new(output)))
         }
         Ok(Event::Reply(Ok(Some(Frame::DetectedRendered { kind, rendered })), true)) => {
-            let accepted = job.kind == JobKind::Auto || MediaKind::for_job(job.kind) == Some(kind);
+            let accepted = match work {
+                Work::Render(job) => {
+                    job.kind == JobKind::Auto || MediaKind::for_job(job.kind) == Some(kind)
+                }
+                Work::Facts(_) => false,
+            };
             stop_rendered(&mut worker, accepted.then_some(kind), rendered)
+                .map(|output| WorkOutput::Media(Box::new(output)))
+        }
+        Ok(Event::Reply(Ok(Some(Frame::FileFactsReply(reply))), true)) => {
+            let accepted =
+                matches!(work, Work::Facts(request) if request.generation == reply.generation);
+            match worker.stop() {
+                Stopped::Exited(WorkerExit::Code(0)) if accepted => Ok(WorkOutput::Facts(reply)),
+                Stopped::OverFootprint => Err(FailureCode::RenderResource),
+                _ => Err(FailureCode::WorkerUnavailable),
+            }
         }
         Ok(Event::Reply(Ok(Some(Frame::Failure(failure))), true)) => {
             Err(refusal_end(failure.code, worker.stop()))
@@ -461,7 +538,7 @@ impl<'a> Running<'a> {
     }
 
     /// Paired workers share one footprint budget, sampled on each worker's schedule.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn with_memory(mut self, memory: [Arc<AtomicU64>; 2]) -> Self {
         self.memory = Some(memory);
         self
@@ -494,8 +571,17 @@ impl<'a> Running<'a> {
                 None => until,
             };
             let now = Instant::now();
-            if now >= limit {
+            if now >= until {
                 return Err(Wait::Timeout);
+            }
+            if now >= limit {
+                // A descheduled caller may resume after the exit grace
+                // period with the reader's complete reply already queued.
+                return match received.recv_timeout(Duration::ZERO) {
+                    Ok(event) => Ok(event),
+                    Err(RecvTimeoutError::Disconnected) => Err(Wait::ReaderGone),
+                    Err(RecvTimeoutError::Timeout) => Err(Wait::Timeout),
+                };
             }
             if now >= self.next_sample {
                 self.look();
@@ -1008,9 +1094,8 @@ mod tests {
         /// How long each spawn and file check take, and how many spawns have
         /// begun.
         spawn_delay: Mutex<Duration>,
-        /// How long a spawn holds its worker after counting it, before the
-        /// client has it.
-        handover_delay: Mutex<Duration>,
+        /// Hold a counted spawn until the test lets the client have it.
+        handover: Mutex<Option<Receiver<()>>>,
         inspect_delay: Mutex<Duration>,
         /// Cancelled as the file check ends, before its caller can look.
         cancel_on_inspect: Mutex<Option<RenderControl>>,
@@ -1021,6 +1106,7 @@ mod tests {
         /// Threads that guarded their pipe writes, and writes from any other.
         guarded: Arc<Mutex<Vec<std::thread::ThreadId>>>,
         unguarded_writes: Arc<AtomicUsize>,
+        writers: AtomicUsize,
     }
 
     /// The worker's stdin, counting writes from a thread that never guarded
@@ -1085,6 +1171,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(std::thread::current().id());
+            self.writers.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         fn spawn(&self, _: &Path) -> std::io::Result<SpawnedWorker> {
@@ -1092,7 +1179,11 @@ mod tests {
             let delay = *self.spawn_delay.lock().unwrap();
             std::thread::sleep(delay);
             self.spawns.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(*self.handover_delay.lock().unwrap());
+            if let Some(handover) = self.handover.lock().unwrap().take() {
+                handover
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(std::io::Error::other)?;
+            }
             let script = self
                 .scripts
                 .lock()
@@ -1184,6 +1275,69 @@ mod tests {
         parts.concat()
     }
 
+    fn facts_request() -> crate::FileFactsRequest {
+        crate::FileFactsRequest {
+            generation: 7,
+            source: Source::Path {
+                path: crate::NativePath::from_path(&std::env::temp_dir().join("report.docx"))
+                    .unwrap(),
+                authorization: crate::Authorization::ExternalAttested(crate::ExternalAttested {
+                    dev: 1,
+                    ino: 2,
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn file_facts_require_the_requested_generation_and_clean_worker_exit() {
+        for generation in [7, 8] {
+            let expected = crate::FileFactsReply {
+                generation,
+                identity: Some(crate::PathIdentity {
+                    dev: 1,
+                    ino: 2,
+                    size: 1234,
+                    mtime_seconds: 3,
+                    mtime_nanos: 4,
+                }),
+            };
+            let output = reply(&[ready(build_id()), frame(&Frame::FileFactsReply(expected))]);
+            let fake = Fake::new(vec![Script::replies(output, WorkerExit::Code(0))]);
+            let result = client(&fake).file_facts(
+                &facts_request(),
+                &RenderControl::with_deadline(Instant::now() + Duration::from_secs(1)),
+            );
+            if generation == 7 {
+                assert_eq!(result, Ok(expected));
+            } else {
+                assert_eq!(
+                    result,
+                    Err(crate::client::RenderError::Failure(
+                        FailureCode::WorkerUnavailable
+                    ))
+                );
+            }
+            assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn file_facts_kill_a_worker_that_never_answers() {
+        let fake = Fake::new(vec![Script::silent_with(ready(build_id()))]);
+        let result = client(&fake).file_facts(
+            &facts_request(),
+            &RenderControl::with_deadline(Instant::now() + Duration::from_millis(80)),
+        );
+        assert_eq!(
+            result,
+            Err(crate::client::RenderError::Failure(
+                FailureCode::RenderTimeout
+            ))
+        );
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn auto_completion_returns_actual_content_kind_after_clean_worker_exit() {
         for kind in [MediaKind::Raster, MediaKind::Svg] {
@@ -1257,6 +1411,82 @@ mod tests {
         let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
         let fake = Fake::new(vec![Script::replies(output, WorkerExit::Code(0))]);
         assert_eq!(client(&fake).render(&job(1)), Ok(rendered()));
+    }
+
+    fn reaped_worker(shared: &Arc<Shared>, exit: WorkerExit) -> Running<'_> {
+        let now = Instant::now();
+        Running {
+            memory: None,
+            process: None,
+            exited: Some((exit, now - FAST.cleanup - TICK)),
+            next_sample: now + TICK,
+            shared,
+            budgets: FAST,
+            control: None,
+        }
+    }
+
+    #[test]
+    fn a_queued_reply_survives_the_exit_grace_period() {
+        let fake = Fake::new(vec![]);
+        let client = client(&fake);
+        for (exit, expected) in [
+            (WorkerExit::Code(0), Ok(rendered())),
+            (WorkerExit::Signal(6), Err(FailureCode::RenderResource)),
+        ] {
+            let mut worker = reaped_worker(&client.shared, exit);
+            let (events, received) = mpsc::channel();
+            events
+                .send(Event::Reply(Ok(Some(Frame::Rendered(rendered()))), true))
+                .unwrap();
+            // The reader queued the reply while the caller was descheduled
+            // past the exit grace period, but inside the render deadline.
+            let result = match worker.next(&received, Instant::now() + FAST.ready, None) {
+                Ok(Event::Reply(Ok(Some(Frame::Rendered(rendered))), true)) => {
+                    stop_rendered(&mut worker, Some(MediaKind::Raster), rendered)
+                        .map(|output| output.rendered)
+                }
+                _ => Err(worker.stop_failure()),
+            };
+            assert_eq!(result, expected, "{exit:?}");
+        }
+    }
+
+    #[test]
+    fn the_exit_grace_period_does_not_wait_for_missing_events() {
+        let fake = Fake::new(vec![]);
+        let client = client(&fake);
+        let mut worker = reaped_worker(&client.shared, WorkerExit::Code(0));
+        let (_events, received) = mpsc::channel::<Event>();
+        assert!(matches!(
+            worker.next(&received, Instant::now() + FAST.ready, None),
+            Err(Wait::Timeout)
+        ));
+    }
+
+    #[test]
+    fn exit_grace_keeps_deadlines_and_cancellation() {
+        let fake = Fake::new(vec![]);
+        let client = client(&fake);
+        for cancelled in [false, true] {
+            let mut worker = reaped_worker(&client.shared, WorkerExit::Code(0));
+            let (events, received) = mpsc::channel();
+            events.send(()).unwrap();
+            let control = RenderControl::default();
+            let until = if cancelled {
+                control.cancel();
+                Instant::now() + FAST.ready
+            } else {
+                Instant::now()
+            };
+            let result = worker.next(&received, until, Some(&control));
+            if cancelled {
+                assert!(matches!(result, Err(Wait::Interrupted)));
+            } else {
+                assert!(matches!(result, Err(Wait::Timeout)));
+            }
+            assert_eq!(received.try_recv(), Ok(()));
+        }
     }
 
     #[test]
@@ -2159,39 +2389,71 @@ mod tests {
         assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
     }
 
-    /// A cancelled render's unkillable worker is counted and kept, whether
-    /// the cancel finds the worker in hand or still being handed over. In
-    /// the second case the late start's helper kills and keeps it after the
-    /// render has returned, so the count is read once that start is done.
+    /// Once the caller has its worker, cancellation finishes accounting
+    /// before the render returns.
     #[test]
     fn cancellation_preserves_abandoned_worker_accounting() {
         use crate::client::RenderError;
-        for handover in [Duration::ZERO, FAST.ready * 2] {
-            let fake = Fake::new(vec![Script {
-                killable: false,
-                ..Script::silent()
-            }]);
-            *fake.handover_delay.lock().unwrap() = handover;
-            let client = patient(&fake);
-            let control = RenderControl::default();
-            std::thread::scope(|scope| {
-                let rendering = scope.spawn(|| client.render_with_control(&job(1), &control));
-                wait_for_count(&fake.spawns, 1);
-                control.cancel();
-                assert_eq!(promptly(rendering), Err(RenderError::Cancelled));
-            });
-            let until = Instant::now() + Duration::from_secs(10);
-            while client.shared.late_spawns.load(Ordering::SeqCst) > 0 {
-                assert!(Instant::now() < until, "the late start never finished");
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            assert_eq!(client.shared.abandoned_count(), 1, "handover {handover:?}");
-            assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
-            fake.released.store(true, Ordering::SeqCst);
-            client.availability();
-            assert_eq!(client.shared.abandoned_count(), 0);
-            assert_eq!(fake.reaped.load(Ordering::SeqCst), 1);
+        let fake = Fake::new(vec![Script {
+            killable: false,
+            ..Script::silent()
+        }]);
+        let client = patient(&fake);
+        let control = RenderControl::default();
+        std::thread::scope(|scope| {
+            let rendering = scope.spawn(|| client.render_with_control(&job(1), &control));
+            // The writer starts only after the caller has its worker.
+            wait_for_count(&fake.writers, 1);
+            control.cancel();
+            assert_eq!(promptly(rendering), Err(RenderError::Cancelled));
+        });
+        assert_eq!(client.shared.late_spawns.load(Ordering::SeqCst), 0);
+        assert_eq!(client.shared.abandoned_count(), 1);
+        assert_eq!(client.shared.stuck.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+        fake.released.store(true, Ordering::SeqCst);
+        client.availability();
+        assert_eq!(client.shared.abandoned_count(), 0);
+        assert_eq!(fake.reaped.load(Ordering::SeqCst), 1);
+    }
+
+    /// A counted spawn need not be in the caller's hands. Its helper keeps
+    /// admission closed until it has killed and accounted for the worker.
+    #[test]
+    fn cancellation_during_handover_preserves_abandoned_worker_accounting() {
+        use crate::client::RenderError;
+        let fake = Fake::new(vec![Script {
+            killable: false,
+            ..Script::silent()
+        }]);
+        let (handover, held) = mpsc::channel();
+        *fake.handover.lock().unwrap() = Some(held);
+        let client = patient(&fake);
+        let control = RenderControl::default();
+        std::thread::scope(|scope| {
+            let rendering = scope.spawn(|| client.render_with_control(&job(1), &control));
+            wait_for_count(&fake.spawns, 1);
+            control.cancel();
+            assert_eq!(promptly(rendering), Err(RenderError::Cancelled));
+        });
+        assert_eq!(client.shared.late_spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(client.shared.abandoned_count(), 0);
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 0);
+        assert_eq!(client.render(&job(1)), Err(FailureCode::WorkerUnavailable));
+        assert_eq!(fake.spawn_calls.load(Ordering::SeqCst), 1);
+        handover.send(()).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while client.shared.late_spawns.load(Ordering::SeqCst) > 0 {
+            assert!(Instant::now() < until, "the late start never finished");
+            std::thread::sleep(Duration::from_millis(5));
         }
+        assert_eq!(client.shared.abandoned_count(), 1);
+        assert_eq!(client.shared.stuck.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+        fake.released.store(true, Ordering::SeqCst);
+        client.availability();
+        assert_eq!(client.shared.abandoned_count(), 0);
+        assert_eq!(fake.reaped.load(Ordering::SeqCst), 1);
     }
 
     impl Script {

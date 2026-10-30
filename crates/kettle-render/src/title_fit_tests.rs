@@ -43,35 +43,9 @@ fn the_title_editor_reads_in_dracula() {
 #[test]
 fn the_renderer_actually_consumes_the_contrast_and_bell_helpers() {
     let src = production_source();
-    for (bar, wiring) in [
-        (
-            "palette and theme picker",
-            "push_input_bar(&mut quads, search_rect, theme, theme.palette[5]);",
-        ),
-        (
-            "layout picker",
-            "push_input_bar(&mut quads, search_rect, theme, theme.palette[6]);",
-        ),
-        (
-            "ssh picker",
-            "push_input_bar(&mut quads, search_rect, theme, theme.palette[4]);",
-        ),
-        (
-            "title editor",
-            "push_input_bar(&mut quads, edit.rect, theme, theme.palette[3]);",
-        ),
-    ] {
-        assert!(
-            src.contains(wiring),
-            "the {bar} must paint through push_input_bar"
-        );
-    }
-    assert_eq!(
-        src.matches("push_input_bar(&mut quads, search_rect, theme, theme.palette[5]);")
-            .count(),
-        2,
-        "the command palette and the theme picker both paint the shared bar"
-    );
+    let compact: String = src.split_whitespace().collect();
+    assert!(compact.contains("push_input_bar(&mutmenu_q,field.rect,theme,theme.palette[field.accent_palette.min(15)],&mutself.chrome_colors,);"),
+        "every modal field must paint the shared readable input bar");
     for slot in 2..=6 {
         assert!(
             !src.contains(&format!("theme.palette[{slot}], 0.96")),
@@ -102,7 +76,7 @@ fn confirm_text_renders_above_its_menu_chrome_background() {
         .split_once("fn encode_scene_pass(")
         .unwrap()
         .1
-        .split("fn create_screenshot_target")
+        .split("\n    }\n")
         .next()
         .unwrap();
     let menu = scene.find("self.menu_text_renderer").unwrap();

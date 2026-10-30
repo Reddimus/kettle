@@ -20,6 +20,8 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
     kettle_test_support::private_tempdir("kettle-state-test-")
 }
 
+#[cfg(unix)]
+pub use private::create_user_selected_file_new_at;
 pub use private::{
     CreatedUserSelectedFile, StagedFilePublishError, StagedUserSelectedFile, create_private_dirs,
     create_private_file_new, create_user_selected_file_new, discard_created_private_file,
@@ -29,7 +31,17 @@ pub use private::{
     stage_user_selected_file_new, truncate_private_file, validate_trusted_directory,
 };
 #[cfg(unix)]
-pub use tree::{TreeRemovalLimits, directory_is_empty, remove_directory_tree_at};
+pub use tree::{
+    TreeRemovalLimits, directory_is_empty, open_directory_for_tree_removal_at,
+    remove_directory_tree_at, remove_owned_readonly_tree_at,
+};
+
+/// Whether `path` still names the native file held by `file`.
+/// This compares identity, not contents; callers coordinate replacements and
+/// check size and modification time separately when those matter.
+pub fn path_matches_file(file: &File, path: &Path) -> io::Result<bool> {
+    private::same_file_identity(file, path)
+}
 
 /// Maximum on-disk size of the shared remote-command spool.
 ///
@@ -448,6 +460,7 @@ fn process_is_definitely_dead(pid: u32) -> bool {
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
         // Access-denied and transient query failures are not proof of death.
+        // SAFETY: GetLastError reads only the calling thread's error state.
         return unsafe { GetLastError() } == ERROR_INVALID_PARAMETER;
     }
     let mut exit_code = 0_u32;
@@ -715,6 +728,8 @@ pub fn swap_directory_entries(
     };
     let (from, to) = (name(from_name)?, name(to_name)?);
 
+    // SAFETY: Both directory Files stay open and both CStrings remain NUL-terminated
+    // for the synchronous renameatx_np call; RENAME_SWAP takes no ownership.
     let swapped = unsafe {
         renameatx_np(
             from_dir.as_raw_fd(),

@@ -122,6 +122,8 @@ mod imp {
         /// the same shape as `AccessibilityActions`.
         struct DockTarget;
 
+        // SAFETY: declare_class supplies the NSObject subclass layout; the unique class name and
+        // MainThreadOnly mutability match its main-thread AppKit use.
         unsafe impl ClassType for DockTarget {
             type Super = NSObject;
             type Mutability = mutability::MainThreadOnly;
@@ -132,8 +134,12 @@ mod imp {
             type Ivars = ();
         }
 
+        // SAFETY: DockTarget inherits NSObject's NSObjectProtocol implementation without
+        // overriding its requirements.
         unsafe impl NSObjectProtocol for DockTarget {}
 
+        // SAFETY: Both selectors have the Objective-C void(id) action signature and only
+        // dispatch events.
         unsafe impl DockTarget {
             #[method(kettleDockNewWindow:)]
             fn new_window(&self, _sender: Option<&AnyObject>) {
@@ -150,6 +156,8 @@ mod imp {
     impl DockTarget {
         fn new(mtm: MainThreadMarker) -> Retained<Self> {
             let this = mtm.alloc().set_ivars(());
+            // SAFETY: this is a newly allocated DockTarget with initialized ivars; NSObject
+            // init consumes it.
             unsafe { msg_send_id![super(this), init] }
         }
     }
@@ -201,6 +209,8 @@ mod imp {
         let menu = NSMenu::new(mtm);
         let target_obj: *const AnyObject = (target as *const DockTarget).cast();
         for (title, command) in dock_menu_model(tr) {
+            // SAFETY: The selectors match DockTarget's void(id) actions; menu creation runs on
+            // the main thread.
             let item = unsafe {
                 NSMenuItem::initWithTitle_action_keyEquivalent(
                     mtm.alloc(),
@@ -234,8 +244,11 @@ mod imp {
         // future winit that supplies its own dock menu must not silently take
         // the window list down with it.
         let windows_menu = NSMenu::new(mtm);
+        // SAFETY: windows_menu is a live NSMenu retained by AppKit; app is accessed on the main
+        // thread.
         unsafe { app.setWindowsMenu(Some(&windows_menu)) };
 
+        // SAFETY: app is the live NSApplication singleton queried on the main thread.
         let Some(delegate) = (unsafe { app.delegate() }) else {
             log::warn!("dock menu: no application delegate to extend");
             return;
