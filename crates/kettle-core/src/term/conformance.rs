@@ -976,6 +976,15 @@ fn mode_1049_saves_origin_mode_for_a_later_decrc() {
     // mode on in the alternate screen does not leave it on for the shell.
     feed(&mut t, &mut p, b"\x1b[?6l\x1b[?1049h\x1b[?6h\x1b[?1049l");
     assert!(!t.mode().contains(TermMode::ORIGIN));
+    // Restoring origin mode on the way out keeps the cursor inside the
+    // margins as they are then, as DECRC does.
+    feed(
+        &mut t,
+        &mut p,
+        b"\x1b[5;20r\x1b[?6h\x1b[?1049h\x1b[?6l\x1b[10;20r\x1b[?1049l",
+    );
+    assert!(t.mode().contains(TermMode::ORIGIN));
+    assert_eq!(t.grid().cursor.point, Point::new(Line(9), Column(0)));
 }
 
 #[test]

@@ -1053,11 +1053,21 @@ impl<T> Term<T> {
         self.mode ^= TermMode::ALT_SCREEN;
         if leaving_with_restore {
             // Resetting 1049 restores the cursor as DECRC does; the primary
-            // grid kept its cursor, so only origin mode comes back here.
-            self.mode.set(TermMode::ORIGIN, self.grid.saved_origin_mode);
+            // grid kept its cursor, so origin mode comes back here.
+            self.restore_saved_origin_mode();
         }
         self.selection = None;
         self.mark_fully_damaged();
+    }
+
+    /// Restore the saved origin mode (DECOM), keeping the cursor inside the
+    /// current margins under it, as xterm's `CursorRestore` does.
+    fn restore_saved_origin_mode(&mut self) {
+        self.mode.set(TermMode::ORIGIN, self.grid.saved_origin_mode);
+        if self.grid.saved_origin_mode {
+            let line = &mut self.grid.cursor.point.line;
+            *line = (*line).clamp(self.scroll_region.start, self.scroll_region.end - 1);
+        }
     }
 
     /// Scroll screen down.
@@ -2264,11 +2274,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.grid.cursor = self.grid.saved_cursor.clone();
         // DECRC restores DECOM too, and under origin mode the restored row
         // is kept inside the current margins (xterm's CursorRestore).
-        self.mode.set(TermMode::ORIGIN, self.grid.saved_origin_mode);
-        if self.grid.saved_origin_mode {
-            let line = &mut self.grid.cursor.point.line;
-            *line = (*line).clamp(self.scroll_region.start, self.scroll_region.end - 1);
-        }
+        self.restore_saved_origin_mode();
         self.damage_cursor();
     }
 
