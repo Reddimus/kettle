@@ -5,6 +5,58 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 5.7.1 cut - 2026-10-31
+
+macOS 27.2, Apple silicon, 1920x1080 at 1x. The signed, notarized universal
+candidate came from [rehearsal 41183036817](https://github.com/Reddimus/kettle/actions/runs/41183036817)
+at `de7990db` (bundle version 5.7.0). Both terminal and worker contain arm64
+and x86_64 slices. Deep codesign, Gatekeeper and stapled-ticket validation
+passed. Later verification-only changes and release metadata are separate
+from this candidate's application code.
+
+Passed with native composited captures and isolated candidate windows:
+
+- Decorated 86% opacity with native blur, a cold TokyoNight Day start under
+  macOS Dark, blur-off translucency, opaque surfaces with blur on and off,
+  and borderless each survived fullscreen and resize round trips with exact
+  restored surface/content geometry and visible shell output afterward.
+  Inspected captions stayed beside the traffic lights; rounded corners had
+  no clear strip. Borderless fullscreen retained its terminal through the
+  sharp-alpha fallback.
+- A controlled opaque Alabaster window supplied a bright backdrop. On the
+  same blurred window, changing its private opacity config from 0.86 to 1.0
+  changed the sampled surface `(60,63,73)` to `(26,27,38)`, then restored
+  `(60,63,73)`, proving the capture and config probe were live.
+- Live Reduce Transparency changed that window to `(29,32,43)` and restored
+  `(60,63,73)` without relaunch. Native system-preference reads confirmed
+  both states. macOS Light with dark Kettle kept its caption and corners;
+  macOS Dark was restored afterward.
+- The cold light-start window changed its native caption and terminal to
+  TokyoNight Night through private config reload.
+- The exact signed bundle passed modal-shortcut, native-titlebar and Dock-menu
+  smokes. The Dock check verified its window list, minimized New Tab restore,
+  and New Window effect alongside the owner's installed session, selecting
+  only the candidate's bundle/process identity.
+- Finder rendered the exact candidate icon with a parallel inset face and
+  centered terminal mark. IconServices and the loose `AppIcon.icns` fallback
+  were rendered separately at 256 px and inspected; both resources are present.
+- `just macos-update-smoke` passed against published 5.7.0 and the candidate
+  archive, including real extraction, signature assessment and a private swap.
+
+Not verified: running and closed-but-pinned Dock pixels, Dock magnification,
+and the global app-switcher icon. The computer-use Dock endpoint timed out;
+Dock-region captures did not agree with fresh accessibility state and were
+rejected as evidence. No global keyboard or pointer workaround was used.
+The resource/Finder observations do not establish those system-UI states.
+Mixed-DPI transitions, physical Intel and VoiceOver speech acceptance also
+remain unrun on this host.
+
+System appearance returned to Dark, Reduce Transparency to off and Dock
+auto-hide to on; magnification stayed at its original zero setting. The
+owned Finder window and candidate processes were closed; no candidate pin
+was added and no production installation occurred. Final tagged-package
+publication and upgrade verification remain separate gates.
+
 ## 5.7.0 cut - 2026-10-29
 
 macOS 27.2, Apple silicon, 1920x1080 at 1x, system appearance Dark. The signed,
