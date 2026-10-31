@@ -18,6 +18,9 @@
 # The drop-error notification was checked in the GNOME notification list,
 # expanded and readable, after a rejected 33-file batch left input unchanged.
 
+# 2026-10-31: menu_a11y_about accepted in the rendered native Spanish About
+# panel and observed accessibility tree, including an independent second pass.
+
 [status]
 menu_detecting_shells = "draft"
 theme_builtin_dark = "draft"
@@ -191,7 +194,7 @@ edit_title_pane = "accepted"
 edit_title_tab = "accepted"
 edit_title_window = "accepted"
 hint_a11y_list = "accepted"
-menu_a11y_about = "draft"
+menu_a11y_about = "accepted"
 menu_a11y_terminal = "accepted"
 menu_about = "accepted"
 menu_close_pane = "accepted"

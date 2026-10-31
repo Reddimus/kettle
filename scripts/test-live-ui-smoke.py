@@ -490,6 +490,158 @@ class LiveUiTests(unittest.TestCase):
                         with self.assertRaises(Submitted):
                             scenario()
 
+    def test_native_dock_targets_retained_candidate_and_refuses_ambiguity(self):
+        spec = importlib.util.spec_from_file_location(
+            "native_dock_test", Path(__file__).with_name("macos-dock.py"))
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        candidate = Path('/private/tmp/Candidate.app')
+
+        class Fixture(native.Dock):
+            def __init__(self, candidates):
+                self.owned = []
+                self.ax = Mock()
+                self.ax.AXUIElementCreateApplication.return_value = 1
+                self.cf = Mock()
+                self.cf.CFBooleanGetValue.side_effect = bool
+                self.actions = []
+                self.data = {
+                    1: {'AXChildren': [2]},
+                    2: {'AXChildren': [3] + list(range(4, 4 + candidates))},
+                    3: {'AXURL': Path('/Applications/kettle.app'), 'AXIsApplicationRunning': True},
+                    10: {'AXRole': 'AXMenu', 'AXChildren': [11]},
+                    11: {'AXTitle': 'New Window'},
+                }
+                for tile in range(4, 4 + candidates):
+                    self.data[tile] = {'AXURL': candidate, 'AXIsApplicationRunning': True,
+                                       'AXChildren': [10]}
+
+            def attr(self, element, name):
+                return self.data.get(element, {}).get(name)
+
+            def children(self, element):
+                return self.attr(element, 'AXChildren') or []
+
+            def typed(self, value, kind):
+                return isinstance(value, bool) if kind == 'Boolean' else False
+
+            def text(self, value):
+                return value
+
+            def path(self, value):
+                return value
+
+            def action(self, element, name):
+                self.actions.append((element, name))
+
+        with patch.object(subprocess, 'check_output', return_value='123'), \
+                patch.object(native.time, 'sleep'), \
+                patch.object(native.os, 'getuid', return_value=501, create=True), \
+                patch.object(native, 'same_bundle', side_effect=lambda left, right: left == right):
+            for count in (2,):
+                fixture = Fixture(count)
+                with self.assertRaisesRegex(RuntimeError, 'ambiguous'):
+                    fixture.command(candidate, 'New Window', Mock())
+                self.assertEqual(fixture.actions, [])
+            fixture = Fixture(1)
+            with self.assertRaisesRegex(RuntimeError, 'identity changed'):
+                fixture.command(candidate, 'New Window', Mock(side_effect=RuntimeError('identity changed')))
+            self.assertEqual(fixture.actions, [])
+            fixture = Fixture(1)
+            original_children = fixture.children
+            reads = []
+            def failing_children(element):
+                if element == 4:
+                    reads.append(element)
+                    if len(reads) == 2:
+                        raise RuntimeError('AX read failed')
+                return original_children(element)
+            fixture.children = failing_children
+            with self.assertRaisesRegex(RuntimeError, 'AX read failed'):
+                fixture.command(candidate, 'New Window', Mock())
+            self.assertEqual(fixture.actions, [(4, 'AXShowMenu'), (10, 'AXCancel')])
+            fixture = Fixture(0)
+            self.assertEqual(fixture.command(candidate, 'New Window', Mock()), 'not-found')
+            self.assertEqual(fixture.actions, [])
+            fixture = Fixture(1)
+            self.assertEqual(fixture.command(candidate, 'New Tab', Mock()), 'not-found')
+            self.assertEqual(fixture.actions, [(4, 'AXShowMenu'), (10, 'AXCancel')])
+            fixture = Fixture(1)
+            validate = Mock(side_effect=[None, RuntimeError('identity changed')])
+            with self.assertRaisesRegex(RuntimeError, 'identity changed'):
+                fixture.command(candidate, 'New Window', validate)
+            self.assertEqual(fixture.actions, [(4, 'AXShowMenu'), (10, 'AXCancel')])
+            fixture = Fixture(1)
+            self.assertEqual(fixture.command(candidate, 'New Window', Mock()), 'clicked')
+            self.assertEqual(fixture.actions, [(4, 'AXShowMenu'), (11, 'AXPress')])
+
+    def test_dock_candidate_requires_exact_bundle_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "Candidate.app/Contents/MacOS/kettle"
+            binary.parent.mkdir(parents=True)
+            binary.touch()
+            self.assertEqual(checker.dock_candidate_bundle(str(binary)), binary.parents[2].resolve())
+            self.assertIsNone(checker.dock_candidate_bundle(str(binary.parent / "worker")))
+            self.assertIsNone(checker.dock_candidate_bundle("target/release/kettle"))
+
+    def test_dock_bundle_allows_other_sessions_but_bare_binary_refuses(self):
+        class Launched(Exception):
+            pass
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "Candidate.app/Contents/MacOS/kettle"
+            binary.parent.mkdir(parents=True)
+            binary.touch()
+            with (
+                patch.object(checker.platform, "system", return_value="Darwin"),
+                patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "999\n", "")),
+                patch.object(checker, "LiveKettle", side_effect=Launched()) as launch,
+                patch.object(checker, "load_candidate_dock",
+                             return_value=Mock(candidate_pids=Mock(return_value=[]))),
+            ):
+                with self.assertRaisesRegex(SystemExit, "another kettle"):
+                    checker.run_dock_menu("target/release/kettle", Path(directory) / "bare")
+                launch.assert_not_called()
+                with self.assertRaises(Launched):
+                    checker.run_dock_menu(str(binary), Path(directory) / "bundle")
+                launch.assert_called_once()
+
+    def test_dock_existing_candidate_refuses_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / 'Candidate.app/Contents/MacOS/kettle'
+            binary.parent.mkdir(parents=True)
+            binary.touch()
+            with (
+                patch.object(checker.platform, 'system', return_value='Darwin'),
+                patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '999', '')),
+                patch.object(checker, 'load_candidate_dock',
+                             return_value=Mock(candidate_pids=Mock(return_value=[999]))),
+                patch.object(checker, 'LiveKettle') as launch,
+            ):
+                with self.assertRaisesRegex(SystemExit, 'already running'):
+                    checker.run_dock_menu(str(binary), Path(directory) / 'out')
+                launch.assert_not_called()
+
+    def test_dock_identity_matches_native_paths_by_file_identity(self):
+        native = checker.load_candidate_dock()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / 'Candidate.app'
+            candidate.mkdir()
+            alias = root / 'alias.app'
+            alias.symlink_to(candidate, target_is_directory=True)
+            other = root / 'Other.app'
+            other.mkdir()
+            self.assertTrue(native.same_bundle(alias, candidate))
+            self.assertFalse(native.same_bundle(other, candidate))
+            self.assertFalse(native.same_bundle(None, candidate))
+            result = subprocess.CompletedProcess([], 0, json.dumps([
+                [999, str(other)], [123, str(alias)], [456, str(candidate)]]), '')
+            with (
+                patch.object(subprocess, 'run', return_value=result),
+                patch.object(native.os, 'getuid', return_value=501, create=True),
+            ):
+                self.assertEqual(native.candidate_pids(candidate), [123, 456])
+
     def test_interaction_and_dock_pin_english_menu_labels(self):
         class Configured(Exception):
             pass

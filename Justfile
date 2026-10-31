@@ -1204,7 +1204,7 @@ line-edit-chords-smoke:
 # another kettle is up (two instances own two identically named Dock tiles).
 [macos]
 dock-menu-smoke:
-    python3 scripts/check-live-ui-smoke.py --cargo-release dock-menu
+    launchctl asuser $(id -u) python3 scripts/check-live-ui-smoke.py --cargo-release dock-menu
 
 # Reproduce underline scrolling with git diff | delta under repeated j/k input.
 # Captures PNG frames and read_cells JSON under target/diagnostics/underline-scroll-*.

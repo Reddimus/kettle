@@ -18502,6 +18502,25 @@ tell application "System Events"
 """
 
 
+def dock_candidate_bundle(kettle: str) -> Optional[Path]:
+    binary = Path(kettle).resolve()
+    if (binary.name == "kettle" and binary.parent.name == "MacOS"
+            and binary.parent.parent.name == "Contents"
+            and binary.parents[2].suffix == ".app" and binary.is_file()):
+        return binary.parents[2]
+    return None
+
+
+def load_candidate_dock():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "candidate_dock", Path(__file__).with_name("macos-dock.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _dock_dismiss(out: Path) -> None:
     with contextlib.suppress(BaseException):
         _dock_osascript(
@@ -18541,6 +18560,10 @@ def run_dock_menu(kettle: str, root: Path) -> Path:
             [
                 "agent-server = full",
                 "language = en",
+                "shell = /bin/sh",
+                "login-shell = false",
+                "shell-integration = false",
+                "window-title-format = Kettle Dock smoke fixture",
                 "text-renderer = grid",
                 "restore-session = false",
                 "update-check = false",
@@ -18558,23 +18581,43 @@ def run_dock_menu(kettle: str, root: Path) -> Path:
         )
         return [line for line in found.stdout.split() if line]
 
-    # Two live kettles own two identically named tiles and the running-app test
-    # can no longer tell them apart, so refuse rather than risk driving the
-    # wrong one.
+    # Bare executables have no bundle identity for a native URL match.
+    # Keep the singleton guard for that older launch path.
+    bundle = dock_candidate_bundle(kettle)
     already = running_kettles()
-    if already:
+    if already and bundle is None:
         raise SystemExit(
             "dock-menu smoke: cannot run (another kettle is already running: "
             f"{', '.join(already)}). The Dock tile would be ambiguous."
         )
 
+    candidate = load_candidate_dock() if bundle is not None else None
+    if candidate is not None and candidate.candidate_pids(bundle):
+        raise SystemExit("dock-menu smoke: candidate bundle is already running")
+
     analysis: Dict[str, object] = {"platform": platform.system()}
     with LiveKettle(kettle, cfg, out / "kettle.log") as live:
         live_pids = running_kettles()
-        if len(live_pids) != 1:
+        if bundle is None and len(live_pids) != 1:
             raise SystemExit(
                 f"dock-menu smoke: expected exactly one kettle, saw {live_pids}"
             )
+
+        def dock_script(name, operation, body):
+            if bundle is None:
+                return _dock_osascript(out, name, body)
+
+            def validate():
+                if candidate.candidate_pids(bundle) != [live.pid]:
+                    raise SystemExit("dock-menu smoke: candidate process identity changed")
+
+            dock = candidate.Dock()
+            try:
+                result = dock.command(bundle, operation, validate)
+                (out / f"{name}.stdout").write_text(result)
+                return result
+            finally:
+                dock.close()
 
         before = live.json_ctl("get_state")
         (out / "state.before.json").write_text(json.dumps(before, indent=2) + "\n")
@@ -18586,9 +18629,9 @@ def run_dock_menu(kettle: str, root: Path) -> Path:
         # ---- 1. the Dock menu carries kettle's rows and the window list ----
         rows: List[str] = []
         for attempt in range(6):
-            listing = _dock_osascript(
-                out,
+            listing = dock_script(
                 f"enumerate-{attempt}",
+                "rows",
                 _RUNNING_KETTLE_TILE
                 + """
     perform action "AXShowMenu" of target
@@ -18649,9 +18692,9 @@ end tell
         if minimized != "true":
             raise SystemExit("dock-menu smoke: could not minimize the only window")
         for attempt in range(6):
-            clicked_tab = _dock_osascript(
-                out,
+            clicked_tab = dock_script(
                 f"click-new-tab-{attempt}",
+                "New Tab",
                 _RUNNING_KETTLE_TILE
                 + """
     perform action "AXShowMenu" of target
@@ -18674,7 +18717,8 @@ end tell
                 break
             time.sleep(1.0)
         else:
-            _dock_dismiss(out)
+            if bundle is None:
+                _dock_dismiss(out)
             raise SystemExit("dock-menu smoke: could not click New Tab")
         deadline = time.monotonic() + 12.0
         while time.monotonic() < deadline:
@@ -18710,9 +18754,9 @@ end tell
         # a missing row.
         clicked = ""
         for attempt in range(6):
-            clicked = _dock_osascript(
-                out,
+            clicked = dock_script(
                 f"click-new-window-{attempt}",
+                "New Window",
                 _RUNNING_KETTLE_TILE
                 + """
     perform action "AXShowMenu" of target
@@ -18735,7 +18779,8 @@ end tell
                 break
             time.sleep(1.0)
         if clicked != "clicked":
-            _dock_dismiss(out)
+            if bundle is None:
+                _dock_dismiss(out)
             raise SystemExit(
                 "dock-menu smoke: could not click New Window after 6 tries; "
                 f"last result {clicked!r} (it enumerated as {rows})"
