@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.7.1] — 2026-10-31
+
 ### Fixed
 
 - Stop the cursor at the scroll margins for CUU, CUD, CPL and CNL whether or
