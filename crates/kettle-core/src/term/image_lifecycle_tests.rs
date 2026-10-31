@@ -1806,6 +1806,7 @@ fn partial_scroll_up_moves_wholly_contained_images_and_crops_at_top_margin() {
             old_screen_top: 100,
             new_screen_top: 100,
             screen_lines: 8,
+            columns: None,
         },
     ));
 
@@ -1841,6 +1842,123 @@ fn partial_scroll_up_moves_wholly_contained_images_and_crops_at_top_margin() {
 }
 
 #[test]
+fn a_long_partial_margin_stream_preserves_images_outside_the_rectangle() {
+    for synchronized in [false, true] {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b[?69h\x1b[3;6s\x1b[4;3H");
+        let mut outside = placement_at(1, 1, 1);
+        outside.col = 0;
+        let mut inside = placement_at(2, 1, 1);
+        inside.col = 3;
+        *harness.images.lock().unwrap() = vec![outside, inside];
+        if synchronized {
+            harness.feed(b"\x1b[?2026h");
+        }
+        harness.feed(&vec![b'\n'; 300]);
+        if synchronized {
+            harness.feed(b"\x1b[?2026l");
+        }
+        let images = harness.images.lock().unwrap();
+        assert_eq!(
+            images.iter().map(|image| image.id).collect::<Vec<_>>(),
+            [Some(1)]
+        );
+        assert_eq!(images[0].abs_line, 1);
+    }
+}
+
+#[test]
+fn horizontal_containment_also_applies_to_images_partly_in_history() {
+    let mut crossing = placement_at(1, 99, 2);
+    crossing.col = 7;
+    crossing.display_cols = 2.0;
+    let mut inside = placement_at(2, 99, 2);
+    inside.col = 2;
+    inside.display_cols = 2.0;
+    let images: Images = Arc::new(Mutex::new(vec![crossing, inside]));
+    assert!(scroll_regular_placements(
+        &images,
+        GraphicsScroll {
+            direction: GraphicsScrollDirection::Up,
+            top: 0,
+            bottom: 4,
+            lines: 1,
+            old_screen_top: 100,
+            new_screen_top: 101,
+            screen_lines: 4,
+            columns: Some(0..8),
+        }
+    ));
+    let images = images.lock().unwrap();
+    assert_eq!(
+        images[0].abs_line, 100,
+        "crossing image retains its visual row"
+    );
+    assert_eq!(
+        images[1].abs_line, 99,
+        "contained image scrolls into history"
+    );
+}
+
+#[test]
+fn full_width_margin_mode_keeps_images_crossing_the_page_edge_stationary() {
+    for (mode, crossing_row) in [(b"\x1b[?69h".as_slice(), 2), (b"\x1b[?69l".as_slice(), 1)] {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(mode);
+        harness.feed(b"\x1b[2;4r");
+        let mut crossing = placement_at(1, 2, 1);
+        crossing.col = 7;
+        crossing.display_cols = 2.0;
+        let mut inside = placement_at(2, 2, 1);
+        inside.col = 2;
+        inside.display_cols = 2.0;
+        *harness.images.lock().unwrap() = vec![crossing, inside];
+        harness.feed(b"\x1b[S");
+        let images = harness.images.lock().unwrap();
+        assert_eq!(images[0].abs_line, crossing_row, "mode {mode:?}");
+        assert_eq!(images[1].abs_line, 1);
+    }
+}
+
+#[test]
+fn horizontal_margins_scroll_only_images_wholly_inside_the_rectangle() {
+    let mut inside = placement_at(1, 103, 1);
+    inside.col = 3;
+    inside.display_cols = 2.0;
+    let mut crossing = placement_at(2, 103, 1);
+    crossing.col = 2;
+    crossing.display_cols = 2.0;
+    crossing.x_offset_cells = -0.25;
+    let mut outside = placement_at(3, 103, 1);
+    outside.col = 7;
+    outside.display_cols = 1.0;
+    let images: Images = Arc::new(Mutex::new(vec![inside, crossing, outside]));
+    assert!(scroll_regular_placements(
+        &images,
+        GraphicsScroll {
+            direction: GraphicsScrollDirection::Up,
+            top: 1,
+            bottom: 5,
+            lines: 1,
+            old_screen_top: 100,
+            new_screen_top: 100,
+            screen_lines: 8,
+            columns: Some(2..6),
+        }
+    ));
+    let images = images.lock().unwrap();
+    assert_eq!(images[0].abs_line, 102);
+    assert_eq!(
+        images[1].abs_line, 103,
+        "image crossing horizontal margin stays stationary"
+    );
+    assert_eq!(
+        images[2].abs_line, 103,
+        "image outside horizontal margin stays stationary"
+    );
+}
+
+#[test]
 fn partial_scroll_down_crops_at_bottom_margin_and_composes_source_ranges() {
     let mut first = placement_at(1, 103, 2);
     first.source_crop = Some(crate::ImageSourceCrop {
@@ -1859,6 +1977,7 @@ fn partial_scroll_down_crops_at_bottom_margin_and_composes_source_ranges() {
             old_screen_top: 100,
             new_screen_top: 100,
             screen_lines: 8,
+            columns: None,
         },
     ));
 
@@ -1887,6 +2006,7 @@ fn separate_top_scrolls_match_coalesced_history_anchors() {
                 old_screen_top,
                 new_screen_top: old_screen_top + 1,
                 screen_lines: 6,
+                columns: None,
             }
         ));
     }
@@ -1900,6 +2020,7 @@ fn separate_top_scrolls_match_coalesced_history_anchors() {
             old_screen_top: 10,
             new_screen_top: 12,
             screen_lines: 6,
+            columns: None,
         }
     ));
     let separate = separate.lock().unwrap();
@@ -1927,6 +2048,7 @@ fn top_anchored_scroll_preserves_history_and_reanchors_fixed_rows() {
             old_screen_top: 10,
             new_screen_top: 11,
             screen_lines: 6,
+            columns: None,
         },
     ));
 
@@ -1968,6 +2090,7 @@ fn coalesced_top_scroll_uses_full_screen_delta_for_graphics_anchors() {
     assert_eq!(
         batch.events,
         vec![GraphicsEvent::Scroll {
+            columns: None,
             direction: GraphicsScrollDirection::Up,
             top: 0,
             bottom: 2,

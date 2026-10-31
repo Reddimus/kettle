@@ -2199,6 +2199,22 @@ Overflow or a journal/marker mismatch is sticky for that update and fails
 closed by clearing both buffer-local graphics stores and resynchronizing the
 extractor to the engine's active screen.
 
+DEC mode 69 enables left/right scrolling margins. The engine clips cursor
+movement and edits to the applicable margins and applies vertical scrolls
+inside their rectangle without rotating whole rows into history. A wide glyph
+straddling a boundary is cleared as a unit, including its outside half, so the
+grid retains valid lead/spacer pairs. Partial-width scrolls have a distinct
+journal event carrying both column bounds; ordinary scrolls also carry those
+bounds while mode 69 is enabled, even when they span the full page. Graphics
+replay moves and vertically clips only placements wholly inside that rectangle.
+Images crossing a margin stay stationary, as with top/bottom margins. Text
+selections outside the rectangle survive; intersecting selections are cleared.
+Partial-width wrapping does not join whole rows for reflow or copying.
+Seven-bit DECSCL selections reset terminal state and gate these margins at
+level 4; DECRQSS reports the selected level and seven-bit encoding. The reply
+transport remains UTF-8 strings, so requests for raw eight-bit C1 replies are
+ignored without changing the selected level or clearing terminal state.
+
 The optional raw-output tap has an explicit delivery policy. Lua output hooks
 use a bounded best-effort sender and may drop under plugin backpressure;
 recording and `kettle exec` use lossless delivery. `kettle exec` pairs that

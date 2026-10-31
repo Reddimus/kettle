@@ -1132,12 +1132,21 @@ On 2026-10-30 Kettle 5.7.0 passed 259 of 567 tests and failed 265 (xterm
 itself is expected to fail 43). Triage found six failures in controls Kettle
 implements: CUU and CUD stopping at the margins only under origin mode,
 DECSC/DECRC dropping origin mode, DECALN leaving the margins and cursor, and
-LNM never applied. Those, and the seven mode 1048 tests, are fixed: the run
-now passes 272 and fails 252, each listed with its reason. The largest groups
-are left and right margins (DECSLRM, 74 tests), reports for modes Kettle does
-not implement (35), colour syntaxes beyond `rgb:` and `#rrggbb` (33), window
-operations Kettle does not perform for a program (30), rectangular-area
-operations (23) and character protection (22).
+LNM never applied. Those fixes and the seven mode 1048 tests brought 5.7.1
+to 272 passed and 252 failed.
+
+The 2026-10-31 margin follow-up passes 327 tests and fails 197, with no new
+failures. DEC mode 69 and DECSLRM now cover origin-relative positioning,
+reports, editing, wrapping, tabs and rectangular vertical scrolling. Partial
+scrolls retain surrounding columns and do not add rows to history; a wide glyph
+straddling a margin is cleared as a unit to preserve cell pairing. Portable
+regressions also cover wide cells, selection, vi movement and graphics.
+Seven-bit DECSCL selections reset terminal state and disable horizontal
+margins below level 4; mode reports are unavailable below level 3. Requests
+for raw eight-bit C1 replies leave the existing state unchanged. This does
+not establish full VT compatibility. The expected list retains the remaining
+protection, rectangle, column-editing, reverse-wrap, colour, mode-report and
+window-policy cases under their actual feature dependencies.
 
 **ucs-detect** (`just conformance-ucs`) measures how many columns the
 terminal gives Unicode text, against `wcwidth`. Kettle 5.7.0 scored 99.6% on

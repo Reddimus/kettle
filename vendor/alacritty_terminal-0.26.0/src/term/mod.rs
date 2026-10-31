@@ -91,6 +91,7 @@ bitflags! {
         const UNNEGOTIATED_MODIFIED_ENTER = 1 << 26;
         /// DEC mode 2031: report colour-scheme changes.
         const COLOR_SCHEME_REPORTS    = 1 << 27;
+        const LEFT_RIGHT_MARGIN       = 1 << 28;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         /// All effective xterm modifyOtherKeys levels.
         const MODIFY_OTHER_KEYS       = Self::MODIFY_OTHER_KEYS_1.bits()
@@ -353,6 +354,8 @@ pub struct Term<T> {
     ///
     /// Range going from top to bottom of the terminal, indexed from the top of the viewport.
     scroll_region: Range<Line>,
+    horizontal_margins: Range<Column>,
+    conformance_level: u8,
 
     /// Modified terminal colors.
     colors: Colors,
@@ -418,8 +421,19 @@ pub enum GraphicsEvent {
         clear: bool,
     },
     Reset,
+    PartialScroll {
+        direction: GraphicsScrollDirection,
+        top: usize,
+        bottom: usize,
+        left: usize,
+        right: usize,
+        lines: usize,
+        screen_top: u64,
+        screen_lines: usize,
+    },
     Scroll {
         direction: GraphicsScrollDirection,
+        columns: Option<(usize, usize)>,
         top: usize,
         bottom: usize,
         lines: usize,
@@ -458,6 +472,7 @@ impl GraphicsEventJournal {
         if let (
             Some(GraphicsEvent::Scroll {
                 direction: previous_direction,
+                columns: previous_columns,
                 top: previous_top,
                 bottom: previous_bottom,
                 lines: previous_lines,
@@ -467,6 +482,7 @@ impl GraphicsEventJournal {
             }),
             GraphicsEvent::Scroll {
                 direction,
+                columns,
                 top,
                 bottom,
                 lines,
@@ -477,6 +493,7 @@ impl GraphicsEventJournal {
             },
         ) = (self.events.last_mut(), event)
             && *previous_direction == direction
+            && *previous_columns == columns
             && *previous_top == top
             && *previous_bottom == bottom
             && *previous_screen_top == old_screen_top
@@ -486,6 +503,42 @@ impl GraphicsEventJournal {
                 .saturating_add(lines)
                 .min(bottom.saturating_sub(top));
             *previous_screen_top = new_screen_top;
+            return;
+        }
+
+        if let (
+            Some(GraphicsEvent::PartialScroll {
+                direction: previous_direction,
+                top: previous_top,
+                bottom: previous_bottom,
+                left: previous_left,
+                right: previous_right,
+                lines: previous_lines,
+                screen_top: previous_screen_top,
+                screen_lines: previous_screen_lines,
+            }),
+            GraphicsEvent::PartialScroll {
+                direction,
+                top,
+                bottom,
+                left,
+                right,
+                lines,
+                screen_top,
+                screen_lines,
+            },
+        ) = (self.events.last_mut(), event)
+            && *previous_direction == direction
+            && *previous_top == top
+            && *previous_bottom == bottom
+            && *previous_left == left
+            && *previous_right == right
+            && *previous_screen_top == screen_top
+            && *previous_screen_lines == screen_lines
+        {
+            *previous_lines = previous_lines
+                .saturating_add(lines)
+                .min(bottom.saturating_sub(top));
             return;
         }
 
@@ -633,6 +686,8 @@ impl<T> Term<T> {
         Term {
             inactive_grid,
             scroll_region,
+            horizontal_margins: Column(0)..Column(grid.columns()),
+            conformance_level: 5,
             event_proxy,
             damage,
             color_scheme_dark: config.color_scheme_dark,
@@ -998,6 +1053,7 @@ impl<T> Term<T> {
 
         // Reset scrolling region.
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.horizontal_margins = Column(0)..Column(self.columns());
 
         // Resize damage information.
         self.damage.resize(num_cols, num_lines);
@@ -1060,6 +1116,28 @@ impl<T> Term<T> {
         self.mark_fully_damaged();
     }
 
+    fn horizontal_region(&self) -> Range<Column> {
+        if self.mode.contains(TermMode::LEFT_RIGHT_MARGIN) {
+            self.horizontal_margins.clone()
+        } else {
+            Column(0)..Column(self.columns())
+        }
+    }
+
+    fn cursor_in_horizontal_region(&self) -> bool {
+        self.horizontal_region()
+            .contains(&self.grid.cursor.point.column)
+    }
+
+    fn input_right_edge(&self) -> Column {
+        let margins = self.horizontal_region();
+        if self.grid.cursor.point.column < margins.end {
+            margins.end
+        } else {
+            Column(self.columns())
+        }
+    }
+
     /// Restore the saved origin mode (DECOM), keeping the cursor inside the
     /// current margins under it, as xterm's `CursorRestore` does.
     fn restore_saved_origin_mode(&mut self) {
@@ -1067,7 +1145,114 @@ impl<T> Term<T> {
         if self.grid.saved_origin_mode {
             let line = &mut self.grid.cursor.point.line;
             *line = (*line).clamp(self.scroll_region.start, self.scroll_region.end - 1);
+            let margins = self.horizontal_region();
+            self.grid.cursor.point.column = self
+                .grid
+                .cursor
+                .point
+                .column
+                .clamp(margins.start, margins.end - 1);
         }
+    }
+
+    /// Partial-width scrolls cannot rotate rows into history or rotate a whole-line selection.
+    fn scroll_partial_region(&mut self, origin: Line, lines: usize, down: bool) -> bool {
+        let columns = self.horizontal_region();
+        if columns.start == 0 && columns.end == self.columns() {
+            return false;
+        }
+        let bottom = self.scroll_region.end;
+        let height = (bottom - origin).0 as usize;
+        let lines = lines.min(height);
+        let bg = self.grid.cursor.template.bg;
+        let selection = self.selection.take().filter(|selection| {
+            let Some(range) = selection.to_range(self) else {
+                return true;
+            };
+            !(origin.0.max(range.start.line.0)..bottom.0.min(range.end.line.0 + 1)).any(|line| {
+                let left = if range.is_block || line == range.start.line.0 {
+                    range.start.column
+                } else {
+                    Column(0)
+                };
+                let right = if range.is_block || line == range.end.line.0 {
+                    range.end.column + 1
+                } else {
+                    Column(self.columns())
+                };
+                let row = &self.grid[Line(line)];
+                let affected_left = if columns.start > 0
+                    && row[columns.start].flags.contains(Flags::WIDE_CHAR_SPACER)
+                {
+                    columns.start - 1
+                } else {
+                    columns.start
+                };
+                let affected_right = if columns.end < self.columns()
+                    && row[columns.end - 1].flags.contains(Flags::WIDE_CHAR)
+                {
+                    columns.end + 1
+                } else {
+                    columns.end
+                };
+                left < affected_right && right > affected_left
+            })
+        });
+        for offset in 0..height {
+            let offset = if down { height - 1 - offset } else { offset };
+            let line = origin + offset;
+            let source = if down {
+                offset.checked_sub(lines)
+            } else {
+                offset.checked_add(lines).filter(|&source| source < height)
+            };
+            // A boundary-straddling wide glyph is cleared as a unit, including
+            // its outside half, as xterm's scrollInMargins does.
+            // Erase split wide glyphs at both boundaries before replacing this slice.
+            let row = source.map(|source| self.grid[origin + source][columns.clone()].to_vec());
+            self.erase_cells(line, columns.start, columns.end);
+            if let Some(mut row) = row {
+                if row[0].flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    row[0] = bg.into();
+                }
+                let last = row.len() - 1;
+                if row[last].flags.contains(Flags::WIDE_CHAR) {
+                    row[last] = bg.into();
+                }
+                for cell in &mut row {
+                    cell.flags
+                        .remove(Flags::WRAPLINE | Flags::LEADING_WIDE_CHAR_SPACER);
+                }
+                self.grid[line][columns.clone()].clone_from_slice(&row);
+            }
+        }
+        self.selection = selection;
+        if (origin..bottom).contains(&self.vi_mode_cursor.point.line)
+            && columns.contains(&self.vi_mode_cursor.point.column)
+        {
+            let line = self.vi_mode_cursor.point.line;
+            self.vi_mode_cursor.point.line = if down {
+                cmp::min(line + lines, bottom - 1)
+            } else {
+                cmp::max(line - lines, origin)
+            };
+        }
+        self.graphics_events.push(GraphicsEvent::PartialScroll {
+            direction: if down {
+                GraphicsScrollDirection::Down
+            } else {
+                GraphicsScrollDirection::Up
+            },
+            top: origin.0 as usize,
+            bottom: bottom.0 as usize,
+            left: columns.start.0,
+            right: columns.end.0,
+            lines,
+            screen_top: self.graphics_screen_top(),
+            screen_lines: self.screen_lines(),
+        });
+        self.mark_fully_damaged();
+        true
     }
 
     /// Scroll screen down.
@@ -1084,6 +1269,10 @@ impl<T> Term<T> {
         );
         lines = cmp::min(lines, (self.scroll_region.end - origin).0 as usize);
         if lines == 0 {
+            return;
+        }
+
+        if lines > 0 && self.scroll_partial_region(origin, lines, true) {
             return;
         }
 
@@ -1108,6 +1297,10 @@ impl<T> Term<T> {
         self.mark_fully_damaged();
         let new_screen_top = self.graphics_screen_top();
         self.graphics_events.push(GraphicsEvent::Scroll {
+            columns: self.mode.contains(TermMode::LEFT_RIGHT_MARGIN).then_some((
+                self.horizontal_margins.start.0,
+                self.horizontal_margins.end.0,
+            )),
             direction: GraphicsScrollDirection::Down,
             top: region.start.0 as usize,
             bottom: region.end.0 as usize,
@@ -1130,6 +1323,10 @@ impl<T> Term<T> {
             lines,
             (self.scroll_region.end - self.scroll_region.start).0 as usize,
         );
+
+        if lines > 0 && self.scroll_partial_region(origin, lines, false) {
+            return;
+        }
 
         let region = origin..self.scroll_region.end;
         lines = cmp::min(lines, (region.end - region.start).0 as usize);
@@ -1166,6 +1363,10 @@ impl<T> Term<T> {
         self.mark_fully_damaged();
         let new_screen_top = self.graphics_screen_top();
         self.graphics_events.push(GraphicsEvent::Scroll {
+            columns: self.mode.contains(TermMode::LEFT_RIGHT_MARGIN).then_some((
+                self.horizontal_margins.start.0,
+                self.horizontal_margins.end.0,
+            )),
             direction: GraphicsScrollDirection::Up,
             top: region.start.0 as usize,
             bottom: region.end.0 as usize,
@@ -1182,6 +1383,8 @@ impl<T> Term<T> {
     {
         // Setting 132 column font makes no sense, but run the other side effects.
         // Clear scrolling region.
+        self.mode.remove(TermMode::LEFT_RIGHT_MARGIN);
+        self.horizontal_margins = Column(0)..Column(self.columns());
         self.set_scrolling_region(1, None);
 
         // Clear grid.
@@ -1357,7 +1560,10 @@ impl<T> Term<T> {
 
         trace!("Wrapping input");
 
-        self.grid.cursor_cell().flags.insert(Flags::WRAPLINE);
+        let margins = self.horizontal_region();
+        if margins.start == 0 && margins.end == self.columns() {
+            self.grid.cursor_cell().flags.insert(Flags::WRAPLINE);
+        }
 
         if self.grid.cursor.point.line + 1 >= self.scroll_region.end {
             self.linefeed();
@@ -1366,9 +1572,46 @@ impl<T> Term<T> {
             self.grid.cursor.point.line += 1;
         }
 
-        self.grid.cursor.point.column = Column(0);
+        self.grid.cursor.point.column = self.horizontal_region().start;
         self.grid.cursor.input_needs_wrap = false;
         self.damage_cursor();
+    }
+
+    /// Remove a wide glyph bisected by an editing boundary before moving cells.
+    fn clear_wide_boundary(&mut self, line: Line, boundary: Column) {
+        if boundary > 0
+            && boundary < self.columns()
+            && self.grid[line][boundary]
+                .flags
+                .contains(Flags::WIDE_CHAR_SPACER)
+        {
+            self.erase_cells(line, boundary, boundary + 1);
+        }
+    }
+
+    /// Editing through a wide glyph must not leave an unpaired lead or spacer.
+    fn repair_wide_cells(&mut self, line: Line) {
+        let bg = self.grid.cursor.template.bg;
+        let columns = self.columns();
+        for col in 0..columns {
+            let cell = &self.grid[line][Column(col)];
+            let invalid = if cell.flags.contains(Flags::WIDE_CHAR) {
+                col + 1 == columns
+                    || !self.grid[line][Column(col + 1)]
+                        .flags
+                        .contains(Flags::WIDE_CHAR_SPACER)
+            } else if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                col == 0
+                    || !self.grid[line][Column(col - 1)]
+                        .flags
+                        .contains(Flags::WIDE_CHAR)
+            } else {
+                false
+            };
+            if invalid {
+                self.grid[line][Column(col)] = bg.into();
+            }
+        }
     }
 
     fn erase_cells(&mut self, line: Line, mut start: Column, mut end: Column) {
@@ -1496,7 +1739,15 @@ impl<T> Term<T> {
         } else {
             0
         };
-        ((point.line.0 - top).max(0) + 1, point.column.0 + 1)
+        let left = if self.mode.contains(TermMode::ORIGIN) {
+            self.horizontal_region().start.0
+        } else {
+            0
+        };
+        (
+            (point.line.0 - top).max(0) + 1,
+            point.column.0.saturating_sub(left) + 1,
+        )
     }
 }
 
@@ -1557,43 +1808,39 @@ impl<T: EventListener> Handler for Term<T> {
             self.wrapline();
         }
 
-        // If in insert mode, first shift cells to the right.
-        let columns = self.columns();
-        if self.mode.contains(TermMode::INSERT) && self.grid.cursor.point.column + width < columns {
-            let line = self.grid.cursor.point.line;
-            let col = self.grid.cursor.point.column;
-            let row = &mut self.grid[line][..];
-
-            for col in (col.0..(columns - width)).rev() {
-                row.swap(col + width, col);
-            }
-        }
-
-        if width == 1 {
-            self.write_at_cursor(c);
-        } else {
-            if self.grid.cursor.point.column + 1 >= columns {
-                if self.mode.contains(TermMode::LINE_WRAP) {
-                    // Insert placeholder before wide char if glyph does not fit in this row.
+        // Wrap a wide glyph before reserving insertion space on its destination row.
+        if width > 1 && self.grid.cursor.point.column + 1 >= self.input_right_edge() {
+            if self.mode.contains(TermMode::LINE_WRAP) {
+                // Insert placeholder before wide char if glyph does not fit in this row.
+                let margins = self.horizontal_region();
+                if margins.start == 0 && margins.end == self.columns() {
                     self.grid
                         .cursor
                         .template
                         .flags
                         .insert(Flags::LEADING_WIDE_CHAR_SPACER);
-                    self.write_at_cursor(' ');
-                    self.grid
-                        .cursor
-                        .template
-                        .flags
-                        .remove(Flags::LEADING_WIDE_CHAR_SPACER);
-                    self.wrapline();
-                } else {
-                    // Prevent out of bounds crash when linewrapping is disabled.
-                    self.grid.cursor.input_needs_wrap = true;
-                    return;
                 }
+                self.write_at_cursor(' ');
+                self.grid
+                    .cursor
+                    .template
+                    .flags
+                    .remove(Flags::LEADING_WIDE_CHAR_SPACER);
+                self.wrapline();
+            } else {
+                // Prevent out of bounds crash when linewrapping is disabled.
+                self.grid.cursor.input_needs_wrap = true;
+                return;
             }
+        }
 
+        if self.mode.contains(TermMode::INSERT) {
+            self.insert_blank(width);
+        }
+        let columns = self.input_right_edge().0;
+        if width == 1 {
+            self.write_at_cursor(c);
+        } else {
             // Write full width glyph to current cursor cell.
             self.grid.cursor.template.flags.insert(Flags::WIDE_CHAR);
             self.write_at_cursor(c);
@@ -1628,6 +1875,7 @@ impl<T: EventListener> Handler for Term<T> {
         // DECALN also resets the margins and homes the cursor (DEC STD 070,
         // xterm), so a test pattern is never drawn into a stale scroll region.
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.horizontal_margins = Column(0)..Column(self.columns());
         self.goto(0, 0);
 
         for line in (0..self.screen_lines()).map(Line::from) {
@@ -1655,7 +1903,12 @@ impl<T: EventListener> Handler for Term<T> {
 
         self.damage_cursor();
         self.grid.cursor.point.line = cmp::max(cmp::min(line + y_offset, max_y), Line(0));
-        self.grid.cursor.point.column = cmp::min(col, self.last_column());
+        let margins = self.horizontal_region();
+        self.grid.cursor.point.column = if self.mode.contains(TermMode::ORIGIN) {
+            cmp::min(col + margins.start.0, margins.end - 1)
+        } else {
+            cmp::min(col, self.last_column())
+        };
         self.damage_cursor();
         self.grid.cursor.input_needs_wrap = false;
     }
@@ -1663,31 +1916,49 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn goto_line(&mut self, line: i32) {
         trace!("Going to line: {line}");
-        self.goto(line, self.grid.cursor.point.column.0)
+        let col = self.grid.cursor.point.column;
+        self.goto(line, 0);
+        self.grid.cursor.point.column = col;
+        self.damage_cursor();
     }
 
     #[inline]
     fn goto_col(&mut self, col: usize) {
         trace!("Going to column: {col}");
         self.damage_cursor();
-        self.grid.cursor.point.column = cmp::min(Column(col), self.last_column());
+        let margins = self.horizontal_region();
+        self.grid.cursor.point.column = if self.mode.contains(TermMode::ORIGIN) {
+            cmp::min(Column(col) + margins.start.0, margins.end - 1)
+        } else {
+            cmp::min(Column(col), self.last_column())
+        };
         self.damage_cursor();
         self.grid.cursor.input_needs_wrap = false;
     }
 
     #[inline]
     fn insert_blank(&mut self, count: usize) {
+        if !self.cursor_in_horizontal_region() {
+            return;
+        }
+        let columns = self.horizontal_region().end.0;
         let cursor = &self.grid.cursor;
         let bg = cursor.template.bg;
 
         // Ensure inserting within terminal bounds
-        let count = cmp::min(count, self.columns() - cursor.point.column.0);
+        let count = cmp::min(count, columns - cursor.point.column.0);
 
         let source = cursor.point.column;
         let destination = cursor.point.column.0 + count;
-        let num_cells = self.columns() - destination;
+        let num_cells = columns - destination;
 
         let line = cursor.point.line;
+        if count == 0 {
+            return;
+        }
+        self.clear_wide_boundary(line, source);
+        self.clear_wide_boundary(line, Column(columns - count));
+        self.clear_wide_boundary(line, Column(columns));
         self.damage
             .damage_line(line.0 as usize, 0, self.columns() - 1);
 
@@ -1702,6 +1973,7 @@ impl<T: EventListener> Handler for Term<T> {
         for cell in &mut row[source.0..destination] {
             *cell = bg.into();
         }
+        self.repair_wide_cells(line);
     }
 
     #[inline]
@@ -1745,7 +2017,14 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn move_forward(&mut self, cols: usize) {
         trace!("Moving forward: {cols}");
-        let last_column = cmp::min(self.grid.cursor.point.column + cols, self.last_column());
+        let point = self.grid.cursor.point.column;
+        let margins = self.horizontal_region();
+        let limit = if point < margins.end {
+            margins.end - 1
+        } else {
+            self.last_column()
+        };
+        let last_column = cmp::min(point + cols, limit);
 
         let cursor_line = self.grid.cursor.point.line.0 as usize;
         self.damage
@@ -1758,7 +2037,10 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn move_backward(&mut self, cols: usize) {
         trace!("Moving backward: {cols}");
-        let column = self.grid.cursor.point.column.saturating_sub(cols);
+        let point = self.grid.cursor.point.column;
+        let left = self.horizontal_region().start;
+        let limit = if point >= left { left.0 } else { 0 };
+        let column = point.saturating_sub(cols).max(limit);
 
         let cursor_line = self.grid.cursor.point.line.0 as usize;
         self.damage
@@ -1946,6 +2228,13 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("DECRQSS {request:?}");
         let setting = match request {
             Some(b"m") => Some(format!("{}m", sgr_report(&self.grid.cursor.template))),
+            Some(b"\"p") if self.conformance_level == 1 => Some(String::from("61\"p")),
+            Some(b"\"p") => Some(format!("6{};1\"p", self.conformance_level)),
+            Some(b"s") => Some(format!(
+                "{};{}s",
+                self.horizontal_margins.start.0 + 1,
+                self.horizontal_margins.end.0
+            )),
             Some(b"r") => Some(format!(
                 "{};{}r",
                 self.scroll_region.start.0 + 1,
@@ -2012,7 +2301,8 @@ impl<T: EventListener> Handler for Term<T> {
             return;
         }
 
-        while self.grid.cursor.point.column < self.columns() && count != 0 {
+        let columns = self.input_right_edge().0;
+        while self.grid.cursor.point.column < columns && count != 0 {
             count -= 1;
 
             let c = self.grid.cursor.charsets[self.active_charset].map('\t');
@@ -2022,7 +2312,7 @@ impl<T: EventListener> Handler for Term<T> {
             }
 
             loop {
-                if (self.grid.cursor.point.column + 1) == self.columns() {
+                if (self.grid.cursor.point.column + 1) == columns {
                     break;
                 }
 
@@ -2040,7 +2330,9 @@ impl<T: EventListener> Handler for Term<T> {
     fn backspace(&mut self) {
         trace!("Backspace");
 
-        if self.grid.cursor.point.column > Column(0) {
+        let col = self.grid.cursor.point.column;
+        let left = self.horizontal_region().start;
+        if col > Column(0) && col != left {
             let line = self.grid.cursor.point.line.0 as usize;
             let column = self.grid.cursor.point.column.0;
             self.grid.cursor.point.column -= 1;
@@ -2053,7 +2345,13 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn carriage_return(&mut self) {
         trace!("Carriage return");
-        let new_col = 0;
+        let left = self.horizontal_region().start;
+        let new_col =
+            if self.mode.contains(TermMode::ORIGIN) || self.grid.cursor.point.column >= left {
+                left.0
+            } else {
+                0
+            };
         let line = self.grid.cursor.point.line.0 as usize;
         self.damage
             .damage_line(line, new_col, self.grid.cursor.point.column.0);
@@ -2067,7 +2365,9 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Linefeed");
         let next = self.grid.cursor.point.line + 1;
         if next == self.scroll_region.end {
-            self.scroll_up(1);
+            if self.cursor_in_horizontal_region() {
+                self.scroll_up(1);
+            }
         } else if next < self.screen_lines() {
             self.damage_cursor();
             self.grid.cursor.point.line += 1;
@@ -2141,7 +2441,7 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Inserting blank {lines} lines");
 
         let origin = self.grid.cursor.point.line;
-        if self.scroll_region.contains(&origin) {
+        if self.scroll_region.contains(&origin) && self.cursor_in_horizontal_region() {
             self.scroll_down_relative(origin, lines);
         }
     }
@@ -2153,7 +2453,7 @@ impl<T: EventListener> Handler for Term<T> {
 
         trace!("Deleting {lines} lines");
 
-        if lines > 0 && self.scroll_region.contains(&origin) {
+        if lines > 0 && self.scroll_region.contains(&origin) && self.cursor_in_horizontal_region() {
             self.scroll_up_relative(origin, lines);
         }
     }
@@ -2176,7 +2476,10 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn delete_chars(&mut self, count: usize) {
-        let columns = self.columns();
+        if !self.cursor_in_horizontal_region() {
+            return;
+        }
+        let columns = self.horizontal_region().end.0;
         let cursor = &self.grid.cursor;
         let bg = cursor.template.bg;
 
@@ -2188,6 +2491,12 @@ impl<T: EventListener> Handler for Term<T> {
         let num_cells = columns - end;
 
         let line = cursor.point.line;
+        if count == 0 {
+            return;
+        }
+        self.clear_wide_boundary(line, Column(start));
+        self.clear_wide_boundary(line, Column(end));
+        self.clear_wide_boundary(line, Column(columns));
         self.damage
             .damage_line(line.0 as usize, 0, self.columns() - 1);
         let row = &mut self.grid[line][..];
@@ -2199,9 +2508,10 @@ impl<T: EventListener> Handler for Term<T> {
         // Clear last `count` cells in the row. If deleting 1 char, need to delete
         // 1 cell.
         let end = columns - count;
-        for cell in &mut row[end..] {
+        for cell in &mut row[end..columns] {
             *cell = bg.into();
         }
+        self.repair_wide_cells(line);
     }
 
     #[inline]
@@ -2209,20 +2519,21 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Moving backward {count} tabs");
 
         let old_col = self.grid.cursor.point.column.0;
+        let left = if self.mode.contains(TermMode::ORIGIN) {
+            self.horizontal_region().start.0
+        } else {
+            0
+        };
         for _ in 0..count {
-            let mut col = self.grid.cursor.point.column;
-
-            if col == 0 {
+            let col = self.grid.cursor.point.column.0;
+            if col <= left {
                 break;
             }
-
-            for i in (0..(col.0)).rev() {
-                if self.tabs[index::Column(i)] {
-                    col = index::Column(i);
-                    break;
-                }
-            }
-            self.grid.cursor.point.column = col;
+            let previous = (left..col)
+                .rev()
+                .find(|&col| self.tabs[Column(col)])
+                .unwrap_or(left);
+            self.grid.cursor.point.column = Column(previous);
         }
 
         let line = self.grid.cursor.point.line.0 as usize;
@@ -2234,7 +2545,7 @@ impl<T: EventListener> Handler for Term<T> {
     fn move_forward_tabs(&mut self, count: u16) {
         trace!("Moving forward {count} tabs");
 
-        let num_cols = self.columns();
+        let num_cols = self.input_right_edge().0;
         let old_col = self.grid.cursor.point.column.0;
         for _ in 0..count {
             let mut col = self.grid.cursor.point.column;
@@ -2480,6 +2791,7 @@ impl<T: EventListener> Handler for Term<T> {
     /// Reset all important fields in the term struct.
     #[inline]
     fn reset_state(&mut self) {
+        self.conformance_level = 5;
         if self.mode.contains(TermMode::ALT_SCREEN) {
             mem::swap(&mut self.grid, &mut self.inactive_grid);
         }
@@ -2488,6 +2800,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.grid.reset();
         self.inactive_grid.reset();
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.horizontal_margins = Column(0)..Column(self.columns());
         self.tabs = TabStops::new(self.columns());
         self.title_stack = Vec::new();
         self.title = None;
@@ -2511,6 +2824,17 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     #[inline]
+    fn set_conformance_level(&mut self, level: u16, controls: u16) {
+        // Replies use the existing UTF-8 String transport. Do not claim to have
+        // selected raw eight-bit C1 replies; VT100 always uses seven-bit controls.
+        if !(61..=65).contains(&level) || (level != 61 && controls != 1) {
+            return;
+        }
+        self.reset_state();
+        self.conformance_level = (level - 60) as u8;
+    }
+
+    #[inline]
     fn soft_reset_state(&mut self) {
         // DECSTR restores terminal state while leaving the display, scrollback and
         // title alone. Programs emit `CSI ! p` from terminfo `is2`/`rs2` while
@@ -2523,6 +2847,7 @@ impl<T: EventListener> Handler for Term<T> {
             TermMode::MODIFY_OTHER_KEYS
                 | TermMode::MODIFY_OTHER_KEYS_NEGOTIATED
                 | TermMode::COLOR_SCHEME_REPORTS
+                | TermMode::LEFT_RIGHT_MARGIN
                 | TermMode::INSERT
                 | TermMode::ORIGIN
                 | TermMode::APP_CURSOR
@@ -2540,6 +2865,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.grid.saved_cursor = Default::default();
         self.grid.saved_origin_mode = false;
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.horizontal_margins = Column(0)..Column(self.columns());
     }
 
     #[inline]
@@ -2547,7 +2873,9 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Reversing index");
         // If cursor is at the top.
         if self.grid.cursor.point.line == self.scroll_region.start {
-            self.scroll_down(1);
+            if self.cursor_in_horizontal_region() {
+                self.scroll_down(1);
+            }
         } else {
             self.damage_cursor();
             self.grid.cursor.point.line = cmp::max(self.grid.cursor.point.line - 1, Line(0));
@@ -2688,6 +3016,11 @@ impl<T: EventListener> Handler for Term<T> {
                 self.mode.insert(TermMode::UTF8_MOUSE);
             }
             NamedPrivateMode::AlternateScroll => self.mode.insert(TermMode::ALTERNATE_SCROLL),
+            NamedPrivateMode::LeftRightMargin => {
+                if self.conformance_level >= 4 {
+                    self.mode.insert(TermMode::LEFT_RIGHT_MARGIN);
+                }
+            }
             NamedPrivateMode::LineWrap => self.mode.insert(TermMode::LINE_WRAP),
             NamedPrivateMode::Origin => {
                 self.mode.insert(TermMode::ORIGIN);
@@ -2768,6 +3101,10 @@ impl<T: EventListener> Handler for Term<T> {
             NamedPrivateMode::SgrMouse => self.mode.remove(TermMode::SGR_MOUSE),
             NamedPrivateMode::Utf8Mouse => self.mode.remove(TermMode::UTF8_MOUSE),
             NamedPrivateMode::AlternateScroll => self.mode.remove(TermMode::ALTERNATE_SCROLL),
+            NamedPrivateMode::LeftRightMargin => {
+                self.mode.remove(TermMode::LEFT_RIGHT_MARGIN);
+                self.horizontal_margins = Column(0)..Column(self.columns());
+            }
             NamedPrivateMode::LineWrap => self.mode.remove(TermMode::LINE_WRAP),
             NamedPrivateMode::Origin => self.mode.remove(TermMode::ORIGIN),
             NamedPrivateMode::ColumnMode => self.deccolm(),
@@ -2784,11 +3121,20 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn report_private_mode(&mut self, mode: PrivateMode) {
+        if self.conformance_level < 3 {
+            return;
+        }
         trace!("Reporting private mode {mode:?}");
         let state = match mode {
             PrivateMode::Named(mode) => match mode {
                 NamedPrivateMode::CursorKeys => self.mode.contains(TermMode::APP_CURSOR).into(),
                 NamedPrivateMode::Origin => self.mode.contains(TermMode::ORIGIN).into(),
+                NamedPrivateMode::LeftRightMargin if self.conformance_level < 4 => {
+                    ModeState::NotSupported
+                }
+                NamedPrivateMode::LeftRightMargin => {
+                    self.mode.contains(TermMode::LEFT_RIGHT_MARGIN).into()
+                }
                 NamedPrivateMode::LineWrap => self.mode.contains(TermMode::LINE_WRAP).into(),
                 NamedPrivateMode::BlinkingCursor => {
                     let style = self
@@ -2880,6 +3226,9 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn report_mode(&mut self, mode: ansi::Mode) {
+        if self.conformance_level < 3 {
+            return;
+        }
         trace!("Reporting mode {mode:?}");
         let state = match mode {
             ansi::Mode::Named(mode) => match mode {
@@ -2896,6 +3245,20 @@ impl<T: EventListener> Handler for Term<T> {
             mode.raw(),
             state as u8,
         )));
+    }
+
+    #[inline]
+    fn set_horizontal_margins(&mut self, left: usize, right: Option<usize>) {
+        if !self.mode.contains(TermMode::LEFT_RIGHT_MARGIN) {
+            self.save_cursor_position();
+            return;
+        }
+        let right = right.unwrap_or(self.columns()).min(self.columns());
+        if left == 0 || left >= right {
+            return;
+        }
+        self.horizontal_margins = Column(left - 1)..Column(right);
+        self.goto(0, 0);
     }
 
     #[inline]
@@ -3772,6 +4135,523 @@ mod tests {
             assert!(!term.mode().intersects(TermMode::MODIFY_OTHER_KEYS));
             assert!(!term.mode().contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED));
             assert!(term.mode().contains(TermMode::UNNEGOTIATED_MODIFIED_ENTER));
+        }
+    }
+
+    #[test]
+    fn left_right_margins_scroll_only_the_rectangle_without_history() {
+        for (control, expected) in [
+            ("\x1b[S", ["aa111aaa", "bb222bbb", "cc   ccc", "dddddddd"]),
+            ("\x1b[T", ["aa   aaa", "bb000bbb", "cc111ccc", "dddddddd"]),
+        ] {
+            let size = TermSize::new(8, 4);
+            let mut term = Term::new(Config::default(), &size, VoidListener);
+            let mut parser: ansi::Processor = ansi::Processor::new();
+            parser.advance(&mut term, b"aaaaaaaa\r\nbbbbbbbb\r\ncccccccc\r\ndddddddd");
+            parser.advance(
+                &mut term,
+                b"\x1b[?69h\x1b[3;5s\x1b[1;3r\x1b[1;3H000\x1b[2;3H111\x1b[3;3H222",
+            );
+            term.take_graphics_events();
+            parser.advance(&mut term, control.as_bytes());
+            for (line, expected) in expected.iter().enumerate() {
+                let actual: String = term.grid[Line(line as i32)][..]
+                    .iter()
+                    .map(|cell| cell.c)
+                    .collect();
+                assert_eq!(&actual, expected, "{control:?} row {line}");
+            }
+            assert_eq!(term.grid.history_size(), 0);
+            assert!(matches!(
+                term.take_graphics_events().events.as_slice(),
+                [GraphicsEvent::PartialScroll {
+                    left: 2,
+                    right: 5,
+                    ..
+                }]
+            ));
+        }
+    }
+
+    #[test]
+    fn left_right_margins_constrain_editing_wrapping_and_linefeed() {
+        let size = TermSize::new(8, 4);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, b"abcdefgh\x1b[?69h\x1b[3;6s\x1b[1;4H\x1b[P");
+        let row = |term: &Term<VoidListener>, line| {
+            term.grid[Line(line)][..]
+                .iter()
+                .map(|cell| cell.c)
+                .collect::<String>()
+        };
+        assert_eq!(row(&term, 0), "abcef gh");
+        parser.advance(&mut term, b"\x1b[@");
+        assert_eq!(row(&term, 0), "abc efgh");
+        parser.advance(&mut term, b"\x1b[1;2H\x1b[99P\x1b[99@");
+        assert_eq!(
+            row(&term, 0),
+            "abc efgh",
+            "editing outside margins is ignored"
+        );
+        parser.advance(&mut term, b"\x1b[2;3H12345");
+        assert_eq!(row(&term, 1), "  1234  ");
+        assert_eq!(row(&term, 2), "  5     ");
+        assert!(
+            !term.grid[Line(1)][Column(5)]
+                .flags
+                .contains(Flags::WRAPLINE)
+        );
+        parser.advance(&mut term, b"\x1b[1;3r\x1b[3;8H\n");
+        assert_eq!(
+            term.grid.cursor.point,
+            Point::new(Line(2), Column(7)),
+            "LF outside horizontal region neither scrolls nor crosses the bottom margin"
+        );
+    }
+
+    #[test]
+    fn left_right_margins_clamp_movement_and_restore_absolute_columns() {
+        let size = TermSize::new(12, 5);
+        let mut term = Term::new(Config::default(), &size, PtyWriteListener::default());
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(
+            &mut term,
+            b"\x1b[?69h\x1b[3;8s\x1b[2;4r\x1b[?6h\x1b[2;3H\x1b7\x1b[99C\x1b[6n",
+        );
+        assert_eq!(term.grid.cursor.point, Point::new(Line(2), Column(7)));
+        parser.advance(&mut term, b"\x1b[99D\x1b8");
+        assert_eq!(term.grid.cursor.point, Point::new(Line(2), Column(4)));
+        parser.advance(&mut term, b"\x1b[1d");
+        assert_eq!(
+            term.grid.cursor.point,
+            Point::new(Line(1), Column(4)),
+            "VPA must not apply horizontal origin twice"
+        );
+        parser.advance(&mut term, b"\x1bP$qs\x1b\\");
+        assert_eq!(
+            *term.event_proxy.0.lock().unwrap(),
+            ["\x1b[2;6R", "\x1bP1$r3;8s\x1b\\"]
+        );
+    }
+
+    #[test]
+    fn left_right_margins_preserve_selection_and_vi_cursor_outside_rectangle() {
+        let size = TermSize::new(8, 4);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, b"\x1b[?69h\x1b[3;6s");
+        let mut selection = Selection::new(
+            SelectionType::Block,
+            Point::new(Line(1), Column(0)),
+            Side::Left,
+        );
+        selection.update(Point::new(Line(2), Column(1)), Side::Right);
+        term.selection = Some(selection.clone());
+        term.vi_mode_cursor.point = Point::new(Line(1), Column(0));
+        parser.advance(&mut term, b"\x1b[S");
+        assert_eq!(term.selection, Some(selection));
+        assert_eq!(term.vi_mode_cursor.point, Point::new(Line(1), Column(0)));
+        let mut selection = Selection::new(
+            SelectionType::Block,
+            Point::new(Line(1), Column(3)),
+            Side::Left,
+        );
+        selection.update(Point::new(Line(1), Column(4)), Side::Right);
+        term.selection = Some(selection);
+        term.vi_mode_cursor.point = Point::new(Line(1), Column(3));
+        parser.advance(&mut term, b"\x1b[S");
+        assert!(term.selection.is_none());
+        assert_eq!(term.vi_mode_cursor.point, Point::new(Line(0), Column(3)));
+    }
+
+    #[test]
+    fn horizontal_edits_do_not_borrow_spacers_from_a_different_wide_glyph() {
+        for (text, edit, expected) in [
+            ("abc界語h", "\x1b[1;4H\x1b[2@", "abc    h"),
+            ("a界語bch", "\x1b[1;3H\x1b[2P", "a  b  ch"),
+        ] {
+            let size = TermSize::new(8, 2);
+            let mut term = Term::new(Config::default(), &size, VoidListener);
+            let mut parser: ansi::Processor = ansi::Processor::new();
+            parser.advance(&mut term, text.as_bytes());
+            parser.advance(&mut term, b"\x1b[?69h\x1b[3;6s");
+            parser.advance(&mut term, edit.as_bytes());
+            let actual: String = term.grid[Line(0)][..].iter().map(|cell| cell.c).collect();
+            assert_eq!(actual, expected, "{text} {edit:?}");
+        }
+    }
+
+    #[test]
+    fn horizontal_edits_match_whole_glyph_motion_across_all_margin_edges() {
+        let wide = Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER;
+        for text in ["abc界語h", "a界語bch", "界a語bcd", "ab界c語d"] {
+            let mut position = 0;
+            let glyphs: Vec<_> = text
+                .chars()
+                .map(|ch| {
+                    let width = if matches!(ch, '\u{754c}' | '\u{8a9e}') {
+                        2
+                    } else {
+                        1
+                    };
+                    let glyph = (position, ch, width);
+                    position += width;
+                    glyph
+                })
+                .collect();
+            assert_eq!(position, 8);
+            for left in 0..7 {
+                for right in left + 2..=8 {
+                    for cursor in left..right {
+                        for count in 0..=8 {
+                            for delete in [false, true] {
+                                let size = TermSize::new(8, 2);
+                                let mut term = Term::new(Config::default(), &size, VoidListener);
+                                let mut parser: ansi::Processor = ansi::Processor::new();
+                                parser.advance(&mut term, text.as_bytes());
+                                parser.advance(
+                                    &mut term,
+                                    format!(
+                                        "\x1b[?69h\x1b[{};{}s\x1b[1;{}H",
+                                        left + 1,
+                                        right,
+                                        cursor + 1
+                                    )
+                                    .as_bytes(),
+                                );
+                                if delete {
+                                    term.delete_chars(count);
+                                } else {
+                                    term.insert_blank(count);
+                                }
+                                let count = count.min(right - cursor);
+                                let mut expected = [(' ', Flags::empty()); 8];
+                                // Model whole glyphs, independent of the engine's cell swaps.
+                                for &(start, ch, width) in &glyphs {
+                                    let end = start + width;
+                                    let target = if count == 0 || end <= cursor || start >= right {
+                                        Some(start)
+                                    } else if delete && start >= cursor + count && end <= right {
+                                        Some(start - count)
+                                    } else if !delete && start >= cursor && end <= right - count {
+                                        Some(start + count)
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(target) = target {
+                                        expected[target] = (
+                                            ch,
+                                            if width == 2 {
+                                                Flags::WIDE_CHAR
+                                            } else {
+                                                Flags::empty()
+                                            },
+                                        );
+                                        if width == 2 {
+                                            expected[target + 1] = (' ', Flags::WIDE_CHAR_SPACER);
+                                        }
+                                    }
+                                }
+                                for (col, expected) in expected.iter().enumerate() {
+                                    let cell = &term.grid[Line(0)][Column(col)];
+                                    assert_eq!(
+                                        (cell.c, cell.flags & wide),
+                                        *expected,
+                                        "{text} margin{left}..{right} cursor{cursor} count{count} delete{delete} col{col}"
+                                    );
+                                }
+                                assert_eq!(
+                                    term.grid.cursor.point,
+                                    Point::new(Line(0), Column(cursor))
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn left_right_margins_leave_no_orphan_wide_cells() {
+        for edit in ["\x1b[@", "\x1b[P", "\x1b[S", "\x1b[T"] {
+            let size = TermSize::new(8, 4);
+            let mut term = Term::new(Config::default(), &size, VoidListener);
+            let mut parser: ansi::Processor = ansi::Processor::new();
+            parser.advance(
+                &mut term,
+                "\x1b[1;2H界界界\x1b[2;2H界界界\x1b[?69h\x1b[3;6s\x1b[1;3H".as_bytes(),
+            );
+            parser.advance(&mut term, edit.as_bytes());
+            for line in 0..4 {
+                for col in 0..8 {
+                    let flags = term.grid[Line(line)][Column(col)].flags;
+                    if flags.contains(Flags::WIDE_CHAR) {
+                        assert!(
+                            col < 7
+                                && term.grid[Line(line)][Column(col + 1)]
+                                    .flags
+                                    .contains(Flags::WIDE_CHAR_SPACER),
+                            "{edit:?} ({line},{col}) orphan lead"
+                        );
+                    }
+                    if flags.contains(Flags::WIDE_CHAR_SPACER) {
+                        assert!(
+                            col > 0
+                                && term.grid[Line(line)][Column(col - 1)]
+                                    .flags
+                                    .contains(Flags::WIDE_CHAR),
+                            "{edit:?} ({line},{col}) orphan spacer"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn margin_wrapping_wide_glyphs_does_not_create_a_full_row_spacer() {
+        let size = TermSize::new(8, 4);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, "\x1b[?69h\x1b[3;6s\x1b[1;6H界".as_bytes());
+        assert!(
+            !term.grid[Line(0)][Column(5)]
+                .flags
+                .contains(Flags::LEADING_WIDE_CHAR_SPACER)
+        );
+        assert_eq!(term.grid[Line(1)][Column(2)].c, '\u{754c}');
+        parser.advance(&mut term, b"\x1b[2;4r\x1b[2;8H\x1bM");
+        assert_eq!(
+            term.grid.cursor.point,
+            Point::new(Line(1), Column(7)),
+            "RI outside horizontal region stops at top margin"
+        );
+    }
+
+    #[test]
+    fn insert_mode_uses_the_same_horizontal_bounds_as_ich() {
+        let size = TermSize::new(8, 4);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, b"abcdefgh\x1b[?69h\x1b[3;6s\x1b[4h\x1b[1;1HZ");
+        let row = |term: &Term<VoidListener>| {
+            term.grid[Line(0)][..]
+                .iter()
+                .map(|cell| cell.c)
+                .collect::<String>()
+        };
+        assert_eq!(
+            row(&term),
+            "Zbcdefgh",
+            "IRM outside horizontal margins only overwrites"
+        );
+        parser.advance(&mut term, b"\x1b[1;4HQ");
+        assert_eq!(
+            row(&term),
+            "ZbcQdegh",
+            "IRM inside horizontal margins inserts and clips"
+        );
+    }
+
+    #[test]
+    fn wide_wrap_recomputes_destination_bounds_and_inserts_there() {
+        let size = TermSize::new(8, 4);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, "\x1b[?69h\x1b[3;4s\x1b[1;8H界".as_bytes());
+        assert_eq!(term.grid.cursor.point, Point::new(Line(1), Column(3)));
+        assert!(term.grid.cursor.input_needs_wrap);
+        parser.advance(&mut term, b"Z");
+        assert_eq!(term.grid[Line(2)][Column(2)].c, 'Z');
+        parser.advance(
+            &mut term,
+            "\x1bc\x1b[2;1HABCDEFGH\x1b[?69h\x1b[3;6s\x1b[4h\x1b[1;6H界".as_bytes(),
+        );
+        assert_eq!(term.grid[Line(1)][Column(2)].c, '\u{754c}');
+        assert_eq!(term.grid[Line(1)][Column(4)].c, 'C');
+        assert_eq!(term.grid[Line(1)][Column(5)].c, 'D');
+        assert_eq!(term.grid[Line(1)][Column(6)].c, 'G');
+        assert_eq!(term.grid[Line(1)][Column(7)].c, 'H');
+    }
+
+    #[test]
+    fn repeated_partial_scrolls_do_not_overflow_the_graphics_journal() {
+        let size = TermSize::new(8, 4);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, b"\x1b[?69h\x1b[3;6s\x1b[4;3H");
+        parser.advance(
+            &mut term,
+            &vec![b'\n'; GRAPHICS_EVENT_JOURNAL_CAPACITY + 10],
+        );
+        let batch = term.take_graphics_events();
+        assert!(!batch.overflowed);
+        assert!(matches!(
+            batch.events.as_slice(),
+            [GraphicsEvent::PartialScroll {
+                lines: 4,
+                left: 2,
+                right: 6,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn conformance_report_omits_the_encoding_parameter_at_vt100_level() {
+        let size = TermSize::new(8, 4);
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &size, listener.clone());
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, b"\x1b[61\"p\x1bP$q\"p\x1b\\");
+        assert_eq!(listener.drain(), ["\x1bP1$r61\"p\x1b\\"]);
+    }
+
+    #[test]
+    fn graphics_scrolls_do_not_coalesce_across_margin_mode_changes() {
+        let size = TermSize::new(8, 4);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, b"\x1b[S\x1b[?69h\x1b[S\x1b[?69l\x1b[S");
+        assert!(matches!(
+            term.take_graphics_events().events.as_slice(),
+            [
+                GraphicsEvent::Scroll { columns: None, .. },
+                GraphicsEvent::Scroll {
+                    columns: Some((0, 8)),
+                    ..
+                },
+                GraphicsEvent::Scroll { columns: None, .. },
+            ]
+        ));
+    }
+
+    #[test]
+    fn an_omitted_conformance_level_does_not_reset_text_or_history() {
+        let size = TermSize::new(12, 3);
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &size, listener.clone());
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, b"one\r\ntwo\r\nthree\r\nfour\r\nfive\x1b[?69h");
+        let history = term.grid.history_size();
+        assert!(history > 0);
+        let text: Vec<char> = term.grid.display_iter().map(|cell| cell.cell.c).collect();
+        parser.advance(&mut term, b"\x1b[\"p\x1b[0\"p\x1bP$q\"p\x1b\\");
+        assert_eq!(term.grid.history_size(), history);
+        assert_eq!(
+            term.grid
+                .display_iter()
+                .map(|cell| cell.cell.c)
+                .collect::<Vec<_>>(),
+            text
+        );
+        assert!(term.mode.contains(TermMode::LEFT_RIGHT_MARGIN));
+        assert_eq!(listener.drain(), ["\x1bP1$r65;1\"p\x1b\\"]);
+    }
+
+    #[test]
+    fn conformance_selection_resets_state_and_refuses_unsupported_encodings() {
+        let size = TermSize::new(12, 5);
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &size, listener.clone());
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(
+            &mut term,
+            b"A\x1b[4h\x1b[?69h\x1b[3;8s\x1b[66;1\"p\x1b[64;2\"p\x1bP$q\"p\x1b\\",
+        );
+        assert_eq!(term.grid[Line(0)][Column(0)].c, 'A');
+        assert!(
+            term.mode
+                .contains(TermMode::INSERT | TermMode::LEFT_RIGHT_MARGIN)
+        );
+        assert_eq!(listener.drain(), ["\x1bP1$r65;1\"p\x1b\\"]);
+        parser.advance(&mut term, b"\x1b[63;1\"p\x1b[4$p\x1b[?69$p");
+        assert_eq!(term.grid[Line(0)][Column(0)].c, ' ');
+        assert!(
+            !term
+                .mode
+                .intersects(TermMode::INSERT | TermMode::LEFT_RIGHT_MARGIN)
+        );
+        assert_eq!(listener.drain(), ["\x1b[4;2$y", "\x1b[?69;0$y"]);
+        parser.advance(&mut term, b"\x1b[62;1\"p\x1b[4$p\x1b[?69$p");
+        assert!(listener.drain().is_empty());
+        parser.advance(&mut term, b"\x1bc\x1b[?69$p");
+        assert_eq!(listener.drain(), ["\x1b[?69;2$y"]);
+    }
+
+    #[test]
+    fn conformance_level_three_disables_left_right_margins() {
+        let size = TermSize::new(12, 5);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, b"\x1b[63;1\"p\x1b[?69h\x1b[3;6s\x1b[1;5Habc");
+        assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(7)));
+        parser.advance(&mut term, b"\x1b[64;1\"p\x1b[?69h\x1b[3;6s\x1b[1;5Habc");
+        assert_eq!(term.grid.cursor.point, Point::new(Line(1), Column(3)));
+    }
+
+    #[test]
+    fn backward_tabs_honor_origin_but_otherwise_ignore_margins() {
+        let size = TermSize::new(16, 5);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, b"\x1b[?69h\x1b[3;12s\x1b[?6h\x1b[Z");
+        assert_eq!(term.grid.cursor.point.column, Column(2));
+        parser.advance(&mut term, b"\x1b[?6l\x1b[1;7H\x1b[2Z");
+        assert_eq!(term.grid.cursor.point.column, Column(0));
+        parser.advance(&mut term, b"\x1b[3g\x1b[1;10H\x1b[Z");
+        assert_eq!(
+            term.grid.cursor.point.column,
+            Column(0),
+            "no tab stops still goes to the left edge"
+        );
+    }
+
+    #[test]
+    fn left_right_margins_reject_empty_regions_and_reset() {
+        let size = TermSize::new(12, 5);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, b"\x1b[?69h\x1b[3;8s\x1b[7;7s\x1b[99;100s");
+        assert_eq!(term.horizontal_margins, Column(2)..Column(8));
+        parser.advance(&mut term, b"\x1b[?69l");
+        assert_eq!(term.horizontal_margins, Column(0)..Column(12));
+        parser.advance(&mut term, b"\x1b[?69h\x1b[3;8s\x1b[!p");
+        assert!(!term.mode.contains(TermMode::LEFT_RIGHT_MARGIN));
+        assert_eq!(term.horizontal_margins, Column(0)..Column(12));
+        parser.advance(&mut term, b"\x1b[?69h\x1b[3;8s\x1b#8");
+        assert_eq!(term.horizontal_margins, Column(0)..Column(12));
+        parser.advance(&mut term, b"\x1b[3;8s\x1bc");
+        assert!(!term.mode.contains(TermMode::LEFT_RIGHT_MARGIN));
+        assert_eq!(term.horizontal_margins, Column(0)..Column(12));
+    }
+
+    #[test]
+    fn left_right_margins_offset_an_origin_mode_cursor() {
+        let size = TermSize::new(12, 5);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, b"\x1b[?69h\x1b[3;8s\x1b[?6h\x1b[1;1H");
+        assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(2)));
+        processor.advance(&mut term, b"\x1b[1;99H");
+        assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(7)));
+    }
+
+    #[test]
+    fn left_right_margin_mode_reports_its_actual_state() {
+        let size = TermSize::new(12, 5);
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &size, listener.clone());
+        let mut processor: Processor = Processor::new();
+        for (sequence, expected) in [
+            (b"\x1b[?69$p".as_slice(), "\x1b[?69;2$y"),
+            (b"\x1b[?69h\x1b[?69$p".as_slice(), "\x1b[?69;1$y"),
+            (b"\x1b[?69l\x1b[?69$p".as_slice(), "\x1b[?69;2$y"),
+        ] {
+            processor.advance(&mut term, sequence);
+            assert_eq!(listener.drain(), [expected]);
         }
     }
 
@@ -4687,6 +5567,7 @@ mod tests {
                         clear: false,
                     },
                     GraphicsEvent::Scroll {
+                        columns: None,
                         direction: GraphicsScrollDirection::Up,
                         top: 1,
                         bottom: 4,
@@ -4720,6 +5601,7 @@ mod tests {
             term.take_graphics_events(),
             GraphicsEventBatch {
                 events: vec![GraphicsEvent::Scroll {
+                    columns: None,
                     direction: GraphicsScrollDirection::Up,
                     top: 0,
                     bottom: 4,
