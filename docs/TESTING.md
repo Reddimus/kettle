@@ -1158,6 +1158,29 @@ Use the exact release bundle for release acceptance.
 Record the OS, display backend, GPU, renderer mode, scale, and application build.
 Keep failures and skipped areas with the evidence.
 
+### Native macOS page-up qualification
+
+Run the bounded reproduction against an identified binary:
+
+```sh
+launchctl asuser "$(id -u)" python3 scripts/check-pageup-stress.py \
+  --kettle /path/to/kettle.app/Contents/MacOS/kettle --out-dir /private/tmp/pageup-run
+```
+
+The default is ten fresh windows and 200 page-up/down pairs: 100 control
+actions, 50 keybinding dispatches and 50 native Shift+Page Up/Down pairs.
+Each window must first contain 1,600 confirmed output lines; an echoed shell
+command is not readiness. Every up must enter scrollback and every down must
+restore offset zero. The fixture uses `/bin/sh` without user startup files.
+Keep the desktop unlocked and allow the owned window to take focus. Native
+input is refused if that window cannot be identified as frontmost.
+
+The new output directory retains executable/script hashes, build version,
+OS, process identities, before/after JSON, visible PNGs, load and failure
+evidence. `--windows` accepts 1 through 30. The portable negative controls run
+in `just script-fixture-self-test`. Passing this bounded check is not a
+root-cause explanation for earlier unidentified intermittent failures.
+
 ### Terminal applications and physical input
 
 - [ ] Use your actual editor, pager, multiplexer, and agent TUI with its normal
