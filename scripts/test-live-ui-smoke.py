@@ -536,6 +536,7 @@ class LiveUiTests(unittest.TestCase):
 
         with patch.object(subprocess, 'check_output', return_value='123'), \
                 patch.object(native.time, 'sleep'), \
+                patch.object(native.os, 'getuid', return_value=501, create=True), \
                 patch.object(native, 'same_bundle', side_effect=lambda left, right: left == right):
             for count in (2,):
                 fixture = Fixture(count)
@@ -635,7 +636,10 @@ class LiveUiTests(unittest.TestCase):
             self.assertFalse(native.same_bundle(None, candidate))
             result = subprocess.CompletedProcess([], 0, json.dumps([
                 [999, str(other)], [123, str(alias)], [456, str(candidate)]]), '')
-            with patch.object(subprocess, 'run', return_value=result):
+            with (
+                patch.object(subprocess, 'run', return_value=result),
+                patch.object(native.os, 'getuid', return_value=501, create=True),
+            ):
                 self.assertEqual(native.candidate_pids(candidate), [123, 456])
 
     def test_interaction_and_dock_pin_english_menu_labels(self):
