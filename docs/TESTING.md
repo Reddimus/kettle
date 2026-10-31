@@ -1160,6 +1160,17 @@ protection, which the suite labels as a reference compatibility exception.
 A subset run does not compare the global expected list; check its reported
 failure count explicitly and run the complete suite for integration.
 
+The rectangular copy/fill/erase follow-up removes another 24 failures: the
+native suite passes 381 tests with 143 expected failures and no new failures.
+Portable rectangular-operation tests cover parser dispatch, defaults, clipped
+coordinates and destinations, page-number clamping, origin-mode margins,
+overlap with complete cell attributes, unchanged cursor and pending wrap,
+DEC versus ISO protection, selective-erase attributes, and wide-cell boundaries.
+A separate whole-glyph reference checks 2,048 horizontal overlapping-copy
+combinations across four mixed CJK rows. A leading-spacer regression fails
+with its cleanup disabled and verifies unrelated preceding-row protection.
+These controls require VT level four or above.
+
 **ucs-detect** (`just conformance-ucs`) measures how many columns the
 terminal gives Unicode text, against `wcwidth`. Kettle 5.7.0 scored 99.6% on
 narrow and 94.9% on wide characters, where the misses are the 26 regional

@@ -2196,6 +2196,25 @@ of retaining a protected blank. Cursor save/restore carries the attribute;
 RIS and DECSTR reset the current protection state. Erasure remains inclusive
 of the physical cursor cell when autowrap is pending.
 
+### Rectangular text operations
+
+DECCRA snapshots a source rectangle before writing its destination, including
+cell colours, protection, combining marks and hyperlinks. Both rectangles use
+the active text page; page numbers clamp to that single page. Defaults and
+oversized coordinates clip to the page, with origin mode translating and
+limiting coordinates to the scrolling region. Margins otherwise do not clip
+rectangles. These controls leave the cursor, pending wrap and history alone.
+
+DECFRA accepts the DEC ASCII/Latin-1 ranges and fills cells using the current
+rendition. DECERA erases character attributes using the current erase
+background, regardless of protection. DECSERA preserves visual attributes and
+honors DEC protection, while ignoring ISO protection. Partial wide glyphs are
+cleared as whole glyphs; copying a partial source glyph produces a blank.
+Replacing a wrapped wide glyph also clears its linked leading spacer without
+changing unrelated preceding-row protection. Destination line-wrap attributes
+remain in place. The controls operate on text cells; they do not duplicate or
+relocate retained graphics placements. VT levels below four ignore them.
+
 ### Synchronized graphics publication
 
 Graphics controls inside DEC 2026 use the same atomic commit boundary. While

@@ -74,6 +74,13 @@ date. Recheck that before upgrading a crate or dropping a patch.
   wide glyph also removes that half's protection. RIS and DECSTR reset the
   current protection state, and cursor save/restore retains the attribute.
   Erase-to-right includes the last cell while autowrap is pending.
+  DECCRA, DECFRA, DECERA and DECSERA operate on clipped, origin-relative text
+  rectangles without moving the cursor or adding history. Copying snapshots
+  complete cells before mutation, including overlapping areas; wide-glyph
+  boundaries remain paired. Selective rectangular erase preserves visual
+  attributes and honors DEC protection, while ignoring ISO protection.
+  Page parameters clamp to the one active page; levels below four ignore
+  these controls. Retained image placements are not copied or relocated.
   DEC mode 69 and DECSLRM define left/right margins for origin-relative
   cursor movement, wrapping, horizontal editing and rectangular vertical
   scrolling. Partial-width scrolls leave history and neighboring columns
