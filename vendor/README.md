@@ -67,6 +67,17 @@ date. Recheck that before upgrading a crate or dropping a patch.
   dark scheme that `CSI ? 996 n` answers and DEC mode 2031 reports on every
   colour change the caller signals, dark to dark included; DECSTR and RIS
   turn mode 2031 off.
+  DEC mode 69 and DECSLRM define left/right margins for origin-relative
+  cursor movement, wrapping, horizontal editing and rectangular vertical
+  scrolling. Partial-width scrolls leave history and neighboring columns
+  intact, except for clearing a wide glyph straddling a margin as a unit.
+  Scroll events retain active horizontal bounds even at full width; images wholly inside the
+  rectangle scroll, while placements crossing a margin stay stationary.
+  DECSTR, RIS, DECALN, DECCOLM and resizing restore full-width margins.
+  DECRQSS reports the current horizontal margins.
+  Seven-bit DECSCL selections perform RIS and restrict margins to VT level
+  4 or above; mode queries are unavailable below level 3. Unsupported levels
+  and eight-bit C1 reply encodings are ignored without resetting state.
   `Term::set_options_preserving_history` changes the scrollback limit on a
   resize without evicting rows: a smaller limit, such as the line cap a wider
   pane's `scrollback-bytes` budget allows, applies when output next scrolls

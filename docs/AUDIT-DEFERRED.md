@@ -92,14 +92,17 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   clusters too, or as a new default that changes how every program's output
   lays out. Close by choosing, then measuring and storing whole clusters per
   cell with their recorded width, with ucs-detect scores before and after.
-- **Unimplemented DEC and xterm controls.** esctest2 still fails 252 tests,
-  listed by reason in `scripts/conformance-esctest-expected.txt`: chiefly
-  left and right margins (DECSLRM), rectangular-area operations, character
-  protection and selective erase, column editing, reverse wraparound and
-  colour syntaxes beyond `rgb:` and `#rrggbb`. None is a defect in a control
-  Kettle implements. Close each by implementing it in the vendored engine and
-  moving its tests out of the list; `just conformance-esctest` fails until the
-  list matches.
+- **Unimplemented DEC and xterm controls.** The left/right margin follow-up
+  removes 55 failures; esctest2 now fails 197 tests, listed by reason in
+  `scripts/conformance-esctest-expected.txt`. Remaining features include
+  rectangular-area operations, character protection and selective erase,
+  column editing, reverse wraparound and additional colour syntaxes. Cases
+  involving those controls and margins remain grouped with their missing
+  feature. The list also retains deliberate identity, checksum and window
+  policies. Close each feature by implementing it in the vendored engine and
+  removing its passing tests; `just conformance-esctest` fails until the list
+  matches. Seven-bit DECSCL selections are implemented; raw eight-bit C1
+  replies remain unsupported without changing the selected terminal state.
 
 ## UX
 

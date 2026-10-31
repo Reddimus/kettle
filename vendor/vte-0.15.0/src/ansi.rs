@@ -769,6 +769,9 @@ pub trait Handler {
     /// scrollback whenever a program initialized the terminal.
     fn soft_reset_state(&mut self) {}
 
+    /// Select a DEC conformance level with the requested control encoding.
+    fn set_conformance_level(&mut self, _level: u16, _controls: u16) {}
+
     /// Reverse Index.
     ///
     /// Move the active position to the same horizontal position on the
@@ -799,6 +802,11 @@ pub trait Handler {
 
     /// DECSTBM - Set the terminal scrolling region.
     fn set_scrolling_region(&mut self, _top: usize, _bottom: Option<usize>) {}
+
+    /// DECSLRM when enabled, otherwise the legacy CSI s cursor save.
+    fn set_horizontal_margins(&mut self, _left: usize, _right: Option<usize>) {
+        self.save_cursor_position();
+    }
 
     /// DECKPAM - Set keypad to applications mode (ESCape instead of digits).
     fn set_keypad_application_mode(&mut self) {}
@@ -1056,6 +1064,7 @@ impl PrivateMode {
             7 => Self::Named(NamedPrivateMode::LineWrap),
             12 => Self::Named(NamedPrivateMode::BlinkingCursor),
             25 => Self::Named(NamedPrivateMode::ShowCursor),
+            69 => Self::Named(NamedPrivateMode::LeftRightMargin),
             1000 => Self::Named(NamedPrivateMode::ReportMouseClicks),
             1002 => Self::Named(NamedPrivateMode::ReportCellMouseMotion),
             1003 => Self::Named(NamedPrivateMode::ReportAllMouseMotion),
@@ -1107,6 +1116,7 @@ pub enum NamedPrivateMode {
     LineWrap = 7,
     BlinkingCursor = 12,
     ShowCursor = 25,
+    LeftRightMargin = 69,
     ReportMouseClicks = 1000,
     ReportCellMouseMotion = 1002,
     ReportAllMouseMotion = 1003,
@@ -1919,6 +1929,11 @@ where
             // this to the hard reset would clear the screen and scrollback of
             // any user whose program initializes the terminal.
             ('p', [b'!']) => handler.soft_reset_state(),
+            ('p', [b'"']) => {
+                let level = next_param_or(0);
+                let controls = next_param_or(0);
+                handler.set_conformance_level(level, controls);
+            },
             // XTVERSION (CSI > Ps q). Only Ps = 0 is defined.
             ('q', [b'>']) => {
                 if next_param_or(0) == 0 {
@@ -1953,7 +1968,11 @@ where
                 handler.set_scrolling_region(top, bottom);
             },
             ('S', []) => handler.scroll_up(next_param_or(1) as usize),
-            ('s', []) => handler.save_cursor_position(),
+            ('s', []) => {
+                let left = next_param_or(1) as usize;
+                let right = params_iter.next().map(|param| param[0] as usize).filter(|&p| p != 0);
+                handler.set_horizontal_margins(left, right);
+            },
             ('T', []) => handler.scroll_down(next_param_or(1) as usize),
             ('t', []) => match next_param_or(1) as usize {
                 14 => handler.text_area_size_pixels(),

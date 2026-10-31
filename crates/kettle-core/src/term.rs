@@ -1754,7 +1754,7 @@ fn retain_source_vertical_range(
     true
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct GraphicsScroll {
     direction: GraphicsScrollDirection,
     top: usize,
@@ -1763,6 +1763,7 @@ struct GraphicsScroll {
     old_screen_top: u64,
     new_screen_top: u64,
     screen_lines: usize,
+    columns: Option<std::ops::Range<usize>>,
 }
 
 fn scroll_regular_placements(images: &Images, scroll: GraphicsScroll) -> bool {
@@ -1774,6 +1775,7 @@ fn scroll_regular_placements(images: &Images, scroll: GraphicsScroll) -> bool {
         old_screen_top,
         new_screen_top,
         screen_lines,
+        columns,
     } = scroll;
     if top >= bottom || bottom > screen_lines || lines == 0 || lines > bottom - top {
         return false;
@@ -1807,13 +1809,23 @@ fn scroll_regular_placements(images: &Images, scroll: GraphicsScroll) -> bool {
             return true;
         }
 
-        if scrolls_into_history && start < 0.0 && end <= region_bottom {
-            return true;
-        }
-
         // Kitty scrolls only images entirely contained by the page margins.
         // Everything else remains at the same visual row; re-anchoring is
         // still required when a top-anchored region advances stable row ids.
+        let outside_columns = columns.as_ref().is_some_and(|columns| {
+            let left = placement.col as f64 + f64::from(placement.x_offset_cells);
+            let right = left + f64::from(placement.display_cols);
+            !left.is_finite()
+                || !right.is_finite()
+                || left < columns.start as f64
+                || right > columns.end as f64
+        });
+        if outside_columns {
+            return set_placement_viewport_start(placement, new_screen_top, start);
+        }
+        if scrolls_into_history && start < 0.0 && end <= region_bottom {
+            return true;
+        }
         if start < region_top || end > region_bottom {
             return set_placement_viewport_start(placement, new_screen_top, start);
         }
@@ -1923,8 +1935,31 @@ fn apply_graphics_event(
             *active_alternate = false;
             true
         }
+        GraphicsEvent::PartialScroll {
+            direction,
+            top,
+            bottom,
+            left,
+            right,
+            lines,
+            screen_top,
+            screen_lines,
+        } => scroll_regular_placements(
+            images,
+            GraphicsScroll {
+                direction,
+                top,
+                bottom,
+                lines,
+                old_screen_top: screen_top,
+                new_screen_top: screen_top,
+                screen_lines,
+                columns: Some(left..right),
+            },
+        ),
         GraphicsEvent::Scroll {
             direction,
+            columns,
             top,
             bottom,
             lines,
@@ -1941,6 +1976,7 @@ fn apply_graphics_event(
                 old_screen_top,
                 new_screen_top,
                 screen_lines,
+                columns: columns.map(|(left, right)| left..right),
             },
         ),
         GraphicsEvent::SyncMarker { .. }
