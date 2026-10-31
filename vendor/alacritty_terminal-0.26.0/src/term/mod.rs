@@ -30,6 +30,14 @@ pub mod cell;
 pub mod color;
 pub mod search;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum ProtectionMode {
+    #[default]
+    Off,
+    Dec,
+    Iso,
+}
+
 /// Minimum number of columns.
 ///
 /// A minimum of 2 is necessary to hold fullwidth unicode characters.
@@ -354,6 +362,7 @@ pub struct Term<T> {
     ///
     /// Range going from top to bottom of the terminal, indexed from the top of the viewport.
     scroll_region: Range<Line>,
+    protection_mode: ProtectionMode,
     horizontal_margins: Range<Column>,
     conformance_level: u8,
 
@@ -686,6 +695,7 @@ impl<T> Term<T> {
         Term {
             inactive_grid,
             scroll_region,
+            protection_mode: ProtectionMode::Off,
             horizontal_margins: Column(0)..Column(grid.columns()),
             conformance_level: 5,
             event_proxy,
@@ -1614,6 +1624,90 @@ impl<T> Term<T> {
         }
     }
 
+    fn clear_line_cells(&mut self, mode: ansi::LineClearMode, selective: bool) {
+        trace!("Clearing line: {mode:?}");
+
+        let cursor = &self.grid.cursor;
+        let point = cursor.point;
+
+        let (left, right) = match mode {
+            ansi::LineClearMode::Right => (point.column, Column(self.columns())),
+            ansi::LineClearMode::Left => (Column(0), point.column + 1),
+            ansi::LineClearMode::All => (Column(0), Column(self.columns())),
+        };
+
+        self.erase_protected_cells(point.line, left, right, selective);
+
+        let range = self.grid.cursor.point.line..=self.grid.cursor.point.line;
+        self.selection = self.selection.take().filter(|s| !s.intersects_range(range));
+    }
+
+    fn clear_protected_screen(&mut self, mode: ansi::ClearMode, selective: bool) {
+        let point = self.grid.cursor.point;
+        let columns = Column(self.columns());
+        let bottom = Line(self.screen_lines() as i32 - 1);
+        let (first, last, left, right) = match mode {
+            ansi::ClearMode::Above => (Line(0), point.line, Column(0), point.column + 1),
+            ansi::ClearMode::Below => (point.line, bottom, point.column, columns),
+            ansi::ClearMode::All => (Line(0), bottom, Column(0), columns),
+            ansi::ClearMode::Saved => return,
+        };
+        for line in first.0..=last.0 {
+            let start = if line == first.0 { left } else { Column(0) };
+            let end = if line == last.0 { right } else { columns };
+            self.erase_protected_cells(Line(line), start, end, selective);
+        }
+        self.selection = self
+            .selection
+            .take()
+            .filter(|selection| !selection.intersects_range(first..=last));
+        self.mark_fully_damaged();
+        if matches!(mode, ansi::ClearMode::All) {
+            self.graphics_events.push(GraphicsEvent::EraseDisplay);
+        }
+    }
+
+    fn erase_protected_cells(
+        &mut self,
+        line: Line,
+        mut start: Column,
+        mut end: Column,
+        selective: bool,
+    ) {
+        let respect = self.protection_mode == ProtectionMode::Iso
+            || (selective && self.protection_mode == ProtectionMode::Dec);
+        if !respect {
+            self.erase_cells(line, start, end);
+            return;
+        }
+        if start >= end {
+            return;
+        }
+        let columns = self.columns();
+        let bg = self.grid.cursor.template.bg;
+        let row = &mut self.grid[line];
+        if start > 0 && row[start].flags.contains(Flags::WIDE_CHAR_SPACER) {
+            start -= 1;
+        }
+        if end < columns && row[end - 1].flags.contains(Flags::WIDE_CHAR) {
+            end += 1;
+        }
+        self.damage.damage_line(line.0 as usize, start.0, end.0 - 1);
+        for col in start.0..end.0 {
+            let flags = row[Column(col)].flags;
+            let protected = flags.contains(Flags::PROTECTED)
+                || (flags.contains(Flags::WIDE_CHAR)
+                    && col + 1 < columns
+                    && row[Column(col + 1)].flags.contains(Flags::PROTECTED))
+                || (flags.contains(Flags::WIDE_CHAR_SPACER)
+                    && col > 0
+                    && row[Column(col - 1)].flags.contains(Flags::PROTECTED));
+            if !protected {
+                row[Column(col)] = bg.into();
+            }
+        }
+    }
+
     fn erase_cells(&mut self, line: Line, mut start: Column, mut end: Column) {
         if start >= end {
             return;
@@ -1655,9 +1749,9 @@ impl<T> Term<T> {
             let wide = cursor_cell.flags.contains(Flags::WIDE_CHAR);
             let point = self.grid.cursor.point;
             if wide && point.column < self.last_column() {
-                self.grid[point.line][point.column + 1]
-                    .flags
-                    .remove(Flags::WIDE_CHAR_SPACER);
+                let spacer = &mut self.grid[point.line][point.column + 1];
+                spacer.clear_wide();
+                spacer.flags.remove(Flags::WIDE_CHAR_SPACER);
             } else if point.column > 0 {
                 self.grid[point.line][point.column - 1].clear_wide();
             }
@@ -1665,9 +1759,12 @@ impl<T> Term<T> {
             // Remove leading spacers.
             if point.column <= 1 && point.line != self.topmost_line() {
                 let column = self.last_column();
-                self.grid[point.line - 1i32][column]
-                    .flags
-                    .remove(Flags::LEADING_WIDE_CHAR_SPACER);
+                let spacer = &mut self.grid[point.line - 1i32][column];
+                if spacer.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+                    spacer
+                        .flags
+                        .remove(Flags::LEADING_WIDE_CHAR_SPACER | Flags::PROTECTED);
+                }
             }
 
             cursor_cell = self.grid.cursor_cell();
@@ -2228,6 +2325,10 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("DECRQSS {request:?}");
         let setting = match request {
             Some(b"m") => Some(format!("{}m", sgr_report(&self.grid.cursor.template))),
+            Some(b"\"q") => Some(format!(
+                "{}\"q",
+                u8::from(self.grid.cursor.template.flags.contains(Flags::PROTECTED))
+            )),
             Some(b"\"p") if self.conformance_level == 1 => Some(String::from("61\"p")),
             Some(b"\"p") => Some(format!("6{};1\"p", self.conformance_level)),
             Some(b"s") => Some(format!(
@@ -2471,7 +2572,7 @@ impl<T: EventListener> Handler for Term<T> {
         let end = cmp::min(start + count, Column(self.columns()));
 
         let line = cursor.point.line;
-        self.erase_cells(line, start, end);
+        self.erase_protected_cells(line, start, end, false);
     }
 
     #[inline]
@@ -2591,22 +2692,31 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn clear_line(&mut self, mode: ansi::LineClearMode) {
-        trace!("Clearing line: {mode:?}");
+        self.clear_line_cells(mode, false);
+    }
 
-        let cursor = &self.grid.cursor;
-        let point = cursor.point;
+    fn selective_clear_line(&mut self, mode: ansi::LineClearMode) {
+        self.clear_line_cells(mode, true);
+    }
 
-        let (left, right) = match mode {
-            ansi::LineClearMode::Right if cursor.input_needs_wrap => return,
-            ansi::LineClearMode::Right => (point.column, Column(self.columns())),
-            ansi::LineClearMode::Left => (Column(0), point.column + 1),
-            ansi::LineClearMode::All => (Column(0), Column(self.columns())),
-        };
+    fn selective_clear_screen(&mut self, mode: ansi::ClearMode) {
+        self.clear_protected_screen(mode, true);
+    }
 
-        self.erase_cells(point.line, left, right);
+    fn set_character_protection(&mut self, protected: bool) {
+        self.protection_mode = ProtectionMode::Dec;
+        self.grid
+            .cursor
+            .template
+            .flags
+            .set(Flags::PROTECTED, protected);
+    }
 
-        let range = self.grid.cursor.point.line..=self.grid.cursor.point.line;
-        self.selection = self.selection.take().filter(|s| !s.intersects_range(range));
+    fn set_protected_area(&mut self, start: bool) {
+        if start {
+            self.protection_mode = ProtectionMode::Iso;
+        }
+        self.grid.cursor.template.flags.set(Flags::PROTECTED, start);
     }
 
     /// Set the indexed color value.
@@ -2701,6 +2811,10 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn clear_screen(&mut self, mode: ansi::ClearMode) {
+        if self.protection_mode == ProtectionMode::Iso && !matches!(mode, ansi::ClearMode::Saved) {
+            self.clear_protected_screen(mode, false);
+            return;
+        }
         trace!("Clearing screen: {mode:?}");
         let erase_display = matches!(&mode, ansi::ClearMode::All);
 
@@ -2791,6 +2905,7 @@ impl<T: EventListener> Handler for Term<T> {
     /// Reset all important fields in the term struct.
     #[inline]
     fn reset_state(&mut self) {
+        self.protection_mode = ProtectionMode::Off;
         self.conformance_level = 5;
         if self.mode.contains(TermMode::ALT_SCREEN) {
             mem::swap(&mut self.grid, &mut self.inactive_grid);
@@ -2836,6 +2951,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn soft_reset_state(&mut self) {
+        self.protection_mode = ProtectionMode::Off;
         // DECSTR restores terminal state while leaving the display, scrollback and
         // title alone. Programs emit `CSI ! p` from terminfo `is2`/`rs2` while
         // initializing, so clearing here would destroy a user's scrollback
@@ -2904,7 +3020,7 @@ impl<T: EventListener> Handler for Term<T> {
             Attr::Reset => {
                 cursor.template.fg = Color::Named(NamedColor::Foreground);
                 cursor.template.bg = Color::Named(NamedColor::Background);
-                cursor.template.flags = Flags::empty();
+                cursor.template.flags &= Flags::PROTECTED;
                 cursor.template.set_underline_color(None);
             }
             Attr::Reverse => cursor.template.flags.insert(Flags::INVERSE),
@@ -4652,6 +4768,201 @@ mod tests {
         ] {
             processor.advance(&mut term, sequence);
             assert_eq!(listener.drain(), [expected]);
+        }
+    }
+
+    #[test]
+    fn protection_is_cleared_only_from_a_linked_leading_wide_spacer() {
+        for (text, expected_char, expected_bg) in [
+            (
+                "abc\x1b[1\"q界\x1b[0\"q\x1b[2;1HX",
+                ' ',
+                Color::Named(NamedColor::Red),
+            ),
+            (
+                "abc\x1b[1\"qP\x1b[2;1H界\x1b[0\"q\x1b[2;1HX",
+                'P',
+                Color::Named(NamedColor::Background),
+            ),
+        ] {
+            let size = TermSize::new(4, 2);
+            let mut term = Term::new(Config::default(), &size, VoidListener);
+            let mut parser: ansi::Processor = ansi::Processor::new();
+            parser.advance(&mut term, text.as_bytes());
+            parser.advance(&mut term, b"\x1b[41m\x1b[1;4H\x1b[?K");
+            let cell = &term.grid[Line(0)][Column(3)];
+            assert_eq!(cell.c, expected_char);
+            assert_eq!(cell.bg, expected_bg, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn protection_scrolls_with_cells_while_vacated_margin_cells_are_cleared() {
+        let size = TermSize::new(8, 4);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(
+            &mut term,
+            b"\x1bVAB\x1bW\x1b[4;3H\x1bVP\x1bWQ\x1b[?69h\x1b[3;6s\x1b[S\x1b[?2J",
+        );
+        for (line, expected) in ["AB      ", "        ", "  P     ", "        "]
+            .iter()
+            .enumerate()
+        {
+            let actual: String = term.grid[Line(line as i32)][..]
+                .iter()
+                .map(|cell| cell.c)
+                .collect();
+            assert_eq!(&actual, expected, "row{line}");
+        }
+        assert_eq!(term.grid.history_size(), 0);
+    }
+
+    #[test]
+    fn protection_does_not_survive_in_the_cleared_half_of_an_overwritten_wide_glyph() {
+        for column in [1, 2] {
+            let size = TermSize::new(8, 2);
+            let mut term = Term::new(Config::default(), &size, VoidListener);
+            let mut parser: ansi::Processor = ansi::Processor::new();
+            parser.advance(&mut term, "\x1b[1\"q界\x1b[0\"q".as_bytes());
+            parser.advance(&mut term, format!("\x1b[1;{column}HX").as_bytes());
+            let cleared = Column(if column == 1 { 1 } else { 0 });
+            assert!(
+                crate::grid::GridCell::is_empty(&term.grid[Line(0)][cleared]),
+                "the erased half must not retain a protected blank at column{cleared}"
+            );
+        }
+    }
+
+    #[test]
+    fn protection_erase_right_includes_the_last_cell_while_wrap_is_pending() {
+        for protected in [false, true] {
+            for (erase, selective) in [(b"\x1b[K".as_slice(), false), (b"\x1b[?K".as_slice(), true)]
+            {
+                let size = TermSize::new(4, 2);
+                let mut term = Term::new(Config::default(), &size, VoidListener);
+                let mut parser: ansi::Processor = ansi::Processor::new();
+                parser.advance(&mut term, b"abc");
+                if protected {
+                    parser.advance(&mut term, b"\x1b[1\"q");
+                }
+                parser.advance(&mut term, b"P");
+                assert!(term.grid.cursor.input_needs_wrap);
+                parser.advance(&mut term, erase);
+                let actual: String = term.grid[Line(0)][..].iter().map(|cell| cell.c).collect();
+                assert_eq!(
+                    actual,
+                    if protected && selective {
+                        "abcP"
+                    } else {
+                        "abc "
+                    }
+                );
+                assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(3)));
+            }
+        }
+    }
+
+    #[test]
+    fn protection_selective_display_erase_covers_all_three_ranges_without_history() {
+        for (erase, expected) in [
+            ("\x1b[?J", ["ABcdefgh", "ABc     ", "AB      "]),
+            ("\x1b[?1J", ["AB      ", "AB  efgh", "ABcdefgh"]),
+            ("\x1b[?2J", ["AB      ", "AB      ", "AB      "]),
+        ] {
+            let size = TermSize::new(8, 3);
+            let mut term = Term::new(Config::default(), &size, VoidListener);
+            let mut parser: ansi::Processor = ansi::Processor::new();
+            for row in 1..=3 {
+                parser.advance(
+                    &mut term,
+                    format!("\x1b[{row};1H\x1b[1\"qAB\x1b[0\"qcdefgh").as_bytes(),
+                );
+            }
+            parser.advance(&mut term, b"\x1b[2;4H");
+            parser.advance(&mut term, erase.as_bytes());
+            for (line, expected) in expected.iter().enumerate() {
+                let actual: String = term.grid[Line(line as i32)][..]
+                    .iter()
+                    .map(|cell| cell.c)
+                    .collect();
+                assert_eq!(&actual, expected, "{erase:?} row {line}");
+            }
+            assert_eq!(term.grid.history_size(), 0);
+        }
+    }
+
+    #[test]
+    fn protection_reports_and_cursor_save_restore_are_independent_of_sgr() {
+        let size = TermSize::new(8, 3);
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &size, listener.clone());
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(
+            &mut term,
+            b"\x1b[1\"qA\x1b7\x1b[0\"qB\x1b8\x1b[0mZ\x1bP$q\"q\x1b\\",
+        );
+        assert_eq!(listener.drain(), ["\x1bP1$r1\"q\x1b\\"]);
+        parser.advance(&mut term, b"\x1b[?2K");
+        assert_eq!(term.grid[Line(0)][Column(0)].c, 'A');
+        assert_eq!(term.grid[Line(0)][Column(1)].c, 'Z');
+        parser.advance(&mut term, b"\x1b[2\"q\x1bP$q\"q\x1b\\");
+        assert_eq!(listener.drain(), ["\x1bP1$r0\"q\x1b\\"]);
+        parser.advance(&mut term, b"\x1b[1\"q\x1b[!pX\x1b[?2J");
+        assert!(term.grid.display_iter().all(|cell| cell.cell.c == ' '));
+    }
+
+    #[test]
+    fn protection_keeps_a_wide_glyph_whole_when_erasing_its_spacer() {
+        let size = TermSize::new(8, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, "\x1bV界\x1bWX\x1b[1;2H\x1b[X".as_bytes());
+        assert_eq!(term.grid[Line(0)][Column(0)].c, '\u{754c}');
+        assert!(
+            term.grid[Line(0)][Column(1)]
+                .flags
+                .contains(Flags::WIDE_CHAR_SPACER)
+        );
+        parser.advance(&mut term, b"\x1b[0\"q\x1b[X");
+        assert_eq!(term.grid[Line(0)][Column(0)].c, ' ');
+        assert!(
+            !term.grid[Line(0)][Column(1)]
+                .flags
+                .contains(Flags::WIDE_CHAR_SPACER)
+        );
+    }
+
+    #[test]
+    fn dec_protection_survives_sgr_and_only_selective_erase_respects_it() {
+        let size = TermSize::new(12, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(
+            &mut term,
+            b"\x1b[1\"qA\x1b[0mBC\x1b[0\"qDEF\x1b[1;1H\x1b[?2K",
+        );
+        let text = |term: &Term<VoidListener>| {
+            term.grid[Line(0)][..]
+                .iter()
+                .map(|cell| cell.c)
+                .collect::<String>()
+        };
+        assert_eq!(text(&term), "ABC         ");
+        parser.advance(&mut term, b"\x1b[2K");
+        assert_eq!(text(&term), "            ");
+    }
+
+    #[test]
+    fn iso_protection_survives_normal_line_display_and_character_erasure() {
+        for erase in ["\x1b[2K", "\x1b[2J", "\x1b[12X"] {
+            let size = TermSize::new(12, 3);
+            let mut term = Term::new(Config::default(), &size, VoidListener);
+            let mut parser: ansi::Processor = ansi::Processor::new();
+            parser.advance(&mut term, b"\x1bVABC\x1bWDEF\x1b[1;1H");
+            parser.advance(&mut term, erase.as_bytes());
+            let actual: String = term.grid[Line(0)][..].iter().map(|cell| cell.c).collect();
+            assert_eq!(actual, "ABC         ", "{erase:?} respects SPA/EPA");
         }
     }
 

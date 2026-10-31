@@ -13,38 +13,6 @@ DA2Tests.test_DA2_NoParameter
 DATests.test_DA_0
 DATests.test_DA_NoParameter
 
-[character protection and selective erase (DECSCA, SPA/EPA, DECSED, DECSEL): not implemented]
-DECRQSSTests.test_DECRQSS_DECSCA
-DECSEDTests.test_DECSED_0
-DECSEDTests.test_DECSED_0_Protection
-DECSEDTests.test_DECSED_0_WithScrollRegion
-DECSEDTests.test_DECSED_0_WithScrollRegion_Protection
-DECSEDTests.test_DECSED_1
-DECSEDTests.test_DECSED_1_Protection
-DECSEDTests.test_DECSED_1_WithScrollRegion
-DECSEDTests.test_DECSED_1_WithScrollRegion_Protection
-DECSEDTests.test_DECSED_2
-DECSEDTests.test_DECSED_2_Protection
-DECSEDTests.test_DECSED_2_WithScrollRegion
-DECSEDTests.test_DECSED_2_WithScrollRegion_Protection
-DECSEDTests.test_DECSED_DECSCA_2
-DECSEDTests.test_DECSED_Default
-DECSEDTests.test_DECSED_Default_Protection
-DECSELTests.test_DECSEL_0
-DECSELTests.test_DECSEL_0_Protection
-DECSELTests.test_DECSEL_1
-DECSELTests.test_DECSEL_1_Protection
-DECSELTests.test_DECSEL_2
-DECSELTests.test_DECSEL_2_Protection
-DECSELTests.test_DECSEL_Default
-DECSELTests.test_DECSEL_Default_Protection
-DECSELTests.test_DECSEL_IgnoresScrollRegion
-DECSELTests.test_DECSEL_IgnoresScrollRegion_Protection
-DECSTRTests.test_DECSTR_DECSCA
-ECHTests.test_ECH_respectsISOProtection
-EDTests.test_ED_respectsISOProtection
-ELTests.test_EL_respectsISOProtection
-
 [colour syntax and special colours beyond rgb: and #rrggbb (X colour spaces, OSC 5, OSC 4 special indices): not implemented]
 ChangeColorTests.test_ChangeColor_CIELab
 ChangeColorTests.test_ChangeColor_CIELuv

@@ -93,10 +93,11 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   lays out. Close by choosing, then measuring and storing whole clusters per
   cell with their recorded width, with ucs-detect scores before and after.
 - **Unimplemented DEC and xterm controls.** The left/right margin follow-up
-  removes 55 failures; esctest2 now fails 197 tests, listed by reason in
+  removes 55 failures and character protection removes another 30; esctest2
+  now fails 167 tests, listed by reason in
   `scripts/conformance-esctest-expected.txt`. Remaining features include
-  rectangular-area operations, character protection and selective erase,
-  column editing, reverse wraparound and additional colour syntaxes. Cases
+  rectangular-area operations, column editing, reverse wraparound and
+  additional colour syntaxes. Cases
   involving those controls and margins remain grouped with their missing
   feature. The list also retains deliberate identity, checksum and window
   policies. Close each feature by implementing it in the vendored engine and

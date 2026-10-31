@@ -2180,6 +2180,22 @@ matcher tolerance with saved forward and reverse regex work before the real
 publication helper runs. The UI frame regression exercises the lost link-cache
 invalidation and the post-presentation retry under that interleaving.
 
+### Character protection
+
+A cell's protection bit is separate from its visual SGR attributes. DECSCA
+selects DEC protection, while SPA/EPA select ISO protection; the terminal
+tracks the current erasure policy as xterm does. DECSEL and DECSED honor the
+bit, and ISO protection also applies to ordinary EL, ED and ECH. Selective
+display erasure acts on the visible grid without rotating rows into history;
+the existing ordinary ED path remains in use when ISO protection is inactive.
+Text protection does not attach a protection attribute to image placements.
+
+Protected blanks count as occupied cells so reflow preserves their attributes.
+Overwriting a wide glyph clears protection from its erased counterpart instead
+of retaining a protected blank. Cursor save/restore carries the attribute;
+RIS and DECSTR reset the current protection state. Erasure remains inclusive
+of the physical cursor cell when autowrap is pending.
+
 ### Synchronized graphics publication
 
 Graphics controls inside DEC 2026 use the same atomic commit boundary. While
