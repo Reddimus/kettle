@@ -765,6 +765,15 @@ pub trait Handler {
     /// Start or end an ISO protected area (SPA/EPA).
     fn set_protected_area(&mut self, _start: bool) {}
 
+    /// Fill a rectangular area with an ASCII or Latin-1 character (DECFRA).
+    fn fill_rectangle(&mut self, _character: u16, _area: Rectangle) {}
+
+    /// Erase a rectangular area, optionally honoring DEC protection.
+    fn erase_rectangle(&mut self, _area: Rectangle, _selective: bool) {}
+
+    /// Copy a rectangular area within the active page (DECCRA).
+    fn copy_rectangle(&mut self, _area: Rectangle, _top: u16, _left: u16) {}
+
     /// Clear tab stops.
     fn clear_tabs(&mut self, _mode: TabulationClearMode) {}
 
@@ -991,6 +1000,26 @@ pub enum KeyboardModesApplyBehavior {
     Union,
     /// Remove the given flags from the active ones.
     Difference,
+}
+
+/// One-based inclusive rectangle coordinates; zero requests the default border.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Rectangle {
+    pub top: u16,
+    pub left: u16,
+    pub bottom: u16,
+    pub right: u16,
+}
+
+impl Rectangle {
+    fn from_parameters(params: &[u16]) -> Self {
+        Self {
+            top: params.first().copied().unwrap_or(0),
+            left: params.get(1).copied().unwrap_or(0),
+            bottom: params.get(2).copied().unwrap_or(0),
+            right: params.get(3).copied().unwrap_or(0),
+        }
+    }
 }
 
 /// Terminal cursor configuration.
@@ -1779,6 +1808,32 @@ where
         };
 
         match (action, intermediates) {
+            ('v' | 'x' | 'z' | '{', [b'$']) => {
+                let limit = match action {
+                    'v' => 8,
+                    'x' => 5,
+                    _ => 4,
+                };
+                if params.len() > limit || params.iter().any(|param| param.len() != 1) {
+                    return unhandled!();
+                }
+                let values: Vec<_> = params.iter().map(|param| param[0]).collect();
+                match action {
+                    'v' => handler.copy_rectangle(
+                        Rectangle::from_parameters(&values),
+                        values.get(5).copied().unwrap_or(0),
+                        values.get(6).copied().unwrap_or(0),
+                    ),
+                    'x' => handler.fill_rectangle(
+                        values.first().copied().unwrap_or(0),
+                        Rectangle::from_parameters(values.get(1..).unwrap_or_default()),
+                    ),
+                    'z' | '{' => {
+                        handler.erase_rectangle(Rectangle::from_parameters(&values), action == '{')
+                    },
+                    _ => unreachable!(),
+                }
+            },
             ('@', []) => handler.insert_blank(next_param_or(1) as usize),
             ('A', []) => handler.move_up(next_param_or(1) as usize),
             ('B', []) | ('e', []) => handler.move_down(next_param_or(1) as usize),

@@ -76,32 +76,8 @@ DECSETTests.test_DECSET_MoreFix
 XtermSaveTests.test_XtermSave_SaveResetState
 XtermSaveTests.test_XtermSave_SaveSetState
 
-[rectangular-area operations (DECCRA, DECFRA, DECERA, DECSERA, DECCARA, DECRARA): not implemented]
-DECCRATests.test_DECCRA_defaultValuesInDest
-DECCRATests.test_DECCRA_defaultValuesInSource
-DECCRATests.test_DECCRA_destinationPartiallyOffscreen
-DECCRATests.test_DECCRA_ignoresMargins
-DECCRATests.test_DECCRA_nonOverlappingSourceAndDest
-DECCRATests.test_DECCRA_overlappingSourceAndDest
-DECCRATests.test_DECCRA_overlyLargeSourceClippedToScreenSize
-DECCRATests.test_DECCRA_respectsOriginMode
-DECERATests.test_DECERA_basic
-DECERATests.test_DECERA_defaultArgs
-DECERATests.test_DECERA_ignoresMargins
-DECERATests.test_DECERA_overlyLargeSourceClippedToScreenSize
-DECERATests.test_DECERA_respectsOriginMode
-DECFRATests.test_DECFRA_basic
-DECFRATests.test_DECFRA_defaultArgs
-DECFRATests.test_DECFRA_ignoresMargins
-DECFRATests.test_DECFRA_overlyLargeSourceClippedToScreenSize
-DECFRATests.test_DECFRA_respectsOriginMode
+[rectangular attribute operations (DECCARA, DECRARA, DECSACE): not implemented]
 DECRQSSTests.test_DECRQSS_DECSACE
-DECSERATests.test_DECSERA_basic
-DECSERATests.test_DECSERA_defaultArgs
-DECSERATests.test_DECSERA_doesNotRespectISOProtect
-DECSERATests.test_DECSERA_ignoresMargins
-DECSERATests.test_DECSERA_overlyLargeSourceClippedToScreenSize
-DECSERATests.test_DECSERA_respectsOriginMode
 
 [reports (DECRQM, DECRQSS, DECDSR) about modes and settings Kettle does not implement]
 DECDSRTests.test_DECDSR_DECCKSR

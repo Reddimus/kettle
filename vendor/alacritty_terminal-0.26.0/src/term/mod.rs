@@ -28,7 +28,11 @@ use crate::vte::ansi::{
 
 pub mod cell;
 pub mod color;
+mod rectangles;
 pub mod search;
+
+#[cfg(test)]
+mod rectangle_tests;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum ProtectionMode {
@@ -2701,6 +2705,25 @@ impl<T: EventListener> Handler for Term<T> {
 
     fn selective_clear_screen(&mut self, mode: ansi::ClearMode) {
         self.clear_protected_screen(mode, true);
+    }
+
+    fn fill_rectangle(&mut self, character: u16, area: ansi::Rectangle) {
+        if self.conformance_level < 4 || !matches!(character, 32..=126 | 160..=255) {
+            return;
+        }
+        self.fill_rect(area, char::from_u32(character as u32).unwrap());
+    }
+
+    fn erase_rectangle(&mut self, area: ansi::Rectangle, selective: bool) {
+        if self.conformance_level >= 4 {
+            self.erase_rect(area, selective);
+        }
+    }
+
+    fn copy_rectangle(&mut self, area: ansi::Rectangle, top: u16, left: u16) {
+        if self.conformance_level >= 4 {
+            self.copy_rect(area, top, left);
+        }
     }
 
     fn set_character_protection(&mut self, protected: bool) {
