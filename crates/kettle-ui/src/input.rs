@@ -522,6 +522,9 @@ pub fn encode(
                     // Alt as ESC, as for every other legacy key: zsh, fish,
                     // Claude Code and Codex read ESC CR as "insert a newline".
                     b"\x1b\r".to_vec()
+                } else if mode.contains(TermMode::LINE_FEED_NEW_LINE) {
+                    // LNM (mode 20): Return sends CR LF, as in xterm.
+                    b"\r\n".to_vec()
                 } else {
                     vec![b'\r']
                 });
@@ -3255,6 +3258,30 @@ mod tests {
         assert_eq!(
             encode_key_press(&enter, ModifiersState::SHIFT, TermMode::empty()),
             Some(b"\r".to_vec())
+        );
+    }
+
+    #[test]
+    fn enter_sends_cr_lf_under_linefeed_newline_mode() {
+        let enter = Key::Named(NamedKey::Enter);
+        let lnm = TermMode::LINE_FEED_NEW_LINE;
+        assert_eq!(
+            encode_key_press(&enter, ModifiersState::empty(), lnm),
+            Some(b"\r\n".to_vec())
+        );
+        // Alt keeps its ESC CR newline chord. The kitty protocol's
+        // disambiguate level sends Return's legacy bytes, LNM included.
+        assert_eq!(
+            encode_key_press(&enter, ModifiersState::ALT, lnm),
+            Some(b"\x1b\r".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(
+                &enter,
+                ModifiersState::empty(),
+                lnm | TermMode::DISAMBIGUATE_ESC_CODES
+            ),
+            Some(b"\r\n".to_vec())
         );
     }
 

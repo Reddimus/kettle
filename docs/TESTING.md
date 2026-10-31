@@ -1090,6 +1090,48 @@ For configured Neovim/AstroNvim, the direct helper accepts `--astro-config` and
 The helper copies them into an isolated sandbox before use.
 Keep the provenance record and distinguish clean from configured editor results.
 
+## Terminal conformance
+
+`just conformance` runs two outside suites in a live Kettle window opened at
+exactly 80x25 cells. They are local runs, not CI gates: both need a desktop
+(on Linux, wrap the recipe in `xvfb-run -a`), and
+`scripts/check-conformance.py` fetches them into `target/conformance` at pinned
+versions rather than vendoring them: esctest2 (GPL-2.0) by commit and
+ucs-detect from PyPI into a private virtual environment.
+
+**esctest2** (`just conformance-esctest`) checks escape sequences against
+xterm. It reads screen cells with DECRQCRA, which Kettle does not answer: a
+checksum reply would let any program reading the terminal's input probe the
+screen. The script replaces that one check with `kettle ctl read_cells`, read
+after a cursor-position report proves the terminal has parsed everything
+before it, and keeps DECRQCRA's origin-mode offset by asking the terminal for
+DECOM and its margins. The run fails when the set of failing tests differs
+from `scripts/conformance-esctest-expected.txt`, which groups every known
+failure by reason; `--update` rewrites it and puts new failures under an
+unclassified heading to triage.
+
+On 2026-10-30 Kettle 5.7.0 passed 259 of 567 tests and failed 265 (xterm
+itself is expected to fail 43). Triage found six failures in controls Kettle
+implements: CUU and CUD stopping at the margins only under origin mode,
+DECSC/DECRC dropping origin mode, DECALN leaving the margins and cursor, and
+LNM never applied. Those, and the seven mode 1048 tests, are fixed: the run
+now passes 272 and fails 252, each listed with its reason. The largest groups
+are left and right margins (DECSLRM, 74 tests), reports for modes Kettle does
+not implement (35), colour syntaxes beyond `rgb:` and `#rrggbb` (33), window
+operations Kettle does not perform for a program (30), rectangular-area
+operations (23) and character protection (22).
+
+**ucs-detect** (`just conformance-ucs`) measures how many columns the
+terminal gives Unicode text, against `wcwidth`. Kettle 5.7.0 scored 99.6% on
+narrow and 94.9% on wide characters, where the misses are the 26 regional
+indicators, which `unicode-width` makes one column wide. Grapheme clusters
+score low, 0.7% for emoji ZWJ sequences, 50% for VS16, 0% for VS15, and 84%
+across 85 languages, chiefly Indic conjuncts. Kettle measures each codepoint
+separately and does not implement grapheme clustering (DEC mode 2027), so a
+cluster takes the sum of its codepoints' widths. Changing that is a product
+decision recorded in
+[AUDIT-DEFERRED.md](AUDIT-DEFERRED.md), not a bug fix.
+
 ## Manual / interactive checks
 
 Use these for behavior that fixtures or synthetic input cannot establish.

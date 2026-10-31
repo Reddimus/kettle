@@ -1025,8 +1025,10 @@ impl<T> Term<T> {
             self.inactive_grid.cursor = self.grid.cursor.clone();
 
             if save_restore_cursor {
-                // Drop information about the primary screen's saved cursor.
+                // Mode 1049 saves the cursor as DECSC does, origin mode
+                // included, replacing the primary screen's saved cursor.
                 self.grid.saved_cursor = self.grid.cursor.clone();
+                self.grid.saved_origin_mode = self.mode.contains(TermMode::ORIGIN);
             }
 
             if clear_on_entry {
@@ -1046,10 +1048,26 @@ impl<T> Term<T> {
         mem::swap(&mut self.keyboard_mode, &mut self.inactive_keyboard_mode);
         self.set_keyboard_term_mode(self.keyboard_mode.into());
 
+        let leaving_with_restore = save_restore_cursor && self.mode.contains(TermMode::ALT_SCREEN);
         mem::swap(&mut self.grid, &mut self.inactive_grid);
         self.mode ^= TermMode::ALT_SCREEN;
+        if leaving_with_restore {
+            // Resetting 1049 restores the cursor as DECRC does; the primary
+            // grid kept its cursor, so origin mode comes back here.
+            self.restore_saved_origin_mode();
+        }
         self.selection = None;
         self.mark_fully_damaged();
+    }
+
+    /// Restore the saved origin mode (DECOM), keeping the cursor inside the
+    /// current margins under it, as xterm's `CursorRestore` does.
+    fn restore_saved_origin_mode(&mut self) {
+        self.mode.set(TermMode::ORIGIN, self.grid.saved_origin_mode);
+        if self.grid.saved_origin_mode {
+            let line = &mut self.grid.cursor.point.line;
+            *line = (*line).clamp(self.scroll_region.start, self.scroll_region.end - 1);
+        }
     }
 
     /// Scroll screen down.
@@ -1467,9 +1485,10 @@ impl<T> Term<T> {
     /// The 1-based cursor position a cursor position report gives. Under
     /// origin mode (DECOM) the row counts from the top margin, as xterm and
     /// kitty report it, so a program can feed it back to CUP unchanged.
-    /// DECRC does not restore DECOM here as it does in xterm, so the cursor
-    /// can sit above the margin with DECOM on; the row then reports as 1, the
-    /// row CUP would put it on, rather than as zero or negative.
+    /// Under origin mode the cursor stays inside the margins (DECRC clamps a
+    /// restored row into them, as xterm does); should it ever sit above the
+    /// top margin, the row reports as 1, the row CUP would put it on, rather
+    /// than as zero or negative.
     fn cursor_report_position(&self) -> (i32, usize) {
         let point = self.grid.cursor.point;
         let top = if self.mode.contains(TermMode::ORIGIN) {
@@ -1606,6 +1625,11 @@ impl<T: EventListener> Handler for Term<T> {
     fn decaln(&mut self) {
         trace!("Decalnning");
 
+        // DECALN also resets the margins and homes the cursor (DEC STD 070,
+        // xterm), so a test pattern is never drawn into a stale scroll region.
+        self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.goto(0, 0);
+
         for line in (0..self.screen_lines()).map(Line::from) {
             for column in 0..self.columns() {
                 let cell = &mut self.grid[line][Column(column)];
@@ -1684,10 +1708,11 @@ impl<T: EventListener> Handler for Term<T> {
     fn move_up(&mut self, lines: usize) {
         trace!("Moving up: {lines}");
 
-        // Under origin mode the top margin stops the cursor, unless it is
-        // already above it (DECRC does not restore DECOM).
+        // The top margin stops the cursor whenever it starts at or below it,
+        // with or without origin mode; from above the margin it stops at the
+        // top line (VT510 CUU, xterm's CursorUp).
         let line = self.grid.cursor.point.line;
-        let top = if self.mode.contains(TermMode::ORIGIN) && line >= self.scroll_region.start {
+        let top = if line >= self.scroll_region.start {
             self.scroll_region.start
         } else {
             Line(0)
@@ -1702,10 +1727,11 @@ impl<T: EventListener> Handler for Term<T> {
     fn move_down(&mut self, lines: usize) {
         trace!("Moving down: {lines}");
 
-        // Under origin mode the bottom margin stops the cursor, unless it is
-        // already below it.
+        // The bottom margin stops the cursor whenever it starts at or above
+        // it, with or without origin mode; from below the margin it stops at
+        // the bottom line (VT510 CUD, xterm's CursorDown).
         let line = self.grid.cursor.point.line;
-        let bottom = if self.mode.contains(TermMode::ORIGIN) && line < self.scroll_region.end {
+        let bottom = if line < self.scroll_region.end {
             self.scroll_region.end - 1
         } else {
             self.bottommost_line()
@@ -2237,6 +2263,7 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Saving cursor position");
 
         self.grid.saved_cursor = self.grid.cursor.clone();
+        self.grid.saved_origin_mode = self.mode.contains(TermMode::ORIGIN);
     }
 
     #[inline]
@@ -2245,6 +2272,9 @@ impl<T: EventListener> Handler for Term<T> {
 
         self.damage_cursor();
         self.grid.cursor = self.grid.saved_cursor.clone();
+        // DECRC restores DECOM too, and under origin mode the restored row
+        // is kept inside the current margins (xterm's CursorRestore).
+        self.restore_saved_origin_mode();
         self.damage_cursor();
     }
 
@@ -2508,6 +2538,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.grid.cursor.charsets = Default::default();
         self.grid.cursor.input_needs_wrap = false;
         self.grid.saved_cursor = Default::default();
+        self.grid.saved_origin_mode = false;
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
     }
 
@@ -2600,6 +2631,12 @@ impl<T: EventListener> Handler for Term<T> {
                 }
                 return;
             }
+            // xterm's mode 1048 saves the cursor as DECSC does.
+            PrivateMode::Unknown(1048) => {
+                trace!("Setting private mode: 1048");
+                self.save_cursor_position();
+                return;
+            }
             PrivateMode::Unknown(mode) => {
                 debug!("Ignoring unknown mode {mode} in set_private_mode");
                 return;
@@ -2683,6 +2720,12 @@ impl<T: EventListener> Handler for Term<T> {
                     self.graphics_events
                         .push(GraphicsEvent::LeaveAlternate { mode, clear });
                 }
+                return;
+            }
+            // Resetting mode 1048 restores the cursor as DECRC does.
+            PrivateMode::Unknown(1048) => {
+                trace!("Unsetting private mode: 1048");
+                self.restore_cursor_position();
                 return;
             }
             PrivateMode::Unknown(mode) => {
@@ -2857,8 +2900,13 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn set_scrolling_region(&mut self, top: usize, bottom: Option<usize>) {
-        // Fallback to the last line as default.
-        let bottom = bottom.unwrap_or_else(|| self.screen_lines());
+        // Fallback to the last line as default. A bottom margin past the
+        // screen is clipped to its last line first, as xterm does, so a
+        // region that would then be empty is refused rather than stored:
+        // the region always holds at least one line.
+        let bottom = bottom
+            .unwrap_or_else(|| self.screen_lines())
+            .min(self.screen_lines());
 
         if top >= bottom {
             debug!("Invalid scrolling region: ({top};{bottom})");
@@ -2874,9 +2922,7 @@ impl<T: EventListener> Handler for Term<T> {
 
         trace!("Setting scrolling region: ({start};{end})");
 
-        let screen_lines = Line(self.screen_lines() as i32);
-        self.scroll_region.start = cmp::min(start, screen_lines);
-        self.scroll_region.end = cmp::min(end, screen_lines);
+        self.scroll_region = start..end;
         self.goto(0, 0);
     }
 
@@ -3423,8 +3469,8 @@ mod tests {
         );
         assert_eq!(listener.drain(), ["\x1b[?1;4R", "\x1b[1;4R"]);
 
-        // DECRC can leave the cursor above the margin with DECOM on; the
-        // report never goes below row 1.
+        // DECRC restores DECOM as it was saved (off here), so the cursor
+        // above the margin reports its absolute row.
         processor.advance(
             &mut term,
             b"\x1b[1;3H\x1b7\x1b[3;5r\x1b[?6h\x1b8\x1b[?6n\x1b[6n\x1b[?6l\x1b[r",

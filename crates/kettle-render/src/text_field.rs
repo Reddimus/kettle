@@ -26,9 +26,10 @@ pub struct TextFieldLayout {
     pub selection: Vec<Rect4>,
 }
 
-/// The prefix and hint as painted: each fitted, with an ellipsis, to at most
-/// 30% of the field. Measuring and painting both use these strings, so a long
-/// or translated label is shortened instead of overflowing its slot.
+/// The prefix and hint as painted: each fitted to at most 30% of the field,
+/// the prefix with an ellipsis and the key hint by dropping segments before
+/// its way out. Measuring and painting both use these strings, so a long or
+/// translated label is shortened instead of overflowing its slot.
 pub fn text_field_labels(field: &TextFieldOverlay, cw: f32) -> (String, String) {
     let budget = if cw > 0.0 {
         (field.rect.2.max(0.0) * 0.3 / cw).floor() as usize
@@ -37,7 +38,7 @@ pub fn text_field_labels(field: &TextFieldOverlay, cw: f32) -> (String, String) 
     };
     (
         super::fit_single_line_label(&field.prefix, budget),
-        super::fit_single_line_label(&field.hint, budget),
+        super::fit_key_hint(&field.hint, budget),
     )
 }
 
@@ -336,12 +337,43 @@ mod tests {
             let painted = crate::display_width(&hint) as f32 * cw;
             assert!(painted <= slot.2 + 0.001, "{width}: {hint:?}");
             assert!(slot.2 <= width * 0.3 + 0.001);
-            if crate::display_width(&field.hint) as f32 * cw > width * 0.3 {
-                assert!(hint.ends_with('…'), "{width}: {hint:?}");
-            } else {
+            if crate::display_width(&field.hint) as f32 * cw <= width * 0.3 {
                 assert_eq!(hint, field.hint);
+            } else if crate::display_width("(Esc cancel)") as f32 * cw <= width * 0.3 {
+                assert!(hint.ends_with("Esc cancel)"), "{width}: {hint:?}");
+            } else {
+                assert!(hint.ends_with('…'), "{width}: {hint:?}");
             }
         }
+    }
+
+    #[test]
+    fn narrow_key_hints_drop_segments_before_the_way_out() {
+        let hint = "(Enter run · Tab/↑↓ select · Esc cancel)";
+        assert_eq!(crate::fit_key_hint(hint, 40), hint);
+        assert_eq!(crate::fit_key_hint(hint, 39), "(Enter run · Esc cancel)");
+        assert_eq!(crate::fit_key_hint(hint, 24), "(Enter run · Esc cancel)");
+        assert_eq!(crate::fit_key_hint(hint, 23), "(Esc cancel)");
+        assert_eq!(crate::fit_key_hint(hint, 12), "(Esc cancel)");
+        assert_eq!(crate::fit_key_hint(hint, 11), "(Esc cance…");
+        assert_eq!(crate::fit_key_hint(hint, 0), "");
+        // Middle segments go before leading ones.
+        let ssh = "(Enter connect · Tab complete · ↑↓ select · Esc cancel)";
+        assert_eq!(
+            crate::fit_key_hint(ssh, 44),
+            "(Enter connect · Tab complete · Esc cancel)"
+        );
+        assert_eq!(crate::fit_key_hint(ssh, 28), "(Enter connect · Esc cancel)");
+        // Spanish keeps its way out too, and other text is a plain label.
+        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+        let es = format!(
+            "(Enter {} · Tab/↑↓ {} · Esc {})",
+            tr.text(kettle_i18n::Text::PickerHintRun),
+            tr.text(kettle_i18n::Text::PickerHintSelect),
+            tr.text(kettle_i18n::Text::PickerHintCancel)
+        );
+        assert_eq!(crate::fit_key_hint(&es, 20), "(Esc cancelar)");
+        assert_eq!(crate::fit_key_hint("no hint shape", 6), "no hi…");
     }
 
     #[test]

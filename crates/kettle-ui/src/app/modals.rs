@@ -2754,7 +2754,7 @@ pub(super) fn modal_editor_mut(
     }
 }
 
-fn reset_modal_results(ws: &mut WindowState) {
+pub(super) fn reset_modal_results(ws: &mut WindowState) {
     if let Some((_, selected)) = ws.palette_input.as_mut() {
         *selected = 0;
     }

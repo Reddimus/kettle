@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- Stop the cursor at the scroll margins for CUU, CUD, CPL and CNL whether or
+  not origin mode is on, as xterm and DEC terminals do. Kettle 5.7.0 stopped
+  it only under origin mode.
+- Save and restore origin mode with the cursor on DECSC/DECRC, `CSI s`/`CSI u`
+  and the alternate screen's mode 1049, keeping a restored origin-mode cursor
+  inside the margins.
+- Reset the margins and home the cursor on DECALN (`ESC # 8`).
+- Ignore a scroll region (DECSTBM) that lies entirely below the screen, as
+  xterm does, instead of storing an empty one.
+- Honour linefeed/newline mode (LNM, mode 20): LF, VT and FF return to the
+  first column, and Return sends CR LF while the mode is set.
+- Save and restore the cursor with xterm's private mode 1048, which Kettle
+  ignored.
+- Keep `Esc cancel` visible in the key hints of the pickers and title editors
+  in narrow windows and splits: hints that do not fit now drop their middle
+  entries first instead of cutting off the way out.
+- Announce the About panel to screen readers as "About Kettle" rather than
+  as the right-click menu.
+- Let Linux screen readers read each Settings value and the text, caret and
+  selection of the title editor and picker fields, and let any screen reader
+  move that caret or change that text: Orca announced only the setting's name
+  and an empty "entry".
+
 ## [5.7.0] — 2026-10-30
 
 ### Added

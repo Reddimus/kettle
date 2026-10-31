@@ -24,6 +24,34 @@ pub(crate) fn fit_single_line_label(label: &str, max_cols: usize) -> String {
     fitted
 }
 
+/// Fit a key hint such as `(Enter run · Tab/↑↓ select · Esc cancel)` to
+/// `max_cols`. Hints list keys in order of use and end with the way out, so
+/// when the whole hint does not fit, segments are dropped from the middle,
+/// then from the front, and the last one stays readable; only when it alone
+/// does not fit is it cut with an ellipsis. Text in any other shape is fitted
+/// as a plain label.
+pub(crate) fn fit_key_hint(hint: &str, max_cols: usize) -> String {
+    if display_width(hint) <= max_cols {
+        return hint.to_string();
+    }
+    let segments: Vec<&str> = match hint.strip_prefix('(').and_then(|h| h.strip_suffix(')')) {
+        Some(inner) => inner.split(" · ").collect(),
+        None => return fit_single_line_label(hint, max_cols),
+    };
+    let Some((last, leading)) = segments.split_last() else {
+        return fit_single_line_label(hint, max_cols);
+    };
+    for keep in (0..leading.len()).rev() {
+        let mut kept = leading[..keep].to_vec();
+        kept.push(last);
+        let candidate = format!("({})", kept.join(" · "));
+        if display_width(&candidate) <= max_cols {
+            return candidate;
+        }
+    }
+    fit_single_line_label(&format!("({last})"), max_cols)
+}
+
 /// Display width (terminal columns) of a string, via `unicode-width`.
 pub(crate) fn display_width(s: &str) -> usize {
     use unicode_width::UnicodeWidthChar;

@@ -1572,7 +1572,10 @@ restored titles instead of opening an empty editor.
 `kettle-render::text_field` shapes modal editor projections with search's
 shaping and grapheme-cluster helpers. Selection spans, caret positions,
 horizontal scrolling and pointer stops all come from that shaped buffer.
-Prefix and hint text have separate clipped slots. Settings computes the inline
+Prefix and hint text have separate clipped slots of at most 30% of the field
+each. A key hint that does not fit drops its middle segments, then its leading
+ones, before its last, so a narrow window still shows `Esc cancel`; only that
+segment alone is ever cut with an ellipsis. Settings computes the inline
 value slot from the same column budgets and scrolling layout as its row painter.
 The UI projects IME preedit over the selected range or at the caret, retains
 the suffix, and commits through the same editor. IME candidate placement shapes

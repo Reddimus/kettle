@@ -1051,6 +1051,8 @@ impl App {
             })
             .unwrap_or((800.0, 600.0));
         self.show_context_menu(ws, items, sw * 0.5 - 140.0, sh * 0.4);
+        // Opening a menu clears its name, so name the panel afterwards.
+        ws.context_menu_a11y_label = Some(tr.text(T::MenuA11yAbout).to_string());
     }
 
     pub(super) fn shell_menu_items(
