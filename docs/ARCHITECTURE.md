@@ -241,7 +241,24 @@ three session buffers, with bounded decoder prebuffering. FFmpeg playback bounds
 input decoding to two threads, filtering to one, and raw-video output encoding
 to one. The output limit also applies without audio: automatic frame threading
 can exhaust the Linux worker's 1 GiB address-space limit after a few large
-frames. The resource limits remain unchanged. The client keeps the newest frame, waking
+frames. The resource limits remain unchanged. Sounding external playback uses two
+contained FFmpeg helpers, each with a metadata-first tee and one raw pipe.
+Their independent timestamp readers prevent video queue pressure from holding
+up the next PCM timestamp across an interior gap. Both inputs are separately
+reopened and identity-checked. The existing CPU allowance is divided between
+them, one quarter for audio and the remainder for video; their sum never
+increases the playback ceiling. Descendant memory remains within the session
+footprint budget. Each raw pipe has two queued packets, with video and PCM
+output queues bounded at two and eight packets. A common stop path kills both
+helpers. Audio-only cancellation keeps video usable. Before a startup failure
+can fall back to video-only decoding, both attempted helpers must be reaped;
+an unreaped child remains a resource failure. Video disposal cancels both helpers
+unless its consumer has actually reached EOF; helper completion alone does
+not imply that queued pictures were consumed. A validated clean audio EOF,
+including an empty stream after a seek beyond its samples, retains the
+supported audio status.
+
+The client keeps the newest frame, waking
 the window once until it looks; the lane makes it an image on the preview
 account (the frame it replaces gives its pixels back for the next) and draws
 it where the poster is, at the video's size, so the image pipeline hands each

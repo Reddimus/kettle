@@ -1858,3 +1858,26 @@ the editor's start with the fitted label and gap at terminal cell-width scales
 0.5, 1 and 2, including narrow panels and wide labels. These unit checks do not
 replace native IME candidate-window, pointer drag, clipboard and live-GPU checks
 on macOS and Linux; record those separately when run.
+
+### Independent FFmpeg stream progress
+
+The native `kettle-media-native` FFmpeg tests include a real Matroska fixture
+with a 1.6 s interior audio gap. The test holds video after 400 ms and requires
+a post-gap PCM timestamp without consuming future pictures. The shared decoder
+stalls at the two-second test deadline; independent contained helpers pass.
+A separate short-audio fixture checks that a seek past its samples keeps a
+supported status and returns clean audio EOF. A deterministic queued-video
+regression verifies cancellation after the video helper has already ended;
+it fails when helper EOF is mistaken for consumer EOF.
+Other tests retain timestamp/sample continuity across seeks, delayed audio,
+audio before video, and video progress after PCM cancellation. The fallback
+stand-in records both attempted helper PIDs and verifies both are reaped before
+the replacement video-only session is accepted. Metadata tests reject wrong
+stream kinds, malformed headers, out-of-order timestamps and oversized packets.
+
+Three short macOS probes of the interior-gap test observed at most two helpers.
+The complete test invocations took 0.11--0.15 s and 0.04 s of reported user plus
+system CPU. The largest sampled simultaneous helper RSS sum was about 29 MiB;
+sampling can miss the true peak, and these small-fixture measurements do not
+establish steady-state or large-video throughput. Production footprint limits
+and the aggregate playback CPU allowance remain in force.

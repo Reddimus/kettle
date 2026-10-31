@@ -1,6 +1,21 @@
-//! Bounded framecrc timestamps shared by the raw video and PCM pipes.
+//! Bounded framecrc timestamps for one independently decoded stream.
 
 use std::io::BufRead;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Stream {
+    Video,
+    Audio,
+}
+
+impl Stream {
+    pub fn index(self) -> usize {
+        match self {
+            Self::Video => 0,
+            Self::Audio => 1,
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Packet {
@@ -11,42 +26,49 @@ pub(super) struct Packet {
 
 pub(super) struct Metadata<R> {
     input: R,
+    stream: Stream,
     line: Vec<u8>,
     video_bytes: usize,
     start_us: u64,
     end_us: u64,
-    time_bases: [Option<(u64, u64)>; 2],
+    time_base: Option<(u64, u64)>,
     seen: u8,
     headers: usize,
-    started: bool,
-    next_us: [Option<u64>; 2],
+    next_us: Option<u64>,
 }
 
 impl<R: BufRead> Metadata<R> {
-    pub fn new(input: R, video_bytes: usize, start_ms: u64, duration_ms: u64) -> Self {
+    pub fn new(
+        input: R,
+        stream: Stream,
+        video_bytes: usize,
+        start_ms: u64,
+        duration_ms: u64,
+    ) -> Self {
         Self {
             input,
+            stream,
             line: Vec::with_capacity(256),
             video_bytes,
             start_us: start_ms.saturating_mul(1000),
             end_us: duration_ms.saturating_mul(1000),
-            time_bases: [None; 2],
+            time_base: None,
             seen: 0,
             headers: 0,
-            started: false,
-            next_us: [None; 2],
+            next_us: None,
         }
     }
 
     pub fn next(&mut self) -> Result<Option<Packet>, ()> {
         loop {
             self.line.clear();
-            // read_until alone could grow without bound before finding a newline.
             let mut limited = self.input.by_ref().take(1025);
             use std::io::Read as _;
             let n = limited.read_until(b'\n', &mut self.line).map_err(|_| ())?;
             if n == 0 {
-                return if self.next_us[0].is_some() {
+                return if self.next_us.is_some()
+                    || (self.stream == Stream::Audio && self.valid_headers())
+                {
                     Ok(None)
                 } else {
                     Err(())
@@ -64,36 +86,37 @@ impl<R: BufRead> Metadata<R> {
                 Some(self.packet(text)?)
             };
             self.line = owned;
-            if let Some(packet) = packet {
-                return Ok(Some(packet));
+            if packet.is_some() {
+                return Ok(packet);
             }
         }
     }
 
     fn header(&mut self, text: &str) -> Result<(), ()> {
         self.headers += 1;
-        if self.started || self.headers > 64 {
+        if self.next_us.is_some() || self.headers > 64 {
             return Err(());
         }
         if let Some(rest) = text.strip_prefix("#tb ") {
             let (index, value) = rest.split_once(": ").ok_or(())?;
-            let index: usize = index.parse().map_err(|_| ())?;
             let (num, den) = super::ratio(value).ok_or(())?;
-            let slot = self.time_bases.get_mut(index).ok_or(())?;
-            if slot.replace((num, den)).is_some()
-                || (index == 1 && (num, den) != (1, 48000))
-                || (index == 0 && u128::from(num) > u128::from(den) * 1000)
+            if index != "0"
+                || self.time_base.replace((num, den)).is_some()
+                || (self.stream == Stream::Audio && (num, den) != (1, 48000))
+                || (self.stream == Stream::Video && u128::from(num) > u128::from(den) * 1000)
             {
                 return Err(());
             }
         }
+        let (media, codec) = match self.stream {
+            Stream::Video => ("video", "rawvideo"),
+            Stream::Audio => ("audio", "pcm_f32le"),
+        };
         for (bit, key, expected) in [
-            (1, "#media_type 0: ", "video"),
-            (2, "#codec_id 0: ", "rawvideo"),
-            (4, "#media_type 1: ", "audio"),
-            (8, "#codec_id 1: ", "pcm_f32le"),
-            (16, "#sample_rate 1: ", "48000"),
-            (32, "#channel_layout_name 1: ", "stereo"),
+            (1, "#media_type 0: ", media),
+            (2, "#codec_id 0: ", codec),
+            (4, "#sample_rate 0: ", "48000"),
+            (8, "#channel_layout_name 0: ", "stereo"),
         ] {
             if let Some(value) = text.strip_prefix(key) {
                 if value != expected || self.seen & bit != 0 {
@@ -105,8 +128,13 @@ impl<R: BufRead> Metadata<R> {
         Ok(())
     }
 
+    fn valid_headers(&self) -> bool {
+        let required = if self.stream == Stream::Video { 3 } else { 15 };
+        self.seen == required && self.time_base.is_some()
+    }
+
     fn packet(&mut self, text: &str) -> Result<Packet, ()> {
-        if self.seen != 63 || self.time_bases.iter().any(Option::is_none) {
+        if !self.valid_headers() {
             return Err(());
         }
         let mut fields = text.split(',').map(str::trim);
@@ -123,15 +151,15 @@ impl<R: BufRead> Metadata<R> {
         {
             return Err(());
         }
-        if stream > 1
+        if stream != 0
             || dts != pts
             || duration == 0
-            || (stream == 0 && (bytes != self.video_bytes || duration != 1))
-            || (stream == 1 && (bytes != 7680 || duration != 960))
+            || (self.stream == Stream::Video && (bytes != self.video_bytes || duration != 1))
+            || (self.stream == Stream::Audio && (bytes != 7680 || duration != 960))
         {
             return Err(());
         }
-        let (num, den) = self.time_bases[stream].ok_or(())?;
+        let (num, den) = self.time_base.ok_or(())?;
         let timestamp = |tick: u64| -> Result<u64, ()> {
             let us = u128::from(tick) * u128::from(num) * 1_000_000 / u128::from(den);
             self.start_us
@@ -140,21 +168,21 @@ impl<R: BufRead> Metadata<R> {
         };
         let at_us = timestamp(pts)?;
         let end_us = timestamp(pts.checked_add(duration).ok_or(())?)?;
-        let allowance = if stream == 0 {
-            (num * 1_000_000).div_ceil(den)
+        let allowance = if self.stream == Stream::Video {
+            u64::try_from((u128::from(num) * 1_000_000).div_ceil(u128::from(den)))
+                .map_err(|_| ())?
         } else {
             1_000_000
         };
         if at_us > self.end_us
             || end_us > self.end_us.saturating_add(allowance)
-            || self.next_us[stream].is_some_and(|next| at_us < next)
+            || self.next_us.is_some_and(|next| at_us < next)
         {
             return Err(());
         }
-        self.started = true;
-        self.next_us[stream] = Some(end_us);
+        self.next_us = Some(end_us);
         Ok(Packet {
-            stream,
+            stream: self.stream.index(),
             at_us,
             bytes,
         })
@@ -164,14 +192,52 @@ impl<R: BufRead> Metadata<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const VIDEO: &str = "#tb 0: 1/25\n#media_type 0: video\n#codec_id 0: rawvideo\n";
+    const AUDIO: &str = "#tb 0: 1/48000\n#media_type 0: audio\n#codec_id 0: pcm_f32le\n#sample_rate 0: 48000\n#channel_layout_name 0: stereo\n";
 
-    const HEAD: &str = "#software: Lavf63.1.102\n#tb 0: 1/25\n#media_type 0: video\n#codec_id 0: rawvideo\n#dimensions 0: 64x48\n#sar 0: 1/1\n#tb 1: 1/48000\n#media_type 1: audio\n#codec_id 1: pcm_f32le\n#sample_rate 1: 48000\n#channel_layout_name 1: stereo\n";
+    #[test]
+    fn independent_streams_keep_the_common_timeline_and_interior_gaps() {
+        let video = format!("{VIDEO}0, 3, 3, 1, 12288, 0x00000000\n");
+        let audio = format!(
+            "{AUDIO}0, 0, 0, 960, 7680, 0x00000000\n0, 96000, 96000, 960, 7680, 0x00000000\n"
+        );
+        let mut v = Metadata::new(video.as_bytes(), Stream::Video, 12288, 2500, 10_000);
+        let mut a = Metadata::new(audio.as_bytes(), Stream::Audio, 12288, 2500, 10_000);
+        assert_eq!(
+            v.next(),
+            Ok(Some(Packet {
+                stream: 0,
+                at_us: 2_620_000,
+                bytes: 12288
+            }))
+        );
+        assert_eq!(
+            a.next(),
+            Ok(Some(Packet {
+                stream: 1,
+                at_us: 2_500_000,
+                bytes: 7680
+            }))
+        );
+        assert_eq!(
+            a.next(),
+            Ok(Some(Packet {
+                stream: 1,
+                at_us: 4_500_000,
+                bytes: 7680
+            }))
+        );
+        assert_eq!(v.next(), Ok(None));
+        assert_eq!(a.next(), Ok(None));
+    }
 
     #[test]
     fn a_low_rate_final_packet_may_span_the_end() {
-        let head = HEAD.replace("1/25", "2/1");
-        let text = format!("{head}0, 4, 4, 1, 12288, 0x00000000\n");
-        let mut metadata = Metadata::new(text.as_bytes(), 12288, 0, 8500);
+        let text = format!(
+            "{}0, 4, 4, 1, 12288, 0x00000000\n",
+            VIDEO.replace("1/25", "2/1")
+        );
+        let mut metadata = Metadata::new(text.as_bytes(), Stream::Video, 12288, 0, 8500);
         assert_eq!(
             metadata.next(),
             Ok(Some(Packet {
@@ -183,68 +249,35 @@ mod tests {
     }
 
     #[test]
-    fn video_and_audio_keep_their_common_timeline() {
-        let text = format!(
-            "{HEAD}1, 0, 0, 960, 7680, 0x00000000\n0, 3, 3, 1, 12288, 0x00000000\n1, 960, 960, 960, 7680, 0x00000000\n"
-        );
-        let mut metadata = Metadata::new(text.as_bytes(), 12288, 2500, 10_000);
-        assert_eq!(
-            metadata.next(),
-            Ok(Some(Packet {
-                stream: 1,
-                at_us: 2_500_000,
-                bytes: 7680
-            }))
-        );
-        assert_eq!(
-            metadata.next(),
-            Ok(Some(Packet {
-                stream: 0,
-                at_us: 2_620_000,
-                bytes: 12288
-            }))
-        );
-        assert_eq!(
-            metadata.next(),
-            Ok(Some(Packet {
-                stream: 1,
-                at_us: 2_520_000,
-                bytes: 7680
-            }))
-        );
-        assert_eq!(metadata.next(), Ok(None));
-    }
-
-    #[test]
-    fn audio_packets_cannot_stand_in_for_a_video() {
-        let text = format!("{HEAD}1, 0, 0, 960, 7680, 0x00000000\n");
-        let mut metadata = Metadata::new(text.as_bytes(), 12288, 0, 10_000);
-        assert!(metadata.next().unwrap().is_some());
-        assert_eq!(metadata.next(), Err(()));
-    }
-
-    #[test]
     fn malformed_or_unbounded_packets_are_refused() {
         for row in [
-            "2, 0, 0, 960, 7680, 0x00000000",
-            "1, 0, 0, 960, 7672, 0x00000000",
-            "1, 0, 0, 959, 7680, 0x00000000",
+            "1, 0, 0, 1, 12288, 0x00000000",
             "0, 0, 0, 1, 12289, 0x00000000",
             "0, 0, -1, 1, 12288, 0x00000000",
             "0, 0, 999999999999999999999, 1, 12288, 0x00000000",
             "0, 0, 250, 1, 12288, 0x00000000",
             "0, 0, 0, 1, 12288, checksum",
         ] {
-            let text = format!("{HEAD}{row}\n");
+            let text = format!("{VIDEO}{row}\n");
             assert_eq!(
-                Metadata::new(text.as_bytes(), 12288, 2500, 10_000).next(),
+                Metadata::new(text.as_bytes(), Stream::Video, 12288, 2500, 10_000).next(),
                 Err(()),
                 "{row}"
             );
         }
-        let text = format!("{HEAD}{}\n", " ".repeat(1025));
+        for row in [
+            "0, 0, 0, 960, 7672, 0x00000000",
+            "0, 0, 0, 959, 7680, 0x00000000",
+        ] {
+            let text = format!("{AUDIO}{row}\n");
+            assert_eq!(
+                Metadata::new(text.as_bytes(), Stream::Audio, 12288, 0, 10_000).next(),
+                Err(())
+            );
+        }
+        let text = format!("{VIDEO}{}\n", " ".repeat(1025));
         assert_eq!(
-            Metadata::new(text.as_bytes(), 12288, 0, 10_000).next(),
+            Metadata::new(text.as_bytes(), Stream::Video, 12288, 0, 10_000).next(),
             Err(())
         );
     }
@@ -252,22 +285,51 @@ mod tests {
     #[test]
     fn headers_and_packet_order_cannot_change_midstream() {
         for tail in ["#tb 0: 1/30\n", "0, 0, 0, 1, 12288, 0x00000000\n"] {
-            let text = format!("{HEAD}0, 0, 0, 1, 12288, 0x00000000\n{tail}");
-            let mut metadata = Metadata::new(text.as_bytes(), 12288, 0, 10_000);
+            let text = format!("{VIDEO}0, 0, 0, 1, 12288, 0x00000000\n{tail}");
+            let mut metadata = Metadata::new(text.as_bytes(), Stream::Video, 12288, 0, 10_000);
             assert!(metadata.next().unwrap().is_some());
             assert_eq!(metadata.next(), Err(()));
         }
         for head in [
-            HEAD.replace("1/25", "0/25"),
-            HEAD.replace("1/48000", "1/44100"),
-            HEAD.replace("stereo", "mono"),
-            HEAD.replace("pcm_f32le", "pcm_s16le"),
+            AUDIO.replace("1/48000", "1/44100"),
+            AUDIO.replace("stereo", "mono"),
+            AUDIO.replace("pcm_f32le", "pcm_s16le"),
         ] {
-            let text = format!("{head}1, 0, 0, 960, 7680, 0x00000000\n");
+            let text = format!("{head}0, 0, 0, 960, 7680, 0x00000000\n");
             assert_eq!(
-                Metadata::new(text.as_bytes(), 12288, 0, 10_000).next(),
+                Metadata::new(text.as_bytes(), Stream::Audio, 12288, 0, 10_000).next(),
                 Err(())
             );
         }
+        let text = format!(
+            "{}0, 0, 0, 1, 12288, 0x00000000\n",
+            VIDEO.replace("1/25", "0/25")
+        );
+        assert_eq!(
+            Metadata::new(text.as_bytes(), Stream::Video, 12288, 0, 10_000).next(),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn only_audio_can_end_after_valid_headers_and_kinds_cannot_be_swapped() {
+        assert_eq!(
+            Metadata::new(VIDEO.as_bytes(), Stream::Video, 12288, 0, 10_000).next(),
+            Err(())
+        );
+        assert_eq!(
+            Metadata::new(AUDIO.as_bytes(), Stream::Audio, 12288, 0, 10_000).next(),
+            Ok(None)
+        );
+        let text = format!("{AUDIO}0, 0, 0, 960, 7680, 0x00000000\n");
+        assert_eq!(
+            Metadata::new(text.as_bytes(), Stream::Video, 12288, 0, 10_000).next(),
+            Err(())
+        );
+        let text = format!("{VIDEO}0, 0, 0, 1, 12288, 0x00000000\n");
+        assert_eq!(
+            Metadata::new(text.as_bytes(), Stream::Audio, 12288, 0, 10_000).next(),
+            Err(())
+        );
     }
 }
