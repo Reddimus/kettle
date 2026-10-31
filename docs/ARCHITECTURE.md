@@ -2232,6 +2232,30 @@ changing unrelated preceding-row protection. Destination line-wrap attributes
 remain in place. The controls operate on text cells; they do not duplicate or
 relocate retained graphics placements. VT levels below four ignore them.
 
+### Column editing and reverse wraparound
+
+DECIC and DECDC shift columns across the scrolling region only when the
+cursor begins within both sets of margins. DECBI and DECFI move by one
+column or shift the region at its horizontal edge. They use the same bounded
+horizontal-edit helpers as ICH/DCH, retaining wide-cell pairing, cursor state,
+surrounding columns and history. Intersecting selections, including a linked
+leading spacer in history, are invalidated; selections outside the affected
+cells survive. Linked spacers are retired before any row shifts, and DECBI
+uses physical single-column movement independently of reverse-wrap modes.
+Rectangle selection invalidation also follows affected cells rather than
+whole rows. Retained image placements stay anchored.
+
+Mode 45 reverse-wraps across recorded line continuations; mode 1045 also
+wraps around the scrolling region. Both require autowrap. A pending forward
+wrap consumes the first backward step. RIS and DECSTR reset both modes,
+and DECRQM reports them. Partial-width continuations use a separate internal
+flag, so they do not join full rows during copying or reflow. Its position
+follows horizontal margin changes while its logical line state survives.
+Rectangle operations retain destination continuation state and omit source
+continuation annotations. Cell flags use 32 bits with the legacy bit values
+unchanged; the cell still fits its existing 24-byte cap on 64-bit targets.
+Control snapshots retain their existing Boolean attribute fields.
+
 ### Synchronized graphics publication
 
 Graphics controls inside DEC 2026 use the same atomic commit boundary. While
