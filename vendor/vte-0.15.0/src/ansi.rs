@@ -749,6 +749,22 @@ pub trait Handler {
     /// Clear screen.
     fn clear_screen(&mut self, _mode: ClearMode) {}
 
+    /// Selectively erase unprotected display cells (DECSED).
+    fn selective_clear_screen(&mut self, mode: ClearMode) {
+        self.clear_screen(mode);
+    }
+
+    /// Selectively erase unprotected line cells (DECSEL).
+    fn selective_clear_line(&mut self, mode: LineClearMode) {
+        self.clear_line(mode);
+    }
+
+    /// Select the DEC character protection attribute (DECSCA).
+    fn set_character_protection(&mut self, _protected: bool) {}
+
+    /// Start or end an ISO protected area (SPA/EPA).
+    fn set_protected_area(&mut self, _start: bool) {}
+
     /// Clear tab stops.
     fn clear_tabs(&mut self, _mode: TabulationClearMode) {}
 
@@ -1819,6 +1835,24 @@ where
                 }
             },
             ('I', []) => handler.move_forward_tabs(next_param_or(1)),
+            ('J', [b'?']) => {
+                let mode = match next_param_or(0) {
+                    0 => ClearMode::Below,
+                    1 => ClearMode::Above,
+                    2 => ClearMode::All,
+                    _ => return unhandled!(),
+                };
+                handler.selective_clear_screen(mode);
+            },
+            ('K', [b'?']) => {
+                let mode = match next_param_or(0) {
+                    0 => LineClearMode::Right,
+                    1 => LineClearMode::Left,
+                    2 => LineClearMode::All,
+                    _ => return unhandled!(),
+                };
+                handler.selective_clear_line(mode);
+            },
             ('J', []) => {
                 let mode = match next_param_or(0) {
                     0 => ClearMode::Below,
@@ -1942,6 +1976,11 @@ where
                     unhandled!();
                 }
             },
+            ('q', [b'"']) => match next_param_or(0) {
+                0 | 2 => handler.set_character_protection(false),
+                1 => handler.set_character_protection(true),
+                _ => unhandled!(),
+            },
             ('q', [b' ']) => {
                 // DECSCUSR (CSI Ps SP q) -- Set Cursor Style.
                 let cursor_style_id = next_param_or(0);
@@ -2044,6 +2083,8 @@ where
             },
             (b'H', []) => self.handler.set_horizontal_tabstop(),
             (b'M', []) => self.handler.reverse_index(),
+            (b'V', []) => self.handler.set_protected_area(true),
+            (b'W', []) => self.handler.set_protected_area(false),
             (b'Z', []) => self.handler.identify_terminal(None),
             (b'c', []) => self.handler.reset_state(),
             (b'0', intermediates) => {

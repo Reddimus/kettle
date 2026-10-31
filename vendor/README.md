@@ -67,6 +67,13 @@ date. Recheck that before upgrading a crate or dropping a patch.
   dark scheme that `CSI ? 996 n` answers and DEC mode 2031 reports on every
   colour change the caller signals, dark to dark included; DECSTR and RIS
   turn mode 2031 off.
+  DECSCA stores character protection independently of SGR; SPA/EPA select
+  ISO protection. DEC selective erase respects protected cells, and ISO
+  protection also applies to ordinary EL, ED and ECH for xterm compatibility.
+  Protected blanks survive reflow trimming; clearing half of an overwritten
+  wide glyph also removes that half's protection. RIS and DECSTR reset the
+  current protection state, and cursor save/restore retains the attribute.
+  Erase-to-right includes the last cell while autowrap is pending.
   DEC mode 69 and DECSLRM define left/right margins for origin-relative
   cursor movement, wrapping, horizontal editing and rectangular vertical
   scrolling. Partial-width scrolls leave history and neighboring columns

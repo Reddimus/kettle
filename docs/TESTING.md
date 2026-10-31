@@ -1148,6 +1148,18 @@ not establish full VT compatibility. The expected list retains the remaining
 protection, rectangle, column-editing, reverse-wrap, colour, mode-report and
 window-policy cases under their actual feature dependencies.
 
+The character-protection follow-up removes another 30 failures: the native
+suite passes 357 tests and matches 167 remaining expected failures, with no
+new failures. Character-protection regressions in the vendored engine exercise DECSCA,
+SPA/EPA, DECSEL/DECSED, ordinary EL/ED/ECH, SGR independence, cursor
+save/restore, status reports, wide-cell overwrites and erasure at pending
+wrap. They use escape sequences through the real parser; the initial cases
+fail with the implementation reverted. The focused native esctest subset
+also checks the existing xterm rule that selective erase respects ISO
+protection, which the suite labels as a reference compatibility exception.
+A subset run does not compare the global expected list; check its reported
+failure count explicitly and run the complete suite for integration.
+
 **ucs-detect** (`just conformance-ucs`) measures how many columns the
 terminal gives Unicode text, against `wcwidth`. Kettle 5.7.0 scored 99.6% on
 narrow and 94.9% on wide characters, where the misses are the 26 regional
