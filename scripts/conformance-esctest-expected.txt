@@ -50,40 +50,14 @@ ResetSpecialColorTests.test_ResetSpecialColor_Single2
 
 [other xterm-only modes (MoreFix 41, XTSAVE/XTRESTORE): not implemented]
 DECSCLTests.test_DECSCL_Level5_SupportsDECNCSM
-DECSETTests.test_DECSET_MoreFix
-XtermSaveTests.test_XtermSave_SaveResetState
-XtermSaveTests.test_XtermSave_SaveSetState
-
-[rectangular attribute operations (DECCARA, DECRARA, DECSACE): not implemented]
-DECRQSSTests.test_DECRQSS_DECSACE
 
 [reports (DECRQM, DECRQSS, DECDSR) about modes and settings Kettle does not implement]
 DECDSRTests.test_DECDSR_DECCKSR
-DECDSRTests.test_DECDSR_DECMSR
-DECDSRTests.test_DECDSR_DSRDECLocatorStatus
-DECDSRTests.test_DECDSR_DSRDataIntegrity
 DECDSRTests.test_DECDSR_DSRKeyboard
-DECDSRTests.test_DECDSR_DSRMultipleSessionStatus
-DECDSRTests.test_DECDSR_DSRPrinterPort
-DECDSRTests.test_DECDSR_DSRUDKLocked
-DECDSRTests.test_DECDSR_LocatorType
-DECRQMTests.test_DECRQM_ANSI_EBM
-DECRQMTests.test_DECRQM_ANSI_FEAM
-DECRQMTests.test_DECRQM_ANSI_FETM
-DECRQMTests.test_DECRQM_ANSI_GATM
-DECRQMTests.test_DECRQM_ANSI_HEM
 DECRQMTests.test_DECRQM_ANSI_KAM
-DECRQMTests.test_DECRQM_ANSI_MATM
-DECRQMTests.test_DECRQM_ANSI_PUM
-DECRQMTests.test_DECRQM_ANSI_SATM
 DECRQMTests.test_DECRQM_ANSI_SRM
-DECRQMTests.test_DECRQM_ANSI_SRTM
-DECRQMTests.test_DECRQM_ANSI_TSM
-DECRQMTests.test_DECRQM_ANSI_TTM
-DECRQMTests.test_DECRQM_ANSI_VEM
 DECRQMTests.test_DECRQM_DEC_DECBKM
 DECRQMTests.test_DECRQM_DEC_DECCOLM
-DECRQMTests.test_DECRQM_DEC_DECHCCM
 DECRQMTests.test_DECRQM_DEC_DECHEBM
 DECRQMTests.test_DECRQM_DEC_DECNKM
 DECRQMTests.test_DECRQM_DEC_DECNRCM
@@ -91,9 +65,7 @@ DECRQMTests.test_DECRQM_DEC_DECPEX
 DECRQMTests.test_DECRQM_DEC_DECPFF
 DECRQMTests.test_DECRQM_DEC_DECSCLM
 DECRQMTests.test_DECRQM_DEC_DECSCNM
-DECRQSSTests.test_DECRQSS_DECSASD
 DECRQSSTests.test_DECRQSS_DECSNLS
-DECRQSSTests.test_DECRQSS_DECSSDT
 
 [window operations (XTWINOPS): Kettle never resizes, moves or iconifies its window for a program, and does not report titles]
 DECRQSSTests.test_DECRQSS_DECSLPP

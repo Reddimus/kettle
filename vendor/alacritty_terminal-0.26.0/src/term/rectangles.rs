@@ -46,6 +46,76 @@ impl<T: EventListener> Term<T> {
         })
     }
 
+    pub(super) fn mark_rect(&mut self, area: ansi::Rectangle, attributes: &[u16], reverse: bool) {
+        let Some(area) = self.resolve_rect(area) else {
+            return;
+        };
+        let exact = self.attribute_extent == 2;
+        let last_row = area.rows.end - 1;
+        let columns = self.columns();
+        for row in area.rows.clone() {
+            let left = if exact || row == area.rows.start {
+                area.columns.start.0
+            } else {
+                0
+            };
+            let right = if exact || row == last_row {
+                area.columns.end.0
+            } else {
+                columns
+            };
+            for column in left..right {
+                let cell = &mut self.grid[Line(row as i32)][Column(column)];
+                if !exact && !cell.flags.contains(Flags::DRAWN) {
+                    continue;
+                }
+                if exact {
+                    if !cell.flags.contains(Flags::DRAWN) {
+                        cell.c = ' ';
+                    }
+                    cell.flags.insert(Flags::DRAWN);
+                }
+                for attribute in attributes {
+                    let flag = match attribute {
+                        0 => Flags::BOLD | Flags::ALL_UNDERLINES | Flags::BLINK | Flags::INVERSE,
+                        1 | 22 => Flags::BOLD,
+                        4 | 24 => Flags::ALL_UNDERLINES,
+                        5 | 25 => Flags::BLINK,
+                        7 | 27 => Flags::INVERSE,
+                        8 | 28 => Flags::HIDDEN,
+                        _ => continue,
+                    };
+                    if reverse {
+                        if *attribute >= 22 {
+                            continue;
+                        }
+                        if *attribute == 4 {
+                            let underline = !cell.flags.intersects(Flags::ALL_UNDERLINES);
+                            cell.flags.remove(Flags::ALL_UNDERLINES);
+                            cell.flags.set(Flags::UNDERLINE, underline);
+                        } else if *attribute == 0 {
+                            cell.flags
+                                .toggle(Flags::BOLD | Flags::BLINK | Flags::INVERSE);
+                            let underline = !cell.flags.intersects(Flags::ALL_UNDERLINES);
+                            cell.flags.remove(Flags::ALL_UNDERLINES);
+                            cell.flags.set(Flags::UNDERLINE, underline);
+                        } else {
+                            cell.flags.toggle(flag);
+                        }
+                    } else if *attribute == 0 || *attribute >= 22 {
+                        cell.flags.remove(flag);
+                    } else if *attribute == 4 {
+                        cell.flags.remove(Flags::ALL_UNDERLINES);
+                        cell.flags.insert(Flags::UNDERLINE);
+                    } else {
+                        cell.flags.insert(flag);
+                    }
+                }
+            }
+        }
+        self.mark_fully_damaged();
+    }
+
     fn invalidate_rect_selection(&mut self, area: &Area) {
         self.selection = self.selection.take().filter(|selection| {
             self.selection_outside_region(
@@ -87,6 +157,7 @@ impl<T: EventListener> Term<T> {
         self.invalidate_rect_selection(&area);
         let mut cell = self.grid.cursor.template.clone();
         cell.c = self.grid.cursor.charsets[self.active_charset].map(character);
+        cell.flags.insert(Flags::DRAWN);
         cell.flags.remove(
             Flags::WIDE_CHAR
                 | Flags::WIDE_CHAR_SPACER
@@ -155,6 +226,7 @@ impl<T: EventListener> Term<T> {
                 if !selective {
                     blank.bg = bg;
                 }
+                blank.flags.insert(Flags::DRAWN);
                 blank.flags.set(Flags::WRAPLINE, wrap);
                 cells[Column(col)] = blank;
             }
@@ -198,6 +270,7 @@ impl<T: EventListener> Term<T> {
                     cells[width - 1] = Self::rect_blank(&cells[width - 1], true);
                 }
                 for cell in &mut cells {
+                    cell.flags.insert(Flags::DRAWN);
                     cell.flags.remove(
                         Flags::WRAPLINE | Flags::LEADING_WIDE_CHAR_SPACER | Flags::PARTIAL_WRAPLINE,
                     );

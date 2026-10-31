@@ -374,6 +374,9 @@ pub struct Term<T> {
     conformance_level: u8,
     reverse_wrap: bool,
     extended_reverse_wrap: bool,
+    morefix: Option<bool>,
+    attribute_extent: u8,
+    saved_private_modes: Vec<(u16, bool)>,
 
     /// Modified terminal colors.
     colors: Colors,
@@ -709,6 +712,9 @@ impl<T> Term<T> {
             conformance_level: 5,
             reverse_wrap: false,
             extended_reverse_wrap: false,
+            morefix: None,
+            attribute_extent: 0,
+            saved_private_modes: Vec::new(),
             event_proxy,
             damage,
             color_scheme_dark: config.color_scheme_dark,
@@ -1742,22 +1748,32 @@ impl<T> Term<T> {
     ) {
         let respect = self.protection_mode == ProtectionMode::Iso
             || (selective && self.protection_mode == ProtectionMode::Dec);
-        if !respect {
-            self.erase_cells(line, start, end);
-            return;
-        }
+        let drawn = end < self.columns();
         if start >= end {
             return;
         }
         let columns = self.columns();
-        let bg = self.grid.cursor.template.bg;
-        let row = &mut self.grid[line];
-        if start > 0 && row[start].flags.contains(Flags::WIDE_CHAR_SPACER) {
+        if start > 0
+            && self.grid[line][start]
+                .flags
+                .contains(Flags::WIDE_CHAR_SPACER)
+        {
             start -= 1;
         }
-        if end < columns && row[end - 1].flags.contains(Flags::WIDE_CHAR) {
+        if end < columns && self.grid[line][end - 1].flags.contains(Flags::WIDE_CHAR) {
             end += 1;
         }
+        if !respect {
+            self.erase_cells(line, start, end);
+            if drawn {
+                for cell in &mut self.grid[line][start..end] {
+                    cell.flags.insert(Flags::DRAWN);
+                }
+            }
+            return;
+        }
+        let bg = self.grid.cursor.template.bg;
+        let row = &mut self.grid[line];
         self.damage.damage_line(line.0 as usize, start.0, end.0 - 1);
         for col in start.0..end.0 {
             let flags = row[Column(col)].flags;
@@ -1770,6 +1786,7 @@ impl<T> Term<T> {
                     && row[Column(col - 1)].flags.contains(Flags::PROTECTED));
             if !protected {
                 row[Column(col)] = bg.into();
+                row[Column(col)].flags.set(Flags::DRAWN, drawn);
             }
         }
     }
@@ -1801,7 +1818,7 @@ impl<T> Term<T> {
         let c = self.grid.cursor.charsets[self.active_charset].map(c);
         let fg = self.grid.cursor.template.fg;
         let bg = self.grid.cursor.template.bg;
-        let flags = self.grid.cursor.template.flags;
+        let flags = self.grid.cursor.template.flags | Flags::DRAWN;
         let extra = self.grid.cursor.template.extra.clone();
 
         let mut cursor_cell = self.grid.cursor_cell();
@@ -1931,6 +1948,69 @@ impl<T> Dimensions for Term<T> {
     }
 }
 
+impl<T> Term<T> {
+    fn private_mode_state(&self, mode: PrivateMode) -> ModeState {
+        match mode {
+            PrivateMode::Named(mode) => match mode {
+                NamedPrivateMode::CursorKeys => self.mode.contains(TermMode::APP_CURSOR).into(),
+                NamedPrivateMode::Origin => self.mode.contains(TermMode::ORIGIN).into(),
+                NamedPrivateMode::LeftRightMargin if self.conformance_level < 4 => {
+                    ModeState::NotSupported
+                }
+                NamedPrivateMode::LeftRightMargin => {
+                    self.mode.contains(TermMode::LEFT_RIGHT_MARGIN).into()
+                }
+                NamedPrivateMode::ReverseWrap => self.reverse_wrap.into(),
+                NamedPrivateMode::ExtendedReverseWrap => self.extended_reverse_wrap.into(),
+                NamedPrivateMode::LineWrap => self.mode.contains(TermMode::LINE_WRAP).into(),
+                NamedPrivateMode::BlinkingCursor => {
+                    let style = self
+                        .cursor_style
+                        .unwrap_or(self.config.default_cursor_style);
+                    style.blinking.into()
+                }
+                NamedPrivateMode::ShowCursor => self.mode.contains(TermMode::SHOW_CURSOR).into(),
+                NamedPrivateMode::ReportMouseClicks => {
+                    self.mode.contains(TermMode::MOUSE_REPORT_CLICK).into()
+                }
+                NamedPrivateMode::ReportCellMouseMotion => {
+                    self.mode.contains(TermMode::MOUSE_DRAG).into()
+                }
+                NamedPrivateMode::ReportAllMouseMotion => {
+                    self.mode.contains(TermMode::MOUSE_MOTION).into()
+                }
+                NamedPrivateMode::ReportFocusInOut => {
+                    self.mode.contains(TermMode::FOCUS_IN_OUT).into()
+                }
+                NamedPrivateMode::Utf8Mouse => self.mode.contains(TermMode::UTF8_MOUSE).into(),
+                NamedPrivateMode::SgrMouse => self.mode.contains(TermMode::SGR_MOUSE).into(),
+                NamedPrivateMode::AlternateScroll => {
+                    self.mode.contains(TermMode::ALTERNATE_SCROLL).into()
+                }
+                NamedPrivateMode::UrgencyHints => {
+                    self.mode.contains(TermMode::URGENCY_HINTS).into()
+                }
+                NamedPrivateMode::SwapScreenAndSetRestoreCursor => {
+                    self.mode.contains(TermMode::ALT_SCREEN).into()
+                }
+                NamedPrivateMode::BracketedPaste => {
+                    self.mode.contains(TermMode::BRACKETED_PASTE).into()
+                }
+                NamedPrivateMode::SyncUpdate => ModeState::Reset,
+                NamedPrivateMode::ColorSchemeReports => {
+                    self.mode.contains(TermMode::COLOR_SCHEME_REPORTS).into()
+                }
+                NamedPrivateMode::ColumnMode => ModeState::NotSupported,
+            },
+            // The older alternate-screen modes `set_private_mode` handles.
+            PrivateMode::Unknown(60) => ModeState::PermanentlyReset,
+            PrivateMode::Unknown(41) => self.morefix.unwrap_or(false).into(),
+            PrivateMode::Unknown(47 | 1047) => self.mode.contains(TermMode::ALT_SCREEN).into(),
+            PrivateMode::Unknown(_) => ModeState::NotSupported,
+        }
+    }
+}
+
 impl<T: EventListener> Handler for Term<T> {
     fn sync_marker(&mut self, id: u64) {
         self.graphics_events.push(GraphicsEvent::SyncMarker { id });
@@ -2047,6 +2127,7 @@ impl<T: EventListener> Handler for Term<T> {
                 let cell = &mut self.grid[line][Column(column)];
                 *cell = Cell::default();
                 cell.c = 'E';
+                cell.flags.insert(Flags::DRAWN);
             }
         }
 
@@ -2383,6 +2464,35 @@ impl<T: EventListener> Handler for Term<T> {
                 let text = format!("\x1b[?{line};{column}R");
                 self.event_proxy.send_event(Event::PtyWrite(text));
             }
+            15 if self.conformance_level >= 2 => self
+                .event_proxy
+                .send_event(Event::PtyWrite("\x1b[?13n".into())),
+            25 if self.conformance_level >= 2 => self
+                .event_proxy
+                .send_event(Event::PtyWrite("\x1b[?21n".into())),
+            26 if self.conformance_level >= 2 => {
+                let reply = match self.conformance_level {
+                    2 => "\x1b[?27;0n",
+                    3 => "\x1b[?27;0;0n",
+                    _ => "\x1b[?27;0;0;0n",
+                };
+                self.event_proxy.send_event(Event::PtyWrite(reply.into()));
+            }
+            53 | 55 if self.conformance_level >= 4 => self
+                .event_proxy
+                .send_event(Event::PtyWrite("\x1b[?53n".into())),
+            56 if self.conformance_level >= 4 => self
+                .event_proxy
+                .send_event(Event::PtyWrite("\x1b[?57;0n".into())),
+            62 if self.conformance_level >= 4 => self
+                .event_proxy
+                .send_event(Event::PtyWrite("\x1b[0*{".into())),
+            75 if self.conformance_level >= 4 => self
+                .event_proxy
+                .send_event(Event::PtyWrite("\x1b[?70n".into())),
+            85 if self.conformance_level >= 4 => self
+                .event_proxy
+                .send_event(Event::PtyWrite("\x1b[?83n".into())),
             // The colour-scheme query, answered while the scheme is known.
             996 => match self.color_scheme_report() {
                 Some(text) => self.event_proxy.send_event(Event::PtyWrite(text)),
@@ -2410,6 +2520,11 @@ impl<T: EventListener> Handler for Term<T> {
     fn request_setting(&mut self, request: Option<&[u8]>) {
         trace!("DECRQSS {request:?}");
         let setting = match request {
+            Some(b"$}") if self.conformance_level >= 3 => Some(String::from("0$}")),
+            Some(b"$~") if self.conformance_level >= 3 => Some(String::from("0$~")),
+            Some(b"*x") if self.conformance_level >= 4 => {
+                Some(format!("{}*x", self.attribute_extent))
+            }
             Some(b"m") => Some(format!("{}m", sgr_report(&self.grid.cursor.template))),
             Some(b"\"q") => Some(format!(
                 "{}\"q",
@@ -2484,8 +2599,14 @@ impl<T: EventListener> Handler for Term<T> {
     fn put_tab(&mut self, mut count: u16) {
         // A tab after the last column is the same as a linebreak.
         if self.grid.cursor.input_needs_wrap {
-            self.wrapline();
-            return;
+            match self.morefix {
+                Some(false) => return,
+                Some(true) => self.wrapline(),
+                None => {
+                    self.wrapline();
+                    return;
+                }
+            }
         }
 
         let columns = self.input_right_edge().0;
@@ -2811,6 +2932,23 @@ impl<T: EventListener> Handler for Term<T> {
         }
     }
 
+    fn set_attribute_extent(&mut self, extent: u16) {
+        if self.conformance_level >= 4 && extent <= 2 {
+            self.attribute_extent = extent as u8;
+        }
+    }
+
+    fn change_rectangle_attributes(
+        &mut self,
+        area: ansi::Rectangle,
+        attributes: &[u16],
+        reverse: bool,
+    ) {
+        if self.conformance_level >= 4 {
+            self.mark_rect(area, attributes, reverse);
+        }
+    }
+
     fn set_character_protection(&mut self, protected: bool) {
         self.protection_mode = ProtectionMode::Dec;
         self.grid
@@ -2940,7 +3078,7 @@ impl<T: EventListener> Handler for Term<T> {
 
                 // Clear up to the current column in the current line.
                 let end = cmp::min(cursor.column + 1, Column(self.columns()));
-                self.erase_cells(cursor.line, Column(0), end);
+                self.erase_protected_cells(cursor.line, Column(0), end, false);
 
                 let range = Line(0)..=cursor.line;
                 self.selection = self.selection.take().filter(|s| !s.intersects_range(range));
@@ -3017,6 +3155,9 @@ impl<T: EventListener> Handler for Term<T> {
         self.conformance_level = 5;
         self.reverse_wrap = false;
         self.extended_reverse_wrap = false;
+        self.morefix = None;
+        self.attribute_extent = 0;
+        self.saved_private_modes.clear();
         if self.mode.contains(TermMode::ALT_SCREEN) {
             mem::swap(&mut self.grid, &mut self.inactive_grid);
         }
@@ -3066,6 +3207,9 @@ impl<T: EventListener> Handler for Term<T> {
 
         self.reverse_wrap = false;
         self.extended_reverse_wrap = false;
+        self.morefix = None;
+        self.attribute_extent = 0;
+        self.saved_private_modes.clear();
         // DECSTR restores terminal state while leaving the display, scrollback and
         // title alone. Programs emit `CSI ! p` from terminfo `is2`/`rs2` while
         // initializing, so clearing here would destroy a user's scrollback
@@ -3138,6 +3282,8 @@ impl<T: EventListener> Handler for Term<T> {
                 cursor.template.flags &= Flags::PROTECTED;
                 cursor.template.set_underline_color(None);
             }
+            Attr::BlinkSlow | Attr::BlinkFast => cursor.template.flags.insert(Flags::BLINK),
+            Attr::CancelBlink => cursor.template.flags.remove(Flags::BLINK),
             Attr::Reverse => cursor.template.flags.insert(Flags::INVERSE),
             Attr::CancelReverse => cursor.template.flags.remove(Flags::INVERSE),
             Attr::Bold => cursor.template.flags.insert(Flags::BOLD),
@@ -3171,9 +3317,6 @@ impl<T: EventListener> Handler for Term<T> {
             Attr::CancelHidden => cursor.template.flags.remove(Flags::HIDDEN),
             Attr::Strike => cursor.template.flags.insert(Flags::STRIKEOUT),
             Attr::CancelStrike => cursor.template.flags.remove(Flags::STRIKEOUT),
-            _ => {
-                debug!("Term got unhandled attr: {attr:?}");
-            }
         }
     }
 
@@ -3181,6 +3324,10 @@ impl<T: EventListener> Handler for Term<T> {
     fn set_private_mode(&mut self, mode: PrivateMode) {
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
+            PrivateMode::Unknown(41) => {
+                self.morefix = Some(true);
+                return;
+            }
             PrivateMode::Unknown(mode @ (47 | 1047)) => {
                 trace!("Setting private mode: {mode}");
                 if !self.mode.contains(TermMode::ALT_SCREEN) {
@@ -3275,6 +3422,10 @@ impl<T: EventListener> Handler for Term<T> {
     fn unset_private_mode(&mut self, mode: PrivateMode) {
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
+            PrivateMode::Unknown(41) => {
+                self.morefix = Some(false);
+                return;
+            }
             PrivateMode::Unknown(mode @ (47 | 1047)) => {
                 trace!("Unsetting private mode: {mode}");
                 if self.mode.contains(TermMode::ALT_SCREEN) {
@@ -3355,68 +3506,48 @@ impl<T: EventListener> Handler for Term<T> {
         }
     }
 
+    fn save_private_mode(&mut self, mode: PrivateMode) {
+        // Sync-update belongs to the parser; 1048 is an action, not a mode.
+        if matches!(mode, PrivateMode::Named(NamedPrivateMode::SyncUpdate)) {
+            return;
+        }
+        let state = match self.private_mode_state(mode) {
+            ModeState::Set => true,
+            ModeState::Reset => false,
+            ModeState::NotSupported | ModeState::PermanentlyReset => return,
+        };
+        if let Some(saved) = self
+            .saved_private_modes
+            .iter_mut()
+            .find(|saved| saved.0 == mode.raw())
+        {
+            saved.1 = state;
+        } else {
+            // Only the finite, recognized set above can reach this allocation.
+            self.saved_private_modes.push((mode.raw(), state));
+        }
+    }
+
+    fn restore_private_mode(&mut self, mode: PrivateMode) {
+        let saved = self
+            .saved_private_modes
+            .iter()
+            .find(|saved| saved.0 == mode.raw())
+            .copied();
+        match saved {
+            Some((_, true)) => self.set_private_mode(mode),
+            Some((_, false)) => self.unset_private_mode(mode),
+            None => (),
+        }
+    }
+
     #[inline]
     fn report_private_mode(&mut self, mode: PrivateMode) {
         if self.conformance_level < 3 {
             return;
         }
         trace!("Reporting private mode {mode:?}");
-        let state = match mode {
-            PrivateMode::Named(mode) => match mode {
-                NamedPrivateMode::CursorKeys => self.mode.contains(TermMode::APP_CURSOR).into(),
-                NamedPrivateMode::Origin => self.mode.contains(TermMode::ORIGIN).into(),
-                NamedPrivateMode::LeftRightMargin if self.conformance_level < 4 => {
-                    ModeState::NotSupported
-                }
-                NamedPrivateMode::LeftRightMargin => {
-                    self.mode.contains(TermMode::LEFT_RIGHT_MARGIN).into()
-                }
-                NamedPrivateMode::ReverseWrap => self.reverse_wrap.into(),
-                NamedPrivateMode::ExtendedReverseWrap => self.extended_reverse_wrap.into(),
-                NamedPrivateMode::LineWrap => self.mode.contains(TermMode::LINE_WRAP).into(),
-                NamedPrivateMode::BlinkingCursor => {
-                    let style = self
-                        .cursor_style
-                        .get_or_insert(self.config.default_cursor_style);
-                    style.blinking.into()
-                }
-                NamedPrivateMode::ShowCursor => self.mode.contains(TermMode::SHOW_CURSOR).into(),
-                NamedPrivateMode::ReportMouseClicks => {
-                    self.mode.contains(TermMode::MOUSE_REPORT_CLICK).into()
-                }
-                NamedPrivateMode::ReportCellMouseMotion => {
-                    self.mode.contains(TermMode::MOUSE_DRAG).into()
-                }
-                NamedPrivateMode::ReportAllMouseMotion => {
-                    self.mode.contains(TermMode::MOUSE_MOTION).into()
-                }
-                NamedPrivateMode::ReportFocusInOut => {
-                    self.mode.contains(TermMode::FOCUS_IN_OUT).into()
-                }
-                NamedPrivateMode::Utf8Mouse => self.mode.contains(TermMode::UTF8_MOUSE).into(),
-                NamedPrivateMode::SgrMouse => self.mode.contains(TermMode::SGR_MOUSE).into(),
-                NamedPrivateMode::AlternateScroll => {
-                    self.mode.contains(TermMode::ALTERNATE_SCROLL).into()
-                }
-                NamedPrivateMode::UrgencyHints => {
-                    self.mode.contains(TermMode::URGENCY_HINTS).into()
-                }
-                NamedPrivateMode::SwapScreenAndSetRestoreCursor => {
-                    self.mode.contains(TermMode::ALT_SCREEN).into()
-                }
-                NamedPrivateMode::BracketedPaste => {
-                    self.mode.contains(TermMode::BRACKETED_PASTE).into()
-                }
-                NamedPrivateMode::SyncUpdate => ModeState::Reset,
-                NamedPrivateMode::ColorSchemeReports => {
-                    self.mode.contains(TermMode::COLOR_SCHEME_REPORTS).into()
-                }
-                NamedPrivateMode::ColumnMode => ModeState::NotSupported,
-            },
-            // The older alternate-screen modes `set_private_mode` handles.
-            PrivateMode::Unknown(47 | 1047) => self.mode.contains(TermMode::ALT_SCREEN).into(),
-            PrivateMode::Unknown(_) => ModeState::NotSupported,
-        };
+        let state = self.private_mode_state(mode);
 
         self.event_proxy.send_event(Event::PtyWrite(format!(
             "\x1b[?{};{}$y",
@@ -3475,6 +3606,7 @@ impl<T: EventListener> Handler for Term<T> {
                     self.mode.contains(TermMode::LINE_FEED_NEW_LINE).into()
                 }
             },
+            ansi::Mode::Unknown(1 | 5 | 7 | 10 | 11 | 13..=19) => ModeState::PermanentlyReset,
             ansi::Mode::Unknown(_) => ModeState::NotSupported,
         };
 
@@ -3637,6 +3769,8 @@ enum ModeState {
     Set = 1,
     /// The mode is currently not set.
     Reset = 2,
+    /// A recognized mode whose reset behavior cannot be changed.
+    PermanentlyReset = 4,
 }
 
 impl From<bool> for ModeState {
@@ -3663,6 +3797,7 @@ fn sgr_report(cell: &Cell) -> String {
         (Flags::UNDERCURL, "4:3"),
         (Flags::DOTTED_UNDERLINE, "4:4"),
         (Flags::DASHED_UNDERLINE, "4:5"),
+        (Flags::BLINK, "5"),
         (Flags::INVERSE, "7"),
         (Flags::HIDDEN, "8"),
         (Flags::STRIKEOUT, "9"),
@@ -4044,6 +4179,110 @@ mod tests {
         processor.advance(&mut term, b"\x1b[>4;0m");
         assert!(!term.mode().intersects(TermMode::MODIFY_OTHER_KEYS));
         assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED));
+    }
+
+    #[test]
+    fn private_mode_save_restore_retains_set_and_reset_states() {
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &TermSize::new(20, 6), listener.clone());
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"\x1b[?7h\x1b[?7s\x1b[?7l\x1b[?7r\x1b[?7$p");
+        assert_eq!(listener.drain(), ["\x1b[?7;1$y"]);
+        parser.advance(&mut term, b"\x1b[?7l\x1b[?7s\x1b[?7h\x1b[?7r\x1b[?7$p");
+        assert_eq!(listener.drain(), ["\x1b[?7;2$y"]);
+        parser.advance(
+            &mut term,
+            b"\x1b[?1;45;1045h\x1b[?1;45;1045s\x1b[?1;45;1045l\x1b[?1;45;1045r",
+        );
+        assert!(term.mode.contains(TermMode::APP_CURSOR));
+        assert!(term.reverse_wrap && term.extended_reverse_wrap);
+    }
+
+    #[test]
+    fn morefix_negotiates_tab_after_pending_wrap_and_resets() {
+        for (mode, expected) in [
+            ("h", Point::new(Line(1), Column(8))),
+            ("l", Point::new(Line(0), Column(19))),
+        ] {
+            let mut term = Term::new(Config::default(), &TermSize::new(20, 6), VoidListener);
+            let mut parser: Processor = Processor::new();
+            parser.advance(
+                &mut term,
+                format!("\x1b[?41{mode}abcdefghijklmnopqrst\t").as_bytes(),
+            );
+            assert_eq!(term.grid.cursor.point, expected);
+            parser.advance(&mut term, b"\x1b[!p\x1b[1;1Habcdefghijklmnopqrst\t");
+            assert_eq!(term.grid.cursor.point, Point::new(Line(1), Column(0)));
+        }
+    }
+
+    #[test]
+    fn reports_describe_absent_devices_and_fixed_modes() {
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &TermSize::new(20, 6), listener.clone());
+        let mut parser: Processor = Processor::new();
+        parser.advance(
+            &mut term,
+            b"\x1b[?15n\x1b[?25n\x1b[?26n\x1b[?55n\x1b[?56n\x1b[?62n\x1b[?75n\x1b[?85n",
+        );
+        assert_eq!(
+            listener.drain(),
+            [
+                "\x1b[?13n",
+                "\x1b[?21n",
+                "\x1b[?27;0;0;0n",
+                "\x1b[?53n",
+                "\x1b[?57;0n",
+                "\x1b[0*{",
+                "\x1b[?70n",
+                "\x1b[?83n"
+            ]
+        );
+        parser.advance(&mut term, b"\x1b[1$p\x1b[?60$p\x1b[65535$p\x1b[?63n");
+        assert_eq!(
+            listener.drain(),
+            ["\x1b[1;4$y", "\x1b[?60;4$y", "\x1b[65535;0$y"]
+        );
+    }
+
+    #[test]
+    fn attribute_extent_and_blink_are_reported_and_reset() {
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &TermSize::new(20, 6), listener.clone());
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"\x1b[2*x\x1b[99*x\x1bP$q*x\x1b\\\x1b[5m\x1bP$qm\x1b\\\x1b[25m\x1bP$qm\x1b\\\x1b[!p\x1bP$q*x\x1b\\");
+        assert_eq!(
+            listener.drain(),
+            [
+                "\x1bP1$r2*x\x1b\\",
+                "\x1bP1$r0;5m\x1b\\",
+                "\x1bP1$r0m\x1b\\",
+                "\x1bP1$r0*x\x1b\\"
+            ]
+        );
+    }
+
+    #[test]
+    fn private_mode_saves_are_bounded_and_do_not_perform_cursor_actions() {
+        let mut term = Term::new(Config::default(), &TermSize::new(20, 6), VoidListener);
+        term.goto(2, 3);
+        let cursor = term.grid.cursor.clone();
+        let saved_cursor = term.grid.saved_cursor.clone();
+        let mut parser: Processor = Processor::new();
+        for mode in 0..=u16::MAX {
+            parser.advance(&mut term, format!("\x1b[?{mode}s").as_bytes());
+        }
+        assert!(term.saved_private_modes.len() <= 32);
+        assert_eq!(term.grid.cursor, cursor);
+        assert_eq!(term.grid.saved_cursor, saved_cursor);
+        assert!(
+            !term
+                .saved_private_modes
+                .iter()
+                .any(|(mode, _)| matches!(mode, 60 | 1048 | 2026))
+        );
+        term.reset_state();
+        assert!(term.saved_private_modes.is_empty());
     }
 
     #[test]
