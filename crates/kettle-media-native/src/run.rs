@@ -113,6 +113,10 @@ impl Running {
 }
 
 impl Running {
+    pub(crate) fn is_reaped(&self) -> bool {
+        self.0.is_none()
+    }
+
     pub(crate) fn stop(&mut self) {
         if let Some(child) = self.0.as_mut() {
             let _ = child.kill();
@@ -311,44 +315,40 @@ pub(crate) fn run<A: AsRef<OsStr>>(
     })
 }
 
-/// Three private pipes for one timestamped decode. Only the two writers
-/// named in the fixed tee output survive exec, and only in that child.
-pub(crate) struct Triple {
+/// A metadata pipe and one private raw-data pipe for a timestamped stream.
+/// Only this writer survives exec, and only in its own contained child.
+pub(crate) struct Pair {
     pub metadata: ChildStdout,
-    pub video: std::io::PipeReader,
-    pub audio: std::io::PipeReader,
+    pub raw: std::io::PipeReader,
     pub running: Running,
 }
 
-pub(crate) fn triple(
+pub(crate) fn pair(
     tool: &Tool,
-    args: impl FnOnce([i32; 2]) -> Vec<std::ffi::OsString>,
+    args: impl FnOnce(i32) -> Vec<std::ffi::OsString>,
     input: File,
     cpu_seconds: u64,
-) -> Result<Triple, RunError> {
+) -> Result<Pair, RunError> {
     use std::os::fd::AsRawFd as _;
-    let (video, video_writer) = std::io::pipe().map_err(|_| RunError::Unavailable)?;
-    let (audio, audio_writer) = std::io::pipe().map_err(|_| RunError::Unavailable)?;
-    let descriptors = [video_writer.as_raw_fd(), audio_writer.as_raw_fd()];
+    let (raw, writer) = std::io::pipe().map_err(|_| RunError::Unavailable)?;
+    let descriptor = writer.as_raw_fd();
     let (running, metadata) = start(
         tool,
-        &args(descriptors),
+        &args(descriptor),
         Some(input),
         Some(cpu_seconds),
-        &descriptors,
+        &[descriptor],
     )?;
-    // Parent copies retain CLOEXEC and close here, so EOF tracks the child.
-    drop((video_writer, audio_writer));
-    Ok(Triple {
+    drop(writer);
+    Ok(Pair {
         metadata,
-        video,
-        audio,
+        raw,
         running,
     })
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Write as _;
 

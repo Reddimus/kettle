@@ -69,6 +69,28 @@ ffmpeg -nostdin -hide_banner -loglevel error -threads 2 \
   -map 0:v -map 1:a -c:v ffv1 -threads:v 2 -c:a pcm_s16le delayed-audio.mkv
 ```
 
+`interior-audio-gap.mkv` has three seconds of 64x48 video at 10 fps,
+with 440 Hz PCM before 0.4 s and after 2 s. Its audio packets contain a
+1.6 s interior timestamp gap. It checks that the next PCM timestamp can
+arrive while pictures after 400 ms remain queued. Made on 2026-10-31 with
+Homebrew FFmpeg 9.0.2:
+
+```sh
+ffmpeg -nostdin -hide_banner -loglevel error -threads 2 \
+  -f lavfi -i testsrc2=size=64x48:rate=10:duration=3 \
+  -f lavfi -i sine=frequency=440:sample_rate=48000:duration=3 \
+  -map 0:v -map 1:a -af "aselect='not(between(t,0.4,2))'" \
+  -c:v ffv1 -threads:v 2 -c:a pcm_s16le -map_metadata -1 \
+  -fflags +bitexact -flags:v +bitexact -flags:a +bitexact interior-audio-gap.mkv
+```
+
+`short-audio.mkv` has three seconds of the same 64x48 video and 0.4 s of
+440 Hz PCM from time zero. Seeking to 1.5 s leaves a valid video stream and
+a clean, empty audio stream. It verifies that supported sound does not turn
+into an Unsupported status after its samples end. Made with the same FFmpeg
+and flags as `interior-audio-gap.mkv`, using `duration=0.4` for the sine input
+and omitting the `aselect` filter.
+
 | File | Bytes | SHA-256 |
 | --- | --- | --- |
 | index.mp4 | 4117 | `4ac5bc7783ee1e305f32272fbab83fbdc46c2a96bb72a992cf326f914c0d9b42` |
@@ -81,3 +103,5 @@ ffmpeg -nostdin -hide_banner -loglevel error -threads 2 \
 | ticks.mp4 | 9583 | `b53795cb3fcc1266f4a5bed15867e633aad1b5707ff69701b746af857e7d6f36` |
 | large-index.webm | 113107 | `77e6aae46ae5764afd1f38e1698d67a8c4d4d26b7a49c34edbf4623cf7c7d910` |
 | delayed-audio.mkv | 319450 | `74326c9ce0ec39873a5afd6c05414b5a2808b35b27dbb22c1eab573e261176d7` |
+| interior-audio-gap.mkv | 167335 | `2a1654cc4ecfcc25c906b81549004ade8f429b4a093bf9b083c579f8543be793` |
+| short-audio.mkv | 71002 | `bbf2e9f3817f1dd8443f7aee75c9644d37cf6522dea7c8b39f87fba5c0621b4c` |
