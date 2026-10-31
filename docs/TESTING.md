@@ -936,7 +936,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Bell flash | `just bell-flash-smoke` | Only ringing pane brightens, then pixels return to baseline | Linux/macOS |
 | Default window size | `just default-window-size-smoke` | Monitor-fitted defaults and explicit sizing; needs a sufficiently wide monitor | Linux/macOS |
 | Line edit chords | `just line-edit-chords-smoke` | Text-action backspace, macOS default chord, and search word deletion | Linux/macOS |
-| Dock menu | `just dock-menu-smoke` | Real Dock rows, window list, and New Window effect; accessibility and no other Kettle instance | macOS |
+| Dock menu | `just dock-menu-smoke` | Real Dock rows, window list, minimized New Tab restoration and New Window effect; accessibility, plus an isolated bundle or no other Kettle instance | macOS |
 | Live stress | `just stress-live [S1 … S10]` | Floods, resize storms, 101 tabs and 151 panes, huge pastes and titles, config churn, hostile media and 64 control clients leave Kettle alive and answering; S6 replaces the clipboard, then restores it; S9 needs a working worker | Linux/macOS |
 | Underline scroll | `just underline-scroll-smoke` | Repeated git-diff/delta scrolling preserves underline pixels; needs git, delta, less | Linux/macOS |
 | Search history | - | Scrollback search status, cells, and highlight pixels; direct helper case | Linux/macOS; Linux CI quarantined |
@@ -944,6 +944,21 @@ Prerequisites beyond the desktop are included in the proof column.
 | Launch-scoped cards | - | Simulated agent TTY launches, receipt privacy, card pixels, exit, and shelf fallback | Linux |
 | Centered media viewer | - | Worker-backed viewer routing and live pixels through native X11 input | Linux X11 |
 | Centered confirmations | `just confirmation-smoke` | Two-pane close, safe Cancel, pointer/Space release, scrolling, retained Settings, visible text, and input isolation | Linux X11 |
+
+To run the Dock smoke alongside an installed Kettle session, pass an isolated
+candidate bundle's executable explicitly:
+
+```sh
+launchctl asuser $(id -u) python3 scripts/check-live-ui-smoke.py \
+  --kettle /path/to/candidate/kettle.app/Contents/MacOS/kettle dock-menu
+```
+
+The harness requires exactly one running process from that bundle and exactly
+one running Dock tile with its canonical bundle URL. It uses retained native
+Accessibility handles for that tile and its menu items; ambiguous identity fails
+before interaction. An unbundled executable still requires no other Kettle
+instance. This checks the menu's behavior, not the icon's composited pixels.
+
 
 The portable `kettle-ui` regressions below exercise queued facts expiry behind a
 blocked check, card placement after a pane narrows during the wait, pickup
