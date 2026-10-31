@@ -31,6 +31,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   move that caret or change that text: Orca announced only the setting's name
   and an empty "entry".
 
+### Maintenance
+
+- Wait for the private D-Bus test daemon to accept connections before starting
+  Linux portal tests, avoiding a startup race under CI load.
+
 ## [5.7.0] — 2026-10-30
 
 ### Added

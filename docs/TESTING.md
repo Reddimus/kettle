@@ -313,6 +313,9 @@ A current-OS pass still needs the other native CI legs before release.
 
 Use a non-root account. Root can bypass the permission checks under test.
 Use an init process for container runs so killed fixture children get reaped.
+Linux portal tests require `dbus-daemon`; their private-bus fixture waits for
+a successful socket connection, since a socket pathname can exist before the
+daemon starts accepting connections.
 Native PTY tests need permission to create Unix PTYs or Windows ConPTYs.
 Restricted sandboxes can skip those tests.
 

@@ -1,6 +1,8 @@
 //! Private session bus for Linux protocol tests.
 
 use std::io::Write;
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -42,7 +44,7 @@ impl Bus {
             address,
         };
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while !socket.exists() {
+        while !bus_ready(&socket) {
             assert!(
                 bus.child.try_wait().unwrap().is_none(),
                 "private bus exited"
@@ -61,5 +63,27 @@ impl Drop for Bus {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+fn bus_ready(socket: &Path) -> bool {
+    // Binding creates the path before the daemon starts accepting connections.
+    UnixStream::connect(socket).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn an_existing_path_is_not_a_listening_bus() {
+        let root = crate::test_tempdir();
+        let socket = root.path().join("bus");
+        std::fs::File::create(&socket).unwrap();
+        assert!(!bus_ready(&socket));
+        std::fs::remove_file(&socket).unwrap();
+        let _listener = UnixListener::bind(&socket).unwrap();
+        assert!(bus_ready(&socket));
     }
 }
