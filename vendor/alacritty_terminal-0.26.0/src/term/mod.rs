@@ -1998,6 +1998,7 @@ impl<T> Term<T> {
     fn private_mode_state(&self, mode: PrivateMode) -> ModeState {
         match mode {
             PrivateMode::Named(mode) => match mode {
+                NamedPrivateMode::ScreenReverse => self.colors.reverse_video().into(),
                 NamedPrivateMode::CursorKeys => self.mode.contains(TermMode::APP_CURSOR).into(),
                 NamedPrivateMode::Origin => self.mode.contains(TermMode::ORIGIN).into(),
                 NamedPrivateMode::LeftRightMargin if self.conformance_level < 4 => {
@@ -3412,6 +3413,7 @@ impl<T: EventListener> Handler for Term<T> {
     /// Reset all important fields in the term struct.
     #[inline]
     fn reset_state(&mut self) {
+        self.colors.set_reverse_video(false);
         self.protection_mode = ProtectionMode::Off;
         self.conformance_level = 5;
         self.reverse_wrap = false;
@@ -3625,6 +3627,11 @@ impl<T: EventListener> Handler for Term<T> {
 
         trace!("Setting private mode: {mode:?}");
         match mode {
+            NamedPrivateMode::ScreenReverse => {
+                if self.colors.set_reverse_video(true) {
+                    self.mark_fully_damaged();
+                }
+            }
             NamedPrivateMode::UrgencyHints => self.mode.insert(TermMode::URGENCY_HINTS),
             NamedPrivateMode::SwapScreenAndSetRestoreCursor => {
                 if !self.mode.contains(TermMode::ALT_SCREEN) {
@@ -3743,6 +3750,11 @@ impl<T: EventListener> Handler for Term<T> {
 
         trace!("Unsetting private mode: {mode:?}");
         match mode {
+            NamedPrivateMode::ScreenReverse => {
+                if self.colors.set_reverse_video(false) {
+                    self.mark_fully_damaged();
+                }
+            }
             NamedPrivateMode::UrgencyHints => self.mode.remove(TermMode::URGENCY_HINTS),
             NamedPrivateMode::SwapScreenAndSetRestoreCursor => {
                 if self.mode.contains(TermMode::ALT_SCREEN) {

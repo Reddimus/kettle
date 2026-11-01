@@ -13,7 +13,7 @@ DA2Tests.test_DA2_NoParameter
 DATests.test_DA_0
 DATests.test_DA_NoParameter
 
-[X colour-space conversion: fixed D65/sRGB with channel clipping and continuous CIE Lab, rather than the suite's X server profile/gamut mapping]
+[X colour spaces: fixed D65/sRGB, channel clipping, physical xy validation and continuous CIE Lab differ from the suite's X server conversion]
 ChangeColorTests.test_ChangeColor_CIELab
 ChangeColorTests.test_ChangeColor_CIELuv
 ChangeColorTests.test_ChangeColor_CIEXYZ
@@ -47,7 +47,6 @@ DECRQMTests.test_DECRQM_DEC_DECNRCM
 DECRQMTests.test_DECRQM_DEC_DECPEX
 DECRQMTests.test_DECRQM_DEC_DECPFF
 DECRQMTests.test_DECRQM_DEC_DECSCLM
-DECRQMTests.test_DECRQM_DEC_DECSCNM
 DECRQSSTests.test_DECRQSS_DECSNLS
 
 [window operations (XTWINOPS): Kettle never resizes, moves or iconifies its window for a program, and does not report titles]

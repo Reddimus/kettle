@@ -1182,6 +1182,7 @@ impl PrivateMode {
         match mode {
             1 => Self::Named(NamedPrivateMode::CursorKeys),
             3 => Self::Named(NamedPrivateMode::ColumnMode),
+            5 => Self::Named(NamedPrivateMode::ScreenReverse),
             6 => Self::Named(NamedPrivateMode::Origin),
             7 => Self::Named(NamedPrivateMode::LineWrap),
             12 => Self::Named(NamedPrivateMode::BlinkingCursor),
@@ -1240,6 +1241,7 @@ pub enum NamedPrivateMode {
     /// * resets DECLRMM to unavailable
     /// * clears data from the status line (if set to host-writable)
     ColumnMode = 3,
+    ScreenReverse = 5,
     Origin = 6,
     LineWrap = 7,
     /// Reverse wrap over previously wrapped lines.

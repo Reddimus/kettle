@@ -64,8 +64,14 @@ fn named(n: NamedColor, theme: &Theme) -> Rgb {
 pub fn resolve_query(idx: usize, theme: &Theme, term_colors: &TermColors) -> Option<Rgb> {
     // Reject out-of-range up front — `Colors` is fixed-size and OSC queries
     // beyond the documented slots aren't meaningful for any app.
-    let fallback = match idx {
-        0..=15 => theme.palette[idx],
+    if !matches!(idx, 0..=258 | 269..=273) {
+        return None;
+    }
+    if idx == 258 {
+        return Some(cursor_block_color(theme, term_colors));
+    }
+    let fallback = match term_colors.mapped_index(idx) {
+        index @ 0..=15 => theme.palette[index],
         16..=255 => indexed_256(idx as u8),
         256 => theme.foreground,
         257 => theme.background,
@@ -149,9 +155,17 @@ pub fn resolve(c: AnsiColor, theme: &Theme, term_colors: &TermColors) -> Rgb {
     match c {
         AnsiColor::Spec(rgb) => Rgb::new(rgb.r, rgb.g, rgb.b),
         AnsiColor::Named(n) => {
+            if n == NamedColor::Cursor {
+                return cursor_block_color(theme, term_colors);
+            }
             if let Some(rgb) = term_colors[n] {
                 Rgb::new(rgb.r, rgb.g, rgb.b)
             } else {
+                let n = if term_colors.reverse_video() {
+                    reversed_named(n)
+                } else {
+                    n
+                };
                 named(n, theme)
             }
         }
@@ -159,11 +173,26 @@ pub fn resolve(c: AnsiColor, theme: &Theme, term_colors: &TermColors) -> Rgb {
             if let Some(rgb) = term_colors[i as usize] {
                 Rgb::new(rgb.r, rgb.g, rgb.b)
             } else if i < 16 {
-                theme.palette[i as usize]
+                theme.palette[term_colors.mapped_index(i as usize)]
             } else {
                 indexed_256(i)
             }
         }
+    }
+}
+
+fn reversed_named(color: NamedColor) -> NamedColor {
+    use NamedColor::*;
+    match color {
+        Black => White,
+        White => Black,
+        BrightBlack => BrightWhite,
+        BrightWhite => BrightBlack,
+        DimBlack => DimWhite,
+        DimWhite => DimBlack,
+        Foreground | BrightForeground | DimForeground => Background,
+        Background => Foreground,
+        other => other,
     }
 }
 
@@ -476,7 +505,9 @@ fn sample_index(sample: usize, pixels: usize, samples: usize) -> usize {
 /// would make this branch unconditional and leave `cursor-fg-color`
 /// unreachable. The decision lives in one named function so a test can pin it.
 pub fn cursor_glyph_color(theme: &Theme, colors: &TermColors, cell_bg: Rgb) -> Rgb {
-    if colors[258].is_some() {
+    if colors[258].is_some()
+        || (colors.reverse_video() && cursor_block_color(theme, colors) != theme.cursor)
+    {
         cell_bg
     } else {
         theme.cursor_text
@@ -485,14 +516,91 @@ pub fn cursor_glyph_color(theme: &Theme, colors: &TermColors, cell_bg: Rgb) -> R
 
 /// The focused block cursor's fill color, with OSC 12 overriding the theme.
 pub fn cursor_block_color(theme: &Theme, colors: &TermColors) -> Rgb {
-    colors[258]
-        .map(|rgb| Rgb::new(rgb.r, rgb.g, rgb.b))
-        .unwrap_or(theme.cursor)
+    if let Some(rgb) = colors[258] {
+        return Rgb::new(rgb.r, rgb.g, rgb.b);
+    }
+    let cursor = theme.cursor;
+    if colors.reverse_video() {
+        let mut normal = *colors;
+        normal.set_reverse_video(false);
+        if cursor == resolve(AnsiColor::Named(NamedColor::Foreground), theme, &normal) {
+            return resolve(AnsiColor::Named(NamedColor::Background), theme, &normal);
+        }
+    }
+    cursor
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_reverse_resolves_default_and_ansi_pairs_without_reversing_explicit_rgb() {
+        let theme = Theme::default();
+        let mut colors = TermColors::default();
+        colors.set_reverse_video(true);
+        assert_eq!(
+            resolve(AnsiColor::Named(NamedColor::Background), &theme, &colors),
+            theme.foreground
+        );
+        assert_eq!(
+            resolve(AnsiColor::Named(NamedColor::Foreground), &theme, &colors),
+            theme.background
+        );
+        for (index, swapped) in [(0, 7), (7, 0), (8, 15), (15, 8)] {
+            assert_eq!(
+                resolve(AnsiColor::Indexed(index), &theme, &colors),
+                theme.palette[swapped]
+            );
+            assert_eq!(
+                resolve_query(index as usize, &theme, &colors),
+                Some(theme.palette[swapped])
+            );
+        }
+        let rgb = alacritty_terminal::vte::ansi::Rgb { r: 1, g: 2, b: 3 };
+        assert_eq!(
+            resolve(AnsiColor::Spec(rgb), &theme, &colors),
+            Rgb::new(1, 2, 3)
+        );
+        assert_eq!(resolve_query(267, &theme, &colors), None);
+        assert!(!colors.has_special_modes());
+    }
+
+    #[test]
+    fn screen_reverse_cursor_follows_the_default_foreground_and_keeps_custom_colors() {
+        let mut theme = Theme::default();
+        theme.cursor = theme.foreground;
+        theme.cursor_text = theme.background;
+        let mut colors = TermColors::default();
+        colors.set_reverse_video(true);
+        assert_eq!(cursor_block_color(&theme, &colors), theme.background);
+        assert_eq!(resolve_query(258, &theme, &colors), Some(theme.background));
+        assert_eq!(
+            cursor_glyph_color(&theme, &colors, theme.foreground),
+            theme.foreground
+        );
+        theme.cursor = Rgb::new(1, 2, 3);
+        theme.cursor_text = Rgb::new(4, 5, 6);
+        assert_eq!(cursor_block_color(&theme, &colors), theme.cursor);
+        assert_eq!(
+            cursor_glyph_color(&theme, &colors, theme.foreground),
+            theme.cursor_text
+        );
+    }
+
+    #[test]
+    fn screen_reverse_keeps_explicit_cursor_set_query_roundtrips() {
+        let theme = Theme::default();
+        let mut colors = TermColors::default();
+        colors.set_reverse_video(true);
+        colors[258] = Some(alacritty_terminal::vte::ansi::Rgb {
+            r: theme.foreground.r,
+            g: theme.foreground.g,
+            b: theme.foreground.b,
+        });
+        assert_eq!(cursor_block_color(&theme, &colors), theme.foreground);
+        assert_eq!(resolve_query(258, &theme, &colors), Some(theme.foreground));
+    }
 
     const TOKYONIGHT_BG: Rgb = Rgb {
         r: 0x1a,
