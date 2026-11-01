@@ -24,6 +24,87 @@ spec.loader.exec_module(checker)
 
 
 class LiveUiTests(unittest.TestCase):
+    def test_steady_printing_warms_the_measured_text_and_rejects_queue_writes(self):
+        # A renderer may legitimately rasterize new shaped text. Replaying the
+        # warmed text must still reject queue uploads and missing mapped work.
+        class Fixture:
+            def __init__(self, queue_write=False, mapped=True):
+                self.counts = dict.fromkeys(
+                    (
+                        "frames_presented",
+                        "buffer_writes",
+                        "buffer_bytes",
+                        "texture_writes",
+                        "text_prepares",
+                        "skipped_writes",
+                        "mapped_writes",
+                        "chrome_prepares",
+                    ),
+                    0,
+                )
+                self.text = ""
+                self.warmed = set()
+                self.queue_write = queue_write
+                self.mapped = mapped
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def json_ctl(self, action):
+                if action == "read_screen":
+                    return {"text": self.text}
+                return {
+                    "window_focused": True,
+                    "render_uploads": {**self.counts, "mapped_uploads": True},
+                }
+
+            def screenshot(self, path):
+                pass
+
+            def ctl(self, action, params):
+                command = params["text"]
+                if command.startswith("head -c"):
+                    self.text = "KETTLE_STEADY_DONE"
+                    return
+                suffix = command.rsplit(" ", 1)[1].strip()
+                # Different shaped runs can use different cached glyphs, even
+                # if their sets of individual characters overlap.
+                cold = command not in self.warmed
+                self.warmed.add(command)
+                self.counts["texture_writes"] += 2 if cold else 0
+                self.counts["buffer_writes"] += int(self.queue_write and not cold)
+                self.counts["mapped_writes"] += 30 if self.mapped else 0
+                self.text = "KETTLE_PRINT_" + suffix
+
+        for queue_write, mapped, expected in [
+            (False, True, None),
+            (True, True, "printing wrote through the queue"),
+            (False, False, "mapped write"),
+        ]:
+            with self.subTest(queue_write=queue_write, mapped=mapped):
+                fixture = Fixture(queue_write, mapped)
+                now = [0.0]
+
+                def sleep(seconds):
+                    now[0] += seconds
+                    fixture.counts["frames_presented"] += 10
+
+                with (
+                    tempfile.TemporaryDirectory() as directory,
+                    patch.object(checker, "LiveKettle", return_value=fixture),
+                    patch.object(checker, "focus_live_kettle_window"),
+                    patch.object(checker.time, "monotonic", side_effect=lambda: now[0]),
+                    patch.object(checker.time, "sleep", side_effect=sleep),
+                ):
+                    if expected is None:
+                        checker.run_steady_uploads("fixture", Path(directory))
+                    else:
+                        with self.assertRaisesRegex(SystemExit, expected):
+                            checker.run_steady_uploads("fixture", Path(directory))
+
     def test_linux_stat_accepts_non_ascii_comm(self):
         with tempfile.TemporaryDirectory() as directory:
             record = Path(directory) / "stat"

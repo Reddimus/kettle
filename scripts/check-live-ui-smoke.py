@@ -973,7 +973,12 @@ def process_exited_without_reaping(process: subprocess.Popen) -> bool:
         process.pid,
         os.WEXITED | os.WNOHANG | os.WNOWAIT,
     )
-    return result is not None
+    # Darwin can return an unconsumed CLD_STOPPED event even with WEXITED.
+    return result is not None and result.si_code in (
+        os.CLD_EXITED,
+        os.CLD_KILLED,
+        os.CLD_DUMPED,
+    )
 
 
 def native_visible_window_ids(pid: int) -> Set[int]:
@@ -19517,22 +19522,32 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
             raise SystemExit(f"steady-uploads smoke: {label} wrote to the GPU: {moved}")
 
     def printing(live: LiveKettle) -> object:
-        """D. The first round of lines rasterizes every glyph they use, so
-        the measured round, the same lines again, needs no texture upload."""
+        """D. Replay warmed text without introducing a new completion marker."""
         value = live.json_ctl("ui_geometry").get("render_uploads") or {}
         if not value.get("mapped_uploads"):
-            print("steady-uploads smoke: phase D not run (this adapter keeps queue uploads)")
+            print(
+                "steady-uploads smoke: phase D not run (this adapter keeps queue uploads)"
+            )
             return "not run: this adapter keeps queue uploads"
         if "chrome_prepares" not in value:
-            raise SystemExit("steady-uploads smoke: phase D needs the chrome_prepares counter")
+            raise SystemExit(
+                "steady-uploads smoke: phase D needs the chrome_prepares counter"
+            )
         # A cursor-only prepare on a blank cell has no vertices to upload.
         # Main/menu prepares can rewrite glyphon's uncounted vertex buffers.
         rounds = {}
-        for index, label in enumerate(("warm-up", "measured"), start=1):
+        # The second marker scrolls the first out of the visible screen. The
+        # measured round then repeats the first command and output exactly;
+        # changing its marker could legitimately rasterize new shaped text.
+        for index, label in ((1, "warm-up"), (2, "warm-up-alternate"), (1, "measured")):
             before = settled(live, f"phase D ({label})")
             # The typed line shows `%s`, so only the output carries the mark,
             # and its digit is one the lines have already drawn.
             mark = f"KETTLE_PRINT_{index}"
+            if mark in screen_text(live.json_ctl("read_screen")):
+                raise SystemExit(
+                    "steady-uploads smoke: stale printing marker is still visible"
+                )
             live.ctl(
                 "send_text",
                 params={
@@ -19543,17 +19558,29 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
             deadline = time.monotonic() + 30.0
             while mark not in screen_text(live.json_ctl("read_screen")):
                 if time.monotonic() > deadline:
-                    raise SystemExit(f"steady-uploads smoke: the {label} lines never finished")
+                    raise SystemExit(
+                        f"steady-uploads smoke: the {label} lines never finished"
+                    )
                 time.sleep(0.2)
             rounds[label] = {"before": before, "after": uploads(live)}
+            (out / "printing-rounds.json").write_text(
+                json.dumps(rounds, indent=2) + "\n"
+            )
         before, after = rounds["measured"]["before"], rounds["measured"]["after"]
         mapped = after["mapped_writes"] - before["mapped_writes"]
         if mapped < 10:
-            raise SystemExit(f"steady-uploads smoke: printing made only {mapped} mapped write(s)")
-        moved = {key: (before[key], after[key]) for key in ("buffer_writes", "texture_writes", "chrome_prepares")
-                 if after[key] != before[key]}
+            raise SystemExit(
+                f"steady-uploads smoke: printing made only {mapped} mapped write(s)"
+            )
+        moved = {
+            key: (before[key], after[key])
+            for key in ("buffer_writes", "texture_writes", "chrome_prepares")
+            if after[key] != before[key]
+        }
         if moved:
-            raise SystemExit(f"steady-uploads smoke: printing wrote through the queue: {moved}")
+            raise SystemExit(
+                f"steady-uploads smoke: printing wrote through the queue: {moved}"
+            )
         return rounds
 
     def blinks(live: LiveKettle, label: str) -> Dict[str, object]:
