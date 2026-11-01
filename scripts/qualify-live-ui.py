@@ -170,6 +170,7 @@ def run_case(case, binary, out):
     original = live.LiveKettle
     fixtures = []
     exit_before_cleanup = {}
+    termination_receipts = {}
     receipt = {"case": case, "status": "FAIL", "cleanup": False, "fixtures": []}
     path = out / "case.json"
 
@@ -186,7 +187,13 @@ def run_case(case, binary, out):
         def __exit__(self, *args):
             if self.proc is not None:
                 exit_before_cleanup[id(self.proc)] = self.proc.poll()
-            return super().__exit__(*args)
+            try:
+                return super().__exit__(*args)
+            finally:
+                if self.proc is not None:
+                    termination_receipts[id(self.proc)] = getattr(
+                        self, "_termination_receipt", None
+                    )
 
     live.LiveKettle = RecordedLive
     try:
@@ -201,14 +208,26 @@ def run_case(case, binary, out):
         for proc in fixtures:
             code = proc.poll()
             before = exit_before_cleanup.get(id(proc))
+            termination = termination_receipts.get(id(proc))
+            witnessed_signal = (
+                isinstance(termination, dict)
+                and termination.get("pid") == proc.pid
+                and any(
+                    item.get("root_alive") is True
+                    and item.get("signal") in (int(signal.SIGTERM), 9)
+                    and code == -item["signal"]
+                    for item in termination.get("signals", [])
+                )
+            )
             receipt["fixtures"].append(
                 {
                     "pid": proc.pid,
                     "closed": code is not None,
                     "exit": code,
                     "exit_before_cleanup": before,
+                    "termination": termination,
                     "unexpected_exit": before not in (None, 0)
-                    or code not in (None, 0, -signal.SIGTERM),
+                    or not (code == 0 or witnessed_signal),
                 }
             )
         receipt["cleanup"] = bool(fixtures) and all(

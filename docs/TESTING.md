@@ -2152,8 +2152,11 @@ split-exit-resize, program-keys, color-scheme and steady-uploads. The last uses
 `--screenshots-only`, matching its existing Xvfb scope.
 
 Each scenario starts fresh fixtures and records their PIDs, pre-cleanup state
-and actual exit codes. A crash or forced kill cannot qualify merely because
-the process closed; normal supervisor SIGTERM cleanup is recorded separately.
+and actual exit codes. Normal Unix teardown records the signals it sends while
+the unreaped process-group leader is still alive. This distinguishes Linux's
+normal SIGKILL after freezing the owned group from an unexpected kill. A
+nonzero exit can qualify only with a matching live-root signal witness and no
+pre-cleanup failure; crashes and unwitnessed signals still fail.
 A failed case stops its allocation without retrying. At the deadline, cleanup
 freezes and records the supervisor and its descendants through stable process
 handles before killing those exact instances, including separate PTY sessions.

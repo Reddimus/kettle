@@ -81,6 +81,68 @@ class QualificationReceipts(unittest.TestCase):
 
 
 class CaseSupervision(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "native Unix termination witness")
+    def test_normal_teardown_witnesses_the_signal_to_a_live_stopped_root(self):
+        live = qualification.load_live()
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            ready = root / "ready"
+            target = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path;import time;Path({str(ready)!r}).touch();time.sleep(60)",
+                ],
+                start_new_session=True,
+            )
+            decoy = subprocess.Popen(
+                [sys.executable, "-c", "import time;time.sleep(60)"]
+            )
+            (root / "owners.json").write_text(
+                json.dumps({"target": target.pid, "decoy": decoy.pid})
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists():
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+                os.kill(target.pid, signal.SIGSTOP)
+                os.waitpid(target.pid, os.WUNTRACED)
+                receipt = live.terminate_owned_process_group(target, grace_s=0.05)
+                self.assertEqual(receipt["pid"], target.pid)
+                self.assertIn(
+                    {"signal": -target.returncode, "root_alive": True},
+                    receipt["signals"],
+                )
+                self.assertIsNone(decoy.poll())
+            finally:
+                if target.poll() is None:
+                    target.kill()
+                target.wait(timeout=5)
+                decoy.kill()
+                decoy.wait(timeout=5)
+
+    @unittest.skipUnless(os.name == "posix", "native Unix termination witness")
+    def test_already_exited_root_has_no_live_signal_witness(self):
+        live = qualification.load_live()
+        target = subprocess.Popen(
+            [sys.executable, "-c", "raise SystemExit(7)"], start_new_session=True
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not live.process_exited_without_reaping(target):
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.01)
+            receipt = live.terminate_owned_process_group(target, grace_s=0.05)
+            self.assertEqual(target.returncode, 7)
+            self.assertTrue(
+                all(item["root_alive"] is False for item in receipt["signals"])
+            )
+        finally:
+            if target.poll() is None:
+                target.kill()
+            target.wait(timeout=5)
+
     def invoke(self, receipt, returncode=0, waits=None):
         with tempfile.TemporaryDirectory() as scratch:
             out = Path(scratch) / "case"
@@ -396,6 +458,41 @@ def run_search_history(binary, out):
             self.assertTrue(receipt["cleanup"])
             self.assertEqual(receipt["status"], "FAIL")
             self.assertEqual(receipt["fixtures"][0]["exit"], -6)
+
+    def test_only_a_witnessed_normal_fixture_signal_can_qualify(self):
+        source = """class Process:
+    pid = 42
+    closed = False
+    def poll(self): return -9 if self.closed else None
+class LiveKettle:
+    def __init__(self): self.proc = Process()
+    def __enter__(self): return self
+    def __exit__(self, *args):
+        self._termination_receipt = WITNESS
+        self.proc.closed = True
+def run_search_history(binary, out):
+    with LiveKettle(): pass
+"""
+        for witness, expected in [
+            ({"pid": 42, "signals": [{"signal": 9, "root_alive": True}]}, 0),
+            ({"pid": 43, "signals": [{"signal": 9, "root_alive": True}]}, 1),
+            ({"pid": 42, "signals": [{"signal": 9, "root_alive": False}]}, 1),
+            ({"pid": 42, "signals": [{"signal": 15, "root_alive": True}]}, 1),
+            ({"pid": 42, "signals": []}, 1),
+            (None, 1),
+        ]:
+            with (
+                self.subTest(witness=witness),
+                tempfile.TemporaryDirectory() as scratch,
+            ):
+                out = Path(scratch)
+                helper = out / "helper.py"
+                helper.write_text("WITNESS = " + repr(witness) + "\n" + source)
+                with patch.object(qualification, "HELPER", helper):
+                    self.assertEqual(
+                        qualification.run_case("search-history", Path("binary"), out),
+                        expected,
+                    )
 
 
 class CampaignAdmission(unittest.TestCase):
