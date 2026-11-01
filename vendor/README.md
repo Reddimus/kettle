@@ -81,6 +81,14 @@ date. Recheck that before upgrading a crate or dropping a patch.
   attributes and honors DEC protection, while ignoring ISO protection.
   Page parameters clamp to the one active page; levels below four ignore
   these controls. Retained image placements are not copied or relocated.
+  DECIC/DECDC and DECBI/DECFI reuse bounded horizontal edits across the
+  scrolling region, with stable cursor/history state and wide-cell pairing.
+  Reverse-wrap modes 45 and 1045 require autowrap and distinguish recorded
+  continuations from circular region wrapping. A separate partial-wrap flag
+  follows margin changes without creating full-row joins; rectangle copies
+  retain destination annotations and do not transplant source annotations.
+  Internal flags widen to 32 bits without changing legacy values or the
+  24-byte cell cap. RIS and DECSTR reset the reverse-wrap modes.
   DEC mode 69 and DECSLRM define left/right margins for origin-relative
   cursor movement, wrapping, horizontal editing and rectangular vertical
   scrolling. Partial-width scrolls leave history and neighboring columns

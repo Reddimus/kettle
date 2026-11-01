@@ -1,4 +1,4 @@
-//! One contained tee process, bounded queues and a shared cancellation path.
+//! Two contained stream decoders, bounded queues and shared cancellation.
 
 use std::io::{BufReader, Read};
 use std::ops::Range;
@@ -10,25 +10,39 @@ use kettle_media::audio::{AudioBlock, AudioSource, CHANNELS};
 use kettle_media::video::{FrameSource, PlayGate};
 use kettle_media::{FailureCode, pcm};
 
-use super::packets::{Metadata, Packet};
-use crate::run::{Exit, Running, Triple};
+use super::packets::{Metadata, Packet, Stream};
+use crate::run::{Exit, Pair, Running};
 
 const ROUND: Duration = Duration::from_millis(10);
 
 struct Shared {
-    running: Mutex<Running>,
+    running: [Mutex<Running>; 2],
     cancelled: AtomicBool,
     audio_cancelled: AtomicBool,
-    clean: AtomicBool,
+    clean: [AtomicBool; 2],
 }
 
 impl Shared {
     fn stop(&self) {
         self.cancelled.store(true, Ordering::Release);
-        self.running
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .stop();
+        for running in &self.running {
+            running
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .stop();
+        }
+    }
+
+    fn stop_and_reap(&self) -> bool {
+        self.stop();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        self.running.iter().fold(true, |reaped, running| {
+            let mut running = running.lock().unwrap_or_else(PoisonError::into_inner);
+            if !running.is_reaped() {
+                running.exit_within(deadline.saturating_duration_since(Instant::now()));
+            }
+            running.is_reaped() && reaped
+        })
     }
 }
 
@@ -42,6 +56,7 @@ pub(super) struct Video {
     packets: mpsc::Receiver<Bytes>,
     size: usize,
     initial_gap: Option<u64>,
+    reached_eof: bool,
 }
 
 pub(super) struct Audio {
@@ -53,7 +68,7 @@ pub(super) struct Audio {
 }
 
 pub(super) fn split(
-    pipes: Triple,
+    streams: [Pair; 2],
     size: usize,
     start_ms: u64,
     duration_ms: u64,
@@ -61,102 +76,139 @@ pub(super) fn split(
     initial_gap: bool,
     deadline: Instant,
 ) -> Result<(Video, Audio), FailureCode> {
-    let Triple {
-        metadata,
-        video,
-        audio,
-        running,
-    } = pipes;
+    let [video, audio] = streams;
+    let Pair {
+        metadata: video_metadata,
+        raw: video_raw,
+        running: video_running,
+    } = video;
+    let Pair {
+        metadata: audio_metadata,
+        raw: audio_raw,
+        running: audio_running,
+    } = audio;
     let shared = Arc::new(Shared {
-        running: Mutex::new(running),
+        running: [Mutex::new(video_running), Mutex::new(audio_running)],
         cancelled: AtomicBool::new(false),
         audio_cancelled: AtomicBool::new(false),
-        clean: AtomicBool::new(false),
+        clean: [AtomicBool::new(false), AtomicBool::new(false)],
     });
-    let raw_video = drain(video, size, Arc::clone(&shared)).inspect_err(|_| shared.stop())?;
-    let raw_audio = drain(audio, 7680, Arc::clone(&shared)).inspect_err(|_| shared.stop())?;
+    let raw_video = drain(video_raw, size, Arc::clone(&shared)).inspect_err(|_| shared.stop())?;
+    let raw_audio = drain(audio_raw, 7680, Arc::clone(&shared)).inspect_err(|_| shared.stop())?;
     let (video_tx, video_rx) = mpsc::sync_channel(2);
     let (audio_tx, audio_rx) = mpsc::sync_channel(8);
-    let (started, startup) = mpsc::sync_channel(1);
-    let drained = Arc::clone(&shared);
-    std::thread::Builder::new()
-        .name("kettle-media-tee".into())
-        .spawn(move || {
-            let mut metadata = Metadata::new(BufReader::new(metadata), size, start_ms, duration_ms);
-            let mut started = Some(started);
-            let mut read = || -> Result<(), ()> {
-                // Separate readers prevent tee's per-slave interleaver from
-                // holding metadata while a large raw packet fills its pipe.
-                while let Some(Packet {
+    let (started, startup) = mpsc::sync_channel(2);
+    for (stream, metadata, raw, sender) in [
+        (Stream::Video, video_metadata, raw_video, video_tx),
+        (Stream::Audio, audio_metadata, raw_audio, audio_tx),
+    ] {
+        let drained = Arc::clone(&shared);
+        let started = started.clone();
+        std::thread::Builder::new()
+            .name(
+                match stream {
+                    Stream::Video => "kettle-media-video",
+                    Stream::Audio => "kettle-media-audio",
+                }
+                .into(),
+            )
+            .spawn(move || {
+                let index = stream.index();
+                let mut metadata = Metadata::new(
+                    BufReader::new(metadata),
                     stream,
-                    at_us,
-                    bytes,
-                }) = metadata.next()?
-                {
-                    if drained.cancelled.load(Ordering::Acquire) {
-                        return Err(());
-                    }
-                    // A packet proves the muxer opened both codecs. Waiting for
-                    // video here would block when audio precedes the picture.
-                    if let Some(started) = started.take() {
-                        let _ = started.send(());
-                    }
-                    let raw = if stream == 0 { &raw_video } else { &raw_audio };
-                    let data = raw.recv().map_err(|_| ())??;
-                    if data.len() != bytes {
-                        return Err(());
-                    }
-                    let mut packet = Bytes { at_us, data };
-                    let sender = if stream == 0 { &video_tx } else { &audio_tx };
-                    loop {
-                        if drained.cancelled.load(Ordering::Acquire) {
+                    size,
+                    start_ms,
+                    duration_ms,
+                );
+                let mut started = Some(started);
+                let mut read = || -> Result<(), ()> {
+                    while let Some(Packet {
+                        stream: packet_stream,
+                        at_us,
+                        bytes,
+                    }) = metadata.next()?
+                    {
+                        if packet_stream != index
+                            || drained.cancelled.load(Ordering::Acquire)
+                            || (stream == Stream::Audio
+                                && drained.audio_cancelled.load(Ordering::Acquire))
+                        {
                             return Err(());
                         }
-                        match sender.try_send(packet) {
-                            Ok(()) => break,
-                            // Sound may be unavailable. Still drain its pipe so
-                            // the same process can continue supplying video.
-                            Err(mpsc::TrySendError::Disconnected(_)) if stream == 1 => break,
-                            Err(mpsc::TrySendError::Disconnected(_)) => return Err(()),
-                            Err(mpsc::TrySendError::Full(returned)) => {
-                                packet = returned;
-                                std::thread::sleep(ROUND);
+                        if let Some(started) = started.take() {
+                            let _ = started.send(());
+                        }
+                        let data = raw.recv().map_err(|_| ())??;
+                        if data.len() != bytes {
+                            return Err(());
+                        }
+                        let mut packet = Bytes { at_us, data };
+                        loop {
+                            if drained.cancelled.load(Ordering::Acquire)
+                                || (stream == Stream::Audio
+                                    && drained.audio_cancelled.load(Ordering::Acquire))
+                            {
+                                return Err(());
+                            }
+                            match sender.try_send(packet) {
+                                Ok(()) => break,
+                                Err(mpsc::TrySendError::Disconnected(_))
+                                    if stream == Stream::Audio =>
+                                {
+                                    break;
+                                }
+                                Err(mpsc::TrySendError::Disconnected(_)) => return Err(()),
+                                Err(mpsc::TrySendError::Full(returned)) => {
+                                    packet = returned;
+                                    std::thread::sleep(ROUND);
+                                }
                             }
                         }
                     }
+                    let exit = drained.running[index]
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .exit_within(Duration::from_secs(1));
+                    if exit != Exit::Clean || raw.recv().is_ok() {
+                        return Err(());
+                    }
+                    Ok(())
+                };
+                if read().is_ok() {
+                    drained.clean[index].store(true, Ordering::Release);
+                    if let Some(started) = started.take() {
+                        let _ = started.send(());
+                    }
+                } else if stream == Stream::Audio && drained.audio_cancelled.load(Ordering::Acquire)
+                {
+                    let mut running = drained.running[index]
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    running.stop();
+                    running.exit_within(Duration::from_secs(1));
+                } else {
+                    drained.stop();
                 }
-                let exit = drained
-                    .running
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .exit_within(Duration::from_secs(1));
-                if exit != Exit::Clean {
-                    return Err(());
-                }
-                if raw_video.recv().is_ok() || raw_audio.recv().is_ok() {
-                    return Err(());
-                }
-                Ok(())
-            };
-            if read().is_ok() {
-                drained.clean.store(true, Ordering::Release);
-            } else {
-                drained.stop();
+            })
+            .map_err(|_| {
+                shared.stop();
+                FailureCode::RenderResource
+            })?;
+    }
+    drop(started);
+    for _ in 0..2 {
+        if let Err(error) = startup.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            if !shared.stop_and_reap() {
+                return Err(FailureCode::RenderResource);
             }
-        })
-        .map_err(|_| {
-            shared.stop();
-            FailureCode::RenderResource
-        })?;
-    startup
-        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        .map_err(|error| {
-            shared.stop();
-            match error {
+            return Err(match error {
                 mpsc::RecvTimeoutError::Timeout => FailureCode::RenderTimeout,
                 mpsc::RecvTimeoutError::Disconnected => FailureCode::RenderParse,
-            }
-        })?;
+            });
+        }
+    }
     let start_frame = start_ms * 48;
     let gap = audio_start_frame.saturating_sub(start_frame);
     // Prime with whole PCM packets; the feeder fills the remaining gap
@@ -168,6 +220,7 @@ pub(super) fn split(
             packets: video_rx,
             size,
             initial_gap: initial_gap.then_some(start_ms),
+            reached_eof: false,
         },
         Audio {
             shared,
@@ -248,7 +301,7 @@ fn receive(
             Ok(packet) => return Ok(Some(packet)),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return if shared.clean.load(Ordering::Acquire) {
+                return if shared.clean[usize::from(audio)].load(Ordering::Acquire) {
                     Ok(None)
                 } else {
                     Err(FailureCode::RenderParse)
@@ -274,6 +327,7 @@ impl FrameSource for Video {
             return Ok(Some(at_ms));
         }
         let Some(packet) = receive(&self.shared, &self.packets, false)? else {
+            self.reached_eof = true;
             return Ok(None);
         };
         rgba.copy_from_slice(&packet.data);
@@ -283,7 +337,7 @@ impl FrameSource for Video {
 
 impl Drop for Video {
     fn drop(&mut self) {
-        if !self.shared.clean.load(Ordering::Acquire) {
+        if !self.reached_eof {
             self.shared.stop();
         }
     }
@@ -342,5 +396,76 @@ impl AudioSource for Audio {
             self.carry = None;
         }
         Ok(Some(AudioBlock { frames, at_frame }))
+    }
+}
+
+impl Drop for Audio {
+    fn drop(&mut self) {
+        self.shared.audio_cancelled.store(true, Ordering::Release);
+        self.shared.running[1]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+
+    #[test]
+    fn dropping_queued_video_stops_audio_after_video_helper_eof() {
+        let directory = kettle_test_support::private_tempdir("kettle-queued-video-drop-");
+        let video_tool = crate::run::tests::script(directory.path(), "video", "exit 0");
+        let audio_tool =
+            crate::run::tests::script(directory.path(), "audio", "while :; do :; done");
+        let Pair {
+            running: mut video_running,
+            ..
+        } = crate::run::pair(
+            &video_tool,
+            |_| Vec::new(),
+            File::open("/dev/null").unwrap(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            video_running.exit_within(Duration::from_secs(1)),
+            Exit::Clean
+        );
+        let Pair {
+            running: audio_running,
+            ..
+        } = crate::run::pair(
+            &audio_tool,
+            |_| Vec::new(),
+            File::open("/dev/null").unwrap(),
+            1,
+        )
+        .unwrap();
+        let shared = Arc::new(Shared {
+            running: [Mutex::new(video_running), Mutex::new(audio_running)],
+            cancelled: AtomicBool::new(false),
+            audio_cancelled: AtomicBool::new(false),
+            clean: [AtomicBool::new(true), AtomicBool::new(false)],
+        });
+        let (sent, received) = mpsc::sync_channel(2);
+        sent.send(Bytes {
+            at_us: 0,
+            data: vec![0; 4],
+        })
+        .unwrap();
+        drop(sent);
+        let video = Video {
+            shared: Arc::clone(&shared),
+            packets: received,
+            size: 4,
+            initial_gap: None,
+            reached_eof: false,
+        };
+        drop(video);
+        assert!(shared.cancelled.load(Ordering::Acquire));
+        assert!(shared.stop_and_reap());
     }
 }

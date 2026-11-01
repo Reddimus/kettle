@@ -1019,8 +1019,16 @@ fn a_session_retries_video_when_audio_conversion_is_unavailable() {
                 r#"#!/bin/sh
 case "$*" in
     *0:a:0*)
-        printf '%s\n' "$@" '--' >> "${0%/*}/ffmpeg.log"
+        printf '%s\n' "$@" '--' >> "${0%/*}/audio-attempt.log"
+        printf '%s\n' "$$" >> "${0%/*}/audio-attempt.pid"
+        while [ ! -s "${0%/*}/video-attempt.pid" ]; do :; done
         exit 1
+        ;;
+    *tee*)
+        printf '%s\n' "$@" '--' >> "${0%/*}/video-attempt.log"
+        printf '%s\n' "$$" >> "${0%/*}/video-attempt.pid"
+        printf '%s\n' '#tb 0: 1/10' '#media_type 0: video' '#codec_id 0: rawvideo' '0, 0, 0, 1, 1200, 0x00000000'
+        while :; do :; done
         ;;
 esac
 "#,
@@ -1050,10 +1058,30 @@ esac
                 .all(|pixel| *pixel == [255, 0, 0, 255])
     }));
     let calls = fake.calls("ffmpeg");
-    assert_eq!(calls.len(), 2);
-    assert!(calls[0].iter().any(|arg| arg == "0:a:0"));
-    assert!(calls[1].iter().any(|arg| arg == "-an"));
-    assert_eq!(arg_after(&calls[1], "-ss"), Some("0.300000"));
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].iter().any(|arg| arg == "-an"));
+    assert_eq!(arg_after(&calls[0], "-ss"), Some("0.300000"));
+    let audio_call =
+        std::fs::read_to_string(fake.directory.path().join("audio-attempt.log")).unwrap();
+    let video_call =
+        std::fs::read_to_string(fake.directory.path().join("video-attempt.log")).unwrap();
+    assert!(audio_call.lines().any(|arg| arg == "0:a:0"));
+    assert!(video_call.lines().any(|arg| arg == "-an"));
+    assert!(audio_call.lines().any(|arg| arg == "tee"));
+    assert!(video_call.lines().any(|arg| arg == "tee"));
+    let pids = ["audio-attempt.pid", "video-attempt.pid"]
+        .map(|name| std::fs::read_to_string(fake.directory.path().join(name)).unwrap());
+    for pid in &pids {
+        let pid: libc::pid_t = pid.trim().parse().unwrap();
+        let mut status = 0;
+        // SAFETY: status is valid for the call; WNOHANG never signals a process.
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        assert_eq!(waited, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
 }
 
 /// A session's run that ends inside a frame is a misframed stream; one that
@@ -1533,5 +1561,95 @@ fn an_end_seek_keeps_a_long_final_frame() {
     assert_eq!(
         arg_after(&fake.calls("ffmpeg").pop().unwrap(), "-ss"),
         Some("1.000000")
+    );
+}
+
+/// The next audio timestamp is needed to fill an interior gap while future
+/// video remains queued. Requiring its pictures to drain first deadlocks.
+#[test]
+fn real_ffmpeg_audio_crosses_an_interior_gap_while_video_is_held() {
+    let Some(decoder) = installed() else { return };
+    let directory = kettle_test_support::private_tempdir("kettle-interior-audio-gap-");
+    let path = directory.path().join("gap.mkv");
+    std::fs::copy(fixture("interior-audio-gap.mkv"), &path).unwrap();
+    let clip = Clip::open(directory, path);
+    let mut playback = play(&decoder, &clip, (64, 48), 0, 10_000).unwrap();
+    let mut audio = playback.audio.take().expect("decoded PCM");
+    let cancel = audio.cancellation().unwrap();
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    let reading = std::thread::spawn(move || {
+        let mut samples = [0.0; 1920];
+        for _ in 0..200 {
+            match audio.next_block(&mut samples) {
+                Ok(Some(block)) if block.at_frame >= 96_000 => {
+                    let loudest = samples[..block.frames * 2]
+                        .iter()
+                        .fold(0.0f32, |max, sample| max.max(sample.abs()));
+                    let _ = sent.send(Ok((block.at_frame, loudest)));
+                    return;
+                }
+                Ok(Some(_)) => {}
+                result => {
+                    let _ = sent.send(Err(format!("audio ended before the gap: {result:?}")));
+                    return;
+                }
+            }
+        }
+        let _ = sent.send(Err("no timestamp after the interior gap".into()));
+    });
+    let mut rgba = vec![0; 64 * 48 * 4];
+    for expected in [0, 100, 200, 300, 400] {
+        assert_eq!(
+            playback.frames.next_frame(&mut rgba, &PlayGate::default()),
+            Ok(Some(expected))
+        );
+    }
+    let after_gap = received.recv_timeout(Duration::from_secs(2));
+    cancel();
+    drop(playback);
+    reading.join().unwrap();
+    let (at_frame, loudest) = after_gap
+        .expect("future PCM stalled behind queued video")
+        .unwrap();
+    assert!(
+        (96_000..100_800).contains(&at_frame),
+        "unexpected gap end {at_frame}"
+    );
+    assert!(loudest > 0.01, "post-gap tone was lost");
+}
+
+#[test]
+fn real_ffmpeg_cancelling_pcm_keeps_video_decoding() {
+    let Some(decoder) = installed() else { return };
+    let directory = kettle_test_support::private_tempdir("kettle-drop-pcm-");
+    let path = directory.path().join("ticks.mp4");
+    std::fs::copy(fixture("ticks.mp4"), &path).unwrap();
+    let clip = Clip::open(directory, path);
+    let mut playback = play(&decoder, &clip, (64, 36), 0, 10_000).unwrap();
+    let audio = playback.audio.take().expect("decoded PCM");
+    audio.cancellation().unwrap()();
+    drop(audio);
+    let frames = frames_of(&mut playback).unwrap();
+    assert_eq!(
+        frames.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+        (0..4000).step_by(100).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn real_ffmpeg_seeking_beyond_audio_keeps_its_supported_status() {
+    let Some(decoder) = installed() else { return };
+    let directory = kettle_test_support::private_tempdir("kettle-ended-pcm-");
+    let path = directory.path().join("short-audio.mkv");
+    std::fs::copy(fixture("short-audio.mkv"), &path).unwrap();
+    let clip = Clip::open(directory, path);
+    let mut playback = play(&decoder, &clip, (64, 48), 1500, 10_000).unwrap();
+    assert_eq!(playback.opened.audio, kettle_media::AudioStatus::Ready);
+    let mut audio = playback.audio.take().expect("supported audio source");
+    assert_eq!(audio.next_block(&mut [0.0; 1920]), Ok(None));
+    let frames = frames_of(&mut playback).unwrap();
+    assert_eq!(
+        frames.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+        (1500..3000).step_by(100).collect::<Vec<_>>()
     );
 }

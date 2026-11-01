@@ -20,8 +20,8 @@
 //! standing for its instant within one frame's length.
 //!
 //! Playback uses bounded raw-video and, when requested, PCM pipes. A
-//! metadata-first framecrc tee preserves their common timestamps; concurrent
-//! readers prevent per-slave interleaving from blocking large raw packets.
+//! metadata-first framecrc tee in each of two contained helpers preserves their
+//! common timestamps without video backpressure holding up future PCM.
 //! Audio is resampled before fixed 20 ms packets are formed. The decoder
 //! never connects to an audio service.
 
@@ -661,14 +661,9 @@ fn play_args(
     .collect()
 }
 
-/// The metadata slave comes first and flushes before either raw pipe.
-fn sounding_args(
-    mut args: Vec<OsString>,
-    pipes: [i32; 2],
-    initial_gap: bool,
-    start_ms: u64,
-    end_ms: u64,
-) -> Vec<OsString> {
+/// Each stream flushes metadata before its own raw pipe. Independent
+/// processes let a future PCM timestamp arrive while video is backpressured.
+fn timed_video_args(mut args: Vec<OsString>, pipe: i32, initial_gap: bool) -> Vec<OsString> {
     let seek_index = args
         .iter()
         .position(|arg| arg == "-ss")
@@ -683,38 +678,70 @@ fn sounding_args(
         .position(|arg| arg == "-ss")
         .expect("fixed seek argument");
     if seek == "0.000000" || initial_gap {
-        // Seeking to a demuxer's first video keyframe can lose earlier sound.
         args.drain(seek_index..seek_index + 2);
     }
-    // Shift PCM in integer output samples. Floating-point seconds can put
-    // adjacent packets one sample apart in the wrong direction.
-    let start_frame = start_ms * 48;
-    let end_frame = end_ms * 48;
     if seek != "0.000000" {
         let vf = args
             .iter()
             .position(|arg| arg == "-vf")
             .expect("fixed video filter")
             + 1;
-        // Both streams lose the same requested origin, never STARTPTS.
         args[vf] = format!(
             "trim=start={seek},setpts=PTS-{seek}/TB,{}",
             args[vf].to_string_lossy()
         )
         .into();
     }
-    let an = args
-        .iter()
-        .position(|arg| arg == "-an")
-        .expect("fixed play arguments");
-    args.splice(an..=an, [OsString::from("-map"), OsString::from("0:a:0")]);
     args.truncate(args.len() - 3);
     args.extend([
-        "-c:v".into(), "rawvideo".into(), "-c:a".into(), "pcm_f32le".into(),
-        "-ar".into(), "48000".into(), "-ac".into(), "2".into(),
-        "-af".into(), format!("aresample=48000,aformat=sample_fmts=flt:channel_layouts=stereo,atrim=start_pts={start_frame}:end_pts={end_frame},asetpts=PTS-{start_frame},asetnsamples=n=960:p=1").into(), "-f".into(), "tee".into(),
-        format!("[f=framecrc:flush_packets=1:max_interleave_delta=1]pipe:1|[select=v:f=rawvideo:flush_packets=1]pipe:{}|[select=a:f=f32le:flush_packets=1]pipe:{}", pipes[0], pipes[1]).into(),
+        "-c:v".into(),
+        "rawvideo".into(),
+        "-f".into(),
+        "tee".into(),
+        format!("[f=framecrc:flush_packets=1]pipe:1|[f=rawvideo:flush_packets=1]pipe:{pipe}")
+            .into(),
     ]);
+    args
+}
+
+fn timed_audio_args(
+    container: VideoContainer,
+    pipe: i32,
+    initial_gap: bool,
+    start_ms: u64,
+    end_ms: u64,
+) -> Vec<OsString> {
+    let mut args: Vec<OsString> = [
+        "-copyts",
+        "-start_at_zero",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-protocol_whitelist",
+        "file",
+        "-threads",
+        THREADS,
+        "-filter_threads",
+        "1",
+        "-f",
+        demuxer(container),
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    if start_ms != 0 && !initial_gap {
+        args.extend([
+            "-ss".into(),
+            seconds(i64::try_from(start_ms * 1000).unwrap_or(i64::MAX)).into(),
+        ]);
+    }
+    let start_frame = start_ms * 48;
+    let end_frame = end_ms * 48;
+    args.extend(["-i".into(), INPUT.into(), "-map".into(), "0:a:0".into(), "-vn".into(), "-sn".into(), "-dn".into(),
+        "-c:a".into(), "pcm_f32le".into(), "-ar".into(), "48000".into(), "-ac".into(), "2".into(),
+        "-af".into(), format!("aresample=48000,aformat=sample_fmts=flt:channel_layouts=stereo,atrim=start_pts={start_frame}:end_pts={end_frame},asetpts=PTS-{start_frame},asetnsamples=n=960:p=1").into(),
+        "-f".into(), "tee".into(), format!("[f=framecrc:flush_packets=1]pipe:1|[f=f32le:flush_packets=1]pipe:{pipe}").into()]);
     args
 }
 
@@ -1104,17 +1131,32 @@ impl VideoPlayer for Ffmpeg {
                 if first_audio > info.duration_ms * 48 {
                     return Err(FailureCode::RenderParse);
                 }
-                let pipes = crate::run::triple(
+                // Both helpers together retain the prior playback CPU ceiling.
+                let audio_cpu = (cpu / 4).max(1);
+                let video = crate::run::pair(
                     &self.ffmpeg,
-                    |pipes| {
-                        sounding_args(args.clone(), pipes, initial_gap, start_ms, info.duration_ms)
+                    |pipe| timed_video_args(args.clone(), pipe, initial_gap),
+                    reopen(input.file, input.identity)?,
+                    cpu - audio_cpu,
+                )
+                .map_err(failure)?;
+                let audio = crate::run::pair(
+                    &self.ffmpeg,
+                    |pipe| {
+                        timed_audio_args(
+                            input.container,
+                            pipe,
+                            initial_gap,
+                            start_ms,
+                            info.duration_ms,
+                        )
                     },
                     reopen(input.file, input.identity)?,
-                    cpu,
+                    audio_cpu,
                 )
                 .map_err(failure)?;
                 playback::split(
-                    pipes,
+                    [video, audio],
                     width as usize * height as usize * 4,
                     start_ms,
                     info.duration_ms,

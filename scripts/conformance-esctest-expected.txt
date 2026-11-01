@@ -48,28 +48,6 @@ ResetSpecialColorTests.test_ResetSpecialColor_Multiple2
 ResetSpecialColorTests.test_ResetSpecialColor_Single
 ResetSpecialColorTests.test_ResetSpecialColor_Single2
 
-[column editing and horizontal index (DECIC, DECDC, DECBI, DECFI): not implemented]
-DECBITests.test_DECBI_Basic
-DECBITests.test_DECBI_LeftOfMargin
-DECBITests.test_DECBI_Scrolls
-DECBITests.test_DECBI_WholeScreenScrolls
-DECDCTests.test_DECDC_CursorWithinTopBottom
-DECDCTests.test_DECDC_DefaultParam
-DECDCTests.test_DECDC_DeleteAll
-DECDCTests.test_DECDC_DeleteAllWithLeftRightMargins
-DECDCTests.test_DECDC_DeleteWithLeftRightMargins
-DECDCTests.test_DECDC_ExplicitParam
-DECFITests.test_DECFI_Basic
-DECFITests.test_DECFI_RightOfMargin
-DECFITests.test_DECFI_Scrolls
-DECFITests.test_DECFI_WholeScreenScrolls
-DECICTests.test_DECIC_CursorWithinTopBottom
-DECICTests.test_DECIC_DefaultParam
-DECICTests.test_DECIC_ExplicitParam
-DECICTests.test_DECIC_ScrollEntirelyOffRightEdge
-DECICTests.test_DECIC_ScrollOffRightEdge
-DECICTests.test_DECIC_ScrollOffRightMarginInScrollRegion
-
 [other xterm-only modes (MoreFix 41, XTSAVE/XTRESTORE): not implemented]
 DECSCLTests.test_DECSCL_Level5_SupportsDECNCSM
 DECSETTests.test_DECSET_MoreFix
@@ -116,20 +94,6 @@ DECRQMTests.test_DECRQM_DEC_DECSCNM
 DECRQSSTests.test_DECRQSS_DECSASD
 DECRQSSTests.test_DECRQSS_DECSNLS
 DECRQSSTests.test_DECRQSS_DECSSDT
-
-[reverse wraparound (modes 45 and 1045): not implemented]
-BSTests.test_BS_AfterNoWrappedInlines
-BSTests.test_BS_AfterOneWrappedInline
-BSTests.test_BS_ReverseWrapGoesToBottom
-BSTests.test_BS_ReverseWrapStartingInDoWrapPosition
-BSTests.test_BS_ReverseWrapWithLeftRight
-BSTests.test_BS_ReversewrapFromLeftEdgeToRightMargin
-BSTests.test_BS_WrapsInWraparoundMode
-CUBTests.test_CUB_AfterNoWrappedInlines
-CUBTests.test_CUB_AfterOneWrappedInline
-DECSETTests.test_DECSET_ReverseWraparoundLastCol_BS
-DECSETTests.test_DECSET_ReverseWraparound_BS
-DECSETTests.test_DECSET_ReverseWraparound_Multi
 
 [window operations (XTWINOPS): Kettle never resizes, moves or iconifies its window for a program, and does not report titles]
 DECRQSSTests.test_DECRQSS_DECSLPP

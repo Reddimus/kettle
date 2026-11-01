@@ -140,7 +140,9 @@ def esctest(args, out):
         return " ".join(shlex.quote(part) for part in [
             sys.executable, "-I", str(Path(__file__).resolve()), "esctest-in-pane",
             str(config), "--", "--expected-terminal=xterm", f"--logfile={log}",
-            "--timeout=1", *extra])
+            # Since xterm 383, mode 45 follows wrapped lines and mode 1045
+            # provides the older screen-wide reverse wrapping.
+            "--timeout=1", "--xterm-reverse-wrap=383", *extra])
 
     status = in_kettle(args.kettle, out, "esctest", command)
     text = log.read_text(errors="replace") if log.exists() else ""

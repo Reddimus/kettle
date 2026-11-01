@@ -1171,6 +1171,16 @@ combinations across four mixed CJK rows. A leading-spacer regression fails
 with its cleanup disabled and verifies unrelated preceding-row protection.
 These controls require VT level four or above.
 
+The column-editing and reverse-wrap follow-up passes 413 esctest tests,
+with 111 expected failures and no new failures: another 32 cases now pass.
+The adapter explicitly selects xterm's post-383 reverse-wrap profile, which
+separates mode 45 from mode 1045; the suite's legacy default expects different
+mode-45 behavior. With that profile the focused native subset passes all
+50 tests. Portable cases also cover clipped counts, cursors outside margins,
+protected wide spacers in history, old full-row wraps after changing margins,
+partial continuation annotations through rectangle operations and margin
+changes, pending wrap, resets, and the existing cell-size cap.
+
 **ucs-detect** (`just conformance-ucs`) measures how many columns the
 terminal gives Unicode text, against `wcwidth`. Kettle 5.7.0 scored 99.6% on
 narrow and 94.9% on wide characters, where the misses are the 26 regional
@@ -1858,3 +1868,26 @@ the editor's start with the fitted label and gap at terminal cell-width scales
 0.5, 1 and 2, including narrow panels and wide labels. These unit checks do not
 replace native IME candidate-window, pointer drag, clipboard and live-GPU checks
 on macOS and Linux; record those separately when run.
+
+### Independent FFmpeg stream progress
+
+The native `kettle-media-native` FFmpeg tests include a real Matroska fixture
+with a 1.6 s interior audio gap. The test holds video after 400 ms and requires
+a post-gap PCM timestamp without consuming future pictures. The shared decoder
+stalls at the two-second test deadline; independent contained helpers pass.
+A separate short-audio fixture checks that a seek past its samples keeps a
+supported status and returns clean audio EOF. A deterministic queued-video
+regression verifies cancellation after the video helper has already ended;
+it fails when helper EOF is mistaken for consumer EOF.
+Other tests retain timestamp/sample continuity across seeks, delayed audio,
+audio before video, and video progress after PCM cancellation. The fallback
+stand-in records both attempted helper PIDs and verifies both are reaped before
+the replacement video-only session is accepted. Metadata tests reject wrong
+stream kinds, malformed headers, out-of-order timestamps and oversized packets.
+
+Three short macOS probes of the interior-gap test observed at most two helpers.
+The complete test invocations took 0.11--0.15 s and 0.04 s of reported user plus
+system CPU. The largest sampled simultaneous helper RSS sum was about 29 MiB;
+sampling can miss the true peak, and these small-fixture measurements do not
+establish steady-state or large-video throughput. Production footprint limits
+and the aggregate playback CPU allowance remain in force.

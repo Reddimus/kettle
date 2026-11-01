@@ -773,6 +773,17 @@ pub trait Handler {
 
     /// Copy a rectangular area within the active page (DECCRA).
     fn copy_rectangle(&mut self, _area: Rectangle, _top: u16, _left: u16) {}
+    /// Insert columns within the scrolling region (DECIC).
+    fn insert_columns(&mut self, _count: usize) {}
+
+    /// Delete columns within the scrolling region (DECDC).
+    fn delete_columns(&mut self, _count: usize) {}
+
+    /// Backward horizontal index (DECBI).
+    fn back_index(&mut self) {}
+
+    /// Forward horizontal index (DECFI).
+    fn forward_index(&mut self) {}
 
     /// Clear tab stops.
     fn clear_tabs(&mut self, _mode: TabulationClearMode) {}
@@ -1109,6 +1120,7 @@ impl PrivateMode {
             7 => Self::Named(NamedPrivateMode::LineWrap),
             12 => Self::Named(NamedPrivateMode::BlinkingCursor),
             25 => Self::Named(NamedPrivateMode::ShowCursor),
+            45 => Self::Named(NamedPrivateMode::ReverseWrap),
             69 => Self::Named(NamedPrivateMode::LeftRightMargin),
             1000 => Self::Named(NamedPrivateMode::ReportMouseClicks),
             1002 => Self::Named(NamedPrivateMode::ReportCellMouseMotion),
@@ -1118,6 +1130,7 @@ impl PrivateMode {
             1006 => Self::Named(NamedPrivateMode::SgrMouse),
             1007 => Self::Named(NamedPrivateMode::AlternateScroll),
             1042 => Self::Named(NamedPrivateMode::UrgencyHints),
+            1045 => Self::Named(NamedPrivateMode::ExtendedReverseWrap),
             1049 => Self::Named(NamedPrivateMode::SwapScreenAndSetRestoreCursor),
             2004 => Self::Named(NamedPrivateMode::BracketedPaste),
             2026 => Self::Named(NamedPrivateMode::SyncUpdate),
@@ -1159,6 +1172,10 @@ pub enum NamedPrivateMode {
     ColumnMode = 3,
     Origin = 6,
     LineWrap = 7,
+    /// Reverse wrap over previously wrapped lines.
+    ReverseWrap = 45,
+    /// Reverse wrap across all lines, including the scrolling-region boundary.
+    ExtendedReverseWrap = 1045,
     BlinkingCursor = 12,
     ShowCursor = 25,
     LeftRightMargin = 69,
@@ -1834,6 +1851,8 @@ where
                     _ => unreachable!(),
                 }
             },
+            ('}', [b'\'']) => handler.insert_columns(next_param_or(1) as usize),
+            ('~', [b'\'']) => handler.delete_columns(next_param_or(1) as usize),
             ('@', []) => handler.insert_blank(next_param_or(1) as usize),
             ('A', []) => handler.move_up(next_param_or(1) as usize),
             ('B', []) | ('e', []) => handler.move_down(next_param_or(1) as usize),
@@ -2145,6 +2164,8 @@ where
             (b'0', intermediates) => {
                 configure_charset!(StandardCharset::SpecialCharacterAndLineDrawing, intermediates)
             },
+            (b'6', []) => self.handler.back_index(),
+            (b'9', []) => self.handler.forward_index(),
             (b'7', []) => self.handler.save_cursor_position(),
             (b'8', [b'#']) => self.handler.decaln(),
             (b'8', []) => self.handler.restore_cursor_position(),
