@@ -44,6 +44,60 @@ def failure_evidence(app, root, report):
         raise
 
 
+def run_correlated_command(
+    app, label, text, *, params=None, timeout_s=3, request_timeout=10, records=None
+):
+    """Retry only refusal before input, within one bounded admission window."""
+    records = records if records is not None else []
+    deadline = time.monotonic() + 5
+    for admission in range(500):
+        cp = app.ctl(
+            "run_command",
+            params={
+                "command": text,
+                "require_correlation": True,
+                "timeout_s": timeout_s,
+                **(params or {}),
+            },
+            raw=True,
+            allow_fail=True,
+            timeout=request_timeout,
+        )
+        result = {
+            "command": text,
+            "returncode": cp.returncode,
+            "stdout": cp.stdout,
+            "stderr": cp.stderr,
+            "admission_attempt": admission + 1,
+        }
+        records.append(result)
+        # Readline disables bracketed paste while it runs a queued command.
+        # A strict multiline refusal writes no input, just like a busy pane.
+        bash_paste_wait = (
+            label == "bash"
+            and "\n" in text
+            and "[bad_params]" in cp.stderr
+            and "pane cannot correlate this command; use a supported bundled shell integration "
+            "(Bash multiline input also requires bracketed paste)"
+            in cp.stderr
+        )
+        if cp.returncode and ("[busy]" in cp.stderr or bash_paste_wait):
+            result["refused_before_input"] = True
+            result["admission_wait"] = (
+                "bash_bracketed_paste" if bash_paste_wait else "busy"
+            )
+            if time.monotonic() >= deadline:
+                raise RuntimeError("command was never admitted: " + cp.stderr)
+            time.sleep(0.01)
+            continue
+        if cp.returncode:
+            raise RuntimeError(cp.stderr)
+        value = json.loads(cp.stdout)
+        result["value"] = value
+        return value, admission + 1
+    raise RuntimeError("command was never admitted")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kettle", type=Path, required=True)
@@ -255,40 +309,10 @@ def main() -> int:
 
         def command(text, **params):
             report["stage"] = text
-            admission_deadline = time.monotonic() + 5
-            for admission in range(500):
-                cp = app.ctl(
-                    "run_command",
-                    params={
-                        "command": text,
-                        "require_correlation": True,
-                        "timeout_s": 3,
-                        **params,
-                    },
-                    raw=True,
-                    allow_fail=True,
-                    timeout=10,
-                )
-                result = {
-                    "command": text,
-                    "returncode": cp.returncode,
-                    "stdout": cp.stdout,
-                    "stderr": cp.stderr,
-                }
-                report["results"].append(result)
-                result["admission_attempt"] = admission + 1
-                if cp.returncode and "[busy]" in cp.stderr:
-                    if time.monotonic() >= admission_deadline:
-                        raise RuntimeError("command was never admitted: " + cp.stderr)
-                    result["refused_before_input"] = True
-                    time.sleep(0.01)
-                    continue
-                if cp.returncode:
-                    raise RuntimeError(cp.stderr)
-                value = json.loads(cp.stdout)
-                result["value"] = value
-                return value
-            raise RuntimeError("command was never admitted")
+            value, _ = run_correlated_command(
+                app, label, text, params=params, records=report["results"]
+            )
+            return value
 
         try:
             with app, failure_evidence(app, root, report):
@@ -414,7 +438,9 @@ def main() -> int:
                         ), value
                         report["fish_vi_normal"] = True
                         # Fish 3.7 --no-config lacks the mode-reset variable hook.
-                        command("fish_default_key_bindings; set -g fish_bind_mode default")
+                        command(
+                            "fish_default_key_bindings; set -g fish_bind_mode default"
+                        )
                     # Keep raw typeahead below the platform input limit. Larger
                     # unpaced bursts can be dropped by the line discipline even
                     # without correlation, so they cannot identify this regression.
@@ -435,45 +461,28 @@ def main() -> int:
                     ]:
                         report["stage"] = "queued " + scenario
                         app.json_ctl("send_text", {"text": (earlier + "\r") * 8})
-                        admission_deadline = time.monotonic() + 5
-                        for attempt in range(500):
-                            queued = app.ctl(
-                                "run_command",
-                                params={
-                                    "command": queued_command,
-                                    "require_correlation": True,
-                                    "timeout_s": 15,
-                                },
-                                raw=True,
-                                allow_fail=True,
-                                timeout=20,
-                            )
-                            if queued.returncode and "[busy]" in queued.stderr:
-                                if time.monotonic() >= admission_deadline:
-                                    raise RuntimeError(
-                                        "queued command was never admitted"
-                                    )
-                                time.sleep(0.01)
-                                continue
-                            assert queued.returncode == 0, queued.stderr
-                            value = json.loads(queued.stdout)
-                            assert (
-                                value["exit_code"] == expected_exit
-                                and not value["timed_out"]
-                            ), value
-                            assert expected_text in value["output"], value
-                            assert "EARLIER_QUEUE" not in value["output"], value
-                            report["queued_commands"].append(
-                                {
-                                    "scenario": scenario,
-                                    "earlier_lines": 8,
-                                    "admission_attempts": attempt + 1,
-                                    "result": value,
-                                }
-                            )
-                            break
-                        else:
-                            raise RuntimeError("queued command was never admitted")
+                        value, attempts = run_correlated_command(
+                            app,
+                            label,
+                            queued_command,
+                            timeout_s=15,
+                            request_timeout=20,
+                            records=report["results"],
+                        )
+                        assert (
+                            value["exit_code"] == expected_exit
+                            and not value["timed_out"]
+                        ), value
+                        assert expected_text in value["output"], value
+                        assert "EARLIER_QUEUE" not in value["output"], value
+                        report["queued_commands"].append(
+                            {
+                                "scenario": scenario,
+                                "earlier_lines": 8,
+                                "admission_attempts": attempts,
+                                "result": value,
+                            }
+                        )
                     if label == "fish":
                         marker = root / "prompt-waiting"
                         setup_pause = (
@@ -651,7 +660,9 @@ def main() -> int:
         except (Exception, SystemExit) as error:
             report["error"] = str(error)
             report["cleanup"] = False
-            report["fixture_process_exited"] = app.proc is not None and app.proc.poll() is not None
+            report["fixture_process_exited"] = (
+                app.proc is not None and app.proc.poll() is not None
+            )
         finally:
             (out / "summary.json").write_text(json.dumps(reports, indent=2) + "\n")
             print(

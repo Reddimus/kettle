@@ -5,10 +5,13 @@ import importlib.util
 from contextlib import redirect_stdout
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -95,10 +98,27 @@ class CaseSupervision(unittest.TestCase):
                     )
                 return proc
 
-            with patch.object(qualification.subprocess, "Popen", side_effect=start):
+            live = Mock()
+            scope = live.LinuxSubreaperScope.acquire.return_value
+            with (
+                patch.object(qualification.subprocess, "Popen", side_effect=start),
+                patch.object(qualification, "load_live", return_value=live),
+                patch.object(
+                    qualification,
+                    "stop_owned_tree",
+                    return_value={"closed": True, "processes": []},
+                ) as stop,
+            ):
                 result = qualification.invoke_case(
                     "search-history", Path("binary"), out
                 )
+                if result["timed_out"]:
+                    stop.assert_called_once_with(
+                        live,
+                        proc,
+                        out,
+                        scope if qualification.platform.system() == "Linux" else None,
+                    )
             return result, proc
 
     def test_process_exit_zero_requires_case_and_cleanup_receipts(self):
@@ -110,15 +130,202 @@ class CaseSupervision(unittest.TestCase):
         self.assertFalse(self.invoke(None)[0]["passed"])
         self.assertFalse(self.invoke(good, returncode=1)[0]["passed"])
 
-    def test_timeout_interrupts_the_recorded_supervisor_and_never_counts_as_pass(self):
+    def test_timeout_closes_the_owned_tree_and_never_counts_as_pass(self):
         good = {"case": "search-history", "status": "PASS", "cleanup": True}
         result, proc = self.invoke(
             good, waits=[subprocess.TimeoutExpired("owned", 300), 0]
         )
         self.assertFalse(result["passed"])
         self.assertTrue(result["timed_out"])
-        proc.send_signal.assert_called_once_with(signal.SIGINT)
+        proc.send_signal.assert_not_called()
         proc.kill.assert_not_called()
+
+    def test_parent_interrupt_closes_the_owned_tree_before_propagating(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            out = Path(scratch) / "case"
+            live = Mock()
+            proc = Mock(pid=123, wait=Mock(side_effect=[KeyboardInterrupt(), -9]))
+            with (
+                patch.object(qualification, "load_live", return_value=live),
+                patch.object(qualification.subprocess, "Popen", return_value=proc),
+                patch.object(qualification, "stop_owned_tree") as stop,
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                qualification.invoke_case("search-history", Path("binary"), out)
+            stop.assert_called_once()
+            self.assertEqual(stop.call_args.args[:3], (live, proc, out))
+            self.assertEqual(proc.wait.call_count, 2)
+
+    @unittest.skipUnless(os.name == "posix", "native Unix ownership regression")
+    def test_forced_timeout_closes_detached_descendants_and_preserves_decoy(self):
+        self.exercise_forced_timeout()
+
+    @unittest.skipUnless(os.name == "posix", "native Unix ownership regression")
+    def test_forced_timeout_retries_transient_inventory_failure(self):
+        self.exercise_forced_timeout(inventory_failure=True)
+
+    def exercise_forced_timeout(self, inventory_failure=False):
+        live = qualification.load_live()
+        real_popen = subprocess.Popen
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            out = root / "case"
+            fixture = root / "fixture.py"
+            fixture.write_text(
+                "import json,os,signal,subprocess,sys,time\n"
+                "from pathlib import Path\n"
+                "root=Path(sys.argv[1]); role=sys.argv[2]\n"
+                "signal.signal(signal.SIGINT,signal.SIG_IGN)\n"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+                "(root/(role+'.pid')).write_text(str(os.getpid()))\n"
+                "if role!='grandchild':\n"
+                " child='child' if role=='supervisor' else 'grandchild'\n"
+                " subprocess.Popen([sys.executable,__file__,str(root),child],start_new_session=True)\n"
+                "while True: time.sleep(1)\n",
+                encoding="utf-8",
+            )
+            decoy = real_popen([sys.executable, "-c", "import time;time.sleep(60)"])
+            recorded = []
+
+            def start(*args, **kwargs):
+                proc = real_popen(
+                    [sys.executable, str(fixture), str(out), "supervisor"], **kwargs
+                )
+                recorded.append(proc)
+                deadline = time.monotonic() + 5
+                while not (out / "grandchild.pid").exists():
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("owned descendant did not start")
+                    time.sleep(0.01)
+                return proc
+
+            try:
+
+                def dispatch(command, *args, **kwargs):
+                    if len(command) > 2 and command[2] == "case":
+                        return start(command, *args, **kwargs)
+                    return real_popen(command, *args, **kwargs)
+
+                real_run = live.run
+                injected = []
+
+                def inventory(command, *args, **kwargs):
+                    if (
+                        inventory_failure
+                        and not injected
+                        and command == ["ps", "-axo", "pid=,ppid=,uid="]
+                        and (out / "grandchild.pid").exists()
+                    ):
+                        injected.append(True)
+                        raise OSError("injected transient process inventory failure")
+                    return real_run(command, *args, **kwargs)
+
+                with (
+                    patch.object(
+                        qualification.subprocess, "Popen", side_effect=dispatch
+                    ),
+                    patch.object(qualification, "load_live", return_value=live),
+                    patch.object(live, "run", side_effect=inventory),
+                ):
+                    result = qualification.invoke_case(
+                        "search-history", Path("binary"), out, timeout=0.05
+                    )
+                self.assertFalse(result["passed"])
+                self.assertTrue(result["timed_out"])
+                expected = {int(p.read_text()) for p in out.glob("*.pid")}
+                self.assertEqual(len(expected), 3)
+                for pid in expected:
+                    handle = live._open_stable_process_if_present(pid, "test fixture")
+                    if handle is not None:
+                        try:
+                            self.assertTrue(
+                                (live._process_state(handle) or "Z").startswith("Z")
+                            )
+                        finally:
+                            handle.close()
+                self.assertTrue(result["forced_cleanup"]["closed"])
+                self.assertNotIn("error", result["forced_cleanup"])
+                self.assertEqual(
+                    expected,
+                    {p["pid"] for p in result["forced_cleanup"]["processes"]},
+                )
+                if inventory_failure:
+                    self.assertEqual(injected, [True])
+                    self.assertIn(
+                        "injected transient",
+                        result["forced_cleanup"]["inventory_errors"][0],
+                    )
+                self.assertIsNone(decoy.poll())
+            finally:
+                # Also close recorded fixtures if the regression fails against old code.
+                for path in out.glob("*.pid"):
+                    handle = live._open_stable_process_if_present(
+                        int(path.read_text()), "recorded test fixture"
+                    )
+                    if handle is not None:
+                        try:
+                            handle.signal(signal.SIGKILL)
+                        finally:
+                            handle.close()
+                for proc in recorded:
+                    proc.wait(timeout=5)
+                decoy.kill()
+                decoy.wait(timeout=5)
+
+    @unittest.skipUnless(sys.platform == "linux", "native Linux subreaper regression")
+    def test_successful_supervisor_cannot_leave_an_orphan_and_qualify(self):
+        real_popen = subprocess.Popen
+        live = qualification.load_live()
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            out = root / "case"
+            fixture = root / "fixture.py"
+            fixture.write_text(
+                "import json,subprocess,sys\nfrom pathlib import Path\n"
+                "root=Path(sys.argv[1])\n"
+                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],start_new_session=True)\n"
+                "(root/'child.pid').write_text(str(child.pid))\n"
+                "(root/'case.json').write_text(json.dumps({'case':'search-history','status':'PASS','cleanup':True}))\n",
+                encoding="utf-8",
+            )
+            decoy = real_popen([sys.executable, "-c", "import time;time.sleep(60)"])
+
+            def dispatch(command, *args, **kwargs):
+                if len(command) > 2 and command[2] == "case":
+                    return real_popen(
+                        [sys.executable, str(fixture), str(out)], **kwargs
+                    )
+                return real_popen(command, *args, **kwargs)
+
+            try:
+                with patch.object(
+                    qualification.subprocess, "Popen", side_effect=dispatch
+                ):
+                    result = qualification.invoke_case(
+                        "search-history", Path("binary"), out, timeout=5
+                    )
+                self.assertFalse(result["passed"])
+                self.assertEqual(result["exit"], 0)
+                self.assertFalse(result["timed_out"])
+                self.assertTrue(result["forced_cleanup"]["closed"])
+                self.assertNotIn("error", result["forced_cleanup"])
+                self.assertEqual(
+                    [p["pid"] for p in result["forced_cleanup"]["processes"]],
+                    [int((out / "child.pid").read_text())],
+                )
+                self.assertIsNone(decoy.poll())
+            finally:
+                if (out / "child.pid").exists():
+                    handle = live._open_stable_process_if_present(
+                        int((out / "child.pid").read_text()), "recorded test orphan"
+                    )
+                    if handle is not None:
+                        try:
+                            handle.signal(signal.SIGKILL)
+                        finally:
+                            handle.close()
+                decoy.kill()
+                decoy.wait(timeout=5)
 
     def test_case_observes_fixture_exit_and_propagates_the_original_assertion(self):
         source = """class Process:

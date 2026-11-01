@@ -56,6 +56,67 @@ class ScriptRegressionTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, 'timed out'):
                 live.wait_for_search_result(fixture, 'wanted')
 
+    def correlation_refusal(self):
+        return subprocess.CompletedProcess([], 1, '',
+            'kettle ctl: server error [bad_params]: pane cannot correlate this command; '
+            'use a supported bundled shell integration '
+            '(Bash multiline input also requires bracketed paste)\n')
+
+    def test_bash_multiline_admission_waits_through_readline_paste_mode_transition(self):
+        check = load('check-command-correlation')
+        fixture = Mock()
+        value = {'exit_code': 0, 'timed_out': False, 'output': 'only target'}
+        fixture.ctl.side_effect = [
+            subprocess.CompletedProcess([], 1, '', 'server error [busy]'),
+            self.correlation_refusal(),
+            subprocess.CompletedProcess([], 0, json.dumps(value), ''),
+        ]
+        records = []
+        with patch.object(check.time, 'sleep'):
+            actual, attempts = check.run_correlated_command(
+                fixture, 'bash', 'first\nsecond', records=records)
+        self.assertEqual(actual, value)
+        self.assertEqual(attempts, 3)
+        self.assertEqual([r.get('refused_before_input', False) for r in records], [True, True, False])
+        self.assertTrue(all(c.kwargs['params']['require_correlation'] for c in fixture.ctl.call_args_list))
+
+    def test_unrelated_correlation_refusals_are_never_retried(self):
+        check = load('check-command-correlation')
+        for label, command, error in [
+            ('fish', 'first\nsecond', self.correlation_refusal()),
+            ('zsh', 'first\nsecond', self.correlation_refusal()),
+            ('bash32', 'first\nsecond', self.correlation_refusal()),
+            ('bash', 'single line', self.correlation_refusal()),
+            ('bash', 'first\nsecond', subprocess.CompletedProcess([], 1, '', 'server error [bad_params]: invalid argument')),
+        ]:
+            with self.subTest(label=label, command=command):
+                fixture = Mock()
+                fixture.ctl.return_value = error
+                with self.assertRaises(RuntimeError), patch.object(check.time, 'sleep') as sleep:
+                    check.run_correlated_command(fixture, label, command)
+                self.assertEqual(fixture.ctl.call_count, 1)
+                sleep.assert_not_called()
+
+    def test_permanently_disabled_paste_mode_still_fails_the_bounded_probe(self):
+        check = load('check-command-correlation')
+        fixture = Mock()
+        fixture.ctl.return_value = self.correlation_refusal()
+        with patch.object(check.time, 'monotonic', side_effect=[0, 0, 6]), \
+             patch.object(check.time, 'sleep'), \
+             self.assertRaisesRegex(RuntimeError, 'never admitted'):
+            check.run_correlated_command(fixture, 'bash', 'first\nsecond')
+        self.assertEqual(fixture.ctl.call_count, 2)
+
+    def test_an_executed_command_failure_is_returned_without_retry(self):
+        check = load('check-command-correlation')
+        fixture = Mock()
+        value = {'exit_code': 1, 'timed_out': True, 'output': 'partial'}
+        fixture.ctl.return_value = subprocess.CompletedProcess([], 0, json.dumps(value), '')
+        actual, attempts = check.run_correlated_command(fixture, 'bash', 'first\nsecond')
+        self.assertEqual(actual, value)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(fixture.ctl.call_count, 1)
+
     def test_modal_startup_failure_preserves_clipboard(self):
         modal = load('check-modal-shortcuts')
         with tempfile.TemporaryDirectory() as raw, \

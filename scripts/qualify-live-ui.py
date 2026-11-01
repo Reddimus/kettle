@@ -5,7 +5,9 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import platform
 import signal
 import subprocess
 import sys
@@ -34,12 +36,137 @@ def save(path, value):
     temporary.replace(path)
 
 
-def run_case(case, binary, out):
-    """Keep fixture cleanup and its result observable even on an interrupt."""
+def load_live():
     spec = importlib.util.spec_from_file_location("qualification_live", HELPER)
     live = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = live
     spec.loader.exec_module(live)
+    return live
+
+
+def stop_owned_tree(live, proc, out, subreaper=None):
+    """Freeze, record and kill retained instances, including detached sessions."""
+    handles = {}
+    receipt = {"processes": [], "closed": False}
+    path = out / "forced-cleanup.json"
+    save(path, receipt)
+
+    def retain(handle):
+        if handle.identity in handles:
+            handle.close()
+            return False
+        handles[handle.identity] = handle
+        receipt["processes"].append(
+            {"pid": handle.pid, "identity": list(handle.identity)}
+        )
+        # Persist ownership before any signal; never target an unrecorded PID.
+        save(path, receipt)
+        handle.signal(signal.SIGSTOP)
+        return True
+
+    try:
+        if proc.returncode is None:
+            # Popen has not reaped this child, so its PID cannot be reused.
+            handle = live._open_stable_process_if_present(proc.pid, "case supervisor")
+            if handle is not None:
+                retain(handle)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            try:
+                listed = live.run(["ps", "-axo", "pid=,ppid=,uid="], timeout=2)
+                if listed.returncode:
+                    raise RuntimeError(
+                        "could not inventory owned supervisor descendants"
+                    )
+                parents = {}
+                for line in listed.stdout.splitlines():
+                    pid, parent, uid = map(int, line.split())
+                    if uid == os.getuid():
+                        parents[pid] = parent
+                added = False
+                if subreaper is not None:
+                    for handle in subreaper.adopted_roots(
+                        parents, set(parents)
+                    ).values():
+                        added = retain(handle) or added
+                owners = {handle.pid: handle for handle in handles.values()}
+                for pid, parent in parents.items():
+                    anchor = owners.get(parent)
+                    if pid in owners or anchor is None or not anchor.matches_current():
+                        continue
+                    handle = live._open_stable_process_if_present(
+                        pid, "case descendant"
+                    )
+                    if handle is None:
+                        continue
+                    try:
+                        current = live.run(
+                            ["ps", "-o", "ppid=", "-p", str(pid)], timeout=2
+                        )
+                        owned = (
+                            current.returncode == 0
+                            and current.stdout.strip() == str(parent)
+                            and handle.matches_current()
+                            and anchor.matches_current()
+                        )
+                    except BaseException:
+                        handle.close()
+                        raise
+                    if owned:
+                        added = retain(handle) or added
+                    else:
+                        handle.close()
+                if not added and all(
+                    (live._process_state(handle) or "Z").startswith(("T", "Z"))
+                    for handle in handles.values()
+                ):
+                    break
+            except Exception as error:
+                receipt.setdefault("inventory_errors", []).append(str(error))
+                save(path, receipt)
+            time.sleep(0.02)
+        else:
+            raise RuntimeError("owned supervisor descendants did not quiesce")
+    except BaseException as error:
+        receipt["error"] = str(error)
+    finally:
+        errors = []
+        for handle in reversed(list(handles.values())):
+            try:
+                handle.signal(signal.SIGKILL)
+            except BaseException as error:
+                errors.append(str(error))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            alive = []
+            for handle in handles.values():
+                try:
+                    state = live._process_state(handle)
+                    if state is not None and not state.startswith("Z"):
+                        alive.append(handle.pid)
+                    elif subreaper is not None and handle.pid != proc.pid:
+                        os.waitpid(handle.pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+                except BaseException as error:
+                    errors.append(str(error))
+                    alive.append(handle.pid)
+            if not alive:
+                receipt["closed"] = True
+                break
+            time.sleep(0.02)
+        errors.extend(
+            str(error) for error in live._close_stable_process_handles(handles)
+        )
+        if errors:
+            receipt["errors"] = errors
+        save(path, receipt)
+    return receipt
+
+
+def run_case(case, binary, out):
+    """Keep fixture cleanup and its result observable even on an interrupt."""
+    live = load_live()
     original = live.LiveKettle
     fixtures = []
     exit_before_cleanup = {}
@@ -109,22 +236,32 @@ def invoke_case(case, binary, out, timeout=300):
         str(out),
     ]
     started = time.monotonic()
-    with (out / "supervisor.log").open("w", encoding="utf-8") as log:
-        proc = subprocess.Popen(
-            command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
-        )
-        save(out / "supervisor.json", {"pid": proc.pid, "command": command})
-        timed_out = False
-        try:
-            code = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            proc.send_signal(signal.SIGINT)
+    live = load_live()
+    scope = live.LinuxSubreaperScope.acquire() if platform.system() == "Linux" else None
+    forced = None
+    try:
+        with (out / "supervisor.log").open("w", encoding="utf-8") as log:
+            proc = subprocess.Popen(
+                command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+            )
+            timed_out = False
             try:
-                code = proc.wait(timeout=20)
+                save(out / "supervisor.json", {"pid": proc.pid, "command": command})
+                code = proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                timed_out = True
+                forced = stop_owned_tree(live, proc, out, scope)
                 code = proc.wait(timeout=5)
+            except BaseException:
+                stop_owned_tree(live, proc, out, scope)
+                proc.wait(timeout=5)
+                raise
+            if scope is not None and forced is None:
+                # Even a supervisor that exited normally may have orphaned a child.
+                forced = stop_owned_tree(live, proc, out, scope)
+    finally:
+        if scope is not None:
+            scope.close()
     try:
         receipt = json.loads((out / "case.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -132,6 +269,16 @@ def invoke_case(case, binary, out, timeout=300):
     passed = (
         code == 0
         and not timed_out
+        and (
+            forced is None
+            or (
+                not forced["processes"]
+                and forced["closed"]
+                and not forced.get("error")
+                and not forced.get("errors")
+                and not forced.get("inventory_errors")
+            )
+        )
         and receipt.get("case") == case
         and receipt.get("status") == "PASS"
         and receipt.get("cleanup") is True
@@ -141,6 +288,7 @@ def invoke_case(case, binary, out, timeout=300):
         "passed": passed,
         "exit": code,
         "timed_out": timed_out,
+        "forced_cleanup": forced,
         "seconds": time.monotonic() - started,
         "receipt": receipt,
     }
