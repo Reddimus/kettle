@@ -390,6 +390,9 @@ pub struct Term<T> {
     protection_mode: ProtectionMode,
     horizontal_margins: Range<Column>,
     conformance_level: u8,
+    input_reset_generation: u64,
+    keyboard_locked: bool,
+    local_echo: bool,
     reverse_wrap: bool,
     extended_reverse_wrap: bool,
     morefix: Option<bool>,
@@ -631,6 +634,9 @@ pub struct Config {
     /// The default value is [`SEMANTIC_ESCAPE_CHARS`].
     pub semantic_escape_chars: String,
 
+    /// The input owner implements KAM and SRM keyboard semantics.
+    pub keyboard_input_modes: bool,
+
     /// Whether to enable kitty keyboard protocol.
     pub kitty_keyboard: bool,
 
@@ -657,6 +663,7 @@ impl Default for Config {
             semantic_escape_chars: SEMANTIC_ESCAPE_CHARS.to_owned(),
             default_cursor_style: Default::default(),
             vi_mode_cursor_style: Default::default(),
+            keyboard_input_modes: false,
             kitty_keyboard: Default::default(),
             unnegotiated_modified_enter: true,
             osc52: Default::default(),
@@ -739,6 +746,9 @@ impl<T> Term<T> {
             protection_mode: ProtectionMode::Off,
             horizontal_margins: Column(0)..Column(grid.columns()),
             conformance_level: 5,
+            input_reset_generation: 0,
+            keyboard_locked: false,
+            local_echo: false,
             reverse_wrap: false,
             extended_reverse_wrap: false,
             morefix: None,
@@ -868,6 +878,10 @@ impl<T> Term<T> {
         T: EventListener,
     {
         let old_config = mem::replace(&mut self.config, options);
+        if !self.config.keyboard_input_modes {
+            self.keyboard_locked = false;
+            self.local_echo = false;
+        }
 
         let title_event = match &self.title {
             Some(title) => Event::Title(title.clone()),
@@ -1123,6 +1137,22 @@ impl<T> Term<T> {
 
         // Resize damage information.
         self.damage.resize(num_cols, num_lines);
+    }
+
+    /// Hard resets invalidate unfinished controls in independent input streams.
+    pub fn input_reset_generation(&self) -> u64 {
+        self.input_reset_generation
+    }
+
+    /// ANSI mode 2 inhibits keyboard-originated input.
+    #[inline]
+    pub fn keyboard_locked(&self) -> bool {
+        self.keyboard_locked
+    }
+
+    /// ANSI mode 12 is reset: echo accepted keyboard input locally.
+    pub fn local_echo(&self) -> bool {
+        self.local_echo
     }
 
     /// Active terminal modes.
@@ -2703,14 +2733,8 @@ impl<T: EventListener> Handler for Term<T> {
             25 if self.conformance_level >= 2 => self
                 .event_proxy
                 .send_event(Event::PtyWrite("\x1b[?21n".into())),
-            26 if self.conformance_level >= 2 => {
-                let reply = match self.conformance_level {
-                    2 => "\x1b[?27;0n",
-                    3 => "\x1b[?27;0;0n",
-                    _ => "\x1b[?27;0;0;0n",
-                };
-                self.event_proxy.send_event(Event::PtyWrite(reply.into()));
-            }
+            // No physical DEC keyboard language, readiness or type is modeled.
+            // Refuse DSR 26 instead of returning a fabricated LK-series device.
             53 | 55 if self.conformance_level >= 4 => self
                 .event_proxy
                 .send_event(Event::PtyWrite("\x1b[?53n".into())),
@@ -3413,9 +3437,12 @@ impl<T: EventListener> Handler for Term<T> {
     /// Reset all important fields in the term struct.
     #[inline]
     fn reset_state(&mut self) {
+        self.input_reset_generation = self.input_reset_generation.wrapping_add(1);
         self.colors.set_reverse_video(false);
         self.protection_mode = ProtectionMode::Off;
         self.conformance_level = 5;
+        self.keyboard_locked = false;
+        self.local_echo = false;
         self.reverse_wrap = false;
         self.extended_reverse_wrap = false;
         self.morefix = None;
@@ -3471,6 +3498,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn soft_reset_state(&mut self) {
+        self.keyboard_locked = false;
         self.protection_mode = ProtectionMode::Off;
 
         self.reverse_wrap = false;
@@ -3827,7 +3855,7 @@ impl<T: EventListener> Handler for Term<T> {
         let state = match self.private_mode_state(mode) {
             ModeState::Set => true,
             ModeState::Reset => false,
-            ModeState::NotSupported | ModeState::PermanentlyReset => return,
+            ModeState::NotSupported | ModeState::PermanentlySet | ModeState::PermanentlyReset => return,
         };
         if let Some(saved) = self
             .saved_private_modes
@@ -3881,6 +3909,16 @@ impl<T: EventListener> Handler for Term<T> {
 
         trace!("Setting public mode: {mode:?}");
         match mode {
+            NamedMode::KeyboardAction => {
+                if self.config.keyboard_input_modes {
+                    self.keyboard_locked = true;
+                }
+            }
+            NamedMode::SendReceive => {
+                if self.config.keyboard_input_modes {
+                    self.local_echo = false;
+                }
+            }
             NamedMode::Insert => self.mode.insert(TermMode::INSERT),
             NamedMode::LineFeedNewLine => self.mode.insert(TermMode::LINE_FEED_NEW_LINE),
         }
@@ -3898,6 +3936,12 @@ impl<T: EventListener> Handler for Term<T> {
 
         trace!("Setting public mode: {mode:?}");
         match mode {
+            NamedMode::KeyboardAction => self.keyboard_locked = false,
+            NamedMode::SendReceive => {
+                if self.config.keyboard_input_modes {
+                    self.local_echo = true;
+                }
+            }
             NamedMode::Insert => {
                 self.mode.remove(TermMode::INSERT);
                 self.mark_fully_damaged();
@@ -3914,6 +3958,14 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Reporting mode {mode:?}");
         let state = match mode {
             ansi::Mode::Named(mode) => match mode {
+                NamedMode::KeyboardAction if !self.config.keyboard_input_modes => {
+                    ModeState::PermanentlyReset
+                }
+                NamedMode::SendReceive if !self.config.keyboard_input_modes => {
+                    ModeState::PermanentlySet
+                }
+                NamedMode::KeyboardAction => self.keyboard_locked.into(),
+                NamedMode::SendReceive => (!self.local_echo).into(),
                 NamedMode::Insert => self.mode.contains(TermMode::INSERT).into(),
                 NamedMode::LineFeedNewLine => {
                     self.mode.contains(TermMode::LINE_FEED_NEW_LINE).into()
@@ -4087,6 +4139,7 @@ enum ModeState {
     /// The mode is currently not set.
     Reset = 2,
     /// A recognized mode whose reset behavior cannot be changed.
+    PermanentlySet = 3,
     PermanentlyReset = 4,
 }
 
@@ -4547,7 +4600,6 @@ mod tests {
             [
                 "\x1b[?13n",
                 "\x1b[?21n",
-                "\x1b[?27;0;0;0n",
                 "\x1b[?53n",
                 "\x1b[?57;0n",
                 "\x1b[0*{",

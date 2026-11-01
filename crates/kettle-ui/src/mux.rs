@@ -37,7 +37,7 @@ const PTY_INPUT_QUEUE_DEPTH: usize = 64;
 const PTY_INPUT_WRITE_CHUNK_BYTES: usize = 8 * 1024;
 // `LOCAL_PASTE_MAX` is 4 MiB; leave room for the bracketed-paste envelope and
 // a small amount of already-queued interactive input.
-const MAX_USER_INPUT_MESSAGE_BYTES: usize = 4 * 1024 * 1024 + 64;
+const MAX_USER_INPUT_MESSAGE_BYTES: usize = kettle_core::term::MAX_LOCAL_ECHO_BYTES;
 const MAX_QUEUED_USER_INPUT_BYTES: usize = MAX_USER_INPUT_MESSAGE_BYTES + 64 * 1024;
 // A 1 MiB OSC 52 clipboard payload expands to roughly 1.34 MiB after base64.
 const MAX_PROTOCOL_REPLY_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -201,10 +201,21 @@ fn pane_environment(config: &Config, pane_id: u64, kettle_pid: u32) -> Vec<(Stri
 pub enum PaneInputResult {
     Queued,
     ReadOnly,
+    KeyboardLocked,
     Backpressured,
     Oversize,
     PathNotTyped,
     Failed,
+}
+
+impl From<kettle_core::term::KeyboardInputError> for PaneInputResult {
+    fn from(error: kettle_core::term::KeyboardInputError) -> Self {
+        match error {
+            kettle_core::term::KeyboardInputError::Locked => Self::KeyboardLocked,
+            kettle_core::term::KeyboardInputError::Oversize => Self::Oversize,
+            kettle_core::term::KeyboardInputError::Unavailable => Self::Failed,
+        }
+    }
 }
 
 impl PaneInputResult {
@@ -222,13 +233,16 @@ impl PaneInputResult {
     /// happened to any of its targets. `pub(crate)` because a cross-window
     /// broadcast merges results from several muxes in `App`.
     pub(crate) fn merge(self, other: Self) -> Self {
-        use PaneInputResult::{Backpressured, Failed, Oversize, PathNotTyped, Queued, ReadOnly};
+        use PaneInputResult::{
+            Backpressured, Failed, KeyboardLocked, Oversize, PathNotTyped, Queued, ReadOnly,
+        };
         match (self, other) {
             (Failed, _) | (_, Failed) => Failed,
             (PathNotTyped, _) | (_, PathNotTyped) => PathNotTyped,
             (Oversize, _) | (_, Oversize) => Oversize,
             (Backpressured, _) | (_, Backpressured) => Backpressured,
             (ReadOnly, _) | (_, ReadOnly) => ReadOnly,
+            (KeyboardLocked, _) | (_, KeyboardLocked) => KeyboardLocked,
             _ => Queued,
         }
     }
@@ -317,6 +331,7 @@ fn pane_input_policy(failed: bool, read_only: bool) -> Option<PaneInputResult> {
 
 struct QueuedPtyInput {
     bytes: Arc<[u8]>,
+    echo: Option<kettle_core::term::LocalEcho>,
     queued_bytes: Arc<AtomicUsize>,
 }
 
@@ -392,7 +407,23 @@ fn run_pty_input_worker<F>(
             }
         }
 
-        if let Some((_, pending)) = current.as_ref() {
+        if let Some((_, pending)) = current.as_mut() {
+            if let Some(echo) = &mut pending.message.echo {
+                match echo.poll_ready() {
+                    Ok(true) => pending.message.echo = None,
+                    Ok(false) => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(error) => {
+                        log::error!("PTY local echo failed: {error}");
+                        if !failed.swap(true, Ordering::AcqRel) {
+                            (waker)();
+                        }
+                        break;
+                    }
+                }
+            }
             match try_write(pending.next_chunk()) {
                 Ok(0) => std::thread::sleep(Duration::from_millis(1)),
                 Ok(written) => {
@@ -606,21 +637,38 @@ impl PtyInputQueue {
     }
 
     fn enqueue_user(&self, focus_reporting: bool, bytes: Arc<[u8]>) -> PaneInputResult {
+        self.enqueue_user_with_echo(focus_reporting, bytes, None)
+    }
+
+    fn enqueue_user_with_echo(
+        &self,
+        focus_reporting: bool,
+        bytes: Arc<[u8]>,
+        echo: Option<kettle_core::term::LocalEcho>,
+    ) -> PaneInputResult {
         let result = self.retry_pending_reports(focus_reporting);
         if !result.is_queued() {
             return result;
         }
-        self.enqueue_user_raw(bytes)
+        self.enqueue_user_raw_with_echo(bytes, echo)
     }
 
     fn enqueue_user_raw(&self, bytes: Arc<[u8]>) -> PaneInputResult {
+        self.enqueue_user_raw_with_echo(bytes, None)
+    }
+
+    fn enqueue_user_raw_with_echo(
+        &self,
+        bytes: Arc<[u8]>,
+        echo: Option<kettle_core::term::LocalEcho>,
+    ) -> PaneInputResult {
         let required = bytes.len();
         let result = self.enqueue(
             &self.user_tx,
             &self.queued_user_bytes,
             (MAX_USER_INPUT_MESSAGE_BYTES, MAX_QUEUED_USER_INPUT_BYTES),
             PTY_INPUT_QUEUE_DEPTH,
-            bytes,
+            (bytes, echo),
             false,
         );
         if result == PaneInputResult::Backpressured {
@@ -648,7 +696,7 @@ impl PtyInputQueue {
                 MAX_QUEUED_USER_INPUT_BYTES + MOUSE_RELEASE_RESERVE_BYTES,
             ),
             PTY_INPUT_QUEUE_DEPTH + MOUSE_RELEASE_RESERVE_DEPTH,
-            bytes,
+            (bytes, None),
             false,
         )
     }
@@ -667,7 +715,7 @@ impl PtyInputQueue {
                 MAX_QUEUED_PROTOCOL_REPLY_BYTES,
             ),
             PTY_INPUT_QUEUE_DEPTH,
-            bytes,
+            (bytes, None),
             false,
         );
         match result {
@@ -685,8 +733,10 @@ impl PtyInputQueue {
                     log::warn!("dropping terminal replies: the program is not reading its input");
                 }
             }
-            PaneInputResult::ReadOnly | PaneInputResult::PathNotTyped | PaneInputResult::Failed => {
-            }
+            PaneInputResult::ReadOnly
+            | PaneInputResult::KeyboardLocked
+            | PaneInputResult::PathNotTyped
+            | PaneInputResult::Failed => {}
         }
         result
     }
@@ -699,7 +749,7 @@ impl PtyInputQueue {
         queued_bytes: &Arc<AtomicUsize>,
         (max_message_bytes, max_queued_bytes): (usize, usize),
         max_depth: usize,
-        bytes: Arc<[u8]>,
+        (bytes, echo): (Arc<[u8]>, Option<kettle_core::term::LocalEcho>),
         fail_on_reject: bool,
     ) -> PaneInputResult {
         if bytes.is_empty() {
@@ -745,6 +795,7 @@ impl PtyInputQueue {
 
         let message = QueuedPtyInput {
             bytes,
+            echo,
             queued_bytes: queued_bytes.clone(),
         };
         match tx.try_send(message) {
@@ -1143,11 +1194,15 @@ impl Pane {
         }
         let input = bytes.as_ref();
         let focus_reporting = self.focus_reporting_enabled();
-        self.term.with_completion_input_admission(&[input], || {
-            let result = self.pty_input.enqueue_user(focus_reporting, bytes.clone());
-            self.record_user_input(result, !bytes.is_empty());
-            (result, result.is_queued())
-        })
+        self.term
+            .with_keyboard_input_admission(&[input], bytes.clone(), |echo| {
+                let result =
+                    self.pty_input
+                        .enqueue_user_with_echo(focus_reporting, bytes.clone(), echo);
+                self.record_user_input(result, !bytes.is_empty());
+                (result, result.is_queued())
+            })
+            .unwrap_or_else(PaneInputResult::from)
     }
 
     /// Admit an already validated synthetic key batch as one queue item while
@@ -1171,12 +1226,33 @@ impl Pane {
         }
         let boundaries: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
         let focus_reporting = self.focus_reporting_enabled();
-        self.term.with_completion_input_admission(&boundaries, || {
-            let nonempty = !joined.is_empty();
+        let nonempty = !joined.is_empty();
+        let joined: Arc<[u8]> = Arc::from(joined);
+        self.term
+            .with_keyboard_input_admission(&boundaries, joined.clone(), |echo| {
+                let result = self
+                    .pty_input
+                    .enqueue_user_with_echo(focus_reporting, joined, echo);
+                self.record_user_input(result, nonempty);
+                (result, result.is_queued())
+            })
+            .unwrap_or_else(PaneInputResult::from)
+    }
+
+    /// Mouse reports are protocol input, so KAM and SRM do not affect them.
+    pub fn feed_pointer_input(&self, bytes: &[u8]) -> PaneInputResult {
+        if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
+            return result;
+        }
+        if bytes.len() > MAX_USER_INPUT_MESSAGE_BYTES {
+            return PaneInputResult::Oversize;
+        }
+        let focus_reporting = self.focus_reporting_enabled();
+        self.term.with_completion_input_admission(&[bytes], || {
             let result = self
                 .pty_input
-                .enqueue_user(focus_reporting, Arc::from(joined));
-            self.record_user_input(result, nonempty);
+                .enqueue_user(focus_reporting, Arc::from(bytes));
+            self.record_user_input(result, !bytes.is_empty());
             (result, result.is_queued())
         })
     }
@@ -2318,6 +2394,7 @@ impl Mux {
             launch.is_none() && cfg.shell_integration,
             &shell_startup,
             TerminalCapabilities {
+                keyboard_input_modes: true,
                 osc52_copy: self.osc52_copy_allowed,
                 osc52_read: true,
                 unnegotiated_modified_enter: unnegotiated_modified_enter(cfg.modify_other_keys),
@@ -5782,6 +5859,174 @@ mod node_tests {
 
     #[cfg(unix)]
     #[test]
+    fn keyboard_lock_blocks_text_and_batches_but_preserves_pointer_and_focus_reports() {
+        use alacritty_terminal::vte::ansi::{
+            Handler, Mode, NamedMode, NamedPrivateMode, PrivateMode,
+        };
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &["/bin/cat".into()],
+            None,
+        )
+        .expect("PTY fixture");
+        let pane = mux.panes.values_mut().next().unwrap();
+        let (queue, rx) = input_queue_fixture();
+        pane.pty_input = queue;
+        pane.term
+            .term
+            .lock()
+            .unwrap()
+            .set_mode(Mode::from(NamedMode::KeyboardAction));
+        let generation = pane.user_input_generation.load(Ordering::Relaxed);
+        assert_eq!(pane.feed_input(b"text"), PaneInputResult::KeyboardLocked);
+        assert_eq!(
+            pane.feed_input_shared(Arc::from(&b"shared"[..])),
+            PaneInputResult::KeyboardLocked
+        );
+        assert_eq!(
+            pane.feed_key_inputs(&[b"key".to_vec()]),
+            PaneInputResult::KeyboardLocked
+        );
+        assert!(rx.is_empty());
+        assert_eq!(
+            pane.user_input_generation.load(Ordering::Relaxed),
+            generation
+        );
+        assert_eq!(pane.feed_pointer_input(b"mouse"), PaneInputResult::Queued);
+        assert_eq!(rx.recv().unwrap().bytes.as_ref(), b"mouse");
+        pane.term
+            .term
+            .lock()
+            .unwrap()
+            .set_private_mode(PrivateMode::Named(NamedPrivateMode::ReportFocusInOut));
+        assert_eq!(pane.feed_focus_report(true), PaneInputResult::Queued);
+        assert_eq!(rx.recv().unwrap().bytes.as_ref(), b"\x1b[I");
+        pane.term.term.lock().unwrap().soft_reset_state();
+        assert_eq!(pane.feed_input(b"unlocked"), PaneInputResult::Queued);
+        assert_eq!(rx.recv().unwrap().bytes.as_ref(), b"unlocked");
+        pane.read_only = true;
+        assert_eq!(pane.feed_pointer_input(b"mouse"), PaneInputResult::ReadOnly);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_echo_begins_only_for_an_accepted_message_and_precedes_its_first_write() {
+        use alacritty_terminal::vte::ansi::{Handler, Mode, NamedMode};
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &["/bin/sleep".into(), "10".into()],
+            None,
+        )
+        .expect("PTY fixture");
+        let pane = mux.panes.values_mut().next().unwrap();
+        let (queue, rx) = input_queue_fixture();
+        pane.pty_input = queue;
+        pane.term
+            .term
+            .lock()
+            .unwrap()
+            .unset_mode(Mode::from(NamedMode::SendReceive));
+        assert_eq!(pane.feed_input(b"echo"), PaneInputResult::Queued);
+        assert!(!pane.term.screen_text(0).unwrap().text.contains("echo"));
+        for _ in 1..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(pane.feed_input(b"discard"), PaneInputResult::Queued);
+        }
+        assert_eq!(pane.feed_input(b"refused"), PaneInputResult::Backpressured);
+        let first = rx.recv().unwrap();
+        assert!(first.echo.is_some());
+        while rx.try_recv().is_ok() {}
+        let (tx, worker_rx) = crossbeam_channel::bounded(1);
+        tx.send(first).unwrap_or_else(|_| panic!("worker fixture"));
+        let (_reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        let failed = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let mut written = Vec::new();
+        let waker: Waker = Arc::new(|| {});
+        run_pty_input_worker(
+            reply_rx,
+            worker_rx,
+            &failed,
+            &stop,
+            &waker,
+            &AtomicBool::new(false),
+            |bytes| {
+                let text = pane.term.screen_text(0).unwrap().text;
+                assert!(text.contains("echo"));
+                assert!(!text.contains("discard") && !text.contains("refused"));
+                written.extend_from_slice(bytes);
+                stop.store(true, Ordering::Release);
+                Ok(bytes.len())
+            },
+        );
+        assert_eq!(written, b"echo");
+        assert!(!failed.load(Ordering::Acquire));
+        assert!(!pane.term.screen_text(0).unwrap().text.contains("discard"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locked_pointer_input_preserves_pending_focus_order_without_local_echo() {
+        use alacritty_terminal::vte::ansi::{
+            Handler, Mode, NamedMode, NamedPrivateMode, PrivateMode,
+        };
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &["/bin/cat".into()],
+            None,
+        )
+        .expect("PTY fixture");
+        let pane = mux.panes.values_mut().next().unwrap();
+        let (queue, rx) = input_queue_fixture();
+        pane.pty_input = queue;
+        {
+            let mut term = pane.term.term.lock().unwrap();
+            term.set_mode(Mode::from(NamedMode::KeyboardAction));
+            term.unset_mode(Mode::from(NamedMode::SendReceive));
+            term.set_private_mode(PrivateMode::Named(NamedPrivateMode::ReportFocusInOut));
+        }
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                pane.pty_input.enqueue_user_raw(Arc::from(&b"old"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        assert_eq!(pane.feed_focus_report(true), PaneInputResult::Backpressured);
+        while rx.try_recv().is_ok() {}
+        assert_eq!(pane.feed_pointer_input(b"mouse"), PaneInputResult::Queued);
+        let focus = rx.recv().unwrap();
+        let pointer = rx.recv().unwrap();
+        assert_eq!(focus.bytes.as_ref(), b"\x1b[I");
+        assert_eq!(pointer.bytes.as_ref(), b"mouse");
+        assert!(focus.echo.is_none() && pointer.echo.is_none());
+        assert!(rx.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn saved_key_release_is_dropped_after_keyboard_reporting_resets() {
         use alacritty_terminal::vte::ansi::{Handler, KeyboardModes};
 
@@ -6382,6 +6627,7 @@ mod node_tests {
         let queued_reply_bytes = Arc::new(AtomicUsize::new(0));
         user_tx
             .send(QueuedPtyInput {
+                echo: None,
                 bytes: user_bytes.clone(),
                 queued_bytes: queued_user_bytes.clone(),
             })
@@ -6411,6 +6657,7 @@ mod node_tests {
                         .take()
                         .unwrap()
                         .send(QueuedPtyInput {
+                            echo: None,
                             bytes: reply_bytes.clone(),
                             queued_bytes: queued_reply_bytes.clone(),
                         })
@@ -6436,6 +6683,7 @@ mod node_tests {
         let queued_reply_bytes = Arc::new(AtomicUsize::new(2));
         user_tx
             .send(QueuedPtyInput {
+                echo: None,
                 bytes: Arc::from(&b"u"[..]),
                 queued_bytes: queued_user_bytes.clone(),
             })
@@ -6444,6 +6692,7 @@ mod node_tests {
         for byte in *b"12" {
             reply_tx
                 .send(QueuedPtyInput {
+                    echo: None,
                     bytes: Arc::from(&[byte][..]),
                     queued_bytes: queued_reply_bytes.clone(),
                 })

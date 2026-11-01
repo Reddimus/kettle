@@ -211,7 +211,9 @@ impl App {
                     continue;
                 };
                 match result {
-                    PaneInputResult::Queued | PaneInputResult::ReadOnly => {
+                    PaneInputResult::Queued
+                    | PaneInputResult::ReadOnly
+                    | PaneInputResult::KeyboardLocked => {
                         self.pending_lua_commands.pop_front();
                         self.lua_command_retry.progressed();
                         processed += 1;
@@ -536,7 +538,9 @@ impl App {
                     continue;
                 };
                 match result {
-                    PaneInputResult::Queued | PaneInputResult::ReadOnly => {
+                    PaneInputResult::Queued
+                    | PaneInputResult::ReadOnly
+                    | PaneInputResult::KeyboardLocked => {
                         self.pending_remote_commands.pop_front();
                         self.remote_command_retry.progressed();
                         processed += 1;

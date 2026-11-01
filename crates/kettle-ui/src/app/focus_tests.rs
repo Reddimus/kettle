@@ -73,7 +73,7 @@ fn every_pane_input_writer_reconciles_focus_reports_first() {
             continue;
         }
         let body = chunk.split("\n    }\n").next().unwrap_or(chunk);
-        let first_write = ["feed_input(", "feed_input_shared(", "feed_key_inputs("]
+        let first_write = ["feed_input(", "feed_input_shared(", "feed_key_inputs(", "feed_pointer_input("]
             .iter()
             .filter_map(|needle| body.find(needle))
             .min();

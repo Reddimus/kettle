@@ -1241,6 +1241,18 @@ portable policy: differences from esctest's X server conversion and physical
 xy input validation are explicit exceptions. Its RGB values are not substituted
 into the implementation.
 
+ANSI keyboard-mode tests exercise defaults, every chunk boundary, RIS,
+DECSTR, capability withdrawal, fixed headless reports, and hardware-report
+refusal. Real PTYs cover split UTF-8 against a child's unfinished control and
+synchronized-update source changes and deadlines. Hard reset clears partial
+local controls, including a reset buffered inside a synchronized update. Queue fixtures cover
+backpressure, stopped readers, parser acknowledgment, rejected messages,
+keyboard lock, and mouse/focus ordering without local echo. Removing lock
+activation, the echo-before-write barrier or parser separation makes the
+corresponding regressions fail. The two native KAM/SRM conformance cases pass;
+the full integrated conformance run verifies the 67 intentional policy
+exceptions. No case in that list remains an unexplained missing feature.
+
 **ucs-detect** (`just conformance-ucs`) measures how many columns the
 terminal gives Unicode text, against `wcwidth`. Kettle 5.7.0 scored 99.6% on
 narrow and 94.9% on wide characters, where the misses are the 26 regional

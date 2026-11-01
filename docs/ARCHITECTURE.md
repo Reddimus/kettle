@@ -2295,12 +2295,41 @@ with it, wide cells, text selections and graphics survive. DECCOLM never
 changes the pane or window geometry. RIS and DECSTR clear DECNCSM.
 
 Device reports describe the emulated terminal: no printer, locked user-defined
-keys, unknown keyboard language, no DEC locator, zero macro space, no link
+keys, no DEC locator, zero macro space, no link
 errors and no DEC multi-session transport. Reports honor the selected VT level.
 DECRQSS reports the normal display and absent status line. Recognized fixed
 ANSI modes and horizontal cursor coupling report permanently reset; unknown
 modes remain unrecognized. Identity, checksums, title disclosure and window
-geometry policies are unchanged.
+geometry policies are unchanged. Keyboard hardware status (DSR 26) is refused:
+the backend does not model the physical language, readiness or DEC keyboard
+type described by the [DEC keyboard report](https://vt100.net/docs/vt510-rm/DSR-KBD.html).
+
+ANSI KAM (2) inhibits text, paste, IME commits and synthetic key batches for
+the target pane. App actions, including Reset terminal, remain available.
+Mouse and focus reports, terminal replies, and releases for previously sent
+presses retain their existing routes. A locked keyboard returns the existing
+`busy` control error without consuming completion or input generations.
+Startup and RIS unlock the keyboard; DECSTR also unlocks it.
+
+ANSI SRM (12) is set by default: keyboard input is sent without local echo.
+Resetting it attaches a bounded echo ticket to each accepted input message.
+KAM and SRM are checked together under the terminal lock, held through the
+non-blocking queue commit; completion uses the same admission transaction.
+The terminal lock is released before completion effects are classified.
+The input worker submits that ticket to the parser and waits for its receipt
+before its first PTY write. Refused or discarded queued messages have no echo;
+queue depth and byte bounds are unchanged. The echo shares the input's byte
+allocation until the reader consumes it. Only the first echo allocates a
+second VT/UTF-8 processor, so a partial child control cannot absorb typed text.
+Switching sources commits the prior source's synchronized update before the
+other stream mutates the shared grid; an idle source retains the ordinary
+parser deadline. Hard reset invalidates the other stream's unfinished parser
+state, including a reset followed by re-enabling echo in the same read. Echo bytes bypass the child graphics extractor and private
+raw-output taps. Session logs and recordings continue to capture child output
+without implicitly recording keyboard input. DECSTR preserves SRM; RIS sets it.
+The input owner explicitly enables these modes through runtime capabilities.
+Raw `kettle exec` stdin remains a PTY transport: KAM reports permanently reset
+and SRM permanently set, and attempts to change them are ignored.
 
 ### Column editing and reverse wraparound
 

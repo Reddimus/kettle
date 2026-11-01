@@ -2,7 +2,10 @@
 //! driven by a dedicated reader thread.
 
 mod command_correlation;
+mod local_echo;
 pub use command_correlation::CommandCorrelationCapability;
+pub use local_echo::LocalEcho;
+use local_echo::LocalPayload;
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
@@ -46,6 +49,16 @@ const PTY_READ_BUFFER_BYTES: usize = 64 * 1024;
 const PTY_PUMP_QUEUE_DEPTH: usize = 4;
 /// Pending [`Terminal::apply_local_output`] requests per pane.
 const LOCAL_OUTPUT_QUEUE_DEPTH: usize = 4;
+/// One bounded user input, including bracketed-paste framing.
+pub const MAX_LOCAL_ECHO_BYTES: usize = 4 * 1024 * 1024 + 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyboardInputError {
+    Locked,
+    Oversize,
+    Unavailable,
+}
+
 /// Maximum time to wait for EOF after the direct child exits.
 ///
 /// A daemonized descendant can retain the slave descriptor forever. The
@@ -1174,6 +1187,8 @@ pub struct LaunchOverrides<'a> {
 /// active security policy or on a headless platform.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalCapabilities {
+    /// The caller owns keyboard admission and bounded local echo.
+    pub keyboard_input_modes: bool,
     pub osc52_copy: bool,
     /// Forward clipboard reads to an owner that enforces the live policy.
     pub osc52_read: bool,
@@ -1194,6 +1209,7 @@ pub struct TerminalCapabilities {
 impl Default for TerminalCapabilities {
     fn default() -> Self {
         Self {
+            keyboard_input_modes: false,
             osc52_copy: true,
             osc52_read: false,
             unnegotiated_modified_enter: true,
@@ -2970,11 +2986,12 @@ enum ParserInput {
     /// Bytes Kettle parses without the child writing them. See
     /// [`Terminal::apply_local_output`].
     Local(Vec<u8>),
+    Echo(Arc<[u8]>, crossbeam_channel::Sender<()>),
 }
 
 /// A local output request: the pump's read generation when it was made, and
 /// the bytes.
-type LocalOutput = (u64, Vec<u8>);
+type LocalOutput = (u64, LocalPayload);
 
 /// Receive the next pump chunk or local output while enforcing the DEC 2026
 /// deadline ahead of ready data, and flushing immediately when EOF makes a
@@ -3010,7 +3027,10 @@ fn receive_parser_input(
             .is_some_and(|(generation, _)| *generation <= handled_generation)
         {
             let (_, bytes) = pending_local.take().expect("checked above");
-            return Some(ParserInput::Local(bytes));
+            return Some(match bytes {
+                LocalPayload::Output(bytes) => ParserInput::Local(bytes),
+                LocalPayload::Echo(bytes, ack) => ParserInput::Echo(bytes, ack),
+            });
         }
 
         // While a request waits for earlier reads, take only PTY chunks.
@@ -3090,7 +3110,9 @@ fn receive_pty_chunk(
     let mut local_rx = crossbeam_channel::never();
     match receive_parser_input(processor, raw_rx, &mut local_rx, &mut None, 0, context)? {
         ParserInput::Pty(generation, buffer, n) => Some((generation, buffer, n)),
-        ParserInput::Local(_) => unreachable!("the local channel never delivers"),
+        ParserInput::Local(_) | ParserInput::Echo(_, _) => {
+            unreachable!("the local channel never delivers")
+        }
     }
 }
 
@@ -3752,19 +3774,28 @@ mod local_output_tests {
     ) -> Option<(Terminal, crossbeam_channel::Receiver<TermEvent>)> {
         let (tx, rx) = crossbeam_channel::unbounded();
         let waker: Waker = Arc::new(|| {});
-        match Terminal::new(
+        match Terminal::new_with_env_and_output_geometry_and_capabilities(
             argv,
             None,
             100,
-            80,
-            24,
-            8,
-            16,
+            0,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
             false,
             CursorShape::Block,
             None,
+            "xterm-256color",
+            "truecolor",
+            &[],
+            false,
+            false,
+            &ShellStartup::default(),
+            TerminalCapabilities {
+                keyboard_input_modes: true,
+                ..TerminalCapabilities::default()
+            },
             tx,
             waker,
+            None,
         ) {
             Ok(terminal) => Some((terminal, rx)),
             Err(error) => {
@@ -3830,6 +3861,148 @@ mod local_output_tests {
                 height: 1.0,
             })
         );
+    }
+
+    fn echo_ready(terminal: &Terminal, bytes: &[u8]) {
+        let mut echo = terminal
+            .prepare_local_echo(Arc::from(bytes))
+            .expect("SRM reset");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !echo.poll_ready().expect("live echo reader") {
+            assert!(std::time::Instant::now() < deadline, "echo deadline");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn local_echo_keeps_its_utf8_and_escape_state_separate_from_the_child() {
+        let script = r"stty raw -echo; printf '\033c\033[12lREADY\033[31'; dd bs=1 count=1 >/dev/null 2>&1; printf 'mCHILD'; exec sleep 10";
+        let argv = ["/bin/sh".to_string(), "-c".to_string(), script.to_string()];
+        let (terminal, events) = spawn_terminal(&argv).expect("test PTY");
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("READY")));
+        let wide = "\u{754c}";
+        let wide = wide.as_bytes();
+        echo_ready(&terminal, &wide[..1]);
+        echo_ready(&terminal, &wide[1..]);
+        assert!(
+            terminal
+                .screen_text(0)
+                .unwrap()
+                .text
+                .contains("READY\u{754c}")
+        );
+        assert!(!terminal.screen_text(0).unwrap().text.contains("CHILD"));
+        terminal.write(b"x");
+        assert!(wait_for(&terminal, &events, |_, text| text
+            .contains("READY\u{754c}CHILD")));
+        let term = terminal.term.lock().unwrap();
+        use alacritty_terminal::index::{Column, Line};
+        assert_eq!(
+            term.grid()[Line(0)][Column(5)].fg,
+            AnsiColor::Named(NamedColor::Foreground)
+        );
+        assert_eq!(
+            term.grid()[Line(0)][Column(7)].fg,
+            AnsiColor::Named(NamedColor::Red)
+        );
+    }
+
+    #[test]
+    fn local_echo_and_child_sync_updates_flush_at_source_switches_and_deadlines() {
+        let argv = ["/bin/sh".to_string(), "-c".to_string(),
+            r"stty raw -echo; printf '\033[12lREADY'; dd bs=1 count=1 >/dev/null 2>&1; printf '\033[?2026hCHILD'; exec sleep 10".to_string()];
+        let (terminal, events) = spawn_terminal(&argv).expect("test PTY");
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("READY")));
+        echo_ready(&terminal, b"\x1b[?2026hECHO");
+        terminal.write(b"x");
+        assert!(wait_for(&terminal, &events, |_, text| text
+            .contains("READYECHOCHILD")));
+        echo_ready(&terminal, b"\x1b[?2026hDEADLINE");
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("DEADLINE")));
+    }
+
+    #[test]
+    fn a_hard_reset_discards_an_unfinished_local_echo_control_even_if_reenabled_in_one_read() {
+        let argv = [
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            r"stty raw -echo; printf '\033[12lREADY'; exec sleep 10".to_string(),
+        ];
+        let (terminal, events) = spawn_terminal(&argv).expect("test PTY");
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("READY")));
+        echo_ready(&terminal, b"\x1b]0;unfinished");
+        assert!(terminal.apply_local_output(b"\x1bc\x1b[12lRESET"));
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("RESET")));
+        echo_ready(&terminal, b"AFTER");
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("RESETAFTER")));
+    }
+
+    #[test]
+    fn a_buffered_hard_reset_invalidates_the_echo_parser_before_the_source_switch() {
+        let argv = [
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            r"stty raw -echo; printf '\033[12lREADY'; exec sleep 10".to_string(),
+        ];
+        let (terminal, events) = spawn_terminal(&argv).expect("test PTY");
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("READY")));
+        echo_ready(&terminal, b"\x1b]0;unfinished");
+        assert!(terminal.apply_local_output(b"\x1b[?2026h\x1bc\x1b[12lRESET"));
+        echo_ready(&terminal, b"AFTER");
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("RESETAFTER")));
+    }
+
+    #[test]
+    fn a_host_mode_change_cannot_interleave_with_the_input_queue_commit() {
+        use alacritty_terminal::vte::ansi::{Mode, NamedMode};
+        let argv = ["/bin/sleep".to_string(), "10".to_string()];
+        let (terminal, _) = spawn_terminal(&argv).expect("test PTY");
+        terminal
+            .term
+            .lock()
+            .unwrap()
+            .unset_mode(Mode::from(NamedMode::SendReceive));
+        let result =
+            terminal.with_keyboard_input_admission(&[b"x"], Arc::from(&b"x"[..]), |echo| {
+                assert!(
+                    echo.is_some(),
+                    "the accepted input uses the same SRM snapshot"
+                );
+                let changed = if let Ok(mut term) = terminal.term.try_lock() {
+                    term.set_mode(Mode::from(NamedMode::KeyboardAction));
+                    term.set_mode(Mode::from(NamedMode::SendReceive));
+                    true
+                } else {
+                    false
+                };
+                assert!(!changed, "a host mode change overtook queue admission");
+                (7, true)
+            });
+        assert_eq!(result, Ok(7));
+        terminal
+            .term
+            .lock()
+            .unwrap()
+            .set_mode(Mode::from(NamedMode::KeyboardAction));
+        let result: Result<(), _> =
+            terminal.with_keyboard_input_admission(&[b"x"], Arc::from(&b"x"[..]), |_| {
+                panic!("locked input must never reach the queue")
+            });
+        assert_eq!(result, Err(KeyboardInputError::Locked));
+        {
+            let mut term = terminal.term.lock().unwrap();
+            term.unset_mode(Mode::from(NamedMode::KeyboardAction));
+            term.set_mode(Mode::from(NamedMode::SendReceive));
+        }
+        let result =
+            terminal.with_keyboard_input_admission(&[b"x"], Arc::from(&b"x"[..]), |echo| {
+                assert!(
+                    echo.is_none(),
+                    "updated SRM state applies to the next message"
+                );
+                (8, true)
+            });
+        assert_eq!(result, Ok(8));
     }
 
     #[test]
@@ -5554,6 +5727,7 @@ impl Terminal {
         };
         let history_limit = effective_scrollback_lines(scrollback, scrollback_bytes, cols, rows);
         let mut tconf = TermConfig {
+            keyboard_input_modes: capabilities.keyboard_input_modes,
             // Live OSC 52 permissions are enforced by the UI at journal drain.
             osc52: if capabilities.osc52_read {
                 alacritty_terminal::term::Osc52::CopyPaste
@@ -5718,6 +5892,9 @@ impl Terminal {
                 .name("kettle-pty-reader".into())
                 .spawn(move || {
                     let mut processor: Processor = Processor::new();
+                    let mut other_processor: Option<Processor> = None;
+                    let mut active_echo = false;
+                    let mut observed_input_reset = 0;
                     // Built before the child spawns, so it sees the hostname
                     // the shell is about to read.
                     let mut extractor = Extractor::for_shell();
@@ -6006,14 +6183,36 @@ impl Terminal {
                                 out_gen: &out_gen_reader,
                                 output_wake: &output_wake,
                             };
-                            receive_parser_input(
+                            let input = receive_parser_input(
                                 &mut processor,
                                 &raw_rx,
                                 &mut local_output_rx,
                                 &mut pending_local,
                                 handled_generation,
                                 &mut sync_flush,
-                            )
+                            );
+                            let echo = matches!(&input, Some(ParserInput::Echo(..)));
+                            if input.is_some() && echo != active_echo {
+                                // A source switch commits its buffered update before
+                                // the other stream can mutate the shared grid. Its VT
+                                // and UTF-8 parser state remains independent.
+                                if processor.sync_timeout().sync_timeout().is_some() {
+                                    force_sync_update_flush(&mut processor, &mut sync_flush);
+                                }
+                                let reset = term.lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .input_reset_generation();
+                                if reset != observed_input_reset {
+                                    other_processor = None;
+                                }
+                                observed_input_reset = reset;
+                                std::mem::swap(
+                                    &mut processor,
+                                    other_processor.get_or_insert_with(Processor::new),
+                                );
+                                active_echo = echo;
+                            }
+                            input
                         };
                         match received {
                             None => {
@@ -6051,6 +6250,7 @@ impl Terminal {
                                 if stop.load(Ordering::Relaxed) {
                                     break;
                                 }
+                                let mut echo_ack = None;
                                 let (read_generation, buffer, n, from_child) = match input {
                                     ParserInput::Pty(generation, buffer, n) => {
                                         handled_generation = generation;
@@ -6059,6 +6259,11 @@ impl Terminal {
                                     ParserInput::Local(bytes) => {
                                         let n = bytes.len();
                                         (reader_progress.load().generation, bytes, n, false)
+                                    }
+                                    ParserInput::Echo(bytes, ack) => {
+                                        echo_ack = Some(ack);
+                                        let n = bytes.len();
+                                        (reader_progress.load().generation, bytes.to_vec(), n, false)
                                     }
                                 };
                                 // Evaluated once per PTY read. If logging starts
@@ -6718,6 +6923,15 @@ impl Terminal {
                                         &mut sync_graphics,
                                     );
                                 }
+                                if other_processor.is_some() {
+                                    let reset = term.lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                        .input_reset_generation();
+                                    if reset != observed_input_reset {
+                                        other_processor = None;
+                                        observed_input_reset = reset;
+                                    }
+                                }
                                 image_pruner.prune_if_changed(&term, &images);
                                 // Local buffers are not the pump's 64 KiB read
                                 // buffers and were never counted as reads.
@@ -6738,6 +6952,9 @@ impl Terminal {
                                 );
                                 if from_child {
                                     reader_progress.mark_chunk_handled();
+                                }
+                                if let Some(ack) = echo_ack {
+                                    let _ = ack.try_send(());
                                 }
                             }
                         }
@@ -6882,8 +7099,24 @@ impl Terminal {
     pub fn apply_local_output(&self, bytes: &[u8]) -> bool {
         let generation = self.pty_read_progress.load().generation;
         self.local_output
-            .try_send((generation, bytes.to_vec()))
+            .try_send((generation, LocalPayload::Output(bytes.to_vec())))
             .is_ok()
+    }
+
+    /// Prepare an echo only for a user message already bounded by the input
+    /// queue. Preparing it has no side effects; the worker begins it on dequeue.
+    pub fn prepare_local_echo(&self, bytes: Arc<[u8]>) -> Option<LocalEcho> {
+        if bytes.is_empty()
+            || bytes.len() > MAX_LOCAL_ECHO_BYTES
+            || !self.term.lock().ok()?.local_echo()
+        {
+            return None;
+        }
+        Some(LocalEcho::new(
+            bytes,
+            self.local_output.clone(),
+            self.pty_read_progress.clone(),
+        ))
     }
 
     /// Update whether DA1 may advertise OSC 52 clipboard writes.
@@ -7454,6 +7687,52 @@ impl Terminal {
             cursor_col,
             admit,
         )
+    }
+
+    /// Admit a keyboard message under one KAM/SRM snapshot, holding the terminal
+    /// lock through its non-blocking enqueue. Lock order is Term then completion;
+    /// the callback must not reenter either lock. Release Term before classifying
+    /// completion effects, while keeping the fast shell reply behind that commit.
+    pub fn with_keyboard_input_admission<R>(
+        &self,
+        inputs: &[&[u8]],
+        bytes: Arc<[u8]>,
+        admit: impl FnOnce(Option<LocalEcho>) -> (R, bool),
+    ) -> Result<R, KeyboardInputError> {
+        if bytes.len() > MAX_LOCAL_ECHO_BYTES {
+            return Err(KeyboardInputError::Oversize);
+        }
+        let term = self
+            .term
+            .lock()
+            .map_err(|_| KeyboardInputError::Unavailable)?;
+        if term.keyboard_locked() {
+            return Err(KeyboardInputError::Locked);
+        }
+        let cursor_col = Some(term.grid().cursor.point.column.0);
+        let echo = (!bytes.is_empty() && term.local_echo()).then(|| {
+            LocalEcho::new(
+                bytes,
+                self.local_output.clone(),
+                self.pty_read_progress.clone(),
+            )
+        });
+        let Ok(mut completion) = self.completion.lock() else {
+            let result = admit(echo).0;
+            drop(term);
+            return Ok(result);
+        };
+        Ok(with_completion_input_admission_slot_at(
+            &mut completion,
+            inputs,
+            std::time::Instant::now(),
+            cursor_col,
+            || {
+                let result = admit(echo);
+                drop(term);
+                result
+            },
+        ))
     }
 
     /// Expire a grace-hidden completion or report how long the event loop must

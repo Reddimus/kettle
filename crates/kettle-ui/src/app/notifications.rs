@@ -23,7 +23,9 @@ const INPUT_REJECTION_NOTICE_INTERVAL: std::time::Duration = std::time::Duration
 
 pub(super) fn input_rejection_message(result: PaneInputResult) -> Option<&'static str> {
     match result {
-        PaneInputResult::Queued | PaneInputResult::ReadOnly => None,
+        PaneInputResult::Queued | PaneInputResult::ReadOnly | PaneInputResult::KeyboardLocked => {
+            None
+        }
         PaneInputResult::Backpressured => Some(
             "Input could not be delivered because a child is not accepting it fast enough. If broadcast mode is active, some panes may already have received it; verify before retrying.",
         ),

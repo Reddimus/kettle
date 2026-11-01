@@ -76,24 +76,20 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   completion guarantee), or accept a rare duplicate window from old launchers.
   The claim-before-confirmation-timeout characterization test retains this
   behavior without treating a claim as completed activation.
-- **Unimplemented DEC and xterm controls.** The left/right margin follow-up
-  removes 55 failures, character protection removes another 30, and
-  rectangular copy/fill/erase removes another 24. Column editing and reverse
-  wrapping remove another 32. Attribute changes, mode save/restore, MoreFix
-  and truthful fixed-mode/device reports remove another 26; esctest2 now
-  fails 69 tests after the keypad, Backarrow, VT5 no-clear, special-colour and
-  screen-reverse follow-ups,
-  listed by reason in
-  `scripts/conformance-esctest-expected.txt`. Remaining features include
-  additional modes. The seven X colour syntaxes are implemented with fixed
-  D65/sRGB conversion, channel clipping and a continuous CIE Lab low-light
-  inverse; 21 conversion and input-validation expectations remain intentional exceptions. Cases
-  involving those controls and margins remain grouped with their missing
-  feature. The list also retains deliberate identity, checksum and window
-  policies. Close each feature by implementing it in the vendored engine and
-  removing its passing tests; `just conformance-esctest` fails until the list
-  matches. Seven-bit DECSCL selections are implemented; raw eight-bit C1
-  replies remain unsupported without changing the selected terminal state.
+- **Intentional DEC and xterm policy exceptions.** The implemented margins,
+  protection, rectangular operations, column editing, reverse wrap, attributes,
+  mode save/restore, special colours, screen reverse and software keyboard
+  modes have portable and native conformance coverage. The remaining 67
+  esctest2 cases are deliberate policies, listed individually in
+  `scripts/conformance-esctest-expected.txt`: program-driven geometry and
+  title operations are disabled, identity remains Kettle, memory checksums and
+  physical DEC keyboard metadata are refused, and printer formatting, legacy
+  Hebrew/NRCS and smooth scrolling are fixed inactive. The seven X colour
+  syntaxes use fixed D65/sRGB conversion, physical chromaticity validation,
+  channel clipping and a continuous CIE Lab low-light inverse; 21 suite
+  colour-profile expectations remain exceptions. Changing any policy requires
+  a product decision and matching tests. Seven-bit DECSCL is implemented;
+  raw eight-bit C1 replies remain unsupported without changing selected state.
 
 ## UX
 
