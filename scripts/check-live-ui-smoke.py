@@ -973,7 +973,12 @@ def process_exited_without_reaping(process: subprocess.Popen) -> bool:
         process.pid,
         os.WEXITED | os.WNOHANG | os.WNOWAIT,
     )
-    return result is not None
+    # Darwin can return an unconsumed CLD_STOPPED event even with WEXITED.
+    return result is not None and result.si_code in (
+        os.CLD_EXITED,
+        os.CLD_KILLED,
+        os.CLD_DUMPED,
+    )
 
 
 def native_visible_window_ids(pid: int) -> Set[int]:

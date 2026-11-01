@@ -2213,7 +2213,13 @@ recorder-path failures remain recorded in runs 41308288788 and 41311723497;
 none of their counts contributes to qualification. These six steps now gate
 the existing required Linux build job. Steady-uploads retains screenshots-only
 scope, and these Xvfb results do not establish physical-GPU or desktop-focus
-coverage. Later verification-only edits preserve the qualified helper bytes.
+coverage. These hashes identify that historical run, rather than qualifying
+later changed helper bytes. A subsequent macOS native run exposed a pending
+`CLD_STOPPED` event returned by `waitid` despite `WEXITED`; a stopped child is
+not an exit. The exit probe now accepts only exited, killed or dumped events.
+The native regression leaves the stop event unconsumed, and the qualification
+supervisor fixtures run in both required Unix CI legs. Changed candidates need
+fresh qualification receipts; counts are never inherited from an older helper.
 
 The search-history probe waits for focused-match pixel rectangles as well as
 match status and the expected visible row. Search may defer viewport highlights

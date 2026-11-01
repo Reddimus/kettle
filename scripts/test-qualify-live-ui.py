@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location(
@@ -81,6 +82,26 @@ class QualificationReceipts(unittest.TestCase):
 
 
 class CaseSupervision(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "Unix wait events")
+    def test_only_terminal_wait_events_are_exits(self):
+        live = qualification.load_live()
+        process = SimpleNamespace(pid=42, returncode=None)
+        for code, expected in [
+            (None, False),
+            (os.CLD_STOPPED, False),
+            (os.CLD_CONTINUED, False),
+            (os.CLD_TRAPPED, False),
+            (os.CLD_EXITED, True),
+            (os.CLD_KILLED, True),
+            (os.CLD_DUMPED, True),
+        ]:
+            event = None if code is None else SimpleNamespace(si_code=code)
+            with (
+                self.subTest(code=code),
+                patch.object(live.os, "waitid", return_value=event),
+            ):
+                self.assertEqual(live.process_exited_without_reaping(process), expected)
+
     @unittest.skipUnless(os.name == "posix", "native Unix termination witness")
     def test_normal_teardown_witnesses_the_signal_to_a_live_stopped_root(self):
         live = qualification.load_live()
@@ -107,7 +128,18 @@ class CaseSupervision(unittest.TestCase):
                     self.assertLess(time.monotonic(), deadline)
                     time.sleep(0.01)
                 os.kill(target.pid, signal.SIGSTOP)
-                os.waitpid(target.pid, os.WUNTRACED)
+                deadline = time.monotonic() + 5
+                while True:
+                    stopped = os.waitid(
+                        os.P_PID,
+                        target.pid,
+                        os.WSTOPPED | os.WNOHANG | os.WNOWAIT,
+                    )
+                    if stopped is not None and stopped.si_code == os.CLD_STOPPED:
+                        break
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+                self.assertFalse(live.process_exited_without_reaping(target))
                 receipt = live.terminate_owned_process_group(target, grace_s=0.05)
                 self.assertEqual(receipt["pid"], target.pid)
                 self.assertIn(

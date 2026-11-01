@@ -170,6 +170,9 @@ jobs:
       - name: Live UI helper self-test (Unix)
         if: runner.os != 'Windows'
         run: python3 scripts/check-live-ui-smoke.py self-test
+      - name: Qualification supervisor fixtures (Unix)
+        if: runner.os != 'Windows'
+        run: python3 scripts/test-qualify-live-ui.py
       - name: Conformance adapter tests (Windows)
         if: runner.os == 'Windows'
         run: python scripts/test-conformance.py
