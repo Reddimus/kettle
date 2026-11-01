@@ -4915,6 +4915,57 @@ mod tests {
     }
 
     #[test]
+    fn an_inflight_json_exit_retains_its_code_after_a_late_stop() {
+        struct GateExit {
+            entered: Sender<()>,
+            release: Option<Receiver<()>>,
+            flushed: Sender<()>,
+            bytes: Arc<Mutex<Vec<u8>>>,
+        }
+        impl Write for GateExit {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Some(release) = self.release.take() {
+                    self.entered.send(()).unwrap();
+                    release.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                self.bytes.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushed.send(()).unwrap();
+                Ok(())
+            }
+        }
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let (flushed_tx, flushed_rx) = crossbeam_channel::bounded(1);
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let mut output = WorkerOutput::spawn(
+            OutputMode::Json,
+            GateExit {
+                entered: entered_tx,
+                release: Some(release_rx),
+                flushed: flushed_tx,
+                bytes: Arc::clone(&bytes),
+            },
+        )
+        .unwrap();
+        output
+            .finish(7, Duration::ZERO, OutputFinish::Complete)
+            .unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // A queued Finish cannot be rewritten while the inherited sink is blocked.
+        let stopped = output.queue_final_write(EXIT_TIMEOUT, Duration::ZERO, Duration::ZERO);
+        release_tx.send(()).unwrap();
+        flushed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(stopped, (Ok(()), false));
+        let event: serde_json::Value = serde_json::from_slice(&bytes.lock().unwrap()).unwrap();
+        assert_eq!(event["event"], "exit");
+        assert_eq!(event["code"], 7);
+        assert_ne!(event["code"], EXIT_TIMEOUT);
+    }
+
+    #[test]
     fn a_stalled_consumer_is_reported_once_the_final_write_grace_ends() {
         struct GateWriter {
             entered: Sender<()>,

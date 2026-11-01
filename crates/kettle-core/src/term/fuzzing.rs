@@ -38,6 +38,7 @@ pub(super) struct SyncGraphicsHarness {
     pub(super) processor: Processor,
     pub(super) extractor: Extractor,
     pub(super) deferred: DeferredGraphicsJournal,
+    pub(super) correlation: Arc<Mutex<command_correlation::CommandCorrelation>>,
     pub(super) active_alternate: bool,
     pub(super) images: Images,
     pub(super) virtuals: Virtuals,
@@ -71,6 +72,9 @@ impl SyncGraphicsHarness {
             processor: Processor::new(),
             extractor: Extractor::new(),
             deferred: DeferredGraphicsJournal::new(),
+            correlation: Arc::new(Mutex::new(
+                command_correlation::CommandCorrelation::default(),
+            )),
             active_alternate: false,
             images,
             virtuals,
@@ -93,6 +97,7 @@ impl SyncGraphicsHarness {
             processor,
             extractor,
             deferred,
+            correlation,
             active_alternate,
             images,
             virtuals,
@@ -129,6 +134,28 @@ impl SyncGraphicsHarness {
                 advance_terminal_bytes(processor, term, &bytes, &mut context);
             }
             Chunk::DeferredGraphics(graphics) => deferred.defer(processor, graphics),
+            Chunk::Prompt(PromptKind::CorrelatedOutputStart(token)) => {
+                command_correlation::CommandMarker::record(
+                    correlation,
+                    command_correlation::CommandBoundary::Begin(token),
+                    std::time::Instant::now(),
+                    processor,
+                    term,
+                    deferred,
+                    proxy,
+                );
+            }
+            Chunk::Prompt(PromptKind::CorrelatedCommandEnd(code, token)) => {
+                command_correlation::CommandMarker::record(
+                    correlation,
+                    command_correlation::CommandBoundary::End(token, 1, code),
+                    std::time::Instant::now(),
+                    processor,
+                    term,
+                    deferred,
+                    proxy,
+                );
+            }
             chunk => {
                 let mut term = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 let graphics = apply_graphics_chunk_at(
@@ -151,6 +178,65 @@ impl SyncGraphicsHarness {
                 );
             }
         });
+    }
+
+    #[cfg(test)]
+    pub(super) fn flush_sync(&mut self) {
+        let Self {
+            term,
+            processor,
+            extractor,
+            deferred,
+            active_alternate,
+            images,
+            virtuals,
+            anims,
+            relatives,
+            inactive,
+            geometry,
+            proxy,
+            ..
+        } = self;
+        let mut context = SyncGraphicsContext {
+            active_alternate,
+            deferred,
+            registries: GraphicsRegistries {
+                inactive,
+                images,
+                virtuals,
+                anims,
+                relatives,
+            },
+            actions: GraphicsActionContext {
+                inactive,
+                images,
+                virtuals,
+                anims,
+                relatives,
+                geometry,
+                proxy,
+            },
+            extractor,
+        };
+        let mut on_graphics = |dispatch: SyncGraphicsDispatch<'_>| {
+            let finishes_sync = matches!(&dispatch, SyncGraphicsDispatch::Batch(_));
+            apply_sync_dispatch(dispatch, &mut context);
+            if finishes_sync {
+                finish_deferred_sync(&mut context);
+            }
+        };
+        force_sync_update_flush(
+            processor,
+            &mut SyncFlushContext {
+                term,
+                images,
+                graphics_gate: &Mutex::new(()),
+                image_pruner: &mut ImageHistoryPruner::default(),
+                on_graphics: &mut on_graphics,
+                out_gen: &AtomicU64::new(0),
+                output_wake: &OutputWakeGate::new(Arc::new(|| {})),
+            },
+        );
     }
 
     /// Commit a resize's local half, as [`Terminal::try_resize_geometry`]

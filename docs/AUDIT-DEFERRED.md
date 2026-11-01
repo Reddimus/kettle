@@ -62,7 +62,9 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   reopening it as a separate description works only on Linux. Close with a
   cancellable writer (bounded writes after readiness on a descriptor Kettle
   owns) and a JSON regression in which the event and the returned status
-  agree under a blocked stdout.
+  agree under a blocked stdout. The blocked-writer characterization test
+  preserves the current child-status event and later timeout-status result;
+  changing that contract remains deferred.
 - **Activation claimed just before its confirmation times out.** When a
   launch hands its request to a running window, the window can claim it just
   as the launcher's five-second wait ends; the launcher then treats the
@@ -72,14 +74,8 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   installed stop reading after five seconds and cannot decode it. Deferred
   for a protocol decision: acknowledge the claim immediately (and give up the
   completion guarantee), or accept a rare duplicate window from old launchers.
-- **`run_command` completion correlation.** `kettle ctl run_command`
-  accepts a pane only when the shell looks idle, then takes the next command
-  completion as its own. Text queued earlier with `send_text` can hold more
-  than one command, so per-write bookkeeping cannot tell whose completion
-  arrives first (`crates/kettle-ui/src/app/ctl.rs`). Deferred because
-  reliable correlation needs the shell integration to echo a request token
-  for each run. Close with a token in the command-start mark that
-  `run_command` matches.
+  The claim-before-confirmation-timeout characterization test retains this
+  behavior without treating a claim as completed activation.
 - **Grapheme-cluster widths (DEC mode 2027).** ucs-detect on 5.7.0
   (`docs/TESTING.md`, "Terminal conformance") found that a grapheme cluster
   takes the sum of its codepoints' widths: 0.7% of emoji ZWJ sequences, 50% of

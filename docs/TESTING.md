@@ -1905,3 +1905,89 @@ system CPU. The largest sampled simultaneous helper RSS sum was about 29 MiB;
 sampling can miss the true peak, and these small-fixture measurements do not
 establish steady-state or large-video throughput. Production footprint limits
 and the aggregate playback CPU allowance remain in force.
+
+### Native command correlation
+
+Build the candidate and run this on a macOS or Linux desktop. The output
+folder must be new:
+
+```sh
+python3 scripts/check-command-correlation.py --kettle ./target/debug/kettle \
+  --output /tmp/kettle-command-correlation-evidence
+```
+
+The harness uses private startup files and history paths, copies the candidate
+binary, and exercises each available Bash, Zsh, Fish and PowerShell interpreter
+inside isolated Kettle windows. It checks exit/status propagation, persistent
+shell variables and positional arguments, eight earlier queued command lines,
+stale and untagged completions, multiline input, synchronized-output capture,
+Zsh Vi command mode, Fish Vi normal mode, read-only rejection, timeout recovery
+and pane-closure errors. Bash Vi and Fish editor-hook withdrawal check
+strict refusal before a side effect. Bash 3.2 checks legacy fallback and strict
+refusal before the fixture side effect. Results and owned-process identities
+remain in the evidence directory. `--shell NAME` selects an installed test leg;
+unavailable default legs are explicitly skipped.
+
+The Linux build job runs it under Xvfb; macOS runs it on its native desktop.
+Windows runs the PowerShell token, native-status, bounded-input and binding
+ownership and post-installation binding-replacement fixtures through
+`just shell-integration-check`, alongside portable
+parser, controller and client tests. This Unix desktop harness does not claim
+live Windows console coverage.
+
+Raw unpaced typeahead above the platform input limit is a separate limit:
+a direct macOS Zsh/PTY control dropped the target from a 48-line burst without
+Kettle or tokens, while an eight-line control delivered all commands.
+Correlation does not make arbitrary terminal input lossless. Keep that failed
+stress evidence separate from correlation acceptance.
+
+Characterization tests retain two legacy constraints: an activation claimed
+before confirmation times out cannot be rolled back, and a JSON exit event
+already blocked in the inherited stdout sink retains its original child code
+after a late stop. These tests document the existing contracts; they do not
+claim either race was fixed.
+
+The synchronized-output regression previously returned exit status 1 with an
+empty capture in Bash, Zsh and Fish. Correlated boundaries now share the
+bounded DEC 2026 marker journal: portable tests cover byte-offset anchors,
+explicit and forced flush, original marker times, cancellation and overflow.
+The native probe also leaves synchronization active through command completion
+and requires the command's text in its successful capture. A matching
+completion wakes the semantic owner even when paint wakes are disabled;
+stale or duplicate completions do not create that wake.
+
+Command checks retry explicit `busy` refusals before input is written. A
+supported shell waiting for its next prompt returns `busy` for both strict and
+automatic submissions. Unsupported capability and other errors fail the check;
+a timeout is never retried by this harness.
+
+Fish's native recorder trace confirms its own `A;click_events=1` follows the
+bundled integration's versioned A. The capability tracker preserves that
+legacy duplicate while recognizing explicit `A;kettle=0` withdrawal, including
+without an intervening C. Portable extractor/tracker tests cover every chunk
+split and BEL/ST; the native Fish editor-hook regression fails with the old
+stale capability. The system Bash 3.2 cannot safely run the new fixture that
+removes a Vi key prefix; that fixture runs on modern Bash. Bash 3.2 still runs
+the legacy fallback and strict-refusal checks.
+
+The Fish withdrawal fixture explicitly emits `fish_prompt` after changing the
+binding. A repaint alone can reuse the cached prompt without running that hook,
+so it cannot establish a new integration capability. Capability reflects the
+last hook announcement; it does not reserve future editor state. Native paired
+runs use the same hook announcement and show old-build admission versus
+new-build refusal before the fixture side effect. Disabled ZLE is separately
+refused and covered by the native Zsh fixture.
+
+Ownership fixtures also preserve longer owner sequences underneath reserved
+chords in Bash, Zsh and Fish. All three previously advertised support for these
+sequences; the guards now refuse correlation before installing any conflicting
+binding. Fish inspects complete binding records, including prefix overlap and
+mode changes, rather than querying only exact chords.
+
+A native automatic-submission regression delays Fish's prompt hook by 200 ms
+and queues eight earlier commands. The old path entered legacy fallback between
+D and A and returned an earlier command's exit code 0 and output. The corrected
+path refuses input while awaiting the next prompt, then returns only the target
+command with exit code 1. Portable capability-state tests retain fresh legacy
+fallback and versioned/legacy duplicate transitions. The Fish Vi fixture uses a
+private 10 ms Escape delay, waits beyond it, and records the actual active map.

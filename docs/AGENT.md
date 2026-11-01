@@ -872,7 +872,35 @@ cancelled or timed-out mutation is of unknown fate — the server may already
 have performed it — and the error text says so, because the agent reading it is
 the one deciding whether to retry.
 
-`run_command` correlates the shell's OSC 133 command-end marker to learn the
+`run_command` uses matching OSC 133 begin/end tokens automatically when an
+updated bundled Bash, Zsh, Fish or PowerShell integration announces support.
+Output and duration begin at the matching command-start marker; unrelated or
+stale completions do not finish that request. Commands still execute in the
+shell's ordinary global scope. Multiline commands use bracketed paste in Bash
+and native editor insertion in Zsh, Fish and PowerShell. Bash 3.2 retains the legacy fallback because it cannot
+inspect existing private editor bindings safely. Bash Vi editing also uses
+legacy fallback; strict correlation requires its Emacs editor.
+
+Set `require_correlation: true` to refuse an unsupported pane or command before
+writing input. The default is `false`, retaining the legacy generation-based
+fallback. The CLI and MCP bridge first check
+`get_state.features.command_correlation == 1` for strict requests. Embedders
+must do the same: old servers ignore unknown request fields and cannot enforce
+this flag. The flag must be a JSON boolean.
+
+After a supported command starts, another call returns `busy` until its next
+prompt announces support or legacy fallback. This also applies when the strict
+flag is omitted: automatic calls must not fall back to legacy matching in the
+gap between command completion and the next prompt. A `busy` refusal sends no
+input; wait for the prompt before retrying.
+
+Correlation capability does not reserve the shell's input stream. Use an
+interactive shell at its ordinary prompt. If queued input starts a foreground
+reader, it can consume a later submission before the editor receives it. A
+timeout leaves execution uncertain; inspect the pane before retrying a command
+with side effects.
+
+Legacy `run_command` uses the shell's OSC 133 command-end marker to learn the
 exit code. **Without shell integration** there is no marker, so the call returns
 `{timed_out: true, …}` after `timeout_s` (default 15) with a hint to add the
 output of `kettle --shell-integration <shell>` to the shell's startup file and

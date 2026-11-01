@@ -1,6 +1,9 @@
 //! A single terminal instance: PTY + `alacritty_terminal` grid + VT parser,
 //! driven by a dedicated reader thread.
 
+mod command_correlation;
+pub use command_correlation::CommandCorrelationCapability;
+
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
@@ -2013,8 +2016,13 @@ fn apply_graphics_batch(
     }
 }
 
+enum DeferredOutput {
+    Graphics(DeferredGraphics),
+    Command(command_correlation::CommandMarker),
+}
+
 struct DeferredGraphicsJournal {
-    entries: VecDeque<(u64, DeferredGraphics)>,
+    entries: VecDeque<(u64, DeferredOutput)>,
     next_id: u64,
     overflowed: bool,
 }
@@ -2029,6 +2037,10 @@ impl DeferredGraphicsJournal {
     }
 
     fn defer(&mut self, processor: &mut Processor, graphics: DeferredGraphics) {
+        self.defer_output(processor, DeferredOutput::Graphics(graphics));
+    }
+
+    fn defer_output(&mut self, processor: &mut Processor, output: DeferredOutput) {
         if self.overflowed {
             return;
         }
@@ -2040,11 +2052,11 @@ impl DeferredGraphicsJournal {
             self.fail_closed();
             return;
         }
-        self.entries.push_back((self.next_id, graphics));
+        self.entries.push_back((self.next_id, output));
         self.next_id = next_id;
     }
 
-    fn take(&mut self, id: u64) -> Option<DeferredGraphics> {
+    fn take(&mut self, id: u64) -> Option<DeferredOutput> {
         if self.overflowed {
             return None;
         }
@@ -2712,9 +2724,17 @@ fn apply_sync_marker(
         deferred.fail_closed();
         return;
     }
-    let Some(graphics) = deferred.take(id) else {
+    let Some(output) = deferred.take(id) else {
         reset_deferred_graphics(active_alternate, deferred, registries, extractor);
         return;
+    };
+
+    let graphics = match output {
+        DeferredOutput::Command(marker) => {
+            marker.apply(term, actions.proxy);
+            return;
+        }
+        DeferredOutput::Graphics(graphics) => graphics,
     };
 
     extractor.set_graphics_deferred(false);
@@ -3279,6 +3299,13 @@ pub struct CommandFinished {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorrelatedCommandFinished {
+    pub command: CommandFinished,
+    pub token: kettle_vt::CommandToken,
+    pub start_line: u64,
+}
+
 /// A protocol-requested desktop notification from the PTY. Produced by
 /// `OSC 9 ; message` or `OSC 777 ; notify ; title ; body` after the extractor
 /// validates and caps each field.
@@ -3457,6 +3484,8 @@ pub struct Terminal {
     /// emitted thousands of fake OSC 133 D sequences would otherwise
     /// grow this Vec indefinitely.
     pub command_finished: Arc<Mutex<Vec<CommandFinished>>>,
+    command_correlation: Arc<Mutex<command_correlation::CommandCorrelation>>,
+    command_shell: Arc<command_correlation::ShellCapability>,
     /// Protocol desktop notifications requested by the PTY. Bounded in the
     /// reader thread so a hostile program cannot queue unbounded toasts.
     pub protocol_notifications: Arc<Mutex<Vec<ProtocolNotification>>>,
@@ -5574,6 +5603,10 @@ impl Terminal {
             Arc::new(std::sync::atomic::AtomicBool::new(false));
         let output_start_seen_for_struct = output_start_seen.clone();
         let command_finished: Arc<Mutex<Vec<CommandFinished>>> = Arc::new(Mutex::new(Vec::new()));
+        let command_correlation = Arc::new(Mutex::new(
+            command_correlation::CommandCorrelation::default(),
+        ));
+        let command_shell = Arc::new(command_correlation::ShellCapability::default());
         let protocol_notifications: Arc<Mutex<Vec<ProtocolNotification>>> =
             Arc::new(Mutex::new(Vec::new()));
         let completion_cell = Arc::new(Mutex::new(CompletionSlot {
@@ -5663,6 +5696,8 @@ impl Terminal {
             let command_generation = command_generation.clone();
             let output_start_seen = output_start_seen.clone();
             let command_finished = command_finished.clone();
+            let command_correlation = command_correlation.clone();
+            let command_shell = command_shell.clone();
             let protocol_notifications = protocol_notifications.clone();
             let completion_cell = completion_cell.clone();
             let cwd_cell = cwd_cell.clone();
@@ -6466,7 +6501,8 @@ impl Terminal {
                                                 },
                                             );
                                         }
-                                        Chunk::Prompt(PromptKind::PromptStart) => {
+                                        Chunk::Prompt(kind @ (PromptKind::PromptStart | PromptKind::IntegratedPromptStart(_) | PromptKind::CorrelationDisabledPromptStart)) => {
+                                            command_shell.announce(kind);
                                             let prompt_row = if let Ok(t) = term.lock()
                                                 && !t.mode().contains(
                                                     alacritty_terminal::term::TermMode::ALT_SCREEN,
@@ -6507,7 +6543,15 @@ impl Terminal {
                                         // shell handed control to a user command. Record
                                         // the timestamp so the matching CommandEnd (D)
                                         // can compute the elapsed duration.
-                                        Chunk::Prompt(PromptKind::OutputStart) => {
+                                        Chunk::Prompt(kind @ (PromptKind::OutputStart | PromptKind::CorrelatedOutputStart(_))) => {
+                                            if let PromptKind::CorrelatedOutputStart(token) = kind {
+                                                command_correlation::CommandMarker::record(
+                                                    &command_correlation,
+                                                    command_correlation::CommandBoundary::Begin(token),
+                                                    std::time::Instant::now(), &mut processor, &term,
+                                                    &mut deferred_graphics, &proxy,
+                                                );
+                                            }
                                             if let Ok(mut completion) = completion_cell.lock() {
                                                 clear_completion_slot(&mut completion);
                                                 completion.prompt_boundary_pending = true;
@@ -6523,6 +6567,7 @@ impl Terminal {
                                                 command_generation
                                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                                 *t = Some(std::time::Instant::now());
+                                                command_shell.command_started();
                                             }
                                             // `shell_idle` needs a REAL OutputStart source.
                                             // Prompt marks alone never authorize a
@@ -6538,21 +6583,30 @@ impl Terminal {
                                         // 32 entries — a runaway / hostile shell that
                                         // spams CommandEnd would otherwise grow the
                                         // Vec without bound.
-                                        Chunk::Prompt(PromptKind::CommandEnd(code)) => {
-                                            let started = output_started_at
-                                                .lock()
-                                                .ok()
-                                                .and_then(|mut t| t.take());
+                                        Chunk::Prompt(kind @ (PromptKind::CommandEnd(_) | PromptKind::CorrelatedCommandEnd(_, _))) => {
+                                            let (code, token) = match kind {
+                                                PromptKind::CorrelatedCommandEnd(code, token) => (code, Some(token)),
+                                                PromptKind::CommandEnd(code) => (code, None),
+                                                _ => unreachable!(),
+                                            };
+                                            if let Some(token) = token {
+                                                command_correlation::CommandMarker::record(
+                                                    &command_correlation,
+                                                    command_correlation::CommandBoundary::End(token,
+                                                        command_generation.load(std::sync::atomic::Ordering::Relaxed), code),
+                                                    std::time::Instant::now(), &mut processor, &term,
+                                                    &mut deferred_graphics, &proxy,
+                                                );
+                                            }
+                                            let started = output_started_at.lock().ok().and_then(|mut t| t.take());
                                             if let Some(started) = started
-                                                && let Ok(mut q) = command_finished.lock()
-                                            {
+                                                && let Ok(mut q) = command_finished.lock() {
                                                 if q.len() >= 32 {
-                                                    let d = q.len() - 31;
-                                                    q.drain(0..d);
+                                                    let count = q.len() - 31;
+                                                    q.drain(0..count);
                                                 }
                                                 q.push(CommandFinished {
-                                                    generation: command_generation
-                                                        .load(std::sync::atomic::Ordering::Relaxed),
+                                                    generation: command_generation.load(std::sync::atomic::Ordering::Relaxed),
                                                     duration: started.elapsed(),
                                                     exit_code: code,
                                                 });
@@ -6762,6 +6816,8 @@ impl Terminal {
             output_started_at,
             command_generation,
             command_finished,
+            command_correlation,
+            command_shell,
             protocol_notifications,
             completion: completion_cell,
             cwd: cwd_cell,
@@ -7287,6 +7343,34 @@ impl Terminal {
     /// window was unfocused. Empty Vec when the shell hasn't shipped
     /// OSC 133 D events (no shell integration) or no command has
     /// completed since the last drain.
+    pub fn command_correlation_capability(&self) -> CommandCorrelationCapability {
+        self.command_shell.get()
+    }
+
+    pub fn expect_correlated_command(&self, token: kettle_vt::CommandToken) -> bool {
+        self.command_correlation
+            .lock()
+            .map(|mut state| state.arm(token))
+            .is_ok()
+    }
+
+    pub fn correlated_command_start_line(&self, token: kettle_vt::CommandToken) -> Option<u64> {
+        self.command_correlation.lock().ok()?.start_line(token)
+    }
+
+    pub fn cancel_correlated_command(&self, token: kettle_vt::CommandToken) {
+        if let Ok(mut state) = self.command_correlation.lock() {
+            state.cancel(token);
+        }
+    }
+
+    pub fn drain_correlated_command_finished_events(&self) -> Vec<CorrelatedCommandFinished> {
+        self.command_correlation
+            .lock()
+            .map(|mut state| state.drain())
+            .unwrap_or_default()
+    }
+
     pub fn drain_command_finished_events(&self) -> Vec<CommandFinished> {
         self.command_finished
             .lock()

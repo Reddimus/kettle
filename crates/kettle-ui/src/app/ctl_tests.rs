@@ -209,6 +209,7 @@ fn run_command_ignores_queued_completion_from_before_submission() {
         req_id: 2,
         start_line: 0,
         command_generation: 7,
+        token: None,
         deadline: std::time::Instant::now(),
         reply,
     };
@@ -225,6 +226,64 @@ fn run_command_ignores_queued_completion_from_before_submission() {
     let run = take_pending_run(&mut runs, 3, &event).unwrap();
     assert_eq!(run.req_id, 2);
     assert!(runs.is_empty());
+}
+
+#[test]
+fn a_correlated_run_ignores_legacy_completion_even_at_the_expected_generation() {
+    use super::{PendingRun, take_pending_run};
+    let (reply, _replies) = crossbeam_channel::bounded(1);
+    let token = kettle_core::CommandToken::parse(b"0123456789abcdef0123456789abcdef").unwrap();
+    let run = PendingRun {
+        conn_id: 1,
+        req_id: 2,
+        start_line: 0,
+        command_generation: 7,
+        token: Some(token),
+        deadline: std::time::Instant::now(),
+        reply,
+    };
+    let mut runs = std::collections::HashMap::from([(3, run)]);
+    let event = kettle_core::CommandFinished {
+        generation: 8,
+        duration: std::time::Duration::from_secs(5),
+        exit_code: Some(9),
+    };
+    assert!(take_pending_run(&mut runs, 3, &event).is_none());
+    assert!(runs.contains_key(&3));
+}
+
+#[test]
+fn correlated_completion_matches_only_its_token_and_uses_its_begin_anchor() {
+    use super::{PendingRun, take_pending_correlated_run};
+    let (reply, _replies) = crossbeam_channel::bounded(1);
+    let token = kettle_core::CommandToken::parse(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+    let stale = kettle_core::CommandToken::parse(b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+    let run = PendingRun {
+        conn_id: 1,
+        req_id: 2,
+        start_line: 10,
+        command_generation: 7,
+        token: Some(token),
+        deadline: std::time::Instant::now(),
+        reply,
+    };
+    let mut runs = std::collections::HashMap::from([(3, run)]);
+    let mut event = kettle_core::CorrelatedCommandFinished {
+        token: stale,
+        start_line: 42,
+        command: kettle_core::CommandFinished {
+            generation: 99,
+            duration: std::time::Duration::from_secs(5),
+            exit_code: Some(9),
+        },
+    };
+    assert!(take_pending_correlated_run(&mut runs, 3, &event).is_none());
+    assert!(runs.contains_key(&3));
+    event.token = token;
+    let run = take_pending_correlated_run(&mut runs, 3, &event).unwrap();
+    assert_eq!(run.req_id, 2);
+    assert_eq!(run.start_line, 42);
+    assert!(take_pending_correlated_run(&mut runs, 3, &event).is_none());
 }
 
 #[test]
@@ -342,3 +401,50 @@ fn control_pane_drag_arms_moves_and_drops_a_pane() {
     }
 }
 
+#[test]
+fn command_correlation_frames_original_global_shell_input() {
+    use super::correlated_command_submission;
+    use kettle_core::CommandShell::{Bash, Fish, PowerShell, Zsh};
+    let token = kettle_core::CommandToken::parse(b"0123456789abcdef0123456789abcdef").unwrap();
+    for shell in [Bash, Zsh, Fish, PowerShell] {
+        let original = "value='quoted text'\nprintf '%s' \"$value\"\n";
+        let input = correlated_command_submission(original, shell, token, true).unwrap();
+        assert_eq!(input.last(), Some(&b'\r'));
+        let unbracketed = correlated_command_submission(original, shell, token, false);
+        if shell == Bash {
+            assert!(
+                input.ends_with(b"\x1b[200~value='quoted text'\nprintf '%s' \"$value\"\x1b[201~\r")
+            );
+            assert!(unbracketed.is_none());
+        } else {
+            assert_eq!(unbracketed.unwrap(), input);
+            let expected: &[u8] = if shell == PowerShell {
+                b"value='quoted text'\x18iprintf '%s' \"$value\"\r"
+            } else {
+                b"value='quoted text'\x18jprintf '%s' \"$value\"\r"
+            };
+            assert!(input.ends_with(expected));
+        }
+        for control in ["literal\x1b[201~", "first\rsecond", "interrupt\x03"] {
+            assert!(correlated_command_submission(control, shell, token, true).is_none());
+        }
+        let simple = correlated_command_submission("false\r\n", shell, token, false).unwrap();
+        assert!(simple.ends_with(b"false\r"));
+    }
+}
+
+#[test]
+fn a_single_line_correlated_command_keeps_the_normal_editor_input_path() {
+    use super::correlated_command_submission;
+    use kettle_core::CommandShell::{Bash, Fish, PowerShell, Zsh};
+    let token = kettle_core::CommandToken::parse(b"0123456789abcdef0123456789abcdef").unwrap();
+    for shell in [Bash, Zsh, Fish, PowerShell] {
+        let enabled =
+            correlated_command_submission("printf 'TARGET\\n'; false", shell, token, true).unwrap();
+        let disabled =
+            correlated_command_submission("printf 'TARGET\\n'; false", shell, token, false)
+                .unwrap();
+        assert_eq!(enabled, disabled);
+        assert!(!enabled.windows(6).any(|part| part == b"\x1b[200~"));
+    }
+}

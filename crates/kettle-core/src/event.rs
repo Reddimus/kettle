@@ -391,7 +391,8 @@ impl EventProxy {
         self.latched.take_clipboard_events()
     }
 
-    fn wake_owner(&self) {
+    /// Publish a queued semantic sidechannel independently of paint visibility.
+    pub(crate) fn wake_owner(&self) {
         self.lifecycle_pending.store(true, Ordering::Release);
         (self.waker)();
     }

@@ -63,6 +63,94 @@ fn command_submission(command: &str) -> String {
     line
 }
 
+pub(super) fn correlated_command_submission(
+    command: &str,
+    shell: kettle_core::CommandShell,
+    token: kettle_core::CommandToken,
+    bracketed_paste: bool,
+) -> Option<Vec<u8>> {
+    use kettle_core::CommandShell;
+    let legacy = command_submission(command);
+    let body = legacy.strip_suffix('\r')?;
+    // A line editor must accept the entire command before executing any line.
+    if body
+        .bytes()
+        .any(|b| (b < 0x20 && b != b'\n' && b != b'\t') || b == 0x7f)
+        || (body.bytes().any(|b| matches!(b, b'\n' | b'\t'))
+            && !bracketed_paste
+            && shell == CommandShell::Bash)
+    {
+        return None;
+    }
+    // Preserve the normal input path for single lines: a paste reader can
+    // consume fresh input ahead of already buffered ordinary editor input.
+    let bracketed_paste = bracketed_paste
+        && shell == CommandShell::Bash
+        && body.bytes().any(|b| matches!(b, b'\n' | b'\t'));
+    let mut input = Vec::with_capacity(body.len().saturating_add(128));
+    match shell {
+        CommandShell::Bash => {
+            input.extend_from_slice(b"\x18\x0b");
+            input.extend_from_slice(token.as_str().as_bytes());
+        }
+        CommandShell::Zsh | CommandShell::Fish | CommandShell::PowerShell => {
+            let prefix: &[u8] = b"\x18";
+            input.extend_from_slice(prefix);
+            input.push(if shell == CommandShell::PowerShell {
+                b'g'
+            } else {
+                b'h'
+            });
+            for digit in token.as_str().bytes() {
+                input.extend_from_slice(prefix);
+                input.push(digit);
+            }
+            input.extend_from_slice(prefix);
+            input.push(if shell == CommandShell::PowerShell {
+                b'h'
+            } else {
+                b'i'
+            });
+        }
+    }
+    if bracketed_paste {
+        input.extend_from_slice(b"\x1b[200~");
+    }
+    if matches!(
+        shell,
+        CommandShell::Zsh | CommandShell::Fish | CommandShell::PowerShell
+    ) {
+        for byte in body.bytes() {
+            match (shell, byte) {
+                (CommandShell::PowerShell, b'\n') => input.extend_from_slice(b"\x18i"),
+                (CommandShell::PowerShell, b'\t') => input.extend_from_slice(b"\x18t"),
+                (_, b'\n') => input.extend_from_slice(b"\x18j"),
+                (_, b'\t') => input.extend_from_slice(b"\x18k"),
+                (_, byte) => input.push(byte),
+            }
+        }
+    } else {
+        input.extend_from_slice(body.as_bytes());
+    }
+    if bracketed_paste {
+        input.extend_from_slice(b"\x1b[201~");
+    }
+    input.push(b'\r');
+    Some(input)
+}
+
+fn new_command_token() -> Option<kettle_core::CommandToken> {
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).ok()?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut token = [0u8; 32];
+    for (byte, pair) in random.into_iter().zip(token.as_chunks_mut::<2>().0) {
+        pair[0] = HEX[(byte >> 4) as usize];
+        pair[1] = HEX[(byte & 15) as usize];
+    }
+    kettle_core::CommandToken::parse(&token)
+}
+
 impl App {
     /// Start the control server if the policy allows anything, the first pane
     /// exists, and no start has been tried. A failed start is logged and not
@@ -158,8 +246,17 @@ impl App {
                         }
                     }
                     // Drop any pending run owned by this connection.
-                    self.pending_runs
-                        .retain(|_, p: &mut PendingRun| p.conn_id != conn_id);
+                    self.pending_runs.retain(|pane, run: &mut PendingRun| {
+                        if run.conn_id != conn_id {
+                            return true;
+                        }
+                        if let Some(token) = run.token
+                            && let Some(p) = Self::ctl_pane_ref(ws, &self.windows, *pane)
+                        {
+                            p.term.cancel_correlated_command(token);
+                        }
+                        false
+                    });
                     // Its `show` pushes are no longer wanted.
                     self.media.disconnected(conn_id);
                     log::info!("agent-server: connection {conn_id} closed");
@@ -403,6 +500,7 @@ impl App {
             "caller": ctl_caller_report(caller, &roots, &panes, std::process::id()),
             "version": env!("CARGO_PKG_VERSION"),
             "pid": std::process::id(),
+            "features": { "command_correlation": 1 },
             // `mode` keeps its original spelling (`readonly`); `policy` uses
             // the config spellings and the display grant itself.
             "mode": format!("{:?}", policy.server()).to_lowercase(),
@@ -3027,6 +3125,18 @@ impl App {
             ));
             return;
         };
+        let require_correlation = match req.params.get("require_correlation") {
+            None => false,
+            Some(serde_json::Value::Bool(flag)) => *flag,
+            Some(_) => {
+                let _ = reply.send(Response::err(
+                    req.id,
+                    ec::BAD_PARAMS,
+                    "require_correlation must be a boolean",
+                ));
+                return;
+            }
+        };
         if self.pending_runs.contains_key(&pane) {
             let _ = reply.send(Response::err(
                 req.id,
@@ -3070,18 +3180,68 @@ impl App {
                 )
             })
             .unwrap_or(0);
-        if let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) {
-            let line = command_submission(command);
-            // An agent acts as the user — the per-pane read-only
-            // toggle (Terminator parity) blocks it, with an explicit error
-            // (no PendingRun is registered; nothing was written).
-            let result = p.feed_input(line.as_bytes());
-            if let Some((code, message)) = ctl_input_error(result) {
-                let _ = reply.send(Response::err(req.id, code, message));
+        let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
+            let _ = reply.send(Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished"));
+            return;
+        };
+        if p.read_only {
+            let (code, message) = ctl_input_error(PaneInputResult::ReadOnly)
+                .expect("read-only input is always rejected");
+            let _ = reply.send(Response::err(req.id, code, message));
+            return;
+        }
+        let shell = match p.term.command_correlation_capability() {
+            kettle_core::CommandCorrelationCapability::Supported(shell) => Some(shell),
+            kettle_core::CommandCorrelationCapability::Unavailable => None,
+            kettle_core::CommandCorrelationCapability::AwaitingPrompt => {
+                let _ = reply.send(Response::err(
+                    req.id,
+                    ec::BUSY,
+                    "waiting for the shell's next correlation capability announcement",
+                ));
                 return;
             }
-            self.dismiss_media_paste_receipt_for_pane(ws, pane);
+        };
+        let correlated = shell.and_then(|shell| {
+            let bracketed = p
+                .term
+                .term
+                .lock()
+                .ok()?
+                .mode()
+                .contains(kettle_core::TermMode::BRACKETED_PASTE);
+            let token = new_command_token()?;
+            correlated_command_submission(command, shell, token, bracketed)
+                .map(|input| (token, input))
+        });
+        if require_correlation && correlated.is_none() {
+            let _ = reply.send(Response::err(req.id, ec::BAD_PARAMS, "pane cannot correlate this command; use a supported bundled shell integration (Bash multiline input also requires bracketed paste)"));
+            return;
         }
+        let (token, input) = match correlated {
+            Some((token, input)) => {
+                if !p.term.expect_correlated_command(token) {
+                    let _ = reply.send(Response::err(
+                        req.id,
+                        ec::BUSY,
+                        "command correlation is unavailable",
+                    ));
+                    return;
+                }
+                (Some(token), input)
+            }
+            None => (None, command_submission(command).into_bytes()),
+        };
+        // Arm before enqueueing: the reader can process the begin marker immediately.
+        let result = p.feed_input(&input);
+        if let Some((code, message)) = ctl_input_error(result) {
+            if let Some(token) = token {
+                p.term.cancel_correlated_command(token);
+            }
+            let _ = reply.send(Response::err(req.id, code, message));
+            return;
+        }
+        self.dismiss_media_paste_receipt_for_pane(ws, pane);
         log::info!("agent-server: run_command conn={conn_id} pane={pane}: {command:?}");
         self.ctl_attach(ws, conn_id, pane);
         self.pending_runs.insert(
@@ -3091,6 +3251,7 @@ impl App {
                 req_id: req.id,
                 start_line,
                 command_generation,
+                token,
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout_s),
                 reply,
             },
@@ -3109,6 +3270,28 @@ impl App {
         let Some(run) = take_pending_run(&mut self.pending_runs, pane, ev) else {
             return;
         };
+        self.complete_pending_run(ws, pane, run, ev);
+    }
+
+    pub(super) fn resolve_pending_correlated_run(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        event: &kettle_core::CorrelatedCommandFinished,
+    ) {
+        let Some(run) = take_pending_correlated_run(&mut self.pending_runs, pane, event) else {
+            return;
+        };
+        self.complete_pending_run(ws, pane, run, &event.command);
+    }
+
+    fn complete_pending_run(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        run: PendingRun,
+        ev: &kettle_core::CommandFinished,
+    ) {
         let (output, output_truncated) = self.ctl_capture_output_since(ws, pane, run.start_line);
         let resp = kettle_ctl::protocol::Response::ok(
             run.req_id,
@@ -3161,8 +3344,17 @@ impl App {
             let Some(run) = self.pending_runs.remove(&pane) else {
                 continue;
             };
-            let (output, output_truncated) =
-                self.ctl_capture_output_since(ws, pane, run.start_line);
+            let mut start_line = run.start_line;
+            if let Some(token) = run.token
+                && let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane)
+            {
+                start_line = p
+                    .term
+                    .correlated_command_start_line(token)
+                    .unwrap_or(start_line);
+                p.term.cancel_correlated_command(token);
+            }
+            let (output, output_truncated) = self.ctl_capture_output_since(ws, pane, start_line);
             let resp = kettle_ctl::protocol::Response::ok(
                 run.req_id,
                 serde_json::json!({
@@ -3372,6 +3564,7 @@ pub(super) struct PendingRun {
     pub(super) start_line: u64,
     /// Command-start generation observed before submitting input.
     pub(super) command_generation: u64,
+    pub(super) token: Option<kettle_core::CommandToken>,
     /// When the request gives up waiting for OSC-133 and replies `timed_out`.
     pub(super) deadline: std::time::Instant,
     /// Where the completion response is sent (the connection thread is blocked
@@ -3384,10 +3577,24 @@ pub(super) fn take_pending_run(
     pane: u64,
     event: &kettle_core::CommandFinished,
 ) -> Option<PendingRun> {
-    if event.generation != runs.get(&pane)?.command_generation.wrapping_add(1) {
+    let run = runs.get(&pane)?;
+    if run.token.is_some() || event.generation != run.command_generation.wrapping_add(1) {
         return None;
     }
     runs.remove(&pane)
+}
+
+pub(super) fn take_pending_correlated_run(
+    runs: &mut std::collections::HashMap<u64, PendingRun>,
+    pane: u64,
+    event: &kettle_core::CorrelatedCommandFinished,
+) -> Option<PendingRun> {
+    if runs.get(&pane)?.token != Some(event.token) {
+        return None;
+    }
+    let mut run = runs.remove(&pane)?;
+    run.start_line = event.start_line;
+    Some(run)
 }
 
 /// The window holding `pane`: `ws` or one of `windows`.

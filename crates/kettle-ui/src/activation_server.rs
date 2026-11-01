@@ -129,4 +129,19 @@ mod tests {
         request.completion.send(true).unwrap();
         assert!(wait_for_confirmation(result, &pending, Duration::ZERO));
     }
+    #[test]
+    fn a_claim_before_confirmation_timeout_is_not_rolled_back() {
+        let (completion, result) = std::sync::mpsc::sync_channel(1);
+        let pending = Arc::new(AtomicBool::new(true));
+        let request = PendingActivation {
+            request: ActivationRequest::new(None, LaunchIdentity::default()),
+            completion,
+            pending: Arc::clone(&pending),
+        };
+        // The UI has claimed the request but has not finished opening its window.
+        assert!(request.claim());
+        assert!(!wait_for_confirmation(result, &pending, Duration::ZERO));
+        assert!(!request.claim());
+        assert!(request.completion.send(true).is_err());
+    }
 }
