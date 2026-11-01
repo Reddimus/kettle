@@ -180,6 +180,12 @@ impl Default for PaneSnapshot {
 }
 
 impl PaneSnapshot {
+    pub(crate) fn has_graphemes(&self) -> bool {
+        self.cells
+            .iter()
+            .any(|cell| cell.flags.contains(Flags::GRAPHEME))
+    }
+
     pub fn captures_card_marks(&self) -> bool {
         self.card_marks_collected
     }

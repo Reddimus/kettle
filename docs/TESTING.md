@@ -1222,10 +1222,77 @@ narrow and 94.9% on wide characters, where the misses are the 26 regional
 indicators, which `unicode-width` makes one column wide. Grapheme clusters
 score low, 0.7% for emoji ZWJ sequences, 50% for VS16, 0% for VS15, and 84%
 across 85 languages, chiefly Indic conjuncts. Kettle measures each codepoint
-separately and does not implement grapheme clustering (DEC mode 2027), so a
-cluster takes the sum of its codepoints' widths. Changing that is a product
-decision recorded in
-[AUDIT-DEFERRED.md](AUDIT-DEFERRED.md), not a bug fix.
+separately in that release, so a cluster takes the sum of its codepoints'
+widths. This remains the default layout; applications can now opt into Unicode
+18 extended-grapheme cells with DECSET 2027.
+
+`just grapheme-tables-check` reproduces the generated tables from the pinned,
+licensed inputs without network access. Patched-engine tests run all 853
+Unicode 18 boundary vectors and a million-scalar stream with finite context.
+Core `grapheme_` tests cover mode/query/reset/save semantics, UTF-8 splits,
+regional indicators, modifiers, Indic conjuncts, zero-width prefixes, storage
+limits, late VS16, VS15 width retention, margins, insertion, REP, overwrite,
+copying, search and reflow. Renderer tests exercise shaping metadata and row
+keys, plus real headless GPU pixels for both renderer settings, unsupported ZWJ
+fallback, monochrome presentation and cached cursor frames. Tests that cannot
+obtain a GPU report an explicit `GRAPHEME_*_GPU_SKIP`; a portable test pass does
+not establish pixel coverage.
+
+The generator round-trip check runs with implicit text encodings treated as
+errors on every platform. It generates into a temporary directory, compares
+the bytes with the checked-in tables, and rejects missing or stale output.
+Unicode inputs and generated Rust are explicitly UTF-8, including on Windows
+where the default encoding may be a legacy code page.
+
+Compare the same candidate in both modes with fresh output directories:
+
+```sh
+python3 scripts/check-conformance.py ucs --kettle /path/to/kettle --grapheme-mode off --ucs-all --out /private/run/ucs-off
+python3 scripts/check-conformance.py ucs --kettle /path/to/kettle --grapheme-mode on --ucs-all --out /private/run/ucs-on
+```
+
+The pinned ucs-detect suite normally enables clustering when supported. The
+`off`/`on` adapter holds the mode throughout the suite, including language
+measurements, and forces an actual DECRQM query inside every mode context. It
+writes `mode2027.json` and restores the
+previous mode on success or failure. An unsupported or unconfirmed fixed-mode run
+fails before measurements. `auto`, the default, retains the upstream context;
+none of these options changes expected widths, scoring or capability reports.
+`--ucs-all` forwards the pinned tool's `--all` flag and includes every width-table
+entry; without it upstream measures only
+contested entries. Fixture launches remove inherited color overrides so Blessed
+queries the terminal capabilities. The parent environment is unchanged.
+
+
+The 2026-11-01 macOS run used ucs-detect 2.3.8 with `--ucs-all`, the same
+candidate binary and fresh panes in each mode. All ten recorded mode contexts
+confirmed support and the requested state. These are the suite's reported case
+counts, including its cached language results, rather than independent samples.
+
+| Measurement | Cases | Mode off | Mode on |
+| --- | ---: | ---: | ---: |
+| VS15 | 158 | 0.00% | 0.00% |
+| VS16 | 426 | 50.00% | 100.00% |
+| ZWJ emoji | 1,445 | 0.69% | 100.00% |
+| Regional-indicator pairs | 262 | 100.00% | 100.00% |
+| Single regional indicators | 26 | 0.00% | 100.00% |
+| Fitzpatrick modifiers | 5 | 100.00% | 0.00% |
+| Narrow codepoints | 36,254 | 99.94% | 99.93% |
+| Wide codepoints | 44,568 | 99.94% | 99.99% |
+| Language sequences, 118 language entries | 25,043 | 94.35% | 79.17% |
+
+These scores compare with the tool's width model, not solely with mode 2027.
+VS15 deliberately retains the allocated width, as the proposal requires. The
+modifier probes attach to the preceding cell in mode 2027, so their measured
+advance is zero. All 3,651 directly measured language mismatches in that mode
+are one cell versus the tool's expected two; another 1,565 failures inherit
+those results from a language sharing the sequence. This reflects first-cell
+cluster width, including spacing marks and Indic conjuncts. Narrow-codepoint
+differences include zero-width prefixes and marks, soft hyphen, and two Khmer
+width choices; the five remaining wide-codepoint differences are the same
+modifiers. The full YAML retains each mismatch. Do not describe these tables as
+complete Unicode rendering conformance or hide them by changing expected widths.
+
 
 ## Manual / interactive checks
 

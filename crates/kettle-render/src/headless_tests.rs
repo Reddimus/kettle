@@ -3974,3 +3974,534 @@ fn ime_preedit_screenshot_hides_existing_glyphs_and_retains_cursor() {
         }
     }
 }
+
+#[test]
+fn grapheme_positive_scalars_do_not_displace_the_next_cell_in_either_renderer() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
+        eprintln!("GRAPHEME_GPU_SKIP: no adapter");
+        return;
+    };
+    cfg.text_renderer = TextRendererMode::Grid;
+    let reference = snapshot_of(20, 4, b"\x1b[?2027h  X\x1b[?25l");
+    let expected = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&reference, 640, 180)],
+        &focused(false),
+    );
+    let snap = snapshot_of(
+        20,
+        4,
+        "\x1b[?2027h\u{1f469}\u{200d}\u{1f4bb}X\x1b[?2027l\x1b[?25l".as_bytes(),
+    );
+    let x = (cfg.padding_x + renderer.cell_w * 2.0).round() as u32;
+    let y = cfg.padding_y.round() as u32;
+    let width = renderer.cell_w.ceil() as u32;
+    let height = renderer.cell_h.ceil() as u32;
+    let crop =
+        |image: &image::RgbaImage| image::imageops::crop_imm(image, x, y, width, height).to_image();
+    let expected_cell = crop(&expected);
+    assert!(
+        expected_cell
+            .pixels()
+            .any(|p| *p != *expected_cell.get_pixel(0, 0)),
+        "reference X has ink"
+    );
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        cfg.text_renderer = mode;
+        let actual = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 640, 180)],
+            &focused(false),
+        );
+        assert!(
+            crop(&actual) == expected_cell,
+            "{mode:?} must keep X at column 2"
+        );
+    }
+    eprintln!("GRAPHEME_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+}
+
+#[test]
+fn grapheme_vs15_after_vs16_prefers_a_monochrome_face_without_shrinking() {
+    use image::GenericImageView;
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
+        eprintln!("GRAPHEME_VS15_GPU_SKIP: no adapter");
+        return;
+    };
+    let Some(_) = renderer.text_symbol_family else {
+        eprintln!("GRAPHEME_VS15_GPU_SKIP: no text-symbol face");
+        return;
+    };
+    cfg.theme.foreground = Rgb::new(255, 255, 255);
+    cfg.theme.background = Rgb::new(0, 0, 0);
+    for sequence in [
+        "\u{2764}\u{fe0f}\u{fe0e}",
+        "\u{231a}\u{fe0e}",
+        "\u{1f600}\u{fe0e}",
+    ] {
+        let text = format!("\x1b[?2027h{sequence}X\x1b[?25l");
+        let snap = snapshot_of(20, 4, text.as_bytes());
+        assert_eq!(snap.cursor.point.column.0, 3);
+        let frame = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 640, 180)],
+            &focused(false),
+        );
+        let cropped = image::imageops::crop_imm(
+            &frame,
+            cfg.padding_x.round() as u32,
+            cfg.padding_y.round() as u32,
+            (renderer.cell_w * 2.0).ceil() as u32,
+            renderer.cell_h.ceil() as u32,
+        );
+        let colored = cropped
+            .pixels()
+            .filter(|(_, _, p)| {
+                p.0[..3].iter().max().unwrap() - p.0[..3].iter().min().unwrap() > 30
+            })
+            .count();
+        let ink = cropped
+            .pixels()
+            .filter(|(_, _, p)| p.0[..3].iter().any(|c| *c > 80))
+            .count();
+        eprintln!(
+            "GRAPHEME_VS15_GPU: colored={colored} ink={ink} adapter={:?}",
+            renderer.gpu.adapter_info()
+        );
+        assert!(ink > 0, "text glyph must be visible");
+        assert_eq!(
+            colored, 0,
+            "the last VS15 must override an earlier VS16's colored presentation"
+        );
+    }
+}
+
+#[test]
+fn grapheme_unsupported_zwj_emoji_uses_one_image_and_keeps_the_next_cell_clear() {
+    use super::geometry::GridGlyphCell;
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(640, 180) else {
+        eprintln!("GRAPHEME_ZWJ_GPU_SKIP: no adapter");
+        return;
+    };
+    let reference = snapshot_of(20, 4, b"\x1b[?2027h  X\x1b[?25l");
+    let expected = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&reference, 640, 180)],
+        &focused(false),
+    );
+    // Both are Extended_Pictographic, but woman-ZWJ-cat has no joined glyph
+    // in the usual platform emoji fonts. It still owns exactly two cells.
+    for marks in [String::new(), "\u{301}".repeat(30)] {
+        let text = format!("\x1b[?2027h\u{1f469}{marks}\u{200d}\u{1f408}X\x1b[?25l");
+        let snap = snapshot_of(20, 4, text.as_bytes());
+        let actual = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 640, 180)],
+            &focused(false),
+        );
+        let keys: Vec<_> = renderer.pane_buffers[0]
+            .layout_runs()
+            .flat_map(|r| r.glyphs.iter())
+            .filter(|g| {
+                GridGlyphCell::from_metadata(g.metadata)
+                    .is_some_and(|c| c.column == 0 && c.clustered)
+            })
+            .map(|g| g.physical((0., 0.), 1.).cache_key)
+            .collect();
+        let visible = keys
+            .iter()
+            .filter(|key| {
+                renderer
+                    .swash
+                    .get_image(&mut renderer.font_system, **key)
+                    .as_ref()
+                    .is_some_and(|i| i.placement.width > 0 && i.placement.height > 0)
+            })
+            .count();
+        eprintln!(
+            "GRAPHEME_ZWJ_GPU: visible_images={visible} adapter={:?}",
+            renderer.gpu.adapter_info()
+        );
+        assert_eq!(
+            visible, 1,
+            "unsupported joined emoji must use one replacement, never decomposed images"
+        );
+        let crop = |i: &image::RgbaImage| {
+            image::imageops::crop_imm(
+                i,
+                (cfg.padding_x + renderer.cell_w * 2.).round() as u32,
+                cfg.padding_y.round() as u32,
+                renderer.cell_w.ceil() as u32,
+                renderer.cell_h.ceil() as u32,
+            )
+            .to_image()
+        };
+        assert!(
+            crop(&actual) == crop(&expected),
+            "cluster must not cover the following X"
+        );
+    }
+}
+
+#[test]
+fn grapheme_replacement_stays_consistent_under_a_cursor_on_cached_frames() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(640, 180) else {
+        eprintln!("GRAPHEME_CURSOR_GPU_SKIP: no adapter");
+        return;
+    };
+    let reference = snapshot_of(20, 4, b"\x1b[?2027h  X\x1b[?25l");
+    let expected = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&reference, 640, 180)],
+        &focused(false),
+    );
+    let snap = snapshot_of(
+        20,
+        4,
+        "\x1b[?2027h\u{1f469}\u{200d}\u{1f408}X\x1b[1;1H\x1b[2 q".as_bytes(),
+    );
+    for repeat in 0..3 {
+        let frame = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 640, 180)],
+            &focused(true),
+        );
+        assert!(
+            renderer.pending_cursor_glyph.is_some(),
+            "block cursor must be exercised"
+        );
+        let keys: Vec<_> = renderer
+            .cursor_glyph_buffer
+            .layout_runs()
+            .flat_map(|r| r.glyphs.iter())
+            .map(|g| g.physical((0., 0.), 1.).cache_key)
+            .collect();
+        let count = keys
+            .iter()
+            .filter(|key| {
+                renderer
+                    .swash
+                    .get_image_uncached(&mut renderer.font_system, **key)
+                    .as_ref()
+                    .is_some_and(|i| i.placement.width > 0 && i.placement.height > 0)
+            })
+            .count();
+        assert_eq!(
+            count, 1,
+            "cursor on frame {repeat} must draw the same single replacement as the pane"
+        );
+        let crop = |image: &image::RgbaImage| {
+            image::imageops::crop_imm(
+                image,
+                (cfg.padding_x + renderer.cell_w * 2.).round() as u32,
+                cfg.padding_y.round() as u32,
+                renderer.cell_w.ceil() as u32,
+                renderer.cell_h.ceil() as u32,
+            )
+            .to_image()
+        };
+        assert!(
+            crop(&frame) == crop(&expected),
+            "cursor must not overwrite the following cell"
+        );
+    }
+    eprintln!(
+        "GRAPHEME_CURSOR_GPU_PASS: {:?}",
+        renderer.gpu.adapter_info()
+    );
+}
+
+#[test]
+fn grapheme_prefixes_keep_the_first_spacing_glyph_visible_in_its_cell() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
+        eprintln!("GRAPHEME_PREFIX_GPU_SKIP: no adapter");
+        return;
+    };
+    cfg.theme.foreground = Rgb::new(255, 255, 255);
+    cfg.theme.background = Rgb::new(0, 0, 0);
+    for (prefix, base) in [
+        ("\u{600}", "A"),
+        ("\u{605}", "A"),
+        ("\u{70f}", "A"),
+        ("\u{94d}", "\u{915}"),
+    ] {
+        let reference = snapshot_of(20, 4, format!("\x1b[?2027h{base}X\x1b[?25l").as_bytes());
+        let expected = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&reference, 640, 180)],
+            &focused(false),
+        );
+        let baseline = renderer.pane_buffers[0]
+            .layout_runs()
+            .next()
+            .unwrap()
+            .line_y
+            .round() as i32;
+        let snap = snapshot_of(
+            20,
+            4,
+            format!("\x1b[?2027h{prefix}{base}X\x1b[?25l").as_bytes(),
+        );
+        assert_eq!(snap.cursor.point.column.0, 2);
+        let actual = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 640, 180)],
+            &focused(false),
+        );
+        let delta = renderer.pane_buffers[0]
+            .layout_runs()
+            .next()
+            .unwrap()
+            .line_y
+            .round() as i32
+            - baseline;
+        let mut ink = 0;
+        let mut retained = 0;
+        for y in cfg.padding_y.round() as u32..(cfg.padding_y + renderer.cell_h * 2.).ceil() as u32
+        {
+            for x in cfg.padding_x.round() as u32..(cfg.padding_x + renderer.cell_w).round() as u32
+            {
+                if expected.get_pixel(x, y).0[..3].iter().all(|c| *c > 220) {
+                    ink += 1;
+                    let actual_y = y as i32 + delta;
+                    if actual_y >= 0
+                        && actual_y < actual.height() as i32
+                        && actual.get_pixel(x, actual_y as u32).0[..3]
+                            .iter()
+                            .all(|c| *c > 180)
+                    {
+                        retained += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("GRAPHEME_PREFIX_GPU: prefix={prefix:?} base={base:?} retained={retained}/{ink}");
+        assert!(
+            ink > 0 && retained * 10 >= ink * 9,
+            "prefix displaced or hid the spacing glyph"
+        );
+    }
+    eprintln!(
+        "GRAPHEME_PREFIX_GPU_PASS: {:?}",
+        renderer.gpu.adapter_info()
+    );
+}
+
+#[test]
+fn grapheme_prefix_cursor_anchors_the_spacing_glyph_on_cached_frames() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(640, 180) else {
+        eprintln!("GRAPHEME_PREFIX_CURSOR_GPU_SKIP: no adapter");
+        return;
+    };
+    for (prefix, base) in [
+        ("\u{600}", "A"),
+        ("\u{605}", "A"),
+        ("\u{70f}", "A"),
+        ("\u{94d}", "\u{915}"),
+    ] {
+        let reference = snapshot_of(
+            20,
+            4,
+            format!("\x1b[?2027h{base}X\x1b[1;1H\x1b[2 q").as_bytes(),
+        );
+        capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&reference, 640, 180)],
+            &focused(true),
+        );
+        let cursor = renderer
+            .pending_cursor_glyph
+            .as_ref()
+            .expect("reference block cursor");
+        let glyph = renderer
+            .cursor_glyph_buffer
+            .layout_runs()
+            .flat_map(|r| r.glyphs.iter())
+            .find(|g| g.start == 0)
+            .unwrap();
+        let expected = glyph.physical((cursor.x, 0.), 1.).x;
+        let snap = snapshot_of(
+            20,
+            4,
+            format!("\x1b[?2027h{prefix}{base}X\x1b[1;1H\x1b[2 q").as_bytes(),
+        );
+        for frame in 0..3 {
+            capture(
+                &mut renderer,
+                &cfg,
+                &[pane(&snap, 640, 180)],
+                &focused(true),
+            );
+            let cursor = renderer
+                .pending_cursor_glyph
+                .as_ref()
+                .expect("prefixed block cursor");
+            let glyph = renderer
+                .cursor_glyph_buffer
+                .layout_runs()
+                .flat_map(|r| r.glyphs.iter())
+                .find(|g| g.start <= prefix.len() && prefix.len() < g.end)
+                .expect("spacing glyph under cursor");
+            assert_eq!(
+                glyph.physical((cursor.x, 0.), 1.).x,
+                expected,
+                "{prefix:?} cursor frame {frame}"
+            );
+        }
+    }
+    eprintln!(
+        "GRAPHEME_PREFIX_CURSOR_GPU_PASS: {:?}",
+        renderer.gpu.adapter_info()
+    );
+}
+
+#[test]
+fn grapheme_trailing_blank_colors_reuse_the_shaped_row() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("GRAPHEME_CACHE_GPU_SKIP: no adapter");
+        return;
+    };
+    let first = snapshot_of(20, 4, b"\x1b[?2027hA     \x1b[?25l");
+    let before = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&first, 320, 120)],
+        &focused(false),
+    );
+    let keys = renderer.pane_line_keys[0].clone();
+    let second = snapshot_of(20, 4, b"\x1b[?2027hA\x1b[31m     \x1b[?25l");
+    let after = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&second, 320, 120)],
+        &focused(false),
+    );
+    assert_eq!(renderer.pane_line_keys[0], keys);
+    assert_eq!(renderer.pane_buffers[0].lines[0].text(), "A ");
+    assert_eq!(
+        before, after,
+        "changing the foreground of cut blanks has no ink"
+    );
+}
+
+#[test]
+fn the_block_cursor_makes_the_same_presentation_choice_as_the_pane() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("CURSOR_PRESENTATION_GPU_SKIP: no adapter");
+        return;
+    };
+    let Some(family) = renderer.text_symbol_family else {
+        eprintln!("CURSOR_PRESENTATION_GPU_SKIP: no text-symbol face");
+        return;
+    };
+    for qualified in [false, true] {
+        let text = format!(
+            "\u{23fa}{}\x1b[1G\x1b[2 q",
+            if qualified { "\u{fe0f}" } else { "" }
+        );
+        let snap = snapshot_of(20, 4, text.as_bytes());
+        capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 320, 120)],
+            &focused(true),
+        );
+        let cursor = renderer
+            .pending_cursor_glyph
+            .as_ref()
+            .expect("block cursor");
+        assert_eq!(cursor.emoji_qualified, qualified);
+        if !qualified {
+            assert_eq!(
+                cursor.attrs.as_attrs().family,
+                glyphon::Family::Name(family)
+            );
+        }
+        let glyphs: Vec<_> = renderer
+            .cursor_glyph_buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .map(|g| g.physical((0., 0.), 1.).cache_key)
+            .collect();
+        let mut ink = 0;
+        for key in glyphs {
+            if let Some(image) = renderer
+                .swash
+                .get_image_uncached(&mut renderer.font_system, key)
+                && image.placement.width > 0
+                && image.placement.height > 0
+            {
+                ink += 1;
+                if !qualified {
+                    assert_ne!(image.content, glyphon::SwashContent::Color);
+                }
+            }
+        }
+        assert!(ink > 0, "cursor symbol has visible ink");
+        let pane = renderer.pane_buffers[0].lines[0].attrs_list().get_span(0);
+        if !qualified {
+            assert_eq!(pane.family, glyphon::Family::Name(family));
+        }
+    }
+}
+
+#[test]
+fn grapheme_cells_do_not_change_other_legacy_rows() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
+        eprintln!("GRAPHEME_LEGACY_GPU_SKIP: no adapter");
+        return;
+    };
+    cfg.text_renderer = TextRendererMode::Legacy;
+    cfg.font_ligatures = true;
+    let first = snapshot_of(40, 5, b"ffi -> === a\x1b[1mb\x1b[0mc\r\n\x1b[?25l");
+    let before = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&first, 640, 180)],
+        &focused(false),
+    );
+    let second = snapshot_of(
+        40,
+        5,
+        "ffi -> === a\x1b[1mb\x1b[0mc\r\n\x1b[?2027h\u{1f469}\u{200d}\u{1f4bb}\x1b[?25l".as_bytes(),
+    );
+    let after = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&second, 640, 180)],
+        &focused(false),
+    );
+    let crop = |image: &image::RgbaImage| {
+        image::imageops::crop_imm(
+            image,
+            cfg.padding_x.round() as u32,
+            cfg.padding_y.round() as u32,
+            (renderer.cell_w * 20.).ceil() as u32,
+            renderer.cell_h.ceil() as u32,
+        )
+        .to_image()
+    };
+    assert!(
+        crop(&before) == crop(&after),
+        "an unrelated Legacy row must retain its pixels when another row gains a grapheme"
+    );
+}

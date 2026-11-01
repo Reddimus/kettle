@@ -3,8 +3,7 @@ use super::{
     Config, ContextMenu, FontSystem, GColor, GlyphInstance, GlyphPipeline, OutlineInstance,
     Overlay, PaneView, PatchRect, QuadInstance, RasterGlyph, Rect4, RenderUploads, Renderer,
     Result, Rgb, SwashCache, TextArea, TextBounds, TextBuffer, TextRendererMode, UploadCounts,
-    cell_locked_pen_x, glyph_grid_col, imgpipe, live_underlay_clear_color, quad,
-    use_live_pane_bases,
+    cell_locked_pen_x, imgpipe, live_underlay_clear_color, quad, use_live_pane_bases,
 };
 
 /// Text/layout damage key for the context-menu renderer.
@@ -446,14 +445,22 @@ pub(crate) fn cell_locked_glyph_offset(
     cell_locked_pen_x(cell_left + (glyph.x - cluster_x), x_off_px) - glyph.x - x_off_px
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum GlyphPositioning {
+    Continuous,
+    Grid(f32),
+    GraphemeRows(f32),
+}
+
 /// Emit cell-locked glyph instances for ONE shaped `TextBuffer`, appending to
 /// `out`. This is the single source of truth for the Grid (cell-locked)
 /// renderer's per-glyph emit: `emit_pane_glyphs` (live panes), the offscreen
 /// `capture_png_with_annotation` screenshot path, and the `grid_prompt_blink`
 /// test fixture all call it so they can never drift apart.
 ///
-/// A `None` cell width retains glyphon's continuous layout for inactive Legacy
-/// panes, whose color bitmaps need this pipeline's dimming shader.
+/// `Continuous` retains glyphon's layout for inactive Legacy panes, whose color
+/// bitmaps need this pipeline's dimming shader. `GraphemeRows` locks only rows
+/// carrying explicit cell metadata, preserving other Legacy rows' positions.
 /// `origin` is the buffer's top-left in physical pixels (the same coordinate a
 /// glyphon `TextArea`'s `left`/`top` would use). With a cell width, each glyph is
 /// pinned to its grid cell and snapped to an integer pixel, preserving any
@@ -467,7 +474,7 @@ pub(crate) fn emit_cell_locked_glyphs(
     out: &mut Vec<GlyphInstance>,
     buf: &TextBuffer,
     origin: (f32, f32),
-    cell_w: Option<f32>,
+    positioning: GlyphPositioning,
     default_color: GColor,
     glyph_pipeline: &mut GlyphPipeline,
     swash: &mut SwashCache,
@@ -477,6 +484,17 @@ pub(crate) fn emit_cell_locked_glyphs(
     char_starts: &mut Vec<u32>,
 ) {
     for run in buf.layout_runs() {
+        let cell_w = match positioning {
+            GlyphPositioning::Continuous => None,
+            GlyphPositioning::Grid(width) => Some(width),
+            GlyphPositioning::GraphemeRows(width) => run
+                .glyphs
+                .iter()
+                .any(|glyph| {
+                    super::geometry::GridGlyphCell::from_metadata(glyph.metadata).is_some()
+                })
+                .then_some(width),
+        };
         // Use the engine's width classifier: zero-width scalars attach to
         // the preceding cell; wide bases still have an explicit spacer cell.
         char_starts.clear();
@@ -486,13 +504,41 @@ pub(crate) fn emit_cell_locked_glyphs(
             }
         }
         let line_y = run.line_y;
+        let mut prefix_anchors = std::collections::HashMap::new();
+        for (range, attrs) in buf.lines[run.line_i].attrs_list().spans_iter() {
+            if super::geometry::GridGlyphCell::from_metadata(attrs.metadata)
+                .is_none_or(|cell| !cell.clustered)
+            {
+                continue;
+            }
+            let Some(text) = run.text.get(range.clone()) else {
+                continue;
+            };
+            let offset = alacritty_terminal::term::grapheme_base_offset(text);
+            if offset == 0 {
+                continue;
+            }
+            let byte = range.start + offset;
+            if let Some(base) = run.glyphs.iter().find(|glyph| {
+                glyph.metadata == attrs.metadata && glyph.start <= byte && byte < glyph.end
+            }) {
+                prefix_anchors.insert(attrs.metadata, base.x);
+            }
+        }
         let mut active_cell = None;
         let mut cluster_x = 0.0;
         for glyph in run.glyphs.iter() {
-            let col = glyph_grid_col(char_starts, glyph.start);
+            let col = super::geometry::glyph_grid_col_with_metadata(
+                char_starts,
+                glyph.start,
+                glyph.metadata,
+            );
             if active_cell != Some(col) {
                 active_cell = Some(col);
-                cluster_x = glyph.x;
+                cluster_x = prefix_anchors
+                    .get(&glyph.metadata)
+                    .copied()
+                    .unwrap_or(glyph.x);
             }
             // Pin the pen to the cell, snapped to an integer physical pixel
             // (crisp + cache-friendly: x_bin = 0), while keeping any intra-
@@ -517,10 +563,26 @@ pub(crate) fn emit_cell_locked_glyphs(
             let color = glyph.color_opt.unwrap_or(default_color);
             let qx = phys.x + slot.left;
             let qy = line_y.round() as i32 + phys.y - slot.top;
+            let mut left = qx as f32;
+            let mut width = slot.w;
+            let mut uv_x = slot.atlas_x;
+            if let Some(cw) = cell_w
+                && let Some(cell) = super::geometry::GridGlyphCell::from_metadata(glyph.metadata)
+                && cell.clustered
+            {
+                let right = (origin.0 + (cell.column + cell.width) as f32 * cw).round();
+                let clipped = (origin.0 + cell.column as f32 * cw).round().max(left);
+                width = (left + width).min(right) - clipped;
+                if width <= 0.0 {
+                    continue;
+                }
+                uv_x += clipped - left;
+                left = clipped;
+            }
             out.push(GlyphInstance {
-                pos: [qx as f32, qy as f32],
-                size: [slot.w, slot.h],
-                uv: [slot.atlas_x, slot.atlas_y],
+                pos: [left, qy as f32],
+                size: [width, slot.h],
+                uv: [uv_x, slot.atlas_y],
                 color: [
                     color.r() as f32 / 255.0,
                     color.g() as f32 / 255.0,

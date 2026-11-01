@@ -34,6 +34,7 @@ bitflags! {
         const PARTIAL_WRAPLINE          = 1 << 16;
         const DRAWN                     = 1 << 17;
         const BLINK                     = 1 << 18;
+        const GRAPHEME                  = 1 << 19;
         const ALL_UNDERLINES            = Self::UNDERLINE.bits() | Self::DOUBLE_UNDERLINE.bits()
                                         | Self::UNDERCURL.bits() | Self::DOTTED_UNDERLINE.bits()
                                         | Self::DASHED_UNDERLINE.bits();
@@ -124,13 +125,11 @@ impl ResetDiscriminant<Color> for Cell {
     }
 }
 
-/// Maximum combining marks retained for a single cell.
+/// Maximum trailing scalars retained for a single cell.
 ///
-/// Unicode's own answer to "how many marks can legitimately follow one base
-/// character": the Stream-Safe Text Format (UAX #15) permits no sequence of
-/// more than 30 non-starters, and text exceeding it is already outside what
-/// conforming processes must handle. Beyond that a longer run is not a grapheme
-/// a user could read — it is an unbounded allocation attached to one cell.
+/// Legacy input attaches combining marks; mode 2027 also attaches spacing
+/// scalars in the same extended grapheme. Both retain this storage bound while
+/// the grapheme boundary algorithm keeps its own finite streaming context.
 pub const MAX_ZEROWIDTH_PER_CELL: usize = 30;
 
 /// Dynamically allocated cell content.
@@ -171,6 +170,17 @@ impl Default for Cell {
 }
 
 impl Cell {
+    /// Character used by word and bracket navigation without reordering text.
+    pub fn semantic_char(&self) -> char {
+        if !self.flags.contains(Flags::GRAPHEME) {
+            return self.c;
+        }
+        std::iter::once(self.c)
+            .chain(self.zerowidth().unwrap_or_default().iter().copied())
+            .find(|&c| super::grapheme::is_base(c))
+            .unwrap_or(self.c)
+    }
+
     /// Zerowidth characters stored in this cell.
     #[inline]
     pub fn zerowidth(&self) -> Option<&[char]> {
@@ -197,10 +207,25 @@ impl Cell {
         extra.zerowidth.push(character);
     }
 
+    pub(crate) fn replace_last_zerowidth(&mut self, character: char) {
+        self.replace_zerowidth_tail(&[character]);
+    }
+
+    pub(crate) fn replace_zerowidth_tail(&mut self, tail: &[char]) {
+        if let Some(extra) = self.extra.as_mut()
+            && extra.zerowidth.len() >= tail.len()
+        {
+            let marks = &mut Arc::make_mut(extra).zerowidth;
+            let start = marks.len() - tail.len();
+            marks[start..].copy_from_slice(tail);
+        }
+    }
+
     /// Remove all wide char data from a cell.
     #[inline(never)]
     pub fn clear_wide(&mut self) {
-        self.flags.remove(Flags::WIDE_CHAR | Flags::PROTECTED);
+        self.flags
+            .remove(Flags::WIDE_CHAR | Flags::PROTECTED | Flags::GRAPHEME);
         if let Some(extra) = self.extra.as_mut() {
             Arc::make_mut(extra).zerowidth = Vec::new();
         }

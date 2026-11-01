@@ -500,7 +500,7 @@ impl<T> Term<T> {
 
     /// Find next matching bracket.
     pub fn bracket_search(&self, point: Point) -> Option<Point> {
-        let start_char = self.grid[point].c;
+        let start_char = self.grid[point].semantic_char();
 
         // Find the matching bracket we're looking for
         let (forward, end_char) = BRACKET_PAIRS.iter().find_map(|(open, close)| {
@@ -530,11 +530,11 @@ impl<T> Term<T> {
             };
 
             // Check if the bracket matches
-            if cell.c == end_char && skip_pairs == 0 {
+            if cell.semantic_char() == end_char && skip_pairs == 0 {
                 return Some(cell.point);
-            } else if cell.c == start_char {
+            } else if cell.semantic_char() == start_char {
                 skip_pairs += 1;
-            } else if cell.c == end_char {
+            } else if cell.semantic_char() == end_char {
                 skip_pairs -= 1;
             }
         }
@@ -587,7 +587,7 @@ impl<T> Term<T> {
 
             point = cell.point;
 
-            if !cell.flags.intersects(wide_spacer) && needles.contains(cell.c) {
+            if !cell.flags.intersects(wide_spacer) && needles.contains(cell.semantic_char()) {
                 return Ok(point);
             }
         }
@@ -611,7 +611,7 @@ impl<T> Term<T> {
         for cell in self.grid.iter_from(point) {
             point = cell.point;
 
-            if !cell.flags.intersects(wide_spacer) && needles.contains(cell.c) {
+            if !cell.flags.intersects(wide_spacer) && needles.contains(cell.semantic_char()) {
                 return Ok(point);
             }
 

@@ -203,6 +203,17 @@ date. Recheck that before upgrading a crate or dropping a patch.
   - Private mode 1048 saves the cursor as DECSC does when set and restores
     it as DECRC does when reset, sharing their saved state. Upstream ignored
     the mode.
+- Kettle's opt-in DEC mode 2027 stores bounded Unicode 18 extended graphemes
+  with their leading cell and recorded width. Its streaming boundary context
+  is independent of retained scalars; official property inputs, 853 boundary
+  vectors, hashes and the Unicode-3.0 license are retained under
+  `alacritty_terminal-0.26.0/tests/unicode18/`. Reproduce the tables with
+  `python3 scripts/generate-grapheme-tables.py --check`. Four upstream comment
+  lines have trailing ASCII spaces removed; `sources.json` records both download
+  and stored hashes for those files. Property records and all test vectors are
+  unchanged. The exact
+  `unicode-width = "=0.2.3"` constraint aligns product, vendor-validation
+  and fuzz width data at Unicode 18. These are local additions to the pinned package.
 - Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
   is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
   from 2026-08-31, is `0.26.1-dev`. Since
@@ -320,7 +331,10 @@ cosmic-text release that contains both commits.
   with ST: the 8-bit `0x9C`, or an ESC whose very next byte is `\`. A query is
   answered only then; one that CAN, SUB or another sequence cuts off gets no
   reply.
-  DEC mode 2031 is a named private mode (`ColorSchemeReports`).
+  DEC mode 2031 is a named private mode (`ColorSchemeReports`), and 2027 is
+  `GraphemeClustering`. CSI REP dispatches to `Handler::repeat_char`, whose
+  default preserves legacy scalar repetition while Kettle can repeat a cell's
+  complete retained cluster.
   XTMODKEYS tells restore from disable. Upstream's `ModifyOtherKeys::Reset` is
   split in two. `Restore` covers `CSI > 4 m` and a parameterless `CSI > m`,
   which the parser reads as `CSI > 0 m`. `Disable` covers `CSI > 4 ; 0 m`.
