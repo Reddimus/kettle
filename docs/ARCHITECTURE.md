@@ -4408,3 +4408,37 @@ unpresented claim and clears overlay ownership. Shared paint/input geometry adap
 fonts without changing PTY layout. About retains the untimed information.
 Local fact reads coalesce refresh requests into one read at a time, skipping an
 older result when a refresh arrived while it was in flight.
+
+
+## Extended terminal colours
+
+OSC 4 palette indices remain 0 through 255. Its indices 256 through 260 and
+OSC 5 indices 0 through 4 alias five separate internal slots (269 through 273)
+for bold, underline, blink, reverse and italic colours. Dynamic foreground,
+background and cursor remain slots 256 through 258; internal dim slots are
+unchanged. OSC 105 resets only special colours. Queries preserve their original
+OSC prefix, index and BEL/ST terminator.
+
+OSC 6 and 106 select the five attribute colour modes and mode 5, which permits
+attribute colours to override explicit ANSI colours. All start disabled. These
+OSC resources persist through RIS and DECSTR, like existing OSC colour values.
+Rendering applies blink, bold, underline, then italic foreground precedence;
+reverse selects the background before SGR inversion. Bold and italic colour
+modes suppress their corresponding font style. Stored cell attributes remain
+unchanged, and the default-off path preserves existing rendering.
+
+The standard-library parser accepts X colour-space names `rgbi`, `CIEXYZ`,
+`CIExyY`, `CIEuvY`, `CIELab`, `CIELuv` and `TekHVC`, in addition to existing
+`rgb:` and hash forms. Conversion uses a fixed D65 white point, the sRGB matrix
+and transfer function, rounding to 8-bit channels after channel clipping.
+It does not consult an X server display profile or implement its gamut mapping.
+Lab/Luv chromatic components follow Xcms's normalization by 100; Lab uses the
+continuous CIE inverse below L*=8 rather than the historical Xlib low-light
+formula. TekHVC uses its red reference and 7.50725 chroma scale. The xyY/uvY zero-luminance and Luv/HVC zero-lightness cases
+map to black; undefined nonzero-luminance chromaticity is rejected.
+
+Each floating component is at most 48 ASCII bytes with absolute value at most
+one million; only finite decimal/exponent values are accepted. RGB intensities
+and luminance are bounded to 0..1, lightness to 0..100, and xy chromaticity to the
+physical triangle. Invalid specifications leave the previous colour unchanged.
+The no-std parser retains its existing integer RGB syntax.

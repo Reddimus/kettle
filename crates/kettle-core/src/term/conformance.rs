@@ -2855,3 +2855,64 @@ fn grapheme_storage_cap_retains_the_last_zwj_and_its_spacing_scalar() {
     assert_eq!(&marks[28..], &['\u{200d}', '\u{1f408}']);
     assert_eq!(term.grid()[Line(0)][Column(2)].c, 'X');
 }
+
+#[test]
+fn special_color_aliases_roundtrip_without_touching_dynamic_colors() {
+    let (mut term, mut parser, rx) = harness_rx(12, 3);
+    feed(
+        &mut term,
+        &mut parser,
+        b"\x1b]10;#102030\x07\x1b]4;256;#123456;260;#abcdef\x07\x1b]5;0;?;4;?\x1b\\",
+    );
+    let foreground = term.colors()[256];
+    assert_eq!(
+        foreground,
+        Some(alacritty_terminal::vte::ansi::Rgb {
+            r: 0x10,
+            g: 0x20,
+            b: 0x30
+        })
+    );
+    let queried: Vec<_> = rx
+        .try_iter()
+        .filter_map(|event| match event {
+            TermEvent::ColorRequest(index, format) => Some(format(term.colors()[index].unwrap())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        queried,
+        [
+            "\x1b]5;0;rgb:1212/3434/5656\x1b\\",
+            "\x1b]5;4;rgb:abab/cdcd/efef\x1b\\"
+        ]
+    );
+    feed(&mut term, &mut parser, b"\x1b]105;0\x07");
+    assert_eq!(term.colors()[269], None);
+    assert!(term.colors()[273].is_some());
+    assert_eq!(term.colors()[256], foreground);
+    feed(&mut term, &mut parser, b"\x1b]105\x07");
+    assert_eq!(term.colors()[273], None);
+    assert_eq!(term.colors()[256], foreground);
+}
+
+#[test]
+fn special_color_modes_are_bounded_and_persist_through_terminal_resets() {
+    let (mut term, mut parser) = harness(12, 3);
+    feed(
+        &mut term,
+        &mut parser,
+        b"\x1b]6;0;1\x07\x1b]106;5;300\x07\x1b]6;6;1\x07",
+    );
+    assert!(term.colors().special_mode(0));
+    assert!(term.colors().special_mode(5));
+    assert!(!term.colors().special_mode(6));
+    assert!(!term.colors().special_mode(usize::MAX));
+    feed(&mut term, &mut parser, b"\x1b]6;0;0\x07");
+    assert!(!term.colors().special_mode(0));
+    assert!(term.colors().special_mode(5));
+    feed(&mut term, &mut parser, b"\x1bc");
+    assert!(term.colors().special_mode(5));
+    feed(&mut term, &mut parser, b"\x1b[!p");
+    assert!(term.colors().special_mode(5));
+}

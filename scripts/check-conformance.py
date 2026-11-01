@@ -28,6 +28,7 @@ test's reason and putting new failures under an unclassified heading.
 """
 
 import argparse
+import ast
 from contextlib import ExitStack, contextmanager
 import importlib.util
 import json
@@ -94,13 +95,13 @@ def load_live():
     return module
 
 
-def in_kettle(kettle, out, label, command_for):
+def in_kettle(kettle, out, label, command_for, config_extra=""):
     """Open Kettle, type command_for(pid, env) into its pane, wait for it."""
     live = load_live()
     with tempfile.TemporaryDirectory(prefix="kettle-conformance-") as scratch:
         root = Path(scratch)
         config = root / "kettle.conf"
-        config.write_text(CONFIG)
+        config.write_text(CONFIG + config_extra)
         env = {"SHELL": "/bin/sh", "ENV": None, "BASH_ENV": None, "PS1": "$ "}
         # Blessed must inspect the terminal's capabilities, not inherited color policy.
         for key in ("NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE"):
@@ -152,7 +153,8 @@ def esctest(args, out):
             # provides the older screen-wide reverse wrapping.
             "--timeout=1", "--xterm-reverse-wrap=383", *extra])
 
-    status = in_kettle(args.kettle, out, "esctest", command)
+    status = in_kettle(args.kettle, out, "esctest", command,
+                       "foreground = #000000\nbackground = #ffffff\n")
     text = log.read_text(errors="replace") if log.exists() else ""
     failed = set(re.findall(r"^\*\*\* TEST (\w+\.\w+) FAILED", text, re.M))
     summary = re.search(r"^\*\*\* \d+ tests? passed.*$", text, re.M)
@@ -346,6 +348,32 @@ def adapt_esctest_options(escutil):
     escutil.optionRequired = option_required
 
 
+def run_esctest_suite(script, commands):
+    """Isolate special colours in the pinned suite's per-case setup."""
+    source = ast.parse(script.read_text(encoding="utf-8"), filename=str(script))
+    entrypoint = source.body[-1]
+    if not (
+        isinstance(entrypoint, ast.Expr)
+        and isinstance(entrypoint.value, ast.Call)
+        and isinstance(entrypoint.value.func, ast.Name)
+        and entrypoint.value.func.id == "main"
+        and not entrypoint.value.args
+        and not entrypoint.value.keywords
+    ):
+        raise RuntimeError("unexpected pinned esctest entrypoint")
+    source.body.pop()
+    namespace = {"__name__": "esctest", "__file__": str(script)}
+    exec(compile(source, str(script), "exec"), namespace)
+    original_reset = namespace["reset"]
+
+    def reset():
+        original_reset()
+        commands.ResetSpecialColor()
+
+    namespace["reset"] = reset
+    return namespace["main"]()
+
+
 def esctest_in_pane(config_path, esctest_args):
     """Inside Kettle's pane: run esctest with the out-of-band cell check."""
     config = json.loads(Path(config_path).read_text())
@@ -443,9 +471,9 @@ def esctest_in_pane(config_path, esctest_args):
     escutil.AssertScreenCharsInRectEqual = assert_screen_chars_in_rect_equal
     adapt_esctest_options(escutil)
     sys.argv = [str(Path(config["esctest_dir"]) / "esctest.py"), *esctest_args]
-    # esctest.py ends with a bare main(): importing it runs the suite, after the
-    # patch above so each test's `from escutil import ...` binds the adapter.
-    import esctest  # noqa: F401
+    # Keep all test functions and assertions intact. Only defer the final main()
+    # call so setup can also reset special resources left by a previous case.
+    return run_esctest_suite(Path(config["esctest_dir"]) / "esctest.py", esccmd)
 
 
 def main():
