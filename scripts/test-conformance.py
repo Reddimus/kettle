@@ -63,5 +63,145 @@ class NoClearOptions(unittest.TestCase):
         self.assertEqual(self.wrapped[0][:3], ("xterm", "anotherOption", True))
 
 
+class GraphemeModes(unittest.TestCase):
+    def fixture(self, enabled=False, supported=True):
+        from contextlib import contextmanager
+
+        states = []
+        term = SimpleNamespace(enabled=enabled, supported=supported)
+
+        def query(mode, timeout, force):
+            self.assertEqual(mode, 2027)
+            self.assertTrue(force)
+            return SimpleNamespace(enabled=term.enabled, supported=term.supported)
+
+        @contextmanager
+        def change(want, mode, timeout):
+            before = term.enabled
+            if term.supported:
+                term.enabled = want
+            try:
+                yield
+            finally:
+                term.enabled = before
+
+        term.get_dec_mode = query
+        term.dec_modes_enabled = lambda mode, timeout: change(True, mode, timeout)
+        term.dec_modes_disabled = lambda mode, timeout: change(False, mode, timeout)
+        module = SimpleNamespace(maybe_grapheme_clustering_mode=object())
+        return term, module, states
+
+    def test_fixed_modes_are_observed_and_restored(self):
+        for mode, before, want in [("off", True, False), ("on", False, True)]:
+            term, module, states = self.fixture(before)
+            checker.adapt_ucs_grapheme_mode(module, mode, states.append)
+            with module.maybe_grapheme_clustering_mode(term):
+                self.assertEqual(term.enabled, want)
+            self.assertEqual(term.enabled, before)
+            self.assertEqual(states, [{"enabled": want, "supported": True}])
+
+    def test_measurement_failures_propagate_and_restore_the_mode(self):
+        term, module, states = self.fixture()
+        checker.adapt_ucs_grapheme_mode(module, "on", states.append)
+        with self.assertRaisesRegex(RuntimeError, "measurement failed"):
+            with module.maybe_grapheme_clustering_mode(term):
+                raise RuntimeError("measurement failed")
+        self.assertFalse(term.enabled)
+
+    def test_unsupported_on_is_not_counted_as_enabled(self):
+        term, module, states = self.fixture(supported=False)
+        checker.adapt_ucs_grapheme_mode(module, "on", states.append)
+        with self.assertRaisesRegex(RuntimeError, "mode 2027"):
+            with module.maybe_grapheme_clustering_mode(term):
+                self.fail("measurement ran without mode")
+        self.assertEqual(states, [{"enabled": False, "supported": False}])
+
+    def test_unsupported_off_is_not_counted_as_confirmed(self):
+        term, module, states = self.fixture(supported=False)
+        checker.adapt_ucs_grapheme_mode(module, "off", states.append)
+        with self.assertRaisesRegex(RuntimeError, "mode 2027"):
+            with module.maybe_grapheme_clustering_mode(term):
+                self.fail("measurement ran without a confirmed mode")
+        self.assertEqual(states, [{"enabled": False, "supported": False}])
+
+    def test_whole_suite_holds_the_mode_outside_table_contexts(self):
+        from contextlib import nullcontext
+
+        for mode, before, want in [("on", False, True), ("off", True, False)]:
+            for fail in [False, True]:
+                term, module, states = self.fixture(before)
+                term.cbreak = nullcontext
+                checker.adapt_ucs_grapheme_mode(module, mode, states.append)
+                init = lambda stream: (term, "writer")
+                suite = SimpleNamespace(init_term=init)
+
+                def main():
+                    actual, writer = suite.init_term("stream")
+                    self.assertIs(actual, term)
+                    self.assertEqual(writer, "writer")
+                    self.assertEqual(actual.enabled, want)
+                    if fail:
+                        raise RuntimeError("language measurement failed")
+                    return 17
+
+                suite.main = main
+                if fail:
+                    with self.assertRaisesRegex(RuntimeError, "language measurement"):
+                        checker.run_ucs_suite(suite, module, mode)
+                else:
+                    self.assertEqual(checker.run_ucs_suite(suite, module, mode), 17)
+                self.assertEqual(term.enabled, before)
+                self.assertIs(suite.init_term, init)
+                self.assertEqual(states, [{"enabled": want, "supported": True}])
+
+    def test_auto_does_not_wrap_suite_initialization(self):
+        init = object()
+        suite = SimpleNamespace(init_term=init, main=lambda: 17)
+        self.assertEqual(checker.run_ucs_suite(suite, None, "auto"), 17)
+        self.assertIs(suite.init_term, init)
+
+    def test_auto_leaves_the_pinned_suite_context_untouched(self):
+        term, module, states = self.fixture()
+        original = module.maybe_grapheme_clustering_mode
+        checker.adapt_ucs_grapheme_mode(module, "auto", states.append)
+        self.assertIs(module.maybe_grapheme_clustering_mode, original)
+
+
+class FixtureEnvironment(unittest.TestCase):
+    def test_color_overrides_are_removed_only_from_the_child(self):
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        class Entered(Exception):
+            pass
+
+        captured = {}
+
+        class FakeLive:
+            def __init__(self, *args, extra_env):
+                captured.update(extra_env)
+
+            def __enter__(self):
+                raise Entered
+
+            def __exit__(self, *args):
+                pass
+
+        flags = {
+            name: "1"
+            for name in ["NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE"]
+        }
+        with tempfile.TemporaryDirectory() as out, patch.dict(os.environ, flags):
+            with patch.object(
+                checker, "load_live", return_value=SimpleNamespace(LiveKettle=FakeLive)
+            ):
+                with self.assertRaises(Entered):
+                    checker.in_kettle(Path("kettle"), Path(out), "fixture", None)
+            for name in flags:
+                self.assertIsNone(captured[name])
+                self.assertEqual(os.environ[name], "1")
+
+
 if __name__ == "__main__":
     unittest.main()

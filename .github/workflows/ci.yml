@@ -176,6 +176,12 @@ jobs:
       - name: Conformance adapter tests (Unix)
         if: runner.os != 'Windows'
         run: python3 scripts/test-conformance.py
+      - name: Pinned Unicode grapheme tables (Windows)
+        if: runner.os == 'Windows'
+        run: python scripts/generate-grapheme-tables.py --check
+      - name: Pinned Unicode grapheme tables (Unix)
+        if: runner.os != 'Windows'
+        run: python3 scripts/generate-grapheme-tables.py --check
       - name: Wayland first-frame trace fixtures (Windows)
         if: runner.os == 'Windows'
         run: python scripts/check-wayland-first-frame.py self-test

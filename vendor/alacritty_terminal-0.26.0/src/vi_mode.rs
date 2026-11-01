@@ -293,7 +293,7 @@ fn semantic<T: EventListener>(
     let expand_semantic = |point: Point| {
         // Do not expand when currently on a semantic escape char.
         let cell = &term.grid()[point];
-        if term.semantic_escape_chars().contains(cell.c)
+        if term.semantic_escape_chars().contains(cell.semantic_char())
             && !cell
                 .flags
                 .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
@@ -409,7 +409,7 @@ fn is_space<T>(term: &Term<T>, point: Point) -> bool {
     !cell
         .flags()
         .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-        && (cell.c == ' ' || cell.c == '\t')
+        && matches!(cell.semantic_char(), ' ' | '\t')
 }
 
 /// Check if the cell at a point contains the WRAPLINE flag.

@@ -76,7 +76,7 @@ features = [
 optional = true
 
 [dependencies.unicode-width]
-version = "0.2.0"
+version = "=0.2.3"
 
 [dependencies.vte]
 version = "0.15.0"

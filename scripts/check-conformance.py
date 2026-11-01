@@ -2,7 +2,7 @@
 """Run the esctest2 and ucs-detect conformance suites in a live Kettle window.
 
     check-conformance.py esctest --kettle PATH [--out DIR] [--include REGEX] [--update]
-    check-conformance.py ucs --kettle PATH [--out DIR]
+    check-conformance.py ucs --kettle PATH [--out DIR] [--grapheme-mode auto|off|on]
 
 Both tools are fetched into target/conformance at pinned versions and never
 vendored: esctest2 (GPL-2.0) by git commit, ucs-detect from PyPI into a
@@ -28,6 +28,7 @@ test's reason and putting new failures under an unclassified heading.
 """
 
 import argparse
+from contextlib import ExitStack, contextmanager
 import importlib.util
 import json
 import os
@@ -101,6 +102,9 @@ def in_kettle(kettle, out, label, command_for):
         config = root / "kettle.conf"
         config.write_text(CONFIG)
         env = {"SHELL": "/bin/sh", "ENV": None, "BASH_ENV": None, "PS1": "$ "}
+        # Blessed must inspect the terminal's capabilities, not inherited color policy.
+        for key in ("NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE"):
+            env[key] = None
         # A relative WAYLAND_DISPLAY names a socket in XDG_RUNTIME_DIR, which
         # is about to become private: pass the compositor's absolute path.
         display = os.environ.get("WAYLAND_DISPLAY")
@@ -206,14 +210,29 @@ def ucs(args, out):
     tool = fetch_ucs_detect()
     results = out / "ucs-detect.yaml"
     results.unlink(missing_ok=True)
-    version = subprocess.run([str(args.kettle), "--version"], capture_output=True,
-                             text=True).stdout.split()
+    version = subprocess.run(
+        [str(args.kettle), "--version"], capture_output=True, text=True
+    ).stdout.split()
     version = version[1] if len(version) > 1 else "unknown"
 
     def command(_root, _pid, _ctl_env):
-        return " ".join(shlex.quote(part) for part in [
-            str(tool), f"--save-yaml={results}", "--set-software-name=Kettle",
-            f"--set-software-version={version}", "--no-final-summary"])
+        return " ".join(
+            shlex.quote(part)
+            for part in [
+                str(tool.parent / "python"),
+                "-I",
+                str(Path(__file__).resolve()),
+                "ucs-in-pane",
+                args.grapheme_mode,
+                str(out / "mode2027.json"),
+                "--",
+                f"--save-yaml={results}",
+                "--set-software-name=Kettle",
+                f"--set-software-version={version}",
+                "--no-final-summary",
+                *(["--all"] if args.ucs_all else []),
+            ]
+        )
 
     status = in_kettle(args.kettle, out, "ucs-detect", command)
     if status != 0 or not results.exists():
@@ -222,9 +241,76 @@ def ucs(args, out):
     print(f"ucs-detect results in {results}")
     summary = subprocess.run(
         [str(tool.parent / "python"), "-I", "-c", UCS_SUMMARY, str(results)],
-        capture_output=True, text=True)
+        capture_output=True,
+        text=True,
+    )
     print(summary.stdout or summary.stderr)
     return status
+
+
+def adapt_ucs_grapheme_mode(terminal_module, mode, record):
+    """Select measurement mode without changing scores or capability reports."""
+    if mode == "auto":
+        return
+    if mode not in {"on", "off"}:
+        raise ValueError("unknown grapheme measurement mode")
+
+    @contextmanager
+    def fixed_mode(term, timeout=1.0):
+        term.get_dec_mode(2027, timeout=timeout, force=True)
+        change = term.dec_modes_enabled if mode == "on" else term.dec_modes_disabled
+        with change(2027, timeout=timeout):
+            response = term.get_dec_mode(2027, timeout=timeout, force=True)
+            state = {"enabled": response.enabled, "supported": response.supported}
+            record(state)
+            if not response.supported or response.enabled != (mode == "on"):
+                raise RuntimeError(
+                    "mode 2027 did not enter the requested measurement state"
+                )
+            yield
+
+    terminal_module.maybe_grapheme_clustering_mode = fixed_mode
+
+
+def run_ucs_suite(suite, terminal_module, mode):
+    """Hold the requested mode for language and table measurements alike."""
+    if mode == "auto":
+        return suite.main()
+    original_init = suite.init_term
+    with ExitStack() as contexts:
+
+        def init_term(*args, **kwargs):
+            term, writer = original_init(*args, **kwargs)
+            contexts.enter_context(term.cbreak())
+            contexts.enter_context(terminal_module.maybe_grapheme_clustering_mode(term))
+            return term, writer
+
+        suite.init_term = init_term
+        try:
+            return suite.main()
+        finally:
+            suite.init_term = original_init
+
+
+def ucs_in_pane(mode, receipt, arguments):
+    import importlib.metadata
+    import ucs_detect
+    from ucs_detect import terminal
+
+    if importlib.metadata.version("ucs-detect") != UCS_DETECT.split("==")[1]:
+        raise RuntimeError("ucs-detect version differs from the pinned adapter")
+    states = []
+
+    def record(state):
+        states.append(state)
+        Path(receipt).write_text(
+            json.dumps({"requested": mode, "states": states}, indent=2) + "\n"
+        )
+
+    Path(receipt).write_text(json.dumps({"requested": mode, "states": states}) + "\n")
+    adapt_ucs_grapheme_mode(terminal, mode, record)
+    sys.argv = ["ucs-detect", *arguments]
+    return run_ucs_suite(ucs_detect, terminal, mode)
 
 
 UCS_SUMMARY = """
@@ -363,6 +449,11 @@ def esctest_in_pane(config_path, esctest_args):
 
 
 def main():
+    if len(sys.argv) > 3 and sys.argv[1] == "ucs-in-pane":
+        rest = sys.argv[4:]
+        return ucs_in_pane(
+            sys.argv[2], sys.argv[3], rest[1:] if rest[:1] == ["--"] else rest
+        )
     if len(sys.argv) > 2 and sys.argv[1] == "esctest-in-pane":
         rest = sys.argv[3:]
         esctest_in_pane(sys.argv[2], rest[1:] if rest[:1] == ["--"] else rest)
@@ -372,13 +463,30 @@ def main():
     parser.add_argument("--kettle", type=Path, required=True)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--include", help="esctest: run only tests matching this regex")
-    parser.add_argument("--update", action="store_true",
-                        help="esctest: rewrite the expected-failure list")
+    parser.add_argument(
+        "--ucs-all", action="store_true",
+        help="ucs: measure all width-table entries, not only contested entries",
+    )
+    parser.add_argument(
+        "--grapheme-mode",
+        choices=["auto", "off", "on"],
+        default="auto",
+        help="ucs: retain suite negotiation, or query and hold mode 2027 off/on",
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="esctest: rewrite the expected-failure list",
+    )
     args = parser.parse_args()
+    if args.suite != "ucs" and (args.grapheme_mode != "auto" or args.ucs_all):
+        parser.error("--grapheme-mode and --ucs-all apply only to ucs")
     args.kettle = args.kettle.resolve()
     # The pane starts in its own directory, so every path it gets is absolute.
-    out = (args.out or REPO / "target" / "diagnostics"
-           / time.strftime("conformance-%Y%m%d-%H%M%S")).resolve()
+    out = (
+        args.out
+        or REPO / "target" / "diagnostics" / time.strftime("conformance-%Y%m%d-%H%M%S")
+    ).resolve()
     out.mkdir(parents=True, exist_ok=True)
     return esctest(args, out) if args.suite == "esctest" else ucs(args, out)
 

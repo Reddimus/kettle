@@ -28,6 +28,7 @@ use crate::vte::ansi::{
 
 pub mod cell;
 pub mod color;
+mod grapheme;
 mod horizontal;
 mod rectangles;
 pub mod search;
@@ -52,6 +53,11 @@ pub const MIN_COLUMNS: usize = 2;
 
 /// Minimum number of visible lines.
 pub const MIN_SCREEN_LINES: usize = 1;
+
+/// UTF-8 offset of a stored cluster's spacing base, retaining prefix order.
+pub fn grapheme_base_offset(text: &str) -> usize {
+    grapheme::base_offset(text)
+}
 
 /// Max size of the window title stack.
 const TITLE_STACK_MAX_DEPTH: usize = 4096;
@@ -331,6 +337,15 @@ impl TermDamageState {
     }
 }
 
+#[derive(Clone, Copy)]
+struct GraphemeAnchor {
+    point: Point,
+    after: Point,
+    pending_wrap: bool,
+    width: usize,
+    has_cell: bool,
+}
+
 pub struct Term<T> {
     /// Terminal focus controlling the cursor shape.
     pub is_focused: bool,
@@ -379,6 +394,11 @@ pub struct Term<T> {
     extended_reverse_wrap: bool,
     morefix: Option<bool>,
     no_clear_column: bool,
+    grapheme_clustering: bool,
+    grapheme_state: grapheme::GraphemeState,
+    grapheme_anchor: Option<GraphemeAnchor>,
+    grapheme_template: Cell,
+    last_grapheme: Vec<char>,
     attribute_extent: u8,
     saved_private_modes: Vec<(u16, bool)>,
 
@@ -669,6 +689,11 @@ pub enum Osc52 {
 }
 
 impl<T> Term<T> {
+    fn stop_grapheme(&mut self) {
+        self.grapheme_state = Default::default();
+        self.grapheme_anchor = None;
+    }
+
     #[inline]
     pub fn scroll_display(&mut self, scroll: Scroll)
     where
@@ -718,6 +743,11 @@ impl<T> Term<T> {
             extended_reverse_wrap: false,
             morefix: None,
             no_clear_column: false,
+            grapheme_clustering: false,
+            grapheme_state: Default::default(),
+            grapheme_anchor: None,
+            grapheme_template: Cell::default(),
+            last_grapheme: Vec::new(),
             attribute_extent: 0,
             saved_private_modes: Vec::new(),
             event_proxy,
@@ -1033,6 +1063,7 @@ impl<T> Term<T> {
 
     /// Mutable access to the raw grid data structure.
     pub fn grid_mut(&mut self) -> &mut Grid<Cell> {
+        self.stop_grapheme();
         &mut self.grid
     }
 
@@ -1049,6 +1080,7 @@ impl<T> Term<T> {
             return;
         }
 
+        self.stop_grapheme();
         debug!("New num_cols is {num_cols} and num_lines is {num_lines}");
         self.clear_partial_wraps();
 
@@ -1110,6 +1142,7 @@ impl<T> Term<T> {
     }
 
     fn swap_alt_with_clear(&mut self, clear_on_entry: bool, save_restore_cursor: bool) {
+        self.stop_grapheme();
         if !self.mode.contains(TermMode::ALT_SCREEN) {
             // Set alt screen cursor to the current primary screen cursor.
             self.inactive_grid.cursor = self.grid.cursor.clone();
@@ -2010,6 +2043,7 @@ impl<T> Term<T> {
                     self.mode.contains(TermMode::BRACKETED_PASTE).into()
                 }
                 NamedPrivateMode::SyncUpdate => ModeState::Reset,
+                NamedPrivateMode::GraphemeClustering => self.grapheme_clustering.into(),
                 NamedPrivateMode::ColorSchemeReports => {
                     self.mode.contains(TermMode::COLOR_SCHEME_REPORTS).into()
                 }
@@ -2033,20 +2067,8 @@ impl<T> Term<T> {
     }
 }
 
-impl<T: EventListener> Handler for Term<T> {
-    fn sync_marker(&mut self, id: u64) {
-        self.graphics_events.push(GraphicsEvent::SyncMarker { id });
-    }
-
-    /// A character to be displayed.
-    #[inline(never)]
-    fn input(&mut self, c: char) {
-        // Number of cells the char will occupy.
-        let width = match c.width() {
-            Some(width) => width,
-            None => return,
-        };
-
+impl<T: EventListener> Term<T> {
+    fn input_char(&mut self, c: char, width: usize) -> Option<Point> {
         // Handle zero-width characters.
         if width == 0 {
             // Get previous column.
@@ -2065,7 +2087,7 @@ impl<T: EventListener> Handler for Term<T> {
             }
 
             self.grid[line][column].push_zerowidth(c);
-            return;
+            return None;
         }
 
         // Move cursor to next line.
@@ -2095,7 +2117,7 @@ impl<T: EventListener> Handler for Term<T> {
             } else {
                 // Prevent out of bounds crash when linewrapping is disabled.
                 self.grid.cursor.input_needs_wrap = true;
-                return;
+                return None;
             }
         }
 
@@ -2103,6 +2125,7 @@ impl<T: EventListener> Handler for Term<T> {
             self.insert_blank(width);
         }
         let columns = self.input_right_edge().0;
+        let point = self.grid.cursor.point;
         if width == 1 {
             self.write_at_cursor(c);
         } else {
@@ -2131,10 +2154,185 @@ impl<T: EventListener> Handler for Term<T> {
         } else {
             self.grid.cursor.input_needs_wrap = true;
         }
+        Some(point)
+    }
+
+    fn print_grapheme(&mut self, width: usize) {
+        let text = self.last_grapheme.clone();
+        let template = mem::replace(
+            &mut self.grid.cursor.template,
+            self.grapheme_template.clone(),
+        );
+        let point = self.input_char(text[0], width);
+        self.grid.cursor.template = template;
+        self.grapheme_anchor = point.map(|point| {
+            let cell = &mut self.grid[point];
+            cell.flags.insert(Flags::GRAPHEME);
+            for &c in &text[1..] {
+                cell.push_zerowidth(c);
+            }
+            GraphemeAnchor {
+                point,
+                after: self.grid.cursor.point,
+                pending_wrap: self.grid.cursor.input_needs_wrap,
+                width,
+                has_cell: true,
+            }
+        });
+    }
+
+    fn input_grapheme(&mut self, c: char, width: usize) {
+        if self.grapheme_anchor.is_some_and(|a| {
+            a.after != self.grid.cursor.point || a.pending_wrap != self.grid.cursor.input_needs_wrap
+        }) {
+            self.stop_grapheme();
+        }
+        let mut state = self.grapheme_state;
+        let boundary = state.advance(c);
+        if boundary || self.grapheme_anchor.is_none() {
+            self.last_grapheme.clear();
+            self.last_grapheme.push(c);
+            self.grapheme_template = self.grid.cursor.template.clone();
+            if width > 0 {
+                self.print_grapheme(width);
+            } else {
+                self.grapheme_anchor = Some(GraphemeAnchor {
+                    point: self.grid.cursor.point,
+                    after: self.grid.cursor.point,
+                    pending_wrap: self.grid.cursor.input_needs_wrap,
+                    width: 0,
+                    has_cell: false,
+                });
+            }
+        } else {
+            let anchor = self.grapheme_anchor.unwrap();
+            let full = self.last_grapheme.len() > cell::MAX_ZEROWIDTH_PER_CELL;
+            let retained_tail = if !full {
+                self.last_grapheme.push(c);
+                1
+            } else if self.last_grapheme.last() == Some(&'\u{200d}') && width > 0 {
+                let len = self.last_grapheme.len();
+                self.last_grapheme[len - 2] = '\u{200d}';
+                self.last_grapheme[len - 1] = c;
+                2
+            } else if matches!(c, '\u{fe0e}' | '\u{fe0f}' | '\u{200d}')
+                || (!anchor.has_cell && width > 0)
+            {
+                // Preserve layout/presentation inside the existing storage cap.
+                *self.last_grapheme.last_mut().unwrap() = c;
+                1
+            } else {
+                0
+            };
+            let retained = retained_tail > 0;
+            if retained && anchor.has_cell {
+                if c == '\u{fe0f}' && anchor.width == 1 {
+                    self.widen_grapheme(anchor);
+                } else {
+                    if full {
+                        let start = self.last_grapheme.len() - retained_tail;
+                        self.grid[anchor.point]
+                            .replace_zerowidth_tail(&self.last_grapheme[start..]);
+                    } else {
+                        self.grid[anchor.point].push_zerowidth(c);
+                    }
+                    self.damage.damage_point(Point::new(
+                        anchor.point.line.0 as usize,
+                        anchor.point.column,
+                    ));
+                }
+            } else if retained && width > 0 {
+                self.print_grapheme(width);
+            }
+        }
+        self.grapheme_state = state;
+    }
+
+    fn widen_grapheme(&mut self, anchor: GraphemeAnchor) {
+        let fits = anchor.point.column + 1 < self.input_right_edge();
+        if !fits && !self.mode.contains(TermMode::LINE_WRAP) {
+            // There is no second cell with autowrap disabled. Retain the
+            // selector without creating a wide cell missing its spacer.
+            let cell = &mut self.grid[anchor.point];
+            if cell
+                .zerowidth()
+                .is_some_and(|marks| marks.len() == cell::MAX_ZEROWIDTH_PER_CELL)
+            {
+                cell.replace_last_zerowidth('\u{fe0f}');
+            } else {
+                cell.push_zerowidth('\u{fe0f}');
+            }
+            self.damage.damage_point(Point::new(
+                anchor.point.line.0 as usize,
+                anchor.point.column,
+            ));
+            return;
+        }
+        self.grid.cursor.point = anchor.point;
+        self.grid.cursor.input_needs_wrap = false;
+        let insert = self.mode.contains(TermMode::INSERT);
+        if fits && insert {
+            // The initial narrow write already inserted one cell. Reserve
+            // only its new spacer, then repaint the cluster without insertion.
+            self.grid.cursor.point.column += 1;
+            self.insert_blank(1);
+            self.grid.cursor.point = anchor.point;
+            self.mode.remove(TermMode::INSERT);
+        }
+        self.print_grapheme(2);
+        self.mode.set(TermMode::INSERT, insert);
+    }
+}
+
+impl<T: EventListener> Handler for Term<T> {
+    fn unhandled_control(&mut self, _byte: u8) {
+        if self.grapheme_clustering {
+            self.stop_grapheme();
+        }
+    }
+
+    fn sync_marker(&mut self, id: u64) {
+        self.graphics_events.push(GraphicsEvent::SyncMarker { id });
+    }
+
+    /// A character to be displayed.
+    #[inline(never)]
+    fn input(&mut self, c: char) {
+        let Some(mut width) = c.width() else {
+            if self.grapheme_clustering {
+                self.stop_grapheme();
+            }
+            return;
+        };
+        if self.grapheme_clustering {
+            if grapheme::emoji_presentation(c) {
+                width = 2;
+            }
+            self.input_grapheme(c, width);
+        } else {
+            self.input_char(c, width);
+        }
+    }
+
+    fn repeat_char(&mut self, c: char, count: u16) {
+        if !self.grapheme_clustering || self.last_grapheme.is_empty() {
+            for _ in 0..count {
+                self.input(c);
+            }
+            return;
+        }
+        let text = self.last_grapheme.clone();
+        for _ in 0..count {
+            self.stop_grapheme();
+            for &c in &text {
+                self.input(c);
+            }
+        }
     }
 
     #[inline]
     fn decaln(&mut self) {
+        self.stop_grapheme();
         trace!("Decalnning");
 
         // DECALN also resets the margins and homes the cursor (DEC STD 070,
@@ -2158,6 +2356,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn goto(&mut self, line: i32, col: usize) {
+        self.stop_grapheme();
         let line = Line(line);
         let col = Column(col);
 
@@ -2182,6 +2381,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn goto_line(&mut self, line: i32) {
+        self.stop_grapheme();
         trace!("Going to line: {line}");
         let col = self.grid.cursor.point.column;
         self.goto(line, 0);
@@ -2191,6 +2391,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn goto_col(&mut self, col: usize) {
+        self.stop_grapheme();
         trace!("Going to column: {col}");
         self.damage_cursor();
         let margins = self.horizontal_region();
@@ -2205,6 +2406,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn insert_blank(&mut self, count: usize) {
+        self.stop_grapheme();
         if !self.cursor_in_horizontal_region() {
             return;
         }
@@ -2244,23 +2446,28 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     fn insert_columns(&mut self, count: usize) {
+        self.stop_grapheme();
         self.scroll_columns(count, true, self.grid.cursor.point.column);
     }
 
     fn delete_columns(&mut self, count: usize) {
+        self.stop_grapheme();
         self.scroll_columns(count, false, self.grid.cursor.point.column);
     }
 
     fn back_index(&mut self) {
+        self.stop_grapheme();
         self.column_index(true);
     }
 
     fn forward_index(&mut self) {
+        self.stop_grapheme();
         self.column_index(false);
     }
 
     #[inline]
     fn move_up(&mut self, lines: usize) {
+        self.stop_grapheme();
         trace!("Moving up: {lines}");
 
         // The top margin stops the cursor whenever it starts at or below it,
@@ -2280,6 +2487,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn move_down(&mut self, lines: usize) {
+        self.stop_grapheme();
         trace!("Moving down: {lines}");
 
         // The bottom margin stops the cursor whenever it starts at or above
@@ -2299,6 +2507,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn move_forward(&mut self, cols: usize) {
+        self.stop_grapheme();
         trace!("Moving forward: {cols}");
         let point = self.grid.cursor.point.column;
         let margins = self.horizontal_region();
@@ -2319,6 +2528,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn move_backward(&mut self, cols: usize) {
+        self.stop_grapheme();
         trace!("Moving backward: {cols}");
         if self.reverse_cursor(cols) {
             return;
@@ -2602,6 +2812,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn move_down_and_cr(&mut self, lines: usize) {
+        self.stop_grapheme();
         trace!("Moving down and cr: {lines}");
 
         self.move_down(lines);
@@ -2610,6 +2821,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn move_up_and_cr(&mut self, lines: usize) {
+        self.stop_grapheme();
         trace!("Moving up and cr: {lines}");
 
         self.move_up(lines);
@@ -2619,6 +2831,7 @@ impl<T: EventListener> Handler for Term<T> {
     /// Insert tab at cursor position.
     #[inline]
     fn put_tab(&mut self, mut count: u16) {
+        self.stop_grapheme();
         // A tab after the last column is the same as a linebreak.
         if self.grid.cursor.input_needs_wrap {
             match self.morefix {
@@ -2658,6 +2871,7 @@ impl<T: EventListener> Handler for Term<T> {
     /// Backspace.
     #[inline]
     fn backspace(&mut self) {
+        self.stop_grapheme();
         trace!("Backspace");
         if self.reverse_cursor(1) {
             return;
@@ -2677,6 +2891,7 @@ impl<T: EventListener> Handler for Term<T> {
     /// Carriage return.
     #[inline]
     fn carriage_return(&mut self) {
+        self.stop_grapheme();
         trace!("Carriage return");
         let left = self.horizontal_region().start;
         let new_col =
@@ -2695,6 +2910,7 @@ impl<T: EventListener> Handler for Term<T> {
     /// Linefeed.
     #[inline]
     fn linefeed(&mut self) {
+        self.stop_grapheme();
         trace!("Linefeed");
         let next = self.grid.cursor.point.line + 1;
         if next == self.scroll_region.end {
@@ -2759,18 +2975,21 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn scroll_up(&mut self, lines: usize) {
+        self.stop_grapheme();
         let origin = self.scroll_region.start;
         self.scroll_up_relative(origin, lines);
     }
 
     #[inline]
     fn scroll_down(&mut self, lines: usize) {
+        self.stop_grapheme();
         let origin = self.scroll_region.start;
         self.scroll_down_relative(origin, lines);
     }
 
     #[inline]
     fn insert_blank_lines(&mut self, lines: usize) {
+        self.stop_grapheme();
         trace!("Inserting blank {lines} lines");
 
         let origin = self.grid.cursor.point.line;
@@ -2781,6 +3000,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn delete_lines(&mut self, lines: usize) {
+        self.stop_grapheme();
         let origin = self.grid.cursor.point.line;
         let lines = cmp::min(self.screen_lines() - origin.0 as usize, lines);
 
@@ -2793,6 +3013,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn erase_chars(&mut self, count: usize) {
+        self.stop_grapheme();
         let cursor = &self.grid.cursor;
 
         trace!(
@@ -2809,6 +3030,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn delete_chars(&mut self, count: usize) {
+        self.stop_grapheme();
         if !self.cursor_in_horizontal_region() {
             return;
         }
@@ -2849,6 +3071,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn move_backward_tabs(&mut self, count: u16) {
+        self.stop_grapheme();
         trace!("Moving backward {count} tabs");
 
         let old_col = self.grid.cursor.point.column.0;
@@ -2876,6 +3099,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn move_forward_tabs(&mut self, count: u16) {
+        self.stop_grapheme();
         trace!("Moving forward {count} tabs");
 
         let num_cols = self.input_right_edge().0;
@@ -2912,6 +3136,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn restore_cursor_position(&mut self) {
+        self.stop_grapheme();
         trace!("Restoring cursor position");
 
         self.damage_cursor();
@@ -2924,18 +3149,22 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn clear_line(&mut self, mode: ansi::LineClearMode) {
+        self.stop_grapheme();
         self.clear_line_cells(mode, false);
     }
 
     fn selective_clear_line(&mut self, mode: ansi::LineClearMode) {
+        self.stop_grapheme();
         self.clear_line_cells(mode, true);
     }
 
     fn selective_clear_screen(&mut self, mode: ansi::ClearMode) {
+        self.stop_grapheme();
         self.clear_protected_screen(mode, true);
     }
 
     fn fill_rectangle(&mut self, character: u16, area: ansi::Rectangle) {
+        self.stop_grapheme();
         if self.conformance_level < 4 || !matches!(character, 32..=126 | 160..=255) {
             return;
         }
@@ -2943,12 +3172,14 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     fn erase_rectangle(&mut self, area: ansi::Rectangle, selective: bool) {
+        self.stop_grapheme();
         if self.conformance_level >= 4 {
             self.erase_rect(area, selective);
         }
     }
 
     fn copy_rectangle(&mut self, area: ansi::Rectangle, top: u16, left: u16) {
+        self.stop_grapheme();
         if self.conformance_level >= 4 {
             self.copy_rect(area, top, left);
         }
@@ -2966,6 +3197,7 @@ impl<T: EventListener> Handler for Term<T> {
         attributes: &[u16],
         reverse: bool,
     ) {
+        self.stop_grapheme();
         if self.conformance_level >= 4 {
             self.mark_rect(area, attributes, reverse);
         }
@@ -3079,6 +3311,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn clear_screen(&mut self, mode: ansi::ClearMode) {
+        self.stop_grapheme();
         if self.protection_mode == ProtectionMode::Iso && !matches!(mode, ansi::ClearMode::Saved) {
             self.clear_protected_screen(mode, false);
             return;
@@ -3179,6 +3412,10 @@ impl<T: EventListener> Handler for Term<T> {
         self.extended_reverse_wrap = false;
         self.morefix = None;
         self.no_clear_column = false;
+        self.grapheme_clustering = false;
+        self.stop_grapheme();
+        self.last_grapheme.clear();
+        self.grapheme_template = Cell::default();
         self.attribute_extent = 0;
         self.saved_private_modes.clear();
         if self.mode.contains(TermMode::ALT_SCREEN) {
@@ -3232,6 +3469,10 @@ impl<T: EventListener> Handler for Term<T> {
         self.extended_reverse_wrap = false;
         self.morefix = None;
         self.no_clear_column = false;
+        self.grapheme_clustering = false;
+        self.stop_grapheme();
+        self.last_grapheme.clear();
+        self.grapheme_template = Cell::default();
         self.attribute_extent = 0;
         self.saved_private_modes.clear();
         // DECSTR restores terminal state while leaving the display, scrollback and
@@ -3271,6 +3512,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn reverse_index(&mut self) {
+        self.stop_grapheme();
         trace!("Reversing index");
         // If cursor is at the top.
         if self.grid.cursor.point.line == self.scroll_region.start {
@@ -3449,6 +3691,13 @@ impl<T: EventListener> Handler for Term<T> {
                 style.blinking = true;
                 self.event_proxy.send_event(Event::CursorBlinkingChange);
             }
+            NamedPrivateMode::GraphemeClustering => {
+                if !self.grapheme_clustering {
+                    self.stop_grapheme();
+                    self.last_grapheme.clear();
+                }
+                self.grapheme_clustering = true;
+            }
             NamedPrivateMode::SyncUpdate => (),
         }
     }
@@ -3542,6 +3791,11 @@ impl<T: EventListener> Handler for Term<T> {
                     .get_or_insert(self.config.default_cursor_style);
                 style.blinking = false;
                 self.event_proxy.send_event(Event::CursorBlinkingChange);
+            }
+            NamedPrivateMode::GraphemeClustering => {
+                self.grapheme_clustering = false;
+                self.stop_grapheme();
+                self.last_grapheme.clear();
             }
             NamedPrivateMode::SyncUpdate => (),
         }
@@ -3660,6 +3914,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn set_horizontal_margins(&mut self, left: usize, right: Option<usize>) {
+        self.stop_grapheme();
         if !self.mode.contains(TermMode::LEFT_RIGHT_MARGIN) {
             self.save_cursor_position();
             return;
@@ -3676,6 +3931,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn set_scrolling_region(&mut self, top: usize, bottom: Option<usize>) {
+        self.stop_grapheme();
         // Fallback to the last line as default. A bottom margin past the
         // screen is clipped to its last line first, as xterm does, so a
         // region that would then be empty is refused rather than stored:
@@ -3716,12 +3972,14 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn configure_charset(&mut self, index: CharsetIndex, charset: StandardCharset) {
+        self.stop_grapheme();
         trace!("Configuring charset {index:?} as {charset:?}");
         self.grid.cursor.charsets[index] = charset;
     }
 
     #[inline]
     fn set_active_charset(&mut self, index: CharsetIndex) {
+        self.stop_grapheme();
         trace!("Setting active charset {index:?}");
         self.active_charset = index;
     }

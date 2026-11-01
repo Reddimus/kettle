@@ -1,0 +1,35 @@
+{
+  "unicode_version": "18.0.0",
+  "grapheme_test_cases": 853,
+  "sources": [
+    {
+      "file": "GraphemeBreakProperty.txt",
+      "url": "https://www.unicode.org/Public/18.0.0/ucd/auxiliary/GraphemeBreakProperty.txt",
+      "sha256": "0839dcb79e4ac639ecd538b1abf7c9d22e3f9dd265b7e182d33627aa4d75b45a"
+    },
+    {
+      "file": "GraphemeBreakTest.txt",
+      "url": "https://www.unicode.org/Public/18.0.0/ucd/auxiliary/GraphemeBreakTest.txt",
+      "sha256": "42045da24db676334a73916c203e0645107170466c658f476b40aac0c261a379",
+      "upstream_sha256": "b0cf047ee94485bbdc846de2b902f5f8a815f6b674f9d04223cddadd91c9df31",
+      "normalization": "Remove trailing ASCII spaces from comment lines only"
+    },
+    {
+      "file": "DerivedCoreProperties.txt",
+      "url": "https://www.unicode.org/Public/18.0.0/ucd/DerivedCoreProperties.txt",
+      "sha256": "09c928886a178fcafd93c29e4bd59073a058e5a100b716d425cb563ab50f68c9"
+    },
+    {
+      "file": "emoji-data.txt",
+      "url": "https://www.unicode.org/Public/18.0.0/ucd/emoji/emoji-data.txt",
+      "sha256": "16dc935647bd803a2b1ccd755f15b59a9a9d1bb75f9ab5f67c80d3ba336a6fe6",
+      "upstream_sha256": "80d00f8e616a0ef27fd6b8de3b758c06383b5d917e2977709578e68baf733bf1",
+      "normalization": "Remove trailing ASCII spaces from comment lines only"
+    },
+    {
+      "file": "LICENSE.txt",
+      "url": "https://www.unicode.org/license.txt",
+      "sha256": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96"
+    }
+  ]
+}

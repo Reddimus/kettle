@@ -1,7 +1,7 @@
 use super::{
     Attrs, AttrsList, BufferLine, Config, Family, FontSystem, GColor, LineEnding, Metrics,
     ShapedRow, Shaping, Style, TextBuffer, Weight, Wrap, font_features, load_bundled_font,
-    production_source, run_attrs,
+    run_attrs,
 };
 use kettle_config::Rgb;
 
@@ -282,34 +282,139 @@ fn a_cut_row_keeps_the_baseline_of_the_whole_row() {
     }
 }
 
-/// `build_pane` keys and shapes each row through one `ShapedRow`. This
-/// guard runs where the headless test has no GPU and skips.
 #[test]
-fn build_pane_keys_and_shapes_the_same_extent() {
-    let src = production_source();
-    let build_pane = src
-        .split_once("    fn build_pane_cells(")
-        .expect("build_pane_cells")
-        .1
-        .split_once("\n    }\n")
-        .expect("end of build_pane")
-        .0;
-    let compact: String = build_pane.split_whitespace().collect();
-    for needle in [
-        "letshaped=ShapedRow::of(runs);",
-        "letkey=shaped.key(runs);",
-        "inruns[..shaped.runs].iter().enumerate(){lettext=shaped.text(i,text);",
-        "shaped.push_pad(&mutrow_text,&mutattrs_list,cfg,&ff);",
-    ] {
-        assert!(compact.contains(needle), "build_pane lost {needle:?}");
+fn grapheme_row_keys_ignore_positions_beyond_the_shaped_extent() {
+    use super::geometry::GridGlyphCell;
+    use super::terminal::CellGlyphSpan;
+    let row = runs(&["A     "]);
+    let shaped = ShapedRow::of(&row);
+    assert_eq!(shaped_text(&row), "A ");
+    let mut positions: Vec<_> = (0..6)
+        .map(|column| CellGlyphSpan {
+            bytes: column..column + 1,
+            cell: GridGlyphCell {
+                column,
+                width: 1,
+                clustered: true,
+                text_presentation: false,
+                single_image: false,
+            },
+            family: None,
+        })
+        .collect();
+    let key = shaped.key_with_positions(&row, &positions);
+    for position in &mut positions[1..] {
+        position.cell.width = 2;
+        position.family = Some("unused blank face".into());
     }
+    assert_eq!(key, shaped.key_with_positions(&row, &positions));
+    positions[0].cell.column = 1;
+    assert_ne!(key, shaped.key_with_positions(&row, &positions));
+}
+
+#[test]
+fn grapheme_geometry_is_part_of_the_shaped_row_cache_key() {
+    use super::geometry::GridGlyphCell;
+    use super::terminal::CellGlyphSpan;
+    let row = runs(&["A "]);
+    let shaped = ShapedRow::of(&row);
+    let mut positions = vec![CellGlyphSpan {
+        bytes: 0..1,
+        cell: GridGlyphCell {
+            column: 0,
+            width: 1,
+            clustered: true,
+            text_presentation: false,
+            single_image: false,
+        },
+        family: None,
+    }];
+    let clustered = shaped.key_with_positions(&row, &positions);
+    assert_ne!(clustered, shaped.key(&row));
+    positions[0].cell.column = 2;
+    assert_ne!(clustered, shaped.key_with_positions(&row, &positions));
+    positions[0].cell.column = 0;
+    positions[0].cell.width = 2;
+    assert_ne!(clustered, shaped.key_with_positions(&row, &positions));
+    assert_eq!(shaped.key_with_positions(&row, &[]), shaped.key(&row));
+}
+
+#[test]
+fn grapheme_metadata_survives_shaping_with_the_cell_style() {
+    use super::geometry::{GridGlyphCell, glyph_grid_col_with_metadata};
+    use super::terminal::{CellGlyphSpan, apply_cell_positions};
+    let text = "\u{1f469}\u{200d}\u{1f4bb} X";
+    let emoji_end = text.find(' ').unwrap();
+    let emoji = GridGlyphCell {
+        column: 0,
+        width: 2,
+        clustered: true,
+        text_presentation: false,
+        single_image: false,
+    };
+    let spacer = GridGlyphCell {
+        column: 1,
+        width: 1,
+        clustered: false,
+        text_presentation: false,
+        single_image: false,
+    };
+    let next = GridGlyphCell {
+        column: 2,
+        width: 1,
+        clustered: false,
+        text_presentation: false,
+        single_image: false,
+    };
+    let positions = [
+        CellGlyphSpan {
+            bytes: 0..emoji_end,
+            cell: emoji,
+            family: None,
+        },
+        CellGlyphSpan {
+            bytes: emoji_end..emoji_end + 1,
+            cell: spacer,
+            family: None,
+        },
+        CellGlyphSpan {
+            bytes: emoji_end + 1..text.len(),
+            cell: next,
+            family: None,
+        },
+    ];
+    let color = GColor::rgb(91, 173, 211);
+    let mut attrs = AttrsList::new(&Attrs::new().color(color).weight(Weight::BOLD));
+    apply_cell_positions(&mut attrs, &positions, text.len(), None);
+    for b in 0..emoji_end {
+        assert_eq!(attrs.get_span(b).metadata, emoji.metadata());
+    }
+    assert_eq!(attrs.get_span(emoji_end + 1).color_opt, Some(color));
+    assert_eq!(attrs.get_span(emoji_end + 1).weight, Weight::BOLD);
+    let mut fs = FontSystem::new();
+    load_bundled_font(&mut fs, kettle_config::font::all().first().unwrap());
+    let mut buf = TextBuffer::new(&mut fs, Metrics::new(20.0, 28.0));
+    buf.set_size(Some(640.0), Some(100.0));
+    buf.set_wrap(Wrap::None);
+    buf.lines = vec![BufferLine::new(
+        text.to_owned(),
+        LineEnding::Lf,
+        attrs,
+        Shaping::Advanced,
+    )];
+    buf.shape_until_scroll(&mut fs, false);
+    let run = buf.layout_runs().next().unwrap();
+    let x = run
+        .glyphs
+        .iter()
+        .find(|g| g.start == emoji_end + 1)
+        .expect("X is shaped");
+    assert_eq!(glyph_grid_col_with_metadata(&[], x.start, x.metadata), 2);
+    assert_eq!(x.color_opt, Some(color));
     assert!(
-        !build_pane.contains("in runs {"),
-        "a loop over a row's whole runs would key or shape the blanks after its ink"
-    );
-    assert_eq!(
-        build_pane.matches("row_text.push").count(),
-        1,
-        "the row text has one source besides the pad"
+        run.glyphs
+            .iter()
+            .filter(|g| g.start < emoji_end)
+            .all(|g| g.metadata == emoji.metadata())
     );
 }
