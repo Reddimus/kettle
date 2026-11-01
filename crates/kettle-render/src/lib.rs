@@ -99,9 +99,9 @@ pub use overlays::{
     ConfirmDialogButton, ConfirmDialogOverlay, ContextMenu, ContextMenuRow, HintLabel, ImePreedit,
     MediaPasteReceiptGeometry, MediaPasteReceiptHit, MediaPasteReceiptKind,
     MediaPasteReceiptOverlay, NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar,
-    TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastOverlay, format_media_size,
-    media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry, tab_drag,
-    theme_picker_prefix, title_edit_prefix, update_toast_geometry,
+    TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
+    format_media_size, media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
+    tab_drag, theme_picker_prefix, title_edit_prefix, update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
@@ -220,6 +220,7 @@ mod present;
 mod quad;
 
 mod rounded_surface;
+mod update_toast;
 
 mod snapshot;
 
@@ -634,6 +635,7 @@ pub struct Renderer {
     /// sit above the panel bg.
     menu_text_renderer: TextRenderer,
     rounded_surfaces: rounded_surface::RoundedSurfacePipeline,
+    toast_surfaces: rounded_surface::RoundedSurfacePipeline,
     transport_surface_count: u32,
     confirmation_text_renderer: TextRenderer,
     confirmation_text: confirm::ConfirmText,
@@ -2997,33 +2999,20 @@ impl Renderer {
         // Pre-size for the menu / settings-overlay rows it collects.
         let mut menu_areas: Vec<TextArea> = Vec::with_capacity(48);
         let mut ime_areas: Vec<TextArea> = Vec::with_capacity(1);
+        let mut toast_surfaces = None;
         if let Some(toast) = &overlay.update_toast
             && let Some(geometry) = notifications.toast
         {
             let text_line_height = self.overlay_text_line_height();
-            let (x, y, w, h) = geometry.rect;
             let alpha = toast.opacity.clamp(0.0, 1.0);
-            let background = theme.palette[0];
-            let foreground = self.chrome_colors.text(theme.foreground, background);
-            menu_q.push(rect(x, y, w, h, background, alpha));
             let accent = self.ui_accent(cfg, theme);
-            let accent = self.chrome_colors.icon(accent, background);
-            menu_q.push(rect(x, y, w, 1.0, accent, alpha));
-            if let Some(index) = toast.focused.filter(|i| *i == 1 || *i == 2) {
-                let (bx, by, bw, bh) = if index == 1 {
-                    geometry.details
-                } else {
-                    geometry.close
-                };
-                for (x, y, w, h) in [
-                    (bx, by, bw, 2.0),
-                    (bx, by + bh - 2.0, bw, 2.0),
-                    (bx, by, 2.0, bh),
-                    (bx + bw - 2.0, by, 2.0, bh),
-                ] {
-                    menu_q.push(rect(x, y, w, h, accent, alpha));
-                }
-            }
+            let palette = update_toast::palette(theme, accent, &mut self.chrome_colors);
+            toast_surfaces = Some(update_toast::surfaces(
+                geometry,
+                &palette,
+                alpha,
+                toast.focused,
+            ));
 
             for (i, area) in [geometry.message, geometry.details, geometry.close]
                 .into_iter()
@@ -3032,7 +3021,15 @@ impl Renderer {
                 let (ax, ay, aw, ah) = area;
                 menu_areas.push(TextArea {
                     buffer: &self.update_toast_buffers[i],
-                    left: ax,
+                    left: if i == 0 {
+                        ax
+                    } else {
+                        let width = self.update_toast_buffers[i]
+                            .layout_runs()
+                            .map(|run| run.line_w)
+                            .fold(0.0, f32::max);
+                        ax + (aw - width).max(0.0) * 0.5
+                    },
                     top: if i == 0 {
                         ay + (ah
                             - self.update_toast_buffers[i].layout_runs().count().max(1) as f32
@@ -3050,9 +3047,9 @@ impl Renderer {
                         bottom: (ay + ah).floor() as i32,
                     },
                     default_color: GColor::rgba(
-                        foreground.r,
-                        foreground.g,
-                        foreground.b,
+                        palette.text[i].r,
+                        palette.text[i].g,
+                        palette.text[i].b,
                         (alpha * 255.0).round() as u8,
                     ),
                     custom_glyphs: &[],
@@ -4811,6 +4808,14 @@ impl Renderer {
             &self.gpu.queue,
             [sw, sh],
             &transport_surfaces,
+        );
+        self.toast_surfaces.upload(
+            &self.gpu.device,
+            &self.gpu.queue,
+            [sw, sh],
+            toast_surfaces
+                .as_ref()
+                .map_or(&[][..], |surfaces| &surfaces[..]),
         );
         self.menu_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &menu_q);

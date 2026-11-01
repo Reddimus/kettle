@@ -3047,6 +3047,7 @@ moving existing items.
 | `batching` | Shared pipelines, retained text damage keys, quad helpers, glyph emission and ordered scene encoding |
 | `terminal` | Pane projections, cell/run painting, selection/search projection, cursor glyphs, decorations and painted-card access |
 | `overlays` | Tab/status bars, menus, title editing, IME projections, toasts, receipts, confirmation projections and shared overlay state |
+| `update_toast` | Theme-derived toast surfaces and control contrast, using shared rounded geometry |
 | `completion` | Completion projections, card layout, visible rows, selection and scroll chrome |
 | `search` | Search projections, responsive bar layout, shaped editor clusters and pointer stops |
 | `text_field` | Modal editor projections, clipped text slots and shared shaped paint/pointer/IME geometry |
@@ -3110,8 +3111,16 @@ flowchart LR
     cursor --> lanes["Preview lane surfaces, images and text"]
     lanes --> overlay["Lane dimming and scrollbar"]
     overlay --> menu["Menu chrome and receipt image"]
-    menu --> labels["Menu and settings text"]
+    menu --> toast["Rounded update-toast surfaces"]
+    toast --> labels["Menu and settings text"]
 ```
+
+Update toasts use a separate instance of the existing rounded-surface pipeline
+for their body and two controls. Its bounded batch cannot consume media-control
+capacity, and it draws below the shared chrome text. Surface uploads are
+retained and counted with the other pipelines. Shared toast geometry supplies
+the rounded contour for pointer ownership and hover pauses, while accessibility
+keeps rectangular control bounds.
 
 **Cell-locked pane text.** In the default `text-renderer = grid` mode,
 pane cell text is drawn by `glyph_pipeline`

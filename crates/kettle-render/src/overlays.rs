@@ -301,6 +301,40 @@ pub struct UpdateToastGeometry {
     pub message: Rect4,
     pub details: Rect4,
     pub close: Rect4,
+    pub radius: f32,
+    pub unit: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateToastHit {
+    Body,
+    Details,
+    Close,
+}
+
+impl UpdateToastGeometry {
+    pub fn hit_test(&self, px: f32, py: f32) -> Option<UpdateToastHit> {
+        let inside = |(x, y, w, h): Rect4| px >= x && px < x + w && py >= y && py < y + h;
+        if !inside(self.rect) {
+            return None;
+        }
+        let (x, y, w, h) = self.rect;
+        let radius = self.radius.clamp(0.0, w.min(h) * 0.5);
+        if radius > 0.0 {
+            let dx = ((px - x - w * 0.5).abs() - (w * 0.5 - radius)).max(0.0) / radius;
+            let dy = ((py - y - h * 0.5).abs() - (h * 0.5 - radius)).max(0.0) / radius;
+            if dx.mul_add(dx, dy * dy) > 1.0 {
+                return None;
+            }
+        }
+        Some(if inside(self.close) {
+            UpdateToastHit::Close
+        } else if inside(self.details) {
+            UpdateToastHit::Details
+        } else {
+            UpdateToastHit::Body
+        })
+    }
 }
 
 pub fn update_toast_geometry(
@@ -320,51 +354,101 @@ pub fn update_toast_geometry(
     {
         return None;
     }
-    let width = (surface.0 - 32.0 * scale).min(480.0 * scale);
+    let max_width = (surface.0 - 32.0 * scale).min(480.0 * scale);
     let y = top + 12.0 * scale;
-    if width < 320.0 * scale || y < 0.0 || message.len() > 1024 {
+    if max_width < 320.0 * scale || y < 0.0 || message.len() > 1024 {
         return None;
     }
-    let x = (surface.0 - width) * 0.5;
-    let close_w = (32.0 * scale).max(cell.0 + 16.0 * scale);
-    let details_w = details_cells as f32 * cell.0 + 16.0 * scale;
-    let message_w = width - close_w - details_w - 28.0 * scale;
+    let diameter = (32.0 * scale).max(cell.0.hypot(cell.1) + 12.0 * scale);
+    let details_w = details_cells as f32 * cell.0 + 24.0 * scale;
+    let gap = 8.0 * scale;
+    let message_gap = 12.0 * scale;
     let rows = |available: f32| {
         let columns = ((available / cell.0).floor() as usize).saturating_sub(1);
         toast_text_rows(message, columns)
     };
-    let inline = rows(message_w).is_some_and(|rows| rows <= 2);
-    let text_width = if inline {
-        message_w
-    } else {
-        width - 24.0 * scale
-    };
-    let text_rows = rows(text_width)?.max(2);
-    if text_rows > 6 || details_w + close_w + 24.0 * scale > width {
+    let capsule_h = diameter + 12.0 * scale;
+    let capsule_radius = capsule_h * 0.5;
+    let capsule_fixed = capsule_radius + message_gap + details_w + gap + diameter + 6.0 * scale;
+    let columns = message
+        .split('\n')
+        .map(unicode_width::UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    // Preserve the wrapper's spare column even after fractional-pixel subtraction.
+    let desired = (capsule_fixed + (columns as f32 + 1.0) * cell.0).ceil() + 1.0;
+    let capsule_w = desired.min(max_width);
+    let capsule_message = capsule_w - capsule_fixed;
+    let inline_message =
+        max_width - 16.0 * scale - message_gap - details_w - gap - diameter - 6.0 * scale;
+    let (width, height, radius, message_x, message_y, text_width, text_rows, controls_y, right_pad) =
+        if rows(capsule_message) == Some(1) {
+            (
+                capsule_w,
+                capsule_h,
+                capsule_radius,
+                capsule_radius,
+                (capsule_h - cell.1) * 0.5,
+                capsule_message,
+                1,
+                6.0 * scale,
+                6.0 * scale,
+            )
+        } else if let Some(count) = rows(inline_message).filter(|count| *count <= 2) {
+            let h = (count as f32 * cell.1 + 24.0 * scale).max(capsule_h);
+            (
+                max_width,
+                h,
+                (16.0 * scale).min(h * 0.5),
+                16.0 * scale,
+                (h - count as f32 * cell.1) * 0.5,
+                inline_message,
+                count,
+                (h - diameter) * 0.5,
+                6.0 * scale,
+            )
+        } else {
+            let text_width = max_width - 32.0 * scale;
+            let count = rows(text_width)?;
+            if count > 6 || details_w + diameter + gap + 32.0 * scale > max_width {
+                return None;
+            }
+            let controls_y = 12.0 * scale + count as f32 * cell.1 + gap;
+            let h = controls_y + diameter + 12.0 * scale;
+            (
+                max_width,
+                h,
+                (16.0 * scale).min(h * 0.5),
+                16.0 * scale,
+                12.0 * scale,
+                text_width,
+                count,
+                controls_y,
+                16.0 * scale,
+            )
+        };
+    if !height.is_finite() || y + height > surface.1 - 16.0 * scale {
         return None;
     }
-    let controls_h = (32.0 * scale).max(cell.1 + 16.0 * scale);
-    let height = text_rows as f32 * cell.1 + 24.0 * scale + if inline { 0.0 } else { controls_h };
-    if y + height > surface.1 - 16.0 * scale {
-        return None;
-    }
-    let controls_y = if inline { y } else { y + height - controls_h };
-    let controls_h = if inline { height } else { controls_h };
+    let x = (surface.0 - width) * 0.5;
+    let close_x = x + width - right_pad - diameter;
     Some(UpdateToastGeometry {
         rect: (x, y, width, height),
         message: (
-            x + 12.0 * scale,
-            y + 12.0 * scale,
+            x + message_x,
+            y + message_y,
             text_width,
             cell.1 * text_rows as f32,
         ),
         details: (
-            x + width - close_w - details_w,
-            controls_y,
+            close_x - gap - details_w,
+            y + controls_y,
             details_w,
-            controls_h,
+            diameter,
         ),
-        close: (x + width - close_w, controls_y, close_w, controls_h),
+        close: (close_x, y + controls_y, diameter, diameter),
+        radius,
+        unit: scale,
     })
 }
 

@@ -4680,3 +4680,126 @@ fn screen_reverse_paints_defaults_preserves_explicit_colors_and_restores_cached_
         );
     }
 }
+
+#[test]
+fn toast_redesign_corners_reveal_terminal_while_center_is_opaque() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(800, 600) else {
+        return;
+    };
+    cfg.theme.background = Rgb::new(35, 75, 120);
+    cfg.theme.palette[0] = Rgb::new(16, 18, 25);
+    let snap = snapshot_of(80, 24, b"");
+    let baseline = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 800, 600)],
+        &Overlay::default(),
+    );
+    let geometry = update_toast_geometry(
+        (800.0, 600.0),
+        0.0,
+        1.0,
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.overlay_text_line_height(),
+        ),
+        7,
+        "v6.0.0 is available.",
+    )
+    .unwrap();
+    let overlay = Overlay {
+        update_toast: Some(UpdateToastOverlay {
+            geometry,
+            message: "v6.0.0 is available.".into(),
+            details: "Details".into(),
+            close: "\u{00d7}".into(),
+            opacity: 1.0,
+            focused: None,
+        }),
+        ..Overlay::default()
+    };
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    let (x, y, w, h) = geometry.rect;
+    for (px, py) in [
+        (x + 2.0, y + 2.0),
+        (x + w - 3.0, y + 2.0),
+        (x + 2.0, y + h - 3.0),
+        (x + w - 3.0, y + h - 3.0),
+    ] {
+        let (px, py) = (px.floor() as u32, py.floor() as u32);
+        assert_eq!(
+            frame.get_pixel(px, py),
+            baseline.get_pixel(px, py),
+            "transparent rounded corner at {px},{py}"
+        );
+    }
+    let (px, py) = ((x + w * 0.5) as u32, (y + h - 4.0) as u32);
+    assert_ne!(frame.get_pixel(px, py), baseline.get_pixel(px, py));
+}
+
+#[test]
+fn toast_redesign_text_focus_fade_and_dismissal_preserve_retained_layers() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(800, 600) else {
+        return;
+    };
+    let snap = snapshot_of(80, 24, b"");
+    let panes = [pane(&snap, 800, 600)];
+    let baseline = capture(&mut renderer, &cfg, &panes, &Overlay::default());
+    let geometry = update_toast_geometry(
+        (800.0, 600.0),
+        0.0,
+        1.0,
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.overlay_text_line_height(),
+        ),
+        7,
+        "v6.0.0 is available.",
+    )
+    .unwrap();
+    let mut overlay = Overlay {
+        update_toast: Some(UpdateToastOverlay {
+            geometry,
+            message: "v6.0.0 is available.".into(),
+            details: "Details".into(),
+            close: "\u{00d7}".into(),
+            opacity: 1.0,
+            focused: Some(2),
+        }),
+        ..Overlay::default()
+    };
+    let opaque = capture(&mut renderer, &cfg, &panes, &overlay);
+    let uploads = renderer.toast_surfaces.upload_counts();
+    assert_eq!(opaque, capture(&mut renderer, &cfg, &panes, &overlay));
+    let steady = renderer.toast_surfaces.upload_counts();
+    assert_eq!(
+        (uploads.buffer_writes, uploads.mapped_writes),
+        (steady.buffer_writes, steady.mapped_writes)
+    );
+    // Text must remain above the opaque surfaces, including both button labels.
+    overlay.update_toast.as_mut().unwrap().message.clear();
+    overlay.update_toast.as_mut().unwrap().details.clear();
+    overlay.update_toast.as_mut().unwrap().close.clear();
+    let blank = capture(&mut renderer, &cfg, &panes, &overlay);
+    for (x, y, w, h) in [geometry.message, geometry.details, geometry.close] {
+        let differences = (y.ceil() as u32..(y + h).floor() as u32)
+            .flat_map(|py| (x.ceil() as u32..(x + w).floor() as u32).map(move |px| (px, py)))
+            .filter(|&(px, py)| opaque.get_pixel(px, py) != blank.get_pixel(px, py))
+            .count();
+        assert!(differences > 4, "text hidden by surface at {x},{y}");
+    }
+    overlay.update_toast.as_mut().unwrap().opacity = 0.5;
+    let half = capture(&mut renderer, &cfg, &panes, &overlay);
+    assert_ne!(blank, half);
+    assert_ne!(baseline, half);
+    overlay.update_toast.as_mut().unwrap().opacity = 0.0;
+    let transparent = capture(&mut renderer, &cfg, &panes, &overlay);
+    assert_eq!(
+        baseline, transparent,
+        "focused stroke must fade with the toast"
+    );
+    overlay.update_toast = None;
+    assert_eq!(baseline, capture(&mut renderer, &cfg, &panes, &overlay));
+}

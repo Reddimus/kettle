@@ -177,6 +177,21 @@ impl RoundedSurfacePipeline {
         self.counters.snapshot()
     }
 
+    /// The drawn instances, read from the retained upload copy.
+    pub(crate) fn uploaded(&self) -> Option<impl Iterator<Item = RoundedSurface> + '_> {
+        const SIZE: usize = std::mem::size_of::<RoundedSurface>();
+        let bytes = self
+            .instances_held
+            .bytes()
+            .get(..self.count as usize * SIZE)?;
+        let (records, _) = bytes.as_chunks::<SIZE>();
+        Some(
+            records
+                .iter()
+                .map(|record| bytemuck::pod_read_unaligned(record)),
+        )
+    }
+
     /// Writes only what changed since the last upload (see `upload.rs`).
     pub fn upload(
         &mut self,

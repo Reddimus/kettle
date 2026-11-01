@@ -725,6 +725,7 @@ impl Renderer {
         let menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let rounded_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
+        let toast_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
         let confirmation_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let confirmation_text = confirm::ConfirmText::new();
@@ -883,6 +884,7 @@ impl Renderer {
             menu_quads,
             menu_text_renderer,
             rounded_surfaces,
+            toast_surfaces,
             transport_surface_count: 0,
             confirmation_text_renderer,
             confirmation_text,

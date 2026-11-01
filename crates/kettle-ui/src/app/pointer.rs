@@ -1719,14 +1719,11 @@ impl App {
         // (after chrome/close-button, before the link-pointer / I-beam default).
         let toast_hover = self.update_toast_projection(ws).and_then(|toast| {
             let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
-            rect_contains(toast.geometry.rect, x, y).then(|| {
-                if rect_contains(toast.geometry.details, x, y)
-                    || rect_contains(toast.geometry.close, x, y)
-                {
+            toast.geometry.hit_test(x, y).map(|hit| match hit {
+                kettle_render::UpdateToastHit::Details | kettle_render::UpdateToastHit::Close => {
                     CursorIcon::Pointer
-                } else {
-                    CursorIcon::Default
                 }
+                kettle_render::UpdateToastHit::Body => CursorIcon::Default,
             })
         });
         let want = drag_icon

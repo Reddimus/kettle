@@ -1401,7 +1401,7 @@ impl App {
             })
             .collect();
         let update_toast = self.update_toast_projection(target).map(|toast| serde_json::json!({
-            "rect": rect_json(toast.geometry.rect), "label": toast.message,
+            "rect": rect_json(toast.geometry.rect), "radius": toast.geometry.radius, "label": toast.message,
             "message": rect_json(toast.geometry.message),
             "details": rect_json(toast.geometry.details), "dismiss": rect_json(toast.geometry.close),
         }));

@@ -1215,6 +1215,8 @@ fn notification_geometry_preserves_unobstructed_placement_and_hides_when_full() 
         message: receipt.pane_rect,
         details: receipt.pane_rect,
         close: receipt.pane_rect,
+        radius: 0.0,
+        unit: 1.0,
     };
     assert!(
         super::notification_geometry(Some(covering), Some(&receipt), None, CELL, CELL.0, CELL.1)

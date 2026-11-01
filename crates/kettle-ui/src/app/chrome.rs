@@ -37,7 +37,10 @@ impl App {
         self.cursor_in_tab_bar(ws)
             || self.cursor_in_status_bar(ws)
             || self.update_toast_projection(ws).is_some_and(|toast| {
-                rect_contains(toast.geometry.rect, ws.cursor.x as f32, ws.cursor.y as f32)
+                toast
+                    .geometry
+                    .hit_test(ws.cursor.x as f32, ws.cursor.y as f32)
+                    .is_some()
             })
     }
 
