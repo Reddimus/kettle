@@ -5,12 +5,57 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+import tempfile
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location(
     "conformance_check", Path(__file__).with_name("check-conformance.py")
 )
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)
+
+
+class EsctestColorIsolation(unittest.TestCase):
+    def test_resets_special_resources_between_cases_without_catching_assertions(self):
+        events = []
+        commands = SimpleNamespace(
+            note=events.append, ResetSpecialColor=lambda: events.append("special reset")
+        )
+        source = """import esccmd
+def reset():
+    esccmd.note("original reset")
+def main():
+    reset()
+    esccmd.note("first test")
+    reset()
+    esccmd.note("second test")
+    raise AssertionError("real failure")
+main()
+"""
+        with tempfile.TemporaryDirectory() as scratch:
+            script = Path(scratch) / "esctest.py"
+            script.write_text(source, encoding="utf-8")
+            with patch.dict("sys.modules", {"esccmd": commands}):
+                with self.assertRaisesRegex(AssertionError, "real failure"):
+                    checker.run_esctest_suite(script, commands)
+        self.assertEqual(
+            events,
+            [
+                "original reset",
+                "special reset",
+                "first test",
+                "original reset",
+                "special reset",
+                "second test",
+            ],
+        )
+
+    def test_refuses_an_unexpected_upstream_entrypoint(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            script = Path(scratch) / "esctest.py"
+            script.write_text("main(1)\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "entrypoint"):
+                checker.run_esctest_suite(script, SimpleNamespace())
 
 
 class NoClearOptions(unittest.TestCase):

@@ -533,15 +533,19 @@ impl Renderer {
 
             let card_cell = card_frame.cell(snap, snapshot_index);
             let owned_cell = !matches!(card_cell, inline_cards::CardCell::Ordinary);
-            let flags = if owned_cell { Flags::empty() } else { sc.flags };
+            let (fg_spec, bg_spec, flags) = if owned_cell {
+                (sc.fg, sc.bg, Flags::empty())
+            } else {
+                color::special_attributes(sc.fg, sc.bg, sc.flags, theme, term_colors)
+            };
             // Terminator parity, terminatorlib/config.py:111
             // `allow_bold`: when false, suppress bold attr entirely.
             // Useful on fonts without a bold companion.
             let bold = cfg.allow_bold && flags.contains(Flags::BOLD);
             let (raw_fg, raw_bg) = if flags.contains(Flags::INVERSE) {
-                (sc.bg, sc.fg)
+                (bg_spec, fg_spec)
             } else {
-                (sc.fg, sc.bg)
+                (fg_spec, bg_spec)
             };
             let raw_fg = if bold && cfg.bold_is_bright {
                 color::bright_for_bold(raw_fg)

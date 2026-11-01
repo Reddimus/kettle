@@ -13,7 +13,7 @@ DA2Tests.test_DA2_NoParameter
 DATests.test_DA_0
 DATests.test_DA_NoParameter
 
-[colour syntax and special colours beyond rgb: and #rrggbb (X colour spaces, OSC 5, OSC 4 special indices): not implemented]
+[X colour-space conversion: fixed D65/sRGB with channel clipping and continuous CIE Lab, rather than the suite's X server profile/gamut mapping]
 ChangeColorTests.test_ChangeColor_CIELab
 ChangeColorTests.test_ChangeColor_CIELuv
 ChangeColorTests.test_ChangeColor_CIEXYZ
@@ -33,20 +33,8 @@ ChangeSpecialColorTests.test_ChangeSpecialColor_CIELuv
 ChangeSpecialColorTests.test_ChangeSpecialColor_CIEXYZ
 ChangeSpecialColorTests.test_ChangeSpecialColor_CIEuvY
 ChangeSpecialColorTests.test_ChangeSpecialColor_CIExyY
-ChangeSpecialColorTests.test_ChangeSpecialColor_Hash12
-ChangeSpecialColorTests.test_ChangeSpecialColor_Hash3
-ChangeSpecialColorTests.test_ChangeSpecialColor_Hash6
-ChangeSpecialColorTests.test_ChangeSpecialColor_Hash9
-ChangeSpecialColorTests.test_ChangeSpecialColor_Multiple
-ChangeSpecialColorTests.test_ChangeSpecialColor_Multiple2
-ChangeSpecialColorTests.test_ChangeSpecialColor_RGB
 ChangeSpecialColorTests.test_ChangeSpecialColor_RGBI
 ChangeSpecialColorTests.test_ChangeSpecialColor_TekHVC
-ResetSpecialColorTests.test_ResetSpecialColor_Dynamic
-ResetSpecialColorTests.test_ResetSpecialColor_Multiple
-ResetSpecialColorTests.test_ResetSpecialColor_Multiple2
-ResetSpecialColorTests.test_ResetSpecialColor_Single
-ResetSpecialColorTests.test_ResetSpecialColor_Single2
 
 [reports (DECRQM, DECRQSS, DECDSR) about modes and settings Kettle does not implement]
 DECDSRTests.test_DECDSR_DECCKSR

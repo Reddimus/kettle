@@ -4505,3 +4505,106 @@ fn grapheme_cells_do_not_change_other_legacy_rows() {
         "an unrelated Legacy row must retain its pixels when another row gains a grapheme"
     );
 }
+
+#[test]
+fn special_attribute_colors_render_only_when_enabled_and_override_ansi_on_request() {
+    use alacritty_terminal::term::cell::Flags;
+    use image::GenericImageView;
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("SPECIAL_COLOR_GPU_SKIP: no adapter");
+        return;
+    };
+    cfg.minimum_contrast = 1.0;
+    cfg.theme.foreground = Rgb::new(255, 255, 255);
+    cfg.theme.background = Rgb::new(0, 0, 0);
+    cfg.theme.palette[2] = Rgb::new(0, 255, 0);
+    cfg.theme.palette[10] = Rgb::new(0, 255, 0);
+    let x = cfg.padding_x.round() as u32;
+    let y = cfg.padding_y.round() as u32;
+    let width = renderer.cell_w.ceil() as u32;
+    let height = renderer.cell_h.ceil() as u32;
+    let ink = |frame: &image::RgbaImage, red: bool| {
+        image::imageops::crop_imm(frame, x, y, width, height)
+            .pixels()
+            .filter(|(_, _, p)| {
+                let [r, g, b, _] = p.0;
+                if red {
+                    r > 70 && u16::from(r) > u16::from(g) * 2 && u16::from(r) > u16::from(b) * 2
+                } else {
+                    g > 70 && u16::from(g) > u16::from(r) * 2 && u16::from(g) > u16::from(b) * 2
+                }
+            })
+            .count()
+    };
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        cfg.text_renderer = mode;
+        let plain = snapshot_of(20, 4, b"\x1b[1mA\x1b[?25l");
+        let expected = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&plain, 320, 120)],
+            &focused(false),
+        );
+        let stored = snapshot_of(20, 4, b"\x1b]5;0;#ff0000\x07\x1b[1mA\x1b[?25l");
+        let inactive = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&stored, 320, 120)],
+            &focused(false),
+        );
+        assert_eq!(
+            expected, inactive,
+            "{mode:?}: setting a special color must not enable it"
+        );
+        for (sgr, override_ansi, want_red) in [
+            ("1", false, true),
+            ("1;32", false, false),
+            ("1;32", true, true),
+        ] {
+            let text = format!(
+                "\x1b]5;0;#ff0000\x07\x1b]6;0;1\x07{}\x1b[{sgr}mA\x1b[?25l",
+                if override_ansi {
+                    "\x1b]106;5;1\x07"
+                } else {
+                    ""
+                }
+            );
+            let snap = snapshot_of(20, 4, text.as_bytes());
+            assert!(
+                snap.cells
+                    .iter()
+                    .find(|c| c.c == 'A')
+                    .unwrap()
+                    .flags
+                    .contains(Flags::BOLD)
+            );
+            let frame = capture(
+                &mut renderer,
+                &cfg,
+                &[pane(&snap, 320, 120)],
+                &focused(false),
+            );
+            assert!(
+                ink(&frame, want_red) > 0,
+                "{mode:?}: selected foreground must reach the pixels, SGR={sgr}, expected_red={want_red}, ANSI override={override_ansi}"
+            );
+        }
+        for (index, sgr) in [(0, "1"), (1, "4"), (2, "5"), (3, "7"), (4, "3")] {
+            let text =
+                format!("\x1b]5;{index};#ff0000\x07\x1b]6;{index};1\x07\x1b[{sgr}mA\x1b[?25l");
+            let snap = snapshot_of(20, 4, text.as_bytes());
+            let frame = capture(
+                &mut renderer,
+                &cfg,
+                &[pane(&snap, 320, 120)],
+                &focused(false),
+            );
+            assert!(
+                ink(&frame, true) > 0,
+                "{mode:?}: special color {index} must reach its attribute's glyph"
+            );
+        }
+    }
+    eprintln!("SPECIAL_COLOR_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+}

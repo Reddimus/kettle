@@ -144,7 +144,7 @@ pub struct PaneSnapshot {
     pub cursor_blinking: bool,
     /// Grid-absolute selection range (`contains` does the point math).
     pub selection: Option<SelectionRange>,
-    /// Full 269-slot color table (OSC 4/10/11/12 overrides + dims) — `Copy`
+    /// Full 274-slot color table (OSC palette/dynamic/special overrides + dims) — `Copy`
     /// in alacritty, ~1KB flat.
     pub colors: TermColors,
     pub display_offset: usize,

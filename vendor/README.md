@@ -555,3 +555,16 @@ them.
 
 Remove this copy and its root patch entry when a released arboard includes the
 CRLF decoder correction and reads INCR segments of any type.
+
+
+### Extended OSC colours
+
+The terminal engine adds five special-colour slots after existing dim colours,
+plus six default-off attribute-colour mode bits in `Colors`. VTE maps OSC 4/5
+aliases, OSC 105 resets and OSC 6/106 mode controls without changing dynamic
+colour indices. `vte::ansi::colors` converts finite X colour-space triples with
+a fixed D65/sRGB profile when the `std` feature is enabled. The formulas follow
+[Xlib colour spaces](https://www.x.org/releases/X11R7.6/doc/libX11/specs/libX11/libX11.html)
+and the [sRGB conversion reference](https://www.w3.org/TR/css-color-4/#color-conversion-code).
+The continuous CIE Lab low-light inverse and channel-clipping policy are
+intentional differences from Xlib's historical conversion/profile pipeline.
