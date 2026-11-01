@@ -2028,3 +2028,34 @@ path refuses input while awaiting the next prompt, then returns only the target
 command with exit code 1. Portable capability-state tests retain fresh legacy
 fallback and versioned/legacy duplicate transitions. The Fish Vi fixture uses a
 private 10 ms Escape delay, waits beyond it, and records the actual active map.
+
+## Linux UI qualification
+
+The manual `Linux UI qualification` workflow builds one release binary and
+binds it to the exact source tree and live-UI helper hashes. Three fresh hosted
+runner allocations download that same artifact. Each runs 100 repetitions of
+all six quarantined scenarios: search-history, text-presentation,
+split-exit-resize, program-keys, color-scheme and steady-uploads. The last uses
+`--screenshots-only`, matching its existing Xvfb scope.
+
+Each scenario starts fresh fixtures and records their PIDs and exit receipts.
+A failed case stops its allocation without retrying; a timeout interrupts the
+recorded supervisor so normal fixture cleanup can run. Case logs, screenshots,
+receipts and every completed count are uploaded even when a job fails. The
+collector rejects missing allocations, changed artifacts, failures, incomplete
+rounds or fewer than 300 successes per scenario. A successful workflow is
+qualification evidence for its recorded candidate, not automatic promotion of
+any scenario. Preserve failures and restart after fixing their cause.
+
+Dispatch against the final integrated candidate, then download and inspect the
+`ui-qualification-result` and three shard artifacts. Promote passing scenarios
+only in a separately reviewed change to their existing required Linux job.
+Physical GPU and desktop-focus claims require their own native evidence.
+
+The search-history probe waits for focused-match pixel rectangles as well as
+match status and the expected visible row. Search may defer viewport highlights
+to another frame after navigation; accepting its earlier status produced a
+false failure despite a highlighted subsequent screenshot. Portable regressions
+cover that transition and still require failure when rectangles never appear.
+The qualification supervisor's native pilot exercises its cleanup path; it does
+not count toward hosted Linux qualification.

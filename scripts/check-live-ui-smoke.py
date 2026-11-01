@@ -8114,6 +8114,8 @@ def wait_for_search_result(
             isinstance(search, dict)
             and search.get("has_match") is True
             and search.get("status") in {"Match", "Wrapped"}
+            and isinstance(search.get("match_rects"), list)
+            and bool(search["match_rects"])
             and expected_text in screen_text(last_screen)
         ):
             return last_geometry, last_screen

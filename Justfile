@@ -429,6 +429,7 @@ script-fixture-self-test:
     python3 scripts/test-menu-screenshot.py
     python3 scripts/check-stress-live.py --self-test
     python3 scripts/test-script-regressions.py
+    python3 scripts/test-qualify-live-ui.py
     python3 scripts/test-linux-checks.py
     python3 scripts/test-newest-release.py
 

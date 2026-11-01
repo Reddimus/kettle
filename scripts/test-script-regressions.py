@@ -28,6 +28,34 @@ def load(name):
 
 
 class ScriptRegressionTests(unittest.TestCase):
+    def test_search_result_waits_for_highlight_geometry_after_navigation(self):
+        live = load('check-live-ui-smoke')
+        pending = {'has_match': True, 'status': 'Match', 'match_rects': []}
+        ready = {**pending, 'match_rects': [{'pane': 1, 'rect': {'x': 8, 'y': 16, 'width': 40, 'height': 16}}]}
+        fixture = Mock()
+        fixture.json_ctl.side_effect = [
+            {'search': pending}, {'text': 'wanted'},
+            {'search': ready}, {'text': 'wanted'},
+        ]
+        with patch.object(live, 'screen_text', return_value='wanted'), \
+             patch.object(live.time, 'sleep'):
+            geometry, _ = live.wait_for_search_result(fixture, 'wanted')
+        self.assertEqual(geometry['search'], ready)
+        self.assertEqual(fixture.json_ctl.call_count, 4)
+
+    def test_search_result_without_highlight_geometry_still_times_out(self):
+        live = load('check-live-ui-smoke')
+        fixture = Mock()
+        fixture.json_ctl.side_effect = [
+            {'search': {'has_match': True, 'status': 'Match', 'match_rects': []}},
+            {'text': 'wanted'},
+        ]
+        with patch.object(live, 'screen_text', return_value='wanted'), \
+             patch.object(live.time, 'sleep'), \
+             patch.object(live.time, 'monotonic', side_effect=[0, 0, 13]):
+            with self.assertRaisesRegex(SystemExit, 'timed out'):
+                live.wait_for_search_result(fixture, 'wanted')
+
     def test_modal_startup_failure_preserves_clipboard(self):
         modal = load('check-modal-shortcuts')
         with tempfile.TemporaryDirectory() as raw, \
