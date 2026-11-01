@@ -1138,7 +1138,9 @@ pub enum Mode {
 impl Mode {
     fn new(mode: u16) -> Self {
         match mode {
+            2 => Self::Named(NamedMode::KeyboardAction),
             4 => Self::Named(NamedMode::Insert),
+            12 => Self::Named(NamedMode::SendReceive),
             20 => Self::Named(NamedMode::LineFeedNewLine),
             _ => Self::Unknown(mode),
         }
@@ -1163,6 +1165,10 @@ impl From<NamedMode> for Mode {
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum NamedMode {
+    /// KAM: inhibit keyboard input.
+    KeyboardAction = 2,
+    /// SRM: send without local echo.
+    SendReceive = 12,
     /// IRM Insert Mode.
     Insert = 4,
     LineFeedNewLine = 20,

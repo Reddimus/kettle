@@ -80,6 +80,10 @@ date. Recheck that before upgrading a crate or dropping a patch.
   blanks separately from undrawn cells. SGR blink is retained for protocol
   round trips while text rendering stays steady. XTSAVE/XTRESTORE retain a
   finite set of implemented private modes; MoreFix is explicitly negotiated.
+  ANSI keyboard lock and send/receive modes expose separate state without
+  widening the public terminal mode flags. KAM resets on RIS and DECSTR; SRM
+  defaults to no local echo, resets on RIS and survives DECSTR. Physical DEC
+  keyboard status is refused rather than inventing hardware metadata.
   Fixed-mode and absent-device reports describe the actual emulation. Copying snapshots
   complete cells before mutation, including overlapping areas; wide-glyph
   boundaries remain paired. Selective rectangular erase preserves visual

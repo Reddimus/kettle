@@ -358,9 +358,9 @@ fn mouse_and_focus_reports_use_chronological_user_input() {
         .nth(1)
         .and_then(|body| body.split("\n    }\n").next())
         .expect("target-aware mouse sender");
-    // Presses and drags take ordinary user input; a release takes the
+    // Presses and drags use the pointer path; a release takes the
     // user lane's room for releases. Both stay in order with typing.
-    assert!(mouse.contains("pane.feed_input(&seq)"));
+    assert!(mouse.contains("pane.feed_pointer_input(&seq)"));
     assert!(mouse.contains("pane.feed_mouse_release(&seq)"));
     assert!(!mouse.contains("queue_protocol_reply"));
 
@@ -439,7 +439,7 @@ fn a_held_buttons_reports_stay_with_the_pane_its_press_went_to() {
     ));
     assert!(send.contains("MouseAt::Held { rect: None, cell } => cell,"));
     assert!(send.contains(
-        "let result = if pressed || motion { pane.feed_input(&seq) } else { pane.feed_mouse_release(&seq) };"
+        "let result = if pressed || motion { pane.feed_pointer_input(&seq) } else { pane.feed_mouse_release(&seq) };"
     ));
     assert!(send.contains(
         "if !result.is_queued() { // The program never got it: a press it missed leaves no button // held, so no release follows. self.report_input_result(result); return MouseReport::Swallowed; }"

@@ -763,7 +763,7 @@ impl App {
         // A release takes the room the program's input keeps for releases,
         // so it always lands behind its press.
         let result = if pressed || motion {
-            pane.feed_input(&seq)
+            pane.feed_pointer_input(&seq)
         } else {
             pane.feed_mouse_release(&seq)
         };
@@ -970,7 +970,7 @@ impl App {
                 .mux
                 .panes
                 .get(&wheel_pane)
-                .map(|pane| pane.feed_input(&bytes))
+                .map(|pane| pane.feed_pointer_input(&bytes))
                 .unwrap_or(PaneInputResult::Queued);
             self.report_input_result(result);
             Self::dismiss_media_paste_receipt_after_input(ws, wheel_pane, result);

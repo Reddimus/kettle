@@ -2956,3 +2956,79 @@ fn screen_reverse_palette_updates_follow_displayed_slots_without_changing_other_
     assert_eq!(term.colors()[7], Some(Rgb { r: 0, g: 0, b: 255 }));
     assert!(!term.colors().has_special_modes());
 }
+
+#[test]
+fn ansi_keyboard_modes_report_defaults_changes_and_reset_boundaries() {
+    let sequence = b"\x1b[2$p\x1b[12$p\x1b[2h\x1b[12l\x1b[2$p\x1b[12$p\x1b[!p\x1b[2$p\x1b[12$p\x1bc\x1b[2$p\x1b[12$p";
+    for split in 0..=sequence.len() {
+        let (mut term, mut parser, rx) = harness_rx(12, 3);
+        term.set_options(TermConfig {
+            keyboard_input_modes: true,
+            ..TermConfig::default()
+        });
+        feed(&mut term, &mut parser, &sequence[..split]);
+        feed(&mut term, &mut parser, &sequence[split..]);
+        let writes: Vec<_> = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                TermEvent::PtyWrite(bytes) => Some(bytes),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            writes,
+            [
+                "\x1b[2;2$y",
+                "\x1b[12;1$y",
+                "\x1b[2;1$y",
+                "\x1b[12;2$y",
+                "\x1b[2;2$y",
+                "\x1b[12;2$y",
+                "\x1b[2;2$y",
+                "\x1b[12;1$y"
+            ],
+            "split {split}"
+        );
+    }
+}
+
+#[test]
+fn keyboard_hardware_status_is_refused_at_every_declared_level() {
+    for level in 62..=65 {
+        let (mut term, mut parser, rx) = harness_rx(12, 3);
+        feed(
+            &mut term,
+            &mut parser,
+            format!("\x1b[{level};1\"p\x1b[?26n").as_bytes(),
+        );
+        assert_eq!(
+            drain_pty(&rx),
+            "",
+            "level {level}: no physical DEC keyboard is modeled"
+        );
+    }
+}
+
+#[test]
+fn a_raw_input_transport_reports_fixed_keyboard_modes_and_does_not_mutate_them() {
+    let (mut term, mut parser, rx) = harness_rx(12, 3);
+    feed(&mut term, &mut parser, b"\x1b[2h\x1b[12l\x1b[2$p\x1b[12$p");
+    assert_eq!(drain_pty(&rx), "\x1b[2;4$y\x1b[12;3$y");
+    assert!(!term.keyboard_locked());
+    assert!(!term.local_echo());
+}
+
+#[test]
+fn withdrawing_keyboard_input_capability_clears_its_mutable_modes() {
+    let (mut term, mut parser, rx) = harness_rx(12, 3);
+    term.set_options(TermConfig {
+        keyboard_input_modes: true,
+        ..TermConfig::default()
+    });
+    feed(&mut term, &mut parser, b"\x1b[2h\x1b[12l");
+    assert!(term.keyboard_locked() && term.local_echo());
+    term.set_options(TermConfig::default());
+    feed(&mut term, &mut parser, b"\x1b[2$p\x1b[12$p");
+    assert_eq!(drain_pty(&rx), "\x1b[2;4$y\x1b[12;3$y");
+    assert!(!term.keyboard_locked() && !term.local_echo());
+}

@@ -261,7 +261,9 @@ fn local_output_waits_for_earlier_reads_and_a_closed_channel_is_skipped() {
     // the request is also ready. `select!` picks at random, so repeat.
     for _ in 0..16 {
         raw_tx.send(Some((3, b"queued".to_vec(), 6))).unwrap();
-        local_tx.send((3, b"\x1bc".to_vec())).unwrap();
+        local_tx
+            .send((3, super::LocalPayload::Output(b"\x1bc".to_vec())))
+            .unwrap();
         let first = receive(&mut pending, &mut local_rx, 2);
         assert!(matches!(first, Some(ParserInput::Pty(3, _, 6))));
         let second = receive(&mut pending, &mut local_rx, 3);
@@ -269,7 +271,9 @@ fn local_output_waits_for_earlier_reads_and_a_closed_channel_is_skipped() {
     }
 
     // A request whose reads are all handled goes straight through.
-    local_tx.send((3, b"\x1b[3J".to_vec())).unwrap();
+    local_tx
+        .send((3, super::LocalPayload::Output(b"\x1b[3J".to_vec())))
+        .unwrap();
     assert!(matches!(
         receive(&mut pending, &mut local_rx, 3),
         Some(ParserInput::Local(bytes)) if bytes == b"\x1b[3J"

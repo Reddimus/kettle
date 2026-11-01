@@ -1,17 +1,32 @@
-# esctest2 tests Kettle fails, grouped by reason. `just conformance-esctest`
-# fails when this set changes; docs/TESTING.md ("Terminal conformance")
-# explains each group. Regenerate with `--update`, then classify new entries.
-
-[80/132-column switching (DECCOLM, mode 40): Kettle does not resize its window for a program]
-DECSETTests.test_DECSET_Allow80To132
-DECSETTests.test_DECSET_DECCOLM
-RISTests.test_RIS_ResetDECCOLM
+# Intentional esctest2 policy exceptions. Every implemented feature must pass.
+# `just conformance-esctest` fails whenever this set changes; docs/TESTING.md
+# explains the fixed geometry, identity, hardware, colour and disclosure policies.
 
 [DA and DA2 identify Kettle, not xterm]
 DA2Tests.test_DA2_0
 DA2Tests.test_DA2_NoParameter
 DATests.test_DA_0
 DATests.test_DA_NoParameter
+
+[Fixed modes: UTF-8 without Hebrew keyboard mapping or NRCS; no printer formatting; jump scrolling]
+DECRQMTests.test_DECRQM_DEC_DECHEBM
+DECRQMTests.test_DECRQM_DEC_DECNRCM
+DECRQMTests.test_DECRQM_DEC_DECPEX
+DECRQMTests.test_DECRQM_DEC_DECPFF
+DECRQMTests.test_DECRQM_DEC_DECSCLM
+
+[Memory checksum disclosure is deliberately refused (DECCKSR)]
+DECDSRTests.test_DECDSR_DECCKSR
+
+[Physical DEC keyboard metadata is not modeled: DSR 26 is deliberately refused]
+DECDSRTests.test_DECDSR_DSRKeyboard
+
+[Program-driven geometry is disabled: DECCOLM and DECSNLS never resize a pane or window]
+DECRQMTests.test_DECRQM_DEC_DECCOLM
+DECRQSSTests.test_DECRQSS_DECSNLS
+DECSETTests.test_DECSET_Allow80To132
+DECSETTests.test_DECSET_DECCOLM
+RISTests.test_RIS_ResetDECCOLM
 
 [X colour spaces: fixed D65/sRGB, channel clipping, physical xy validation and continuous CIE Lab differ from the suite's X server conversion]
 ChangeColorTests.test_ChangeColor_CIELab
@@ -35,19 +50,6 @@ ChangeSpecialColorTests.test_ChangeSpecialColor_CIEuvY
 ChangeSpecialColorTests.test_ChangeSpecialColor_CIExyY
 ChangeSpecialColorTests.test_ChangeSpecialColor_RGBI
 ChangeSpecialColorTests.test_ChangeSpecialColor_TekHVC
-
-[reports (DECRQM, DECRQSS, DECDSR) about modes and settings Kettle does not implement]
-DECDSRTests.test_DECDSR_DECCKSR
-DECDSRTests.test_DECDSR_DSRKeyboard
-DECRQMTests.test_DECRQM_ANSI_KAM
-DECRQMTests.test_DECRQM_ANSI_SRM
-DECRQMTests.test_DECRQM_DEC_DECCOLM
-DECRQMTests.test_DECRQM_DEC_DECHEBM
-DECRQMTests.test_DECRQM_DEC_DECNRCM
-DECRQMTests.test_DECRQM_DEC_DECPEX
-DECRQMTests.test_DECRQM_DEC_DECPFF
-DECRQMTests.test_DECRQM_DEC_DECSCLM
-DECRQSSTests.test_DECRQSS_DECSNLS
 
 [window operations (XTWINOPS): Kettle never resizes, moves or iconifies its window for a program, and does not report titles]
 DECRQSSTests.test_DECRQSS_DECSLPP
@@ -80,3 +82,4 @@ XtermWinopsTests.test_XtermWinops_ResizePixels_OmittedHeight
 XtermWinopsTests.test_XtermWinops_ResizePixels_OmittedWidth
 XtermWinopsTests.test_XtermWinops_ResizePixels_ZeroHeight
 XtermWinopsTests.test_XtermWinops_ResizePixels_ZeroWidth
+

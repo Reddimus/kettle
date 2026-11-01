@@ -3635,6 +3635,10 @@ pub(super) fn ctl_input_error(result: PaneInputResult) -> Option<(&'static str, 
     use kettle_ctl::protocol::error_codes as ec;
     match result {
         PaneInputResult::Queued => None,
+        PaneInputResult::KeyboardLocked => Some((
+            ec::BUSY,
+            "keyboard input is locked by ANSI mode 2; no bytes were sent",
+        )),
         PaneInputResult::ReadOnly => Some((
             ec::READ_ONLY,
             "pane is read-only (user toggled 'Read only')",
