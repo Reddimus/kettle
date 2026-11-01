@@ -1216,6 +1216,20 @@ Kitty precedence and reset. Removing the negotiated-key binding override
 makes the keyboard regression fail; removing the modes makes the core
 regressions fail.
 
+The extended-colour regressions exercise all seven floating colour formats,
+known sRGB primaries and neutral values, signed/scientific components, invalid
+and degenerate inputs, and every split of palette, dynamic and special-colour
+OSC sequences. Special-colour tests cover alias queries, reset isolation,
+default-off modes, ANSI override and retained OSC resources through resets.
+The native esctest run passes 456 cases, retains 41 upstream known-bug cases
+and has 70 explicit expected failures, with no new failures. Twelve special-colour
+cases now pass. Fixture setup uses the suite's black/white defaults and resets
+special resources between cases; every original test assertion remains intact.
+A native GPU regression exercises all five attributes in both renderer paths;
+removing the render hook makes it fail. The fixed D65/sRGB conversion is a
+portable policy: esctest's display-profile-specific RGB expectations are kept
+as explicit exceptions rather than substituted into the implementation.
+
 **ucs-detect** (`just conformance-ucs`) measures how many columns the
 terminal gives Unicode text, against `wcwidth`. Kettle 5.7.0 scored 99.6% on
 narrow and 94.9% on wide characters, where the misses are the 26 regional

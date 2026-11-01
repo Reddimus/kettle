@@ -3,7 +3,8 @@ use std::ops::{Index, IndexMut};
 use crate::vte::ansi::{NamedColor, Rgb};
 
 /// Number of terminal colors.
-pub const COUNT: usize = 269;
+pub const COUNT: usize =
+    crate::vte::ansi::SPECIAL_COLOR_BASE + crate::vte::ansi::SPECIAL_COLOR_COUNT;
 
 /// Array of indexed colors.
 ///
@@ -17,13 +18,39 @@ pub const COUNT: usize = 269;
 /// | 258      | Cursor            |
 /// | 259..267 | Dim colors        |
 /// | 267      | Bright foreground |
-/// | 268      | Dim background    |
+/// | 268      | Dim foreground    |
+/// | 269..274 | Special attribute colors |
 #[derive(Copy, Clone)]
-pub struct Colors([Option<Rgb>; COUNT]);
+pub struct Colors([Option<Rgb>; COUNT], u8);
 
 impl Default for Colors {
     fn default() -> Self {
-        Self([None; COUNT])
+        Self([None; COUNT], 0)
+    }
+}
+
+impl Colors {
+    #[inline]
+    pub fn has_special_modes(&self) -> bool {
+        self.1 != 0
+    }
+
+    #[inline]
+    pub fn special_mode(&self, index: usize) -> bool {
+        index < 6 && self.1 & (1 << index) != 0
+    }
+
+    pub fn set_special_mode(&mut self, index: usize, enabled: bool) -> bool {
+        if index >= 6 {
+            return false;
+        }
+        let before = self.1;
+        if enabled {
+            self.1 |= 1 << index;
+        } else {
+            self.1 &= !(1 << index);
+        }
+        self.1 != before
     }
 }
 

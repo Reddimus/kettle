@@ -81,10 +81,12 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   rectangular copy/fill/erase removes another 24. Column editing and reverse
   wrapping remove another 32. Attribute changes, mode save/restore, MoreFix
   and truthful fixed-mode/device reports remove another 26; esctest2 now
-  fails 82 tests after the keypad, Backarrow and VT5 no-clear follow-up,
+  fails 70 tests after the keypad, Backarrow, VT5 no-clear and special-colour follow-ups,
   listed by reason in
   `scripts/conformance-esctest-expected.txt`. Remaining features include
-  additional modes and colour syntaxes. Cases
+  additional modes. The seven X colour syntaxes are implemented with fixed
+  D65/sRGB conversion, channel clipping and a continuous CIE Lab low-light
+  inverse; 21 profile-specific expectations remain intentional exceptions. Cases
   involving those controls and margins remain grouped with their missing
   feature. The list also retains deliberate identity, checksum and window
   policies. Close each feature by implementing it in the vendored engine and

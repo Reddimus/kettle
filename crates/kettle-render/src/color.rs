@@ -53,7 +53,9 @@ fn named(n: NamedColor, theme: &Theme) -> Rgb {
 /// an `Rgb`. `alacritty_terminal` numbers these the same way `Colors` is
 /// indexed: `0..=15` is the ANSI palette, `16..=255` is the xterm 256-color
 /// cube + grayscale ramp, **256 = default foreground**, **257 = default
-/// background**, **258 = cursor**. Anything else returns `None`.
+/// background**, **258 = cursor**, and `269..=273` are special attribute
+/// colours. Unset special colours use the theme foreground. Anything else
+/// returns `None`.
 ///
 /// Runtime overrides set via OSC 4 / 10 / 11 / 12 (stored in `term_colors`)
 /// take precedence over the theme. Pure — no I/O, fully unit-tested — so the
@@ -68,6 +70,7 @@ pub fn resolve_query(idx: usize, theme: &Theme, term_colors: &TermColors) -> Opt
         256 => theme.foreground,
         257 => theme.background,
         258 => theme.cursor,
+        alacritty_terminal::vte::ansi::SPECIAL_COLOR_BASE..=273 => theme.foreground,
         _ => return None,
     };
     // Runtime override (set via OSC 4 / 10 / 11 / 12) wins over the theme.
@@ -162,6 +165,57 @@ pub fn resolve(c: AnsiColor, theme: &Theme, term_colors: &TermColors) -> Rgb {
             }
         }
     }
+}
+
+pub(crate) fn special_attributes(
+    mut fg: AnsiColor,
+    mut bg: AnsiColor,
+    flags: alacritty_terminal::term::cell::Flags,
+    theme: &Theme,
+    colors: &TermColors,
+) -> (AnsiColor, AnsiColor, alacritty_terminal::term::cell::Flags) {
+    use alacritty_terminal::term::cell::Flags;
+    use alacritty_terminal::vte::ansi::{Rgb as AnsiRgb, SPECIAL_COLOR_BASE};
+    if !colors.has_special_modes() {
+        return (fg, bg, flags);
+    }
+    let special = |index: usize| {
+        AnsiColor::Spec(colors[SPECIAL_COLOR_BASE + index].unwrap_or(AnsiRgb {
+            r: theme.foreground.r,
+            g: theme.foreground.g,
+            b: theme.foreground.b,
+        }))
+    };
+    let override_ansi = colors.special_mode(5);
+    let mut style = flags;
+    if colors.special_mode(0) {
+        style.remove(Flags::BOLD);
+    }
+    if colors.special_mode(4) {
+        style.remove(Flags::ITALIC);
+    }
+    if (override_ansi || bg == AnsiColor::Named(NamedColor::Background))
+        && flags.contains(Flags::INVERSE)
+        && colors.special_mode(3)
+    {
+        bg = special(3);
+    }
+    if override_ansi || fg == AnsiColor::Named(NamedColor::Foreground) {
+        // XTerm gives blink, bold, underline, then italic color precedence.
+        for (index, attribute) in [
+            (2, Flags::BLINK),
+            (0, Flags::BOLD),
+            (1, Flags::ALL_UNDERLINES),
+            (4, Flags::ITALIC),
+        ] {
+            if flags.intersects(attribute) && colors.special_mode(index) {
+                fg = special(index);
+                style.remove(attribute);
+                break;
+            }
+        }
+    }
+    (fg, bg, style)
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -940,5 +994,102 @@ mod tests {
         );
         // Direction: dark bg ⇒ lifted toward white (out is brighter).
         assert!(relative_luminance(out) > relative_luminance(fg));
+    }
+}
+
+#[cfg(test)]
+mod special_color_tests {
+    use super::*;
+
+    #[test]
+    fn special_queries_use_their_own_overrides_and_foreground_fallback() {
+        let theme = Theme::default();
+        let mut colors = TermColors::default();
+        for index in 269..=273 {
+            assert_eq!(
+                resolve_query(index, &theme, &colors),
+                Some(theme.foreground)
+            );
+        }
+        let override_rgb = Rgb::new(18, 52, 86);
+        colors[269] = Some(alacritty_terminal::vte::ansi::Rgb {
+            r: 18,
+            g: 52,
+            b: 86,
+        });
+        assert_eq!(resolve_query(269, &theme, &colors), Some(override_rgb));
+        assert_eq!(resolve_query(256, &theme, &colors), Some(theme.foreground));
+        assert_eq!(resolve_query(274, &theme, &colors), None);
+        assert_eq!(resolve_query(259, &theme, &colors), None);
+    }
+    #[test]
+    fn special_attributes_preserve_default_output_and_apply_enabled_priority() {
+        use alacritty_terminal::term::cell::Flags;
+        let theme = Theme::default();
+        let mut colors = TermColors::default();
+        let fg = AnsiColor::Named(NamedColor::Foreground);
+        let bg = AnsiColor::Named(NamedColor::Background);
+        let flags = Flags::BOLD | Flags::UNDERLINE | Flags::BLINK | Flags::ITALIC | Flags::GRAPHEME;
+        for (index, red) in [(269, 10), (270, 20), (271, 30), (272, 40), (273, 50)] {
+            colors[index] = Some(alacritty_terminal::vte::ansi::Rgb { r: red, g: 0, b: 0 });
+        }
+        assert_eq!(
+            special_attributes(fg, bg, flags, &theme, &colors),
+            (fg, bg, flags)
+        );
+        for index in 0..5 {
+            colors.set_special_mode(index, true);
+        }
+        for (disable, expected) in [(None, 30), (Some(2), 10), (Some(0), 20), (Some(1), 50)] {
+            if let Some(index) = disable {
+                colors.set_special_mode(index, false);
+            }
+            let (actual, _, style) = special_attributes(fg, bg, flags, &theme, &colors);
+            assert_eq!(resolve(actual, &theme, &colors), Rgb::new(expected, 0, 0));
+            assert!(style.contains(Flags::GRAPHEME));
+        }
+    }
+
+    #[test]
+    fn special_attributes_respect_ansi_colors_until_override_is_enabled() {
+        use alacritty_terminal::term::cell::Flags;
+        let theme = Theme::default();
+        let mut colors = TermColors::default();
+        colors[269] = Some(alacritty_terminal::vte::ansi::Rgb {
+            r: 18,
+            g: 52,
+            b: 86,
+        });
+        colors.set_special_mode(0, true);
+        let fg = AnsiColor::Indexed(2);
+        let bg = AnsiColor::Named(NamedColor::Background);
+        assert_eq!(
+            special_attributes(fg, bg, Flags::BOLD, &theme, &colors).0,
+            fg
+        );
+        colors.set_special_mode(5, true);
+        let (actual, _, style) = special_attributes(fg, bg, Flags::BOLD, &theme, &colors);
+        assert_eq!(resolve(actual, &theme, &colors), Rgb::new(18, 52, 86));
+        assert!(!style.contains(Flags::BOLD));
+    }
+
+    #[test]
+    fn special_reverse_color_is_the_background_before_video_inversion() {
+        use alacritty_terminal::term::cell::Flags;
+        let theme = Theme::default();
+        let mut colors = TermColors::default();
+        colors[272] = Some(alacritty_terminal::vte::ansi::Rgb {
+            r: 18,
+            g: 52,
+            b: 86,
+        });
+        colors.set_special_mode(3, true);
+        let fg = AnsiColor::Named(NamedColor::Foreground);
+        let bg = AnsiColor::Named(NamedColor::Background);
+        let (actual_fg, actual_bg, flags) =
+            special_attributes(fg, bg, Flags::INVERSE, &theme, &colors);
+        assert_eq!(actual_fg, fg);
+        assert_eq!(resolve(actual_bg, &theme, &colors), Rgb::new(18, 52, 86));
+        assert!(flags.contains(Flags::INVERSE));
     }
 }

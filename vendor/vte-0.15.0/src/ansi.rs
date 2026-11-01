@@ -32,6 +32,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Params, ParamsIter};
 
+#[cfg(feature = "std")]
+mod colors;
+
 /// Maximum time before a synchronized update is aborted.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(150);
 
@@ -186,7 +189,14 @@ fn xparse_color(color: &[u8]) -> Option<Rgb> {
     } else if color.len() >= 4 && &color[..4] == b"rgb:" {
         parse_rgb_color(&color[4..])
     } else {
-        None
+        #[cfg(feature = "std")]
+        {
+            colors::parse(color)
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            None
+        }
     }
 }
 
@@ -227,6 +237,31 @@ fn parse_legacy_color(color: &[u8]) -> Option<Rgb> {
         g: color_from_slice(&color[item_len..item_len * 2])?,
         b: color_from_slice(&color[item_len * 2..])?,
     })
+}
+
+/// Internal special-color slots follow the existing dynamic and dim colors.
+pub const SPECIAL_COLOR_BASE: usize = NamedColor::DimForeground as usize + 1;
+pub const SPECIAL_COLOR_COUNT: usize = 5;
+
+fn parse_color_number(input: &[u8]) -> Option<u16> {
+    if input.is_empty() {
+        return None;
+    }
+    input.iter().try_fold(0_u16, |value, byte| {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value.checked_mul(10)?.checked_add(u16::from(byte - b'0'))
+    })
+}
+
+fn color_slot(kind: &[u8], index: u16) -> Option<usize> {
+    match (kind, usize::from(index)) {
+        (b"4", index @ 0..=255) => Some(index),
+        (b"4", index @ 256..=260) => Some(SPECIAL_COLOR_BASE + index - 256),
+        (b"5", index @ 0..=4) => Some(SPECIAL_COLOR_BASE + index),
+        _ => None,
+    }
 }
 
 fn parse_number(input: &[u8]) -> Option<u8> {
@@ -895,6 +930,9 @@ pub trait Handler {
 
     /// Respond to a color query escape sequence.
     fn dynamic_color_sequence(&mut self, _: String, _: usize, _: &str) {}
+
+    /// Enable a special attribute color (0..4), or its ANSI override mode (5).
+    fn set_special_color_mode(&mut self, _: usize, _: bool) {}
 
     /// Reset an indexed color to original value.
     fn reset_color(&mut self, _: usize) {}
@@ -1674,14 +1712,14 @@ where
             },
 
             // Set color index.
-            b"4" => {
+            b"4" | b"5" => {
                 if params.len() <= 1 || params.len() % 2 == 0 {
                     unhandled(params);
                     return;
                 }
 
                 for chunk in params[1..].chunks(2) {
-                    let index = match parse_number(chunk[0]) {
+                    let index = match parse_color_number(chunk[0]) {
                         Some(index) => index,
                         None => {
                             unhandled(params);
@@ -1689,14 +1727,32 @@ where
                         },
                     };
 
+                    let Some(slot) = color_slot(params[0], index) else {
+                        unhandled(params);
+                        continue;
+                    };
                     if let Some(c) = xparse_color(chunk[1]) {
-                        self.handler.set_color(index as usize, c);
+                        self.handler.set_color(slot, c);
                     } else if chunk[1] == b"?" {
-                        let prefix = alloc::format!("4;{index}");
-                        self.handler.dynamic_color_sequence(prefix, index as usize, terminator);
+                        let prefix =
+                            alloc::format!("{};{index}", str::from_utf8(params[0]).unwrap());
+                        self.handler.dynamic_color_sequence(prefix, slot, terminator);
                     } else {
                         unhandled(params);
                     }
+                }
+            },
+
+            b"6" | b"106" => {
+                if params.len() == 3 {
+                    match (parse_color_number(params[1]), parse_color_number(params[2])) {
+                        (Some(index @ 0..=5), Some(enabled)) => {
+                            self.handler.set_special_color_mode(usize::from(index), enabled != 0);
+                        },
+                        _ => unhandled(params),
+                    }
+                } else {
+                    unhandled(params);
                 }
             },
 
@@ -1818,6 +1874,22 @@ where
                     match parse_number(param) {
                         Some(index) => self.handler.reset_color(index as usize),
                         None => unhandled(params),
+                    }
+                }
+            },
+
+            b"105" => {
+                if params.len() == 1 || params[1].is_empty() {
+                    for index in SPECIAL_COLOR_BASE..SPECIAL_COLOR_BASE + SPECIAL_COLOR_COUNT {
+                        self.handler.reset_color(index);
+                    }
+                } else {
+                    for value in &params[1..] {
+                        if let Some(index @ 0..=4) = parse_color_number(value) {
+                            self.handler.reset_color(SPECIAL_COLOR_BASE + usize::from(index));
+                        } else {
+                            unhandled(params);
+                        }
                     }
                 }
             },
@@ -2838,6 +2910,58 @@ mod tests {
         assert_eq!(xparse_color(b"rgb:ffff/0/0"), Some(Rgb { r: 0xFF, g: 0x0, b: 0x0 }));
     }
 
+    #[cfg(feature = "std")]
+    #[test]
+    fn parse_extended_color_spaces() {
+        let gray = Rgb { r: 188, g: 188, b: 188 };
+        assert_eq!(xparse_color(b"rgbi:.5/5e-1/+0.5"), Some(gray));
+        let gray = Rgb { r: 119, g: 119, b: 119 };
+        for color in [b"CIELab:50/0/0".as_slice(), b"CIELuv:50/0/0", b"TekHVC:0/50/0"] {
+            assert_eq!(xparse_color(color), Some(gray), "{color:?}");
+        }
+        let red = Rgb { r: 255, g: 0, b: 0 };
+        for color in [
+            b"CIEXYZ:.4123908/.212639/.0193308".as_slice(),
+            b"CIExyY:.64/.33/.212639",
+            b"CIEuvY:.45070422535/.52288732394/.212639",
+            b"CIELab:53.237115595/.800901/.672031",
+            b"CIELuv:53.237115595/1.750094/.377651",
+        ] {
+            assert_eq!(xparse_color(color), Some(red), "{color:?}");
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn extended_color_spaces_validate_components_and_degenerate_chromaticity() {
+        for color in [
+            b"rgbi:NaN/0/0".as_slice(),
+            b"rgbi:inf/0/0",
+            b"rgbi:1e999/0/0",
+            b"rgbi:-.1/0/0",
+            b"rgbi:1.1/0/0",
+            b"rgbi: 1/0/0",
+            b"rgbi:1/0/0/0",
+            b"CIEXYZ:-1/0/0",
+            b"CIExyY:.3/0/1",
+            b"CIExyY:.9/.9/1",
+            b"CIEuvY:.3/0/1",
+            b"CIELab:101/0/0",
+            b"CIELuv:-1/0/0",
+            b"TekHVC:0/50/-1",
+            b"TekHVC:NaN/50/1",
+        ] {
+            assert_eq!(xparse_color(color), None, "{color:?}");
+        }
+        for color in [b"CIExyY:0/0/0".as_slice(), b"CIEuvY:0/0/0", b"CIELuv:0/1/1"] {
+            assert_eq!(xparse_color(color), Some(Rgb::default()), "{color:?}");
+        }
+        assert_eq!(xparse_color(b"CIELab:7.99/0/0"), xparse_color(b"CIELuv:7.99/0/0"));
+        assert_eq!(xparse_color(b"CIELab:8.01/0/0"), xparse_color(b"CIELuv:8.01/0/0"));
+        assert!(xparse_color(b"CIELab:50/-1/.5").is_some());
+        assert!(xparse_color(b"TekHVC:720/50/20").is_some());
+    }
+
     #[test]
     fn parse_valid_legacy_rgb_colors() {
         assert_eq!(xparse_color(b"#1af"), Some(Rgb { r: 0x10, g: 0xA0, b: 0xF0 }));
@@ -2883,6 +3007,115 @@ mod tests {
         parser.advance(&mut handler, bytes);
 
         assert_eq!(handler.color, Some(Rgb { r: 0xF0, g: 0xF0, b: 0xF0 }));
+    }
+
+    #[derive(Default)]
+    struct ColorHandler {
+        set: Vec<(usize, Rgb)>,
+        query: Vec<(String, usize, String)>,
+        reset: Vec<usize>,
+        modes: Vec<(usize, bool)>,
+    }
+
+    impl Handler for ColorHandler {
+        fn set_color(&mut self, index: usize, color: Rgb) {
+            self.set.push((index, color));
+        }
+        fn dynamic_color_sequence(&mut self, prefix: String, index: usize, terminator: &str) {
+            self.query.push((prefix, index, terminator.into()));
+        }
+        fn reset_color(&mut self, index: usize) {
+            self.reset.push(index);
+        }
+        fn set_special_color_mode(&mut self, index: usize, enabled: bool) {
+            self.modes.push((index, enabled));
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn extended_color_syntax_reaches_palette_dynamic_and_special_slots_across_splits() {
+        for (color, expected) in [
+            ("rgbi:.5/.5/.5", Rgb { r: 188, g: 188, b: 188 }),
+            ("CIEXYZ:0/0/0", Rgb::default()),
+            ("CIExyY:0/0/0", Rgb::default()),
+            ("CIEuvY:0/0/0", Rgb::default()),
+            ("CIELab:50/0/0", Rgb { r: 119, g: 119, b: 119 }),
+            ("CIELuv:50/0/0", Rgb { r: 119, g: 119, b: 119 }),
+            ("TekHVC:360/50/0", Rgb { r: 119, g: 119, b: 119 }),
+        ] {
+            let bytes = format!("\x1b]4;1;{color}\x07\x1b]10;{color}\x1b\\\x1b]5;0;{color}\x07");
+            for split in 0..=bytes.len() {
+                let mut parser = Processor::<TestSyncHandler>::new();
+                let mut handler = ColorHandler::default();
+                parser.advance(&mut handler, &bytes.as_bytes()[..split]);
+                parser.advance(&mut handler, &bytes.as_bytes()[split..]);
+                assert_eq!(
+                    handler.set,
+                    vec![(1, expected), (256, expected), (269, expected)],
+                    "{color} split {split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn special_colors_have_distinct_slots_and_keep_query_aliases_across_splits() {
+        let bytes = b"\x1b]4;256;#123456;260;#abcdef\x07\x1b]5;0;?;4;?\x1b\\\x1b]4;256;?;260;?\x07\x1b]10;#102030\x07";
+        for split in 0..=bytes.len() {
+            let mut parser = Processor::<TestSyncHandler>::new();
+            let mut handler = ColorHandler::default();
+            parser.advance(&mut handler, &bytes[..split]);
+            parser.advance(&mut handler, &bytes[split..]);
+            assert_eq!(
+                handler.set,
+                vec![
+                    (269, Rgb { r: 0x12, g: 0x34, b: 0x56 }),
+                    (273, Rgb { r: 0xab, g: 0xcd, b: 0xef }),
+                    (256, Rgb { r: 0x10, g: 0x20, b: 0x30 }),
+                ],
+                "split {split}"
+            );
+            assert_eq!(
+                handler.query,
+                vec![
+                    ("5;0".into(), 269, "\x1b\\".into()),
+                    ("5;4".into(), 273, "\x1b\\".into()),
+                    ("4;256".into(), 269, "\x07".into()),
+                    ("4;260".into(), 273, "\x07".into()),
+                ],
+                "split {split}"
+            );
+        }
+    }
+
+    #[test]
+    fn special_color_modes_accept_both_controls_and_reject_unknown_modes() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = ColorHandler::default();
+        parser.advance(
+            &mut handler,
+            b"\x1b]6;0;1\x07\x1b]106;5;300\x1b\\\x1b]6;0;0\x07\x1b]6;6;1\x07\x1b]106;2;invalid\x07",
+        );
+        assert_eq!(handler.modes, vec![(0, true), (5, true), (0, false)]);
+    }
+
+    #[test]
+    fn special_color_resets_do_not_reset_dynamic_or_palette_slots() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = ColorHandler::default();
+        parser.advance(&mut handler, b"\x1b]105;4;0\x07\x1b]104;256;1\x07\x1b]105\x1b\\");
+        assert_eq!(handler.reset, vec![273, 269, 1, 269, 270, 271, 272, 273]);
+    }
+
+    #[test]
+    fn special_color_indices_outside_the_five_slots_are_ignored() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = ColorHandler::default();
+        parser.advance(&mut handler,b"\x1b]5;5;#123456;65535;?\x07\x1b]4;261;?;99999999999999999999999;#123456\x07\x1b]105;5;65535\x07");
+        assert!(handler.set.is_empty());
+        assert!(handler.query.is_empty());
+        assert!(handler.reset.is_empty());
     }
 
     #[test]

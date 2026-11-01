@@ -3232,6 +3232,12 @@ impl<T: EventListener> Handler for Term<T> {
         self.colors[index] = Some(color);
     }
 
+    fn set_special_color_mode(&mut self, index: usize, enabled: bool) {
+        if self.colors.set_special_mode(index, enabled) {
+            self.mark_fully_damaged();
+        }
+    }
+
     /// Respond to a color query escape sequence.
     #[inline]
     fn dynamic_color_sequence(&mut self, prefix: String, index: usize, terminator: &str) {
