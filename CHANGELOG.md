@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.8.0] — 2026-11-01
+
 ### Added
 
 - Opt-in Unicode 18 extended-grapheme cells with DEC mode 2027, off by
