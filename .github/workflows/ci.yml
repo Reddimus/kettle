@@ -170,6 +170,12 @@ jobs:
       - name: Live UI helper self-test (Unix)
         if: runner.os != 'Windows'
         run: python3 scripts/check-live-ui-smoke.py self-test
+      - name: Conformance adapter tests (Windows)
+        if: runner.os == 'Windows'
+        run: python scripts/test-conformance.py
+      - name: Conformance adapter tests (Unix)
+        if: runner.os != 'Windows'
+        run: python3 scripts/test-conformance.py
       - name: Wayland first-frame trace fixtures (Windows)
         if: runner.os == 'Windows'
         run: python scripts/check-wayland-first-frame.py self-test

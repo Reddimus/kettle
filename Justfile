@@ -454,7 +454,7 @@ macos-compare-score-self-test:
 # This is the fast pre-commit loop; run it before every commit. It does NOT
 # cover the packaging/installer/update-manifest/GPU-render checks ci.yml
 # also runs; see `gauntlet-full` below for those.
-gauntlet: live-ui-helper-selftest native-titlebar-self-test wayland-first-frame-self-test shell-integration-check vm-launcher-test fuzz-check
+gauntlet: conformance-adapter-self-test live-ui-helper-selftest native-titlebar-self-test wayland-first-frame-self-test shell-integration-check vm-launcher-test fuzz-check
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets -- -D warnings
     # Feature unification hides a crate that leans on an optional dependency,
@@ -912,6 +912,15 @@ modal-shortcuts-smoke: release
 [unix]
 interaction-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release interaction
+
+# Verify that conformance adapters retain assertions and geometry restrictions.
+[unix]
+conformance-adapter-self-test:
+    python3 scripts/test-conformance.py
+
+[windows]
+conformance-adapter-self-test:
+    python scripts/test-conformance.py
 
 # Run esctest2 in a live 80x25 window and compare its failures with
 # scripts/conformance-esctest-expected.txt. Local only: it fetches esctest2 at

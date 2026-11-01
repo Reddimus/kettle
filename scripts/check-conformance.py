@@ -10,6 +10,10 @@ private virtual environment. Kettle opens at exactly 80x25 cells with
 /bin/sh, private XDG directories and the control server on, through the
 live-UI harness, and the suite runs inside its pane.
 
+The adapter also removes xterm's window-resize precondition from its two
+DECNCSM set/query tests. Kettle supports no-clear without program-controlled
+window resizing; the behavior assertions and other option decorators stay.
+
 Kettle does not answer DECRQCRA: a checksum reply would let any program that
 reads the terminal's input probe the screen. esctest reads cells with it, so
 the run replaces esctest's cell check with `kettle ctl read_cells`, read after
@@ -238,6 +242,24 @@ for category, versions in sorted(results.items()):
 """
 
 
+def adapt_esctest_options(escutil):
+    """DECNCSM works independently of Kettle's window-size policy."""
+    original = escutil.optionRequired
+    no_clear_cases = {"test_DECRQM_DEC_DECNCSM", "test_DECSET_DECNCSM"}
+
+    def option_required(terminal, option, allowPassWithoutOption=False):
+        def decorate(function):
+            if (terminal == "xterm" and option == "xtermWinopsEnabled"
+                    and function.__name__ in no_clear_cases):
+                # Retain every assertion, including failures. Do not enable
+                # xterm's global geometry option or force assertions to pass.
+                return function
+            return original(terminal, option, allowPassWithoutOption)(function)
+        return decorate
+
+    escutil.optionRequired = option_required
+
+
 def esctest_in_pane(config_path, esctest_args):
     """Inside Kettle's pane: run esctest with the out-of-band cell check."""
     config = json.loads(Path(config_path).read_text())
@@ -333,6 +355,7 @@ def esctest_in_pane(config_path, esctest_args):
             escutil.Raise(esctypes.ChecksumException(errors, actual, expected))
 
     escutil.AssertScreenCharsInRectEqual = assert_screen_chars_in_rect_equal
+    adapt_esctest_options(escutil)
     sys.argv = [str(Path(config["esctest_dir"]) / "esctest.py"), *esctest_args]
     # esctest.py ends with a bare main(): importing it runs the suite, after the
     # patch above so each test's `from escutil import ...` binds the adapter.
