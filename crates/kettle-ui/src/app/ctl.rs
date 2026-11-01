@@ -2823,7 +2823,7 @@ impl App {
                 let b = if crate::input::key_press_uses_kitty_sequence(key, *mods, mode) {
                     b
                 } else {
-                    apply_bs_del_binding(&self.cfg, key, b)
+                    apply_bs_del_binding(&self.cfg, key, mode, b)
                 };
                 if let Err(message) = extend_ctl_send_key_bytes(&mut bytes, &b) {
                     return Response::err(req.id, ec::BAD_PARAMS, message);

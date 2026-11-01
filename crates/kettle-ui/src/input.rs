@@ -548,12 +548,12 @@ pub fn encode(
                 //     convention; users coming from VS Code / browsers
                 //     expect this to be "delete word back," and bash can
                 //     be told so with `bind '"\C-h":backward-kill-word'`.
-                return Some(match (ctrl, alt) {
-                    (true, true) => vec![0x1b, 0x08],
-                    (true, false) => vec![0x08],
-                    (false, true) => vec![0x1b, 0x7f],
-                    (false, false) => vec![0x7f],
-                });
+                let code = if ctrl || mode.contains(TermMode::BACKARROW) {
+                    0x08
+                } else {
+                    0x7f
+                };
+                return Some(if alt { vec![0x1b, code] } else { vec![code] });
             }
             // Shift+Tab is the standard "back-tab" (`CSI Z`) used by
             // readline, fzf, and every TUI form for reverse field nav.
