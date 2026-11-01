@@ -28,6 +28,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Present update notices in a compact capsule with rounded Details and Close
+  controls. Longer messages use a rounded card with room for translated text
+  and large fonts; transparent corners leave terminal input available.
 - Keep video moving through interior audio timestamp gaps by decoding audio
   and video independently from identity-verified input handles. Silence is
   generated lazily from audio timestamps within the existing aggregate

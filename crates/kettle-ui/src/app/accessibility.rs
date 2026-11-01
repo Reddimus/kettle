@@ -777,13 +777,15 @@ impl App {
         }
         if let Some(toast) = &overlay.update_toast {
             toast.message.hash(&mut hasher);
-            for value in [
-                toast.geometry.rect.0,
-                toast.geometry.rect.1,
-                toast.geometry.rect.2,
-                toast.geometry.rect.3,
+            for rect in [
+                toast.geometry.rect,
+                toast.geometry.message,
+                toast.geometry.details,
+                toast.geometry.close,
             ] {
-                value.to_bits().hash(&mut hasher);
+                for value in [rect.0, rect.1, rect.2, rect.3] {
+                    value.to_bits().hash(&mut hasher);
+                }
             }
         }
         self.update_toast_focus.hash(&mut hasher);

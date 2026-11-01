@@ -1985,6 +1985,12 @@ from delivery-lock contention, window-owner closure and persistent dismissal.
 On X11, xdotool/xwininfo exercise manual re-docking and closing background
 windows through the control API. Large-font warnings and hyphenated version
 tokens are checked against the actual text shaper.
+Short notices use a content-sized capsule; two-row notices retain inline
+controls and longer notices stack them in a rounded card. Geometry tests cover
+fractional scales, translated labels and large fonts. GPU checks verify clear
+corners, text above the fill, focused-control fading, retained uploads and
+complete removal. Pointer ownership, hover pauses and cursor feedback share
+the rounded body's hit test; inset controls retain rectangular click targets.
 
 The media-native runner also tests refused child termination: it must not report
 cleanup until the recorded child is reaped. Optional audio fallback requires

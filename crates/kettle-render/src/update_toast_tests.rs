@@ -140,3 +140,145 @@ fn toast_uses_chrome_metrics_with_scaled_terminal_cells() {
         assert!(text.lines().count() as f32 * chrome.1 <= geometry.message.3);
     }
 }
+
+#[test]
+fn toast_redesign_short_notice_is_one_row_with_inset_controls() {
+    let g = update_toast_geometry(
+        (800.0, 600.0),
+        30.0,
+        1.0,
+        (8.0, 16.0),
+        7,
+        "v6.0.0 is available.",
+    )
+    .unwrap();
+    assert_eq!(
+        g.message.3, 16.0,
+        "a short notice must not reserve an empty second row"
+    );
+    assert!(
+        g.rect.2 < 480.0,
+        "short notifications should hug their content"
+    );
+    assert!(g.close.0 + g.close.2 < g.rect.0 + g.rect.2);
+    assert!(g.close.1 > g.rect.1);
+}
+
+#[test]
+fn toast_contour_owns_only_visible_body_and_inset_control_targets() {
+    use super::UpdateToastHit;
+    for scale in [1.0, 1.25, 1.5, 2.0] {
+        let g = update_toast_geometry(
+            (800.0 * scale, 600.0 * scale),
+            30.0 * scale,
+            scale,
+            (8.0 * scale, 16.0 * scale),
+            7,
+            "v6.0.0 is available.",
+        )
+        .unwrap();
+        let (x, y, w, h) = g.rect;
+        for (px, py) in [
+            (x, y),
+            (x + w - 1.0, y),
+            (x, y + h - 1.0),
+            (x + w, y + h * 0.5),
+        ] {
+            assert_eq!(g.hit_test(px, py), None);
+        }
+        assert_eq!(
+            g.hit_test(x + w * 0.5, y + 2.0 * scale),
+            Some(UpdateToastHit::Body)
+        );
+        for (rect, hit) in [
+            (g.details, UpdateToastHit::Details),
+            (g.close, UpdateToastHit::Close),
+        ] {
+            assert_eq!(
+                g.hit_test(rect.0 + rect.2 * 0.5, rect.1 + rect.3 * 0.5),
+                Some(hit)
+            );
+        }
+        // The circular Close retains a forgiving rectangular target inside the body.
+        assert_eq!(
+            g.hit_test(g.close.0 + scale, g.close.1 + scale),
+            Some(UpdateToastHit::Close)
+        );
+        assert_eq!(g.hit_test(f32::NAN, y), None);
+    }
+}
+
+#[test]
+fn toast_shaped_layout_covers_localized_narrow_and_large_font_notices() {
+    use super::{Attrs, Family, FontSystem, Metrics, Shaping, TextBuffer};
+    let mut fonts = FontSystem::new();
+    super::load_bundled_font(&mut fonts, kettle_config::font::REGULAR);
+    for scale in [1.0, 1.25, 2.0] {
+        for font_size in [14.0, 24.0, 40.0, 64.0] {
+            let metrics = Metrics::new(font_size * scale, font_size * 1.25 * scale);
+            let mut buffer = TextBuffer::new(&mut fonts, metrics);
+            let family = kettle_config::font::FAMILY;
+            let cell = super::measure_cell(&mut fonts, &mut buffer, family, metrics);
+            for width in [360.0, 800.0] {
+                for (message, details) in [
+                    ("v6.0.0 is available.", "Details"),
+                    ("Kettle v6.0.0 est\u{00e1} instalado", "Detalles"),
+                    (
+                        "Could not install v6.0.0-aaa-bbbbbbbbbb-cccccccccc.",
+                        "Details",
+                    ),
+                ] {
+                    let Some(g) = update_toast_geometry(
+                        (width * scale, 1200.0 * scale),
+                        30.0 * scale,
+                        scale,
+                        cell,
+                        details.len(),
+                        message,
+                    ) else {
+                        continue;
+                    };
+                    for (text, rect, wrap) in [
+                        (message, g.message, true),
+                        (details, g.details, false),
+                        ("\u{00d7}", g.close, false),
+                    ] {
+                        let (text, mode) = super::toast_buffer_text(text, rect.2, cell.0, wrap);
+                        buffer.set_wrap(mode);
+                        buffer.set_size(Some(rect.2), Some(rect.3));
+                        buffer.set_text(
+                            &text,
+                            &Attrs::new().family(Family::Name(family)),
+                            Shaping::Advanced,
+                            None,
+                        );
+                        buffer.shape_until_scroll(&mut fonts, false);
+                        let runs: Vec<_> = buffer.layout_runs().collect();
+                        assert!(
+                            runs.len() as f32 * cell.1 <= rect.3 + 0.01,
+                            "{message}: {g:?}"
+                        );
+                        assert!(
+                            runs.iter().all(|r| r.line_w <= rect.2 + 0.01),
+                            "{text}: {g:?}"
+                        );
+                    }
+                    assert!(
+                        g.details.0 >= g.rect.0 && g.close.0 + g.close.2 <= g.rect.0 + g.rect.2
+                    );
+                }
+            }
+        }
+    }
+    let g = update_toast_geometry(
+        (360.0, 600.0),
+        30.0,
+        1.0,
+        (8.0, 16.0),
+        8,
+        "Kettle v6.0.0 est\u{00e1} instalado",
+    )
+    .unwrap();
+    assert_eq!(g.message.3, 32.0);
+    assert!(g.rect.3 <= 56.0, "two rows should keep inline controls");
+}

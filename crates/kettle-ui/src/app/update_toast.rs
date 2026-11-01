@@ -230,7 +230,7 @@ impl App {
         let notice = self.update_notice();
         let hovered = self.update_toast_geometry(ws).is_some_and(|g| {
             ws.native_pointer
-                .is_some_and(|p| rect_contains(g.rect, p.x as f32, p.y as f32))
+                .is_some_and(|p| g.hit_test(p.x as f32, p.y as f32).is_some())
         });
         let motion = self.motion_allowed();
         if let Some(toast) = self.update_toast.as_mut().filter(|t| t.window == ws.seq) {
@@ -340,7 +340,7 @@ impl App {
         let Some(toast) = self.update_toast_projection(ws) else {
             return false;
         };
-        if !rect_contains(toast.geometry.rect, x, y) {
+        let Some(hit) = toast.geometry.hit_test(x, y) else {
             if self.update_toast_focus.take().is_some() {
                 ws.accessibility_pending = true;
                 if let Some(window) = &ws.window {
@@ -348,13 +348,17 @@ impl App {
                 }
             }
             return false;
-        }
+        };
         if button == 0 {
-            if rect_contains(toast.geometry.close, x, y) {
-                self.dismiss_update_toast(ws);
-            } else if rect_contains(toast.geometry.details, x, y) {
-                self.dismiss_update_toast(ws);
-                self.open_about_panel(ws);
+            match hit {
+                kettle_render::UpdateToastHit::Close => {
+                    self.dismiss_update_toast(ws);
+                }
+                kettle_render::UpdateToastHit::Details => {
+                    self.dismiss_update_toast(ws);
+                    self.open_about_panel(ws);
+                }
+                kettle_render::UpdateToastHit::Body => {}
             }
         }
         true

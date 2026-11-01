@@ -942,9 +942,14 @@ impl Renderer {
         )
     }
 
-    /// Whether an image or a pane outline can paint inside `near`. Their
+    /// Whether an image, outline or rounded toast can paint inside `near`. Their
     /// shading is interpolated, so it does not crop exactly.
     fn inexact_draws_touch(&self, near: PixelBox) -> bool {
+        if self.toast_surfaces.uploaded().is_none_or(|mut surfaces| {
+            surfaces.any(|surface| PixelBox::bounding(surface.pos, surface.size).intersects(near))
+        }) {
+            return true;
+        }
         if self.ime_prepared
             && self.ime_quads.uploaded().is_none_or(|mut quads| {
                 quads.any(|quad| PixelBox::bounding(quad.pos, quad.size).intersects(near))
@@ -2426,6 +2431,66 @@ mod tests {
         assert_eq!(
             renderer.cursor_patch_for_tests(&cfg).err(),
             Some(CursorPatchIneligible::Overlap)
+        );
+    }
+
+    #[test]
+    fn a_rounded_toast_over_the_cursor_is_ineligible() {
+        let _serialized = gpu_test_guard();
+        let Some((mut renderer, mut cfg)) = crate::headless_tests::renderer(800, 600) else {
+            return;
+        };
+        let snap = snapshot_of(80, 24, b"\x1b[3;30Hx\x1b[3;30H");
+        stabilize_padding(&renderer, &mut cfg, &snap);
+        let panes = [pane(&snap, 800, 600)];
+        capture(&mut renderer, &cfg, &panes, &focused(false));
+        assert!(
+            renderer.cursor_patch_for_tests(&cfg).is_ok(),
+            "unobstructed control"
+        );
+        let range = renderer.cursor_quad_range.as_ref().unwrap();
+        let cursor = renderer.quad_scratch[range.start as usize];
+        let mut geometry = crate::update_toast_geometry(
+            (800.0, 600.0),
+            0.0,
+            1.0,
+            (8.0, 16.0),
+            7,
+            "v6.0.0 is available.",
+        )
+        .unwrap();
+        let offset = (
+            cursor.pos[0] - geometry.rect.0,
+            cursor.pos[1] - geometry.rect.1,
+        );
+        for rect in [
+            &mut geometry.rect,
+            &mut geometry.message,
+            &mut geometry.details,
+            &mut geometry.close,
+        ] {
+            rect.0 += offset.0;
+            rect.1 += offset.1;
+        }
+        let mut overlay = focused(false);
+        overlay.update_toast = Some(crate::UpdateToastOverlay {
+            geometry,
+            message: "v6.0.0 is available.".into(),
+            details: "Details".into(),
+            close: "\u{00d7}".into(),
+            opacity: 1.0,
+            focused: None,
+        });
+        capture(&mut renderer, &cfg, &panes, &overlay);
+        assert_eq!(
+            renderer.cursor_patch_for_tests(&cfg).err(),
+            Some(CursorPatchIneligible::Overlap)
+        );
+        overlay.update_toast = None;
+        capture(&mut renderer, &cfg, &panes, &overlay);
+        assert!(
+            renderer.cursor_patch_for_tests(&cfg).is_ok(),
+            "dismissal clears the overlap"
         );
     }
 

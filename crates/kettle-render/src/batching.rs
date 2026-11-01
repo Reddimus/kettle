@@ -175,6 +175,7 @@ impl Renderer {
             self.overlay_quads.upload_counts(),
             self.menu_quads.upload_counts(),
             self.rounded_surfaces.upload_counts(),
+            self.toast_surfaces.upload_counts(),
             self.imgs.upload_counts(),
             self.card_base.upload_counts(),
             self.card_cursors.upload_counts(),
@@ -357,6 +358,7 @@ impl Renderer {
         // and the context-menu labels both remain readable above images.
         self.menu_quads.draw(&mut pass);
         self.media_receipt_img.draw(&mut pass);
+        self.toast_surfaces.draw_range(&mut pass, 0..u32::MAX);
         self.menu_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         self.rounded_surfaces
