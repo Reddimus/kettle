@@ -434,6 +434,43 @@ def run_search_history(binary, out):
                     qualification.run_case("search-history", Path("binary"), out), 1
                 )
 
+    def test_relative_output_artifacts_work_in_a_different_pty_cwd(self):
+        source = """import subprocess,sys
+from pathlib import Path
+class Process:
+    pid = 42
+    closed = False
+    def poll(self): return 0 if self.closed else None
+class LiveKettle:
+    def __init__(self): self.proc = Process()
+    def __enter__(self): return self
+    def __exit__(self, *args): self.proc.closed = True
+def run_program_keys(binary, out):
+    artifact = out / "recorder-fixture.txt"
+    artifact.write_text("fixture")
+    foreign = out / "pty-cwd"
+    foreign.mkdir()
+    with LiveKettle():
+        subprocess.run([sys.executable, "-c",
+            "from pathlib import Path;import sys;assert Path(sys.argv[1]).read_text() == 'fixture'",
+            str(artifact)], cwd=foreign, check=True, capture_output=True)
+"""
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            out = root / "case"
+            out.mkdir()
+            helper = root / "helper.py"
+            helper.write_text(source, encoding="utf-8")
+            relative = Path(os.path.relpath(out, Path.cwd()))
+            with patch.object(qualification, "HELPER", helper):
+                self.assertEqual(
+                    qualification.run_case("program-keys", Path("binary"), relative),
+                    0,
+                )
+            receipt = json.loads((out / "case.json").read_text(encoding="utf-8"))
+            self.assertEqual(receipt["status"], "PASS")
+            self.assertTrue(receipt["cleanup"])
+
     def test_a_crashed_fixture_cannot_qualify_just_because_it_closed(self):
         source = """class Process:
     pid = 42

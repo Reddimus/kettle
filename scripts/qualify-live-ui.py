@@ -166,6 +166,8 @@ def stop_owned_tree(live, proc, out, subreaper=None):
 
 def run_case(case, binary, out):
     """Keep fixture cleanup and its result observable even on an interrupt."""
+    # Scenarios pass artifact paths to programs whose PTY cwd is independent.
+    out = out.resolve()
     live = load_live()
     original = live.LiveKettle
     fixtures = []

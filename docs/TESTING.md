@@ -2151,6 +2151,10 @@ all six quarantined scenarios: search-history, text-presentation,
 split-exit-resize, program-keys, color-scheme and steady-uploads. The last uses
 `--screenshots-only`, matching its existing Xvfb scope.
 
+Case artifact directories are resolved before invoking a scenario, so recorder
+paths remain valid when a PTY starts in a different working directory. A native
+relative-output regression covers the same command shape used by the workflow.
+
 Each scenario starts fresh fixtures and records their PIDs, pre-cleanup state
 and actual exit codes. Normal Unix teardown records the signals it sends while
 the unreaped process-group leader is still alive. This distinguishes Linux's
