@@ -2029,14 +2029,10 @@ fn sgr_individual_attribute_resets() {
     // diverge from xterm behavior (cells AFTER the `not X`
     // would carry residual flags).
     //
-    // Note on SGR 25 / blink: `alacritty_terminal`'s `Cell::flags`
-    // bitfield deliberately doesn't track BLINK (blink is a
-    // render-time concern, not a cell attribute). SGR 5 / 25 are
-    // accepted at the parser layer but produce no cell-flag
-    // change; we don't assert on them here.
+    // Blink rendition is retained for protocol operations; text stays steady.
     let (mut t, mut p) = harness(20, 2);
     // Stack: bold + dim + italic + underline + reverse + strike.
-    // (Skip blink — see note above.)
+    // Blink has its own round-trip test below.
     feed(&mut t, &mut p, b"\x1b[1;2;3;4;7;9mA");
     let a = &t.grid()[Point::new(Line(0), Column(0))];
     assert!(a.flags.contains(Flags::BOLD), "SGR 1 set");
@@ -2097,6 +2093,38 @@ fn app_cursor_and_keypad_modes() {
     feed(&mut t, &mut p, b"\x1b[?1l\x1b>");
     assert!(!t.mode().contains(TermMode::APP_CURSOR));
     assert!(!t.mode().contains(TermMode::APP_KEYPAD), "DECKPNM clears");
+}
+
+#[test]
+fn blink_rendition_is_retained_and_cleared_without_affecting_other_attributes() {
+    let (mut t, mut p) = harness(20, 2);
+    feed(&mut t, &mut p, b"\x1b[1;5mA\x1b[25mB\x1b[6mC\x1b[0mD");
+    let grid = t.grid();
+    assert!(
+        grid[Point::new(Line(0), Column(0))]
+            .flags
+            .contains(Flags::BOLD | Flags::BLINK)
+    );
+    assert!(
+        !grid[Point::new(Line(0), Column(1))]
+            .flags
+            .contains(Flags::BLINK)
+    );
+    assert!(
+        grid[Point::new(Line(0), Column(1))]
+            .flags
+            .contains(Flags::BOLD)
+    );
+    assert!(
+        grid[Point::new(Line(0), Column(2))]
+            .flags
+            .contains(Flags::BLINK)
+    );
+    assert!(
+        !grid[Point::new(Line(0), Column(3))]
+            .flags
+            .intersects(Flags::BOLD | Flags::BLINK)
+    );
 }
 
 #[test]

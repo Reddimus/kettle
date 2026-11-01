@@ -766,6 +766,18 @@ pub trait Handler {
     fn set_protected_area(&mut self, _start: bool) {}
 
     /// Fill a rectangular area with an ASCII or Latin-1 character (DECFRA).
+    /// DECSACE - select stream or rectangular attribute extent.
+    fn set_attribute_extent(&mut self, _extent: u16) {}
+
+    /// DECCARA / DECRARA - change existing cell rendition.
+    fn change_rectangle_attributes(
+        &mut self,
+        _area: Rectangle,
+        _attributes: &[u16],
+        _reverse: bool,
+    ) {
+    }
+
     fn fill_rectangle(&mut self, _character: u16, _area: Rectangle) {}
 
     /// Erase a rectangular area, optionally honoring DEC protection.
@@ -832,6 +844,12 @@ pub trait Handler {
 
     /// Unset private mode.
     fn unset_private_mode(&mut self, _mode: PrivateMode) {}
+
+    /// XTSAVE - remember a private mode.
+    fn save_private_mode(&mut self, _mode: PrivateMode) {}
+
+    /// XTRESTORE - restore a remembered private mode.
+    fn restore_private_mode(&mut self, _mode: PrivateMode) {}
 
     /// DECRPM - report private mode.
     fn report_private_mode(&mut self, _mode: PrivateMode) {}
@@ -1825,6 +1843,19 @@ where
         };
 
         match (action, intermediates) {
+            ('x', [b'*']) => handler.set_attribute_extent(next_param_or(0)),
+            ('r' | 't', [b'$']) => {
+                if params.iter().any(|param| param.len() != 1) {
+                    return unhandled!();
+                }
+                let values: Vec<_> = params.iter().map(|param| param[0]).collect();
+                let attributes = values.get(4..).filter(|v| !v.is_empty()).unwrap_or(&[0]);
+                handler.change_rectangle_attributes(
+                    Rectangle::from_parameters(&values),
+                    attributes,
+                    action == 't',
+                );
+            },
             ('v' | 'x' | 'z' | '{', [b'$']) => {
                 let limit = match action {
                     'v' => 8,
@@ -2072,6 +2103,18 @@ where
                     shape.map(|shape| CursorStyle { shape, blinking: cursor_style_id % 2 == 1 });
 
                 handler.set_cursor_style(cursor_style);
+            },
+            ('s' | 'r', [b'?']) => {
+                for param in params_iter {
+                    if let [value] = param {
+                        let mode = PrivateMode::new(*value);
+                        if action == 's' {
+                            handler.save_private_mode(mode);
+                        } else {
+                            handler.restore_private_mode(mode);
+                        }
+                    }
+                }
             },
             ('r', []) => {
                 let top = next_param_or(1) as usize;

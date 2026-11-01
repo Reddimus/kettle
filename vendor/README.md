@@ -75,7 +75,12 @@ date. Recheck that before upgrading a crate or dropping a patch.
   current protection state, and cursor save/restore retains the attribute.
   Erase-to-right includes the last cell while autowrap is pending.
   DECCRA, DECFRA, DECERA and DECSERA operate on clipped, origin-relative text
-  rectangles without moving the cursor or adding history. Copying snapshots
+  rectangles without moving the cursor or adding history. DECCARA/DECRARA
+  change rendition over DECSACE stream or rectangle extents, tracking printed
+  blanks separately from undrawn cells. SGR blink is retained for protocol
+  round trips while text rendering stays steady. XTSAVE/XTRESTORE retain a
+  finite set of implemented private modes; MoreFix is explicitly negotiated.
+  Fixed-mode and absent-device reports describe the actual emulation. Copying snapshots
   complete cells before mutation, including overlapping areas; wide-glyph
   boundaries remain paired. Selective rectangular erase preserves visual
   attributes and honors DEC protection, while ignoring ISO protection.

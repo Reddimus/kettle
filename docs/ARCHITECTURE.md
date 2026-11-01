@@ -2232,6 +2232,32 @@ changing unrelated preceding-row protection. Destination line-wrap attributes
 remain in place. The controls operate on text cells; they do not duplicate or
 relocate retained graphics placements. VT levels below four ignore them.
 
+DECCARA and DECRARA change cell rendition without changing cursor state,
+text, colours, protection, hyperlinks or retained graphics. DECSACE selects
+stream extent (0/1) or rectangular extent (2). Stream changes skip undrawn
+cells, including trailing blanks created by ordinary erasure. Printed spaces,
+interior erasures, rectangular fills/erasures/copies and alignment cells are
+included. Rectangle changes include blank cells. A private drawn flag records
+this distinction without changing the existing trailing-blank reflow policy.
+The blink attribute is retained by SGR, attribute operations, copies and
+reports; text continues to render steadily. Slow and fast blink share this
+protocol attribute. RIS and DECSTR reset the selected attribute extent.
+
+XTSAVE and XTRESTORE retain one value per implemented private mode. Unknown
+modes, fixed modes, cursor-save actions and parser-owned synchronized updates
+are excluded. Repeated saves replace the prior value and resets clear the
+cache. Mode 41 explicitly negotiates the MoreFix tab rule: enabled wraps then
+advances to the next tab, disabled leaves a pending wrap untouched. Before a
+program negotiates mode 41, Kettle retains its existing wrap-only tab rule.
+
+Device reports describe the emulated terminal: no printer, locked user-defined
+keys, unknown keyboard language, no DEC locator, zero macro space, no link
+errors and no DEC multi-session transport. Reports honor the selected VT level.
+DECRQSS reports the normal display and absent status line. Recognized fixed
+ANSI modes and horizontal cursor coupling report permanently reset; unknown
+modes remain unrecognized. Identity, checksums, title disclosure and window
+geometry policies are unchanged.
+
 ### Column editing and reverse wraparound
 
 DECIC and DECDC shift columns across the scrolling region only when the

@@ -95,10 +95,11 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
 - **Unimplemented DEC and xterm controls.** The left/right margin follow-up
   removes 55 failures, character protection removes another 30, and
   rectangular copy/fill/erase removes another 24. Column editing and reverse
-  wrapping remove another 32; esctest2 now fails 111 tests, listed by reason in
+  wrapping remove another 32. Attribute changes, mode save/restore, MoreFix
+  and truthful fixed-mode/device reports remove another 26; esctest2 now
+  fails 85 tests, listed by reason in
   `scripts/conformance-esctest-expected.txt`. Remaining features include
-  rectangular attribute changes and
-  additional colour syntaxes. Cases
+  additional modes and colour syntaxes. Cases
   involving those controls and margins remain grouped with their missing
   feature. The list also retains deliberate identity, checksum and window
   policies. Close each feature by implementing it in the vendored engine and
