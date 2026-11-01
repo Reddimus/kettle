@@ -90,30 +90,15 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   colour-profile expectations remain exceptions. Changing any policy requires
   a product decision and matching tests. Seven-bit DECSCL is implemented;
   raw eight-bit C1 replies remain unsupported without changing selected state.
-
-## UX
-
-- **Intermittent macOS page-up failure.** The page-up action in
-  `crates/kettle-ui/src/app/actions.rs` and `scripts/check-live-ui-smoke.py`
-  need investigation: earlier runs stayed at display offset zero after 1,600 lines,
-  while later runs passed without an explained fix or retained build hashes.
-  Deferred because the failure is intermittent. Close with a root-cause fix or
-  bounded stress results for identified artifacts; retain executable/harness
-  hashes, before/after screen JSON, visible PNGs and system load on failure.
-
-## Media
-
-- **Audio after an interior gap waits for video.** In FFmpeg playback
-  (`crates/kettle-media-native/src/ffmpeg/playback.rs`), the packet splitter
-  blocks on video delivery before it reads the next audio packet's
-  timestamp, so audio that resumes after a multi-second gap is held until
-  video catches up. Filling the gap with silence when that packet arrives is
-  too late, and inferring gaps from video timestamps is unsound because the
-  streams interleave freely. Close with a demuxer that reads audio ahead
-  independently of video delivery (separate bounded queues), then fills
-  interior gaps with bounded silence.
+  The 41 additional upstream known-bug results are accounted for separately
+  in `docs/TESTING.md`; they include skipped profiles and compatibility
+  exceptions and are not conformance passes.
 
 ## Performance
+
+The [2026-11-01 diagnostics](SCALING-2026-11-01.md) sampled PTY, window and
+history scaling. Calibration refused the busy host; the partial 64-PTY
+campaign and startup outlier remain inconclusive. These entries stay open.
 
 - **PTY worker consolidation.** `crates/kettle-core/src/term.rs` uses a parser
   thread plus a blocking read pump per pane. Deferred pending large-pane-count
@@ -143,14 +128,13 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   lifecycle handlers, keeping application code thin, and replacing
   source-text guards with behavioural tests where an outcome makes them
   observable.
-- **Live UI gate coverage and quarantine.** `scripts/check-live-ui-smoke.py`
-  has manual cases beyond CI's selection; `.github/workflows/ci.yml` still makes
-  Linux search-history and several other live checks advisory. Deferred until
-  runner reliability is measured. Close by adding scenarios individually,
-  recording flake rates and making reliable checks required. Keep native-pointer
-  tear/re-dock coverage in `scripts/check-tearoff-live-smoke.sh`; the Python
-  `tearoff` case only tests the control action. Native macOS caption/modifier
-  checks now exist, but do not cover every live scenario.
+- **Native live UI cases outside CI.** The six formerly advisory Linux cases
+  passed 300 repetitions each across three fresh allocations and now gate the
+  required build job; see `docs/TESTING.md`. Other manual cases still need
+  behavior-specific native evidence. Keep native-pointer tear/re-dock coverage
+  in `scripts/check-tearoff-live-smoke.sh`; the Python `tearoff` case only tests
+  the control action. Native macOS caption/modifier checks do not cover every
+  live scenario.
 
 ## Platform
 
@@ -166,12 +150,8 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   the intended recording configuration. Deferred until that release and desktop
   are available. Close with installed artifact identity, launcher and recording
   evidence on the target desktop.
-- **Deeper configured agent/TUI sessions.** `scripts/check-live-ui-smoke.py`
-  covers configured Neovim/LazyVCS and opt-in authenticated marker prompts;
-  interactive Codex/Claude attachment and longer configured AstroNvim workflows
-  remain outside that proof. Deferred for installed credentials/configuration
-  and native interaction. Close with identified clients/configurations and
-  captured real-session results beyond deterministic markers.
+  Source-install Super-key and private recording checks passed on 2026-11-01;
+  acceptance of the frozen public package remains a post-publication check.
 - **Two Windows state-file races.** `ExclusiveFileLock::remove` releases the
   lock before deleting its file on Windows, so another process can open the
   file in between (`crates/kettle-state`, used by kettle-ctl activation

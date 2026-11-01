@@ -568,15 +568,13 @@ jobs:
           path: target/diagnostics/command-correlation-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
           retention-days: 7
-      - name: Live UI ctl + search-history smoke (Linux, quarantined)
+      - name: Live UI ctl + search-history smoke (Linux, required)
         if: runner.os == 'Linux'
         # Launch a window under Xvfb, drive the control server, search
         # retained history, validate pixels in the reported search and match
         # rectangles, and capture screen/cell/PNG evidence.
-        # Keep it non-blocking while hosted-runner behavior is measured;
-        # the result remains visible and its artifacts are always
-        # uploaded. Promote it to required only from observed CI evidence.
-        continue-on-error: true
+        # Qualification run 41314378019 passed 300 repetitions per scenario
+        # across three fresh allocations. Failures still preserve artifacts.
         timeout-minutes: 5
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -592,14 +590,12 @@ jobs:
           path: target/diagnostics/live-ui-ci
           if-no-files-found: warn
           retention-days: 7
-      - name: Live UI text-presentation smoke (Linux, quarantined)
+      - name: Live UI text-presentation smoke (Linux, required)
         if: runner.os == 'Linux'
         # A codepoint Unicode renders as text must not come from a colour face.
         # Nothing below kettle consults `Emoji_Presentation`, so the answer is
         # decided by which fonts the host has, which makes it worth checking on
         # a runner rather than only on a developer machine.
-        # Quarantined pending hosted-runner evidence, like the other live-UI legs.
-        continue-on-error: true
         timeout-minutes: 5
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -615,15 +611,13 @@ jobs:
           path: target/diagnostics/live-ui-text-presentation
           if-no-files-found: warn
           retention-days: 7
-      - name: Live UI split-exit-resize smoke (Linux, quarantined)
+      - name: Live UI split-exit-resize smoke (Linux, required)
         if: runner.os == 'Linux'
         # A split closed by its own shell exiting must hand its rows back to
         # the pane that inherits the space. The tree work is unit-tested and
         # both reap sites carry a source guard; only a live window proves the
         # surviving PTY actually receives the new winsize, which the scenario
         # reads back with `stty size`.
-        # Promote it from quarantine only from observed CI evidence.
-        continue-on-error: true
         timeout-minutes: 5
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -639,7 +633,7 @@ jobs:
           path: target/diagnostics/live-ui-split-exit-resize
           if-no-files-found: warn
           retention-days: 7
-      - name: Live UI program-keys smoke (Linux, quarantined)
+      - name: Live UI program-keys smoke (Linux, required)
         if: runner.os == 'Linux'
         # A default Kettle chord that a program also uses (Shift+Left for
         # resizing a split, Codex's queued-message key) must reach a program
@@ -647,8 +641,6 @@ jobs:
         # once it lets go. The routing is unit-tested; this drives it through
         # the control route's real resolver against a real PTY. Only macOS
         # posts real key presses, since Xvfb has no window manager to focus.
-        # Quarantined like the other live-UI legs.
-        continue-on-error: true
         timeout-minutes: 5
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -664,13 +656,11 @@ jobs:
           path: target/diagnostics/live-ui-program-keys
           if-no-files-found: warn
           retention-days: 7
-      - name: Live UI color-scheme smoke (Linux, quarantined)
+      - name: Live UI color-scheme smoke (Linux, required)
         if: runner.os == 'Linux'
         # A program that turned on DEC mode 2031 must hear each light/dark
         # theme flip. The replies are unit-tested; this drives the real theme
-        # action through a live window and a real PTY. Quarantined like the
-        # other live-UI legs.
-        continue-on-error: true
+        # action through a live window and a real PTY.
         timeout-minutes: 5
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -686,15 +676,13 @@ jobs:
           path: target/diagnostics/live-ui-color-scheme
           if-no-files-found: warn
           retention-days: 7
-      - name: Live UI steady-uploads smoke (Linux, quarantined)
+      - name: Live UI steady-uploads smoke (Linux, required)
         if: runner.os == 'Linux'
         # A window whose content is not changing must write nothing to the
         # GPU: the renderer keeps a copy of each buffer and writes only what
         # changed. Under Xvfb the window never gets focus, so --screenshots-only
         # runs just the first phase (screenshots of an unchanged window add no
         # writes); the blinking phases run on a developer Mac.
-        # Quarantined pending hosted-runner evidence, like the other live-UI legs.
-        continue-on-error: true
         timeout-minutes: 5
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"

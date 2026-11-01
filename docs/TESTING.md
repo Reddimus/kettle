@@ -942,7 +942,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Dock menu | `just dock-menu-smoke` | Real Dock rows, window list, minimized New Tab restoration and New Window effect; accessibility, plus an isolated bundle or no other Kettle instance | macOS |
 | Live stress | `just stress-live [S1 … S10]` | Floods, resize storms, 101 tabs and 151 panes, huge pastes and titles, config churn, hostile media and 64 control clients leave Kettle alive and answering; S6 replaces the clipboard, then restores it; S9 needs a working worker | Linux/macOS |
 | Underline scroll | `just underline-scroll-smoke` | Repeated git-diff/delta scrolling preserves underline pixels; needs git, delta, less | Linux/macOS |
-| Search history | - | Scrollback search status, cells, and highlight pixels; direct helper case | Linux/macOS; Linux CI quarantined |
+| Search history | - | Scrollback search status, cells, and highlight pixels; direct helper case | Linux/macOS; required in Linux CI |
 | Native image paste routes | - | Native paste shortcuts, PRIMARY/middle-click, managed image path, and optional real composer attachments | Linux/macOS |
 | Launch-scoped cards | - | Simulated agent TTY launches, receipt privacy, card pixels, exit, and shelf fallback | Linux |
 | Centered media viewer | - | Worker-backed viewer routing and live pixels through native X11 input | Linux X11 |
@@ -1253,6 +1253,28 @@ corresponding regressions fail. The two native KAM/SRM conformance cases pass;
 the full integrated conformance run verifies the 67 intentional policy
 exceptions. No case in that list remains an unexplained missing feature.
 
+The integrated run records **459 passes, 41 upstream known-bug results and
+67 intentional expected failures**. The known-bug count is not a pass count:
+the pinned suite's decorators can skip a test before its assertions or catch a
+failure as `KnownBug`. In addition to the individually named 67 exceptions,
+the following table accounts for all 41 known-bug results under this profile.
+Names below are the suite's test method names with the common `test_` prefix
+omitted.
+
+| Count | Cases | Selected policy or coverage limit |
+| --- | --- | --- |
+| 11 | `APC_8bit`, `DECID_8bit`, `HTS_8bit`, `IND_8bit`, `NEL_8bit`, `PM_8bit`, `RI_8bit`, `S8C1T_CSI`, `S8C1T_DCS`, `S8C1T_SPA_EPA`, `SOS_8bit` | Decorators require `disableWideChars`. This UTF-8 profile does not enable legacy eight-bit control processing. |
+| 19 | `DECRQM_DEC_DECAAM`, `DECRQM_DEC_DECARM`, `DECRQM_DEC_DECARSM`, `DECRQM_DEC_DECCANSM`, `DECRQM_DEC_DECCRTSM`, `DECRQM_DEC_DECESKM`, `DECRQM_DEC_DECHDPXM`, `DECRQM_DEC_DECHEM`, `DECRQM_DEC_DECKBUM`, `DECRQM_DEC_DECKPM`, `DECRQM_DEC_DECMCM`, `DECRQM_DEC_DECNAKB`, `DECRQM_DEC_DECNULM`, `DECRQM_DEC_DECOSCNM`, `DECRQM_DEC_DECPCCM`, `DECRQM_DEC_DECRLCM`, `DECRQM_DEC_DECRLM`, `DECRQM_DEC_DECVCCM`, `DECRQM_DEC_DECXRLM` | Fixed or unmodeled device/peripheral modes; the suite marks these unsupported or permanently reset. No hardware capability is fabricated. |
+| 3 | `DECRQSS_DECELF`, `DECRQSS_DECLFKC`, `DECRQSS_DECSMKR` | Locator, local function-key and modifier-key settings are unmodeled. |
+| 1 | `DECSCL_RISOnChange` | Upstream explicitly does not try this case. Portable reset tests are separate evidence, not a native pass of this test. |
+| 2 | `DECSED_doesNotRespectISOProtect`, `DECSEL_doesNotRespectISOProtect` | Selective ED/EL retain xterm-compatible ISO protection. ISO protection also applies to ordinary ED/EL/ECH; DECSERA remains DEC-only. |
+| 5 | `ManipulateSelectionData_default`, `SMTitle_SetHexQueryHex`, `SMTitle_SetHexQueryUTF8`, `SMTitle_SetUTF8QueryHex`, `SMTitle_SetUTF8QueryUTF8` | Decorators require `xtermWinopsEnabled`. Clipboard/title disclosure and program-controlled window policies remain enforced. |
+
+These classifications document this pinned run; the expected-failure guard
+compares the 67 failing test names. It does not independently freeze the suite's
+41 known-bug decorator outcomes. Neither count establishes complete VT, xterm
+or Unicode conformance.
+
 **ucs-detect** (`just conformance-ucs`) measures how many columns the
 terminal gives Unicode text, against `wcwidth`. Kettle 5.7.0 scored 99.6% on
 narrow and 94.9% on wide characters, where the misses are the 26 regional
@@ -1535,8 +1557,8 @@ Linux adds these checks inside `build`:
 - Isolated Linux install/uninstall, including the online path when available.
 - Hidden main/alternate/split job-control fixtures and negative controls.
 - A windowed Xvfb GPU launch plus offscreen GPU-info, menu, and PNG checks.
-- The quarantined search-history live step, with artifacts retained even when
-  it fails. That step uses `continue-on-error`; it does not gate the matrix.
+- Required search-history, text-presentation, split-exit-resize, program-keys,
+  color-scheme and steady-uploads live steps. Artifacts are retained on failure.
 
 macOS adds these checks inside `build`:
 
@@ -1815,8 +1837,8 @@ handles PR opened/synchronize/reopened/ready-for-review events.
 ### Interpreting CI evidence
 
 Check the job and step, not only the workflow badge.
-A green matrix can include an explicitly skipped native prerequisite or a
-quarantined step. Read the output for the behavior you intend to claim.
+A green matrix can include an explicitly skipped native prerequisite or an
+optional early-warning check. Read the output for the behavior you intend to claim.
 
 Keep the failing input or artifact directory when reporting a failure.
 Include the exact revision and runner, and say whether the result came from
@@ -2147,7 +2169,7 @@ private 10 ms Escape delay, waits beyond it, and records the actual active map.
 The manual `Linux UI qualification` workflow builds one release binary and
 binds it to the exact source tree and live-UI helper hashes. Three fresh hosted
 runner allocations download that same artifact. Each runs 100 repetitions of
-all six quarantined scenarios: search-history, text-presentation,
+all six scenarios: search-history, text-presentation,
 split-exit-resize, program-keys, color-scheme and steady-uploads. The last uses
 `--screenshots-only`, matching its existing Xvfb scope.
 
@@ -2180,6 +2202,19 @@ Dispatch against the final integrated candidate, then download and inspect the
 only in a separately reviewed change to their existing required Linux job.
 Physical GPU and desktop-focus claims require their own native evidence.
 
+[Qualification run 41314378019](https://github.com/Reddimus/kettle/actions/runs/41314378019)
+passed all six scenarios 300 times each across three fresh allocations, using
+one binary (`1bad2c889198707e03f2013bc91a1f59ce34462ee6e5e65fd6631cf9757f6579`)
+and helper (`0017cdd9571ee366b35699b9337045e865b4f6e8a894b3da6bb0520c2d357ae9`).
+All 1,800 case receipts passed with closed fixtures, no timeout and no forced
+cleanup. The qualified source was `83900fc2`, tree `c2774768`, preserved by the
+normal merge at `35a66745`. The earlier teardown-classification and relative
+recorder-path failures remain recorded in runs 41308288788 and 41311723497;
+none of their counts contributes to qualification. These six steps now gate
+the existing required Linux build job. Steady-uploads retains screenshots-only
+scope, and these Xvfb results do not establish physical-GPU or desktop-focus
+coverage. Later verification-only edits preserve the qualified helper bytes.
+
 The search-history probe waits for focused-match pixel rectangles as well as
 match status and the expected visible row. Search may defer viewport highlights
 to another frame after navigation; accepting its earlier status produced a
@@ -2187,3 +2222,50 @@ false failure despite a highlighted subsequent screenshot. Portable regressions
 cover that transition and still require failure when rectangles never appear.
 The qualification supervisor's native pilot exercises its cleanup path; it does
 not count toward hosted Linux qualification.
+
+## Scaling diagnostic scope
+
+[The 2026-11-01 scaling observations](SCALING-2026-11-01.md) cover PTY, native
+window and retained-history states. They retain failed admissions and startup
+outliers and are explicitly excluded from calibrated performance standings.
+
+## Configured-session and desktop acceptance, 2026-11-01
+
+On native macOS, the configured AstroNvim/LazyVCS copy completed a five-minute,
+60-cycle disposable-repository edit/write/scroll soak, followed by clean and
+configured split checks. The loaded plugin source and owner configuration
+identities stayed unchanged. The real configured Codex CLI 0.166.0 and Claude
+Code 2.1.260 authenticated through their existing native configuration and
+accepted a synthetic image through native Command-V in ready composers. Both
+showed `[Image #1]`, and Kettle displayed its image receipt and preview. No
+model prompt was submitted. Clipboard bytes, the Codex configuration and
+Claude user-settings files were unchanged after fixture cleanup; the owned
+worktree source stayed clean. A prior attempt stopped at a
+new-repository trust dialog and used an invalid print-only interactive flag;
+it is retained as failed setup evidence, not counted as acceptance.
+
+In an isolated Ubuntu ARM64 GNOME Wayland desktop, real Super-key search
+launched the installed desktop entry with recording off and on. Off produced
+no recording. On displayed the recording indicator and wrote a valid v2 cast
+containing the output marker, ordered timestamps and no input events. The
+closed file was mode 0600 in a mode-0700 directory. The installed debug source
+build was stripped only in its owned installer staging copy; allocated ELF
+sections and entry point matched the frozen original. This is source-install
+acceptance, not proof of the final published release package. All desktop and
+recording fixtures closed.
+
+Real Japanese Romaji IME checks committed `nihongo` as Japanese text exactly
+once, moved the composition caret, cancelled a later composition and changed
+focus between owned windows without committing into either receiver. These
+were native composition events rather than injected Unicode. Enabled/current
+input sources, clipboard, input-menu and dictation settings were restored.
+The release-cut candidate requires separate appearance and update acceptance.
+
+Actual macOS VoiceOver was also started. Its owned caption window displayed
+`Copy version info` and menu-item contextual help while the isolated About
+panel was focused. The accessibility tree labels that menu `About Kettle`.
+The automatic spoken parent-panel name remains unverified: caption sequences
+captured the item and help text, while VoiceOver's own accessibility-tree query
+timed out. No audio recording or complete speech-output certification is
+claimed. VoiceOver was turned off again, and input sources, clipboard and the
+changed utility navigation state were restored.
