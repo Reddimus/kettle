@@ -406,6 +406,40 @@ impl Client {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| CtlError::Protocol("request deadline is out of range".into()))?;
+        if method == "run_command"
+            && params
+                .get("require_correlation")
+                .is_some_and(|flag| !flag.is_boolean())
+        {
+            return Err(CtlError::Protocol(
+                "require_correlation must be a boolean".into(),
+            ));
+        }
+        if method == "run_command"
+            && params.get("require_correlation").and_then(Value::as_bool) == Some(true)
+        {
+            let state = self.call_inner(
+                "get_state",
+                serde_json::json!({}),
+                deadline.saturating_duration_since(Instant::now()),
+                cancelled,
+            )?;
+            if state
+                .pointer("/features/command_correlation")
+                .and_then(Value::as_u64)
+                != Some(1)
+            {
+                return Err(CtlError::Protocol(
+                    "server does not advertise command correlation".into(),
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(CtlError::TimedOut);
+            }
+            if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                return Err(CtlError::Cancelled);
+            }
+        }
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -1550,6 +1584,77 @@ mod tests {
             Err(CtlError::Protocol(message)) if message.contains("request id space is exhausted")
         ));
         assert_eq!(client.next_id, u64::MAX);
+    }
+
+    #[test]
+    fn strict_command_never_reaches_an_old_server_that_would_ignore_the_flag() {
+        let (listener, endpoint) = test_listener("strict-old");
+        let (observed, requests) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            let mut conn = listener.accept().expect("accept");
+            let mut reader = std::io::BufReader::new(conn.try_clone().expect("clone"));
+            let mut methods = Vec::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    break;
+                }
+                let request: Request = serde_json::from_str(&line).unwrap();
+                methods.push(request.method);
+                let reply =
+                    serde_json::to_vec(&Response::ok(request.id, json!({"version": "old"})))
+                        .unwrap();
+                conn.write_all(&reply).unwrap();
+                conn.write_all(b"\n").unwrap();
+                conn.flush().unwrap();
+            }
+            observed.send(methods).unwrap();
+        });
+        let mut client = Client::connect_endpoint(&endpoint).unwrap();
+        let result = client.call(
+            "run_command",
+            json!({"command": "must not execute", "require_correlation": true}),
+        );
+        drop(client);
+        let methods = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+        server.join().unwrap();
+        assert!(
+            matches!(result, Err(CtlError::Protocol(message)) if message.contains("correlation"))
+        );
+        assert_eq!(methods, ["get_state"]);
+    }
+
+    #[test]
+    fn invalid_strict_command_flag_never_writes_a_request() {
+        for flag in [Value::Null, json!(1), json!("true"), json!([])] {
+            let mut client = client_stalled(Duration::from_millis(1));
+            assert!(matches!(
+                client.call("run_command", json!({"command": "side effect", "require_correlation": flag})),
+                Err(CtlError::Protocol(message)) if message.contains("boolean")
+            ));
+            assert_eq!(client.next_id, 1);
+        }
+    }
+
+    #[test]
+    fn strict_command_checks_capability_before_its_actual_request() {
+        let state = serde_json::to_string(&Response::ok(
+            1,
+            json!({"features": {"command_correlation": 1}}),
+        ))
+        .unwrap();
+        let result = serde_json::to_string(&Response::ok(2, json!({"completed": true}))).unwrap();
+        let mut client = client_replies_in_turn(vec![vec![state], vec![result]]);
+        assert_eq!(
+            client
+                .call(
+                    "run_command",
+                    json!({"command": "true", "require_correlation": true})
+                )
+                .unwrap(),
+            json!({"completed": true})
+        );
     }
 
     #[test]

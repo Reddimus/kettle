@@ -31,6 +31,7 @@
 //! - [`placeholder`] — Unicode-placeholder (`U+10EEEE` + zero-width
 //!   diacritics) decode path for kitty `U=1` virtual placements.
 
+mod command;
 pub mod completion;
 pub mod control;
 mod decode_base64;
@@ -46,6 +47,7 @@ pub mod placeholder;
 pub mod quota;
 pub mod sixel;
 
+pub use command::{CommandShell, CommandToken};
 pub use completion::{CompletionCandidate, CompletionKind, CompletionList, CompletionUpdate};
 pub use control::AnsiStripper;
 pub use extract::{Chunk, DeferredGraphics, Extractor, PrivateOutputFilter, Progress, PromptKind};

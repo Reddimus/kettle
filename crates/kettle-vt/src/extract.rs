@@ -14,12 +14,20 @@ use crate::{iterm, sixel};
 pub enum PromptKind {
     /// `A` — start of a fresh prompt.
     PromptStart,
+    /// A version-one integration announces its shell at a fresh prompt.
+    IntegratedPromptStart(crate::CommandShell),
+    /// The bundled integration explicitly withdraws command correlation.
+    CorrelationDisabledPromptStart,
     /// `B` — end of prompt / start of user input.
     CommandStart,
     /// `C` — command began executing (output starts).
     OutputStart,
+    /// Output for a specifically submitted command.
+    CorrelatedOutputStart(crate::CommandToken),
     /// `D` — command finished (optional exit code).
     CommandEnd(Option<i32>),
+    /// Completion carrying the submitted command's token.
+    CorrelatedCommandEnd(Option<i32>, crate::CommandToken),
 }
 
 /// Graphics-protocol storage follows the terminal's two screen buffers.
@@ -2519,15 +2527,52 @@ fn clean_notify_field(bytes: &[u8], allow_newline: bool) -> Option<String> {
 }
 
 fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {
+    if rest == b"A;kettle=0" {
+        return Some(PromptKind::CorrelationDisabledPromptStart);
+    }
+    let correlated = || {
+        if rest.len() > 96 {
+            return None;
+        }
+        let mut fields = rest.split(|byte| *byte == b';');
+        match fields.next()? {
+            b"A" if fields.next()? == b"kettle=1" => {
+                let shell = crate::CommandShell::parse(fields.next()?.strip_prefix(b"shell=")?)?;
+                fields
+                    .next()
+                    .is_none()
+                    .then_some(PromptKind::IntegratedPromptStart(shell))
+            }
+            b"C" => {
+                let token = crate::CommandToken::parse(fields.next()?.strip_prefix(b"kettle=")?)?;
+                fields
+                    .next()
+                    .is_none()
+                    .then_some(PromptKind::CorrelatedOutputStart(token))
+            }
+            b"D" => {
+                let code = std::str::from_utf8(fields.next()?)
+                    .ok()?
+                    .trim()
+                    .parse::<i32>()
+                    .ok();
+                let token = crate::CommandToken::parse(fields.next()?.strip_prefix(b"kettle=")?)?;
+                fields
+                    .next()
+                    .is_none()
+                    .then_some(PromptKind::CorrelatedCommandEnd(code, token))
+            }
+            _ => None,
+        }
+    };
+    if let Some(kind) = correlated() {
+        return Some(kind);
+    }
     match rest.first()? {
         b'A' => Some(PromptKind::PromptStart),
         b'B' => Some(PromptKind::CommandStart),
         b'C' => Some(PromptKind::OutputStart),
         b'D' => {
-            // Only the second `;`-separated field carries the exit code, so
-            // read it out of the borrowed bytes. Converting the whole body
-            // first would allocate up to three times a 16 MiB OSC payload to
-            // parse one integer out of its first few bytes.
             let code = rest
                 .splitn(3, |&b| b == b';')
                 .nth(1)
@@ -2587,6 +2632,88 @@ mod tests {
                     .any(|c| matches!(c, Chunk::Cwd(p) if p == "/home/me/proj")),
                 "{label} must still report a cwd"
             );
+        }
+    }
+
+    #[test]
+    fn prompt_metadata_carries_bounded_command_tokens_and_known_shells() {
+        let token = crate::CommandToken::parse(b"0123456789abcdef0123456789abcdef").unwrap();
+        assert_eq!(
+            super::parse_prompt(b"A;kettle=0"),
+            Some(PromptKind::CorrelationDisabledPromptStart)
+        );
+        assert_eq!(
+            super::parse_prompt(b"A;kettle=1;shell=bash"),
+            Some(PromptKind::IntegratedPromptStart(crate::CommandShell::Bash))
+        );
+        assert_eq!(
+            super::parse_prompt(b"C;kettle=0123456789abcdef0123456789abcdef"),
+            Some(PromptKind::CorrelatedOutputStart(token))
+        );
+        assert_eq!(
+            super::parse_prompt(b"D;7;kettle=0123456789abcdef0123456789abcdef"),
+            Some(PromptKind::CorrelatedCommandEnd(Some(7), token))
+        );
+        assert_eq!(
+            super::parse_prompt(b"D;7;kettle=bad"),
+            Some(PromptKind::CommandEnd(Some(7)))
+        );
+        assert_eq!(
+            super::parse_prompt(b"A;kettle=2;shell=bash"),
+            Some(PromptKind::PromptStart)
+        );
+        assert_eq!(
+            super::parse_prompt(b"A;kettle=1;shell=unknown"),
+            Some(PromptKind::PromptStart)
+        );
+        for invalid in [
+            &b""[..],
+            &b"0123456789abcdef0123456789abcdeg01"[..],
+            &b"0123456789abcdef0123456789abcdef00"[..],
+        ] {
+            assert!(crate::CommandToken::parse(invalid).is_none());
+        }
+    }
+
+    #[test]
+    fn correlation_markers_survive_every_input_split_and_both_terminators() {
+        let token = crate::CommandToken::parse(b"0123456789abcdef0123456789abcdef").unwrap();
+        for terminator in ["\x07", "\x1b\\"] {
+            let wire = format!(
+                "before\x1b]133;A;kettle=1;shell=zsh{terminator}\x1b]133;C;kettle={}{terminator}after\x1b]133;D;7;kettle={}{terminator}",
+                token.as_str(),
+                token.as_str()
+            );
+            for split in 0..=wire.len() {
+                let mut extractor = Extractor::default();
+                let mut chunks = extractor.feed(&wire.as_bytes()[..split]);
+                chunks.extend(extractor.feed(&wire.as_bytes()[split..]));
+                let marks: Vec<_> = chunks
+                    .iter()
+                    .filter_map(|chunk| match chunk {
+                        Chunk::Prompt(kind) => Some(*kind),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    marks,
+                    [
+                        PromptKind::IntegratedPromptStart(crate::CommandShell::Zsh),
+                        PromptKind::CorrelatedOutputStart(token),
+                        PromptKind::CorrelatedCommandEnd(Some(7), token)
+                    ]
+                );
+                let text: Vec<_> = chunks
+                    .iter()
+                    .filter_map(|chunk| match chunk {
+                        Chunk::Pass(bytes) => Some(bytes.as_slice()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .copied()
+                    .collect();
+                assert_eq!(text, b"beforeafter");
+            }
         }
     }
 

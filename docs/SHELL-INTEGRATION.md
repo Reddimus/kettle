@@ -259,3 +259,48 @@ The OSC 133 marks also make close-confirmation prompt-aware. A pane idle at an
 integrated-shell prompt (marks seen, no command running) skips the
 `ask-before-closing` dialog. A shell without integration always counts as busy,
 so its behavior is unchanged.
+
+### Command correlation
+
+Updated bundled integrations announce version 1 support and attach matching
+begin/end tokens to commands submitted through `run_command`. The command text
+still goes through the shell's ordinary parser in global scope. Multiline
+correlation uses bracketed paste in Bash and native editor insertion in Zsh,
+Fish and PowerShell. Older Bash 3.2 retains the legacy fallback because it cannot
+enumerate existing private editor bindings. Bash Vi editing also keeps the
+legacy fallback; token correlation requires its Emacs editor.
+Owner bindings take precedence: if the private chord family or a longer
+overlapping sequence is occupied, the
+integration retains ordinary OSC 133 operation without announcing correlation.
+Bash reserves Ctrl+X Ctrl+K; Zsh and Fish reserve Ctrl+X followed by h, i, j,
+k and 0..f; PowerShell reserves Ctrl+X followed by g, h, i, t and 0..f.
+PowerShell also requires the stock AcceptLine Enter handler and an Emacs or
+Windows editor mode. It stops advertising correlation if those bindings change
+after installation; start a new shell after restoring them. Re-source the
+updated integration in a new shell after installing an update.
+
+`require_correlation: true` requests refusal before input when correlation is
+unavailable. The CLI and MCP bridge check the server version first. Custom
+clients must check `get_state.features.command_correlation == 1` before sending
+a strict request, because older servers ignore unknown fields. Without the
+flag, unsupported integrations retain the existing fallback and timeout.
+
+A supported prompt uses `A;kettle=1;shell=NAME`; `A;kettle=0` explicitly
+withdraws that capability without requiring a command to run. Plain legacy
+`A` duplicates within an announced prompt leave it unchanged, because Fish
+emits its own unversioned marker after the integration hook. A supported command
+start waits for the next prompt announcement: calls in that interval return
+`busy` before writing input, including automatic calls without the strict flag.
+A new legacy-only prompt restores fallback; an explicit versioned announcement
+restores support or withdraws it. Custom editor maps and
+shells with line editing disabled use legacy fallback and refuse strict input.
+Capability reflects the last integration prompt hook. After changing editor
+bindings, start a fresh prompt or shell before submitting strict commands. A
+cached prompt repaint may not run the integration hook.
+
+Correlation requires an interactive shell accepting ordinary command input.
+The advertised capability describes its installed integration, not a reservation
+of its input stream. A previously queued command can start a foreground reader
+before later input reaches the editor; that reader can consume the submission.
+A timeout does not establish whether the submitted command ran, so inspect the
+pane before retrying commands with side effects.

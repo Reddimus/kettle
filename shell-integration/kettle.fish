@@ -25,9 +25,150 @@ set -q __kettle_completion_generation; or set -g __kettle_completion_generation 
 set -g __kettle_completion_counter_max 4503599627370495
 set -g __kettle_completion_enabled 1
 
+function __kettle_correlation_begin
+    set -l prior $status
+    set -g __kettle_pending_token ''
+    if contains -- $fish_key_bindings fish_vi_key_bindings fish_hybrid_key_bindings
+        set -g fish_bind_mode insert
+    end
+    return $prior
+end
+function __kettle_correlation_nibble --argument digit
+    set -l prior $status
+    if test (string length -- "$__kettle_pending_token") -lt 33
+        set -g __kettle_pending_token "$__kettle_pending_token$digit"
+    end
+    return $prior
+end
+function __kettle_correlation_arm
+    set -l prior $status
+    set -g __kettle_command_token ''
+    if string match --quiet --regex '^[0-9a-f]{32}$' -- "$__kettle_pending_token"
+        set -g __kettle_command_token $__kettle_pending_token
+    end
+    set -g __kettle_pending_token ''
+    return $prior
+end
+function __kettle_correlation_newline
+    set -l prior $status
+    commandline --insert \n
+    return $prior
+end
+function __kettle_correlation_tab
+    set -l prior $status
+    commandline --insert \t
+    return $prior
+end
+function __kettle_correlation_install
+    status is-interactive; or return 1
+    if set -q fish_bind_mode; and not contains -- $fish_bind_mode default insert
+        return 1
+    end
+    set -l reserved h 0 1 2 3 4 5 6 7 8 9 a b c d e f i j k
+    set -l control_x \cx
+    for mode in default insert
+        for binding in (bind --mode $mode)
+            if not string match --quiet -- '*ctrl-x*' "$binding"; and not string match --quiet -- '*cx*' "$binding"; and not string match --quiet -- "*$control_x*" "$binding"
+                continue
+            end
+            set -l words
+            printf '%s\n' "$binding" | read --tokenize --array words; or return 1
+            test "$words[1]" = bind; or return 1
+            set -e words[1]
+            set -l preset 0
+            set -l changes_mode 0
+            while test (count $words) -gt 0
+                switch $words[1]
+                    case -M --mode
+                        test (count $words) -ge 2; and test "$words[2]" = "$mode"; or return 1
+                        set -e words[1..2]
+                    case --preset
+                        set preset 1
+                        set -e words[1]
+                    case --user
+                        set -e words[1]
+                    case -m --sets-mode
+                        test (count $words) -ge 2; or return 1
+                        set changes_mode 1
+                        set -e words[1..2]
+                    case --
+                        set -e words[1]
+                        break
+                    case '-*'
+                        return 1
+                    case '*'
+                        break
+                end
+            end
+            test (count $words) -ge 2; or return 1
+            set -l key $words[1]
+            set -l digit
+            if test "$key" = ctrl-x; or test "$key" = "$control_x"
+                # Keep stock prefix actions in both Emacs and Vi maps. An
+                # owner-installed prefix still disables our private family.
+                if test $preset -eq 1; and test $changes_mode -eq 0; and test (count $words) -eq 2; and contains -- "$words[2]" fish_clipboard_copy fish_vi_dec
+                    continue
+                end
+                return 1
+            else if string match --quiet -- 'ctrl-x,*' "$key"
+                set -l keys (string split , -- "$key")
+                set digit $keys[2]
+                contains -- "$digit" $reserved; or continue
+                test (count $keys) -eq 2; or return 1
+            else if string match --quiet -- "$control_x*" "$key"
+                set digit (string sub --start 2 --length 1 -- "$key")
+                contains -- "$digit" $reserved; or continue
+                test (string length -- "$key") -eq 2; or return 1
+            else
+                continue
+            end
+            set -l expected "__kettle_correlation_nibble $digit"
+            switch $digit
+                case h
+                    set expected __kettle_correlation_begin
+                case i
+                    set expected __kettle_correlation_arm
+                case j
+                    set expected __kettle_correlation_newline
+                case k
+                    set expected __kettle_correlation_tab
+            end
+            # Preserve complete owner command lists and longer sequences that
+            # would take priority over a reserved chord. Never evaluate them.
+            test $changes_mode -eq 0; and test (count $words) -eq 2; and test "$words[2]" = "$expected"; or return 1
+        end
+    end
+    for mode in default insert
+        bind --mode $mode \cxh __kettle_correlation_begin
+        for digit in 0 1 2 3 4 5 6 7 8 9 a b c d e f
+            bind --mode $mode \cx$digit "__kettle_correlation_nibble $digit"
+        end
+        bind --mode $mode \cxi __kettle_correlation_arm
+        bind --mode $mode \cxj __kettle_correlation_newline
+        bind --mode $mode \cxk __kettle_correlation_tab
+    end
+end
+set -g __kettle_pending_token ''
+set -g __kettle_command_token ''
+set -g __kettle_active_token ''
+set -g __kettle_correlation_enabled 0
+if __kettle_correlation_install
+    set -g __kettle_correlation_enabled 1
+end
+
 function __kettle_prompt --on-event fish_prompt
+    set -g __kettle_command_token ''
+    set -g __kettle_pending_token ''
+    set -g __kettle_correlation_enabled 0
+    if __kettle_correlation_install
+        set -g __kettle_correlation_enabled 1
+    end
     __kettle_completion_clear
-    printf '\e]133;A\a'
+    if test $__kettle_correlation_enabled -eq 1
+        printf '\e]133;A;kettle=1;shell=fish\a'
+    else
+        printf '\e]133;A;kettle=0\a'
+    end
     if __kettle_completion_begin_session
         printf '\e]777;kettle-completion;4;sync;%d;%d\a' \
             $__kettle_completion_session (__kettle_completion_key_mask)
@@ -36,10 +177,22 @@ function __kettle_prompt --on-event fish_prompt
 end
 function __kettle_preexec --on-event fish_preexec
     __kettle_completion_clear
-    printf '\e]133;C\a'
+    set -g __kettle_active_token $__kettle_command_token
+    set -g __kettle_command_token ''
+    if test -n "$__kettle_active_token"
+        printf '\e]133;C;kettle=%s\a' $__kettle_active_token
+    else
+        printf '\e]133;C\a'
+    end
 end
 function __kettle_postexec --on-event fish_postexec
-    printf '\e]133;D;%d\a' $status
+    set -l command_status $status
+    if test -n "$__kettle_active_token"
+        printf '\e]133;D;%d;kettle=%s\a' $command_status $__kettle_active_token
+        set -g __kettle_active_token ''
+    else
+        printf '\e]133;D;%d\a' $command_status
+    end
 end
 
 # OSC 7 cwd report: powers new-tab/split cwd inheritance and

@@ -126,6 +126,53 @@ kettle_completion_clear() {
   __kettle_completion_generation=$(( ${__kettle_completion_generation:-0} + 1 ))
   printf '\033]777;kettle-completion;1;clear;%s\007' "$__kettle_completion_generation"
 }
+# The editor consumes metadata separately from the original command buffer.
+__kettle_correlation_arm() {
+  local __kettle_status=$? LC_ALL=C __kettle_candidate=''
+  if IFS= read -r -s -n32 -t1 __kettle_candidate &&
+      [[ ${#__kettle_candidate} == 32 && $__kettle_candidate != *[!0-9a-f]* ]]; then
+    __kettle_command_token=$__kettle_candidate
+  else
+    __kettle_command_token=''
+  fi
+  return "$__kettle_status"
+}
+__kettle_correlation_install() {
+  local __kettle_map=emacs-standard __kettle_bindings __kettle_binding
+  [[ $- == *i* ]] || return 1
+  [[ -o emacs && ! -o vi ]] || return 1
+  # Older Readline cannot enumerate bind -x handlers without replacing them.
+  bind -X >/dev/null 2>&1 || return 1
+  # Macros can have the same text as our callback. Only bind -X proves
+  # that the entry invokes shell code, rather than inserting owner text.
+  __kettle_bindings=$(bind -m "$__kettle_map" -p; bind -m "$__kettle_map" -s)
+  while IFS= read -r __kettle_binding; do
+    case "$__kettle_binding" in
+      '"\C-x"'*|'"\C-x\C-k'*) return 1 ;;
+    esac
+  done <<< "$__kettle_bindings"
+  __kettle_bindings=$(bind -m "$__kettle_map" -X)
+  while IFS= read -r __kettle_binding; do
+    case "$__kettle_binding" in
+      '"\C-x\C-k" "__kettle_correlation_arm"'|'"\C-x\C-k": "__kettle_correlation_arm"') ;;
+      '"\C-x"'*|'"\C-x\C-k'*) return 1 ;;
+    esac
+  done <<< "$__kettle_bindings"
+  bind -m "$__kettle_map" -x '"\C-x\C-k":__kettle_correlation_arm'
+}
+__kettle_command_token=''
+__kettle_active_token=''
+__kettle_correlation_enabled=0
+if __kettle_correlation_install 2>/dev/null; then __kettle_correlation_enabled=1; fi
+__kettle_command_begin() {
+  __kettle_active_token=${__kettle_command_token-}
+  __kettle_command_token=''
+  if [[ -n $__kettle_active_token ]]; then
+    printf '\033]133;C;kettle=%s\007' "$__kettle_active_token"
+  else
+    printf '\033]133;C\007'
+  fi
+}
 # Capture the command's status FIRST, and hand it back on the way out.
 #
 # kettle runs first in PROMPT_COMMAND so its own `$?` read is the real one.
@@ -135,8 +182,21 @@ kettle_completion_clear() {
 __kettle_pc() {
   local __kettle_status=$?
   __kettle_command_ready=0
+  __kettle_command_token=''
+  __kettle_correlation_enabled=0
+  if __kettle_correlation_install 2>/dev/null; then __kettle_correlation_enabled=1; fi
   kettle_completion_clear
-  printf '\033]133;D;%s\007\033]133;A\007' "$__kettle_status"
+  if [[ -n ${__kettle_active_token-} ]]; then
+    printf '\033]133;D;%s;kettle=%s\007' "$__kettle_status" "$__kettle_active_token"
+    __kettle_active_token=''
+  else
+    printf '\033]133;D;%s\007' "$__kettle_status"
+  fi
+  if [[ $__kettle_correlation_enabled == 1 ]]; then
+    printf '\033]133;A;kettle=1;shell=bash\007'
+  else
+    printf '\033]133;A;kettle=0\007'
+  fi
   __kettle_osc7
   return "$__kettle_status"
 }
@@ -162,7 +222,8 @@ case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
 esac
 PS1='\[\033]133;B\007\]'"$PS1"
 __kettle_command_ready=0
-trap 'if [[ ${__kettle_command_ready:-0} == 1 && $BASH_COMMAND != __kettle_pc ]]; then
+trap 'if [[ ${__kettle_command_ready:-0} == 1 && $BASH_COMMAND != __kettle_pc &&
+    $BASH_COMMAND != __kettle_correlation_arm && ${FUNCNAME[0]-} != __kettle_correlation_arm ]]; then
   __kettle_command_ready=0
-  printf "\033]133;C\007"
+  __kettle_command_begin
 fi' DEBUG

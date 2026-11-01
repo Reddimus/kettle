@@ -1317,6 +1317,12 @@
     "get_state_result": {
       "type": "object",
       "properties": {
+        "features": {
+          "type": "object",
+          "properties": {"command_correlation": {"const": 1}},
+          "additionalProperties": true,
+          "description": "Optional on legacy servers. Version 1 supports strict command-correlation admission."
+        },
         "version": {
           "type": "string"
         },
@@ -2641,13 +2647,18 @@
     },
     "run_command_params": {
       "type": "object",
-      "description": "Capability: mutate. Consumes pane, command and timeout_s; unknown fields are ignored. Absent pane targets focus; explicit null is rejected. command may be empty. CR is appended unless it already ends in CR or LF. timeout_s defaults to 15 for absent/nonnumeric values; numeric values are clamped to 0.1..600 seconds. Only one pending command per pane is allowed. Input locks/backpressure apply. Completion depends on OSC 133 markers.",
+      "description": "Capability: mutate. Consumes pane, command, timeout_s and require_correlation; unknown fields are ignored. Absent pane targets focus; explicit null is rejected. command may be empty. One trailing LF and then one trailing CR are removed before appending CR. timeout_s defaults to 15 for absent/nonnumeric values; numeric values are clamped to 0.1..600 seconds. Only one pending command per pane is allowed. Input locks/backpressure apply. Completion depends on OSC 133 markers. Updated bundled integrations use matching begin/end tokens automatically. require_correlation defaults to false; true refuses unsupported panes/commands before PTY writes. Strict clients must first verify get_state.features.command_correlation equals 1; old servers ignore unknown request fields.",
       "properties": {
         "pane": {
           "$ref": "#/$defs/u64"
         },
         "command": {
           "type": "string"
+        },
+        "require_correlation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Require matching command tokens; check server capability before sending to an older server."
         },
         "timeout_s": {
           "$ref": "#/$defs/ignored_unless_number",

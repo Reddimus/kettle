@@ -312,7 +312,8 @@ fn full_tool_specs() -> Vec<Value> {
                 "properties": {
                     "pane": {"type": "integer", "description": "pane id (default: focused)"},
                     "command": {"type": "string"},
-                    "timeout_s": {"type": "number", "description": "give up waiting after N seconds (default 15)"}
+                    "timeout_s": {"type": "number", "description": "give up waiting after N seconds (default 15)"},
+                    "require_correlation": {"type": "boolean", "default": false, "description": "refuse before writing input unless the server and pane support matching command tokens"}
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -1380,6 +1381,7 @@ fn tool_argument_fields(name: &str) -> Option<&'static [(&'static str, ArgKind)]
             ("pane", ArgKind::Unsigned),
             ("command", ArgKind::String),
             ("timeout_s", ArgKind::Number),
+            ("require_correlation", ArgKind::Bool),
         ],
         "kettle_send_keys" => &[("pane", ArgKind::Unsigned), ("keys", ArgKind::Strings)],
         "kettle_dispatch_ui_key" => &[("keys", ArgKind::Strings)],

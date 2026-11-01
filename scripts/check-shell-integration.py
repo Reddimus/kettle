@@ -18,7 +18,7 @@ from urllib.parse import quote
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "scripts" / "fixtures" / "shell-integration"
 INTEGRATION = ROOT / "shell-integration"
-OSC_A = b"\x1b]133;A\x07"
+OSC_A = b"\x1b]133;A;kettle=0\x07"
 OSC_B = b"\x1b]133;B\x07"
 OSC_C = b"\x1b]133;C\x07"
 OSC_D_1 = b"\x1b]133;D;1\x07"
@@ -33,6 +33,7 @@ def run(
     label: str,
     announce: bool = True,
     environment: dict[str, str] | None = None,
+    timeout: float | None = None,
 ) -> bytes:
     process_environment = os.environ.copy()
     if environment is not None:
@@ -44,6 +45,7 @@ def run(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
+        timeout=timeout,
     )
     if result.returncode != 0:
         output = result.stdout.decode("utf-8", errors="replace")
@@ -112,6 +114,7 @@ def check_no_inline_completion_fallbacks() -> None:
 
 
 def check_zsh(executable: str) -> None:
+    check_correlation_binding_ownership(executable, "zsh")
     prompt_output = run(
         [
             executable,
@@ -203,6 +206,202 @@ def check_zsh(executable: str) -> None:
     print(f"zsh maximum completion payload fixture: PASS ({elapsed:.2f}s)")
 
 
+def check_correlation_binding_ownership(
+    executable: str, shell: str, lookalike: bool = False
+) -> None:
+    """An integration must refuse its new capability rather than replace owner keys."""
+    integration = str(INTEGRATION / ("kettle." + shell))
+    if (
+        lookalike
+        and shell == "bash"
+        and b"version 3.2"
+        in run([executable, "--version"], "Bash version", announce=False)
+    ):
+        print("Bash 3.2 bind -x inspection: SKIP (unsupported; legacy refusal checked)")
+        return
+    if shell == "bash":
+        program = r"""
+PS1=''
+bind -m emacs-standard '"\C-x\C-k":"owner"'
+source "$1"
+[[ $__kettle_correlation_enabled == 0 ]] || exit 1
+case "$(bind -m emacs-standard -s)" in *'"\C-x\C-k": "owner"'*) ;; *) exit 2;; esac
+"""
+        if lookalike:
+            program = r"""
+PS1=''
+bind -m emacs-standard -x '"\C-x\C-k":__kettle_correlation_arm; printf owner'
+source "$1"
+[[ $__kettle_correlation_enabled == 0 ]] || exit 1
+case "$(bind -m emacs-standard -X)" in *'"__kettle_correlation_arm; printf owner"'*) ;; *) exit 2;; esac
+"""
+        command = [
+            executable,
+            "--noprofile",
+            "--norc",
+            "-ic",
+            program,
+            "fixture",
+            integration,
+        ]
+    elif shell == "zsh":
+        program = r"""
+PROMPT=''
+bindkey -M emacs $'\C-xh' self-insert
+source "$1"
+(( __kettle_correlation_enabled == 0 )) || exit 1
+[[ $(bindkey -M emacs $'\C-xh') == *self-insert ]] || exit 2
+"""
+        if lookalike:
+            program = program.replace("self-insert", "__kettle_correlation_owner")
+        command = [executable, "-f", "-i", "-c", program, "fixture", integration]
+    elif shell == "fish":
+        program = r"""
+bind \cxh self-insert
+source $argv[1]
+test $__kettle_correlation_enabled -eq 0; or exit 1
+string match --quiet '*self-insert*' -- (bind \cxh); or exit 2
+"""
+        if lookalike:
+            program = program.replace(
+                "bind \\cxh self-insert",
+                "bind \\cxh 'echo owner; __kettle_correlation_begin'",
+            ).replace("*self-insert*", "*echo owner*")
+        command = [
+            executable,
+            "--no-config",
+            "--interactive",
+            "-c",
+            program,
+            integration,
+        ]
+    else:
+        program = r"""
+$ErrorActionPreference='Stop'
+Import-Module PSReadLine
+Set-PSReadLineKeyHandler -Key Enter -Function AcceptLine
+Set-PSReadLineKeyHandler -Chord 'Ctrl+x,g' -BriefDescription OwnerKey -ScriptBlock { }
+. $args[0]
+if ($global:__kettle_correlation_enabled) { throw 'owner key was replaced' }
+$key = Get-PSReadLineKeyHandler -Bound | Where-Object { $_.Key -eq 'Ctrl+x,g' }
+if ($key.Function -ne 'OwnerKey') { throw 'owner key was changed' }
+"""
+        if lookalike:
+            program = program.replace("OwnerKey", "KettleCorrelationOwner")
+        # A file parameter avoids interpolating its path into PowerShell code.
+        with tempfile.TemporaryDirectory(prefix="kettle-correlation-guard-") as folder:
+            fixture = Path(folder) / "guard.ps1"
+            fixture.write_text(program, encoding="utf-8")
+            run(
+                [
+                    executable,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-File",
+                    str(fixture),
+                    integration,
+                ],
+                "PowerShell correlation binding ownership",
+            )
+        if not lookalike:
+            check_correlation_binding_ownership(executable, shell, lookalike=True)
+        return
+    run(
+        command,
+        shell
+        + " correlation binding ownership"
+        + (" (lookalike)" if lookalike else ""),
+        environment={"HISTFILE": os.devnull, "fish_history": ""},
+    )
+    if shell == "fish" and lookalike:
+        multiple = [
+            arg.replace(
+                "'echo owner; __kettle_correlation_begin'",
+                "'echo owner' __kettle_correlation_begin",
+            )
+            for arg in command
+        ]
+        run(
+            multiple,
+            "fish correlation multi-command binding ownership",
+            environment={"fish_history": ""},
+        )
+    if not lookalike:
+        check_correlation_binding_ownership(executable, shell, lookalike=True)
+        if shell == "bash":
+            # Bash 5.2 can crash when set -o vi runs before Readline's first
+            # prompt, even without integration. Select the mode at startup.
+            vi_program = r'''PS1=''; source "$1"; [[ $__kettle_correlation_enabled == 0 ]] || exit 1; exit 0'''
+            run(
+                [
+                    executable,
+                    "--noprofile",
+                    "--norc",
+                    "-o",
+                    "vi",
+                    "-ic",
+                    vi_program,
+                    "fixture",
+                    integration,
+                ],
+                "Bash Vi correlation refusal",
+                environment={"HISTFILE": os.devnull},
+                timeout=15,
+            )
+        programs = {
+            "bash": r"""PS1=''; set +o emacs; set +o vi; source "$1"; [[ $__kettle_correlation_enabled == 0 ]]""",
+            "zsh": r"""PROMPT=''; bindkey -N custom emacs; bindkey -A custom main; source "$1"; (( __kettle_correlation_enabled == 0 )) && [[ $(bindkey -lL main) == 'bindkey -A custom main' ]]""",
+            "fish": r"""set -g fish_bind_mode custom; bind -M custom '' self-insert; source $argv[1]; test $__kettle_correlation_enabled -eq 0""",
+        }
+        # Keep the same native interpreter and startup arguments as the owner
+        # binding fixture, replacing only the isolated program.
+        unsupported = [programs[shell] if arg == program else arg for arg in command]
+        run(
+            unsupported,
+            shell + " unsupported editor correlation refusal",
+            environment={"HISTFILE": os.devnull, "fish_history": ""},
+            timeout=15,
+        )
+        if shell == "zsh":
+            disabled = r"""PROMPT=''; unsetopt zle; source "$1"; (( __kettle_correlation_enabled == 0 )) && [[ ! -o zle ]]"""
+            run(
+                [disabled if arg == program else arg for arg in command],
+                "Zsh disabled line editor correlation refusal",
+                environment={"HISTFILE": os.devnull},
+                timeout=15,
+            )
+            enclosing = r"""PROMPT=''; bindkey -M vicmd -R $'\x17-\x19' self-insert; before=$(bindkey -M vicmd $'\C-x'); source "$1"; (( __kettle_correlation_enabled == 0 )) && [[ $(bindkey -M vicmd $'\C-x') == "$before" ]]"""
+            run(
+                [enclosing if arg == program else arg for arg in command],
+                "Zsh enclosing range preservation",
+                environment={"HISTFILE": os.devnull},
+                timeout=15,
+            )
+        if shell == "fish":
+            standard_maps = r"""source $argv[1]; test $__kettle_correlation_enabled -eq 1; or exit 1; fish_vi_key_bindings; set -l before_default (bind --preset -M default \cx | string collect); set -l before_insert (bind --preset -M insert \cx | string collect); __kettle_correlation_install; or exit 2; test (bind --preset -M default \cx | string collect) = "$before_default"; or exit 3; test (bind --preset -M insert \cx | string collect) = "$before_insert"; or exit 3; fish_default_key_bindings; set -l before_emacs (bind --preset -M default \cx | string collect); __kettle_correlation_install; or exit 4; test (bind --preset -M default \cx | string collect) = "$before_emacs"; or exit 5"""
+            run(
+                [standard_maps if arg == program else arg for arg in command],
+                "Fish stock Emacs and Vi prefix preservation",
+                environment={"fish_history": ""},
+                timeout=15,
+            )
+        longer_programs = {
+            "bash": r"""PS1=''; bind -m emacs-standard '"\C-x\C-ka":"owner"'; source "$1"; [[ $__kettle_correlation_enabled == 0 ]] && [[ $(bind -m emacs-standard -s) == *'"\C-x\C-ka": "owner"'* ]]""",
+            "zsh": r"""PROMPT=''; bindkey -s -M emacs $'\C-xh\C-xa' 'true '; before=$(bindkey -M emacs $'\C-xh\C-xa'); source "$1"; (( __kettle_correlation_enabled == 0 )) && [[ $(bindkey -M emacs $'\C-xh\C-xa') == "$before" ]]""",
+            "fish": r'''bind \cxh\cxa 'commandline --insert owner'; set -l before (bind \cxh\cxa); source $argv[1]; test $__kettle_correlation_enabled -eq 0; and test (bind \cxh\cxa) = "$before"''',
+        }
+        if shell != "bash" or b"version 3.2" not in run(
+            [executable, "--version"], "Bash version", announce=False
+        ):
+            run(
+                [longer_programs[shell] if arg == program else arg for arg in command],
+                shell + " longer overlapping binding preservation",
+                environment={"HISTFILE": os.devnull, "fish_history": ""},
+                timeout=15,
+            )
+
+
 def check_bash_command_markers(executable: str, version: bytes) -> None:
     match = re.search(rb"version (\d+)\.(\d+)", version)
     array_supported = match is not None and tuple(map(int, match.groups())) >= (5, 1)
@@ -244,7 +443,42 @@ def check_bash_command_markers(executable: str, version: bytes) -> None:
     print("Bash command timing markers fixture: PASS")
 
 
+def check_bash_correlation_revalidation(executable: str) -> None:
+    program = r"""PS1=''; supported=0; bind -X >/dev/null 2>&1 && supported=1; source "$1"; [[ $__kettle_correlation_enabled == "$supported" ]] || exit 4; if (( supported )); then __kettle_correlation_install || exit 5; __kettle_pc; [[ $__kettle_correlation_enabled == 1 ]] || exit 6; __kettle_pc; [[ $__kettle_correlation_enabled == 1 ]] || exit 7; fi; exit 0"""
+    run(
+        [
+            executable,
+            "--noprofile",
+            "--norc",
+            "-ic",
+            program,
+            "fixture",
+            str(INTEGRATION / "kettle.bash"),
+        ],
+        "Bash correlation survives prompt revalidation",
+        environment={"HISTFILE": os.devnull, "INPUTRC": os.devnull},
+        timeout=15,
+    )
+    macro = r"""PS1=''; bind -m emacs-standard '"\C-x\C-k":"__kettle_correlation_arm"' || exit 8; before=$(bind -m emacs-standard -s); [[ -n "$before" ]] || exit 9; source "$1"; [[ $__kettle_correlation_enabled == 0 && $(bind -m emacs-standard -s) == "$before" ]] || exit 10; exit 0"""
+    run(
+        [
+            executable,
+            "--noprofile",
+            "--norc",
+            "-ic",
+            macro,
+            "fixture",
+            str(INTEGRATION / "kettle.bash"),
+        ],
+        "Bash same-text macro remains owned",
+        environment={"HISTFILE": os.devnull, "INPUTRC": os.devnull},
+        timeout=15,
+    )
+
+
 def check_bash(executable: str, require_32: bool) -> None:
+    check_bash_correlation_revalidation(executable)
+    check_correlation_binding_ownership(executable, "bash")
     version = run([executable, "--version"], "Bash version probe").splitlines()[0]
     if require_32 and b"version 3.2" not in version:
         raise RuntimeError(
@@ -374,6 +608,7 @@ def username_completion_prefix(executable: str, user: str) -> str | None:
 
 
 def check_fish(executable: str) -> None:
+    check_correlation_binding_ownership(executable, "fish")
     with tempfile.TemporaryDirectory(prefix="kettle fish ") as temporary:
         cwd = Path(temporary) / "kt test" / "\u00fcn\u00efcode"
         cwd.mkdir(parents=True)
@@ -1152,6 +1387,7 @@ def check_fish(executable: str) -> None:
 
 
 def check_powershell(executable: str) -> None:
+    check_correlation_binding_ownership(executable, "ps1")
     common = [
         executable,
         "-NoLogo",
@@ -1161,6 +1397,16 @@ def check_powershell(executable: str) -> None:
         "Bypass",
         "-File",
     ]
+    token = b"0123456789abcdef0123456789abcdef"
+    for replacement in ["Arm", "Enter", "Vi"]:
+        correlation = run(
+            [*common, str(FIXTURES / "powershell-correlation.ps1"), "-IntegrationPath", str(INTEGRATION / "kettle.ps1"), "-ReplaceBinding", replacement],
+            f"{Path(executable).name} correlation token fixture ({replacement})", announce=False,
+        )
+        for mark in [b"\x1b]133;C;kettle=" + token + b"\x07", b"\x1b]133;D;7;kettle=" + token + b"\x07", b"KETTLE_POWERSHELL_CORRELATION_OK"]:
+            if mark not in correlation:
+                raise RuntimeError(f"PowerShell omitted correlation marker: {mark!r}")
+        print(f"{Path(executable).name} correlation token fixture ({replacement}): PASS")
     prompt_output = run(
         [
             *common,
@@ -1170,7 +1416,8 @@ def check_powershell(executable: str) -> None:
         ],
         f"{Path(executable).name} prompt-status fixture",
     )
-    prompt_start = prompt_output.find(b"\x1b]133;A\x07")
+    prompt_mark = re.search(rb"\x1b\]133;A(?:;kettle=1;shell=powershell|;kettle=0)?\x07", prompt_output)
+    prompt_start = prompt_mark.start() if prompt_mark else -1
     user_prompt = prompt_output.find(b"USER-PROMPT")
     prompt_end = prompt_output.find(OSC_B)
     if not (0 <= prompt_start < user_prompt < prompt_end):

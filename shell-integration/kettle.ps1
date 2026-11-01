@@ -15,6 +15,62 @@ if (-not $global:__kettle_prompt_installed) {
     # `prompt` after this wrapper replaces it and recurses forever.
     $global:__kettle_original_prompt = (Get-Item function:prompt -ErrorAction SilentlyContinue).ScriptBlock
 
+    $global:__kettle_pending_token = ''
+    $global:__kettle_command_token = ''
+    $global:__kettle_active_token = ''
+    $global:__kettle_correlation_enabled = $false
+    function global:__kettle_correlation_begin {
+        Set-StrictMode -Off
+        $global:__kettle_pending_token = ''
+    }
+    function global:__kettle_correlation_nibble([char]$Digit) {
+        Set-StrictMode -Off
+        if ($global:__kettle_pending_token.Length -lt 33) {
+            $global:__kettle_pending_token += $Digit
+        }
+    }
+    function global:__kettle_correlation_arm {
+        Set-StrictMode -Off
+        $global:__kettle_command_token = ''
+        if ($global:__kettle_pending_token -cmatch '^[0-9a-f]{32}$') {
+            $global:__kettle_command_token = $global:__kettle_pending_token
+        }
+        $global:__kettle_pending_token = ''
+    }
+    function global:__kettle_command_begin {
+        Set-StrictMode -Off
+        $global:__kettle_active_token = $global:__kettle_command_token
+        $global:__kettle_command_token = ''
+        $metadata = if ($global:__kettle_active_token) { ';kettle=' + $global:__kettle_active_token } else { '' }
+        [Console]::Write([char]27 + ']133;C' + $metadata + [char]7)
+    }
+    function global:__kettle_correlation_bindings_owned {
+        Set-StrictMode -Off
+        try {
+            if ((Get-PSReadLineOption).EditMode -eq 'Vi') { return $false }
+            $expected = @{
+                'Enter' = 'KettleAcceptLine'
+                'Ctrl+x,g' = 'KettleCorrelationBegin'
+                'Ctrl+x,h' = 'KettleCorrelationArm'
+                'Ctrl+x,i' = 'KettleCorrelationNewline'
+                'Ctrl+x,t' = 'KettleCorrelationTab'
+            }
+            foreach ($digit in '0123456789abcdef'.ToCharArray()) {
+                $expected["Ctrl+x,$digit"] = 'KettleCorrelationNibble'
+            }
+            foreach ($handler in (Get-PSReadLineKeyHandler -Bound -ErrorAction Stop)) {
+                if ($handler.Key -eq 'Ctrl+x') { return $false }
+                if ($expected.ContainsKey($handler.Key)) {
+                    if ($handler.Function -ne $expected[$handler.Key]) { return $false }
+                    [void]$expected.Remove($handler.Key)
+                }
+            }
+            return $expected.Count -eq 0
+        } catch {
+            return $false
+        }
+    }
+
     function global:prompt {
         # Capture status before a dynamically scoped prompt can overwrite it.
         # `$?` first: any statement, Set-StrictMode included, resets it. Strict
@@ -50,7 +106,16 @@ if (-not $global:__kettle_prompt_installed) {
         $bel = [char]7
         __kettle_completion_clear
         # OSC 133: D is the prior exit; A starts this prompt.
-        [Console]::Write("$esc]133;D;$__kettle_code$bel$esc]133;A$bel")
+        $metadata = if ($global:__kettle_active_token) { ';kettle=' + $global:__kettle_active_token } else { '' }
+        [Console]::Write("$esc]133;D;$__kettle_code$metadata$bel")
+        $global:__kettle_active_token = ''
+        $global:__kettle_command_token = ''
+        $global:__kettle_pending_token = ''
+        if ($global:__kettle_correlation_enabled -and -not (__kettle_correlation_bindings_owned)) {
+            $global:__kettle_correlation_enabled = $false
+        }
+        $capability = if ($global:__kettle_correlation_enabled) { ';kettle=1;shell=powershell' } else { ';kettle=0' }
+        [Console]::Write("$esc]133;A$capability$bel")
         if ($global:__kettle_completion_enabled -and
             $global:__kettle_completion_session -lt $global:__kettle_completion_counter_max) {
             $global:__kettle_completion_session =
@@ -492,13 +557,32 @@ if (-not $global:__kettle_prompt_installed) {
                 Where-Object { $_.Key -eq 'Enter' } |
                 Select-Object -First 1
             if ($null -ne $enterHandler -and $enterHandler.Function -eq 'AcceptLine') {
-                Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
+                Set-PSReadLineKeyHandler -Key Enter -BriefDescription KettleAcceptLine -ScriptBlock {
                     Set-StrictMode -Off
                     __kettle_completion_clear
                     $errors = $null
                     [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$null, [ref]$null, [ref]$errors, [ref]0)
-                    if ($true -notin $errors.IncompleteInput) { [Console]::Write([char]27 + ']133;C' + [char]7) }
+                    if ($true -notin $errors.IncompleteInput) { __kettle_command_begin }
                     [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+                }
+                # Preserve every owner binding before claiming the private chord family.
+                $occupied = Get-PSReadLineKeyHandler -Bound | Where-Object {
+                    $_.Key -match '^Ctrl\+x(?:,[0-9a-it])?$'
+                }
+                if ($null -eq $occupied) {
+                    Set-PSReadLineKeyHandler -Chord 'Ctrl+x,g' -BriefDescription KettleCorrelationBegin -ScriptBlock { __kettle_correlation_begin }
+                    Set-PSReadLineKeyHandler -Chord 'Ctrl+x,h' -BriefDescription KettleCorrelationArm -ScriptBlock { __kettle_correlation_arm }
+                    foreach ($digit in '0123456789abcdef'.ToCharArray()) {
+                        $handler = { __kettle_correlation_nibble $digit }.GetNewClosure()
+                        Set-PSReadLineKeyHandler -Chord "Ctrl+x,$digit" -BriefDescription KettleCorrelationNibble -ScriptBlock $handler
+                    }
+                    Set-PSReadLineKeyHandler -Chord 'Ctrl+x,i' -BriefDescription KettleCorrelationNewline -ScriptBlock {
+                        [Microsoft.PowerShell.PSConsoleReadLine]::Insert("`n")
+                    }
+                    Set-PSReadLineKeyHandler -Chord 'Ctrl+x,t' -BriefDescription KettleCorrelationTab -ScriptBlock {
+                        [Microsoft.PowerShell.PSConsoleReadLine]::Insert("`t")
+                    }
+                    $global:__kettle_correlation_enabled = $true
                 }
             }
 

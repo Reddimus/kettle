@@ -1521,6 +1521,37 @@ the `OVERLAPPED`. Named-pipe `flush` is deliberately a no-op because
 `FlushFileBuffers` on the server end waits for the client to drain buffered
 bytes and would bypass the write deadline.
 
+Bundled shell integrations announce command correlation version 1 with
+`OSC 133;A;kettle=1;shell=NAME`; `A;kettle=0` explicitly withdraws support.
+Unversioned duplicate prompt marks preserve the last announcement (Fish emits
+one after its hook). A supported command start records `AwaitingPrompt`:
+admission returns `busy` until the next prompt, so automatic calls cannot
+mistake temporary absence for permission to use legacy matching. A fresh
+legacy-only prompt restores fallback. Private editor bindings consume a bounded
+32-digit hexadecimal token separately from the unchanged command buffer.
+Matching `C;kettle=TOKEN` and `D;STATUS;kettle=TOKEN` markers drive a separate
+bounded tracker; ordinary shell activity, notifications and subscriber events
+retain their legacy handling. The tracker records the matching begin's clock
+and absolute document row, so an earlier queued command cannot supply either.
+A timeout or disconnected requester cancels the expected token without
+interrupting the shell command. Controller admission arms the tracker before
+enqueueing input and cancels it if input is rejected. Correlated boundaries
+inside DEC 2026 share the bounded graphics marker journal, preserving their
+text offsets before capture; their original receipt timestamps still determine
+duration. Only a matching completion requests a semantic owner wake, including
+when paint wakes are disabled for a hidden window.
+
+`get_state.features.command_correlation` advertises the server version.
+Strict clients preflight that feature before submitting `require_correlation`;
+the server also rejects unsupported pane/integration/input combinations before
+PTY writes. Legacy integrations keep the generation-based fallback. Editor
+bindings already claimed by the owner disable the new capability. Integration
+support assumes the shell is accepting ordinary command input, as the existing
+control method does; it does not make arbitrary foreground programs into
+shells. Queued foreground reads can consume later submissions: capability
+advertisement does not reserve the input stream, and a timeout leaves the
+command's execution uncertain.
+
 The UI server caps admission at eight peers. Request inactivity is 30 seconds;
 once a frame starts, its newline has an absolute five-second deadline that
 slow-drip bytes cannot reset. Every response/event write has five seconds,

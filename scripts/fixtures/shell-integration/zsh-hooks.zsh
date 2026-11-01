@@ -39,7 +39,7 @@ for command_status in 0 7 130; do
   )
   hook_status=$?
   if (( hook_status != 0 )) ||
-     [[ "$output" != *$'\e]133;D;'"$command_status"$'\a\e]133;A\a'* ]]; then
+     [[ "$output" != *$'\e]133;D;'"$command_status"$'\a\e]133;A;kettle=0\a'* ]]; then
     print -u2 -- "kettle precmd lost command status $command_status"
     exit 1
   fi

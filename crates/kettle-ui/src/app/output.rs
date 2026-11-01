@@ -280,6 +280,7 @@ impl App {
         // is destructive, so the command-notify, the run_command correlator, and
         // event subscribers must all be fed from one place, AFTER this pane loop.
         let mut command_finished_local: Vec<(u64, kettle_core::CommandFinished)> = Vec::new();
+        let mut correlated_command_finished_local = Vec::new();
         // Protocol desktop notifications (OSC 9 / OSC 777) drained once per
         // pass and dispatched after the pane loop so the UI owns all toasts.
         let mut protocol_notifications_local: Vec<(u64, kettle_core::ProtocolNotification)> =
@@ -529,6 +530,9 @@ impl App {
             for ev in pane.term.drain_command_finished_events() {
                 command_finished_local.push((pane_id, ev));
             }
+            for event in pane.term.drain_correlated_command_finished_events() {
+                correlated_command_finished_local.push((pane_id, event));
+            }
             for ev in pane.term.drain_protocol_notifications() {
                 protocol_notifications_local.push((pane_id, ev));
             }
@@ -619,6 +623,9 @@ impl App {
                     "duration_ms": ev.duration.as_millis() as u64,
                 }),
             );
+        }
+        for (pane_id, event) in correlated_command_finished_local {
+            self.resolve_pending_correlated_run(ws, pane_id, &event);
         }
         for (pane_id, ev) in protocol_notifications_local {
             fire_notify(&ev.title, &ev.body);

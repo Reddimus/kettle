@@ -122,15 +122,101 @@ kettle_completion_clear() {
   (( __kettle_completion_generation++ ))
   print -rn -- $'\e]777;kettle-completion;1;clear;'"$__kettle_completion_generation"$'\a'
 }
+__kettle_correlation_begin() {
+  typeset -g __kettle_pending_token=''
+  if [[ ${KEYMAP-} == vicmd ]]; then zle .vi-insert; fi
+}
+__kettle_correlation_nibble() {
+  (( ${#__kettle_pending_token} < 33 )) && __kettle_pending_token+=${KEYS[-1]}
+  return 0
+}
+__kettle_correlation_arm() {
+  if [[ ${#__kettle_pending_token} == 32 && $__kettle_pending_token != *[^0-9a-f]* ]]; then
+    typeset -g __kettle_command_token=$__kettle_pending_token
+  else
+    typeset -g __kettle_command_token=''
+  fi
+  typeset -g __kettle_pending_token=''
+}
+__kettle_correlation_newline() { LBUFFER+=$'\n'; }
+__kettle_correlation_tab() { LBUFFER+=$'\t'; }
+__kettle_correlation_install() {
+  emulate -L zsh
+  [[ -o interactive && -o zle ]] || return 1
+  case "$(bindkey -lL main)" in
+    ('bindkey -A emacs main'|'bindkey -A viins main') ;;
+    (*) return 1 ;;
+  esac
+  local map digit binding expected
+  for map in emacs viins vicmd; do
+    # An enclosing range can occupy Ctrl+X without its inventory starting there.
+    binding=$(bindkey -M "$map" $'\C-x')
+    [[ $binding == *' undefined-key' ]] || return 1
+    for binding in "${(@f)$(bindkey -M "$map")}"; do
+      if [[ $binding == '"^X" '* || $binding == '"^X'[0-9a-fhijk]'" '* ]]; then
+        case "$binding" in
+          ('"^Xh" '*) expected=__kettle_correlation_begin ;;
+          ('"^Xi" '*) expected=__kettle_correlation_arm ;;
+          ('"^Xj" '*) expected=__kettle_correlation_newline ;;
+          ('"^Xk" '*) expected=__kettle_correlation_tab ;;
+          ('"^X'[0-9a-f]'" '*) expected=__kettle_correlation_nibble ;;
+          (*) expected=undefined-key ;;
+        esac
+        [[ $binding == *' undefined-key' || $binding == *" $expected" ]] || return 1
+      elif [[ $binding == '"^X'[0-9a-fhijk]* || $binding == '"^X'*'"-"'* ]]; then
+        return 1
+      fi
+    done
+  done
+  zle -N __kettle_correlation_begin
+  zle -N __kettle_correlation_nibble
+  zle -N __kettle_correlation_arm
+  zle -N __kettle_correlation_newline
+  zle -N __kettle_correlation_tab
+  for map in emacs viins vicmd; do
+    bindkey -M "$map" $'\C-xh' __kettle_correlation_begin
+    for digit in 0 1 2 3 4 5 6 7 8 9 a b c d e f; do
+      bindkey -M "$map" $'\C-x'"$digit" __kettle_correlation_nibble
+    done
+    bindkey -M "$map" $'\C-xi' __kettle_correlation_arm
+    bindkey -M "$map" $'\C-xj' __kettle_correlation_newline
+    bindkey -M "$map" $'\C-xk' __kettle_correlation_tab
+  done
+}
+typeset -g __kettle_pending_token='' __kettle_command_token='' __kettle_active_token=''
+typeset -gi __kettle_correlation_enabled=0
+if __kettle_correlation_install; then __kettle_correlation_enabled=1; fi
 autoload -Uz add-zsh-hook
 __kettle_precmd() {
   local command_status=$?
+  __kettle_command_token=''
+  __kettle_pending_token=''
+  __kettle_correlation_enabled=0
+  if __kettle_correlation_install; then __kettle_correlation_enabled=1; fi
   kettle_completion_clear
-  printf '\e]133;D;%d\a\e]133;A\a' "$command_status"
+  if [[ -n $__kettle_active_token ]]; then
+    printf '\e]133;D;%d;kettle=%s\a' "$command_status" "$__kettle_active_token"
+    __kettle_active_token=''
+  else
+    printf '\e]133;D;%d\a' "$command_status"
+  fi
+  if (( __kettle_correlation_enabled )); then
+    printf '\e]133;A;kettle=1;shell=zsh\a'
+  else
+    printf '\e]133;A;kettle=0\a'
+  fi
   __kettle_osc7
   return 0
 }
-__kettle_preexec() { print -Pn '\e]133;C\a'; }
+__kettle_preexec() {
+  __kettle_active_token=$__kettle_command_token
+  __kettle_command_token=''
+  if [[ -n $__kettle_active_token ]]; then
+    printf '\e]133;C;kettle=%s\a' "$__kettle_active_token"
+  else
+    print -Pn '\e]133;C\a'
+  fi
+}
 add-zsh-hook precmd __kettle_precmd
 add-zsh-hook preexec __kettle_preexec
 if [[ "$PS1" != $'%{\e]133;B\a%}'* ]]; then
