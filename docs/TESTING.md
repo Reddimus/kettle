@@ -2242,6 +2242,17 @@ cover that transition and still require failure when rectangles never appear.
 The qualification supervisor's native pilot exercises its cleanup path; it does
 not count toward hosted Linux qualification.
 
+The rounded-toast follow-up received a fresh qualification at
+[run 41337919259](https://github.com/Reddimus/kettle/actions/runs/41337919259):
+all six scenarios passed 300 times each across three fresh runner allocations.
+All 1,800 individual receipts had closed fixtures, no timeout and no forced
+cleanup. Source `532cf329`, tree `cf9956a8`, produced binary
+`192e479e3643bd1721a2561f12f19930da3dd99b2337ec9e8e33509bc321b6ca`
+with helper
+`ecb567319447e7ca2a67ba4c46316e10d0e7d8b6003a24c1c24635e9e94a2fc8`.
+The normal merge at `f765718c` preserved that exact tree. Earlier qualification
+runs retain their recorded source and helper identities.
+
 ## Scaling diagnostic scope
 
 [The 2026-11-01 scaling observations](SCALING-2026-11-01.md) cover PTY, native
@@ -2278,6 +2289,23 @@ once, moved the composition caret, cancelled a later composition and changed
 focus between owned windows without committing into either receiver. These
 were native composition events rather than injected Unicode. Enabled/current
 input sources, clipboard, input-menu and dictation settings were restored.
+A separate native search-field run committed `nihongo` as `日本語`, moved its
+caret and selected `本`. A later converted composition was cancelled through
+both IME stages without changing the committed query. The raw terminal
+receiver remained empty until an intentional key after search closed. Input
+sources, clipboard and the changed input-menu and dictation settings were
+restored. Spoken search-result and caret feedback still needs its own
+assistive-technology observation.
+
+Native key events also exercised a fixture configured to send Backspace as
+0x08. DEC mode 67 set sent 0x08, reset sent 0x7f, and DECSTR/RIS restored the
+configured 0x08. Mode 66 changed keypad 1 between `ESC O q` and `1`. KAM
+blocked terminal input and local echo while native New Tab and Close Tab
+recovery remained usable. After unlocking, SRM reset echoed accepted input
+once; SRM set delivered input without local echo. These receipts identify the
+pre-toast application source; hosted CI and later renderer checks retain
+their separate artifact identities.
+
 The release-cut candidate requires separate appearance and update acceptance.
 
 Actual macOS VoiceOver was also started. Its owned caption window displayed
@@ -2288,3 +2316,58 @@ captured the item and help text, while VoiceOver's own accessibility-tree query
 timed out. No audio recording or complete speech-output certification is
 claimed. VoiceOver was turned off again, and input sources, clipboard and the
 changed utility navigation state were restored.
+
+
+The post-toast integrated macOS run passed seven available live scenarios,
+including foreground idle and paced-printing upload checks. Invoking-process
+native-event preflight denied access, so program-key ownership, native line
+editing and the page-up stress run were skipped in that invocation. Keep these
+skips distinct from the earlier native run and hosted Linux qualification.
+Any later manual acceptance must identify its actual source and artifact.
+
+After publication, validate Ubuntu desktop acceptance against the actual public
+archive in an isolated prefix and desktop session. Verify its published digest
+and installed version, then use Super-key search to launch the installed entry
+with recording off and on. Off must create no recording. On must produce a
+valid v2 cast with the expected output marker, ordered timestamps and no input
+events; the file must be mode 0600 in a mode-0700 directory. Retain archive,
+installed executable, launcher, recording and fixture-closure identities.
+Uninstall only that prefix and close the owned desktop session. Source-install
+and rehearsal observations remain separate from this publication check.
+
+
+The signed main preflight for 5.8 used the universal 5.7.1 candidate from
+[run 41343253350](https://github.com/Reddimus/kettle/actions/runs/41343253350)
+at `f765718cfed0`. Its application, vendored, asset, packaging and verification
+script sources are unchanged in the 5.8.0 version cut; workspace versions and
+release documentation are separate metadata. The same signed bundle passed
+modal-shortcut, native-titlebar, Dock-menu and update-toast smokes and six
+composited appearance modes. Its system preferences were restored and all
+seven owned appearance windows closed.
+
+The manually launched debug run passed nine scenarios before page navigation
+failed with an unfocused window. A signed main run passed its first two
+scenarios, then its split-size shell probe received an unexpected leading `r`
+and failed before measuring the resize; the remaining seven suite cases were
+unrun in that invocation. Those interruptions and the separate native-access
+skips remain diagnostic evidence. No terminal root-cause fix is claimed and
+none of those partial counts contributes to hosted Linux qualification.
+
+The `macos-signing` environment permits `main` and version tags. The branch
+rehearsal [41355144293](https://github.com/Reddimus/kettle/actions/runs/41355144293)
+passed release pretests, then macOS signing was rejected before a runner
+started because the cut branch was outside that policy. The remaining jobs
+were stopped and their evidence retained. Keep the protection policy intact:
+use the main appearance preflight with unchanged application code for the
+version/documentation cut, then run a nonpublishing signed rehearsal of the exact final 5.8.0 `main`
+commit before creating its tag. That final gate before tagging requires all ten native
+scenarios, 200 page-navigation pairs across ten fresh windows, the four window
+and toast smokes, six composited appearance modes, restored preferences and
+closed fixtures. Retain its exact source and package identities separately.
+
+For macOS publication acceptance, copy the previously published notarized app
+to a private writable folder and run that copy's own `kettle update --yes`
+against the production signed feed. Require the new version and source, verify
+the resulting terminal/worker identity and bundle trust, then require a second
+update to report that it is current. Preserve the original app and the owner's
+installation. Record this separately from the candidate archive swap smoke.
