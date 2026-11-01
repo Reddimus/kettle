@@ -2041,6 +2041,15 @@ refusal before the fixture side effect. Results and owned-process identities
 remain in the evidence directory. `--shell NAME` selects an installed test leg;
 unavailable default legs are explicitly skipped.
 
+Readline disables bracketed paste while queued Bash commands execute. The
+admission helper waits at most five seconds through busy responses and the
+specific strict Bash multiline refusal, which writes no input. It records
+all admission attempts. Other shells, single-line requests and unrelated
+parameter errors are not retried; a permanently disabled paste mode still
+fails. An executed command's failure or timeout is returned without retry.
+Portable regressions cover these boundaries. A delayed native Bash prompt
+provides a control for the transition before Readline enables paste again.
+
 The Linux build job runs it under Xvfb; macOS runs it on its native desktop.
 Windows runs the PowerShell token, native-status, bounded-input and binding
 ownership and post-installation binding-replacement fixtures through
@@ -2120,3 +2129,42 @@ path refuses input while awaiting the next prompt, then returns only the target
 command with exit code 1. Portable capability-state tests retain fresh legacy
 fallback and versioned/legacy duplicate transitions. The Fish Vi fixture uses a
 private 10 ms Escape delay, waits beyond it, and records the actual active map.
+
+## Linux UI qualification
+
+The manual `Linux UI qualification` workflow builds one release binary and
+binds it to the exact source tree and live-UI helper hashes. Three fresh hosted
+runner allocations download that same artifact. Each runs 100 repetitions of
+all six quarantined scenarios: search-history, text-presentation,
+split-exit-resize, program-keys, color-scheme and steady-uploads. The last uses
+`--screenshots-only`, matching its existing Xvfb scope.
+
+Each scenario starts fresh fixtures and records their PIDs, pre-cleanup state
+and actual exit codes. A crash or forced kill cannot qualify merely because
+the process closed; normal supervisor SIGTERM cleanup is recorded separately.
+A failed case stops its allocation without retrying. At the deadline, cleanup
+freezes and records the supervisor and its descendants through stable process
+handles before killing those exact instances, including separate PTY sessions.
+Linux child-subreaper containment also drains orphaned descendants after a
+supervisor exits. Forced cleanup always fails qualification; its ownership and
+closure receipt is retained. Transient inventory failures retry within an
+eight-second deadline and remain in the failed receipt. Native regressions
+exercise an unresponsive tree and an unrelated decoy that must survive. Case logs, screenshots,
+receipts and every completed count are uploaded even when a job fails. The
+collector rejects missing allocations, changed artifacts, failures, incomplete
+rounds or fewer than 300 successes per scenario. A successful workflow is
+qualification evidence for its recorded candidate, not automatic promotion of
+any scenario. Preserve failures and restart after fixing their cause.
+
+Dispatch against the final integrated candidate, then download and inspect the
+`ui-qualification-result` and three shard artifacts. Promote passing scenarios
+only in a separately reviewed change to their existing required Linux job.
+Physical GPU and desktop-focus claims require their own native evidence.
+
+The search-history probe waits for focused-match pixel rectangles as well as
+match status and the expected visible row. Search may defer viewport highlights
+to another frame after navigation; accepting its earlier status produced a
+false failure despite a highlighted subsequent screenshot. Portable regressions
+cover that transition and still require failure when rectangles never appear.
+The qualification supervisor's native pilot exercises its cleanup path; it does
+not count toward hosted Linux qualification.
