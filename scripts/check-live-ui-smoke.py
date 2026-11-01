@@ -198,7 +198,7 @@ def remaining_before(deadline: float, action: str, *, cap: float) -> float:
 
 def terminate_owned_process_group(
     process: subprocess.Popen, *, grace_s: float = 0.5
-) -> None:
+) -> Dict[str, object]:
     """Terminate one Unix process group created by this helper.
 
     The group is established by ``start_new_session=True`` before Kettle starts.
@@ -209,10 +209,21 @@ def terminate_owned_process_group(
     if os.name == "nt":
         raise RuntimeError("Unix process-group cleanup is unavailable on Windows")
     group = process.pid
+    sent: List[Dict[str, object]] = []
+    receipt: Dict[str, object] = {"pid": group, "signals": sent}
+
+    def root_alive() -> bool:
+        try:
+            return not process_exited_without_reaping(process)
+        except (OSError, ChildProcessError):
+            # An uncertain observation cannot witness a normal fixture exit.
+            return False
+
     # Do not call poll/wait between the two signals. Even if the leader exits
     # on TERM, retaining its zombie keeps the PID/process-group id unavailable
     # for reuse until the final wait below.
     if process.returncode is None:
+        alive = root_alive()
         try:
             os.killpg(group, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
@@ -220,17 +231,23 @@ def terminate_owned_process_group(
             # unsignalable zombies. No unrelated process can join this new
             # session, so that state is equivalent to an empty live group.
             pass
+        else:
+            sent.append({"signal": int(signal.SIGTERM), "root_alive": alive})
         time.sleep(grace_s)
+        alive = root_alive()
         try:
             os.killpg(group, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
+        else:
+            sent.append({"signal": int(signal.SIGKILL), "root_alive": alive})
     try:
         process.wait(timeout=max(1.0, grace_s))
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(
             f"owned process-group leader {process.pid} did not exit"
         ) from error
+    return receipt
 
 
 @dataclass
@@ -5466,6 +5483,7 @@ class LiveKettle:
         self.extra_args = extra_args or []
         self.extra_env = extra_env or {}
         self.proc: Optional[subprocess.Popen] = None
+        self._termination_receipt: Optional[Dict[str, object]] = None
         self._tracker_owner_pid: Optional[int] = None
         self._post_exit_cleanup: List[Callable[[], None]] = []
         self._pty_sessions: Set[int] = set()
@@ -6272,7 +6290,7 @@ while True:
                 )
                 self._tracker_sessions.clear()
                 try:
-                    terminate_owned_process_group(self.proc)
+                    self._termination_receipt = terminate_owned_process_group(self.proc)
                 except Exception as error:
                     session_errors.append(error)
             if session_errors:
