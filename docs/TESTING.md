@@ -2219,7 +2219,14 @@ later changed helper bytes. A subsequent macOS native run exposed a pending
 not an exit. The exit probe now accepts only exited, killed or dumped events.
 The native regression leaves the stop event unconsumed, and the qualification
 supervisor fixtures run in both required Unix CI legs. Changed candidates need
-fresh qualification receipts; counts are never inherited from an older helper.
+fresh qualification receipts; counts are never inherited from an older helper. Native
+steady-uploads also checks paced printing. Its measured command and output
+repeat a completed warm-up exactly, after an alternate round has scrolled the
+old completion marker away. A changed marker is not evidence of a warm glyph
+cache. Each round records counters before any assertion; queue-write refusal
+and the mapped-work minimum remain enforced. An earlier native run recorded two
+texture writes with different warm-up and measured markers; three diagnostic
+reruns passed, so that observation does not establish a persistent renderer bug.
 
 The search-history probe waits for focused-match pixel rectangles as well as
 match status and the expected visible row. Search may defer viewport highlights
