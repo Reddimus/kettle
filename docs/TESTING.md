@@ -1181,6 +1181,20 @@ protected wide spacers in history, old full-row wraps after changing margins,
 partial continuation annotations through rectangle operations and margin
 changes, pending wrap, resets, and the existing cell-size cap.
 
+The attribute/mode/report follow-up passes 439 native esctest cases, with
+85 classified expected failures and no new failures: 26 more cases now pass.
+A completed repeat verified the result after an earlier run's process-table
+cleanup timeout; the failed cleanup run is not counted as a harness pass.
+
+Portable attribute-operation cases cover stream versus rectangle extents,
+printed spaces versus undrawn blanks, cumulative set/toggle/reset operations,
+preserved text/colours/protection/cursor state, and DECRQSS extent/blink round
+trips. Mode save/restore is tested in both directions and across multiple
+modes; MoreFix tests explicitly negotiated on/off behavior and reset to the
+legacy tab rule. Status-report cases verify fixed modes, absent peripherals,
+and continued refusal of checksum queries. Blink rendition is stored and
+reset independently of bold while rendered text remains steady.
+
 **ucs-detect** (`just conformance-ucs`) measures how many columns the
 terminal gives Unicode text, against `wcwidth`. Kettle 5.7.0 scored 99.6% on
 narrow and 94.9% on wide characters, where the misses are the 26 regional

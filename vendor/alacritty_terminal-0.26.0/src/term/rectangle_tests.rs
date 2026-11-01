@@ -269,3 +269,132 @@ fn rectangle_replacing_wrapped_glyph_invalidates_a_linked_history_selection() {
     parser.advance(&mut term, b"\x1b[90;1;1;1;1$x");
     assert!(term.selection.is_none());
 }
+
+#[test]
+fn rectangle_attributes_preserve_text_colours_protection_and_cursor() {
+    let (mut term, mut parser) = terminal("\x1b[31;44m\x1b[1\"qabc\x1b[0\"q");
+    let cursor = term.grid.cursor.clone();
+    parser.advance(&mut term, b"\x1b[2*x\x1b[1;2;2;3;1;4;7$r");
+    let changed = &term.grid[Line(0)][Column(1)];
+    assert!(
+        changed
+            .flags
+            .contains(Flags::BOLD | Flags::UNDERLINE | Flags::INVERSE | Flags::PROTECTED)
+    );
+    assert_eq!(changed.c, 'b');
+    assert_eq!(changed.fg, Color::Named(NamedColor::Red));
+    assert_eq!(changed.bg, Color::Named(NamedColor::Blue));
+    assert_eq!(term.grid.cursor, cursor);
+    assert!(!term.grid[Line(0)][Column(0)].flags.contains(Flags::BOLD));
+    assert!(term.grid[Line(1)][Column(1)].flags.contains(Flags::BOLD));
+    parser.advance(&mut term, b"\x1b[1;2;2;3;1;4$t");
+    assert!(
+        !term.grid[Line(0)][Column(1)]
+            .flags
+            .intersects(Flags::BOLD | Flags::ALL_UNDERLINES)
+    );
+    assert!(
+        term.grid[Line(0)][Column(1)]
+            .flags
+            .contains(Flags::INVERSE | Flags::PROTECTED)
+    );
+}
+
+#[test]
+fn stream_attributes_skip_undrawn_cells_but_include_printed_spaces() {
+    let (mut term, mut parser) = terminal("a \x1b[3;2Hc");
+    parser.advance(&mut term, b"\x1b[1;2;3;3;1$r");
+    assert!(!term.grid[Line(0)][Column(0)].flags.contains(Flags::BOLD));
+    assert!(term.grid[Line(0)][Column(1)].flags.contains(Flags::BOLD));
+    assert!(!term.grid[Line(0)][Column(2)].flags.contains(Flags::BOLD));
+    assert!(!term.grid[Line(1)][Column(1)].flags.contains(Flags::BOLD));
+    assert!(term.grid[Line(2)][Column(1)].flags.contains(Flags::BOLD));
+    assert!(!term.grid[Line(2)][Column(3)].flags.contains(Flags::BOLD));
+}
+
+#[test]
+fn rectangle_attributes_apply_in_order_and_leave_unrelated_rendition() {
+    let (mut term, mut parser) = terminal("\x1b[2;3;8;9mX");
+    parser.advance(&mut term, b"\x1b[2*x\x1b[1;1;1;1;1;4;5;7;0;1$r");
+    let flags = term.grid[Line(0)][Column(0)].flags;
+    assert!(
+        flags.contains(Flags::BOLD | Flags::DIM | Flags::ITALIC | Flags::HIDDEN | Flags::STRIKEOUT)
+    );
+    assert!(!flags.intersects(Flags::ALL_UNDERLINES | Flags::BLINK | Flags::INVERSE));
+    parser.advance(&mut term, b"\x1b[1;1;1;1;0;8;22$t");
+    let flags = term.grid[Line(0)][Column(0)].flags;
+    assert!(flags.contains(
+        Flags::DIM
+            | Flags::ITALIC
+            | Flags::STRIKEOUT
+            | Flags::UNDERLINE
+            | Flags::BLINK
+            | Flags::INVERSE
+    ));
+    assert!(!flags.intersects(Flags::BOLD | Flags::HIDDEN));
+}
+
+#[test]
+fn trailing_erasure_is_undrawn_but_copied_blanks_are_drawn() {
+    let (mut term, mut parser) = terminal("ab\x1b[1;1H\x1b[K");
+    parser.advance(&mut term, b"\x1b[1;1;1;1;1$r");
+    assert!(!term.grid[Line(0)][Column(0)].flags.contains(Flags::BOLD));
+    parser.advance(&mut term, b"\x1b[1;1;1;1;1;2;1;1$v\x1b[2;1;2;1;1$r");
+    assert!(term.grid[Line(1)][Column(0)].flags.contains(Flags::BOLD));
+}
+
+#[test]
+fn explicit_blank_operations_and_alignment_cells_accept_stream_attributes() {
+    for command in [
+        "\x1b#8",
+        "\x1b[X",
+        "\x1b[1K",
+        "\x1b[1J",
+        "\x1b[1;1;1;1$z",
+        "\x1b[1;1;1;1${",
+    ] {
+        let (mut term, mut parser) = terminal("");
+        parser.advance(&mut term, command.as_bytes());
+        parser.advance(&mut term, b"\x1b[1;1;1;1;1$r");
+        assert!(
+            term.grid[Line(0)][Column(0)].flags.contains(Flags::BOLD),
+            "{command:?}"
+        );
+    }
+}
+
+#[test]
+fn interior_wide_erasure_marks_both_erased_cells_for_stream_attributes() {
+    for protection in ["", "\x1bV\x1bW"] {
+        for column in [1, 2] {
+            let (mut term, mut parser) = terminal(protection);
+            parser.advance(
+                &mut term,
+                format!("界\x1b[1;{column}H\x1b[X\x1b[1;1;1;2;7$r").as_bytes(),
+            );
+            for column in 0..2 {
+                let cell = &term.grid[Line(0)][Column(column)];
+                assert_eq!(cell.c, ' ');
+                assert!(cell.flags.contains(Flags::INVERSE));
+            }
+        }
+    }
+}
+
+#[test]
+fn attribute_operations_keep_selection_and_ignore_lower_vt_levels() {
+    let (mut term, mut parser) = terminal("abc");
+    let point = Point::new(Line(0), Column(1));
+    let mut selection = Selection::new(SelectionType::Simple, point, Side::Left);
+    selection.update(point, Side::Right);
+    term.selection = Some(selection.clone());
+    parser.advance(&mut term, b"\x1b[2*x\x1b[1;1;1;3;1$r");
+    assert_eq!(term.selection, Some(selection));
+    for level in 61..=63 {
+        parser.advance(
+            &mut term,
+            format!("\x1b[{level};1\"pabc\x1b[2*x\x1b[1;1;1;3;1$r").as_bytes(),
+        );
+        assert!(!term.grid[Line(0)][Column(1)].flags.contains(Flags::BOLD));
+    }
+}
