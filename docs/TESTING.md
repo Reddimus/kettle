@@ -1238,6 +1238,12 @@ fallback, monochrome presentation and cached cursor frames. Tests that cannot
 obtain a GPU report an explicit `GRAPHEME_*_GPU_SKIP`; a portable test pass does
 not establish pixel coverage.
 
+The generator round-trip check runs with implicit text encodings treated as
+errors on every platform. It generates into a temporary directory, compares
+the bytes with the checked-in tables, and rejects missing or stale output.
+Unicode inputs and generated Rust are explicitly UTF-8, including on Windows
+where the default encoding may be a legacy code page.
+
 Compare the same candidate in both modes with fresh output directories:
 
 ```sh

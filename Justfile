@@ -916,11 +916,11 @@ interaction-smoke:
 # Reproduce the Unicode tables from the pinned, licensed offline inputs.
 [unix]
 grapheme-tables-check:
-    python3 scripts/generate-grapheme-tables.py --check
+    python3 -X warn_default_encoding -W error::EncodingWarning scripts/test-grapheme-tables.py
 
 [windows]
 grapheme-tables-check:
-    python scripts/generate-grapheme-tables.py --check
+    python -X warn_default_encoding -W error::EncodingWarning scripts/test-grapheme-tables.py
 
 # Verify that conformance adapters retain assertions and geometry restrictions.
 [unix]

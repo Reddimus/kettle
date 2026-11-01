@@ -27,7 +27,7 @@ GCB = {
 
 
 def records(name):
-    for line in (DATA / name).read_text().splitlines():
+    for line in (DATA / name).read_text(encoding="utf-8").splitlines():
         body = line.split("#", 1)[0].strip()
         if not body:
             continue
@@ -50,7 +50,7 @@ def table(name, kind, values):
 
 
 def generate():
-    manifest = json.loads((DATA / "sources.json").read_text())
+    manifest = json.loads((DATA / "sources.json").read_text(encoding="utf-8"))
     if manifest["unicode_version"] != "18.0.0":
         raise ValueError("Unicode version must stay explicit")
     for source in manifest["sources"]:
@@ -93,12 +93,12 @@ def main():
     args = parser.parse_args()
     output = generate()
     if args.check:
-        if not OUTPUT.exists() or OUTPUT.read_text() != output:
+        if not OUTPUT.exists() or OUTPUT.read_text(encoding="utf-8") != output:
             raise SystemExit(
                 "grapheme tables differ; run scripts/generate-grapheme-tables.py"
             )
     else:
-        OUTPUT.write_text(output)
+        OUTPUT.write_text(output, encoding="utf-8", newline="\n")
     print("Unicode 18 grapheme tables: PASS")
 
 
