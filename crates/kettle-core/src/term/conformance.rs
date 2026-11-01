@@ -2916,3 +2916,43 @@ fn special_color_modes_are_bounded_and_persist_through_terminal_resets() {
     feed(&mut term, &mut parser, b"\x1b[!p");
     assert!(term.colors().special_mode(5));
 }
+
+#[test]
+fn screen_reverse_mode_queries_save_restore_and_resets_across_chunks() {
+    let bytes = b"\x1b[?5$p\x1b[?5h\x1b[?5$p\x1b[!p\x1b[?5$p\x1b[?5s\x1b[?5l\x1b[?5$p\x1b[?5r\x1b[?5$p\x1bc\x1b[?5$p";
+    for split in 0..=bytes.len() {
+        let (mut term, mut parser, rx) = harness_rx(12, 3);
+        feed(&mut term, &mut parser, &bytes[..split]);
+        feed(&mut term, &mut parser, &bytes[split..]);
+        assert_eq!(
+            drain_pty(&rx),
+            "\x1b[?5;2$y\x1b[?5;1$y\x1b[?5;1$y\x1b[?5;2$y\x1b[?5;1$y\x1b[?5;2$y",
+            "split {split}"
+        );
+    }
+}
+
+#[test]
+fn screen_reverse_palette_updates_follow_displayed_slots_without_changing_other_colors() {
+    use alacritty_terminal::vte::ansi::Rgb;
+    let (mut term, mut parser) = harness(12, 3);
+    feed(
+        &mut term,
+        &mut parser,
+        b"\x1b]4;0;#ff0000;7;#00ff00;1;#123456\x07\x1b[?5h",
+    );
+    assert_eq!(term.colors()[0], Some(Rgb { r: 0, g: 255, b: 0 }));
+    assert_eq!(term.colors()[7], Some(Rgb { r: 255, g: 0, b: 0 }));
+    assert_eq!(
+        term.colors()[1],
+        Some(Rgb {
+            r: 0x12,
+            g: 0x34,
+            b: 0x56
+        })
+    );
+    feed(&mut term, &mut parser, b"\x1b]4;0;#0000ff\x07\x1b[?5l");
+    assert_eq!(term.colors()[0], Some(Rgb { r: 255, g: 0, b: 0 }));
+    assert_eq!(term.colors()[7], Some(Rgb { r: 0, g: 0, b: 255 }));
+    assert!(!term.colors().has_special_modes());
+}

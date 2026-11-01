@@ -4608,3 +4608,75 @@ fn special_attribute_colors_render_only_when_enabled_and_override_ansi_on_reques
     }
     eprintln!("SPECIAL_COLOR_GPU_PASS: {:?}", renderer.gpu.adapter_info());
 }
+
+#[test]
+fn screen_reverse_paints_defaults_preserves_explicit_colors_and_restores_cached_frames() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("SCREEN_REVERSE_GPU_SKIP: no adapter");
+        return;
+    };
+    cfg.minimum_contrast = 1.0;
+    cfg.theme.foreground = Rgb::new(255, 255, 255);
+    cfg.theme.background = Rgb::new(0, 0, 0);
+    let x = cfg.padding_x.round() as u32;
+    let y = cfg.padding_y.round() as u32;
+    let cw = renderer.cell_w;
+    let ch = renderer.cell_h;
+    let content = b"\x1b[48;2;18;52;86m   \x1b[0mA\x1b[31mR\x1b[0m\r\n\x1b[7m   \x1b[0m\x1b[?25l";
+    let sample = |frame: &image::RgbaImage, col: usize, row: usize| {
+        *frame.get_pixel(
+            x + ((col as f32 + 0.5) * cw) as u32,
+            y + ((row as f32 + 0.5) * ch) as u32,
+        )
+    };
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        cfg.text_renderer = mode;
+        let normal = snapshot_of(20, 4, content);
+        let original = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&normal, 320, 120)],
+            &focused(false),
+        );
+        let mut reversed = b"\x1b[?5h".to_vec();
+        reversed.extend_from_slice(content);
+        let reverse = snapshot_of(20, 4, &reversed);
+        let flipped = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&reverse, 320, 120)],
+            &focused(false),
+        );
+        assert_eq!(
+            sample(&original, 10, 2).0[..3],
+            [0, 0, 0],
+            "{mode:?}: initial background"
+        );
+        assert_eq!(
+            sample(&flipped, 10, 2).0[..3],
+            [255, 255, 255],
+            "{mode:?}: reversed background"
+        );
+        assert_eq!(
+            sample(&original, 1, 0),
+            sample(&flipped, 1, 0),
+            "{mode:?}: explicit RGB background"
+        );
+        assert_eq!(
+            sample(&flipped, 1, 1).0[..3],
+            [0, 0, 0],
+            "{mode:?}: SGR inverse composes with screen mode"
+        );
+        let restored = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&normal, 320, 120)],
+            &focused(false),
+        );
+        assert_eq!(
+            original, restored,
+            "{mode:?}: restoring normal mode must restore the frame"
+        );
+    }
+}

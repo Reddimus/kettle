@@ -32,7 +32,7 @@ impl Default for Colors {
 impl Colors {
     #[inline]
     pub fn has_special_modes(&self) -> bool {
-        self.1 != 0
+        self.1 & 0x3f != 0
     }
 
     #[inline]
@@ -52,6 +52,38 @@ impl Colors {
         }
         self.1 != before
     }
+
+    #[inline]
+    pub fn reverse_video(&self) -> bool {
+        self.1 & 0x40 != 0
+    }
+
+    pub fn set_reverse_video(&mut self, enabled: bool) -> bool {
+        let before = self.1;
+        if enabled {
+            self.1 |= 0x40;
+        } else {
+            self.1 &= !0x40;
+        }
+        self.1 != before
+    }
+
+    /// Canonical storage for a displayed palette or dynamic-colour slot.
+    #[inline]
+    pub fn mapped_index(&self, index: usize) -> usize {
+        if !self.reverse_video() {
+            return index;
+        }
+        match index {
+            0 => 7,
+            7 => 0,
+            8 => 15,
+            15 => 8,
+            256 => 257,
+            257 => 256,
+            _ => index,
+        }
+    }
 }
 
 impl Index<usize> for Colors {
@@ -59,13 +91,14 @@ impl Index<usize> for Colors {
 
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
-        &self.0[index]
+        &self.0[self.mapped_index(index)]
     }
 }
 
 impl IndexMut<usize> for Colors {
     #[inline]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        let index = self.mapped_index(index);
         &mut self.0[index]
     }
 }
@@ -75,13 +108,13 @@ impl Index<NamedColor> for Colors {
 
     #[inline]
     fn index(&self, index: NamedColor) -> &Self::Output {
-        &self.0[index as usize]
+        &self[index as usize]
     }
 }
 
 impl IndexMut<NamedColor> for Colors {
     #[inline]
     fn index_mut(&mut self, index: NamedColor) -> &mut Self::Output {
-        &mut self.0[index as usize]
+        &mut self[index as usize]
     }
 }

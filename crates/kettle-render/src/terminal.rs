@@ -385,9 +385,12 @@ impl Renderer {
         // not scrolled (display_offset == 0).
         let display_off = snap.display_offset as i32;
         let screen_rows = snap.screen_lines as i32;
-        let default_bg = term_colors[257]
-            .map(|c| Rgb::new(c.r, c.g, c.b))
-            .unwrap_or(theme.background);
+        let default_bg = color::resolve_query(257, theme, term_colors).unwrap_or(theme.background);
+        let dim_bg = if term_colors.reverse_video() {
+            default_bg
+        } else {
+            theme.background
+        };
 
         let bw = if cfg.handle_size < 0 {
             1.0
@@ -674,7 +677,7 @@ impl Renderer {
                 fg = self.chrome_colors.inactive(
                     fg,
                     cell_background,
-                    theme.background,
+                    dim_bg,
                     inactive,
                     self.config.format.is_srgb(),
                 );
@@ -740,7 +743,7 @@ impl Renderer {
                     self.chrome_colors.inactive(
                         line,
                         cell_background,
-                        theme.background,
+                        dim_bg,
                         inactive,
                         self.config.format.is_srgb(),
                     )
@@ -1178,7 +1181,6 @@ impl Renderer {
     ) {
         let pad_x = cfg.padding_x;
         let pad_y = cfg.padding_y;
-        let default_fg = cfg.theme.foreground;
         // Split `*self` into disjoint field borrows so the glyph pipeline (mut),
         // the swash cache + font system (mut, for rasterization), the shaped pane
         // buffers (shared) and the scratch all coexist during the walk.
@@ -1210,9 +1212,14 @@ impl Renderer {
             // Per-pane default fg (OSC 10 / theme), the fallback for a glyph with
             // no explicit color span. Mirrors the glyphon pane TextArea's
             // `default_color`.
-            let pane_fg = pv.snap.colors[256]
-                .map(|c| Rgb::new(c.r, c.g, c.b))
-                .unwrap_or(default_fg);
+            let pane_fg = color::resolve_query(256, &cfg.theme, &pv.snap.colors)
+                .unwrap_or(cfg.theme.foreground);
+            let dim_bg = if pv.snap.colors.reverse_video() {
+                color::resolve_query(257, &cfg.theme, &pv.snap.colors)
+                    .unwrap_or(cfg.theme.background)
+            } else {
+                cfg.theme.background
+            };
             let default_color = GColor::rgb(pane_fg.r, pane_fg.g, pane_fg.b);
 
             let buf = &pane_buffers[i];
@@ -1238,7 +1245,7 @@ impl Renderer {
                 glyph_char_starts,
             );
             for glyph in &mut out[clip_start as usize..] {
-                glyph.dim_color(cfg.theme.background, inactive);
+                glyph.dim_color(dim_bg, inactive);
             }
             clips.push(GlyphClip {
                 rect: [rx, ry, rw, rh],

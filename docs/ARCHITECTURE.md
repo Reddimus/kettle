@@ -4442,3 +4442,22 @@ one million; only finite decimal/exponent values are accepted. RGB intensities
 and luminance are bounded to 0..1, lightness to 0..100, and xy chromaticity to the
 physical triangle. Invalid specifications leave the previous colour unchanged.
 The no-std parser retains its existing integer RGB syntax.
+
+
+### Screen reverse video
+
+DEC private mode 5 reverses default foreground/background and ANSI pairs 0/7
+and 8/15. Other palette entries and explicit RGB colours retain their values.
+The colour table carries this display mapping in its existing mode byte;
+terminal cell attributes and the `u32` input-mode contract stay unchanged.
+OSC sets, queries and resets address displayed slots, including updates made
+while reverse video is active. The renderer resolves mapped defaults for pane
+backgrounds, both text paths, cursor overlays and inactive-pane dimming.
+A theme cursor matching the original foreground follows it to the original
+background. Explicit OSC 12 cursor colours retain their set/query round trip,
+including a value equal to the normal foreground.
+
+DECRQM and private-mode save/restore recognize mode 5. DECSTR preserves it, as
+XTerm does; RIS restores normal video while retaining the other OSC resources.
+Mode changes fully damage the terminal without reinterpreting stored text,
+protection, grapheme payloads or retained images.
