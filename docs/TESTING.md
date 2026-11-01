@@ -1966,9 +1966,9 @@ bundled integration's versioned A. The capability tracker preserves that
 legacy duplicate while recognizing explicit `A;kettle=0` withdrawal, including
 without an intervening C. Portable extractor/tracker tests cover every chunk
 split and BEL/ST; the native Fish editor-hook regression fails with the old
-stale capability. The system Bash 3.2 cannot safely run the new fixture that
-removes a Vi key prefix; that fixture runs on modern Bash. Bash 3.2 still runs
-the legacy fallback and strict-refusal checks.
+stale capability. Bash Vi refusal fixtures preserve the stock key bindings and
+exit explicitly; they do not delete a Readline prefix during initialization.
+Bash 3.2 also runs the legacy fallback and strict-refusal checks.
 
 The Fish withdrawal fixture explicitly emits `fish_prompt` after changing the
 binding. A repaint alone can reuse the cached prompt without running that hook,

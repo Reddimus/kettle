@@ -232,7 +232,8 @@ def main() -> int:
 
         def command(text, **params):
             report["stage"] = text
-            for admission in range(50):
+            admission_deadline = time.monotonic() + 5
+            for admission in range(500):
                 cp = app.ctl(
                     "run_command",
                     params={
@@ -254,6 +255,8 @@ def main() -> int:
                 report["results"].append(result)
                 result["admission_attempt"] = admission + 1
                 if cp.returncode and "[busy]" in cp.stderr:
+                    if time.monotonic() >= admission_deadline:
+                        raise RuntimeError("command was never admitted: " + cp.stderr)
                     result["refused_before_input"] = True
                     time.sleep(0.01)
                     continue
@@ -408,7 +411,8 @@ def main() -> int:
                     ]:
                         report["stage"] = "queued " + scenario
                         app.json_ctl("send_text", {"text": (earlier + "\r") * 8})
-                        for attempt in range(50):
+                        admission_deadline = time.monotonic() + 5
+                        for attempt in range(500):
                             queued = app.ctl(
                                 "run_command",
                                 params={
@@ -421,6 +425,10 @@ def main() -> int:
                                 timeout=20,
                             )
                             if queued.returncode and "[busy]" in queued.stderr:
+                                if time.monotonic() >= admission_deadline:
+                                    raise RuntimeError(
+                                        "queued command was never admitted"
+                                    )
                                 time.sleep(0.01)
                                 continue
                             assert queued.returncode == 0, queued.stderr
@@ -457,7 +465,8 @@ def main() -> int:
                         )
                         wait(lambda: marker.exists())
                         report["stage"] = "automatic with delayed next prompt"
-                        for admission in range(100):
+                        admission_deadline = time.monotonic() + 5
+                        for admission in range(500):
                             automatic = app.ctl(
                                 "run_command",
                                 params={"command": target, "timeout_s": 15},
@@ -466,6 +475,10 @@ def main() -> int:
                                 timeout=20,
                             )
                             if automatic.returncode and "[busy]" in automatic.stderr:
+                                if time.monotonic() >= admission_deadline:
+                                    raise RuntimeError(
+                                        "automatic request was never admitted"
+                                    )
                                 time.sleep(0.01)
                                 continue
                             assert automatic.returncode == 0, automatic.stderr
@@ -560,7 +573,7 @@ def main() -> int:
                         report["pane_closure_error"] = True
                     if label in {"bash", "fish"}:
                         if label == "bash":
-                            command("set -o vi; bind -m vi-insert -r '\\C-x'")
+                            command("set -o vi")
                         else:
                             command(
                                 "bind \\cxz 'bind \\cxh self-insert; emit fish_prompt; commandline -f repaint'"

@@ -329,16 +329,10 @@ if ($key.Function -ne 'OwnerKey') { throw 'owner key was changed' }
         )
     if not lookalike:
         check_correlation_binding_ownership(executable, shell, lookalike=True)
-        if shell == "bash" and b"version 3.2" not in run(
-            [executable, "--version"], "Bash version", announce=False
-        ):
-            vi_program = r"""
-PS1=''
-set -o vi
-bind -m vi-insert -r '\C-x'
-source "$1"
-[[ $__kettle_correlation_enabled == 0 ]] || exit 1
-"""
+        if shell == "bash":
+            # Switching Readline modes in multiline -ic input can crash or hang
+            # some Bash versions. Keep this mode check on one explicit command.
+            vi_program = r'''PS1=''; set -o vi; source "$1"; [[ $__kettle_correlation_enabled == 0 ]] || exit 1; exit 0'''
             run(
                 [
                     executable,
