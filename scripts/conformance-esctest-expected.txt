@@ -48,18 +48,13 @@ ResetSpecialColorTests.test_ResetSpecialColor_Multiple2
 ResetSpecialColorTests.test_ResetSpecialColor_Single
 ResetSpecialColorTests.test_ResetSpecialColor_Single2
 
-[other xterm-only modes (MoreFix 41, XTSAVE/XTRESTORE): not implemented]
-DECSCLTests.test_DECSCL_Level5_SupportsDECNCSM
-
 [reports (DECRQM, DECRQSS, DECDSR) about modes and settings Kettle does not implement]
 DECDSRTests.test_DECDSR_DECCKSR
 DECDSRTests.test_DECDSR_DSRKeyboard
 DECRQMTests.test_DECRQM_ANSI_KAM
 DECRQMTests.test_DECRQM_ANSI_SRM
-DECRQMTests.test_DECRQM_DEC_DECBKM
 DECRQMTests.test_DECRQM_DEC_DECCOLM
 DECRQMTests.test_DECRQM_DEC_DECHEBM
-DECRQMTests.test_DECRQM_DEC_DECNKM
 DECRQMTests.test_DECRQM_DEC_DECNRCM
 DECRQMTests.test_DECRQM_DEC_DECPEX
 DECRQMTests.test_DECRQM_DEC_DECPFF

@@ -1139,7 +1139,10 @@ impl PrivateMode {
             12 => Self::Named(NamedPrivateMode::BlinkingCursor),
             25 => Self::Named(NamedPrivateMode::ShowCursor),
             45 => Self::Named(NamedPrivateMode::ReverseWrap),
+            66 => Self::Named(NamedPrivateMode::ApplicationKeypad),
+            67 => Self::Named(NamedPrivateMode::Backarrow),
             69 => Self::Named(NamedPrivateMode::LeftRightMargin),
+            95 => Self::Named(NamedPrivateMode::NoClearColumn),
             1000 => Self::Named(NamedPrivateMode::ReportMouseClicks),
             1002 => Self::Named(NamedPrivateMode::ReportCellMouseMotion),
             1003 => Self::Named(NamedPrivateMode::ReportAllMouseMotion),
@@ -1196,7 +1199,13 @@ pub enum NamedPrivateMode {
     ExtendedReverseWrap = 1045,
     BlinkingCursor = 12,
     ShowCursor = 25,
+    /// Application keypad mode, equivalent to DECKPAM/DECKPNM.
+    ApplicationKeypad = 66,
+    /// Backarrow sends BS when set and DEL when reset.
+    Backarrow = 67,
     LeftRightMargin = 69,
+    /// Preserve display contents across DECCOLM at VT level 5.
+    NoClearColumn = 95,
     ReportMouseClicks = 1000,
     ReportCellMouseMotion = 1002,
     ReportAllMouseMotion = 1003,

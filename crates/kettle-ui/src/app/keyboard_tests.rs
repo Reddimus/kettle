@@ -211,7 +211,7 @@ fn a_modified_delete_keeps_its_modifier_through_the_binding_remap() {
                  cannot detect the remap flattening it"
         );
         assert_eq!(
-            apply_bs_del_binding(&cfg, &delete, encoded.clone()),
+            apply_bs_del_binding(&cfg, &delete, kettle_core::TermMode::empty(), encoded.clone()),
             encoded,
             "{label}+Delete must survive the binding remap unchanged"
         );
@@ -223,7 +223,7 @@ fn a_modified_delete_keeps_its_modifier_through_the_binding_remap() {
         ..kettle_config::Config::default()
     };
     assert_eq!(
-        apply_bs_del_binding(&ascii_del, &delete, plain.clone()),
+        apply_bs_del_binding(&ascii_del, &delete, kettle_core::TermMode::empty(), plain.clone()),
         vec![0x7f],
         "an unmodified Delete must still honour the binding"
     );
@@ -262,7 +262,7 @@ fn a_modified_backspace_keeps_its_encoding_through_the_binding_remap() {
             .expect("Backspace encodes");
     assert_eq!(plain, vec![0x7f]);
     assert_eq!(
-        apply_bs_del_binding(&cfg, &backspace, plain),
+        apply_bs_del_binding(&cfg, &backspace, kettle_core::TermMode::empty(), plain),
         vec![0x08],
         "an unmodified Backspace must honour `control-h`"
     );
@@ -288,7 +288,7 @@ fn a_modified_backspace_keeps_its_encoding_through_the_binding_remap() {
                  cannot detect the remap flattening it"
         );
         assert_eq!(
-            apply_bs_del_binding(&cfg, &backspace, encoded.clone()),
+            apply_bs_del_binding(&cfg, &backspace, kettle_core::TermMode::empty(), encoded.clone()),
             encoded,
             "{label}+Backspace must survive the binding remap unchanged"
         );
@@ -725,3 +725,42 @@ fn terminal_owned_key_focus_loss_sends_exactly_one_release() {
     ws.mux.kill_children();
 }
 
+
+
+#[test]
+fn dec_backarrow_controls_legacy_keys_until_reset_without_rewriting_kitty() {
+    use kettle_config::Config;
+    use alacritty_terminal::{Term, event::VoidListener, term::Config as TermConfig, vte::ansi::Processor};
+    use kettle_core::TermMode;
+    use winit::keyboard::{Key, ModifiersState, NamedKey};
+    let size = kettle_core::term::TermSize::new(8, 3);
+    let key = Key::Named(NamedKey::Backspace);
+    for (binding, initial) in [
+        (kettle_config::BackspaceBinding::AsciiDel, vec![0x7f]),
+        (kettle_config::BackspaceBinding::ControlH, vec![8]),
+        (kettle_config::BackspaceBinding::EscapeSequence, b"\x1b[3~".to_vec()),
+        (kettle_config::BackspaceBinding::Automatic, vec![0x7f]),
+    ] {
+        let cfg = Config { backspace_binding: binding, ..Config::default() };
+        let mut term = Term::new(TermConfig::default(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        let encode = |mode, mods| {
+            let bytes = crate::input::encode_key_press(&key, mods, mode).unwrap();
+            apply_bs_del_binding(&cfg, &key, mode, bytes)
+        };
+        assert_eq!(encode(*term.mode(), ModifiersState::empty()), initial);
+        parser.advance(&mut term, b"\x1b[?67h");
+        assert_eq!(encode(*term.mode(), ModifiersState::empty()), vec![8]);
+        assert_eq!(encode(*term.mode(), ModifiersState::ALT), vec![0x1b, 8]);
+        assert_eq!(encode(*term.mode(), ModifiersState::CONTROL), vec![8]);
+        let kitty = *term.mode() | TermMode::DISAMBIGUATE_ESC_CODES;
+        assert_eq!(encode(kitty, ModifiersState::ALT), b"\x1b[127;3u");
+        parser.advance(&mut term, b"\x1b[?67l");
+        assert_eq!(encode(*term.mode(), ModifiersState::empty()), vec![0x7f]);
+        for reset in [b"\x1b[!p".as_slice(), b"\x1bc"] {
+            parser.advance(&mut term, b"\x1b[?67h");
+            parser.advance(&mut term, reset);
+            assert_eq!(encode(*term.mode(), ModifiersState::empty()), initial);
+        }
+    }
+}

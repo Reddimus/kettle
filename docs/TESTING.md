@@ -1195,6 +1195,27 @@ legacy tab rule. Status-report cases verify fixed modes, absent peripherals,
 and continued refusal of checksum queries. Blink rendition is stored and
 reset independently of bold while rendered text remains steady.
 
+The keypad/Backarrow/no-clear follow-up passes 444 native esctest cases,
+with 41 known bugs and 82 classified expected failures. Five more cases pass:
+DECNKM and DECBKM reports, VT5 no-clear selection, and the two DECNCSM
+set/query cases. The last two require adapting esctest's xterm-specific
+window-resize precondition: Kettle supports no-clear independently of window
+resizing. The adapter removes that precondition only for those two named
+cases, retains every behavior assertion, and leaves geometry tests unchanged.
+`just conformance-adapter-self-test` checks both successful and failing
+assertions and the unaffected option decorators; it runs in the strict gate
+and native CI matrix. An initial run reported two unexpected-pass errors
+from that precondition; it is retained as diagnostic evidence, not counted
+as the final conformance result.
+
+Portable cases cover every split of the no-clear sequence, VT4 versus VT5,
+mode save/restore, cursor homing in one-row panes, wide cells, selections,
+retained-graphics events, alternate screens, RIS and DECSTR. Backarrow tests
+exercise configured startup bindings, explicit BS/DEL negotiation, modifiers,
+Kitty precedence and reset. Removing the negotiated-key binding override
+makes the keyboard regression fail; removing the modes makes the core
+regressions fail.
+
 **ucs-detect** (`just conformance-ucs`) measures how many columns the
 terminal gives Unicode text, against `wcwidth`. Kettle 5.7.0 scored 99.6% on
 narrow and 94.9% on wide characters, where the misses are the 26 regional

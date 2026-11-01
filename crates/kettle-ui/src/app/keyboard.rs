@@ -228,10 +228,19 @@ impl App {}
 /// level-1 `Shift+Backspace` (`CSI 27;2;8~`) and any kitty-protocol encoding
 /// are left alone, because an application that negotiated a precise encoding
 /// must not have it overwritten by a legacy remap.
-pub(super) fn apply_bs_del_binding(cfg: &Config, key: &Key, bytes: Vec<u8>) -> Vec<u8> {
+pub(super) fn apply_bs_del_binding(
+    cfg: &Config,
+    key: &Key,
+    mode: kettle_core::TermMode,
+    bytes: Vec<u8>,
+) -> Vec<u8> {
     let Key::Named(named) = key else {
         return bytes;
     };
+    // Explicit DECBKM overrides the configured startup encoding until reset.
+    if *named == NamedKey::Backspace && mode.contains(kettle_core::TermMode::BACKARROW_NEGOTIATED) {
+        return bytes;
+    }
     use kettle_config::{BackspaceBinding, DeleteBinding};
     /// What `input::encode` emits for an unmodified Backspace.
     const PLAIN_BACKSPACE: &[u8] = &[0x7f];
@@ -264,7 +273,7 @@ pub(super) fn encode_key_event_for_mode(
 ) -> Option<Vec<u8>> {
     let mut bytes = input::encode_key_event(event, mods, mode)?;
     if !input::uses_kitty_sequence(event, mods, mode) {
-        bytes = apply_bs_del_binding(cfg, &event.logical_key, bytes);
+        bytes = apply_bs_del_binding(cfg, &event.logical_key, mode, bytes);
     }
     Some(bytes)
 }

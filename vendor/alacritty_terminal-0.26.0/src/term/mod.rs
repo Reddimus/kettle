@@ -107,6 +107,9 @@ bitflags! {
         /// DEC mode 2031: report colour-scheme changes.
         const COLOR_SCHEME_REPORTS    = 1 << 27;
         const LEFT_RIGHT_MARGIN       = 1 << 28;
+        const BACKARROW               = 1 << 29;
+        /// A program explicitly selected the Backarrow encoding with DECBKM.
+        const BACKARROW_NEGOTIATED    = 1 << 30;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         /// All effective xterm modifyOtherKeys levels.
         const MODIFY_OTHER_KEYS       = Self::MODIFY_OTHER_KEYS_1.bits()
@@ -375,6 +378,7 @@ pub struct Term<T> {
     reverse_wrap: bool,
     extended_reverse_wrap: bool,
     morefix: Option<bool>,
+    no_clear_column: bool,
     attribute_extent: u8,
     saved_private_modes: Vec<(u16, bool)>,
 
@@ -713,6 +717,7 @@ impl<T> Term<T> {
             reverse_wrap: false,
             extended_reverse_wrap: false,
             morefix: None,
+            no_clear_column: false,
             attribute_extent: 0,
             saved_private_modes: Vec::new(),
             event_proxy,
@@ -1426,10 +1431,18 @@ impl<T> Term<T> {
         self.mode.remove(TermMode::LEFT_RIGHT_MARGIN);
         self.relocate_partial_wraps(self.last_column());
         self.horizontal_margins = Column(0)..Column(self.columns());
-        self.set_scrolling_region(1, None);
+        // DECSTBM rejects equal endpoints; DECCOLM still resets a one-row pane.
+        self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.goto(0, 0);
 
-        // Clear grid.
-        self.grid.reset_region(..);
+        if !self.no_clear_column {
+            self.grid.reset_region(..);
+            self.selection = self
+                .selection
+                .take()
+                .filter(|s| !s.intersects_range(Line(0)..));
+            self.graphics_events.push(GraphicsEvent::EraseDisplay);
+        }
         self.mark_fully_damaged();
     }
 
@@ -2000,7 +2013,16 @@ impl<T> Term<T> {
                 NamedPrivateMode::ColorSchemeReports => {
                     self.mode.contains(TermMode::COLOR_SCHEME_REPORTS).into()
                 }
-                NamedPrivateMode::ColumnMode => ModeState::NotSupported,
+                NamedPrivateMode::Backarrow => self.mode.contains(TermMode::BACKARROW).into(),
+                NamedPrivateMode::ApplicationKeypad => {
+                    self.mode.contains(TermMode::APP_KEYPAD).into()
+                }
+                NamedPrivateMode::NoClearColumn if self.conformance_level >= 5 => {
+                    self.no_clear_column.into()
+                }
+                NamedPrivateMode::NoClearColumn | NamedPrivateMode::ColumnMode => {
+                    ModeState::NotSupported
+                }
             },
             // The older alternate-screen modes `set_private_mode` handles.
             PrivateMode::Unknown(60) => ModeState::PermanentlyReset,
@@ -3156,6 +3178,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.reverse_wrap = false;
         self.extended_reverse_wrap = false;
         self.morefix = None;
+        self.no_clear_column = false;
         self.attribute_extent = 0;
         self.saved_private_modes.clear();
         if self.mode.contains(TermMode::ALT_SCREEN) {
@@ -3208,6 +3231,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.reverse_wrap = false;
         self.extended_reverse_wrap = false;
         self.morefix = None;
+        self.no_clear_column = false;
         self.attribute_extent = 0;
         self.saved_private_modes.clear();
         // DECSTR restores terminal state while leaving the display, scrollback and
@@ -3225,7 +3249,9 @@ impl<T: EventListener> Handler for Term<T> {
                 | TermMode::INSERT
                 | TermMode::ORIGIN
                 | TermMode::APP_CURSOR
-                | TermMode::APP_KEYPAD,
+                | TermMode::APP_KEYPAD
+                | TermMode::BACKARROW
+                | TermMode::BACKARROW_NEGOTIATED,
         );
         self.mode
             .insert(TermMode::SHOW_CURSOR | TermMode::LINE_WRAP);
@@ -3363,6 +3389,15 @@ impl<T: EventListener> Handler for Term<T> {
             }
             NamedPrivateMode::ShowCursor => self.mode.insert(TermMode::SHOW_CURSOR),
             NamedPrivateMode::CursorKeys => self.mode.insert(TermMode::APP_CURSOR),
+            NamedPrivateMode::ApplicationKeypad => self.mode.insert(TermMode::APP_KEYPAD),
+            NamedPrivateMode::Backarrow => self
+                .mode
+                .insert(TermMode::BACKARROW | TermMode::BACKARROW_NEGOTIATED),
+            NamedPrivateMode::NoClearColumn => {
+                if self.conformance_level >= 5 {
+                    self.no_clear_column = true;
+                }
+            }
             // Mouse protocols are mutually exclusive.
             NamedPrivateMode::ReportMouseClicks => {
                 self.mode.remove(TermMode::MOUSE_MODE);
@@ -3465,6 +3500,12 @@ impl<T: EventListener> Handler for Term<T> {
             }
             NamedPrivateMode::ShowCursor => self.mode.remove(TermMode::SHOW_CURSOR),
             NamedPrivateMode::CursorKeys => self.mode.remove(TermMode::APP_CURSOR),
+            NamedPrivateMode::ApplicationKeypad => self.mode.remove(TermMode::APP_KEYPAD),
+            NamedPrivateMode::Backarrow => {
+                self.mode.remove(TermMode::BACKARROW);
+                self.mode.insert(TermMode::BACKARROW_NEGOTIATED);
+            }
+            NamedPrivateMode::NoClearColumn => self.no_clear_column = false,
             NamedPrivateMode::ReportMouseClicks => {
                 self.mode.remove(TermMode::MOUSE_REPORT_CLICK);
                 self.event_proxy.send_event(Event::MouseCursorDirty);

@@ -2312,3 +2312,128 @@ fn a_rectangle_over_a_diagram_takes_its_lines_whole() {
         ]))
     );
 }
+
+#[test]
+fn dec_keypad_mode_alias_and_saved_state_follow_the_live_keypad() {
+    let (mut term, mut parser, rx) = harness_rx(8, 3);
+    feed(&mut term, &mut parser, b"\x1b[?66h\x1b[?66$p");
+    assert!(term.mode().contains(TermMode::APP_KEYPAD));
+    assert_eq!(drain_pty(&rx), "\x1b[?66;1$y");
+    feed(&mut term, &mut parser, b"\x1b[?66s\x1b>\x1b[?66$p");
+    assert!(!term.mode().contains(TermMode::APP_KEYPAD));
+    assert_eq!(drain_pty(&rx), "\x1b[?66;2$y");
+    feed(&mut term, &mut parser, b"\x1b[?66r");
+    assert!(term.mode().contains(TermMode::APP_KEYPAD));
+    feed(&mut term, &mut parser, b"\x1b[?66l\x1b=\x1b[?66$p");
+    assert_eq!(drain_pty(&rx), "\x1b[?66;1$y");
+    feed(&mut term, &mut parser, b"\x1b[!p\x1b[?66$p");
+    assert_eq!(drain_pty(&rx), "\x1b[?66;2$y");
+}
+
+#[test]
+fn dec_no_clear_preserves_cells_but_still_homes_and_resets_margins() {
+    for level in [4, 5] {
+        for column_change in ["\x1b[?3h", "\x1b[?3l"] {
+            let prefix = format!(
+                "\x1b[{};1\"pABC\x1b[?95h\x1b[?69h\x1b[2;7s\x1b[2;3r\x1b[?6h",
+                60 + level
+            );
+            let bytes = format!("{prefix}{column_change}\x1b[?95$p").into_bytes();
+            for split in 0..=bytes.len() {
+                let (mut term, mut parser, rx) = harness_rx(8, 3);
+                feed(&mut term, &mut parser, &bytes[..split]);
+                feed(&mut term, &mut parser, &bytes[split..]);
+                assert_eq!(term.columns(), 8, "programs cannot resize Kettle");
+                assert_eq!(term.grid().cursor.point, Point::new(Line(0), Column(0)));
+                assert!(!term.mode().contains(TermMode::LEFT_RIGHT_MARGIN));
+                let row: String = term.grid()[Line(0)][..].iter().map(|c| c.c).collect();
+                assert_eq!(row, if level == 5 { "ABC     " } else { "        " });
+                assert_eq!(
+                    drain_pty(&rx),
+                    if level == 5 {
+                        "\x1b[?95;1$y"
+                    } else {
+                        "\x1b[?95;0$y"
+                    }
+                );
+                feed(&mut term, &mut parser, b"\x1b[?95l\x1b[?3h");
+                assert!(term.grid()[Line(0)][..].iter().all(|c| c.c == ' '));
+            }
+        }
+    }
+}
+
+#[test]
+fn dec_no_clear_tracks_graphics_selection_alternate_screen_and_resets() {
+    use alacritty_terminal::term::GraphicsEvent;
+    let (mut term, mut parser, rx) = harness_rx(8, 3);
+    feed(&mut term, &mut parser, "\x1b[?95h\x1b[?95s界X".as_bytes());
+    let mut selection = Selection::new(
+        SelectionType::Simple,
+        Point::new(Line(0), Column(0)),
+        Side::Left,
+    );
+    selection.update(Point::new(Line(0), Column(2)), Side::Right);
+    term.selection = Some(selection);
+    term.take_graphics_events();
+    feed(&mut term, &mut parser, b"\x1b[?3h");
+    assert_eq!(term.selection_to_string().as_deref(), Some("界X"));
+    assert!(
+        term.grid()[Line(0)][Column(0)]
+            .flags
+            .contains(Flags::WIDE_CHAR)
+    );
+    assert!(
+        term.grid()[Line(0)][Column(1)]
+            .flags
+            .contains(Flags::WIDE_CHAR_SPACER)
+    );
+    assert!(term.take_graphics_events().events.is_empty());
+    feed(
+        &mut term,
+        &mut parser,
+        b"\x1b[?95l\x1b[?95r\x1b[?1049hALT\x1b[?3l",
+    );
+    assert_eq!(term.grid()[Line(0)][Column(0)].c, 'A');
+    feed(&mut term, &mut parser, b"\x1b[?1049l\x1b[?95l");
+    term.take_graphics_events();
+    feed(&mut term, &mut parser, b"\x1b[?3h");
+    assert!(term.selection.is_none());
+    assert_eq!(
+        term.take_graphics_events().events,
+        [GraphicsEvent::EraseDisplay]
+    );
+    for reset in ["\x1b[!p", "\x1bc"] {
+        feed(&mut term, &mut parser, b"\x1b[?95h\x1b[?95s");
+        feed(&mut term, &mut parser, reset.as_bytes());
+        feed(&mut term, &mut parser, b"\x1b[?95r\x1b[?95$p");
+        assert_eq!(drain_pty(&rx), "\x1b[?95;2$y");
+    }
+}
+
+#[test]
+fn dec_backarrow_reports_negotiation_and_restores_its_saved_state() {
+    let (mut term, mut parser, rx) = harness_rx(8, 3);
+    feed(
+        &mut term,
+        &mut parser,
+        b"\x1b[?67$p\x1b[?67h\x1b[?67$p\x1b[?67s\x1b[?67l\x1b[?67$p\x1b[?67r\x1b[?67$p",
+    );
+    assert_eq!(
+        drain_pty(&rx),
+        "\x1b[?67;2$y\x1b[?67;1$y\x1b[?67;2$y\x1b[?67;1$y"
+    );
+}
+
+#[test]
+fn dec_column_change_homes_even_in_a_single_row_pane() {
+    for keep in [false, true] {
+        let (mut term, mut parser) = harness(8, 1);
+        feed(&mut term, &mut parser, b"ABC\x1b[?69h\x1b[2;7s\x1b[?6h");
+        if keep {
+            feed(&mut term, &mut parser, b"\x1b[?95h");
+        }
+        feed(&mut term, &mut parser, b"\x1b[?3h");
+        assert_eq!(term.grid().cursor.point, Point::new(Line(0), Column(0)));
+    }
+}

@@ -49,14 +49,14 @@ fn a_backspace_binding_remap_still_leaves_the_word_delete_alone() {
     // Legacy pane: ESC DEL survives the remap.
     let legacy = crate::input::encode(&key, None, mods, TermMode::empty()).expect("legacy");
     assert_eq!(
-        apply_bs_del_binding(&cfg, &key, legacy),
+        apply_bs_del_binding(&cfg, &key, kettle_core::TermMode::empty(), legacy),
         vec![0x1b, 0x7f],
         "the remap replaces only the unmodified Backspace"
     );
     // …and an unmodified Backspace still honours the user's choice.
     let plain = crate::input::encode(&key, None, ModifiersState::empty(), TermMode::empty())
         .expect("plain");
-    assert_eq!(apply_bs_del_binding(&cfg, &key, plain), vec![0x08]);
+    assert_eq!(apply_bs_del_binding(&cfg, &key, kettle_core::TermMode::empty(), plain), vec![0x08]);
 
     // Kitty pane: the chord becomes CSI-u and carries the alt bit there.
     let kitty = TermMode::KITTY_KEYBOARD_PROTOCOL | TermMode::DISAMBIGUATE_ESC_CODES;

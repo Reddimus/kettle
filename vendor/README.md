@@ -102,6 +102,12 @@ date. Recheck that before upgrading a crate or dropping a patch.
   rectangle scroll, while placements crossing a margin stay stationary.
   DECSTR, RIS, DECALN, DECCOLM and resizing restore full-width margins.
   DECRQSS reports the current horizontal margins.
+  DECNKM (66) aliases the existing keypad state, including mode reports and
+  save/restore. DECBKM (67) exposes negotiated Backarrow state to key encoders;
+  RIS and DECSTR clear that negotiation. VT level 5 DECNCSM (95) preserves
+  text, selections and graphics across DECCOLM. Otherwise DECCOLM clears
+  visible selections and emits the retained-graphics erase event. Its margin
+  reset homes the cursor even in a one-row pane; it never resizes the window.
   Seven-bit DECSCL selections perform RIS and restrict margins to VT level
   4 or above; mode queries are unavailable below level 3. Unsupported levels
   and eight-bit C1 reply encodings are ignored without resetting state.

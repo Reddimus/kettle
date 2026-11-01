@@ -2250,6 +2250,19 @@ cache. Mode 41 explicitly negotiates the MoreFix tab rule: enabled wraps then
 advances to the next tab, disabled leaves a pending wrap untouched. Before a
 program negotiates mode 41, Kettle retains its existing wrap-only tab rule.
 
+DECNKM (66) and DECKPAM/DECKPNM operate on the same keypad flag. DECBKM
+(67) selects BS or DEL for legacy Backarrow input, for both native keys and
+`send_keys`. Its explicit negotiation overrides the configured startup
+Backspace binding until RIS or DECSTR; Kitty and modifyOtherKeys sequences
+retain their protocol encodings. Mode save/restore uses the live state.
+
+DECNCSM (95) is available at VT level 5. It suppresses the display-clear
+side effect of DECCOLM while retaining its cursor home and full-width/full-
+height margin reset. In lower conformance levels the mode is unrecognized.
+Without it, clearing also invalidates visible selections and retained graphics;
+with it, wide cells, text selections and graphics survive. DECCOLM never
+changes the pane or window geometry. RIS and DECSTR clear DECNCSM.
+
 Device reports describe the emulated terminal: no printer, locked user-defined
 keys, unknown keyboard language, no DEC locator, zero macro space, no link
 errors and no DEC multi-session transport. Reports honor the selected VT level.
