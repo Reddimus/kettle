@@ -1171,6 +1171,16 @@ combinations across four mixed CJK rows. A leading-spacer regression fails
 with its cleanup disabled and verifies unrelated preceding-row protection.
 These controls require VT level four or above.
 
+The column-editing and reverse-wrap follow-up passes 413 esctest tests,
+with 111 expected failures and no new failures: another 32 cases now pass.
+The adapter explicitly selects xterm's post-383 reverse-wrap profile, which
+separates mode 45 from mode 1045; the suite's legacy default expects different
+mode-45 behavior. With that profile the focused native subset passes all
+50 tests. Portable cases also cover clipped counts, cursors outside margins,
+protected wide spacers in history, old full-row wraps after changing margins,
+partial continuation annotations through rectangle operations and margin
+changes, pending wrap, resets, and the existing cell-size cap.
+
 **ucs-detect** (`just conformance-ucs`) measures how many columns the
 terminal gives Unicode text, against `wcwidth`. Kettle 5.7.0 scored 99.6% on
 narrow and 94.9% on wide characters, where the misses are the 26 regional

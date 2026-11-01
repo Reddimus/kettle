@@ -28,9 +28,12 @@ use crate::vte::ansi::{
 
 pub mod cell;
 pub mod color;
+mod horizontal;
 mod rectangles;
 pub mod search;
 
+#[cfg(test)]
+mod column_tests;
 #[cfg(test)]
 mod rectangle_tests;
 
@@ -369,6 +372,8 @@ pub struct Term<T> {
     protection_mode: ProtectionMode,
     horizontal_margins: Range<Column>,
     conformance_level: u8,
+    reverse_wrap: bool,
+    extended_reverse_wrap: bool,
 
     /// Modified terminal colors.
     colors: Colors,
@@ -702,6 +707,8 @@ impl<T> Term<T> {
             protection_mode: ProtectionMode::Off,
             horizontal_margins: Column(0)..Column(grid.columns()),
             conformance_level: 5,
+            reverse_wrap: false,
+            extended_reverse_wrap: false,
             event_proxy,
             damage,
             color_scheme_dark: config.color_scheme_dark,
@@ -1032,6 +1039,7 @@ impl<T> Term<T> {
         }
 
         debug!("New num_cols is {num_cols} and num_lines is {num_lines}");
+        self.clear_partial_wraps();
 
         // Move vi mode cursor with the content.
         let history_size = self.history_size();
@@ -1067,6 +1075,7 @@ impl<T> Term<T> {
 
         // Reset scrolling region.
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.relocate_partial_wraps(self.last_column());
         self.horizontal_margins = Column(0)..Column(self.columns());
 
         // Resize damage information.
@@ -1169,6 +1178,46 @@ impl<T> Term<T> {
         }
     }
 
+    fn selection_outside_region(
+        &self,
+        selection: &Selection,
+        origin: Line,
+        bottom: Line,
+        columns: &Range<Column>,
+    ) -> bool {
+        let Some(range) = selection.to_range(self) else {
+            return true;
+        };
+        !(origin.0.max(range.start.line.0)..bottom.0.min(range.end.line.0 + 1)).any(|line| {
+            let left = if range.is_block || line == range.start.line.0 {
+                range.start.column
+            } else {
+                Column(0)
+            };
+            let right = if range.is_block || line == range.end.line.0 {
+                range.end.column + 1
+            } else {
+                Column(self.columns())
+            };
+            let row = &self.grid[Line(line)];
+            let affected_left = if columns.start > 0
+                && row[columns.start].flags.contains(Flags::WIDE_CHAR_SPACER)
+            {
+                columns.start - 1
+            } else {
+                columns.start
+            };
+            let affected_right = if columns.end < self.columns()
+                && row[columns.end - 1].flags.contains(Flags::WIDE_CHAR)
+            {
+                columns.end + 1
+            } else {
+                columns.end
+            };
+            left < affected_right && right > affected_left
+        })
+    }
+
     /// Partial-width scrolls cannot rotate rows into history or rotate a whole-line selection.
     fn scroll_partial_region(&mut self, origin: Line, lines: usize, down: bool) -> bool {
         let columns = self.horizontal_region();
@@ -1179,39 +1228,10 @@ impl<T> Term<T> {
         let height = (bottom - origin).0 as usize;
         let lines = lines.min(height);
         let bg = self.grid.cursor.template.bg;
-        let selection = self.selection.take().filter(|selection| {
-            let Some(range) = selection.to_range(self) else {
-                return true;
-            };
-            !(origin.0.max(range.start.line.0)..bottom.0.min(range.end.line.0 + 1)).any(|line| {
-                let left = if range.is_block || line == range.start.line.0 {
-                    range.start.column
-                } else {
-                    Column(0)
-                };
-                let right = if range.is_block || line == range.end.line.0 {
-                    range.end.column + 1
-                } else {
-                    Column(self.columns())
-                };
-                let row = &self.grid[Line(line)];
-                let affected_left = if columns.start > 0
-                    && row[columns.start].flags.contains(Flags::WIDE_CHAR_SPACER)
-                {
-                    columns.start - 1
-                } else {
-                    columns.start
-                };
-                let affected_right = if columns.end < self.columns()
-                    && row[columns.end - 1].flags.contains(Flags::WIDE_CHAR)
-                {
-                    columns.end + 1
-                } else {
-                    columns.end
-                };
-                left < affected_right && right > affected_left
-            })
-        });
+        let selection = self
+            .selection
+            .take()
+            .filter(|selection| self.selection_outside_region(selection, origin, bottom, &columns));
         for offset in 0..height {
             let offset = if down { height - 1 - offset } else { offset };
             let line = origin + offset;
@@ -1398,6 +1418,7 @@ impl<T> Term<T> {
         // Setting 132 column font makes no sense, but run the other side effects.
         // Clear scrolling region.
         self.mode.remove(TermMode::LEFT_RIGHT_MARGIN);
+        self.relocate_partial_wraps(self.last_column());
         self.horizontal_margins = Column(0)..Column(self.columns());
         self.set_scrolling_region(1, None);
 
@@ -1577,6 +1598,11 @@ impl<T> Term<T> {
         let margins = self.horizontal_region();
         if margins.start == 0 && margins.end == self.columns() {
             self.grid.cursor_cell().flags.insert(Flags::WRAPLINE);
+        } else {
+            let line = self.grid.cursor.point.line;
+            self.grid[line][margins.end - 1]
+                .flags
+                .insert(Flags::PARTIAL_WRAPLINE);
         }
 
         if self.grid.cursor.point.line + 1 >= self.scroll_region.end {
@@ -1589,6 +1615,39 @@ impl<T> Term<T> {
         self.grid.cursor.point.column = self.horizontal_region().start;
         self.grid.cursor.input_needs_wrap = false;
         self.damage_cursor();
+    }
+
+    fn clear_linked_leading_wide_spacer(
+        &mut self,
+        line: Line,
+        start: Column,
+        respect: bool,
+    ) -> bool {
+        if start > 1
+            || line == self.topmost_line()
+            || !self.grid[line][Column(0)].flags.contains(Flags::WIDE_CHAR)
+            || (respect
+                && (self.grid[line][Column(0)].flags | self.grid[line][Column(1)].flags)
+                    .contains(Flags::PROTECTED))
+        {
+            return false;
+        }
+        self.clear_leading_wide_spacer(line - 1i32)
+    }
+
+    fn clear_leading_wide_spacer(&mut self, line: Line) -> bool {
+        let last = self.last_column();
+        let spacer = &mut self.grid[line][last];
+        if !spacer.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+            return false;
+        }
+        spacer
+            .flags
+            .remove(Flags::LEADING_WIDE_CHAR_SPACER | Flags::PROTECTED);
+        self.selection = self.selection.take().filter(|selection| {
+            self.selection_outside_region(selection, line, line + 1i32, &(last..last + 1))
+        });
+        true
     }
 
     /// Remove a wide glyph bisected by an editing boundary before moving cells.
@@ -1608,6 +1667,9 @@ impl<T> Term<T> {
         let bg = self.grid.cursor.template.bg;
         let columns = self.columns();
         for col in 0..columns {
+            self.grid[line][Column(col)]
+                .flags
+                .remove(Flags::PARTIAL_WRAPLINE);
             let cell = &self.grid[line][Column(col)];
             let invalid = if cell.flags.contains(Flags::WIDE_CHAR) {
                 col + 1 == columns
@@ -1976,6 +2038,7 @@ impl<T: EventListener> Handler for Term<T> {
         // DECALN also resets the margins and homes the cursor (DEC STD 070,
         // xterm), so a test pattern is never drawn into a stale scroll region.
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.relocate_partial_wraps(self.last_column());
         self.horizontal_margins = Column(0)..Column(self.columns());
         self.goto(0, 0);
 
@@ -2077,6 +2140,22 @@ impl<T: EventListener> Handler for Term<T> {
         self.repair_wide_cells(line);
     }
 
+    fn insert_columns(&mut self, count: usize) {
+        self.scroll_columns(count, true, self.grid.cursor.point.column);
+    }
+
+    fn delete_columns(&mut self, count: usize) {
+        self.scroll_columns(count, false, self.grid.cursor.point.column);
+    }
+
+    fn back_index(&mut self) {
+        self.column_index(true);
+    }
+
+    fn forward_index(&mut self) {
+        self.column_index(false);
+    }
+
     #[inline]
     fn move_up(&mut self, lines: usize) {
         trace!("Moving up: {lines}");
@@ -2138,6 +2217,9 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn move_backward(&mut self, cols: usize) {
         trace!("Moving backward: {cols}");
+        if self.reverse_cursor(cols) {
+            return;
+        }
         let point = self.grid.cursor.point.column;
         let left = self.horizontal_region().start;
         let limit = if point >= left { left.0 } else { 0 };
@@ -2434,6 +2516,9 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn backspace(&mut self) {
         trace!("Backspace");
+        if self.reverse_cursor(1) {
+            return;
+        }
 
         let col = self.grid.cursor.point.column;
         let left = self.horizontal_region().start;
@@ -2930,6 +3015,8 @@ impl<T: EventListener> Handler for Term<T> {
     fn reset_state(&mut self) {
         self.protection_mode = ProtectionMode::Off;
         self.conformance_level = 5;
+        self.reverse_wrap = false;
+        self.extended_reverse_wrap = false;
         if self.mode.contains(TermMode::ALT_SCREEN) {
             mem::swap(&mut self.grid, &mut self.inactive_grid);
         }
@@ -2938,6 +3025,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.grid.reset();
         self.inactive_grid.reset();
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.relocate_partial_wraps(self.last_column());
         self.horizontal_margins = Column(0)..Column(self.columns());
         self.tabs = TabStops::new(self.columns());
         self.title_stack = Vec::new();
@@ -2975,6 +3063,9 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn soft_reset_state(&mut self) {
         self.protection_mode = ProtectionMode::Off;
+
+        self.reverse_wrap = false;
+        self.extended_reverse_wrap = false;
         // DECSTR restores terminal state while leaving the display, scrollback and
         // title alone. Programs emit `CSI ! p` from terminfo `is2`/`rs2` while
         // initializing, so clearing here would destroy a user's scrollback
@@ -3004,6 +3095,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.grid.saved_cursor = Default::default();
         self.grid.saved_origin_mode = false;
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.relocate_partial_wraps(self.last_column());
         self.horizontal_margins = Column(0)..Column(self.columns());
     }
 
@@ -3160,6 +3252,8 @@ impl<T: EventListener> Handler for Term<T> {
                     self.mode.insert(TermMode::LEFT_RIGHT_MARGIN);
                 }
             }
+            NamedPrivateMode::ReverseWrap => self.reverse_wrap = true,
+            NamedPrivateMode::ExtendedReverseWrap => self.extended_reverse_wrap = true,
             NamedPrivateMode::LineWrap => self.mode.insert(TermMode::LINE_WRAP),
             NamedPrivateMode::Origin => {
                 self.mode.insert(TermMode::ORIGIN);
@@ -3242,8 +3336,11 @@ impl<T: EventListener> Handler for Term<T> {
             NamedPrivateMode::AlternateScroll => self.mode.remove(TermMode::ALTERNATE_SCROLL),
             NamedPrivateMode::LeftRightMargin => {
                 self.mode.remove(TermMode::LEFT_RIGHT_MARGIN);
+                self.relocate_partial_wraps(self.last_column());
                 self.horizontal_margins = Column(0)..Column(self.columns());
             }
+            NamedPrivateMode::ReverseWrap => self.reverse_wrap = false,
+            NamedPrivateMode::ExtendedReverseWrap => self.extended_reverse_wrap = false,
             NamedPrivateMode::LineWrap => self.mode.remove(TermMode::LINE_WRAP),
             NamedPrivateMode::Origin => self.mode.remove(TermMode::ORIGIN),
             NamedPrivateMode::ColumnMode => self.deccolm(),
@@ -3274,6 +3371,8 @@ impl<T: EventListener> Handler for Term<T> {
                 NamedPrivateMode::LeftRightMargin => {
                     self.mode.contains(TermMode::LEFT_RIGHT_MARGIN).into()
                 }
+                NamedPrivateMode::ReverseWrap => self.reverse_wrap.into(),
+                NamedPrivateMode::ExtendedReverseWrap => self.extended_reverse_wrap.into(),
                 NamedPrivateMode::LineWrap => self.mode.contains(TermMode::LINE_WRAP).into(),
                 NamedPrivateMode::BlinkingCursor => {
                     let style = self
@@ -3396,6 +3495,8 @@ impl<T: EventListener> Handler for Term<T> {
         if left == 0 || left >= right {
             return;
         }
+
+        self.relocate_partial_wraps(Column(right - 1));
         self.horizontal_margins = Column(left - 1)..Column(right);
         self.goto(0, 0);
     }

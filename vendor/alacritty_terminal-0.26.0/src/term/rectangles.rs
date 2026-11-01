@@ -46,36 +46,15 @@ impl<T: EventListener> Term<T> {
         })
     }
 
-    fn finish_rect(&mut self, rows: Range<usize>) {
+    fn invalidate_rect_selection(&mut self, area: &Area) {
         self.selection = self.selection.take().filter(|selection| {
-            !selection.intersects_range(Line(rows.start as i32)..=Line(rows.end as i32 - 1))
+            self.selection_outside_region(
+                selection,
+                Line(area.rows.start as i32),
+                Line(area.rows.end as i32),
+                &area.columns,
+            )
         });
-        self.mark_fully_damaged();
-    }
-
-    fn clear_rect_leading_spacer(&mut self, line: Line, start: Column, respect: bool) -> bool {
-        if start > 1
-            || line == self.topmost_line()
-            || !self.grid[line][Column(0)].flags.contains(Flags::WIDE_CHAR)
-            || (respect
-                && (self.grid[line][Column(0)].flags | self.grid[line][Column(1)].flags)
-                    .contains(Flags::PROTECTED))
-        {
-            return false;
-        }
-        let last = self.last_column();
-        let spacer = &mut self.grid[line - 1i32][last];
-        if !spacer.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
-            return false;
-        }
-        spacer
-            .flags
-            .remove(Flags::LEADING_WIDE_CHAR_SPACER | Flags::PROTECTED);
-        self.selection = self
-            .selection
-            .take()
-            .filter(|selection| !selection.intersects_range(line - 1i32..=line - 1i32));
-        true
     }
 
     fn rect_blank(cell: &Cell, keep_attributes: bool) -> Cell {
@@ -89,9 +68,12 @@ impl<T: EventListener> Term<T> {
         } else {
             Cell::default()
         };
-        blank
-            .flags
-            .remove(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
+        blank.flags.remove(
+            Flags::WIDE_CHAR
+                | Flags::WIDE_CHAR_SPACER
+                | Flags::LEADING_WIDE_CHAR_SPACER
+                | Flags::PARTIAL_WRAPLINE,
+        );
         if keep_attributes {
             blank.set_underline_color(cell.underline_color());
         }
@@ -102,20 +84,23 @@ impl<T: EventListener> Term<T> {
         let Some(area) = self.resolve_rect(area) else {
             return;
         };
+        self.invalidate_rect_selection(&area);
         let mut cell = self.grid.cursor.template.clone();
         cell.c = self.grid.cursor.charsets[self.active_charset].map(character);
         cell.flags.remove(
             Flags::WIDE_CHAR
                 | Flags::WIDE_CHAR_SPACER
                 | Flags::LEADING_WIDE_CHAR_SPACER
-                | Flags::WRAPLINE,
+                | Flags::WRAPLINE
+                | Flags::PARTIAL_WRAPLINE,
         );
-        let mut first = area.rows.start;
+        let partial_column = self.horizontal_region().end - 1;
         for row in area.rows.clone() {
             let line = Line(row as i32);
-            if self.clear_rect_leading_spacer(line, area.columns.start, false) {
-                first = first.min(row.saturating_sub(1));
-            }
+            let partial_wrap = self.grid[line][partial_column]
+                .flags
+                .contains(Flags::PARTIAL_WRAPLINE);
+            self.clear_linked_leading_wide_spacer(line, area.columns.start, false);
             let wrap = self.grid[line][Column(self.columns() - 1)]
                 .flags
                 .contains(Flags::WRAPLINE);
@@ -123,22 +108,27 @@ impl<T: EventListener> Term<T> {
             self.grid[line][area.columns.clone()].fill(cell.clone());
             let last = Column(self.columns() - 1);
             self.grid[line][last].flags.set(Flags::WRAPLINE, wrap);
+            self.grid[line][partial_column]
+                .flags
+                .set(Flags::PARTIAL_WRAPLINE, partial_wrap);
         }
-        self.finish_rect(first..area.rows.end);
+        self.mark_fully_damaged();
     }
 
     pub(super) fn erase_rect(&mut self, area: ansi::Rectangle, selective: bool) {
         let Some(area) = self.resolve_rect(area) else {
             return;
         };
+        self.invalidate_rect_selection(&area);
         let bg = self.grid.cursor.template.bg;
         let respect = selective && self.protection_mode == ProtectionMode::Dec;
-        let mut first = area.rows.start;
+        let partial_column = self.horizontal_region().end - 1;
         for row in area.rows.clone() {
             let line = Line(row as i32);
-            if self.clear_rect_leading_spacer(line, area.columns.start, respect) {
-                first = first.min(row.saturating_sub(1));
-            }
+            let partial_wrap = self.grid[line][partial_column]
+                .flags
+                .contains(Flags::PARTIAL_WRAPLINE);
+            self.clear_linked_leading_wide_spacer(line, area.columns.start, respect);
             let cells = &mut self.grid[line];
             let mut start = area.columns.start.0;
             let mut end = area.columns.end.0;
@@ -168,8 +158,11 @@ impl<T: EventListener> Term<T> {
                 blank.flags.set(Flags::WRAPLINE, wrap);
                 cells[Column(col)] = blank;
             }
+            cells[partial_column]
+                .flags
+                .set(Flags::PARTIAL_WRAPLINE, partial_wrap);
         }
-        self.finish_rect(first..area.rows.end);
+        self.mark_fully_damaged();
     }
 
     pub(super) fn copy_rect(&mut self, source: ansi::Rectangle, top: u16, left: u16) {
@@ -186,6 +179,10 @@ impl<T: EventListener> Term<T> {
         let height = source.rows.len().min(destination.rows.len());
         let width = (source.columns.end.0 - source.columns.start.0)
             .min(destination.columns.end.0 - destination.columns.start.0);
+        self.invalidate_rect_selection(&Area {
+            rows: destination.rows.start..destination.rows.start + height,
+            columns: destination.columns.start..destination.columns.start + width,
+        });
         // Snapshot before writing, so overlapping source and destination are independent.
         let snapshot: Vec<_> = source
             .rows
@@ -201,18 +198,20 @@ impl<T: EventListener> Term<T> {
                     cells[width - 1] = Self::rect_blank(&cells[width - 1], true);
                 }
                 for cell in &mut cells {
-                    cell.flags
-                        .remove(Flags::WRAPLINE | Flags::LEADING_WIDE_CHAR_SPACER);
+                    cell.flags.remove(
+                        Flags::WRAPLINE | Flags::LEADING_WIDE_CHAR_SPACER | Flags::PARTIAL_WRAPLINE,
+                    );
                 }
                 cells
             })
             .collect();
-        let mut first = destination.rows.start;
+        let partial_column = self.horizontal_region().end - 1;
         for (offset, cells) in snapshot.iter().enumerate() {
             let line = Line((destination.rows.start + offset) as i32);
-            if self.clear_rect_leading_spacer(line, destination.columns.start, false) {
-                first = first.min((destination.rows.start + offset).saturating_sub(1));
-            }
+            let partial_wrap = self.grid[line][partial_column]
+                .flags
+                .contains(Flags::PARTIAL_WRAPLINE);
+            self.clear_linked_leading_wide_spacer(line, destination.columns.start, false);
             let last = Column(self.columns() - 1);
             let wrap = self.grid[line][last].flags.contains(Flags::WRAPLINE);
             self.erase_cells(
@@ -223,7 +222,10 @@ impl<T: EventListener> Term<T> {
             self.grid[line][destination.columns.start..destination.columns.start + width]
                 .clone_from_slice(cells);
             self.grid[line][last].flags.set(Flags::WRAPLINE, wrap);
+            self.grid[line][partial_column]
+                .flags
+                .set(Flags::PARTIAL_WRAPLINE, partial_wrap);
         }
-        self.finish_rect(first..destination.rows.start + height);
+        self.mark_fully_damaged();
     }
 }
