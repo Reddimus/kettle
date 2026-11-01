@@ -1216,6 +1216,16 @@ Kitty precedence and reset. Removing the negotiated-key binding override
 makes the keyboard regression fail; removing the modes makes the core
 regressions fail.
 
+The screen-reverse follow-up passes 457 native esctest cases, retains 41
+upstream known-bug results and matches 69 expected failures with no new failures.
+
+Screen-reverse regressions exercise every split of query/set/reset/save/restore,
+DECSTR preservation and RIS reset. Palette updates made while reversed are
+checked after returning to normal video. Native GPU captures in both text paths
+verify default background reversal, explicit RGB preservation, SGR inversion
+and exact frame restoration across cached captures. Removing mode activation
+makes the pixel regression fail. Cursor tests preserve explicit custom colours.
+
 The extended-colour regressions exercise all seven floating colour formats,
 known sRGB primaries and neutral values, signed/scientific components, invalid
 and degenerate inputs, and every split of palette, dynamic and special-colour
@@ -1227,8 +1237,9 @@ cases now pass. Fixture setup uses the suite's black/white defaults and resets
 special resources between cases; every original test assertion remains intact.
 A native GPU regression exercises all five attributes in both renderer paths;
 removing the render hook makes it fail. The fixed D65/sRGB conversion is a
-portable policy: esctest's display-profile-specific RGB expectations are kept
-as explicit exceptions rather than substituted into the implementation.
+portable policy: differences from esctest's X server conversion and physical
+xy input validation are explicit exceptions. Its RGB values are not substituted
+into the implementation.
 
 **ucs-detect** (`just conformance-ucs`) measures how many columns the
 terminal gives Unicode text, against `wcwidth`. Kettle 5.7.0 scored 99.6% on

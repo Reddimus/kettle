@@ -842,8 +842,7 @@ impl Renderer {
         let default_bg = panes
             .iter()
             .find(|p| p.focused)
-            .and_then(|p| p.snap.colors[257])
-            .map(|c| Rgb::new(c.r, c.g, c.b))
+            .and_then(|p| color::resolve_query(257, theme, &p.snap.colors))
             .unwrap_or(theme.background);
         let pad_x = cfg.padding_x;
         let pad_y = cfg.padding_y;
@@ -3624,9 +3623,8 @@ impl Renderer {
             // whitespace / IME composition / chrome strings ride the
             // default. Matches the OSC 11 chrome path —
             // engine override (Colors[256]) wins, theme is fallback.
-            let pane_fg = pv.snap.colors[256]
-                .map(|c| Rgb::new(c.r, c.g, c.b))
-                .unwrap_or(theme.foreground);
+            let pane_fg =
+                color::resolve_query(256, theme, &pv.snap.colors).unwrap_or(theme.foreground);
             // Glyphon's color shader ignores foreground tint. Inactive legacy
             // panes use our pipeline at their original layout positions so
             // bitmap dimming and ordinary text contrast remain independent.

@@ -568,3 +568,10 @@ a fixed D65/sRGB profile when the `std` feature is enabled. The formulas follow
 and the [sRGB conversion reference](https://www.w3.org/TR/css-color-4/#color-conversion-code).
 The continuous CIE Lab low-light inverse and channel-clipping policy are
 intentional differences from Xlib's historical conversion/profile pipeline.
+
+
+DEC private mode 5 adds a display mapping to the existing `Colors` mode byte.
+It swaps foreground/background and ANSI black/white pairs on indexed reads and
+writes, leaving cell data intact. RIS clears the mapping; DECSTR and OSC special
+resources otherwise keep their existing lifetime. Named mode parsing and private
+save/restore/query use the same engine state.
