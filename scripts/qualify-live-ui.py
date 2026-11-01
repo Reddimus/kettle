@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the six quarantined Linux scenarios repeatedly on one fixed artifact."""
+"""Repeat the six Linux UI scenarios against one fixed artifact."""
 
 import argparse
 import hashlib

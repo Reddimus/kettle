@@ -3430,6 +3430,14 @@ no context reads, clock queries, formatting or writes.
 
 ## Threading model
 
+The [2026-11-01 scaling diagnostics](SCALING-2026-11-01.md) retain the current
+per-pane readers, renderer-owned font systems and bounded search slices. The
+host did not qualify for calibrated standings. Thread and process-memory
+observations, the incomplete 64-PTY campaign and pending-search controls do not
+justify a shared read pump, shared mutable font system or search worker. This
+is a decision to defer those changes pending measurements, not a performance
+non-regression claim.
+
 - **Main thread** — winit event loop, *all* GPU work, every window's
   tab/split tree (the `windows` map; dispatch is take-out/put-back, see
   above), input encoding, search/SSH overlays, session save/restore,

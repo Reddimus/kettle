@@ -6,6 +6,40 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in Unicode 18 extended-grapheme cells with DEC mode 2027, off by
+  default. Joined emoji, regional-indicator pairs, combining sequences and
+  Indic conjuncts retain one leading cell through rendering, copying, search
+  and reflow. Late VS16 can widen a cluster; documented resource and glyph
+  fallback limits still apply.
+- DEC left/right margins, column editing, horizontal index, reverse
+  wraparound, protected cells and selective erase, rectangular copy/fill/erase
+  and attribute operations, mode save/restore, special colours and screen
+  reverse. Status reports describe supported modes without inventing device
+  capabilities; Kettle identity and window/title/checksum policies remain.
+- Software keyboard lock (KAM) and send/receive mode (SRM). Accepted local
+  echo has its own parser state and reaches the terminal before the matching
+  PTY write; rejected input is never echoed. Recovery actions and protocol
+  replies remain available while keyboard input is locked.
+- Versioned command-begin/end correlation in bundled shell integrations.
+  Control clients can require correlation before submitting input; older
+  integrations retain their existing fallback behavior.
+
+### Fixed
+
+- Keep video moving through interior audio timestamp gaps by decoding audio
+  and video independently from identity-verified input handles. Silence is
+  generated lazily from audio timestamps within the existing aggregate
+  resource bounds.
+
+
+### Maintenance
+
+- Require the six Linux live UI checks after each passed 300 repetitions
+  across three fresh runner allocations. Retain case artifacts on failure and
+  keep physical-GPU and desktop-focus validation separate.
+
 ## [5.7.1] — 2026-10-31
 
 ### Fixed
