@@ -1,12 +1,13 @@
 use super::theme::pane_inactive_amount;
 use super::{
     Attrs, AttrsList, AttrsOwned, BufferLine, CellHighlight, Config, Family, Flags, FontFeatures,
-    GColor, GlyphClip, GlyphInstance, InlineCards, LineEnding, Metrics, PaneSnapshot, QuadInstance,
-    Rect4, Renderer, Rgb, Shaping, Style, TextBuffer, TextRendererMode, Translator, Weight, Wrap,
-    background_has_wallpaper, card_scene, clip_quads, color, composed_bg_alpha, cursor_policy,
-    emit_cell_locked_glyphs, font_features, inline_cards, inline_image_clip, pane_backdrop_rect,
-    pane_grid_origin, pane_metrics, rect, resolved_cell_foreground_cached, selection_row_span,
-    single_column_text_presentation, visible_selection_rows,
+    GColor, GlyphClip, GlyphInstance, GlyphPositioning, InlineCards, LineEnding, Metrics,
+    PaneSnapshot, QuadInstance, Rect4, Renderer, Rgb, Shaping, Style, TextBuffer, TextRendererMode,
+    Translator, Weight, Wrap, background_has_wallpaper, card_scene, clip_quads, color,
+    composed_bg_alpha, cursor_policy, emit_cell_locked_glyphs, font_features, inline_cards,
+    inline_image_clip, pane_backdrop_rect, pane_grid_origin, pane_metrics, rect,
+    resolved_cell_foreground_cached, selection_row_span, single_column_text_presentation,
+    visible_selection_rows,
 };
 
 /// A card a frame drew: its pane, its nonce, and the part of it inside its
@@ -202,7 +203,7 @@ pub(crate) struct PendingCursorGlyph {
     /// Cursor foreground (theme `cursor_text`, or the cell bg under an OSC 12
     /// runtime cursor color so the inverted glyph follows reverse-video).
     pub(crate) color: Rgb,
-    /// Pane rect `(x, y, w, h)` used to clip the glyph to its pane.
+    /// Pane rect `(x, y, w, h)`, narrowed to the cell for clustered text.
     pub(crate) clip: (f32, f32, f32, f32),
 }
 
@@ -428,6 +429,22 @@ impl Renderer {
         // `None` when the next char must open a new run.
         let mut cur: Option<(Rgb, bool, bool)> = None;
         let mut search_highlight_cursor = 0usize;
+        let mut cell_positions: Vec<Option<Vec<CellGlyphSpan>>> = if snap.has_graphemes() {
+            vec![None; screen_rows.max(0) as usize]
+        } else {
+            Vec::new()
+        };
+        if !cell_positions.is_empty() {
+            for cell in &snap.cells {
+                if cell.flags.contains(Flags::GRAPHEME)
+                    && let Ok(row) = usize::try_from(cell.line + display_off)
+                    && let Some(positions) = cell_positions.get_mut(row)
+                {
+                    positions.get_or_insert_with(Vec::new);
+                }
+            }
+        }
+        let mut row_bytes = 0;
 
         // Terminator parity, cursor_fg_color / cursor_bg_color: a
         // focused SOLID block cursor renders the block in `theme.cursor`
@@ -506,6 +523,7 @@ impl Renderer {
             // negative when scrolled) stays for the relative line-break deltas.
             let vrow = row + display_off;
             if row != cur_row {
+                row_bytes = 0;
                 cur = None; // runs never span a line break
                 for _ in cur_row..row {
                     span_line_breaks.push(n);
@@ -544,12 +562,57 @@ impl Renderer {
             let italic = flags.contains(Flags::ITALIC);
             saw_styled_text |= bold || italic;
             let hidden = flags.contains(Flags::HIDDEN);
-            let dc = card_cell.glyph(sc.c, hidden);
-            let marks: &[char] = if hidden || owned_cell {
+            let mut dc = card_cell.glyph(sc.c, hidden);
+            let mut marks: &[char] = if hidden || owned_cell {
                 &[]
             } else {
                 sc.zerowidth()
             };
+            let text_presentation = flags.contains(Flags::GRAPHEME)
+                && marks
+                    .iter()
+                    .rev()
+                    .find(|&&c| matches!(c, '\u{fe0e}' | '\u{fe0f}'))
+                    == Some(&'\u{fe0e}');
+            let text_family = if text_presentation {
+                let family = super::fonts::grapheme_text_family(
+                    &mut self.font_system,
+                    cfg.family_for(bold, italic),
+                    dc,
+                    marks,
+                );
+                if family.is_none() {
+                    dc = '\u{fffd}';
+                    marks = &[];
+                }
+                family
+            } else {
+                None
+            };
+            if let Ok(row) = usize::try_from(vrow)
+                && let Some(Some(positions)) = cell_positions.get_mut(row)
+            {
+                let end =
+                    row_bytes + dc.len_utf8() + marks.iter().map(|c| c.len_utf8()).sum::<usize>();
+                positions.push(CellGlyphSpan {
+                    bytes: row_bytes..end,
+                    cell: super::geometry::GridGlyphCell {
+                        column: col,
+                        width: if flags.contains(Flags::WIDE_CHAR) {
+                            2
+                        } else {
+                            1
+                        },
+                        clustered: flags.contains(Flags::GRAPHEME),
+                        text_presentation,
+                        single_image: flags.contains(Flags::GRAPHEME | Flags::WIDE_CHAR)
+                            && !text_presentation
+                            && marks.contains(&'\u{200d}'),
+                    },
+                    family: text_family.clone(),
+                });
+                row_bytes = end;
+            }
             // The same search pair drives the match background quads and the
             // terminal glyphs above them. Active matches use the configured
             // search fg/bg; inactive matches reuse the theme selection pair.
@@ -627,9 +690,13 @@ impl Renderer {
                 // See `color::cursor_glyph_color` for which colour and why.
                 let cursor_fg = color::cursor_glyph_color(theme, term_colors, bg);
                 let mut attrs = run_attrs(cfg, &font_features(cfg), cursor_fg, bold, italic);
-                if let Some(symbol_family) = self
-                    .text_symbol_family
-                    .filter(|_| !marks.contains(&'\u{FE0F}') && single_column_text_presentation(dc))
+                if let Some(symbol_family) = text_family
+                    .as_deref()
+                    .or(self.text_symbol_family)
+                    .filter(|_| {
+                        text_presentation
+                            || (!marks.contains(&'\u{FE0F}') && single_column_text_presentation(dc))
+                    })
                 {
                     attrs = attrs.family(Family::Name(symbol_family));
                 }
@@ -927,6 +994,7 @@ impl Renderer {
         // records the live run count at each row transition (one entry per
         // crossed row, `rows - 1` total).
         let mut start = 0usize;
+        let mut reshaped_grapheme_rows = Vec::new();
         for row in 0..rows {
             let end = span_line_breaks.get(row).copied().unwrap_or(n).min(n);
             let runs = &spans[start.min(end)..end];
@@ -935,13 +1003,20 @@ impl Renderer {
             // The key covers exactly what is shaped, so recolouring the
             // blanks after that cell reshapes nothing.
             let shaped = ShapedRow::of(runs);
-            let key = shaped.key(runs);
+            let positions = cell_positions
+                .get(row)
+                .and_then(Option::as_deref)
+                .unwrap_or_default();
+            let key = shaped.key_with_positions(runs, positions);
             let prev = keys.get(row).copied();
             if prev == Some(key) {
                 continue;
             }
             // This row reshapes — the buffer's glyph vertices will differ.
             text_changed = true;
+            if !positions.is_empty() {
+                reshaped_grapheme_rows.push(row);
+            }
             row_text.clear();
             let mut attrs_list = AttrsList::new(&default_attrs);
             for (i, (text, fg, bold, italic)) in runs[..shaped.runs].iter().enumerate() {
@@ -984,6 +1059,12 @@ impl Renderer {
                     }
                 }
             }
+            apply_cell_positions(
+                &mut attrs_list,
+                positions,
+                row_text.len(),
+                text_symbol_family,
+            );
             shaped.push_pad(&mut row_text, &mut attrs_list, cfg, &ff);
             if prev.is_some() {
                 buf.lines[row].set_text(&row_text, LineEnding::Lf, attrs_list);
@@ -1003,6 +1084,64 @@ impl Renderer {
         // `scroll.vertical` is already non-zero or `scroll.line > 0`, and
         // nothing here sets either.)
         buf.shape_until_scroll(&mut self.font_system, false);
+        let replaced = replace_unsupported_graphemes(
+            buf,
+            &mut self.font_system,
+            &mut self.swash,
+            &reshaped_grapheme_rows,
+        );
+        if replaced {
+            buf.shape_until_scroll(&mut self.font_system, false);
+        }
+        if recolor_cursor_cell.is_some()
+            && let Some(cursor) = self.pending_cursor_glyph.as_mut()
+            && let Some(line) = usize::try_from(cvrow)
+                .ok()
+                .and_then(|row| buf.lines.get(row))
+            && let Some((range, attrs, cell)) =
+                line.attrs_list().spans_iter().find_map(|(range, attrs)| {
+                    super::geometry::GridGlyphCell::from_metadata(attrs.metadata)
+                        .filter(|cell| {
+                            cell.clustered
+                                && cell.column <= cp.column.0
+                                && cp.column.0 < cell.column + cell.width
+                        })
+                        .map(|cell| (range, attrs, cell))
+                })
+        {
+            let text = &line.text()[range.clone()];
+            cursor.ch = text.chars().next().unwrap_or(' ');
+            cursor.text = text.to_owned();
+            cursor.emoji_qualified = text.contains('\u{fe0f}');
+            cursor.attrs = AttrsOwned::new(&attrs.as_attrs().metadata(0).color(GColor::rgb(
+                cursor.color.r,
+                cursor.color.g,
+                cursor.color.b,
+            )));
+            let left = cursor.x.round().max(cursor.clip.0);
+            let right = (cursor.x + cell.width as f32 * cw)
+                .round()
+                .min(cursor.clip.0 + cursor.clip.2);
+            cursor.clip = (left, cursor.clip.1, (right - left).max(0.0), cursor.clip.3);
+            let offset = alacritty_terminal::term::grapheme_base_offset(text);
+            if offset > 0
+                && let Some(run) = buf.layout_runs().find(|run| run.line_i == cvrow as usize)
+            {
+                let glyphs: Vec<_> = run
+                    .glyphs
+                    .iter()
+                    .filter(|glyph| glyph.metadata == attrs.metadata)
+                    .collect();
+                let byte = range.start + offset;
+                if let Some(base) = glyphs
+                    .iter()
+                    .find(|glyph| glyph.start <= byte && byte < glyph.end)
+                    && let Some(origin) = glyphs.iter().map(|glyph| glyph.x).min_by(f32::total_cmp)
+                {
+                    cursor.x -= base.x - origin;
+                }
+            }
+        }
         if draw_cursor
             && matches!(shape, EShape::Block)
             && let Some(cursor) = self.pending_cursor_glyph.as_mut()
@@ -1055,7 +1194,8 @@ impl Renderer {
 
         for (i, pv) in panes.iter().enumerate() {
             let inactive = pane_inactive_amount(pv, panes.len(), cfg);
-            if cfg.text_renderer == TextRendererMode::Legacy && inactive == 0.0 {
+            let graphemes = pv.snap.has_graphemes();
+            if cfg.text_renderer == TextRendererMode::Legacy && inactive == 0.0 && !graphemes {
                 continue;
             }
             let (rx, ry, rw, rh) = pv.terminal;
@@ -1078,7 +1218,13 @@ impl Renderer {
                 out,
                 buf,
                 (ox, oy),
-                (cfg.text_renderer == TextRendererMode::Grid).then_some(cw),
+                if cfg.text_renderer == TextRendererMode::Grid {
+                    GlyphPositioning::Grid(cw)
+                } else if graphemes {
+                    GlyphPositioning::GraphemeRows(cw)
+                } else {
+                    GlyphPositioning::Continuous
+                },
                 default_color,
                 glyph_pipeline,
                 swash,
@@ -1138,6 +1284,106 @@ pub(crate) struct ShapedRow {
     pub(crate) pad_faces: u8,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct CellGlyphSpan {
+    pub bytes: std::ops::Range<usize>,
+    pub cell: super::geometry::GridGlyphCell,
+    pub family: Option<String>,
+}
+
+pub(crate) fn apply_cell_positions(
+    attrs: &mut AttrsList,
+    positions: &[CellGlyphSpan],
+    len: usize,
+    text_family: Option<&str>,
+) {
+    for position in positions
+        .iter()
+        .take_while(|position| position.bytes.start < len)
+    {
+        let owned = AttrsOwned::new(&attrs.get_span(position.bytes.start));
+        let mut cell_attrs = owned.as_attrs().metadata(position.cell.metadata());
+        if position.cell.text_presentation
+            && let Some(family) = position.family.as_deref().or(text_family)
+        {
+            cell_attrs = cell_attrs.family(Family::Name(family));
+        }
+        attrs.add_span(
+            position.bytes.start..position.bytes.end.min(len),
+            &cell_attrs,
+        );
+    }
+}
+
+fn replace_unsupported_graphemes(
+    buffer: &mut TextBuffer,
+    fonts: &mut super::FontSystem,
+    swash: &mut super::SwashCache,
+    rows: &[usize],
+) -> bool {
+    use super::geometry::GridGlyphCell;
+    use std::collections::{HashMap, HashSet};
+    let mut replacements = Vec::new();
+    for run in buffer
+        .layout_runs()
+        .filter(|run| rows.binary_search(&run.line_i).is_ok())
+    {
+        let mut images: HashMap<usize, usize> = buffer.lines[run.line_i]
+            .attrs_list()
+            .spans_iter()
+            .filter_map(|(_, attrs)| {
+                GridGlyphCell::from_metadata(attrs.metadata)
+                    .filter(|cell| cell.single_image)
+                    .map(|_| (attrs.metadata, 0))
+            })
+            .collect();
+        for glyph in run.glyphs {
+            if let Some(count) = images.get_mut(&glyph.metadata) {
+                let key = glyph.physical((0.0, 0.0), 1.0).cache_key;
+                if swash
+                    .get_image_uncached(fonts, key)
+                    .as_ref()
+                    .is_some_and(|image| image.placement.width > 0 && image.placement.height > 0)
+                {
+                    *count += 1;
+                }
+            }
+        }
+        let bad: HashSet<_> = images
+            .into_iter()
+            .filter(|(_, count)| *count != 1)
+            .map(|(metadata, _)| metadata)
+            .collect();
+        if !bad.is_empty() {
+            replacements.push((run.line_i, bad));
+        }
+    }
+    let changed = !replacements.is_empty();
+    for (row, bad) in replacements {
+        let line = &buffer.lines[row];
+        let mut text = String::new();
+        let mut attrs = AttrsList::new(&line.attrs_list().defaults());
+        let mut replaced = HashSet::new();
+        for (byte, ch) in line.text().char_indices() {
+            let style = line.attrs_list().get_span(byte);
+            let ch = if bad.contains(&style.metadata) {
+                if !replaced.insert(style.metadata) {
+                    continue;
+                }
+                '\u{fffd}'
+            } else {
+                ch
+            };
+            let start = text.len();
+            text.push(ch);
+            attrs.add_span(start..text.len(), &style);
+        }
+        let ending = line.ending();
+        buffer.lines[row].set_text(text, ending, attrs);
+    }
+    changed
+}
+
 impl ShapedRow {
     /// The pad's colour. A blank draws no ink, so a fixed colour changes
     /// nothing on screen and keeps a recolour of the cut blanks out of the
@@ -1194,6 +1440,32 @@ impl ShapedRow {
         }
         self.pad_faces.hash(&mut h);
         h.finish()
+    }
+
+    pub(crate) fn key_with_positions(
+        self,
+        runs: &[(String, Rgb, bool, bool)],
+        positions: &[CellGlyphSpan],
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let key = self.key(runs);
+        if positions.is_empty() {
+            return key;
+        }
+        let len: usize = runs[..self.runs]
+            .iter()
+            .enumerate()
+            .map(|(i, (text, ..))| self.text(i, text).len())
+            .sum();
+        let mut hash = std::hash::DefaultHasher::new();
+        key.hash(&mut hash);
+        for position in positions
+            .iter()
+            .take_while(|position| position.bytes.start < len)
+        {
+            position.hash(&mut hash);
+        }
+        hash.finish()
     }
 
     /// Appends the pad after the shaped runs: one blank per face in

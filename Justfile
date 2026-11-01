@@ -455,7 +455,7 @@ macos-compare-score-self-test:
 # This is the fast pre-commit loop; run it before every commit. It does NOT
 # cover the packaging/installer/update-manifest/GPU-render checks ci.yml
 # also runs; see `gauntlet-full` below for those.
-gauntlet: conformance-adapter-self-test live-ui-helper-selftest native-titlebar-self-test wayland-first-frame-self-test shell-integration-check vm-launcher-test fuzz-check
+gauntlet: grapheme-tables-check conformance-adapter-self-test live-ui-helper-selftest native-titlebar-self-test wayland-first-frame-self-test shell-integration-check vm-launcher-test fuzz-check
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets -- -D warnings
     # Feature unification hides a crate that leans on an optional dependency,
@@ -914,6 +914,15 @@ modal-shortcuts-smoke: release
 interaction-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release interaction
 
+# Reproduce the Unicode tables from the pinned, licensed offline inputs.
+[unix]
+grapheme-tables-check:
+    python3 -X warn_default_encoding -W error::EncodingWarning scripts/test-grapheme-tables.py
+
+[windows]
+grapheme-tables-check:
+    python -X warn_default_encoding -W error::EncodingWarning scripts/test-grapheme-tables.py
+
 # Verify that conformance adapters retain assertions and geometry restrictions.
 [unix]
 conformance-adapter-self-test:
@@ -932,8 +941,8 @@ conformance-esctest: release
 
 # Measure Unicode width handling with ucs-detect, pinned, in a live window.
 [unix]
-conformance-ucs: release
-    python3 scripts/check-conformance.py ucs --kettle ./target/release/kettle
+conformance-ucs *ARGS: release
+    python3 scripts/check-conformance.py ucs --kettle ./target/release/kettle {{ARGS}}
 
 # Both terminal conformance suites; docs/TESTING.md records the results.
 [unix]

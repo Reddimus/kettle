@@ -144,7 +144,8 @@ def run_search_history(binary, out):
             receipt = json.loads((out / "case.json").read_text(encoding="utf-8"))
             self.assertEqual(receipt["status"], "FAIL")
             self.assertTrue(receipt["cleanup"])
-            self.assertEqual(receipt["fixtures"], [{"pid": 42, "closed": True}])
+            self.assertEqual(receipt["fixtures"][0]["pid"], 42)
+            self.assertTrue(receipt["fixtures"][0]["closed"])
             helper.write_text(
                 source.replace('raise AssertionError("real UI failure")', "pass"),
                 encoding="utf-8",
@@ -163,6 +164,31 @@ def run_search_history(binary, out):
                 self.assertEqual(
                     qualification.run_case("search-history", Path("binary"), out), 1
                 )
+
+    def test_a_crashed_fixture_cannot_qualify_just_because_it_closed(self):
+        source = """class Process:
+    pid = 42
+    closed = False
+    def poll(self): return -6 if self.closed else None
+class LiveKettle:
+    def __init__(self): self.proc = Process()
+    def __enter__(self): return self
+    def __exit__(self, *args): self.proc.closed = True
+def run_search_history(binary, out):
+    with LiveKettle(): pass
+"""
+        with tempfile.TemporaryDirectory() as scratch:
+            out = Path(scratch)
+            helper = out / "helper.py"
+            helper.write_text(source, encoding="utf-8")
+            with patch.object(qualification, "HELPER", helper):
+                self.assertEqual(
+                    qualification.run_case("search-history", Path("binary"), out), 1
+                )
+            receipt = json.loads((out / "case.json").read_text(encoding="utf-8"))
+            self.assertTrue(receipt["cleanup"])
+            self.assertEqual(receipt["status"], "FAIL")
+            self.assertEqual(receipt["fixtures"][0]["exit"], -6)
 
 
 class CampaignAdmission(unittest.TestCase):
@@ -185,6 +211,42 @@ class CampaignAdmission(unittest.TestCase):
             self.assertEqual(receipt["status"], "FAIL")
             self.assertEqual(sum(receipt["counts"].values()), 0)
             self.assertIn("dirty checkout", receipt["admission_error"])
+
+    def test_invalid_manifest_keeps_a_failed_zero_count_receipt(self):
+        for kind in ("missing", "malformed", "directory"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                manifest = root / "identity.json"
+                if kind == "malformed":
+                    manifest.write_text("{invalid", encoding="utf-8")
+                elif kind == "directory":
+                    manifest.mkdir()
+                out = root / "out"
+                with (
+                    patch(
+                        "sys.argv",
+                        [
+                            "qualify",
+                            "run",
+                            "--kettle",
+                            str(root / "binary"),
+                            "--out",
+                            str(out),
+                            "--allocation",
+                            "allocation",
+                            "--identity",
+                            str(manifest),
+                        ],
+                    ),
+                    patch.object(qualification, "invoke_case") as invoke,
+                ):
+                    self.assertEqual(qualification.main(), 1)
+                invoke.assert_not_called()
+                receipt = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+                self.assertEqual(receipt["status"], "FAIL")
+                self.assertFalse(receipt["admitted"])
+                self.assertEqual(sum(receipt["counts"].values()), 0)
+                self.assertTrue(receipt["admission_error"])
 
     def test_aggregate_missing_receipt_produces_a_failed_result(self):
         with tempfile.TemporaryDirectory() as scratch:

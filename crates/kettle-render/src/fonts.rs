@@ -63,6 +63,52 @@ pub(crate) fn resolve_text_symbol_family(font_system: &mut FontSystem) -> Option
     None
 }
 
+/// VS15 may request a text glyph even for default emoji. Use a verified
+/// monochrome face that covers the cluster's spacing scalars; otherwise the
+/// caller can draw a replacement without changing the stored grid text.
+pub(crate) fn grapheme_text_family(
+    font_system: &mut FontSystem,
+    primary: &str,
+    base: char,
+    marks: &[char],
+) -> Option<String> {
+    use unicode_width::UnicodeWidthChar;
+    for family in std::iter::once(primary).chain(TEXT_SYMBOL_FAMILIES.iter().copied()) {
+        let ids: Vec<_> = font_system
+            .db()
+            .faces()
+            .filter(|face| {
+                face.families
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case(family))
+            })
+            .map(|face| face.id)
+            .collect();
+        for id in ids {
+            if font_system
+                .get_font(id, fontdb::Weight::NORMAL)
+                .is_some_and(|font| {
+                    let face = font.as_swash();
+                    if [b"COLR", b"CBDT", b"sbix", b"SVG "]
+                        .iter()
+                        .any(|tag| face.table(u32::from_be_bytes(**tag)).is_some())
+                    {
+                        return false;
+                    }
+                    let cmap = face.charmap();
+                    std::iter::once(base)
+                        .chain(marks.iter().copied())
+                        .filter(|c| c.width().is_some_and(|width| width > 0))
+                        .all(|c| cmap.map(c) != 0)
+                })
+            {
+                return Some(family.to_owned());
+            }
+        }
+    }
+    None
+}
+
 /// Whether this codepoint is emoji-capable, text by default, and occupies one
 /// column.
 ///

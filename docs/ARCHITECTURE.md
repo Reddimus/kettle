@@ -2326,6 +2326,49 @@ continuation annotations. Cell flags use 32 bits with the legacy bit values
 unchanged; the cell still fits its existing 24-byte cap on 64-bit targets.
 Control snapshots retain their existing Boolean attribute fields.
 
+### Opt-in Unicode 18 grapheme cells
+
+DECSET/DECRST 2027 enables/disables extended-grapheme output; DECRQM reports
+its current state. It starts off, and RIS and DECSTR disable it. It is separate
+from saved cursor state. Changing the mode does not reinterpret existing cells.
+Legacy output keeps its per-codepoint layout.
+
+The engine uses generated Unicode 18 GCB, InCB and Extended_Pictographic tables,
+with all 853 official GraphemeBreakTest vectors. Its finite streaming boundary
+state survives PTY splits independently of retained text. The product, vendor
+validation and fuzz graphs all pin Unicode 18 width tables in `unicode-width` 0.2.3;
+the Unicode 17 segmentation dependency used by other interfaces does not decide
+terminal cluster boundaries.
+
+A cluster occupies its leading cell and its recorded wide spacer, with at most
+30 trailing scalars in the existing cell extra storage. Beyond that cap, the
+latest variation selector, ZWJ and its following spacing scalar, or first
+spacing scalar replace the final retained slots; other excess scalars are
+dropped while boundary state still advances.
+The first scalar's attributes apply to the whole cell. A late VS16 widens once,
+wrapping the complete cluster when needed and inserting only the additional
+spacer in insertion mode. At a nonwrapping right edge, it stays clipped rather
+than creating an orphan wide cell. VS15 changes presentation without shrinking
+an already-wide cluster. Cursor/grid edits and ignored Unicode controls end
+the append context; REP repeats
+the complete retained cluster and leaves its final cell open to combining input.
+
+The `GRAPHEME` cell flag survives copying and reflow without enlarging the cell.
+Rows containing these cells carry explicit grid ownership through shaping
+metadata, including neighboring legacy cells. Prefixes remain in their original
+text order; shaping and cursor overlays anchor the first spacing base, and word
+and bracket navigation classify that base. Both renderer settings use those
+positions for stored clusters even after mode 2027 is disabled. Legacy rows
+without grapheme metadata retain continuous glyph positions when another row
+in the pane contains a cluster. The row key
+includes that geometry. Unsupported joined emoji use one replacement glyph
+instead of decomposed images. VS15 selects a verified monochrome face, with a
+replacement when none covers the cluster. These display fallbacks preserve the
+stored text for copying and search. Cluster ink and its cursor overlay stay
+inside the reserved columns; cached cursor frames use the row's actual display
+choice. Fallback checks rasterize without populating another unbounded bitmap
+cache and run only for changed rows.
+
 ### Synchronized graphics publication
 
 Graphics controls inside DEC 2026 use the same atomic commit boundary. While

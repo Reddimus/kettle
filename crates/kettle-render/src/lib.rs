@@ -34,10 +34,10 @@ use background::{BgImageJob, BgImageResult};
 #[cfg(test)]
 use batching::cell_locked_glyph_offset;
 use batching::{
-    SharedPipelines, apply_quad_alpha_floor, clip_quads, completion_text_damage_key,
-    context_menu_text_damage_key, emit_cell_locked_glyphs, pane_outline,
-    prepared_text_areas_damage_key, push_ime_preedit_quads, rect, text_bounds_for_rect,
-    text_layout_damage_key, text_overlay_requires_continuous_prepare,
+    GlyphPositioning, SharedPipelines, apply_quad_alpha_floor, clip_quads,
+    completion_text_damage_key, context_menu_text_damage_key, emit_cell_locked_glyphs,
+    pane_outline, prepared_text_areas_damage_key, push_ime_preedit_quads, rect,
+    text_bounds_for_rect, text_layout_damage_key, text_overlay_requires_continuous_prepare,
 };
 pub use capture::{
     DebugScene, capture_png, capture_png_with, capture_png_with_annotation, offscreen_selftest,
@@ -62,17 +62,17 @@ pub use fonts::{PreparedFonts, StartupFonts, clamp_font_size, metrics_for, pane_
 #[cfg(test)]
 use fonts::{TEXT_SYMBOL_PROBE, resolve_text_symbol_family};
 use fonts::{font_features, load_bundled_font, measure_cell, single_column_text_presentation};
-#[cfg(test)]
-use geometry::snapshot_viewport_top;
 use geometry::{
     MACOS_WINDOW_CORNER_RADIUS_POINTS, OUTLINE_BOTTOM_LEFT, OUTLINE_BOTTOM_RIGHT,
     background_image_rect, cell_locked_pen_x, centered_text_origin, fair_placement_quotas,
-    glyph_grid_col, ime_preedit_rect, inline_image_clip, inline_placement_rect,
-    live_surface_dimensions, pane_backdrop_rect, pane_bottom_window_corner_mask,
-    placement_is_visible, placement_viewport_row, rect_covers_surface, rects_overlap,
-    row_thumb_floor, selection_row_span, visible_selection_rows,
+    ime_preedit_rect, inline_image_clip, inline_placement_rect, live_surface_dimensions,
+    pane_backdrop_rect, pane_bottom_window_corner_mask, placement_is_visible,
+    placement_viewport_row, rect_covers_surface, rects_overlap, row_thumb_floor,
+    selection_row_span, visible_selection_rows,
 };
 pub use geometry::{Rect4, cap_axis_cells, pane_grid_origin};
+#[cfg(test)]
+use geometry::{glyph_grid_col, snapshot_viewport_top};
 pub use gpu::{
     AdapterEscalation, AdapterSelection, FrameOutcome, GpuAdapterInfo, GpuAdapterKey, GpuContext,
     GpuFault, RendererRecoveryState, detect_gpus, enumerate_adapter_infos, escalation_for_attempt,
@@ -3631,7 +3631,7 @@ impl Renderer {
             // panes use our pipeline at their original layout positions so
             // bitmap dimming and ordinary text contrast remain independent.
             if cfg.text_renderer == TextRendererMode::Legacy {
-                if pane_inactive_amount(pv, panes.len(), cfg) > 0.0 {
+                if pane_inactive_amount(pv, panes.len(), cfg) > 0.0 || pv.snap.has_graphemes() {
                     continue;
                 }
                 areas.push(TextArea {

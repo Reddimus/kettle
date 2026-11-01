@@ -328,6 +328,55 @@ pub(crate) fn glyph_grid_col(char_starts: &[u32], cluster_start: usize) -> usize
         .saturating_sub(1)
 }
 
+/// Grid ownership carried through shaping, including clusters with several
+/// spacing scalars. Zero metadata retains the legacy codepoint mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct GridGlyphCell {
+    pub column: usize,
+    pub width: usize,
+    pub clustered: bool,
+    pub text_presentation: bool,
+    pub single_image: bool,
+}
+
+impl GridGlyphCell {
+    pub fn metadata(self) -> usize {
+        self.column
+            .checked_add(1)
+            .and_then(|column| column.checked_mul(32))
+            .map_or(0, |column| {
+                column
+                    | self.width
+                    | (usize::from(self.clustered) << 2)
+                    | (usize::from(self.text_presentation) << 3)
+                    | (usize::from(self.single_image) << 4)
+            })
+    }
+
+    pub fn from_metadata(metadata: usize) -> Option<Self> {
+        let column = (metadata >> 5).checked_sub(1)?;
+        let width = metadata & 3;
+        matches!(width, 1 | 2).then_some(Self {
+            column,
+            width,
+            clustered: metadata & 4 != 0,
+            text_presentation: metadata & 8 != 0,
+            single_image: metadata & 16 != 0,
+        })
+    }
+}
+
+pub(crate) fn glyph_grid_col_with_metadata(
+    char_starts: &[u32],
+    cluster_start: usize,
+    metadata: usize,
+) -> usize {
+    GridGlyphCell::from_metadata(metadata).map_or_else(
+        || glyph_grid_col(char_starts, cluster_start),
+        |cell| cell.column,
+    )
+}
+
 /// Cell-locked logical pen X (physical px), snapped to an integer pixel so the
 /// glyph is crisp and shares one subpixel-bin (x_bin = 0) cache slot regardless
 /// of cell: the grid cell's left edge plus any intra-cluster `x_offset` (kept so

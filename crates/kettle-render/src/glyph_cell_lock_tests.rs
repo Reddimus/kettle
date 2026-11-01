@@ -75,11 +75,6 @@ fn grid_path_wiring_is_present() {
         "the cell-locked glyph pipeline must draw against the live target size"
     );
     assert!(
-        src.contains("if cfg.text_renderer == TextRendererMode::Legacy && inactive == 0.0 {")
-            && src.contains("(cfg.text_renderer == TextRendererMode::Grid).then_some(cw)"),
-        "active legacy panes use glyphon; inactive legacy panes retain continuous layout"
-    );
-    assert!(
         src.contains("buf.set_wrap(Wrap::None);"),
         "pane buffers must be Wrap::None so a row is one run + char==column holds"
     );
@@ -275,4 +270,42 @@ fn separate_combining_glyph_keeps_its_internal_pen_advance() {
         expected.x,
         actual.x
     );
+}
+
+#[test]
+fn grapheme_cell_metadata_overrides_positive_scalar_counts() {
+    use super::geometry::{GridGlyphCell, glyph_grid_col_with_metadata};
+    // U+1F469 ZWJ U+1F4BB, a wide spacer, then X. Codepoint counting
+    // places X at column 3; the mode-2027 grid owns columns 0, 1 and 2.
+    let starts = [0, 7, 11, 12];
+    let emoji = GridGlyphCell {
+        column: 0,
+        width: 2,
+        clustered: true,
+        text_presentation: false,
+        single_image: false,
+    }
+    .metadata();
+    let next = GridGlyphCell {
+        column: 2,
+        width: 1,
+        clustered: false,
+        text_presentation: false,
+        single_image: false,
+    }
+    .metadata();
+    assert_eq!(glyph_grid_col_with_metadata(&starts, 7, emoji), 0);
+    assert_eq!(glyph_grid_col_with_metadata(&starts, 12, next), 2);
+    assert_eq!(glyph_grid_col_with_metadata(&starts, 12, 0), 3);
+    assert_eq!(
+        GridGlyphCell::from_metadata(emoji),
+        Some(GridGlyphCell {
+            column: 0,
+            width: 2,
+            clustered: true,
+            text_presentation: false,
+            single_image: false
+        })
+    );
+    assert_eq!(GridGlyphCell::from_metadata(0), None);
 }

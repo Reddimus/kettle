@@ -76,18 +76,6 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   completion guarantee), or accept a rare duplicate window from old launchers.
   The claim-before-confirmation-timeout characterization test retains this
   behavior without treating a claim as completed activation.
-- **Grapheme-cluster widths (DEC mode 2027).** ucs-detect on 5.7.0
-  (`docs/TESTING.md`, "Terminal conformance") found that a grapheme cluster
-  takes the sum of its codepoints' widths: 0.7% of emoji ZWJ sequences, 50% of
-  VS16 and 0% of VS15 sequences, and 84% of graphemes across 85 languages,
-  chiefly Indic conjuncts, get the width `wcwidth` gives the whole cluster.
-  The grid measures each codepoint (`unicode-width`) in the vendored
-  `alacritty_terminal`. Deferred as a product decision, not a defect: a
-  program's cursor arithmetic must agree with the terminal, so clustering
-  would arrive behind mode 2027, which a program sets when it measures
-  clusters too, or as a new default that changes how every program's output
-  lays out. Close by choosing, then measuring and storing whole clusters per
-  cell with their recorded width, with ucs-detect scores before and after.
 - **Unimplemented DEC and xterm controls.** The left/right margin follow-up
   removes 55 failures, character protection removes another 30, and
   rectangular copy/fill/erase removes another 24. Column editing and reverse

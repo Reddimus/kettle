@@ -612,6 +612,9 @@ pub trait Timeout: Default {
 /// XXX Should probably not provide default impls for everything, but it makes
 /// writing specific handler impls for tests far easier.
 pub trait Handler {
+    /// An ignored C0/C1 control still separates consecutive graphic input.
+    fn unhandled_control(&mut self, _byte: u8) {}
+
     /// Commit one internal out-of-band event at its synchronized byte offset.
     ///
     /// PTY input cannot invoke this callback; only
@@ -629,6 +632,13 @@ pub trait Handler {
 
     /// A character to be displayed.
     fn input(&mut self, _c: char) {}
+
+    /// Repeat the preceding printable character; embedders may retain a cluster.
+    fn repeat_char(&mut self, c: char, count: u16) {
+        for _ in 0..count {
+            self.input(c);
+        }
+    }
 
     /// Set cursor to position.
     fn goto(&mut self, _line: i32, _col: usize) {}
@@ -1155,6 +1165,7 @@ impl PrivateMode {
             1049 => Self::Named(NamedPrivateMode::SwapScreenAndSetRestoreCursor),
             2004 => Self::Named(NamedPrivateMode::BracketedPaste),
             2026 => Self::Named(NamedPrivateMode::SyncUpdate),
+            2027 => Self::Named(NamedPrivateMode::GraphemeClustering),
             2031 => Self::Named(NamedPrivateMode::ColorSchemeReports),
             _ => Self::Unknown(mode),
         }
@@ -1218,6 +1229,8 @@ pub enum NamedPrivateMode {
     BracketedPaste = 2004,
     /// The mode is handled automatically by [`Processor`].
     SyncUpdate = 2026,
+    /// Opt-in extended-grapheme clustering.
+    GraphemeClustering = 2027,
     /// Report the terminal's light or dark colour scheme whenever it changes
     /// (`CSI ? 997 ; 1 n` dark, `CSI ? 997 ; 2 n` light), as proposed by
     /// Contour and implemented by kitty and Ghostty.
@@ -1564,7 +1577,10 @@ where
             C0::SUB => self.handler.substitute(),
             C0::SI => self.handler.set_active_charset(CharsetIndex::G0),
             C0::SO => self.handler.set_active_charset(CharsetIndex::G1),
-            _ => debug!("[unhandled] execute byte={:02x}", byte),
+            _ => {
+                self.handler.unhandled_control(byte);
+                debug!("[unhandled] execute byte={:02x}", byte);
+            },
         }
     }
 
@@ -1898,9 +1914,7 @@ where
             ('B', []) | ('e', []) => handler.move_down(next_param_or(1) as usize),
             ('b', []) => {
                 if let Some(c) = self.state.preceding_char {
-                    for _ in 0..next_param_or(1) {
-                        handler.input(c);
-                    }
+                    handler.repeat_char(c, next_param_or(1));
                 } else {
                     debug!("tried to repeat with no preceding char");
                 }

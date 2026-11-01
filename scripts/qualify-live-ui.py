@@ -42,6 +42,7 @@ def run_case(case, binary, out):
     spec.loader.exec_module(live)
     original = live.LiveKettle
     fixtures = []
+    exit_before_cleanup = {}
     receipt = {"case": case, "status": "FAIL", "cleanup": False, "fixtures": []}
     path = out / "case.json"
 
@@ -55,6 +56,11 @@ def run_case(case, binary, out):
                     receipt["fixtures"].append({"pid": self.proc.pid, "closed": False})
                     save(path, receipt)
 
+        def __exit__(self, *args):
+            if self.proc is not None:
+                exit_before_cleanup[id(self.proc)] = self.proc.poll()
+            return super().__exit__(*args)
+
     live.LiveKettle = RecordedLive
     try:
         function = getattr(live, "run_" + case.replace("-", "_"))
@@ -64,13 +70,26 @@ def run_case(case, binary, out):
             function(str(binary), out)
         receipt["status"] = "PASS"
     finally:
-        receipt["fixtures"] = [
-            {"pid": proc.pid, "closed": proc.poll() is not None} for proc in fixtures
-        ]
+        receipt["fixtures"] = []
+        for proc in fixtures:
+            code = proc.poll()
+            before = exit_before_cleanup.get(id(proc))
+            receipt["fixtures"].append(
+                {
+                    "pid": proc.pid,
+                    "closed": code is not None,
+                    "exit": code,
+                    "exit_before_cleanup": before,
+                    "unexpected_exit": before not in (None, 0)
+                    or code not in (None, 0, -signal.SIGTERM),
+                }
+            )
         receipt["cleanup"] = bool(fixtures) and all(
             item["closed"] for item in receipt["fixtures"]
         )
-        if not receipt["cleanup"]:
+        if not receipt["cleanup"] or any(
+            item["unexpected_exit"] for item in receipt["fixtures"]
+        ):
             receipt["status"] = "FAIL"
         save(path, receipt)
     return 0 if receipt["status"] == "PASS" else 1
@@ -184,7 +203,7 @@ def identity(binary):
 def campaign(binary, out, allocation, expected):
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     receipt = {
-        "expected_identity": expected,
+        "expected_identity": str(expected) if isinstance(expected, Path) else expected,
         "allocation": allocation,
         "counts": dict.fromkeys(SCENARIOS, 0),
         "status": "FAIL",
@@ -193,6 +212,9 @@ def campaign(binary, out, allocation, expected):
     }
     save(out / "summary.json", receipt)
     try:
+        if isinstance(expected, Path):
+            expected = json.loads(expected.read_text(encoding="utf-8"))
+            receipt["expected_identity"] = expected
         binary = binary.resolve(strict=True)
         candidate = identity(binary)
         receipt["observed_identity"] = candidate
@@ -256,7 +278,7 @@ def main():
             args.kettle,
             args.out,
             args.allocation,
-            json.loads(args.identity.read_text(encoding="utf-8")),
+            args.identity,
         )
     if args.command == "manifest":
         save(args.out, identity(args.kettle))

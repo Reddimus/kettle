@@ -112,35 +112,6 @@ fn a_variation_selector_keeps_the_colour_face() {
     );
 }
 
-/// The block cursor reshapes its own glyph and draws it last.
-///
-/// Without the same choice the pane draws a text circle and the cursor
-/// paints a colour square over it whenever the cursor rests on one.
-#[test]
-fn the_block_cursor_makes_the_same_presentation_choice() {
-    let src = crate::production_source();
-    let choice = [
-        "self\n                    .text_symbol_family\n                    .filter(|_| ",
-        "!marks.contains(&'\\u{FE0F}') && single_column_text_presentation(dc))",
-    ]
-    .concat();
-    assert!(
-        src.contains(&choice),
-        "the cursor glyph pass must pick the text face for the same cells \
-             the pane does"
-    );
-    let captured = [
-        "cursor_glyph_capture = Some((dc, cursor_fg, marks, ",
-        "AttrsOwned::new(&attrs)))",
-    ]
-    .concat();
-    let used = [".set_text(gtext, &", "gattrs, Shaping::Advanced, None)"].concat();
-    assert!(
-        src.contains(&captured) && src.contains(&used),
-        "the chosen family must actually reach the cursor buffer"
-    );
-}
-
 /// The selection rule has to reach the shaper, not just exist.
 ///
 /// A behavioural test cannot get here: it needs a GPU surface, a shaped
