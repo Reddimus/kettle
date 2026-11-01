@@ -138,20 +138,12 @@ campaign and startup outlier remain inconclusive. These entries stay open.
 
 ## Platform
 
-- **Remaining native macOS search evidence.** `docs/TESTING.md` and
-  `scripts/check-live-ui-smoke.py` cover modifiers and live rendering, but do not
-  establish a complete native IME/accessibility search exercise. Deferred for a
-  native desktop run. Close with identified artifacts and recorded input-method
-  and assistive-technology results; retain current appearance skips in
-  `docs/APPEARANCE-GATE.md` rather than inferring a pass from older cuts.
-- **Installed-release desktop launch and recording.** `scripts/install.sh` and
-  `scripts/check-linux-installers.sh` cover installation wiring, but do not prove
-  the user's installed signed release launches from Ubuntu Super-key search with
-  the intended recording configuration. Deferred until that release and desktop
-  are available. Close with installed artifact identity, launcher and recording
-  evidence on the target desktop.
-  Source-install Super-key and private recording checks passed on 2026-11-01;
-  acceptance of the frozen public package remains a post-publication check.
+- **Native macOS search speech feedback.** Native Japanese Romaji composition,
+  commit/cancel, caret/selection and terminal-input isolation have recorded
+  desktop evidence in `docs/TESTING.md`. Spoken search-result and caret feedback
+  still needs an identified assistive-technology observation. Keep appearance
+  skips in `docs/APPEARANCE-GATE.md` with their own artifact scope.
+
 - **Two Windows state-file races.** `ExclusiveFileLock::remove` releases the
   lock before deleting its file on Windows, so another process can open the
   file in between (`crates/kettle-state`, used by kettle-ctl activation

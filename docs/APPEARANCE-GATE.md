@@ -5,6 +5,55 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 5.8.0 preflight - 2026-11-01
+
+macOS 27.2, Apple silicon, 1920x1080 at 1x. The signed and notarized universal
+candidate came from [main rehearsal 41343253350](https://github.com/Reddimus/kettle/actions/runs/41343253350)
+at `f765718cfed0`, with bundle version 5.7.1. Application, vendored, asset,
+packaging and verification-script sources match the 5.8.0 version cut at
+`72e04d1aba07`; workspace version and release documentation are separate
+metadata. Deep codesign, Gatekeeper, stapled-ticket validation, both universal
+architectures and the real private bundle-updater smoke passed.
+
+Native composited captures covered decorated 86% opacity with native blur,
+cold TokyoNight Day under system Dark, translucent blur-off, opacity 1.0 with
+blur on and off, and borderless. Fullscreen and resize round trips restored
+surface/content geometry. Captions remained beside the traffic lights and
+rounded corners had no clear strip. Borderless fullscreen kept the terminal
+visible through the sharp-alpha fallback.
+
+A private opaque Alabaster window supplied the bright backdrop. Live opacity
+0.86 -> 1.0 -> 0.86 changed the sampled surface `(60,63,73)` to `(26,27,38)`
+and back. Live Reduce Transparency changed it to `(29,32,43)` and restored the
+original surface. Cold light -> runtime dark and system Light -> Dark kept the
+native treatment stable. Appearance returned to Dark, automatic switching
+stayed off, Reduce Transparency returned to off, and the original Keyboard page
+and input settings were restored. Screen Saver Never was preserved.
+
+The exact signed bundle passed modal-shortcut, native-titlebar, Dock-menu and
+rounded update-toast smokes. Small notices used a capsule and large text used
+a rounded card. The private cached-notice fixture retained terminal input and
+delivery receipts; it does not establish live-feed delivery. All owned windows
+closed. A keychain notice obscured the original borderless captures; those
+images were retained and excluded. After the user cancelled that unrelated
+notice, fresh fullscreen/round-trip and controlled-backdrop captures passed.
+
+Actual 256 px IconServices and loose-fallback resources from this package were
+rendered and inspected in the recorded Dark appearance/icon-style context.
+Running and closed-but-pinned Dock pixels, magnification and the global
+app-switcher icon remain unverified because the computer-use Dock endpoint
+timed out. No candidate pin or global pointer workaround was used. Physical
+Intel/GPU, mixed-DPI transitions and full VoiceOver speech acceptance remain
+unrun. Resource renders do not establish those system-UI states.
+
+Signing is restricted to `main` and `v*` tags. The unmerged cut-branch rehearsal
+was rejected by that environment policy before its macOS runner started.
+The completed main preflight with unchanged application code supports the
+version/documentation cut, following the metadata distinction recorded for 5.7.1 below. Before the
+5.8.0 tag, run a nonpublishing signed rehearsal of the exact final `main` commit
+and repeat its complete native suite and appearance checks. Keep that pre-tag
+package identity separate from this preflight and final public-asset upgrades.
+
 ## 5.7.1 cut - 2026-10-31
 
 macOS 27.2, Apple silicon, 1920x1080 at 1x. The signed, notarized universal
