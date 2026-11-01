@@ -330,14 +330,16 @@ if ($key.Function -ne 'OwnerKey') { throw 'owner key was changed' }
     if not lookalike:
         check_correlation_binding_ownership(executable, shell, lookalike=True)
         if shell == "bash":
-            # Switching Readline modes in multiline -ic input can crash or hang
-            # some Bash versions. Keep this mode check on one explicit command.
-            vi_program = r'''PS1=''; set -o vi; source "$1"; [[ $__kettle_correlation_enabled == 0 ]] || exit 1; exit 0'''
+            # Bash 5.2 can crash when set -o vi runs before Readline's first
+            # prompt, even without integration. Select the mode at startup.
+            vi_program = r'''PS1=''; source "$1"; [[ $__kettle_correlation_enabled == 0 ]] || exit 1; exit 0'''
             run(
                 [
                     executable,
                     "--noprofile",
                     "--norc",
+                    "-o",
+                    "vi",
                     "-ic",
                     vi_program,
                     "fixture",
@@ -377,7 +379,7 @@ if ($key.Function -ne 'OwnerKey') { throw 'owner key was changed' }
                 timeout=15,
             )
         if shell == "fish":
-            standard_maps = r"""source $argv[1]; test $__kettle_correlation_enabled -eq 1; or exit 1; fish_vi_key_bindings; __kettle_correlation_install; or exit 2; string match --quiet '*fish_vi_dec' -- (bind --preset -M default \cx); or exit 3; fish_default_key_bindings; __kettle_correlation_install; or exit 4"""
+            standard_maps = r"""source $argv[1]; test $__kettle_correlation_enabled -eq 1; or exit 1; fish_vi_key_bindings; set -l before_default (bind --preset -M default \cx | string collect); set -l before_insert (bind --preset -M insert \cx | string collect); __kettle_correlation_install; or exit 2; test (bind --preset -M default \cx | string collect) = "$before_default"; or exit 3; test (bind --preset -M insert \cx | string collect) = "$before_insert"; or exit 3; fish_default_key_bindings; set -l before_emacs (bind --preset -M default \cx | string collect); __kettle_correlation_install; or exit 4; test (bind --preset -M default \cx | string collect) = "$before_emacs"; or exit 5"""
             run(
                 [standard_maps if arg == program else arg for arg in command],
                 "Fish stock Emacs and Vi prefix preservation",
