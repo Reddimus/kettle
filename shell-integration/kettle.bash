@@ -143,10 +143,18 @@ __kettle_correlation_install() {
   [[ -o emacs && ! -o vi ]] || return 1
   # Older Readline cannot enumerate bind -x handlers without replacing them.
   bind -X >/dev/null 2>&1 || return 1
-  __kettle_bindings=$(bind -m "$__kettle_map" -p; bind -m "$__kettle_map" -s; bind -m "$__kettle_map" -X)
+  # Macros can have the same text as our callback. Only bind -X proves
+  # that the entry invokes shell code, rather than inserting owner text.
+  __kettle_bindings=$(bind -m "$__kettle_map" -p; bind -m "$__kettle_map" -s)
   while IFS= read -r __kettle_binding; do
     case "$__kettle_binding" in
-      '"\C-x\C-k" "__kettle_correlation_arm"') ;;
+      '"\C-x"'*|'"\C-x\C-k'*) return 1 ;;
+    esac
+  done <<< "$__kettle_bindings"
+  __kettle_bindings=$(bind -m "$__kettle_map" -X)
+  while IFS= read -r __kettle_binding; do
+    case "$__kettle_binding" in
+      '"\C-x\C-k" "__kettle_correlation_arm"'|'"\C-x\C-k": "__kettle_correlation_arm"') ;;
       '"\C-x"'*|'"\C-x\C-k'*) return 1 ;;
     esac
   done <<< "$__kettle_bindings"

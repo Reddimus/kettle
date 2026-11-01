@@ -443,7 +443,41 @@ def check_bash_command_markers(executable: str, version: bytes) -> None:
     print("Bash command timing markers fixture: PASS")
 
 
+def check_bash_correlation_revalidation(executable: str) -> None:
+    program = r"""PS1=''; supported=0; bind -X >/dev/null 2>&1 && supported=1; source "$1"; [[ $__kettle_correlation_enabled == "$supported" ]] || exit 4; if (( supported )); then __kettle_correlation_install || exit 5; __kettle_pc; [[ $__kettle_correlation_enabled == 1 ]] || exit 6; __kettle_pc; [[ $__kettle_correlation_enabled == 1 ]] || exit 7; fi; exit 0"""
+    run(
+        [
+            executable,
+            "--noprofile",
+            "--norc",
+            "-ic",
+            program,
+            "fixture",
+            str(INTEGRATION / "kettle.bash"),
+        ],
+        "Bash correlation survives prompt revalidation",
+        environment={"HISTFILE": os.devnull, "INPUTRC": os.devnull},
+        timeout=15,
+    )
+    macro = r"""PS1=''; bind -m emacs-standard '"\C-x\C-k":"__kettle_correlation_arm"' || exit 8; before=$(bind -m emacs-standard -s); [[ -n "$before" ]] || exit 9; source "$1"; [[ $__kettle_correlation_enabled == 0 && $(bind -m emacs-standard -s) == "$before" ]] || exit 10; exit 0"""
+    run(
+        [
+            executable,
+            "--noprofile",
+            "--norc",
+            "-ic",
+            macro,
+            "fixture",
+            str(INTEGRATION / "kettle.bash"),
+        ],
+        "Bash same-text macro remains owned",
+        environment={"HISTFILE": os.devnull, "INPUTRC": os.devnull},
+        timeout=15,
+    )
+
+
 def check_bash(executable: str, require_32: bool) -> None:
+    check_bash_correlation_revalidation(executable)
     check_correlation_binding_ownership(executable, "bash")
     version = run([executable, "--version"], "Bash version probe").splitlines()[0]
     if require_32 and b"version 3.2" not in version:

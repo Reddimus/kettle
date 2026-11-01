@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import json
@@ -19,6 +20,28 @@ import shutil
 import subprocess
 import sys
 import time
+
+
+@contextmanager
+def failure_evidence(app, root, report):
+    """Capture the failed live fixture before its context manager closes it."""
+    try:
+        yield
+    except (Exception, SystemExit):
+        diagnostics = report.setdefault("failure_evidence", {})
+        for method in ["read_screen", "get_state"]:
+            try:
+                cp = app.ctl(method, raw=True, allow_fail=True, timeout=3)
+                (root / ("failure-" + method + ".json")).write_text(cp.stdout)
+                diagnostics[method] = {"exit": cp.returncode, "stderr": cp.stderr}
+            except (Exception, SystemExit) as error:
+                diagnostics[method] = {"error": str(error)}
+        try:
+            app.screenshot(root / "failure.png")
+            diagnostics["screenshot"] = True
+        except (Exception, SystemExit) as error:
+            diagnostics["screenshot"] = {"error": str(error)}
+        raise
 
 
 def main() -> int:
@@ -268,7 +291,7 @@ def main() -> int:
             raise RuntimeError("command was never admitted")
 
         try:
-            with app:
+            with app, failure_evidence(app, root, report):
                 report["pid"] = app.pid
                 (root / "owner.json").write_text(
                     json.dumps({"pid": app.pid, "binary": str(binary), "shell": shell})
@@ -390,7 +413,8 @@ def main() -> int:
                             and "GLOBAL=quoted value" in value["output"]
                         ), value
                         report["fish_vi_normal"] = True
-                        command("fish_default_key_bindings")
+                        # Fish 3.7 --no-config lacks the mode-reset variable hook.
+                        command("fish_default_key_bindings; set -g fish_bind_mode default")
                     # Keep raw typeahead below the platform input limit. Larger
                     # unpaced bursts can be dropped by the line discipline even
                     # without correlation, so they cannot identify this regression.
@@ -627,6 +651,7 @@ def main() -> int:
         except (Exception, SystemExit) as error:
             report["error"] = str(error)
             report["cleanup"] = False
+            report["fixture_process_exited"] = app.proc is not None and app.proc.poll() is not None
         finally:
             (out / "summary.json").write_text(json.dumps(reports, indent=2) + "\n")
             print(

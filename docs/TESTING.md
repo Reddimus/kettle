@@ -1974,6 +1974,18 @@ prefix during initialization. Fish stock-prefix checks compare bindings before
 and after installation: Fish 3.7 uses `fish_clipboard_copy` where newer Vi
 maps use `fish_vi_dec`. Bash 3.2 also runs the legacy fallback and strict-refusal checks.
 
+Bash prompt revalidation accepts both `bind -X` display formats used by
+Readline 5.2 and 5.3. Function and macro inventories are checked separately
+from shell callbacks: an owner macro containing the same text as the callback
+stays owned. The positive fixture installs the integration and revalidates it
+across repeated prompts; it fails with the old colon-rejecting guard.
+
+The native Fish fixture explicitly selects the `default` map after returning
+from Vi to Emacs. Fish 3.7 under `--no-config` has no variable-change hook to
+reset the active map; leaving it in `insert` removes ordinary Enter handling.
+The native failure path captures screen/state and a screenshot before closing
+the fixture, preserving the original failure even if diagnostics fail.
+
 The Fish withdrawal fixture explicitly emits `fish_prompt` after changing the
 binding. A repaint alone can reuse the cached prompt without running that hook,
 so it cannot establish a new integration capability. Capability reflects the
