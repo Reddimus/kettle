@@ -7,8 +7,9 @@
 //!
 //! - an isolated group's layer: its transformed layer bounds, floored and
 //!   ceiled, widened by 2 pixels a side without filters, and clamped to the
-//!   region resvg clamps to (from -2 to +3 canvas widths and heights: up to
-//!   25 times the canvas area, whatever resvg's comment says);
+//!   current rendering context. The initial context spans -2 to +3 canvas
+//!   widths and heights; filtered groups remove rotation/skew first and
+//!   transform both bounds and clipping context into layer coordinates;
 //! - every filter primitive's result at the layer's size (an input that is
 //!   the source graphic is a copy of the whole layer, and every result lives
 //!   until the filter ends), plus a layer-sized charge and drawing step for
