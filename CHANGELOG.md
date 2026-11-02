@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.8.1] — 2026-11-02
+
 ### Fixed
 
 - Update the coordinated Mermaid and SVG renderer families, including inherited

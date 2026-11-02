@@ -1036,9 +1036,11 @@ image at the full fitted size, and must itself fit those limits, or it is
 surfaces are counted, each time they are used, against 4,194,304 pixels
 (`MAX_SVG_LAYER_PIXELS`):
 
-- an isolated group's layer, at its transformed bounds widened by 2 pixels a
-  side, clamped to resvg's own limit (from -2 to +3 canvas widths and
-  heights: up to 25 times the canvas area);
+- an isolated group's layer at its transformed bounds, with 2 pixels of
+  padding per side only without filters, clamped to the current rendering
+  context. The initial context spans -2 to +3 canvas widths and heights.
+  Filtered groups first remove rotation/skew and transform both the bounds
+  and clipping context into the intermediate layer's coordinates;
 - each filter primitive's result at the layer's size (an input that is the
   source graphic copies the whole layer, and every result lives until the
   filter ends), plus a layer-sized charge and drawing step per merge input
