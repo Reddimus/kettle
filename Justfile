@@ -331,9 +331,8 @@ release-assets-test:
 release-script-test:
     python3 scripts/test-release.py
 
-# Hermetic unit tests for scripts/package-manifest.py (the inner
-# release-tarball manifest generator/verifier). Mirrors CI's
-# Linux-only "Inner package manifest generator and verifier" step.
+# Hermetic package manifest, archive packing and macOS ZIP compaction tests.
+# Mirrors CI's native "Inner package manifest generator and verifier" step.
 [unix]
 package-manifest-test:
     python3 scripts/test-package-manifest.py

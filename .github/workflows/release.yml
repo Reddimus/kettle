@@ -471,10 +471,22 @@ jobs:
       - name: Package signed/stapled macOS app
         if: runner.os == 'macOS'
         shell: bash
-        # Generic recursive ZIP tools drop the extended attributes/resource-
-        # fork data used by a stapled notarization ticket. `ditto` is Apple's
-        # bundle-aware path and preserves the exact app Gatekeeper assessed.
-        run: ditto -c -k --keepParent dist/kettle.app ${{ matrix.artifact }}
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+        # Keep Apple's file records and metadata, but omit redundant directory
+        # records so existing updaters can read the archive within 128 entries.
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent dist/kettle.app ${{ matrix.artifact }}
+          python3 scripts/package-manifest.py compact-macos --archive "${{ matrix.artifact }}"
+          extracted=$(mktemp -d)
+          trap 'rm -rf "$extracted"' EXIT
+          ditto -x -k "${{ matrix.artifact }}" "$extracted"
+          if [ -n "$APPLE_CERT_P12" ]; then
+            codesign --verify --deep --strict --verbose=2 "$extracted/kettle.app"
+            xcrun stapler validate "$extracted/kettle.app"
+            spctl --assess --type execute --verbose=4 "$extracted/kettle.app"
+          fi
 
       - name: Remove ephemeral Apple signing material
         if: always() && runner.os == 'macOS'

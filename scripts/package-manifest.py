@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate, verify, or safely extract Kettle release packages."""
+"""Generate, verify, compact, or safely extract Kettle release packages."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import subprocess
 import tarfile
 import tempfile
 from typing import BinaryIO
@@ -396,6 +397,76 @@ def pack_archive(archive_path: Path, root: Path, target: str, version: str) -> N
         os.link(temporary, archive_path)
     finally:
         os.unlink(temporary)
+
+
+def compact_macos_archive(archive_path: Path) -> None:
+    """Remove redundant directory records from a trusted Apple-created ZIP."""
+    archive_path = Path(os.path.abspath(archive_path))
+
+    def inventory() -> dict[str, tuple]:
+        stream, _ = _open_regular_archive(archive_path)
+        records = {}
+        paths = ArchivePaths()
+        total = 0
+        with stream, zipfile.ZipFile(stream) as archive:
+            for entry in archive.infolist():
+                name = entry.orig_filename
+                parts = portable_components(name, directory=entry.is_dir())
+                if name != entry.filename or parts[0] != "kettle.app":
+                    raise ValueError("macOS archive must contain only kettle.app")
+                paths.insert(name.rstrip("/"), entry.is_dir())
+                mode = (entry.external_attr >> 16) & 0xFFFF
+                expected_type = stat.S_IFDIR if entry.is_dir() else stat.S_IFREG
+                if stat.S_IFMT(mode) not in {0, expected_type}:
+                    raise ValueError(f"special ZIP entry is forbidden: {name!r}")
+                if entry.is_dir() and entry.file_size:
+                    raise ValueError(f"ZIP directory has nonzero size: {name!r}")
+                total += entry.file_size
+                if total > MAX_TOTAL_BYTES:
+                    raise ValueError("archive contents exceed the 512 MiB safety limit")
+                _, digest, _ = _measure_member(
+                    archive,
+                    ArchiveMember(entry, name, entry.is_dir(), entry.file_size, None),
+                )
+                records[name] = (
+                    entry.date_time,
+                    entry.compress_type,
+                    entry.extra,
+                    entry.comment,
+                    entry.external_attr,
+                    entry.internal_attr,
+                    entry.create_system,
+                    entry.create_version,
+                    entry.extract_version,
+                    entry.volume,
+                    # Info-ZIP moves data-descriptor lengths into local headers.
+                    entry.flag_bits & ~0x8,
+                    entry.CRC,
+                    entry.compress_size,
+                    entry.file_size,
+                    digest,
+                )
+        return records
+
+    before = inventory()
+    redundant = [
+        name
+        for name in before
+        if name.endswith("/")
+        and any(other != name and other.startswith(name) for other in before)
+    ]
+    expected = {
+        name: record for name, record in before.items() if name not in redundant
+    }
+    if not expected or len(expected) > MAX_ARCHIVE_ENTRIES:
+        raise ValueError(
+            "macOS archive exceeds the 128-entry limit after directory compaction"
+        )
+    if redundant:
+        # Keep Apple's compressed file records, extra fields and ticket intact.
+        subprocess.run(["zip", "-q", "-d", str(archive_path), *redundant], check=True)
+        if inventory() != expected:
+            raise ValueError("ZIP compaction changed bundle files or metadata")
 
 
 def _archive_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
@@ -999,13 +1070,24 @@ def extract_archive(archive_path: Path, root: Path, target: str, version: str) -
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("generate", "verify", "pack", "extract"))
+    parser.add_argument(
+        "operation", choices=("generate", "verify", "pack", "extract", "compact-macos")
+    )
     parser.add_argument("--archive", type=Path)
-    parser.add_argument("--root", required=True, type=Path)
-    parser.add_argument("--target", required=True, choices=sorted(TARGETS))
-    parser.add_argument("--version", required=True)
+    parser.add_argument("--root", type=Path)
+    parser.add_argument("--target", choices=sorted(TARGETS))
+    parser.add_argument("--version")
     args = parser.parse_args()
     try:
+        if args.operation == "compact-macos":
+            if args.archive is None or any(
+                value is not None for value in (args.root, args.target, args.version)
+            ):
+                raise ValueError("compact-macos requires only --archive")
+            compact_macos_archive(args.archive)
+            return 0
+        if args.root is None or args.target is None or args.version is None:
+            raise ValueError("--root, --target and --version are required")
         if args.operation == "generate":
             if args.archive is not None:
                 raise ValueError("--archive is only valid with pack or extract")
@@ -1022,7 +1104,13 @@ def main() -> int:
             if args.archive is None:
                 raise ValueError("--archive is required with extract")
             extract_archive(args.archive, args.root, args.target, args.version)
-    except (OSError, RuntimeError, ValueError) as error:
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        subprocess.CalledProcessError,
+        zipfile.BadZipFile,
+    ) as error:
         parser.error(str(error))
     return 0
 

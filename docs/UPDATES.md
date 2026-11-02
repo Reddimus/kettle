@@ -228,6 +228,10 @@ and ZIP parsing. Both paths copy accepted members into immutable in-memory
 buffers and the transaction applies those buffers directly. No writable
 archive or extracted pathname exists between verification and application.
 Archive parsing accepts at most 128 entries and 512 MiB of actual output.
+Release packaging omits redundant directory records from Linux tarballs and
+Apple-created macOS ZIPs so nested license notices fit the same entry limit.
+The macOS ZIP retains every file's contents, permissions and Apple metadata;
+the extracted signed bundle is checked again by codesign, stapler and Gatekeeper.
 Absolute paths, traversal, duplicates and case aliases,
 file/directory prefix conflicts, encrypted entries, links, special/sparse
 files, Windows device names, and declared/actual size mismatches are rejected.

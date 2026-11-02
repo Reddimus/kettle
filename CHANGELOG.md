@@ -12,6 +12,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Update the coordinated Mermaid and SVG renderer families, including inherited
   baselines in nested SVG text. Keep renderer version pairs checked together.
+- Keep the notarized macOS archive within the existing updater's entry limit
+  as bundled license notices grow, while preserving every notice and the seal.
 
 ## [5.8.0] — 2026-11-01
 

@@ -770,12 +770,20 @@ and archive validation; they do not prove public HTTPS availability.
 | `just update-manifest-test` | Signed-feed bytes, trust root, sidecars, signing command wiring |
 | `just release-assets-test` | Exact draft asset names, sizes, and SHA-256 binding |
 | `just release-script-test` | Release preparation, version/document updates, immutable historical references |
-| `just package-manifest-test` | Inner manifests, Linux packing at the 128-entry limit, bounded extraction, media installation |
+| `just package-manifest-test` | Inner manifests, Linux packing and macOS ZIP compaction at the 128-entry limit, bounded extraction, media installation |
 | `just online-installer-test` | Online install parsing, implied parent directories, transport limits, no downgrade, hostile archives |
 | `just package-templates` | Deterministic Homebrew/AUR template rendering and optional published checks |
 | `just icons-check-required` | Generated icon geometry, rasters, and formats with tooling required |
 | `just icns-smoke` | macOS release icon assets through Xcode actool |
 | `just linux-installer-smoke` | Real install/uninstall paths in isolated prefixes |
+
+The macOS release job creates its ZIP with `ditto`, then runs
+`python3 scripts/package-manifest.py compact-macos --archive ARCHIVE.zip` to
+omit redundant parent-directory records. The portable package fixtures check
+nested notice bytes, executable modes, ZIP metadata, empty directories and the
+unchanged 128-entry limit. The native release job checks the extracted bundle's
+signature and notarization again; the signed candidate also needs
+`scripts/check-macos-update-smoke.sh ARCHIVE.zip` before tagging.
 
 ### Fixture commands
 
