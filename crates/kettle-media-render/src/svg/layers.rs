@@ -1,7 +1,7 @@
 //! Layer admission: the pixels resvg will allocate while rendering a tree,
 //! counted on the tree before any pixmap exists.
 //!
-//! The walk follows resvg 0.48.1's own traversal (`render.rs`, `clip.rs`,
+//! The walk follows resvg 0.49.0's own traversal (`render.rs`, `clip.rs`,
 //! `mask.rs`, `path.rs`, `filter/mod.rs`) and charges the following surfaces,
 //! each time they are used:
 //!
@@ -296,6 +296,32 @@ fn isolate<'a>(
         });
         return Ok(());
     }
+    // Filter layers render before the rotation/skew part is composited.
+    let rest = if group.filters().is_empty() {
+        Transform::identity()
+    } else {
+        let sx = transform.sx.hypot(transform.ky);
+        let sy = transform.kx.hypot(transform.sy);
+        Transform::from_row(
+            transform.sx / sx,
+            transform.ky / sx,
+            transform.kx / sy,
+            transform.sy / sy,
+            0.0,
+            0.0,
+        )
+    };
+    let Some(inverse) = rest.invert() else {
+        return Ok(());
+    };
+    let Some(bounds) = bounds
+        .to_rect()
+        .transform(inverse)
+        .and_then(|rect| rect.round_out())
+    else {
+        return Ok(());
+    };
+    let transform = finite(inverse.pre_concat(transform))?;
     // Where resvg finds no layer, it draws nothing and allocates nothing.
     let Some(bbox) = group.layer_bounding_box().transform(transform) else {
         return Ok(());
@@ -492,6 +518,36 @@ mod tests {
         tree(&format!(
             r#"<style>.p {{ fill: url(#p) }}</style><pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse">{content}</pattern><g class="p">{rects}</g>"#
         ))
+    }
+
+    #[test]
+    fn rotated_filter_layers_are_measured_before_compositing() {
+        let pixels = |transform| {
+            let tree = tree(&format!(
+                r#"<filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="10" height="20"><feFlood flood-color="red"/></filter><g id="target" transform="{transform}" filter="url(#f)"><rect width="10" height="20"/></g>"#
+            ));
+            let Some(usvg::Node::Group(group)) = tree.node_by_id("target") else {
+                panic!("filtered group");
+            };
+            let mut budget = Budget::default();
+            isolate(
+                group,
+                Transform::identity(),
+                canvas_bounds(64, 64),
+                &mut budget,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            budget.pixels
+        };
+        let ordinary = pixels("matrix(1 0 0 1 0 0)");
+        let rotated = pixels("matrix(0.6 0.8 -0.8 0.6 0 0)");
+        assert!(ordinary > 0);
+        // Only outward pixel rounding can enlarge the unrotated filter layer.
+        assert!(
+            rotated.abs_diff(ordinary) <= 100,
+            "ordinary={ordinary}; rotated={rotated}"
+        );
     }
 
     #[test]

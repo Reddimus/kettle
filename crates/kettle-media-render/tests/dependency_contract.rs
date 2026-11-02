@@ -1,12 +1,12 @@
 use std::path::Path;
 
 const FAMILY: &[(&str, &str)] = &[
-    ("merman", "0.9.2"),
-    ("merman-core", "0.9.2"),
-    ("merman-render", "0.9.2"),
-    ("dugong", "0.9.2"),
-    ("dugong-graphlib", "0.9.2"),
-    ("manatee", "0.9.2"),
+    ("merman", "0.9.3"),
+    ("merman-core", "0.9.3"),
+    ("merman-render", "0.9.3"),
+    ("dugong", "0.9.3"),
+    ("dugong-graphlib", "0.9.3"),
+    ("manatee", "0.9.3"),
     // Not merman's own, but merman-render's Markdown parser, which the
     // gallery extraction shares rather than locking a second copy.
     ("pulldown-cmark", "0.13.5"),
@@ -15,6 +15,8 @@ const FAMILY: &[(&str, &str)] = &[
     // local copy: one version of each.
     ("hayro", "0.8.0"),
     ("hayro-interpret", "0.8.0"),
+    ("resvg", "0.49.0"),
+    ("usvg", "0.49.0"),
     ("hayro-syntax", "0.8.0"),
 ];
 
@@ -176,5 +178,21 @@ fn loose_pins_default_features_and_extra_adapters_fail_the_drift_guard() {
                 .unwrap_err()
                 .contains("enable only")
         );
+    }
+}
+
+#[test]
+fn split_svg_renderer_upgrade_fails_the_contract() {
+    for name in ["resvg", "usvg"] {
+        let (mut manifest, mut lock) = fixture();
+        dependencies(&mut manifest).get_mut(name).unwrap()["version"] = "=0.48.1".into();
+        let package = lock["package"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|package| package["name"].as_str() == Some(name))
+            .unwrap();
+        package["version"] = "0.48.1".into();
+        assert!(contract(&manifest, &lock).unwrap_err().contains(name));
     }
 }

@@ -1032,7 +1032,7 @@ ratio, then, without a crop, within 1024 pixels a side and 1,048,576 pixels
 (`MAX_SVG_RENDERED_EDGE`, `MAX_SVG_RENDERED_PIXELS`); the result may be
 smaller than the box. A crop selects target-box pixels around the centered
 image at the full fitted size, and must itself fit those limits, or it is
-`BadParams`. Before the canvas is allocated, the following resvg 0.48.1
+`BadParams`. Before the canvas is allocated, the following resvg 0.49.0
 surfaces are counted, each time they are used, against 4,194,304 pixels
 (`MAX_SVG_LAYER_PIXELS`):
 

@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn formatted_child_spans_keep_their_own_default_baseline() {
+    fn formatted_child_spans_inherit_the_parent_baseline() {
         let fonts = super::super::fonts::for_mermaid_job(&[]).unwrap();
         let selected = style(&fonts);
         let ordinary = measure_shape("Av", &selected, TextShape::Formatted, &fonts)
@@ -496,7 +496,18 @@ mod tests {
             .unwrap()
             .unwrap();
         let delta = f64::from(middle.bounds.y() - ordinary.bounds.y());
-        assert_eq!(delta, 0.0, "ordinary={ordinary:?}; middle={middle:?}");
+        let raw = measure_shape("Av", &selected, TextShape::Raw, &fonts)
+            .unwrap()
+            .unwrap();
+        let raw_middle = measure_shape("Av", &selected, TextShape::RawMiddle, &fonts)
+            .unwrap()
+            .unwrap();
+        let inherited_delta = f64::from(raw_middle.bounds.y() - raw.bounds.y());
+        assert!(inherited_delta > 0.0);
+        assert!(
+            (delta - inherited_delta).abs() < 0.001,
+            "ordinary={ordinary:?}; middle={middle:?}"
+        );
         assert_eq!(middle.faces, ordinary.faces);
     }
 
