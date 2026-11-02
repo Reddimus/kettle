@@ -31,7 +31,7 @@ png = "0.18.1"
 # discovery, memory-mapped fonts, compressed SVG or embedded raster images;
 # text shapes with the fonts the job names only.
 resvg = { version = "=0.48.1", default-features = false, features = ["text"] }
-usvg = { version = "=0.48.1", default-features = false, features = ["text"] }
+usvg = { version = "=0.49.0", default-features = false, features = ["text"] }
 # Parses SVG for sanitizing before usvg sees it, and writes the result back.
 roxmltree = "=0.21.1"
 xmlwriter = "=0.1.0"
