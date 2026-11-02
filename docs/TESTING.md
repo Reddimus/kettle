@@ -396,6 +396,12 @@ on every platform to cover failed termination, polling errors, bounded cleanup,
 and eventual background reaping. The Windows pipe tests still require a native
 Windows runner.
 
+The control-client cancellation-retirement test cancels only after its peer
+has read the request. It checks both local refusal of a second request and
+server-observed closure. A timer started before the call can cancel before any
+bytes are written, which correctly leaves the connection usable and does not
+exercise retirement.
+
 The remote reconnect tests run offline without a remote daemon or cluster:
 
 ```sh

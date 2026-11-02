@@ -1802,15 +1802,34 @@ mod tests {
     /// server may still be executing the request it already received.
     #[test]
     fn a_cancelled_call_retires_the_connection() {
-        let mut client = client_stalled(Duration::from_millis(500));
+        let (listener, endpoint) = test_listener("cancelled");
         let cancelled = std::sync::Arc::new(AtomicBool::new(false));
         let setter = cancelled.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(30));
+        let (closed, wait_for_close) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            use std::io::BufRead as _;
+
+            let conn = listener.accept().expect("accept");
+            let mut reader = std::io::BufReader::new(conn.try_clone().expect("clone"));
+            let mut request = String::new();
+            assert!(reader.read_line(&mut request).expect("read request") > 0);
+            let request: Request = serde_json::from_str(&request).expect("request");
+            assert_eq!(request.id, 1);
+            assert_eq!(request.method, "get_state");
+            // Cancellation before any byte is sent keeps the connection usable.
             setter.store(true, Ordering::Release);
+            let mut extra = String::new();
+            assert_eq!(reader.read_line(&mut extra).expect("read close"), 0);
+            closed.send(()).expect("signal closed connection");
         });
+        let mut client = Client::connect_endpoint(&endpoint).expect("connect");
         assert!(matches!(
-            client.call_cancellable("get_state", Value::Null, &cancelled),
+            client.call_cancellable_with_timeout(
+                "get_state",
+                Value::Null,
+                &cancelled,
+                Duration::from_secs(5),
+            ),
             Err(CtlError::Cancelled)
         ));
         assert!(!client.is_usable());
@@ -1824,6 +1843,10 @@ mod tests {
             client.next_id, 2,
             "a refused request must not be written to the abandoned stream"
         );
+        wait_for_close
+            .recv_timeout(Duration::from_secs(5))
+            .expect("retiring closed the transport without sending a second request");
+        server.join().expect("server finished");
     }
 
     /// Breaching the queued-event bound abandons the call mid-stream, so the
