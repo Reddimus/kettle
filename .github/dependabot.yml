@@ -37,9 +37,20 @@ updates:
           - "dugong*"
           - "manatee"
           - "roughr-merman"
+      svg-renderer-family:
+        patterns:
+          - "resvg"
+          - "usvg"
       # Bundle non-breaking bumps so a slow review week doesn't pile up
       # 15 PRs. Major bumps stay on their own so we can weigh each one.
       cargo-patch-and-minor:
+        exclude-patterns:
+          - "merman*"
+          - "dugong*"
+          - "manatee"
+          - "roughr-merman"
+          - "resvg"
+          - "usvg"
         update-types:
           - patch
           - minor

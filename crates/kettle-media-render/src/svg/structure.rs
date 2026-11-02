@@ -159,7 +159,7 @@ fn painted(name: &str) -> bool {
     )
 }
 
-/// Names copied by usvg 0.48.1 while resolving filter inputs. The names in
+/// Names copied by usvg 0.49.0 while resolving filter inputs. The names in
 /// this pass borrow the document; only its short generated names are owned.
 fn filter_input_bytes(filter: Node<'_, '_>) -> u64 {
     fn input_bytes(node: Node<'_, '_>, attribute: &str, results: &[Cow<'_, str>]) -> u64 {

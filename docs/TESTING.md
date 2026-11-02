@@ -2371,3 +2371,10 @@ against the production signed feed. Require the new version and source, verify
 the resulting terminal/worker identity and bundle trust, then require a second
 update to report that it is current. Preserve the original app and the owner's
 installation. Record this separately from the candidate archive swap smoke.
+
+
+Renderer dependency upgrades retain one exact Mermaid family and matching resvg/usvg
+versions. The dependency contract rejects either half of a split SVG update.
+SVG 0.49 inherits parent baselines in formatted spans; native text metric tests
+compare that offset with the raw baseline shift. Filter-layer admission follows
+the renderer's rotation/skew decomposition before measuring intermediate layers.

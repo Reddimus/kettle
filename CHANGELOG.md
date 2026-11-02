@@ -6,6 +6,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- Update the coordinated Mermaid and SVG renderer families, including inherited
+  baselines in nested SVG text. Keep renderer version pairs checked together.
+
 ## [5.8.0] — 2026-11-01
 
 ### Added

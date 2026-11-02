@@ -41,7 +41,7 @@ impl NativeTextHost {
     pub(crate) fn policy(&self) -> Result<TextMeasurementPolicy, FailureCode> {
         let name =
             MeasurementProfileId::new("kettle-native-svg").map_err(|_| FailureCode::RenderParse)?;
-        let identity = TextMeasurementProfileIdentity::new(name, "usvg-0.48.1-fira-4.301-v1")
+        let identity = TextMeasurementProfileIdentity::new(name, "usvg-0.49.0-fira-4.301-v1")
             .map_err(|_| FailureCode::RenderParse)?;
         Ok(TextMeasurementPolicy::host_display(
             identity,
@@ -617,8 +617,8 @@ mod tests {
         else {
             panic!("offsets");
         };
-        // The child spans keep their default baseline in the pinned SVG engine.
-        assert_eq!(a, b);
+        // SVG 0.49 inherits the parent baseline through the formatted spans.
+        assert!(b > a, "ordinary={a}; middle={b}");
     }
 
     #[test]
