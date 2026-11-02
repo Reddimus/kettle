@@ -848,5 +848,122 @@ class ArchiveExtractionTests(unittest.TestCase):
             self.assertFalse(output.exists())
 
 
+class CompactMacosArchive(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("zip"), "archive compaction requires Info-ZIP")
+    def test_nested_notices_fit_the_existing_updater_without_changing_files(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "kettle.zip"
+            expected = {}
+            with zipfile.ZipFile(path, "w") as archive:
+                for index in range(65):
+                    directory = f"kettle.app/Contents/Resources/notices/{index}/"
+                    archive.writestr(zip_info(directory, file_type=stat.S_IFDIR), b"")
+                    name = directory + "LICENSE"
+                    data = f"Notice {index}\n".encode()
+                    entry = zip_info(name, mode=0o644)
+                    entry.extra = b"UT\x05\x00\x01\x00\xf1Se"
+                    entry.comment = b"upstream notice"
+                    archive.writestr(entry, data)
+                    expected[name] = data
+                for name in ["kettle", "kettle-media-worker"]:
+                    full = f"kettle.app/Contents/MacOS/{name}"
+                    archive.writestr(zip_info(full, mode=0o755), b"binary")
+                    expected[full] = b"binary"
+                ticket = "kettle.app/Contents/CodeResources"
+                archive.writestr(zip_info(ticket), b"notarization ticket")
+                expected[ticket] = b"notarization ticket"
+            with zipfile.ZipFile(path) as archive:
+                self.assertGreater(len(archive.infolist()), 128)
+                modes = {
+                    i.filename: i.external_attr
+                    for i in archive.infolist()
+                    if not i.is_dir()
+                }
+            subprocess.run(
+                [sys.executable, str(SCRIPT), "compact-macos", "--archive", str(path)],
+                check=True,
+                capture_output=True,
+            )
+            with zipfile.ZipFile(path) as archive:
+                self.assertLessEqual(len(archive.infolist()), 128)
+                self.assertEqual(set(archive.namelist()), set(expected))
+                for name, data in expected.items():
+                    self.assertEqual(archive.read(name), data)
+                    self.assertEqual(archive.getinfo(name).external_attr, modes[name])
+                    if name.endswith("LICENSE"):
+                        self.assertEqual(
+                            archive.getinfo(name).extra, b"UT\x05\x00\x01\x00\xf1Se"
+                        )
+                        self.assertEqual(
+                            archive.getinfo(name).comment, b"upstream notice"
+                        )
+
+    def test_changed_file_contents_are_refused(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "kettle.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(zip_info("kettle.app/", file_type=stat.S_IFDIR), b"")
+                archive.writestr(
+                    zip_info("kettle.app/Contents/CodeResources"), b"ticket"
+                )
+
+            def broken_tool(*_args, **_kwargs):
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr(
+                        zip_info("kettle.app/Contents/CodeResources"), b"changed"
+                    )
+
+            with mock.patch.object(MODULE.subprocess, "run", side_effect=broken_tool):
+                with self.assertRaisesRegex(ValueError, "changed bundle files"):
+                    MODULE.compact_macos_archive(path)
+
+    def test_entry_limit_is_unchanged_and_overflow_leaves_the_archive_intact(self):
+        with tempfile.TemporaryDirectory() as raw:
+            for count in (128, 129):
+                path = Path(raw) / f"{count}.zip"
+                with zipfile.ZipFile(path, "w") as archive:
+                    for index in range(count):
+                        archive.writestr(
+                            zip_info(f"kettle.app/Contents/{index}"), b"file"
+                        )
+                before = path.read_bytes()
+                with mock.patch.object(
+                    MODULE.subprocess,
+                    "run",
+                    side_effect=AssertionError("no redundant directories"),
+                ):
+                    if count == 128:
+                        MODULE.compact_macos_archive(path)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "128-entry limit"):
+                            MODULE.compact_macos_archive(path)
+                self.assertEqual(path.read_bytes(), before)
+
+    @unittest.skipUnless(shutil.which("zip"), "archive compaction requires Info-ZIP")
+    def test_empty_directory_is_preserved_and_compaction_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "kettle.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(zip_info("kettle.app/", file_type=stat.S_IFDIR), b"")
+                archive.writestr(
+                    zip_info("kettle.app/empty/", file_type=stat.S_IFDIR), b""
+                )
+                archive.writestr(
+                    zip_info("kettle.app/Contents/CodeResources"), b"ticket"
+                )
+            MODULE.compact_macos_archive(path)
+            with zipfile.ZipFile(path) as archive:
+                self.assertEqual(
+                    set(archive.namelist()),
+                    {"kettle.app/empty/", "kettle.app/Contents/CodeResources"},
+                )
+                self.assertEqual(
+                    archive.read("kettle.app/Contents/CodeResources"), b"ticket"
+                )
+            before = path.read_bytes()
+            MODULE.compact_macos_archive(path)
+            self.assertEqual(path.read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()
