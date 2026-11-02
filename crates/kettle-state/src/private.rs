@@ -7729,10 +7729,19 @@ mod tests {
         }
         use std::os::unix::fs::PermissionsExt as _;
         let root = crate::test_tempdir();
+        let create_exit_artifact = |name: &str| {
+            let path = root.path().join(name);
+            std::fs::write(&path, b"").unwrap();
+            path.metadata().unwrap().permissions().mode() & 0o777
+        };
+        let original_mode = create_exit_artifact("before-fixture");
         // SAFETY: only the re-executed child changes its process-wide umask.
-        unsafe { libc::umask(0o400) };
+        let previous = unsafe { libc::umask(0o400) };
         let path = root.path().join("missing/nested/private");
         let result = create_private_file_new(&path);
+        // Restore it before exit so the coverage runtime can write a readable profile.
+        // SAFETY: as above, this isolated child starts no application threads.
+        unsafe { libc::umask(previous) };
         assert!(
             result.is_ok(),
             "missing parents must restore owner read before opening: {result:?}"
@@ -7746,6 +7755,11 @@ mod tests {
                 0o700
             );
         }
+        assert_eq!(
+            create_exit_artifact("after-fixture"),
+            original_mode,
+            "the test fixture must restore the mode of default-created exit artifacts"
+        );
     }
 
     #[cfg(unix)]

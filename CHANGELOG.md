@@ -6,6 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.8.2] — 2026-11-02
+
+### Maintenance
+
+- Restore the restrictive-umask test fixture before process exit so coverage
+  profiles remain readable and line-coverage reports merge successfully.
+
 ## [5.8.1] — 2026-11-02
 
 ### Fixed

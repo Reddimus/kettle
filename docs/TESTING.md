@@ -1646,6 +1646,12 @@ Its three jobs are advisory: they point at work rather than gate merges.
 - `coverage` runs `just coverage` and uploads HTML and LCOV. GPU and decoder
   tests that skip without their host count as uncovered, so read it for
   uncovered branches in limits and refusal paths, not for a percentage.
+  Child fixtures that change `umask` must restore it before returning: LLVM
+  writes profiles at process exit. The missing-parent creation fixture is
+  covered by this job. Leaving its `0400` mask active creates a profile without
+  owner-read permission; with Rust 1.99.1's LLVM 23, merging that profile traps.
+  Its unit test also compares ordinary file creation before and after the
+  fixture, so leaked process state fails without coverage instrumentation.
 - `mutants` runs one of 26 weekly `cargo-mutants` slices over kettle-vt,
   kettle-media, kettle-config, kettle-update and kettle-state; a dispatch can
   name any `k/n` shard. A surviving mutant is a lead to check, not a failure;
