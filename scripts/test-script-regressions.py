@@ -345,6 +345,24 @@ items.addObject(item);
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn('right-edge layout', result.stderr)
 
+    def test_control_storm_accepts_darwin_closed_peer_error_only_on_darwin(self):
+        stress = load('check-stress-live')
+        error = 'control I/O error: Socket is not connected (os error 57)'
+
+        class ClosedPeer:
+            def json_ctl(self, _method):
+                raise SystemExit(error)
+
+        for host in ('darwin', 'linux', 'win32'):
+            with self.subTest(host=host), patch.object(stress.sys, 'platform', host):
+                row = stress.s10_ctl_storm(ClosedPeer())
+            self.assertEqual(row['ctl_ok'], 0)
+            self.assertEqual(row['ctl_refused_at_cap'], 1280 if host == 'darwin' else 0)
+            self.assertEqual(row['ctl_errors'], 0 if host == 'darwin' else 1280)
+        error = 'control I/O error: another transport failure'
+        with patch.object(stress.sys, 'platform', 'darwin'):
+            self.assertEqual(stress.s10_ctl_storm(ClosedPeer())['ctl_errors'], 1280)
+
     def test_tearoff_failure_releases_button(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

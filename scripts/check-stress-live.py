@@ -282,7 +282,13 @@ def s10_ctl_storm(live):
                 live.json_ctl("get_state")
                 ok += 1
             except SystemExit as error:
-                if any(mark in str(error) for mark in REFUSED_AT_CAP):
+                message = str(error)
+                # LOCAL_PEERPID returns ENOTCONN after macOS closes an
+                # accepted socket at the connection cap, before any request.
+                closed_peer = sys.platform == "darwin" and (
+                    "control I/O error: Socket is not connected (os error 57)" in message
+                )
+                if closed_peer or any(mark in message for mark in REFUSED_AT_CAP):
                     refused += 1
                 else:
                     errors += 1

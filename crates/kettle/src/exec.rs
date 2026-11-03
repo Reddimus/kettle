@@ -6992,6 +6992,9 @@ wait
         ) {
             return;
         }
+        if std::env::var_os("KETTLE_ACTIVE_FORK_DELAY").is_some() {
+            std::thread::sleep(Duration::from_millis(600));
+        }
         use std::os::unix::process::CommandExt as _;
 
         let helper = std::env::current_exe().expect("resolve active-fork test binary");
@@ -7022,8 +7025,17 @@ wait
         ) {
             return;
         }
-        println!("FORK_PID {}", std::process::id());
-        let _ = std::io::stdout().flush();
+        let mut pids = std::fs::File::create(
+            std::env::var_os("KETTLE_ACTIVE_FORK_PIDS").expect("fixture PID path"),
+        )
+        .expect("create fixture PID log");
+        let mut announce = |pid| {
+            writeln!(pids, "{pid}").expect("record fixture PID");
+            pids.flush().expect("flush fixture PID");
+            println!("FORK_PID {pid}");
+            let _ = std::io::stdout().flush();
+        };
+        announce(std::process::id());
         // SAFETY: getppid has no preconditions.
         let parent = unsafe { libc::getppid() };
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -7040,9 +7052,8 @@ wait
                 .stderr(std::process::Stdio::null())
                 .spawn()
                 .expect("spawn active-fork descendant");
-            println!("FORK_PID {}", child.id());
+            announce(child.id());
             children.push(child);
-            let _ = std::io::stdout().flush();
             std::thread::sleep(Duration::from_millis(2));
         }
         for mut child in children {
@@ -7061,11 +7072,58 @@ wait
         // scan, not how fast a runner scans: allow the scan ten seconds.
         // Raising it only makes other tests' scans more patient.
         LINUX_PROC_SCAN_TIME_FOR_TESTS.store(10_000, Ordering::Relaxed);
+        fn recorded_pids(path: &Path) -> Vec<u32> {
+            std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .split_inclusive('\n')
+                .filter(|line| line.ends_with('\n'))
+                .filter_map(|line| line.trim().parse().ok())
+                .collect()
+        }
+        struct ForkReadyOutput<'a> {
+            direct: DirectOutput<'a>,
+            pids: &'a Path,
+        }
+        impl ExecOutput for ForkReadyOutput<'_> {
+            fn ready(&mut self) -> OutputResult<bool> {
+                self.direct.ready()
+            }
+            fn start(&mut self, cols: u16, rows: u16) -> OutputResult<()> {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while recorded_pids(self.pids).len() < 8 {
+                    if Instant::now() >= deadline {
+                        return Err(OutputDeliveryError::unexpected(
+                            "fork fixture did not become ready",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                self.direct.start(cols, rows)
+            }
+            fn output(&mut self, bytes: Vec<u8>) -> OutputResult<()> {
+                self.direct.output(bytes)
+            }
+            fn title(&mut self, title: String) -> OutputResult<()> {
+                self.direct.title(title)
+            }
+            fn finish(
+                &mut self,
+                code: i32,
+                duration: Duration,
+                mode: OutputFinish,
+            ) -> OutputResult<()> {
+                self.direct.finish(code, duration, mode)
+            }
+        }
+        let directory = kettle_test_support::private_tempdir("kettle-active-fork-");
+        let pids_path = directory.path().join("pids");
         let helper = std::env::current_exe().expect("resolve the unit-test binary");
         let opts = ExecOpts {
             argv: vec![
                 "/usr/bin/env".into(),
                 "KETTLE_ACTIVE_FORK_FIXTURE=1".into(),
+                "KETTLE_ACTIVE_FORK_DELAY=1".into(),
+                format!("KETTLE_ACTIVE_FORK_PIDS={}", pids_path.display()),
                 helper.to_string_lossy().into_owned(),
                 "--exact".into(),
                 LINUX_FORK_FIXTURE.into(),
@@ -7081,23 +7139,21 @@ wait
             forward_stdin: false,
         };
         let mut sink = Vec::new();
-        assert_eq!(run_exec_with(opts, &|| None, &mut sink), EXIT_TIMEOUT);
-
-        let output = String::from_utf8_lossy(&sink);
-        let pids = output
-            .split("FORK_PID ")
-            .skip(1)
-            .filter_map(|tail| {
-                tail.chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect::<String>()
-                    .parse::<u32>()
-                    .ok()
-            })
-            .collect::<Vec<_>>();
+        // This tests teardown with an actively forking session, rather than
+        // startup speed. Hold only the injected test sink until the fixture
+        // is ready, even when the unchanged timeout has already elapsed.
+        let mut output = ForkReadyOutput {
+            direct: DirectOutput::new(OutputMode::Raw, &mut sink),
+            pids: &pids_path,
+        };
+        assert_eq!(
+            run_exec_engine(opts, &|| None, &mut output, None, false),
+            EXIT_TIMEOUT
+        );
+        let pids = recorded_pids(&pids_path);
         assert!(
             pids.len() >= 8,
-            "fixture must still be forking when teardown starts; output={output:?}"
+            "fixture must still be forking when teardown starts; output={sink:?}"
         );
         let deadline = Instant::now() + Duration::from_secs(2);
         while pids.iter().any(|pid| !linux_process_has_exited(*pid)) && Instant::now() < deadline {

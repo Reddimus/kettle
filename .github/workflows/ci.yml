@@ -310,6 +310,11 @@ jobs:
       - name: Live-probe and menu-screenshot fixtures
         if: runner.os == 'Linux'
         run: just script-fixture-self-test
+      - name: Native smoke fixture regressions (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          python3 scripts/check-stress-live.py --self-test
+          python3 scripts/test-script-regressions.py
       - name: Rustdoc (Linux, warnings denied)
         # rustdoc has its own warning class (broken intra-doc links, missing
         # docs on public items, malformed code blocks) that

@@ -240,6 +240,12 @@ Linux CI must also run the native exec teardown tests. The `kettle-state` test
 unsupported hard links and exercises the native atomic rename fallback,
 no-clobber behavior, and private-directory checks.
 
+The active-fork teardown fixture deliberately starts more slowly than its
+300 ms exec timeout. An injected test sink waits for eight complete PID records
+before entering the lifecycle loop, so teardown runs against an active session
+instead of racing fixture startup. This checks timeout cleanup, not startup
+latency; production exec code and its timeout remain unchanged.
+
 The Linux MCP supervisor regressions must run on a native Linux runner with
 `setsid`, `sh`, `sleep`, procfs and pidfds available:
 
@@ -1203,6 +1209,9 @@ pass criteria without a desktop.
 The tab scenario must reach 101 tabs and 151 panes and close back to one of
 each. Run it with enough process file handles, for example `ulimit -n 2048`
 in the test's launch shell. A reduced workload fails the gate.
+The control storm allows connection-cap closures. On macOS, closing an accepted
+socket can make `LOCAL_PEERPID` return `ENOTCONN` before a request is sent; only
+the native error 57 is accepted there. Other transport failures still fail.
 
 The tear-off recipe has two tiers. Its shell helper skips native pointer work
 outside X11. The control tier alone cannot prove the native drag gesture.

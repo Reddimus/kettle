@@ -49,7 +49,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   paths, which would otherwise resolve against a different working directory.
 - Recognize PowerShell's `-ec` encoded-command alias as a one-shot command,
   while keeping `-NoExit` sessions interactive.
-
 - Give cards to interactive Claude Code launches on Linux using
   `--dangerously-skip-permissions`, `--add-dir`, `--mcp-config`, `--ide`,
   `--debug`, and the other supported interactive flags instead of silently
@@ -59,6 +58,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   leaves an interactive Claude Code launch without Kettle cards. The stderr
   notice never includes option values or prompts; images and diagrams still
   reach the media shelf (#759, #761).
+
+### Maintenance
+
+- Verify pane-drag geometry across split rounding, wait for the Linux fork
+  fixture to start before testing timeout cleanup, and recognize macOS's
+  closed-peer response during control-connection stress checks.
+- Point failed client probes to their captured output without assuming an
+  authentication problem, and align the vendor soft-reset notes with DECSTR.
 
 ## [5.8.2] — 2026-11-02
 
