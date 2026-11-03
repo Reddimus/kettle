@@ -402,7 +402,8 @@ fn print_form(
     use kettle_ui::codex_shell as snippets;
     let name = match agent {
         SetupAgent::Claude => "claude",
-        _ => "codex",
+        SetupAgent::Codex => "codex",
+        SetupAgent::Agy => unreachable!("agy uses native plugin setup"),
     };
     Ok(match form {
         SetupForm::Entry => snippets::entry_script(kettle, name)?,
@@ -891,6 +892,7 @@ fn claude_exclusion_after(args: &[OsString]) -> Option<Exclusion> {
 #[cfg(any(target_os = "linux", test))]
 fn claude_interactive(args: &[OsString]) -> Result<(), Refusal> {
     let mut prompt = false;
+    let mut switched_off = None;
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         let arg = arg.to_str().ok_or(Refusal::NotUnicode)?;
@@ -901,7 +903,7 @@ fn claude_interactive(args: &[OsString]) -> Result<(), Refusal> {
                 return Err(Refusal::NotUnicode);
             }
             return if usize::from(prompt) + rest.len() <= 1 {
-                Ok(())
+                switched_off.map_or(Ok(()), |why| Err(Refusal::Excluded(why)))
             } else {
                 Err(Refusal::ExtraPrompt)
             };
@@ -916,12 +918,13 @@ fn claude_interactive(args: &[OsString]) -> Result<(), Refusal> {
                     return Err(claude_exclusion_after(&args[index..])
                         .map_or_else(|| Refusal::unknown_option(name), Refusal::Excluded));
                 }
-                // A hooks-off or strict-MCP flag is no reason to tell the user
-                // about cards when the launch is print mode or help anyway.
+                // A hooks-off or strict-MCP flag only matters if the launch is
+                // otherwise an interactive session: keep reading, so print
+                // mode, help, a subcommand or a malformed launch is what the
+                // user hears about, or nothing.
                 Some(Flag::Excluded(why @ (Exclusion::HooksOff | Exclusion::McpOff))) => {
-                    return Err(Refusal::Excluded(
-                        claude_exclusion_after(&args[index..]).unwrap_or(why),
-                    ));
+                    switched_off.get_or_insert(why);
+                    continue;
                 }
                 Some(Flag::Excluded(why)) => return Err(Refusal::Excluded(why)),
                 Some(Flag::Takes(arity)) => arity,
@@ -959,7 +962,7 @@ fn claude_interactive(args: &[OsString]) -> Result<(), Refusal> {
         }
         prompt = true;
     }
-    Ok(())
+    switched_off.map_or(Ok(()), |why| Err(Refusal::Excluded(why)))
 }
 
 fn launch_claude(argv: Vec<OsString>) -> i32 {
@@ -1042,6 +1045,10 @@ pub(crate) fn run(args: SetupArgs) -> i32 {
     }
     if !(args.print || args.uninstall) {
         eprintln!("kettle agent-setup: choose --print, --status or --uninstall.");
+        return 2;
+    }
+    if args.form == Some(SetupForm::Entry) && args.shell.is_some() {
+        eprintln!("kettle agent-setup: an entry script is a POSIX sh script; omit --shell.");
         return 2;
     }
     if args.uninstall {
@@ -1241,18 +1248,25 @@ fn launch_line(name: &str, marker: kettle_ui::codex_shell::AgentFunction) -> Str
             format!("Kettle's {name} function starts it, through agent-setup --launch-{name}")
         }
         AgentFunction::Own => format!(
-            "your own {name} function or alias runs first; it gets cards only if it ends in \
+            "your own {name} function runs first; it gets cards only if it ends in \
              Kettle's launcher; {fix}"
         ),
         AgentFunction::Unchecked => format!(
-            "not checked (only zsh and fish panes Kettle started are); a function of your own \
-             gets cards only if it ends in Kettle's launcher; {fix}"
+            "not checked (only zsh and fish panes Kettle started are, and an alias is not); a \
+             function of your own gets cards only if it ends in Kettle's launcher; {fix}"
         ),
     }
 }
 
+/// The hint the shell that ran this command left for `name`. The hint names
+/// the shell that set it, so a shell started inside that one, which inherits
+/// the variable, reads as not checked.
 fn this_shells_marker(name: &str) -> kettle_ui::codex_shell::AgentFunction {
-    kettle_ui::codex_shell::agent_function_marker(&|key| std::env::var_os(key), name)
+    #[cfg(unix)]
+    let shell = std::os::unix::process::parent_id();
+    #[cfg(not(unix))]
+    let shell = 0;
+    kettle_ui::codex_shell::agent_function_marker(&|key| std::env::var_os(key), name, shell)
 }
 
 fn print_status() {
@@ -1793,20 +1807,53 @@ update|upgrade
     }
 
     #[test]
-    fn hooks_off_and_strict_mcp_flags_defer_to_print_mode_and_help() {
+    fn hooks_off_and_strict_mcp_flags_defer_to_every_other_refusal() {
         for (args, expected) in [
-            (vec!["--bare", "-p", "q"], Exclusion::Print),
-            (vec!["--safe-mode", "--print"], Exclusion::Print),
-            (vec!["--strict-mcp-config", "--help"], Exclusion::Info),
-            (vec!["--bare", "--bg"], Exclusion::Detached),
-            (vec!["--bare"], Exclusion::HooksOff),
-            (vec!["--strict-mcp-config", "--", "-p"], Exclusion::McpOff),
+            (
+                vec!["--bare", "-p", "q"],
+                Refusal::Excluded(Exclusion::Print),
+            ),
+            (vec!["-p", "--bare"], Refusal::Excluded(Exclusion::Print)),
+            (
+                vec!["--safe-mode", "--print"],
+                Refusal::Excluded(Exclusion::Print),
+            ),
+            (
+                vec!["--strict-mcp-config", "--help"],
+                Refusal::Excluded(Exclusion::Info),
+            ),
+            (
+                vec!["--bare", "--bg"],
+                Refusal::Excluded(Exclusion::Detached),
+            ),
+            (vec!["--bare", "update"], Refusal::Subcommand),
+            (
+                vec!["--strict-mcp-config", "mcp", "list"],
+                Refusal::Subcommand,
+            ),
+            (vec!["--bare", "a", "b"], Refusal::ExtraPrompt),
+            (vec!["--bare", "--model"], Refusal::MissingValue),
+            (vec!["--bare", "--ide=x"], Refusal::UnexpectedValue),
+            (vec!["--bare"], Refusal::Excluded(Exclusion::HooksOff)),
+            (
+                vec!["--bare", "hello"],
+                Refusal::Excluded(Exclusion::HooksOff),
+            ),
+            (
+                vec!["--bare", "--", "hello"],
+                Refusal::Excluded(Exclusion::HooksOff),
+            ),
+            (
+                vec!["--model", "opus", "--safe-mode", "--", "-p"],
+                Refusal::Excluded(Exclusion::HooksOff),
+            ),
+            (
+                vec!["--strict-mcp-config", "--", "-p"],
+                Refusal::Excluded(Exclusion::McpOff),
+            ),
+            (vec!["--bare", "--", "a", "b"], Refusal::ExtraPrompt),
         ] {
-            assert_eq!(
-                claude_interactive(&argv(&args)),
-                Err(Refusal::Excluded(expected)),
-                "{args:?}"
-            );
+            assert_eq!(claude_interactive(&argv(&args)), Err(expected), "{args:?}");
         }
     }
 
