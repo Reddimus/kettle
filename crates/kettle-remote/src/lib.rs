@@ -1948,8 +1948,9 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
             rest.iter().any(|arg| shell_flag_carries_a_command(arg))
         }
         // PowerShell: -Command / -c, -File, or -EncodedCommand / -e (each
-        // prefix-abbreviated, case-insensitive) run and exit unless -NoExit
-        // keeps the session open. Tools spawn one-shots as `pwsh -e <base64>`.
+        // prefix-abbreviated, case-insensitive), plus the -ec alias, run and exit
+        // unless -NoExit keeps the session open. Tools spawn one-shots as
+        // `pwsh -e <base64>`.
         "pwsh" | "powershell" => {
             let norm = |a: &String| {
                 a.strip_prefix('-')
@@ -1971,7 +1972,8 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
                     !s.is_empty()
                         && ("command".starts_with(&s)
                             || "file".starts_with(&s)
-                            || "encodedcommand".starts_with(&s))
+                            || "encodedcommand".starts_with(&s)
+                            || s == "ec")
                 })
         }
         // cmd: `/c` runs then exits; `/k` runs then STAYS interactive (allowed).
@@ -2436,7 +2438,7 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     let mut options = SshOptions::default();
     let mut port_seen = false;
     let mut jump_seen = false;
-    let mut config_seen = false;
+    let mut config_unreproducible = false;
     let mut options_enabled = true;
     while i < argv.len() {
         let a = &argv[i];
@@ -2519,17 +2521,21 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
                         field_is_safe(value, FILE_PATH_EXTRA),
                     );
                 }
-                'F' => capture_first_option(
-                    &mut options.config,
-                    &mut config_seen,
-                    &mut options.unreproducible,
-                    value,
-                    field_is_safe(value, FILE_PATH_EXTRA),
-                ),
+                'F' => {
+                    // OpenSSH assigns each -F; the final path replaces earlier ones.
+                    options.config = None;
+                    config_unreproducible = false;
+                    capture_option(
+                        &mut options.config,
+                        &mut config_unreproducible,
+                        value,
+                        field_is_safe(value, FILE_PATH_EXTRA),
+                    );
+                }
                 'o' => options.unreproducible |= ssh_option_selects_endpoint(value),
-                // Tags select Match blocks; stdio forwarding selects another
-                // host. Control sockets can select a master's endpoint.
-                'P' | 'W' | 'S' => options.unreproducible = true,
+                // Source bindings select a route; tags select Match blocks.
+                // Stdio forwarding and control sockets can select another endpoint.
+                'P' | 'W' | 'S' | 'b' | 'B' => options.unreproducible = true,
                 // Everything else (ciphers, forwards, log files) leaves
                 // the endpoint where it was.
                 _ => {}
@@ -2537,6 +2543,7 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
         }
         i += if short.consumed_next { 2 } else { 1 };
     }
+    options.unreproducible |= config_unreproducible;
     let host = target?.to_owned();
     let user = flag_user;
     if host.is_empty() {
@@ -2564,7 +2571,7 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
 
 fn ssh_destination_parts(raw: &str) -> Option<(Option<String>, &str, Option<&str>)> {
     let Some(authority) = raw.strip_prefix("ssh://") else {
-        return Some(match raw.split_once('@') {
+        return Some(match raw.rsplit_once('@') {
             Some((user, host)) if !user.is_empty() && !host.is_empty() => {
                 (Some(user.to_owned()), host, None)
             }
@@ -2675,6 +2682,7 @@ fn ssh_option_selects_endpoint(option: &str) -> bool {
             | "canonicalizehostname"
             | "canonicaldomains"
             | "controlpath"
+            | "tag"
     )
 }
 
@@ -3248,6 +3256,10 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<SessionCommand> {
         } => {
             if options.unreproducible
                 || options.environment_unavailable
+                || options
+                    .config
+                    .as_deref()
+                    .is_some_and(|path| !connection_path_is_absolute(path))
                 || has_control_char(container)
             {
                 return None;
@@ -4247,11 +4259,16 @@ mod tests {
         .unwrap();
         assert_eq!(command.program, "ssh");
         assert_eq!(command.args, ["-J", value, &format!("{value}@{value}")]);
+        let config = if cfg!(windows) {
+            format!("C:\\{value}")
+        } else {
+            format!("/{value}")
+        };
         let command = clone_session_command(&RemoteContext::Container {
             runtime: ContainerRuntime::Kubectl,
             container: value.into(),
             options: ContainerOptions {
-                config: Some(value.into()),
+                config: Some(config.clone()),
                 pod_container: Some(value.into()),
                 ..ContainerOptions::default()
             },
@@ -4262,7 +4279,7 @@ mod tests {
             command.args,
             [
                 "--kubeconfig",
-                value,
+                &config,
                 "exec",
                 "-it",
                 value,
@@ -4679,7 +4696,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_scalar_options_keep_the_first_obtained_value() {
+    fn ssh_scalar_options_follow_client_precedence() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
             detect_ssh(&argv(&[
@@ -4705,7 +4722,7 @@ mod tests {
                 options: SshOptions {
                     port: Some("2222".into()),
                     jump: Some("first-jump".into()),
-                    config: Some("/first/config".into()),
+                    config: Some("/second/config".into()),
                     ..SshOptions::default()
                 },
             })
@@ -4723,11 +4740,8 @@ mod tests {
         let RemoteContext::Ssh { options, .. } = unsafe_first else {
             unreachable!();
         };
-        assert!(options.unreproducible);
-        assert_eq!(
-            options.config, None,
-            "a later value cannot replace the first"
-        );
+        assert!(!options.unreproducible);
+        assert_eq!(options.config.as_deref(), Some("/safe/config"));
     }
 
     /// `detect_container` takes the `exec` subcommand only from the first
@@ -5139,19 +5153,23 @@ mod tests {
             "sh",
         ]))
         .expect("a Windows kubeconfig path is still a kubectl session");
-        assert_eq!(
-            clone_session_command(&kubeconfig),
-            Some(session_command(&[
-                "kubectl",
-                "--kubeconfig",
-                "C:\\Program Files (x86)\\kube\\config",
-                "exec",
-                "-it",
-                "api-0",
-                "--",
-                "/bin/sh"
-            ]))
-        );
+        if cfg!(windows) {
+            assert_eq!(
+                clone_session_command(&kubeconfig),
+                Some(session_command(&[
+                    "kubectl",
+                    "--kubeconfig",
+                    "C:\\Program Files (x86)\\kube\\config",
+                    "exec",
+                    "-it",
+                    "api-0",
+                    "--",
+                    "/bin/sh"
+                ]))
+            );
+        } else {
+            assert!(clone_session_command(&kubeconfig).is_none());
+        }
 
         // An apostrophe is preserved literally.
         let key = host_path("/home/o'brien/.ssh/id");
@@ -6003,7 +6021,9 @@ mod tests {
                         ContainerOptionSlot::Context => options.context = Some(PROBE.into()),
                         ContainerOptionSlot::Endpoint => options.endpoint = Some(PROBE.into()),
                         ContainerOptionSlot::Namespace => options.namespace = Some(PROBE.into()),
-                        ContainerOptionSlot::Config => options.config = Some(PROBE.into()),
+                        ContainerOptionSlot::Config => {
+                            options.config = Some(host_path(&format!("/{PROBE}")));
+                        }
                         ContainerOptionSlot::PodContainer => {
                             options.pod_container = Some(PROBE.into());
                         }
@@ -7573,5 +7593,122 @@ mod tests {
         // No remote client in the cycle → None, but the test
         // would hang forever pre-`visited` if there's a regression.
         assert!(detect_in_tree(100, &mut tree).is_none());
+    }
+
+    #[test]
+    fn regression_ssh_configuration_uses_the_last_occurrence() {
+        let last = host_path("/last/config");
+        for first in [host_path("/first/config"), host_path("/ignored/$config")] {
+            let attached = format!("-F{last}");
+            let args = ["ssh", "-F", &first, "box", &attached].map(String::from);
+            let context = detect_ssh(&args).unwrap();
+            let RemoteContext::Ssh { options, .. } = &context else {
+                unreachable!()
+            };
+            assert_eq!(options.config.as_deref(), Some(last.as_str()));
+            assert!(!options.unreproducible);
+            assert_eq!(
+                clone_session_command(&context).unwrap().args,
+                ["-F", last.as_str(), "box"]
+            );
+        }
+    }
+
+    #[test]
+    fn regression_last_config_does_not_clear_other_unreproducible_options() {
+        let safe = host_path("/safe/config");
+        let bad = host_path("/bad/$config");
+        for args in [
+            vec!["ssh", "-F", &safe, "-F", &bad, "box"],
+            vec!["ssh", "-o", "HostName=elsewhere", "-F", &safe, "box"],
+        ] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            let context = detect_ssh(&args).unwrap();
+            assert!(clone_session_command(&context).is_none(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn regression_ssh_login_can_contain_an_at_sign() {
+        let args = ["ssh", "first.last@corp.example@host"].map(String::from);
+        let context = detect_ssh(&args).expect("OpenSSH login with an at sign");
+        let RemoteContext::Ssh { host, user, .. } = &context else {
+            unreachable!()
+        };
+        assert_eq!(host, "host");
+        assert_eq!(user.as_deref(), Some("first.last@corp.example"));
+        assert_eq!(
+            clone_session_command(&context).unwrap().args,
+            ["first.last@corp.example@host"]
+        );
+    }
+
+    #[test]
+    fn regression_reconnect_retains_binding_and_tag_selection_policy() {
+        for args in [
+            vec!["ssh", "-b", "127.0.0.2", "box"],
+            vec!["ssh", "-B", "eth0", "box"],
+            vec!["ssh", "-o", "Tag=prod", "box"],
+            vec!["ssh", "-o", " tag prod", "box"],
+        ] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            let context = detect_ssh(&args).unwrap();
+            assert!(clone_session_command(&context).is_none(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn regression_container_reconnect_requires_absolute_config_paths() {
+        for runtime in [
+            ContainerRuntime::Docker,
+            ContainerRuntime::Kubectl,
+            ContainerRuntime::Lxc,
+        ] {
+            for config in ["relative/config", "../other/config", "~/config"] {
+                let context = RemoteContext::Container {
+                    runtime,
+                    container: "web".into(),
+                    options: ContainerOptions {
+                        config: Some(config.into()),
+                        ..Default::default()
+                    },
+                };
+                assert!(
+                    clone_session_command(&context).is_none(),
+                    "{runtime:?} {config}"
+                );
+            }
+            let absolute = if cfg!(windows) {
+                r"C:\settings\config"
+            } else {
+                "/settings/config"
+            };
+            let context = RemoteContext::Container {
+                runtime,
+                container: "web".into(),
+                options: ContainerOptions {
+                    config: Some(absolute.into()),
+                    ..Default::default()
+                },
+            };
+            assert!(
+                clone_session_command(&context)
+                    .unwrap()
+                    .args
+                    .contains(&absolute.into())
+            );
+        }
+    }
+
+    #[test]
+    fn regression_encoded_command_alias_is_not_an_interactive_shell() {
+        for program in ["pwsh", "powershell", "pwsh.exe"] {
+            for flag in ["-ec", "-EC", "/ec"] {
+                let args = [program, flag, "ZQB4AGkAdAAgADAA"].map(String::from);
+                assert!(!shell_launch_is_interactive(&args), "{args:?}");
+                let args = [program, "-NoExit", flag, "ZQB4AGkAdAAgADAA"].map(String::from);
+                assert!(shell_launch_is_interactive(&args), "{args:?}");
+            }
+        }
     }
 }

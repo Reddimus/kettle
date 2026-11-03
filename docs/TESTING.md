@@ -106,6 +106,15 @@ corresponding frame/reuse/wake invalidation rules. See
 for the reader analysis. Finish with full `kettle-core` and `kettle-ui` tests and
 Clippy for both crates with `--all-targets -- -D warnings`.
 
+### Remote session reproduction
+
+`cargo test -p kettle-remote` pins OpenSSH's last-`-F` precedence and final-`@`
+login split, binding/tag selection, absolute client configuration paths and
+PowerShell's `-ec`/`-NoExit` classification. The tests cover host-specific path
+semantics on every native CI runner. Native `ssh -G` configuration-only probes
+and PowerShell encoded commands can verify the client behavior without opening
+an SSH connection or starting an interactive shell.
+
 ### Main gates
 
 The MCP unit tests in `crates/kettle/src/mcp_tools.rs` include
