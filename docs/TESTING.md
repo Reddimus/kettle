@@ -1218,6 +1218,8 @@ Startup failures do not read or replace the clipboard. Clipboard providers are
 terminated and reaped if writing the fixture fails. Raw paste requires standalone
 command output, so it works with shell echo disabled and cannot pass on
 command echo alone.
+Video receipt checks require both copied filenames, including names split
+across physical terminal rows.
 Shared fixture configs disable automatic copy-on-selection, so selection-only
 checks do not replace the clipboard when releasing a drag.
 

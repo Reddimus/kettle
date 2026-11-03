@@ -70,6 +70,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   smoke, and require a disposable desktop for other clipboard-replacing
   cases. Reap a clipboard provider when writing its fixture fails, and verify
   pasted command output independently of shell echo.
+- Verify both pasted video filenames even when long paths wrap across
+  terminal rows.
 
 ## [5.8.2] — 2026-11-02
 

@@ -363,6 +363,38 @@ items.addObject(item);
         with patch.object(stress.sys, 'platform', 'darwin'):
             self.assertEqual(stress.s10_ctl_storm(ClosedPeer())['ctl_errors'], 1280)
 
+    def test_video_receipt_paste_accepts_wrapping_and_requires_both_files(self):
+        live = load('check-live-ui-smoke')
+
+        class Captured(Exception):
+            pass
+
+        for screen, complete in (('first-vi\ndeo.mp4 second-video.we\nbm', True),
+                                 ('first-video.mp4', False)):
+            with self.subTest(complete=complete), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                videos = [root / 'one.mp4', root / 'two.webm']
+                for path in videos:
+                    path.write_bytes(b'fixture')
+                fixture = Mock()
+                fixture.json_ctl.side_effect = lambda method, *_args, **_kwargs: (
+                    {'text': screen} if method == 'read_screen' else {'window_focused': True})
+                receipt = {'count': 2, 'openable': False, 'rect': {'x': 0, 'y': 0, 'width': 32, 'height': 32},
+                           'preview_rect': {'x': 0, 'y': 0, 'width': 16, 'height': 16}}
+                with patch.object(live.platform, 'system', return_value='Linux'), \
+                     patch.dict(os.environ, {'KETTLE_SMOKE_VIDEO_FIXTURES': os.pathsep.join(map(str, videos))}), \
+                     patch.object(live, 'LiveKettle', return_value=contextlib.nullcontext(fixture)), \
+                     patch.object(live, 'set_file_list_clipboard', return_value=None), \
+                     patch.object(live, 'wait_for_media_worker'), \
+                     patch.object(live, 'wait_for_media_receipt', return_value=({}, receipt)), \
+                     patch.object(live, 'capture_receipt_lane', side_effect=Captured):
+                    if complete:
+                        with self.assertRaises(Captured):
+                            live.run_video_paste_receipt('kettle', root, isolated_clipboard=True)
+                    else:
+                        with self.assertRaisesRegex(SystemExit, 'copied file list'):
+                            live.run_video_paste_receipt('kettle', root, isolated_clipboard=True)
+
     def test_raw_paste_startup_failure_does_not_touch_the_clipboard(self):
         live = load('check-live-ui-smoke')
         with tempfile.TemporaryDirectory() as raw, \

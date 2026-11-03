@@ -16444,7 +16444,9 @@ def run_video_paste_receipt(kettle: str, root: Path, *, isolated_clipboard: bool
             },
         )
         screen = live.json_ctl("read_screen")
-        if not any(path.name in json.dumps(screen) for path in fixtures):
+        # read_screen reports physical rows, including soft-wrapped filenames.
+        pasted = "".join(screen_text(screen).splitlines())
+        if not all(path.name in pasted for path in fixtures):
             raise SystemExit("video-paste-receipt smoke: pane did not receive the copied file list")
 
         (out / "expanded.geometry.json").write_text(
