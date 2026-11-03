@@ -10,6 +10,12 @@ produce a supported package. Record every skipped check and its reason.
 
 ## Run it
 
+The shell path regression runs Fish integration from directories containing
+spaces, quotes, `cx`, and `ctrl-x`. It verifies that source-location comments
+in `bind` output cannot disable correlation or change stock key bindings.
+Native bash and zsh tests also source generated agent functions and wrappers
+with existing aliases and verify that both the functions and aliases survive.
+
 Run commands from the repository root. [Justfile](../Justfile) defines the
 recipes; `just --list` shows those available on your host.
 Install the source-build dependencies in [INSTALL.md](INSTALL.md#from-source).

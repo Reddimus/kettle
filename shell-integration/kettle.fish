@@ -68,6 +68,8 @@ function __kettle_correlation_install
     set -l control_x \cx
     for mode in default insert
         for binding in (bind --mode $mode)
+            # Fish includes source-location comments alongside the bindings.
+            string match --quiet -- '#*' "$binding"; and continue
             if not string match --quiet -- '*ctrl-x*' "$binding"; and not string match --quiet -- '*cx*' "$binding"; and not string match --quiet -- "*$control_x*" "$binding"
                 continue
             end

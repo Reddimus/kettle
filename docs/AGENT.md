@@ -1562,6 +1562,12 @@ checks `KETTLE_PANE_ID` and that Kettle is executable, calls the launcher when
 both checks pass, and runs the plain command otherwise. These forms do not
 apply to agy. Kettle never edits your startup files or agent configuration.
 
+Source a function or wrapper with the shell selected by `--shell`; the bash
+forms use bash function syntax. The bash and zsh declarations preserve an
+existing alias without expanding it while defining the function. That alias
+still takes precedence when you type its name; remove it yourself or use
+`\codex` or `\claude` to invoke the function without alias expansion.
+
 For example, this bash or zsh profile wrapper takes the profile as its first
 argument. Replace `/absolute/path/to/kettle` with the path in your printed
 wrapper, and run it as `prodex work [ARGS...]`:

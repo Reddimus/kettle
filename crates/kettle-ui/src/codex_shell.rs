@@ -69,14 +69,26 @@ pub fn claude_function(kettle: &Path, shell: CodexShell) -> Result<String, Funct
 
 fn agent_function(kettle: &Path, shell: CodexShell, name: &str) -> Result<String, FunctionError> {
     let path = quoted_kettle_path(kettle, shell)?;
+    let declaration = shell_function_declaration(name, shell);
     Ok(match shell {
         CodexShell::Bash | CodexShell::Zsh => {
-            format!("{name}() {{\n  command {path} agent-setup --launch-{name} -- \"$@\"\n}}\n")
+            format!(
+                "{declaration} {{\n  command {path} agent-setup --launch-{name} -- \"$@\"\n}}\n"
+            )
         }
         CodexShell::Fish => {
             format!("function {name}\n  command {path} agent-setup --launch-{name} -- $argv\nend\n")
         }
     })
+}
+
+fn shell_function_declaration(name: &str, shell: CodexShell) -> String {
+    // Both shells can expand aliases in a POSIX-style function declaration.
+    match shell {
+        CodexShell::Bash => format!("function {name}"),
+        CodexShell::Zsh => format!("'{name}'()"),
+        CodexShell::Fish => format!("function {name}"),
+    }
 }
 
 fn quoted_kettle_path(kettle: &Path, shell: CodexShell) -> Result<String, FunctionError> {
@@ -96,6 +108,7 @@ pub fn wrapper_snippet(
     name: &str,
 ) -> Result<String, FunctionError> {
     let path = quoted_kettle_path(kettle, shell)?;
+    let declaration = shell_function_declaration(name, shell);
     let profile = if name == "codex" {
         "CODEX_HOME=\"$HOME/.codex-work\""
     } else {
@@ -103,7 +116,7 @@ pub fn wrapper_snippet(
     };
     Ok(match shell {
         CodexShell::Bash | CodexShell::Zsh => format!(
-            "{name}() {{\n\
+            "{declaration} {{\n\
              \x20 # Put your account's environment variables before both commands below,\n\
              \x20 # for example: {profile} command ...\n\
              \x20 if [ -n \"${{KETTLE_PANE_ID-}}\" ] && [ -x {path} ]; then\n\
@@ -921,6 +934,52 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn printed_functions_and_wrappers_preserve_existing_aliases() {
+        for (program, shell) in [("zsh", CodexShell::Zsh), ("bash", CodexShell::Bash)] {
+            let Some(program) = installed(program) else {
+                continue;
+            };
+            for name in ["claude", "codex"] {
+                for script in [
+                    agent_function(Path::new("/fixture/kettle"), shell, name).unwrap(),
+                    wrapper_snippet(Path::new("/fixture/kettle"), shell, name).unwrap(),
+                ] {
+                    let options = if shell == CodexShell::Bash {
+                        "shopt -s expand_aliases\n"
+                    } else {
+                        ""
+                    };
+                    let inspect = if shell == CodexShell::Bash {
+                        format!("declare -f {name}")
+                    } else {
+                        format!("functions {name}")
+                    };
+                    let probe = format!(
+                        "{options}alias {name}='printf preserved-alias'\n\
+                     eval \"$1\" || exit\n\
+                     {inspect} || exit\n\
+                     alias {name}\n"
+                    );
+                    let output = std::process::Command::new(&program)
+                        .args(["-f", "-c", &probe, "wrapper-test", &script])
+                        .env_clear()
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{name}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let stdout = String::from_utf8(output.stdout).unwrap();
+                    assert!(stdout.contains(&format!("agent-setup --launch-{name}")));
+                    assert!(stdout.contains(&format!("{name}='printf preserved-alias'")));
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn wrapper_and_entry_paths_with_quotes_and_newlines_are_valid_shell_syntax() {
         let kettle = Path::new("/fixture/quote'and\nnewline\\/kettle");
         for (program, shell, flag) in [
@@ -937,6 +996,12 @@ mod tests {
                 let mut scripts = vec![wrapper_snippet(kettle, shell, name).unwrap()];
                 if shell != CodexShell::Fish {
                     scripts.push(entry_script(kettle, name).unwrap());
+                }
+                if Path::new(&program)
+                    .file_name()
+                    .is_some_and(|name| name == "sh")
+                {
+                    scripts = vec![entry_script(kettle, name).unwrap()];
                 }
                 for script in scripts {
                     let output = std::process::Command::new(&program)
