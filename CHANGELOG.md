@@ -33,6 +33,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Match symbolic shortcuts such as imported Terminator `Ctrl+Plus` when
+  Shift produces the symbol, while preserving explicit Shift bindings and
+  the active layout's character.
 - Preserve existing aliases when sourcing generated bash and zsh agent
   functions or wrappers, instead of failing to parse the function declaration.
 - Keep Fish command correlation enabled when the integration's source path

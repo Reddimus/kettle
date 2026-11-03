@@ -544,6 +544,22 @@ pub(super) fn keybind_candidates(
             }
         }
     }
+    // A symbolic accelerator such as Ctrl+Plus omits the Shift consumed by
+    // typing its symbol. Keep exact chords first, and require the layout's
+    // base character so an extra Shift on an unshifted symbol stays distinct.
+    if mods.shift_key()
+        && let Some(KKey::Char(symbol)) = logical_key.and_then(to_kkey)
+        && !symbol.is_alphanumeric()
+        && !symbol.is_whitespace()
+        && !symbol.is_control()
+        && let Some(KKey::Char(base)) = unshifted_key.and_then(to_kkey)
+        && base != symbol
+    {
+        push_unique_trigger(
+            &mut out,
+            Trigger::new(kmods - Mods::SHIFT, KKey::Char(symbol)),
+        );
+    }
     out
 }
 

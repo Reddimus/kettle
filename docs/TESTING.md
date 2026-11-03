@@ -106,6 +106,14 @@ corresponding frame/reuse/wake invalidation rules. See
 for the reader analysis. Finish with full `kettle-core` and `kettle-ui` tests and
 Clippy for both crates with `--all-targets -- -D warnings`.
 
+### Symbol shortcuts
+
+`kettle-ui` keyboard regressions exercise imported `Ctrl+Plus` with a native
+Shift/`+`/unmodified-`=` event. They also retain explicit Shift precedence,
+letter chords, unshifted symbols and layout-specific punctuation. The control
+API's keybind dispatcher has no unmodified layout character, so it does not
+stand in for this native event check.
+
 ### Main gates
 
 The MCP unit tests in `crates/kettle/src/mcp_tools.rs` include
