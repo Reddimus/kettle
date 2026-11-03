@@ -1067,9 +1067,47 @@ and multi-value options stop before an argument starting with `-`, and that a
 prompt after multi-value options needs `--`. Refused groups cover print mode
 and its options, detached sessions, hooks-off modes, help and version output,
 subcommands, unknown options, missing values, extra prompts, and non-Unicode
-arguments. Notice tests check that only unknown options and hooks-off modes
-produce the fallback message, and that option values, prompts, control
-characters, and unsafe or overlong option names never leak into it.
+arguments. Refusal notice tests cover unknown options, hooks-off modes and
+strict MCP configuration. `NoCard` unit tests check fixed notices for both
+agent names across unreadable and unsupported versions, executable checks,
+server failures and declined registration. They pin deliberately silent
+refusals and check that argument values, prompts, paths, versions, pids,
+environment values, control characters, and unsafe or overlong option names
+never leak into the notice. These formatting tests do not prove that every
+Codex fallback reaches the notice path; see
+[Linux card launches](AGENT.md#linux-card-launches).
+
+Status unit tests cover the fixed Kettle, own-command and unchecked launch
+lines without echoing environment values. Print-form tests cover function,
+wrapper and entry selection for both agents, including entry scripts without
+a shell selection. Marker-reader tests accept only known agent names and
+literal `0` or `1`; missing, invalid and non-Unicode values are unchecked.
+
+`crates/kettle-ui/src/codex_shell.rs` byte-compares all wrapper and entry
+forms against `scripts/fixtures/agent-wrappers/`, and both agents' startup
+snippets against `scripts/fixtures/shell-integration/`. Real bash wrapper
+and sh entry runs use a stand-in Kettle to check verbatim arguments (empty,
+spaces, newlines and literal `--`), the account environment prefix on both
+branches, exit-status propagation, and fallback outside a pane or when Kettle
+is missing or not executable. Bash, sh, zsh and fish syntax checks include
+Kettle paths with quotes and newlines. The forwarding test executes bash and
+sh, not zsh; a real zsh wrapper forwarding run is a separate manual check.
+
+Native zsh and fish startup tests cover both agents with no user function,
+a user function, aliases in zsh, abbreviations in fish, autoloadable functions,
+and stale inherited markers in both directions. They also check that zsh's
+one-shot hook removes itself. Native tests skip an unavailable shell, and zsh
+can skip when the system zshenv prevents injection. The portable
+`pane_spawn_strips_inherited_agent_function_markers` test in `mux.rs` checks
+that both markers enter the spawn's removal list before the terminal starts.
+
+`scripts/check-shell-integration.py` also asserts Codex markers for Kettle's
+function and an autoloadable user function, including stale inherited values.
+Its fish checks run only when fish is installed; the CI fish job exercises
+Fish 3.7, 4.2 and 4.8, and the Linux build job also installs fish. A real ccx
+run and real card delivery end to end through a user wrapper are not part of
+CI. Treat the ccx entry recipe as experimental until a manual run in a
+throwaway profile verifies it.
 
 The drift guard classifies every option and subcommand in the captured Claude
 Code 2.1.317 `claude --help`, and reads each option's arity from its

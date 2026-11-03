@@ -937,6 +937,27 @@ Linux, supported Codex launches also add a `PostToolUse` `mcp_tool` hook;
 the display server then keys cards by Codex's call id, and
 `kettle_card` hands each to that hook once, as for Claude Code.
 
+`agent_setup` also exposes `--launch-claude` for Linux card admission. Both
+launch flags are documented wrapper interfaces: original arguments and the
+caller's environment pass through, and the agent supplies the exit status
+(127 if it cannot start). `print_form` selects the existing function, a
+customizable wrapper, or an experimental POSIX entry script rendered by
+`codex_shell::wrapper_snippet` and `entry_script`. Each embeds this Kettle's
+absolute path. The wrapper and entry check the pane and executable before
+calling the launcher, otherwise they run the plain agent. Kettle edits none
+of the user's startup files or agent configuration.
+
+On Linux, `agent_setup::NoCard` names argument refusals, unreadable or
+unsupported versions, executable-check failures, an unavailable display
+server and a declined registration. `NoCard::notice` and `cardless_notice`
+produce one stderr line before a cardless fallback, using fixed text and at
+most a bounded plain option name. Claude's launcher maps every eligible
+failure through it. Codex maps native `linux::prepare` failures through it;
+its earlier version rejection still uses the older warning, and its
+post-registration executable-change fallback remains silent. Noninteractive
+Claude refusals and launches without an allowed plugin produce no cardless
+notice. These diagnostics do not change admission.
+
 Codex also receives hidden `kettle_agent_hook` calls at `UserPromptSubmit`
 and `Stop`. The first supplies visual guidance and the private session inbox;
 the second checks that inbox after the model has had a turn to call
@@ -1026,6 +1047,20 @@ its original value, any bytes, and whether it was set, which the file
 on the pane's `PATH` for that check. fish gets `-C` and the code, which the vendored
 portable-pty passes to the default shell after its login `argv[0]`
 (`shell_arg`).
+
+The one-shot zsh and fish startup hooks also export `KETTLE_OWN_CODEX` and,
+on Linux when offered, `KETTLE_OWN_CLAUDE`. They write `0` for Kettle's
+function and `1` when the user's function, zsh alias, fish abbreviation or
+autoloadable function wins. A zsh alias can run before a Kettle function
+defined beneath it. `Mux::spawn_pane` strips both inherited variables for
+every new pane. `codex_shell::agent_function_marker` accepts only literal
+`0` and `1` as `AgentFunction::Kettle` and `Own`; everything else is
+`Unchecked`. This forgeable marker is diagnostic only, never admission.
+`agent_setup::launch_line` uses it only for fixed status text and never
+prints its value. The Codex `Delivery:` line avoids promising cards when
+the user's command runs first. There is no function-body inspection or
+per-prompt hook; nested shells and shells started with arguments are not
+checked by this startup mechanism.
 
 Installation tries the shared lock without waiting. A busy lock sets a retry
 250 ms later, which the event loop wakes for, and then both enabled offers are
