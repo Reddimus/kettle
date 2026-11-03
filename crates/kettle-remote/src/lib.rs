@@ -5372,10 +5372,11 @@ mod tests {
         );
 
         // A kubeconfig defines the clusters every other selector resolves in.
+        let kubeconfig_path = host_path("/home/me/.kube/staging");
         let kubeconfig = detect_container(&argv(&[
             "kubectl",
             "--kubeconfig",
-            "/home/me/.kube/staging",
+            &kubeconfig_path,
             "exec",
             "api-0",
             "--",
@@ -5387,7 +5388,7 @@ mod tests {
             Some(session_command(&[
                 "kubectl",
                 "--kubeconfig",
-                "/home/me/.kube/staging",
+                &kubeconfig_path,
                 "exec",
                 "-it",
                 "api-0",
@@ -5472,15 +5473,15 @@ mod tests {
         }
         // A non-default container root holds a different set of containers, so
         // it has to come back out with the name.
-        let rooted =
-            detect_container(&argv(&["lxc-attach", "-P", "/srv/lxc", "-n", "web"])).unwrap();
+        let root = host_path("/srv/lxc");
+        let rooted = detect_container(&argv(&["lxc-attach", "-P", &root, "-n", "web"])).unwrap();
         assert_eq!(
             rooted,
             RemoteContext::Container {
                 runtime: ContainerRuntime::Lxc,
                 container: "web".into(),
                 options: ContainerOptions {
-                    config: Some("/srv/lxc".into()),
+                    config: Some(root.clone()),
                     ..ContainerOptions::default()
                 },
             }
@@ -5490,7 +5491,7 @@ mod tests {
             Some(session_command(&[
                 "lxc-attach",
                 "--lxcpath",
-                "/srv/lxc",
+                &root,
                 "-n",
                 "web"
             ]))
