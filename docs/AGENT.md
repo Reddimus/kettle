@@ -1402,7 +1402,7 @@ pane with plugin hooks on. The flag groups match Claude Code 2.1.316's
 `claude --help`:
 
 - Switches: `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`,
-  `--ide`, `--chrome`, `--no-chrome`, `--strict-mcp-config`,
+  `--ide`, `--chrome`, `--no-chrome`,
   `--disable-slash-commands`, `--ax-screen-reader`, `--brief`,
   `--exclude-dynamic-system-prompt-sections`, `--continue` (`-c`),
   `--fork-session`, and `--verbose`.
@@ -1420,24 +1420,32 @@ pane with plugin hooks on. The flag groups match Claude Code 2.1.316's
   argument that does not start with `-`. Put `--` before a prompt after one,
   as Claude Code requires: `claude --add-dir ../shared -- "explain this code"`.
 
+Like Claude Code, Kettle reads an empty string or a lone `-` as a value, not as
+an option.
+
 Print mode and its options, help and version output, subcommands, and unknown
 options get no card scope. Neither do background, remote, or tmux forms
 (`--bg`, `--background`, `--cloud`, `--environment`, `--desktop`, `--teleport`,
-`--tmux`), or `--bare` and `--safe-mode`, which turn off plugin hooks so
-`kettle_card` cannot run. Missing values, extra prompts, and non-Unicode
+`--tmux`), `--bare` and `--safe-mode`, which turn off plugin hooks so
+`kettle_card` cannot run, or `--strict-mcp-config`, which makes Claude Code
+ignore every MCP server but its own `--mcp-config`, Kettle's plugin's included,
+so `kettle_show` does not exist (checked on Claude Code 2.1.317). Missing values, extra prompts, and non-Unicode
 arguments also get no card scope. Both stdin and stdout must be terminals.
 
 When an otherwise eligible launch in a Kettle pane gets no card scope because
-of an unknown option or `--bare` or `--safe-mode`, the launcher prints one line
+of an unknown option, `--bare`, `--safe-mode` or `--strict-mcp-config`, the
+launcher prints one line
 to stderr before starting Claude Code:
 
 ```text
 kettle agent-setup: starting Claude Code without Kettle cards: ...; images and diagrams will go to the media shelf.
 ```
 
-The reason names only a safe option name, never a value or prompt, or says the
-launch turns off plugin hooks. Unsafe or overlong unknown option names get a
-generic reason. Print mode, subcommands, help and version output, detached
+The reason names only a plain long option name (lower case letters, digits and
+`-`), never a value or prompt, or says the launch turns off plugin hooks or
+ignores the plugin's MCP server. Short, unusual or overlong unknown options get
+a generic reason. An unknown option before `-p`, `--help` or another option that
+is no interactive session in this pane gets no notice. Print mode, subcommands, help and version output, detached
 sessions, malformed arguments, and non-terminal runs get no notice. Claude
 Code may redraw over the line. Items still reach the media shelf.
 

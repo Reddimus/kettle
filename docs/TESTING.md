@@ -1071,9 +1071,11 @@ arguments. Notice tests check that only unknown options and hooks-off modes
 produce the fallback message, and that option values, prompts, control
 characters, and unsafe or overlong option names never leak into it.
 
-The drift guard classifies every option in the captured Claude Code 2.1.316
-`claude --help`, so each option needs an explicit arity or exclusion. To diff
-that classification against the installed CLI, opt in with:
+The drift guard classifies every option and subcommand in the captured Claude
+Code 2.1.317 `claude --help`, and reads each option's arity from its
+declaration (`<value>`, `[value]`, `<values...>` or none), so each option needs
+a matching arity or an explicit exclusion. To diff the capture against the
+installed CLI, opt in with:
 
 ```sh
 cargo test -p kettle claude_help_matches_installed_cli -- --ignored
