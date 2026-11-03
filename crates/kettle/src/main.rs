@@ -2125,6 +2125,8 @@ mod activation_cli_tests {
             vec!["--install", "--agent", "agy"],
             vec!["--launch-claude", "--", "--model", "opus", "hello"],
             vec!["--launch-codex", "--", "resume"],
+            vec!["--print", "--agent", "codex", "--form", "wrapper"],
+            vec!["--print", "--agent", "claude", "--form", "entry"],
         ] {
             assert!(Cli::try_parse_from(["kettle", "agent-setup"].into_iter().chain(args)).is_ok());
         }
@@ -2134,6 +2136,9 @@ mod activation_cli_tests {
             vec!["--launch-claude", "--agent", "claude"],
             vec!["--install", "--print", "--agent", "agy"],
             vec!["--print", "--", "hello"],
+            vec!["--status", "--form", "wrapper"],
+            vec!["--form", "wrapper"],
+            vec!["--print", "--form", "bogus"],
         ] {
             assert!(
                 Cli::try_parse_from(["kettle", "agent-setup"].into_iter().chain(args)).is_err()
@@ -3559,8 +3564,6 @@ mod tests {
         // The `--record*` flags ship as a runtime feature and MUST be documented
         // in the man page (see docs/RECORDING.md), so they are not excluded here.
         // `--claude-card-hook` is passed only by Kettle's own Claude Code plugin.
-        // `--launch-codex` is run only by the function `agent-setup --print`
-        // prints.
         let allow_missing: &[&str] = &[
             "internal-capture-tail",
             "tab-handoff",
@@ -3569,8 +3572,6 @@ mod tests {
             "exec",
             "claude-card-hook",
             "codex-card-hook",
-            "launch-codex",
-            "launch-claude",
         ];
         fn collect_missing_flags(
             cmd: &clap::Command,

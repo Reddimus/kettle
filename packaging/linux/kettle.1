@@ -52,7 +52,13 @@ kettle \- fast GPU-accelerated terminal emulator for Linux and macOS
 .br
 .B kettle agent\-setup
 .RB ( \-\-print " [" \-\-shell
-.IR SHELL "] | " \-\-status " | " \-\-uninstall )
+.IR SHELL "] [" \-\-form
+.IR FORM "] | " \-\-status " | " \-\-uninstall )
+.br
+.B kettle agent\-setup
+.RB ( \-\-launch\-codex " | " \-\-launch\-claude )
+.B \-\-
+.RI [ AGENT\-ARGUMENT ...]
 .br
 .B kettle update
 .RI [ \-\-yes ]
@@ -651,7 +657,7 @@ change is refused unless it is sticky. Exits 0 once it is
 written, 1 otherwise. Showing media to the user is
 .BR "kettle show" .
 .TP
-.B kettle agent\-setup \fR(\fB\-\-print\fR [\fB\-\-shell \fISHELL\fR] | \fB\-\-status\fR | \fB\-\-uninstall\fR)
+.B kettle agent\-setup \fR(\fB\-\-print\fR [\fB\-\-shell \fISHELL\fR] [\fB\-\-form \fIFORM\fR] | \fB\-\-status\fR | \fB\-\-uninstall\fR)
 Print per-launch agent setup without editing agent or shell settings.
 .B \-\-print
 prints a
@@ -1130,6 +1136,27 @@ for the full list. Bug reports + feature requests at
 .UR https://github.com/Reddimus/kettle/issues
 .UE .
 
+.SH AGENT LAUNCHER
+.B kettle agent\-setup \-\-launch\-codex \-\-
+and
+.B kettle agent\-setup \-\-launch\-claude \-\-
+start the agent with Kettle's display server or card scope when the launch qualifies, and as it is otherwise.
+The functions
+.B \-\-print
+writes call them, and so can a function of your own that sets an account's environment first
+(for example
+.BR CODEX_HOME ).
+Arguments after
+.B \-\-
+reach the agent unchanged, its exit status is the command's, and 127 means it could not start.
+Outside a Kettle pane the agent simply runs.
+.B \-\-print \-\-form wrapper
+writes such a function, and
+.B \-\-form entry
+a script for a program that starts the agent itself.
+A launch that should have cards and cannot says so on standard error before the agent starts.
+.B kettle agent\-setup \-\-status
+reports whether a function of your own replaced Kettle's.
 .SH AGENT PREVIEW ADAPTERS
 .B kettle agent\-setup \-\-agent agy \-\-install
 stages Kettle's private native agy plugin and invokes agy's installer. It requires

@@ -15,9 +15,7 @@
 //! `--agent claude` selects its printed function. Setup is Unix-only.
 #![cfg_attr(not(unix), allow(dead_code))]
 
-#[cfg(unix)]
-use crate::cli::SetupAgent;
-use crate::cli::{SetupArgs, SetupShell};
+use crate::cli::{SetupAgent, SetupArgs, SetupForm, SetupShell};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -381,16 +379,44 @@ impl SetupShell {
     }
 }
 
-/// The function `--print` writes: `codex`, handing its arguments to this
-/// Kettle as they are. The shell expands nothing in them.
-fn print_function(kettle: &Path, shell: SetupShell) -> Result<String, SetupError> {
+fn codex_shell(shell: SetupShell) -> kettle_ui::codex_shell::CodexShell {
     use kettle_ui::codex_shell::CodexShell;
-    let shell = match shell {
+    match shell {
         SetupShell::Bash => CodexShell::Bash,
         SetupShell::Zsh => CodexShell::Zsh,
         SetupShell::Fish => CodexShell::Fish,
+    }
+}
+
+/// What `--print` writes for `agent` (`codex` or `claude`): the function
+/// Kettle defines, handing its arguments to this Kettle as they are, a
+/// wrapper of the same shape with a place for an account's environment, or
+/// the entry script for a program that starts the agent itself. The shell
+/// expands nothing in the arguments.
+fn print_form(
+    kettle: &Path,
+    agent: SetupAgent,
+    shell: Option<SetupShell>,
+    form: SetupForm,
+) -> Result<String, SetupError> {
+    use kettle_ui::codex_shell as snippets;
+    let name = match agent {
+        SetupAgent::Claude => "claude",
+        _ => "codex",
     };
-    Ok(kettle_ui::codex_shell::codex_function(kettle, shell)?)
+    Ok(match form {
+        SetupForm::Entry => snippets::entry_script(kettle, name)?,
+        SetupForm::Function | SetupForm::Wrapper => {
+            let shell = codex_shell(SetupShell::chosen(shell)?);
+            if form == SetupForm::Wrapper {
+                snippets::wrapper_snippet(kettle, shell, name)?
+            } else if agent == SetupAgent::Claude {
+                snippets::claude_function(kettle, shell)?
+            } else {
+                snippets::codex_function(kettle, shell)?
+            }
+        }
+    })
 }
 
 /// What the harnesses still write, which status and removal say rather than
@@ -756,12 +782,12 @@ impl Refusal {
         })
     }
 
-    /// What to tell a user who started an interactive session and gets no
-    /// card, or `None` where the launch was never meant to have one: print
-    /// mode, a subcommand, help, a detached session, or a malformed launch
-    /// that Claude Code will itself report.
-    fn notice(&self) -> Option<String> {
-        let why = match self {
+    /// Why a user who started an interactive session gets no card, or `None`
+    /// where the launch was never meant to have one: print mode, a
+    /// subcommand, help, a detached session, or a malformed launch that
+    /// Claude Code will itself report.
+    fn why(&self) -> Option<String> {
+        Some(match self {
             Self::UnknownOption(name) if name.is_empty() => {
                 "Kettle does not know one of its options".to_owned()
             }
@@ -771,11 +797,56 @@ impl Refusal {
                 "this launch ignores the MCP server Kettle's plugin provides".to_owned()
             }
             _ => return None,
+        })
+    }
+}
+
+/// The one line printed, before the agent starts, when a launch that should
+/// have cards cannot. `why` is fixed text or a plain option name, never an
+/// argument, path, version or environment value.
+#[cfg(any(target_os = "linux", test))]
+fn cardless_notice(agent: &str, why: &str) -> String {
+    format!(
+        "kettle agent-setup: starting {agent} without Kettle cards: {why}; \
+         images and diagrams will go to the media shelf."
+    )
+}
+
+/// Why a launch that should have cards cannot, for either agent.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Eq, PartialEq)]
+enum NoCard {
+    Refused(Refusal),
+    /// `--version` printed nothing Kettle could read.
+    NoVersion,
+    /// A version that gets no card.
+    UnsupportedVersion,
+    /// Kettle could not hold and check the executable it would start.
+    NotNative,
+    /// No display server answered.
+    ServerUnavailable,
+    /// The display server did not accept the launch, as when previews are off.
+    NotRegistered,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl NoCard {
+    /// The notice for `agent`, or `None` where the launch was not meant to
+    /// have a card.
+    fn notice(&self, agent: &str) -> Option<String> {
+        let why = match self {
+            Self::Refused(refusal) => refusal.why()?,
+            Self::NoVersion => "Kettle could not read its version".to_owned(),
+            Self::UnsupportedVersion => "Kettle gives no cards to this version".to_owned(),
+            Self::NotNative => "Kettle could not check the executable it would start".to_owned(),
+            Self::ServerUnavailable => "Kettle's display server did not answer".to_owned(),
+            Self::NotRegistered => {
+                "Kettle declined the launch; check that agent previews and this agent's \
+                 previews are on in Settings"
+                    .to_owned()
+            }
         };
-        Some(format!(
-            "kettle agent-setup: starting Claude Code without Kettle cards: {why}; \
-             images and diagrams will go to the media shelf."
-        ))
+        Some(cardless_notice(agent, &why))
     }
 }
 
@@ -845,6 +916,13 @@ fn claude_interactive(args: &[OsString]) -> Result<(), Refusal> {
                     return Err(claude_exclusion_after(&args[index..])
                         .map_or_else(|| Refusal::unknown_option(name), Refusal::Excluded));
                 }
+                // A hooks-off or strict-MCP flag is no reason to tell the user
+                // about cards when the launch is print mode or help anyway.
+                Some(Flag::Excluded(why @ (Exclusion::HooksOff | Exclusion::McpOff))) => {
+                    return Err(Refusal::Excluded(
+                        claude_exclusion_after(&args[index..]).unwrap_or(why),
+                    ));
+                }
                 Some(Flag::Excluded(why)) => return Err(Refusal::Excluded(why)),
                 Some(Flag::Takes(arity)) => arity,
             };
@@ -895,24 +973,26 @@ fn launch_claude(argv: Vec<OsString>) -> i32 {
             && plugin.in_pane
             && !plugin.forbidden
         {
-            match claude_interactive(&argv) {
-                Ok(()) => {
-                    if let Some(version) = version_of(Path::new("claude"))
-                        && let Some(native) = linux::prepare(
-                            "claude",
-                            kettle_ctl::show::InlineTarget::ClaudeHook,
-                            &version,
-                        )
-                        && let Some(mut command) = native.command("claude")
-                    {
-                        use std::os::unix::process::CommandExt as _;
-                        let error = command.args(argv).exec();
-                        eprintln!("kettle agent-setup: cannot start claude: {error}");
-                        return 127;
-                    }
+            let launch = claude_interactive(&argv)
+                .map_err(NoCard::Refused)
+                .and_then(|()| {
+                    let version = version_of(Path::new("claude")).ok_or(NoCard::NoVersion)?;
+                    linux::prepare(
+                        "claude",
+                        kettle_ctl::show::InlineTarget::ClaudeHook,
+                        &version,
+                    )
+                })
+                .and_then(|native| native.command("claude").ok_or(NoCard::NotNative));
+            match launch {
+                Ok(mut command) => {
+                    use std::os::unix::process::CommandExt as _;
+                    let error = command.args(argv).exec();
+                    eprintln!("kettle agent-setup: cannot start claude: {error}");
+                    return 127;
                 }
-                Err(refusal) => {
-                    if let Some(notice) = refusal.notice() {
+                Err(no_card) => {
+                    if let Some(notice) = no_card.notice("Claude Code") {
                         eprintln!("{notice}");
                     }
                 }
@@ -940,6 +1020,10 @@ pub(crate) fn run(args: SetupArgs) -> i32 {
             eprintln!("agy uses a native plugin, not a shell function; omit --shell");
             return 2;
         }
+        if args.form.is_some() {
+            eprintln!("agy uses a native plugin, not a shell function; omit --form");
+            return 2;
+        }
         return crate::agy::setup(args.print, args.install, args.uninstall);
     }
     if args.install {
@@ -960,14 +1044,14 @@ pub(crate) fn run(args: SetupArgs) -> i32 {
         eprintln!("kettle agent-setup: choose --print, --status or --uninstall.");
         return 2;
     }
-    let shell = match SetupShell::chosen(args.shell) {
-        Ok(shell) => shell,
-        Err(error) => {
-            eprintln!("kettle agent-setup: {}", error.message());
-            return 2;
-        }
-    };
     if args.uninstall {
+        let shell = match SetupShell::chosen(args.shell) {
+            Ok(shell) => shell,
+            Err(error) => {
+                eprintln!("kettle agent-setup: {}", error.message());
+                return 2;
+            }
+        };
         if args.agent == SetupAgent::Claude {
             let command = match shell {
                 SetupShell::Bash => "unset -f claude",
@@ -982,18 +1066,13 @@ pub(crate) fn run(args: SetupArgs) -> i32 {
         }
         return 0;
     }
-    match this_kettle().and_then(|kettle| match args.agent {
-        SetupAgent::Codex => print_function(&kettle, shell),
-        SetupAgent::Agy => unreachable!("agy uses native plugin setup"),
-        SetupAgent::Claude => {
-            use kettle_ui::codex_shell::CodexShell;
-            let shell = match shell {
-                SetupShell::Bash => CodexShell::Bash,
-                SetupShell::Zsh => CodexShell::Zsh,
-                SetupShell::Fish => CodexShell::Fish,
-            };
-            kettle_ui::codex_shell::claude_function(&kettle, shell).map_err(SetupError::from)
-        }
+    match this_kettle().and_then(|kettle| {
+        print_form(
+            &kettle,
+            args.agent,
+            args.shell,
+            args.form.unwrap_or_default(),
+        )
     }) {
         Ok(function) => {
             print!("{function}");
@@ -1025,9 +1104,19 @@ fn launch(argv: Vec<OsString>) -> i32 {
         cards && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
     };
     #[cfg(target_os = "linux")]
-    let native = cards
-        .then(|| linux::prepare("codex", kettle_ctl::show::InlineTarget::CodexHook, &version))
-        .flatten();
+    let native = if cards {
+        match linux::prepare("codex", kettle_ctl::show::InlineTarget::CodexHook, &version) {
+            Ok(native) => Some(native),
+            Err(no_card) => {
+                if let Some(notice) = no_card.notice("Codex") {
+                    eprintln!("{notice}");
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
     #[cfg(target_os = "linux")]
     let cards = native.is_some();
     match this_kettle().and_then(|kettle| launch_args(&argv, &kettle, cards)) {
@@ -1138,6 +1227,34 @@ fn claude_integration() -> bool {
         .is_some_and(|config| config.agent_display && config.agent_display_claude_code)
 }
 
+/// What `--status` says about the `name` function the pane's shell has, from
+/// the hint its startup left. The hint is forgeable, so the wording stays
+/// hedged and nothing but a fixed line is printed.
+fn launch_line(name: &str, marker: kettle_ui::codex_shell::AgentFunction) -> String {
+    use kettle_ui::codex_shell::AgentFunction;
+    let fix = format!(
+        "kettle agent-setup --print --agent {name} --form wrapper prints one that ends in \
+         Kettle's launcher"
+    );
+    match marker {
+        AgentFunction::Kettle => {
+            format!("Kettle's {name} function starts it, through agent-setup --launch-{name}")
+        }
+        AgentFunction::Own => format!(
+            "your own {name} function or alias runs first; it gets cards only if it ends in \
+             Kettle's launcher; {fix}"
+        ),
+        AgentFunction::Unchecked => format!(
+            "not checked (only zsh and fish panes Kettle started are); a function of your own \
+             gets cards only if it ends in Kettle's launcher; {fix}"
+        ),
+    }
+}
+
+fn this_shells_marker(name: &str) -> kettle_ui::codex_shell::AgentFunction {
+    kettle_ui::codex_shell::agent_function_marker(&|key| std::env::var_os(key), name)
+}
+
 fn print_status() {
     let found =
         kettle_ctl::Client::discover_display(None).and_then(|mut client| previews_on(&mut client));
@@ -1157,11 +1274,15 @@ fn print_status() {
             "not in a Kettle pane, so Codex starts without Kettle's display server"
         }
     );
+    let own_codex = this_shell_in_kettle()
+        && this_shells_marker("codex") == kettle_ui::codex_shell::AgentFunction::Own;
     let launched = this_shell_in_kettle() && version.as_deref().is_some_and(supported_version);
     let cards = launched && version.as_deref().is_some_and(card_version);
     println!(
         "Delivery: {}",
-        if cards {
+        if own_codex {
+            "none unless your own codex function ends in Kettle's launcher (see Codex launch)"
+        } else if cards {
             "a supported card-hook release line; interactive launches get a card under the call \
              after platform checks and Codex's hook review, otherwise the pane's shelf"
         } else if launched {
@@ -1171,6 +1292,12 @@ fn print_status() {
             "none from this shell"
         }
     );
+    if this_shell_in_kettle() {
+        println!(
+            "Codex launch: {}",
+            launch_line("codex", this_shells_marker("codex"))
+        );
+    }
     println!("Needs: agent previews on in Kettle (Settings, Agents, Agent previews)");
     let automatic = automatic_integration();
     println!("Automatic: {}", automatic_status(automatic));
@@ -1185,6 +1312,12 @@ fn print_status() {
         "Claude Code: {}",
         claude_status_text(claude, claude_integration(), found.as_ref().ok().copied())
     );
+    if this_shell_in_kettle() {
+        println!(
+            "Claude Code launch: {}",
+            launch_line("claude", this_shells_marker("claude"))
+        );
+    }
     println!(
         "Interactive sessions get Kettle's display server for that launch only. Codex's \
          configuration and your shell's startup files are left as they are."
@@ -1195,6 +1328,13 @@ fn print_status() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Refusal {
+        /// The line printed for it, for Claude Code.
+        fn notice(&self) -> Option<String> {
+            self.why().map(|why| cardless_notice("Claude Code", &why))
+        }
+    }
 
     // Captured from Claude Code 2.1.317 --help, including aliases and placeholders.
     const HELP_OPTIONS: &str = r"--add-dir <directories...>
@@ -1653,6 +1793,24 @@ update|upgrade
     }
 
     #[test]
+    fn hooks_off_and_strict_mcp_flags_defer_to_print_mode_and_help() {
+        for (args, expected) in [
+            (vec!["--bare", "-p", "q"], Exclusion::Print),
+            (vec!["--safe-mode", "--print"], Exclusion::Print),
+            (vec!["--strict-mcp-config", "--help"], Exclusion::Info),
+            (vec!["--bare", "--bg"], Exclusion::Detached),
+            (vec!["--bare"], Exclusion::HooksOff),
+            (vec!["--strict-mcp-config", "--", "-p"], Exclusion::McpOff),
+        ] {
+            assert_eq!(
+                claude_interactive(&argv(&args)),
+                Err(Refusal::Excluded(expected)),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
     fn claude_unknown_option_defers_to_noninteractive_exclusions() {
         for &(flag, reason) in EXCLUDED {
             if matches!(
@@ -1973,6 +2131,116 @@ update|upgrade
                 "{args:?}: {section} missing declarations: {missing:?}; added declarations: {added:?}"
             );
         }
+    }
+
+    #[test]
+    fn every_cardless_launch_class_has_a_fixed_notice_or_is_deliberately_silent() {
+        for agent in ["Claude Code", "Codex"] {
+            for no_card in [
+                NoCard::NoVersion,
+                NoCard::UnsupportedVersion,
+                NoCard::NotNative,
+                NoCard::ServerUnavailable,
+                NoCard::NotRegistered,
+                NoCard::Refused(Refusal::unknown_option("--some-new-flag")),
+                NoCard::Refused(Refusal::Excluded(Exclusion::HooksOff)),
+                NoCard::Refused(Refusal::Excluded(Exclusion::McpOff)),
+            ] {
+                let notice = no_card
+                    .notice(agent)
+                    .unwrap_or_else(|| panic!("{no_card:?}"));
+                assert!(
+                    notice.starts_with(&format!(
+                        "kettle agent-setup: starting {agent} without Kettle cards: "
+                    )),
+                    "{notice}"
+                );
+                assert!(notice.ends_with("go to the media shelf."), "{notice}");
+                assert!(!notice.contains(['/', '$', '\n', '\x1b']), "{notice}");
+                assert!(!notice.contains(|c: char| c.is_ascii_digit()), "{notice}");
+            }
+            for silent in [
+                Refusal::Excluded(Exclusion::Print),
+                Refusal::Excluded(Exclusion::Detached),
+                Refusal::Excluded(Exclusion::Info),
+                Refusal::Subcommand,
+                Refusal::NotUnicode,
+                Refusal::MissingValue,
+                Refusal::UnexpectedValue,
+                Refusal::ExtraPrompt,
+            ] {
+                assert_eq!(NoCard::Refused(silent).notice(agent), None);
+            }
+        }
+    }
+
+    #[test]
+    fn status_says_who_owns_the_agent_function_without_echoing_anything() {
+        use kettle_ui::codex_shell::AgentFunction;
+        for name in ["claude", "codex"] {
+            let kettle = launch_line(name, AgentFunction::Kettle);
+            assert!(kettle.contains(&format!("--launch-{name}")), "{kettle}");
+            let own = launch_line(name, AgentFunction::Own);
+            assert!(own.contains("your own"), "{own}");
+            assert!(
+                own.contains("only if it ends in Kettle's launcher"),
+                "{own}"
+            );
+            assert!(
+                own.contains(&format!("--print --agent {name} --form wrapper")),
+                "{own}"
+            );
+            let unchecked = launch_line(name, AgentFunction::Unchecked);
+            assert!(unchecked.starts_with("not checked"), "{unchecked}");
+            assert!(unchecked.contains("--form wrapper"), "{unchecked}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn print_forms_name_the_launcher_and_the_entry_needs_no_shell() {
+        let kettle = fixture("kettle");
+        for agent in [SetupAgent::Claude, SetupAgent::Codex] {
+            let name = if agent == SetupAgent::Claude {
+                "claude"
+            } else {
+                "codex"
+            };
+            for shell in [SetupShell::Bash, SetupShell::Zsh, SetupShell::Fish] {
+                for form in [SetupForm::Function, SetupForm::Wrapper] {
+                    let text = print_form(&kettle, agent, Some(shell), form).unwrap();
+                    assert!(
+                        text.contains(&format!("agent-setup --launch-{name} --")),
+                        "{text}"
+                    );
+                    assert_eq!(
+                        text.contains("KETTLE_PANE_ID"),
+                        form == SetupForm::Wrapper,
+                        "{text}"
+                    );
+                }
+            }
+            // An entry script is a POSIX script whatever shell is chosen.
+            let entry = print_form(&kettle, agent, None, SetupForm::Entry).unwrap();
+            assert!(entry.starts_with("#!/bin/sh\n"), "{entry}");
+            assert!(
+                entry.contains(&format!("agent-setup --launch-{name} --")),
+                "{entry}"
+            );
+            assert_eq!(
+                entry,
+                print_form(&kettle, agent, Some(SetupShell::Fish), SetupForm::Entry).unwrap()
+            );
+        }
+        assert_eq!(
+            print_form(
+                Path::new("relative/kettle"),
+                SetupAgent::Codex,
+                Some(SetupShell::Bash),
+                SetupForm::Wrapper
+            ),
+            Err(SetupError::UnnamedKettle)
+        );
     }
 
     fn fixture(name: &str) -> PathBuf {
@@ -2302,9 +2570,11 @@ update|upgrade
         // not absolute, and is refused before.
         #[cfg(unix)]
         assert_eq!(
-            print_function(
+            print_form(
                 Path::new("/private/var/folders/x/AppTranslocation/y/kettle.app/kettle"),
-                SetupShell::Zsh
+                SetupAgent::Codex,
+                Some(SetupShell::Zsh),
+                SetupForm::Function
             ),
             Err(SetupError::Translocated)
         );
@@ -2442,7 +2712,13 @@ update|upgrade
                 continue;
             };
             assert!(found.success());
-            let function = print_function(&stand_in, shell).unwrap();
+            let function = print_form(
+                &stand_in,
+                SetupAgent::Codex,
+                Some(shell),
+                SetupForm::Function,
+            )
+            .unwrap();
             let output = std::process::Command::new(program)
                 .arg("-c")
                 .arg(format!("{function}codex \"$@\""))
