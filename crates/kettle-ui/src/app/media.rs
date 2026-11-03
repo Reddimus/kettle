@@ -194,15 +194,32 @@ impl App {
         };
         #[cfg(target_os = "linux")]
         let _ = harness;
+        // An adapter's hook asked for a card: a launch the caller's agent
+        // registered grants it, and without one the item still goes to the
+        // shelf, for a reason the receipt can name.
         #[cfg(target_os = "linux")]
-        let native_grant = show
+        let (native_grant, card_reason) = match show
             .inline
             .filter(|&target| target != kettle_ctl::show::InlineTarget::Cli)
-            .zip(sender.as_ref())
-            .and_then(|(target, sender)| {
-                let caller = self.scoped_card_caller(ws, request.caller(), sender, target)?;
-                self.agent_launches.grant(caller, std::time::Instant::now())
-            });
+        {
+            None => (None, None),
+            Some(target) => {
+                let caller = sender.as_ref().and_then(|sender| {
+                    self.scoped_card_caller(ws, request.caller(), sender, target)
+                });
+                match caller {
+                    None => (None, Some(kettle_ctl::show::card_reason::UNTRACED)),
+                    Some(caller) => {
+                        match self.agent_launches.grant(caller, std::time::Instant::now()) {
+                            Some(grant) => (Some(grant), None),
+                            None => (None, Some(kettle_ctl::show::card_reason::NOT_LAUNCHED)),
+                        }
+                    }
+                }
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let card_reason: Option<&'static str> = None;
         #[cfg(target_os = "linux")]
         let harness = native_grant.as_ref().map(|grant| grant.owner());
         // The command that would print a command-line card, checked again
@@ -358,6 +375,7 @@ impl App {
                 provenance,
                 inline,
                 inline_refused,
+                card_reason,
                 gallery: None,
             },
             spec,
@@ -944,6 +962,7 @@ impl App {
                 provenance: crate::media::Provenance::User,
                 inline: None,
                 inline_refused: None,
+                card_reason: None,
                 gallery,
             },
             spec,
@@ -1327,6 +1346,7 @@ impl App {
                     provenance,
                     inline,
                     inline_refused,
+                    card_reason,
                     gallery: _,
                 } = draft;
                 let item = crate::media::ShelfItem::checking_file(
@@ -1341,7 +1361,7 @@ impl App {
                     ws,
                     (origin, route, control),
                     item,
-                    (inline, inline_refused),
+                    (inline, inline_refused, card_reason),
                     None,
                 );
             }
@@ -1363,6 +1383,7 @@ impl App {
             provenance,
             inline,
             inline_refused,
+            card_reason,
             gallery,
         } = draft;
         let textual = matches!(
@@ -1414,7 +1435,7 @@ impl App {
             ws,
             (origin, route, control),
             item,
-            (inline, inline_refused),
+            (inline, inline_refused, card_reason),
             page,
         );
     }
@@ -1432,9 +1453,10 @@ impl App {
             kettle_media::client::RenderControl,
         ),
         item: crate::media::ShelfItem,
-        (inline, mut inline_refused): (
+        (inline, mut inline_refused, mut card_reason): (
             Option<crate::media::InlineDraft>,
             Option<kettle_ctl::show::InlineRefusal>,
+            Option<&'static str>,
         ),
         page: Option<kettle_media::PageOf>,
     ) {
@@ -1461,12 +1483,17 @@ impl App {
         };
         #[cfg(target_os = "linux")]
         let inline = inline.filter(|draft| {
-            draft.printer.is_some()
+            let kept = draft.printer.is_some()
                 || draft
                     .launch
                     .as_ref()
                     .zip(pane.caller_root)
-                    .is_some_and(|(grant, root)| grant.valid(route.pane, root))
+                    .is_some_and(|(grant, root)| grant.valid(route.pane, root));
+            // The caller was traced when it asked, and no longer is.
+            if !kept {
+                card_reason.get_or_insert(kettle_ctl::show::card_reason::UNTRACED);
+            }
+            kept
         });
         // `kettle show --inline` is checked again now the render is done: the
         // command may have left the foreground, or a program taken the screen.
@@ -1542,6 +1569,9 @@ impl App {
                     Ok(publication) => publication,
                     Err(refusal) => {
                         inline_refused = cli.then_some(refusal).or(inline_refused);
+                        if !cli {
+                            card_reason.get_or_insert(kettle_ctl::show::card_reason::PANE_CANNOT);
+                        }
                         (None, None)
                     }
                 }
@@ -1640,6 +1670,7 @@ impl App {
         };
         result.inline = delivery;
         result.inline_refused = inline_refused;
+        result.card_reason = card_reason.map(Into::into);
         result.page = page.map(kettle_ctl::show::ShowPage::from);
         result.video = video.map(kettle_ctl::show::ShowVideo::from);
         if let Some(mut query) = facts_query {
@@ -1945,7 +1976,10 @@ fn finish_file_facts(
                             result.inline = delivery;
                         }
                         Err(refusal) if cli => result.inline_refused = Some(refusal),
-                        Err(_) => {}
+                        Err(_) => {
+                            result.card_reason =
+                                Some(kettle_ctl::show::card_reason::PANE_CANNOT.into());
+                        }
                     }
                 }
             }

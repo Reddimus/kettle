@@ -693,6 +693,45 @@ fn a_command_line_card_needs_the_panes_own_terminal_and_foreground() {
 /// The App gives a card only to a verified route, retires cards on its
 /// tick and when their item is replaced or dropped, and keeps a painted
 /// card's pixels.
+/// A hook card that does not come says why in the result, in fixed words,
+/// at each place the card can be lost: the caller cannot be traced to its
+/// pane, its agent did not start through the launcher, its launch lapsed, or
+/// the pane cannot hold a card.
+#[test]
+fn a_hook_card_that_does_not_come_names_its_reason() {
+    let source = super::production_source();
+    let body = |name: &str| {
+        source
+            .split(&format!("fn {name}("))
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .unwrap_or_else(|| panic!("{name} present"))
+    };
+    let show = body("ctl_show");
+    for word in ["UNTRACED", "NOT_LAUNCHED"] {
+        assert!(
+            show.contains(&format!("kettle_ctl::show::card_reason::{word}")),
+            "ctl_show names {word}"
+        );
+    }
+    // Only a hook target, never `kettle show --inline`, is given a reason.
+    let target = show
+        .find("InlineTarget::Cli)")
+        .expect("hook targets are told from the command line's");
+    assert!(show.find("card_reason::UNTRACED").unwrap() > target);
+    let publish = body("publish_show");
+    for needle in [
+        "card_reason::UNTRACED",
+        "card_reason::PANE_CANNOT",
+        "result.card_reason = card_reason.map(Into::into);",
+    ] {
+        assert!(publish.contains(needle), "publish_show: {needle}");
+    }
+    // `kettle show --inline` keeps its own refusal words and gets no reason.
+    assert!(publish.contains("if !cli {"));
+    assert!(source.contains("(inline, mut inline_refused, mut card_reason): ("));
+}
+
 #[test]
 fn cards_are_for_verified_harnesses_and_retire_with_their_item() {
     let source = super::production_source();

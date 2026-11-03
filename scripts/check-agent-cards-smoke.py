@@ -302,6 +302,13 @@ def check_case(app, binary, root, out, name, target, scoped, path, asset, native
         assert delivery == ("card" if scoped else "shelf"), model
         receipt = model["result"]["structuredContent"]
         assert receipt["model_has_seen"] is False and receipt["verified"] is True
+        # A launch Kettle checked gets its card; one it did not, the shelf and
+        # the fixed word that says why.
+        if scoped:
+            assert "card_reason" not in receipt, receipt
+        else:
+            assert receipt.get("card_reason") == "not_launched", receipt
+            assert "launcher" in model["result"]["content"][0]["text"], model
         assert receipt["kind"] == {"png": "raster", "jpg": "raster", "webp": "raster", "gif": "raster"}.get(kind, kind)
         menu_checks = []
         if scoped:
@@ -389,6 +396,7 @@ def check(kettle, worker, node, out):
                     ("npm-codex", "codex", True, npm),
                     ("native-claude", "claude", True, direct),
                     ("unscoped-codex", "codex", False, direct),
+                    ("unscoped-claude", "claude", False, direct),
                 ]:
                     for kind, asset in (assets.items() if scoped and path == direct else [("svg", assets["svg"])]):
                         record = check_case(app, binary, root, out, name + "-" + kind, target,
