@@ -6,6 +6,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- Give cards to interactive Claude Code launches on Linux using
+  `--dangerously-skip-permissions`, `--add-dir`, `--mcp-config`, `--ide`,
+  `--debug`, and the other supported interactive flags instead of silently
+  falling back to the media shelf (#759).
+- Say when an unknown option or `--bare` or `--safe-mode` leaves an interactive
+  Claude Code launch without Kettle cards. The stderr notice never includes
+  option values or prompts; images and diagrams still reach the media shelf.
+
 ## [5.8.2] — 2026-11-02
 
 ### Maintenance

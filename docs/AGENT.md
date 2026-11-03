@@ -1396,8 +1396,52 @@ release lines, executable layouts and invocation forms get no card scope.
 On Linux, Claude Code previews also offer a `claude` function in new zsh and
 fish panes. For another shell, review `kettle agent-setup --print --agent
 claude --shell bash`. It forwards arguments unchanged and respects the
-existing plugin policy. Print, background and unknown command forms get no
-card scope. Cards support Codex 0.162 or newer within 0.x, and native Claude
+existing plugin policy. The function calls `kettle agent-setup --launch-claude`,
+which gives card scope to supported launches that stay interactive in this
+pane with plugin hooks on. The flag groups match Claude Code 2.1.316's
+`claude --help`:
+
+- Switches: `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`,
+  `--ide`, `--chrome`, `--no-chrome`, `--strict-mcp-config`,
+  `--disable-slash-commands`, `--ax-screen-reader`, `--brief`,
+  `--exclude-dynamic-system-prompt-sections`, `--continue` (`-c`),
+  `--fork-session`, and `--verbose`.
+- One-value options: `--model`, `--effort`, `--permission-mode`, `--agent`,
+  `--agents`, `--name` (`-n`), `--session-id`, `--settings`, `--setting-sources`,
+  `--system-prompt`, `--append-system-prompt`, `--plugin-dir`, `--plugin-url`,
+  `--debug-file`, `--autocompact`, `--fallback-model`, `--system-prompt-snapshot`,
+  and `--remote-control-session-name-prefix`.
+- Optional-value options: `--resume` (`-r`), `--debug` (`-d`), `--worktree` (`-w`),
+  `--remote-control`, `--from-pr`, and `--prompt-suggestions`. These consume the
+  next argument only when it is nonempty and does not start with `-`.
+- Multi-value options: `--add-dir`, `--allowedTools` (`--allowed-tools`),
+  `--disallowedTools` (`--disallowed-tools`), `--mcp-config`, `--tools`,
+  `--betas`, and `--file`. These require a value and consume every following
+  argument that does not start with `-`. Put `--` before a prompt after one,
+  as Claude Code requires: `claude --add-dir ../shared -- "explain this code"`.
+
+Print mode and its options, help and version output, subcommands, and unknown
+options get no card scope. Neither do background, remote, or tmux forms
+(`--bg`, `--background`, `--cloud`, `--environment`, `--desktop`, `--teleport`,
+`--tmux`), or `--bare` and `--safe-mode`, which turn off plugin hooks so
+`kettle_card` cannot run. Missing values, extra prompts, and non-Unicode
+arguments also get no card scope. Both stdin and stdout must be terminals.
+
+When an otherwise eligible launch in a Kettle pane gets no card scope because
+of an unknown option or `--bare` or `--safe-mode`, the launcher prints one line
+to stderr before starting Claude Code:
+
+```text
+kettle agent-setup: starting Claude Code without Kettle cards: ...; images and diagrams will go to the media shelf.
+```
+
+The reason names only a safe option name, never a value or prompt, or says the
+launch turns off plugin hooks. Unsafe or overlong unknown option names get a
+generic reason. Print mode, subcommands, help and version output, detached
+sessions, malformed arguments, and non-terminal runs get no notice. Claude
+Code may redraw over the line. Items still reach the media shelf.
+
+Cards support Codex 0.162 or newer within 0.x, and native Claude
 Code 2.1.280 or newer within 2.x. A new major version needs a compatibility
 review. These minimum versions describe compatibility, not vendor authenticity.
 
