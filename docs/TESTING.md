@@ -982,10 +982,10 @@ Prerequisites beyond the desktop are included in the proof column.
 | Agent CLI | `just agent-cli-smoke` | Mandatory PTY/JSON/MCP probes plus available client version/help checks; no composer attachment proof | Linux/macOS; required in macOS CI |
 | Native titlebar | `just native-titlebar-smoke` | Light caption, traffic-light separation, resize, native fullscreen and restoration | macOS |
 | Modal shortcuts | `just modal-shortcuts-smoke` | Command chords do not act as ordinary modal letters | macOS |
-| Interaction | `just interaction-smoke` | Multiline input, wheel, selection/copy, tabs, context-menu split, and screenshots | Linux/macOS |
+| Interaction | `just interaction-smoke --isolated-clipboard` | Multiline input, wheel, selection/copy, tabs, context-menu split, and screenshots | Linux/macOS |
 | Selection autoscroll | `just selection-autoscroll-smoke` | Held selection scrolls at both vertical pane edges; native pointer on macOS, control path on Linux | Linux/macOS |
-| Image paste receipt | `just image-paste-receipt-smoke` | Bitmap paste and expanded, compact, hover-expanded receipts; replaces clipboard | Linux/macOS |
-| Video paste receipt | `just video-paste-receipt-smoke` | Two pasted video files produce bounded poster receipts; needs ffmpeg and worker | Linux/macOS |
+| Image paste receipt | `just image-paste-receipt-smoke --isolated-clipboard` | Bitmap paste and expanded, compact, hover-expanded receipts; replaces clipboard | Linux/macOS |
+| Video paste receipt | `just video-paste-receipt-smoke --isolated-clipboard` | Two pasted video files produce bounded poster receipts; needs ffmpeg and worker | Linux/macOS |
 | Hover wheel | `just hover-wheel-smoke` | Wheel targets hovered pane; no swapchain screenshot support required | Linux/macOS |
 | Window close isolation | `just window-close-isolation-smoke` | One detached child's exit leaves the sibling OS window and pane alive; Linux needs xdotool | Linux X11/macOS |
 | Touchpad scroll | `just touchpad-scroll-smoke` | Fractional wheel deltas accumulate into scrolling through the real conversion path | Linux/macOS |
@@ -1007,9 +1007,9 @@ Prerequisites beyond the desktop are included in the proof column.
 | Color scheme | `just color-scheme-smoke` | DEC 2031 subscriber receives light/dark changes | Linux/macOS |
 | Theme picker | `just theme-picker-smoke` | Preview, Esc restore, Enter persistence, Settings and menu entry points | Linux/macOS |
 | Remote links | `just remote-links-smoke` | Shift-picked missing path bypasses confirmation; tmux leg skips if unavailable | Linux/macOS |
-| Raw paste | `just raw-paste-smoke` | Multiline paste into an unbracketed shell proceeds; replaces clipboard | Linux/macOS |
+| Raw paste | `just raw-paste-smoke` | Multiline paste into an unbracketed shell proceeds; macOS restores its clipboard, other hosts need isolation | Linux/macOS |
 | Program keys | `just program-keys-smoke` | Client-owned Shift+Left reaches Kitty client, then returns to split resize | Linux/macOS |
-| Search selection | `just search-selection-smoke` | Open search bar preserves grid selection, copy, menus, focus, shortcuts, and Esc | Linux/macOS |
+| Search selection | `just search-selection-smoke --isolated-clipboard` | Open search bar preserves grid selection, copy, menus, focus, shortcuts, and Esc | Linux/macOS |
 | Bell flash | `just bell-flash-smoke` | Only ringing pane brightens, then pixels return to baseline | Linux/macOS |
 | Default window size | `just default-window-size-smoke` | Monitor-fitted defaults and explicit sizing; needs a sufficiently wide monitor | Linux/macOS |
 | Line edit chords | `just line-edit-chords-smoke` | Text-action backspace, macOS default chord, and search word deletion | Linux/macOS |
@@ -1200,6 +1200,26 @@ and stdout; non-terminal launches must stay silent.
 The helper's `all` case does not include every scenario.
 Dock, clipboard receipt, selection-autoscroll, hover-wheel, and window-isolation
 cases have explicit opt-ins. Use the table instead of treating `all` as a gate.
+
+Clipboard-replacing cases require `--isolated-clipboard`: `interaction`,
+`search-selection`, image/video paste receipts, `all`, and `raw-paste` outside
+macOS. Use it only on a disposable desktop, such as a separate Xvfb server;
+it does not create isolation. For example, with a built binary:
+
+```sh
+xvfb-run -a python3 scripts/check-live-ui-smoke.py --kettle target/release/kettle --isolated-clipboard raw-paste
+```
+
+The corresponding `just` recipes forward this option. macOS `raw-paste` instead
+uses the modal probe's bounded snapshot of every clipboard item and format.
+An uncapturable clipboard refuses the check before writing. Restoration only
+replaces the probe's own text and generation, preserving a later foreign copy.
+Startup failures do not read or replace the clipboard. Clipboard providers are
+terminated and reaped if writing the fixture fails. Raw paste requires standalone
+command output, so it works with shell echo disabled and cannot pass on
+command echo alone.
+Shared fixture configs disable automatic copy-on-selection, so selection-only
+checks do not replace the clipboard when releasing a drag.
 
 `just stress-live` runs every scenario when given no names. Each one must
 leave Kettle alive with no panic in its log, answering `get_state` within 2 s

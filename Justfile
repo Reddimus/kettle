@@ -910,8 +910,8 @@ modal-shortcuts-smoke: release
 # Drive broader live UI interactions: multiline text entry, scrollback wheel,
 # selection drag, tab creation, context-menu split dispatch, and screenshots.
 [unix]
-interaction-smoke:
-    python3 scripts/check-live-ui-smoke.py --cargo-release interaction
+interaction-smoke *ARGS:
+    python3 scripts/check-live-ui-smoke.py --cargo-release interaction {{ARGS}}
 
 # Reproduce the Unicode tables from the pinned, licensed offline inputs.
 [unix]
@@ -967,15 +967,15 @@ selection-autoscroll-smoke:
 # action, and capture expanded, compact, and hover-expanded receipt frames.
 # Artifacts land under target/diagnostics/image-paste-receipt-*.
 [unix]
-image-paste-receipt-smoke:
-    python3 scripts/check-live-ui-smoke.py --cargo-release image-paste-receipt
+image-paste-receipt-smoke *ARGS:
+    python3 scripts/check-live-ui-smoke.py --cargo-release image-paste-receipt {{ARGS}}
 
 # Copy two generated local videos, drive the real Paste action, and capture the
 # bounded native-poster receipt. Requires ffmpeg and a graphical session.
 # Artifacts land under target/diagnostics/video-paste-receipt-*.
 [unix]
-video-paste-receipt-smoke:
-    python3 scripts/check-live-ui-smoke.py --cargo-release video-paste-receipt
+video-paste-receipt-smoke *ARGS:
+    python3 scripts/check-live-ui-smoke.py --cargo-release video-paste-receipt {{ARGS}}
 
 # Focus only the cross-pane hover-wheel contract and require no surface-copy
 # support. Useful on virtual GLES adapters that render normally but cannot copy
@@ -1169,9 +1169,10 @@ remote-links-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release remote-links
 
 # Prove a multi-line paste into a shell without bracketed paste runs with no
-# confirmation. Sets the desktop clipboard (restored afterwards on macOS).
-raw-paste-smoke:
-    python3 scripts/check-live-ui-smoke.py --cargo-release raw-paste
+# confirmation. macOS restores all captured formats; other hosts require
+# --isolated-clipboard on a disposable desktop.
+raw-paste-smoke *ARGS:
+    python3 scripts/check-live-ui-smoke.py --cargo-release raw-paste {{ARGS}}
 
 # Prove a default chord a program also uses goes to the program while it owns
 # the keyboard: a byte recorder takes kitty flags and the alternate screen in a
@@ -1189,8 +1190,8 @@ program-keys-smoke:
 # the bar is open, and Esc.
 # Captures geometry/screen JSON under target/diagnostics/search-selection-*.
 [unix]
-search-selection-smoke:
-    python3 scripts/check-live-ui-smoke.py --cargo-release search-selection
+search-selection-smoke *ARGS:
+    python3 scripts/check-live-ui-smoke.py --cargo-release search-selection {{ARGS}}
 
 # Prove the visual bell washes only the pane that rang and fades: a two-pane
 # split rings BEL, the live frame must lighten that pane's body while the

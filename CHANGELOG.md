@@ -66,6 +66,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   closed-peer response during control-connection stress checks.
 - Point failed client probes to their captured output without assuming an
   authentication problem, and align the vendor soft-reset notes with DECSTR.
+- Preserve captured macOS clipboard items and formats during the raw-paste
+  smoke, and require a disposable desktop for other clipboard-replacing
+  cases. Reap a clipboard provider when writing its fixture fails, and verify
+  pasted command output independently of shell echo.
 
 ## [5.8.2] — 2026-11-02
 

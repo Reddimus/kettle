@@ -2,12 +2,10 @@
 """Exercise modifier filtering through live modal handlers on macOS."""
 
 import argparse
-from contextlib import contextmanager
 import importlib.util
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import time
 
@@ -71,36 +69,15 @@ def screenshot(live, path):
     live.screenshot(path)
 
 
+clipboard = live_ui.clipboard_tools()
+
+
 def pasteboard(request):
-    helper = Path(__file__).with_name("modal-pasteboard.js")
-    result = subprocess.run(
-        ["osascript", "-l", "JavaScript", str(helper)],
-        input=json.dumps(request), text=True, capture_output=True, timeout=10, check=True,
-    )
-    return json.loads(result.stdout)
+    return clipboard.pasteboard(request)
 
 
-@contextmanager
 def clipboard_probe(text):
-    snapshot = None
-    try:
-        snapshot = pasteboard({"op": "snapshot"})
-    except (subprocess.SubprocessError, ValueError) as error:
-        print(f"clipboard probe skipped: snapshot failed ({type(error).__name__})", flush=True)
-    if snapshot is None or not snapshot["ok"]:
-        if snapshot is not None:
-            print(f"clipboard probe skipped: {snapshot['reason']}", flush=True)
-        yield False
-        return
-    try:
-        yield snapshot
-    finally:
-        try:
-            restored = pasteboard({"op": "restore", "snapshot": snapshot, "text": text})
-            if not restored["ok"]:
-                print(f"clipboard restore skipped: {restored['reason']}", flush=True)
-        except (subprocess.SubprocessError, ValueError) as error:
-            print(f"clipboard restore skipped: helper failed ({type(error).__name__})", flush=True)
+    return clipboard.clipboard_probe(text, request=pasteboard)
 
 
 def check(kettle, out):
