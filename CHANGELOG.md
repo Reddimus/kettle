@@ -36,10 +36,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Match symbolic shortcuts such as imported Terminator `Ctrl+Plus` when
   Shift produces the symbol, while preserving explicit Shift bindings and
   the active layout's character.
+- Report why a file's hook card is unavailable when its pickup is lost while
+  Kettle waits for file metadata.
 - Preserve existing aliases when sourcing generated bash and zsh agent
   functions or wrappers, instead of failing to parse the function declaration.
 - Keep Fish command correlation enabled when the integration's source path
   contains `cx` or `ctrl-x`; source-location comments are not key bindings.
+- Reconnect SSH sessions using the final `-F` configuration and preserve login
+  names containing `@`; suppress cloning when source bindings or Match tags
+  cannot be reproduced.
+- Refuse to reconnect container sessions with relative client configuration
+  paths, which would otherwise resolve against a different working directory.
+- Recognize PowerShell's `-ec` encoded-command alias as a one-shot command,
+  while keeping `-NoExit` sessions interactive.
 
 - Give cards to interactive Claude Code launches on Linux using
   `--dangerously-skip-permissions`, `--add-dir`, `--mcp-config`, `--ide`,

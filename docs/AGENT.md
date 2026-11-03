@@ -1620,7 +1620,7 @@ interactive session to get cards.
 | A Claude Code background-daemon session stays shelf-only | The session cannot be traced to a pane | Keep the session interactive in the pane; no wrapper or launcher change fixes a daemon session |
 | `card_reason: "untraced"`: "Kettle cannot tell which pane this session runs in." | The session runs in Claude Code's background daemon or cannot be traced to this pane | Restart the session in the pane in the foreground |
 | `card_reason: "not_launched"`: "Kettle has no checked launch for this session, which usually means it did not start through Kettle's launcher." | The pane's own session has no checked launch on record: it bypassed the launcher, or its launch lapsed because the agent or its pane changed | Use the launcher or route your wrapper through it; see [Wrapping your own Claude or Codex function](#wrapping-your-own-claude-or-codex-function). Check `kettle agent-setup --status` |
-| `card_reason: "pane_cannot"`: "the pane cannot hold one right now." | The launched session's pane cannot hold a card now | Enlarge the pane, leave the full-screen program, or wait |
+| `card_reason: "pane_cannot"`: "the pane cannot hold one right now." | The launched session's pane cannot hold a card now, including a file card whose pickup became unavailable while its metadata was being read | Enlarge the pane, leave the full-screen program, or wait; restart the agent through Kettle's launcher if its pane changed |
 | ccx starts Claude Code without cards | ccx starts the executable itself and bypasses shell functions | In a throwaway profile, try the experimental entry script through `realClaudePath` or `CAS_REAL_CLAUDE_PATH`; real ccx acceptance is unverified |
 
 ### Kettle defines it for you

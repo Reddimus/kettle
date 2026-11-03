@@ -3942,7 +3942,12 @@ Other additions:
   context, daemon address, namespace, config file, in-pod container) so the
   reconnect command reproduces the original session rather than whatever the
   client's defaults reach; an option that cannot be reproduced faithfully
-  suppresses the menu entry instead. Windows retains the cross-platform
+  suppresses the menu entry instead. SSH keeps the last `-F` config path,
+  the first login/port values, and splits a plain destination at its final `@`.
+  Source-address/interface bindings and Match tags suppress cloning when their
+  selection cannot be reproduced. SSH and container configuration paths must be
+  absolute because the original client's working directory is not retained.
+  Windows retains the cross-platform
   `sysinfo` snapshot. One coalescing worker owns process enumeration for all
   windows and wakes the event loop only after publishing a complete latest
   snapshot. The app polls on redraw, at most every 200 ms, so a blinking

@@ -1915,6 +1915,7 @@ fn finish_file_facts(
                 reason: query.why.as_str().into(),
             });
             if let (Some(inline), Some(window)) = (inline, window) {
+                let cli = inline.draft.harness == kettle_render::CardHarness::Cli;
                 let cell = window
                     .renderer
                     .as_ref()
@@ -1936,7 +1937,6 @@ fn finish_file_facts(
                     && let Some(image) = item.card_image()
                 {
                     let kind = item.kind;
-                    let cli = inline.draft.harness == kettle_render::CardHarness::Cli;
                     let geometry = pane.term.term.lock().ok().map(|term| {
                         let grid = term.grid();
                         let dimensions = (grid.columns(), grid.screen_lines());
@@ -1985,13 +1985,16 @@ fn finish_file_facts(
                             let delivery = Some(delivery);
                             result.inline = delivery;
                         }
-                        Err(refusal) if cli => result.inline_refused = Some(refusal),
-                        Err(_) => {
-                            result.card_reason.get_or_insert_with(|| {
-                                kettle_ctl::show::card_reason::PANE_CANNOT.into()
-                            });
+                        Err(refusal) => {
+                            result.inline_refused =
+                                cli.then_some(refusal).or(result.inline_refused);
                         }
                     }
+                }
+                if !cli && result.inline.is_none() {
+                    result
+                        .card_reason
+                        .get_or_insert_with(|| kettle_ctl::show::card_reason::PANE_CANNOT.into());
                 }
             }
             answer_show(origin, result);
