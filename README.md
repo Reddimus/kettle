@@ -113,6 +113,9 @@ compatibility review.
 
 [Automation and MCP](docs/AGENT.md) explains supported versions, what each
 setting allows, and the local control API.
+Use `kettle agent-setup --status` to check which command runs first. The
+[wrapper forms](docs/AGENT.md#wrapping-your-own-claude-or-codex-function)
+let your function keep its account environment and call Kettle's launcher.
 
 ## Features
 

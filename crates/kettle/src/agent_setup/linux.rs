@@ -9,6 +9,8 @@ use std::process::Command;
 use kettle_ctl::agent_launch::{HeldExecutable, LaunchRegistration};
 use kettle_ctl::show::InlineTarget;
 
+use super::NoCard;
+
 pub(super) struct PreparedLaunch {
     program: PathBuf,
     native: HeldExecutable,
@@ -31,35 +33,40 @@ impl PreparedLaunch {
         Some(command)
     }
 
-    fn register(&self, target: InlineTarget, version: &str) -> bool {
-        let Some(registration) =
+    fn register(&self, target: InlineTarget, version: &str) -> Result<(), NoCard> {
+        let registration =
             LaunchRegistration::new(target, version, &self.native, self.launcher.as_ref())
-        else {
-            return false;
-        };
-        let Ok(params) = serde_json::to_value(registration) else {
-            return false;
-        };
+                .ok_or(NoCard::NotNative)?;
+        let params = serde_json::to_value(registration).map_err(|_| NoCard::NotNative)?;
         let Ok(mut client) = kettle_ctl::Client::discover_display(None) else {
             log::debug!("agent cards: launch server unavailable");
-            return false;
+            return Err(NoCard::ServerUnavailable);
         };
-        client
+        let reply = client
             .call_with_timeout("agent_launch", params, std::time::Duration::from_secs(2))
-            .ok()
-            .and_then(|reply| reply.get("enabled").and_then(serde_json::Value::as_bool))
-            .unwrap_or(false)
+            .map_err(|_| NoCard::ServerUnavailable)?;
+        if reply.get("enabled").and_then(serde_json::Value::as_bool) == Some(true) {
+            Ok(())
+        } else {
+            Err(NoCard::NotRegistered)
+        }
     }
 }
 
-pub(super) fn prepare(name: &str, target: InlineTarget, version: &str) -> Option<PreparedLaunch> {
+/// Prepare a checked launch of `name`, or say why it cannot have cards.
+pub(super) fn prepare(
+    name: &str,
+    target: InlineTarget,
+    version: &str,
+) -> Result<PreparedLaunch, NoCard> {
     if !kettle_ctl::agent_launch::card_version(target, version) {
-        return None;
+        return Err(NoCard::UnsupportedVersion);
     }
-    let path = std::env::var_os("PATH")?;
-    let cwd = std::env::current_dir().ok()?;
+    let path = std::env::var_os("PATH").ok_or(NoCard::NotNative)?;
+    let cwd = std::env::current_dir().map_err(|_| NoCard::NotNative)?;
     let prepared = resolve(name, target, version, &path, &cwd)
-        .inspect(|_| log::debug!("agent cards: executable resolved"))?;
+        .inspect(|_| log::debug!("agent cards: executable resolved"))
+        .ok_or(NoCard::NotNative)?;
     let native_path = PathBuf::from(format!(
         "/proc/self/fd/{}",
         prepared.native.as_fd().as_raw_fd()
@@ -70,14 +77,11 @@ pub(super) fn prepare(name: &str, target: InlineTarget, version: &str) -> Option
         .is_some_and(|native| native.trim() == version.trim());
     log::debug!("agent cards: held executable version matches={version_matches}");
     if !version_matches {
-        return None;
+        return Err(NoCard::NotNative);
     }
     let registered = prepared.register(target, version);
-    log::debug!("agent cards: launch registered={registered}");
-    if !registered {
-        return None;
-    }
-    Some(prepared)
+    log::debug!("agent cards: launch registered={}", registered.is_ok());
+    registered.map(|()| prepared)
 }
 
 fn resolve(

@@ -655,6 +655,18 @@ pub(crate) enum SetupShell {
     Fish,
 }
 
+/// What `agent-setup --print` writes.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SetupForm {
+    /// The `claude` or `codex` function Kettle defines.
+    #[default]
+    Function,
+    /// A function for your own startup files that calls the launcher.
+    Wrapper,
+    /// A shell script for a program that starts the agent itself.
+    Entry,
+}
+
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum SetupAgent {
     #[default]
@@ -685,10 +697,19 @@ pub(crate) struct SetupArgs {
     /// Print how to remove the selected agent's function.
     #[arg(long)]
     pub(crate) uninstall: bool,
-    /// Run by the printed function: start Codex with these arguments.
-    #[arg(long, hide = true, conflicts_with = "action")]
+    /// Start Codex through Kettle's launcher, with the arguments after `--`.
+    /// This is what the printed `codex` function runs, and what your own
+    /// wrapper can end in instead of the `codex` binary. Arguments reach
+    /// Codex as they are; its exit status is yours, or 127 if it cannot
+    /// start. Outside a Kettle pane this just runs Codex.
+    #[arg(long, conflicts_with = "action")]
     pub(crate) launch_codex: bool,
-    #[arg(long, hide = true, conflicts_with = "action")]
+    /// Start Claude Code through Kettle's launcher, with the arguments after
+    /// `--`. This is what the printed `claude` function runs, and what your
+    /// own wrapper can end in instead of the `claude` binary. Arguments reach
+    /// Claude Code as they are; its exit status is yours, or 127 if it cannot
+    /// start. Outside a Kettle pane this just runs Claude Code.
+    #[arg(long, conflicts_with = "action")]
     pub(crate) launch_claude: bool,
     /// The agent integration to print, inspect, install or remove.
     #[arg(long, value_enum, default_value_t = SetupAgent::Codex, conflicts_with_all = ["launch_codex", "launch_claude"])]
@@ -696,6 +717,12 @@ pub(crate) struct SetupArgs {
     /// The shell to print for (default: the one `SHELL` names).
     #[arg(long, value_enum, conflicts_with_all = ["status", "launch_codex", "launch_claude"])]
     pub(crate) shell: Option<SetupShell>,
+    /// What --print writes: the `function` Kettle defines (default), a
+    /// `wrapper` to put your account's environment in front of Kettle's
+    /// launcher in a function of your own, or an `entry` script for a program
+    /// that starts the agent itself.
+    #[arg(long, value_enum, requires = "print", conflicts_with_all = ["status", "uninstall", "install", "launch_codex", "launch_claude"])]
+    pub(crate) form: Option<SetupForm>,
     /// The agent's own arguments, after `--`.
     #[arg(last = true, allow_hyphen_values = true, requires = "launch")]
     pub(crate) argv: Vec<OsString>,

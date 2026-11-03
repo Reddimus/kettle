@@ -6,6 +6,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- Document `agent-setup --launch-codex` and `--launch-claude` as stable
+  wrapper interfaces, visible in help, preserving arguments, environment
+  and the agent's exit status (#760).
+- Add `agent-setup --print --form wrapper` for user startup files and
+  `--form entry` for programs that start an agent themselves. The ccx entry
+  recipe is experimental and has not been verified with a real run. Entry
+  scripts refuse to run when named `claude` or `codex` (#760).
+
+### Changed
+
+- Report a user's own `claude` or `codex` function in
+  `agent-setup --status`, and avoid claiming Codex cards when that command
+  runs first. One-shot zsh and fish startup hooks record `KETTLE_OWN_*`
+  hints bound to the defining shell's PID for status only; aliases are not
+  checked, fish abbreviations do not suppress Kettle's function, and inherited
+  hints in child shells read as not checked. They never affect admission (#760).
+- Extend Linux cardless-launch notices to Claude Code version, executable
+  and display-server failures, and Codex native card-preparation failures.
+  Codex's earlier version warning and some silent fallbacks remain (#760).
+
 ### Fixed
 
 - Give cards to interactive Claude Code launches on Linux using

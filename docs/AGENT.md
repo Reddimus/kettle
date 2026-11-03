@@ -1413,7 +1413,7 @@ pane with plugin hooks on. The flag groups match Claude Code 2.1.316's
   and `--remote-control-session-name-prefix`.
 - Optional-value options: `--resume` (`-r`), `--debug` (`-d`), `--worktree` (`-w`),
   `--remote-control`, `--from-pr`, and `--prompt-suggestions`. These consume the
-  next argument only when it is nonempty and does not start with `-`.
+  next argument when it is empty, a lone `-`, or does not start with `-`.
 - Multi-value options: `--add-dir`, `--allowedTools` (`--allowed-tools`),
   `--disallowedTools` (`--disallowed-tools`), `--mcp-config`, `--tools`,
   `--betas`, and `--file`. These require a value and consume every following
@@ -1432,22 +1432,53 @@ ignore every MCP server but its own `--mcp-config`, Kettle's plugin's included,
 so `kettle_show` does not exist (checked on Claude Code 2.1.317). Missing values, extra prompts, and non-Unicode
 arguments also get no card scope. Both stdin and stdout must be terminals.
 
-When an otherwise eligible launch in a Kettle pane gets no card scope because
-of an unknown option, `--bare`, `--safe-mode` or `--strict-mcp-config`, the
-launcher prints one line
-to stderr before starting Claude Code:
+On Linux, when an otherwise eligible Claude Code launch in a Kettle pane
+gets no card scope, the launcher prints one line to stderr before starting
+Claude Code. Codex uses the same notice when its native card preparation
+fails, with `Codex` in place of `Claude Code`:
 
 ```text
 kettle agent-setup: starting Claude Code without Kettle cards: ...; images and diagrams will go to the media shelf.
 ```
 
-The reason names only a plain long option name (lower case letters, digits and
-`-`), never a value or prompt, or says the launch turns off plugin hooks or
-ignores the plugin's MCP server. Short, unusual or overlong unknown options get
-a generic reason. An unknown option before `-p`, `--help` or another option that
-is no interactive session in this pane gets no notice. Print mode, subcommands, help and version output, detached
-sessions, malformed arguments, and non-terminal runs get no notice. Claude
-Code may redraw over the line. Items still reach the media shelf.
+The reasons are fixed text. Claude Code's argument refusals use:
+
+- `Kettle does not know --<option>`, for a plain long option name of at most
+  40 characters, including `--`, using lower case letters, digits and `-`;
+- `Kettle does not know one of its options`, for short, unusual or overlong
+  unknown options;
+- `this launch turns off plugin hooks`, for `--bare` or `--safe-mode`;
+- `this launch ignores the MCP server Kettle's plugin provides`, for
+  `--strict-mcp-config`.
+
+Version and card preparation failures use:
+
+- `Kettle could not read its version`;
+- `Kettle gives no cards to this version`;
+- `Kettle could not check the executable it would start`;
+- `Kettle's display server did not answer`;
+- `Kettle declined the launch; check that agent previews and this agent's previews are on in Settings`.
+
+These notices never include argument values, prompts, paths, versions, pids
+or environment values. An unknown option before `-p`, `--help` or another
+option that rules out an interactive session in this pane gets no notice.
+Invocations classified as print mode, subcommands, help or version output,
+detached sessions, or malformed arguments get no cardless notice, even after
+a `--bare`, `--safe-mode` or `--strict-mcp-config` flag. Non-terminal Claude
+Code runs get no cardless notice. Neither does Claude Code in a pane without
+Kettle's plugin or with plugins forbidden by policy. Claude Code may redraw
+over the line. When `kettle_show` remains
+available, items still reach the media shelf; `--strict-mcp-config` hides the
+plugin's server entirely.
+
+Codex currently uses the older "this Codex CLI is not one Kettle knows"
+warning if its version cannot be read or is unsupported. Codex 0.159 through
+0.161 and launches that set their own hooks get the shelf without a cardless
+notice. If the held executable changes after registration, Codex falls back
+to a plain launch without that notice. Non-terminal Codex launches on Linux
+skip native card preparation but can still receive the display server.
+On macOS, Codex does not gate its display-server or hook options on terminal
+stdin and stdout.
 
 Cards support Codex 0.162 or newer within 0.x, and native Claude
 Code 2.1.280 or newer within 2.x. A new major version needs a compatibility
@@ -1465,6 +1496,112 @@ The hook retrieves each card once through its own display connection with a
 five-second permit. Neither the permit nor card text enters the model's
 receipt, terminal diagnostics or screen reads. Launch housekeeping grants no
 screen reading or input control. macOS keeps its existing signature checks.
+
+### Launcher interface
+
+The launcher is a stable interface for wrappers, and both launch flags appear
+in `kettle agent-setup --help`:
+
+```sh
+kettle agent-setup --launch-codex -- ARGS
+kettle agent-setup --launch-claude -- ARGS
+```
+
+Arguments after `--` reach the agent unchanged, including empty arguments and
+literal `--` arguments. The environment passes through, so an account wrapper
+can set `CODEX_HOME` or another variable before calling the launcher. The
+command's exit status is the agent's, or 127 if the agent cannot start. Use
+the same absolute Kettle executable that the printed function names.
+
+Outside a Kettle pane, the launcher just runs the agent. Print mode,
+subcommands other than Codex's interactive `resume` and `fork`, help and
+version, and launch forms it does not understand also pass through. Claude
+Code needs terminal stdin and stdout for card admission; Codex's non-terminal
+behavior is described above. Claude Code's card launcher is Linux-only today.
+On macOS, only Codex uses launcher card admission; Claude Code keeps its
+existing plugin and signature checks, and `--launch-claude` runs it plainly.
+
+### Wrapping your own claude or codex function
+
+Kettle leaves your own function in place. Aliases and fish abbreviations
+expand command text before function lookup; they can still reach Kettle's
+function and do not count as your own function.
+If a Codex wrapper ends in `command codex`, it bypasses Kettle's launcher and
+gets no Kettle display server at all, so `kettle_show` is unavailable through
+this integration. On Linux, a Claude Code wrapper ending in `command claude`
+still gets `kettle_show` through the plugin, if offered, but items go to the
+media shelf alone. Sessions moved into Claude Code's background daemon
+cannot be traced to a pane and stay shelf-only whatever the wrapper. There
+is no launcher fix for those sessions.
+
+To keep an account wrapper's environment and reach the launcher, print a form
+for your own startup files:
+
+```sh
+kettle agent-setup --print --agent codex --shell bash --form wrapper
+kettle agent-setup --print --agent claude --shell zsh --form wrapper
+```
+
+The syntax is `--print --agent claude|codex [--shell bash|zsh|fish] --form
+function|wrapper|entry`. Choose one value from each list. Without `--shell`,
+the function forms use the shell `SHELL` names. `function` is the unchanged
+default. `wrapper` embeds the absolute Kettle path and includes a comment
+showing where account environment variables go before both commands. It
+checks `KETTLE_PANE_ID` and that Kettle is executable, calls the launcher when
+both checks pass, and runs the plain command otherwise. These forms do not
+apply to agy. Kettle never edits your startup files or agent configuration.
+
+For example, this bash or zsh profile wrapper takes the profile as its first
+argument. Replace `/absolute/path/to/kettle` with the path in your printed
+wrapper, and run it as `prodex work [ARGS...]`:
+
+```sh
+prodex() {
+  local profile="${1:?usage: prodex PROFILE [ARGS...]}"
+  shift
+  # Keep the account's environment on both the launcher and fallback.
+  if [ -n "${KETTLE_PANE_ID-}" ] && [ -x '/absolute/path/to/kettle' ]; then
+    CODEX_HOME="$HOME/.prodex/profiles/$profile" command '/absolute/path/to/kettle' agent-setup --launch-codex -- "$@"
+  else
+    CODEX_HOME="$HOME/.prodex/profiles/$profile" command codex "$@"
+  fi
+}
+```
+
+For a program that starts the agent itself, `--form entry` prints a POSIX sh
+script instead of a shell function. It needs no `--shell`, uses the same pane
+and executable checks, and `exec`s either the launcher or the plain agent.
+The known integration point is ccx's `realClaudePath` setting, or its
+`CAS_REAL_CLAUDE_PATH` environment variable.
+
+This ccx recipe is **experimental** and has not been verified against a real
+ccx run. Try it in a throwaway profile. The script must be user-owned and
+not writable by others. It refuses to run with exit status 2 and a stderr
+message when named `claude` or `codex`, since its fallback could call itself.
+It must not sit in a `PATH` directory under either name.
+Use a directory you own that others cannot write:
+
+```sh
+mkdir -p "$HOME/.local/libexec/kettle-agent"
+chmod 700 "$HOME/.local/libexec/kettle-agent"
+kettle agent-setup --print --agent claude --form entry > "$HOME/.local/libexec/kettle-agent/claude-entry"
+chmod 700 "$HOME/.local/libexec/kettle-agent/claude-entry"
+CAS_REAL_CLAUDE_PATH="$HOME/.local/libexec/kettle-agent/claude-entry" ccx run
+```
+
+Alternatively, set `realClaudePath` to that script's absolute path in the
+throwaway profile. A wrapper still has to reach the launcher with an eligible
+interactive session to get cards.
+
+#### Why a card did not show
+
+| What you see | Cause | What to do |
+|---|---|---|
+| `Codex launch:` or `Claude Code launch:` says `your own ... function runs first` | Your function takes precedence | Review `--print --agent codex --form wrapper` or the Claude equivalent and route your wrapper through the launcher |
+| Stderr says `Kettle does not know ...` | A Claude Code launch flag is unknown to Kettle | Check the supported flags above; use a supported interactive form or the shelf |
+| A version, executable or display-server notice | The launch failed a version or executable check, could not reach the server, or was declined | Check `--status`, supported versions, the native installation, and both agent-preview settings; start a new pane after enabling them |
+| A Claude Code background-daemon session stays shelf-only | The session cannot be traced to a pane | Keep the session interactive in the pane; no wrapper or launcher change fixes a daemon session |
+| ccx starts Claude Code without cards | ccx starts the executable itself and bypasses shell functions | In a throwaway profile, try the experimental entry script through `realClaudePath` or `CAS_REAL_CLAUDE_PATH`; real ccx acceptance is unverified |
 
 ### Kettle defines it for you
 
@@ -1487,8 +1624,46 @@ Claude Code previews independently enable the `claude` function too:
   configuration and defines `codex` unless you have one. Nothing is
   borrowed, so your configuration sees what it would without Kettle.
 
-Your own startup files run once each, in their usual order, and a `codex` you
-define, or can autoload, still wins. In zsh the definition waits in
+Your own startup files run once each, in their usual order. A `codex` or
+`claude` function you define or can autoload still wins. Aliases and fish
+abbreviations do not count as your own function. A fish abbreviation does
+not suppress Kettle's function. When zsh defines Kettle's function and an
+alias of that name exists, the launch is not checked: Kettle cannot know
+whether the expanded alias reaches the function.
+`kettle agent-setup --status` reports this in a Kettle pane with `Codex launch:`
+and `Claude Code launch:` lines. Each uses fixed wording for Kettle's function,
+your own function, or a launch that was not checked. For either agent,
+with `<name>` replaced by `codex` or `claude`, the wording is:
+
+| State | Launch text |
+|---|---|
+| Kettle's function | `Kettle's <name> function starts it, through agent-setup --launch-<name>` |
+| Your own command | `your own <name> function runs first; it gets cards only if it ends in Kettle's launcher` |
+| Not checked | `not checked (only zsh and fish panes Kettle started are, and an alias is not); a function of your own gets cards only if it ends in Kettle's launcher` |
+
+The last two append `; kettle agent-setup --print --agent <name> --form wrapper
+prints one that ends in Kettle's launcher`. Codex's `Delivery:` line for your
+own command says
+`none unless your own codex function ends in Kettle's launcher (see Codex launch)`.
+See the [wrapper guide](#wrapping-your-own-claude-or-codex-function).
+
+The one-shot startup hook sets `KETTLE_OWN_CLAUDE` and `KETTLE_OWN_CODEX` for
+the integrations offered: `0:<pid>` when Kettle defined the function, or
+`1:<pid>` when your defined or autoloadable function wins. The PID is the
+defining shell's own decimal PID (`$$` in zsh, `$fish_pid` in fish). When zsh
+defines Kettle's function under an alias, it exports an empty value instead.
+The hook adds no per-prompt cost. These are forgeable hints used only to choose
+status text, never for card admission; status never prints their raw values.
+Only an exact `0:<pid>` or `1:<pid>` matching the status command's parent shell
+PID is checked. Missing, empty, bare `0`/`1`, malformed or non-Unicode values,
+including PIDs with leading zeros or signs, mean not checked. New panes strip
+inherited values before their startup hooks run. Only zsh and fish panes
+Kettle starts are checked. Bash uses printed functions only; nested shells
+and shells started with arguments are not checked. A child shell can inherit
+the exported hint, but its different PID makes status read it as not checked.
+Status does not inspect function bodies or track later changes to your functions.
+
+In zsh the definition waits in
 `precmd_functions`, so a `.zshrc` that replaces that list outright gets no
 `codex` from Kettle. A system `zshenv` (`/etc/zshenv`, `/etc/zsh/zshenv`, or
 the `etc/zshenv` of the prefix zsh is installed under) runs before Kettle's

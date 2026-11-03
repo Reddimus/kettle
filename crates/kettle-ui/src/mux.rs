@@ -2354,7 +2354,10 @@ impl Mux {
         // pane. A failed spawn leaves a harmless gap; ids are never reused.
         let id = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut pane_env = pane_environment(cfg, id, std::process::id());
-        let mut remove_env = Vec::new();
+        let mut remove_env = vec![
+            "KETTLE_OWN_CLAUDE".to_owned(),
+            "KETTLE_OWN_CODEX".to_owned(),
+        ];
         if let Some(launch) = launch {
             for (name, value) in launch.environment.iter() {
                 pane_env.retain(|(key, _)| key != name);
@@ -10801,6 +10804,24 @@ mod node_tests {
             .expect("terminal spawn");
         assert!(allocated < environment && environment < spawned);
         assert_eq!(spawn.matches("NEXT_PANE_ID.fetch_add(").count(), 1);
+    }
+
+    #[test]
+    fn pane_spawn_strips_inherited_agent_function_markers() {
+        let src = production_source();
+        let spawn = src.split_once("fn spawn_pane(").expect("spawn_pane").1;
+        let removed = spawn
+            .find("let mut remove_env = vec![")
+            .expect("inherited variables removed for every pane");
+        let names = spawn[removed..].split_once("];").unwrap().0;
+        for marker in ["KETTLE_OWN_CLAUDE", "KETTLE_OWN_CODEX"] {
+            assert!(names.contains(&format!("\"{marker}\".to_owned()")));
+        }
+        let spawned = spawn
+            .find("Terminal::new_with_launch_environment(")
+            .expect("terminal spawn");
+        assert!(removed < spawned);
+        assert!(spawn[spawned..].contains("remove_env: &remove_env"));
     }
 
     #[test]

@@ -68,19 +68,111 @@ pub fn claude_function(kettle: &Path, shell: CodexShell) -> Result<String, Funct
 }
 
 fn agent_function(kettle: &Path, shell: CodexShell, name: &str) -> Result<String, FunctionError> {
-    let path = kettle_path(kettle)?;
+    let path = quoted_kettle_path(kettle, shell)?;
     Ok(match shell {
         CodexShell::Bash | CodexShell::Zsh => {
-            let path = path.replace('\'', "'\\''");
-            format!("{name}() {{\n  command '{path}' agent-setup --launch-{name} -- \"$@\"\n}}\n")
+            format!("{name}() {{\n  command {path} agent-setup --launch-{name} -- \"$@\"\n}}\n")
         }
         CodexShell::Fish => {
-            let path = path.replace('\\', "\\\\").replace('\'', "\\'");
-            format!(
-                "function {name}\n  command '{path}' agent-setup --launch-{name} -- $argv\nend\n"
-            )
+            format!("function {name}\n  command {path} agent-setup --launch-{name} -- $argv\nend\n")
         }
     })
+}
+
+fn quoted_kettle_path(kettle: &Path, shell: CodexShell) -> Result<String, FunctionError> {
+    let path = kettle_path(kettle)?;
+    let path = match shell {
+        CodexShell::Bash | CodexShell::Zsh => path.replace('\'', "'\\''"),
+        CodexShell::Fish => path.replace('\\', "\\\\").replace('\'', "\\'"),
+    };
+    Ok(format!("'{path}'"))
+}
+
+/// A wrapper the user can customize with an environment prefix on both
+/// commands. `name` must be `claude` or `codex`.
+pub fn wrapper_snippet(
+    kettle: &Path,
+    shell: CodexShell,
+    name: &str,
+) -> Result<String, FunctionError> {
+    let path = quoted_kettle_path(kettle, shell)?;
+    let profile = if name == "codex" {
+        "CODEX_HOME=\"$HOME/.codex-work\""
+    } else {
+        "CLAUDE_CONFIG_DIR=\"$HOME/.claude-work\""
+    };
+    Ok(match shell {
+        CodexShell::Bash | CodexShell::Zsh => format!(
+            "{name}() {{\n\
+             \x20 # Put your account's environment variables before both commands below,\n\
+             \x20 # for example: {profile} command ...\n\
+             \x20 if [ -n \"${{KETTLE_PANE_ID-}}\" ] && [ -x {path} ]; then\n\
+             \x20   command {path} agent-setup --launch-{name} -- \"$@\"\n\
+             \x20 else\n\
+             \x20   command {name} \"$@\"\n\
+             \x20 fi\n\
+             }}\n"
+        ),
+        CodexShell::Fish => format!(
+            "function {name}\n\
+             \x20 # Put your account's environment variables before both commands below,\n\
+             \x20 # for example: {profile} command ...\n\
+             \x20 if set -q KETTLE_PANE_ID; and test -x {path}\n\
+             \x20   command {path} agent-setup --launch-{name} -- $argv\n\
+             \x20 else\n\
+             \x20   command {name} $argv\n\
+             \x20 end\n\
+             end\n"
+        ),
+    })
+}
+
+/// An experimental POSIX entry script for a program that starts the agent
+/// itself. `name` must be `claude` or `codex`.
+pub fn entry_script(kettle: &Path, name: &str) -> Result<String, FunctionError> {
+    let path = quoted_kettle_path(kettle, CodexShell::Bash)?;
+    Ok(format!(
+        "#!/bin/sh\n\
+         # Hand the launch to Kettle's launcher so a program that starts {name}\n\
+         # itself (for example ccx's realClaudePath setting) gets Kettle cards.\n\
+         # This entry script is experimental. It must NOT be named claude or codex\n\
+         # and must not sit in a PATH directory under either name.\n\
+         # It must be user-owned and not writable by others.\n\
+         case \"${{0##*/}}\" in claude|codex) echo \"kettle entry script: do not name it claude or codex\" >&2; exit 2 ;; esac\n\
+         if [ -n \"${{KETTLE_PANE_ID-}}\" ] && [ -x {path} ]; then\n\
+         \x20 exec {path} agent-setup --launch-{name} -- \"$@\"\n\
+         fi\n\
+         # Outside a Kettle pane, run whatever {name} is first on PATH.\n\
+         exec {name} \"$@\"\n"
+    ))
+}
+
+/// A forgeable diagnostic hint, never an admission check or printable value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentFunction {
+    Kettle,
+    Own,
+    Unchecked,
+}
+
+/// Read only the literal markers for `claude` and `codex`; other names and
+/// values are unchecked. Only the defining shell's PID matches; inherited
+/// markers in child shells are unchecked. Never use the marker for admission.
+pub fn agent_function_marker(
+    var: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    name: &str,
+    shell_pid: u32,
+) -> AgentFunction {
+    let variable = match name {
+        "claude" => "KETTLE_OWN_CLAUDE",
+        "codex" => "KETTLE_OWN_CODEX",
+        _ => return AgentFunction::Unchecked,
+    };
+    match var(variable).as_deref() {
+        Some(value) if value == format!("0:{shell_pid}").as_str() => AgentFunction::Kettle,
+        Some(value) if value == format!("1:{shell_pid}").as_str() => AgentFunction::Own,
+        _ => AgentFunction::Unchecked,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +239,7 @@ pub(crate) fn startup_files(
 /// The function goes in as it is, never re-indented: a newline inside the
 /// quoted path is part of the path.
 fn zsh_definition(function: &str, name: &str) -> String {
+    let marker = format!("KETTLE_OWN_{}", name.to_ascii_uppercase());
     let title = if name == "codex" {
         "Codex"
     } else {
@@ -167,6 +260,13 @@ fn zsh_definition(function: &str, name: &str) -> String {
          \x20   'builtin' 'unfunction' '_kettle_{name}'\n\
          \x20   if (( ! ${{+functions[{name}]}} )); then\n\
          {function}\
+         \x20     if (( ${{+aliases[{name}]}} )); then\n\
+         \x20       'builtin' 'export' {marker}=\n\
+         \x20     else\n\
+         \x20       'builtin' 'export' {marker}=0:$$\n\
+         \x20     fi\n\
+         \x20   else\n\
+         \x20     'builtin' 'export' {marker}=1:$$\n\
          \x20   fi\n\
          \x20 }}\n\
          \x20 'builtin' 'typeset' -ga precmd_functions\n\
@@ -185,8 +285,16 @@ pub(crate) fn fish_code(executable: &Path, agents: Agents) -> Result<String, Fun
     let mut code = String::new();
     for name in agents.names() {
         let function = agent_function(executable, CodexShell::Fish, name)?;
+        let marker = format!("KETTLE_OWN_{}", name.to_ascii_uppercase());
         code.push_str(&format!(
-            "if status is-interactive; and not functions -q {name}\n{function}end\n"
+            "if status is-interactive\n\
+             \x20 if functions -q {name}\n\
+             \x20   set -gx {marker} 1:$fish_pid\n\
+             \x20 else\n\
+             {function}\
+             \x20   set -gx {marker} 0:$fish_pid\n\
+             \x20 end\n\
+             end\n"
         ));
     }
     Ok(code)
@@ -348,22 +456,143 @@ mod tests {
     #[test]
     fn the_startup_matches_the_checked_fixtures() {
         let kettle = Path::new("/kettle-stand-in/bin/kettle");
-        let files = startup_files(kettle, "0", CODEX).unwrap();
-        let zsh = files
-            .files
-            .iter()
-            .find(|(path, _)| *path == ZSH_FILE)
-            .map(|(_, contents)| contents.as_str());
+        for name in ["claude", "codex"] {
+            let agents = Agents {
+                codex: name == "codex",
+                claude: name == "claude",
+            };
+            let files = startup_files(kettle, "0", agents).unwrap();
+            let zsh = &files
+                .files
+                .iter()
+                .find(|(path, _)| *path == ZSH_FILE)
+                .unwrap()
+                .1;
+            assert_fixture(&format!("shell-integration/{name}-zshenv"), zsh);
+            assert_fixture(
+                &format!("shell-integration/{name}-init.fish"),
+                &fish_code(kettle, agents).unwrap(),
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_fixture(path: &str, actual: &str) {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/fixtures")
+            .join(path);
         assert_eq!(
-            zsh,
-            Some(include_str!(
-                "../../../scripts/fixtures/shell-integration/codex-zshenv"
-            ))
+            actual.as_bytes(),
+            std::fs::read(&path).unwrap(),
+            "{}",
+            path.display()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_wrapper_and_entry_snippets_match_their_fixtures() {
+        let kettle = Path::new("/fixture/kettle");
+        for name in ["claude", "codex"] {
+            for shell in [CodexShell::Bash, CodexShell::Zsh, CodexShell::Fish] {
+                assert_fixture(
+                    &format!("agent-wrappers/{name}-{}.txt", shell.name()),
+                    &wrapper_snippet(kettle, shell, name).unwrap(),
+                );
+            }
+            assert_fixture(
+                &format!("agent-wrappers/{name}-entry.txt"),
+                &entry_script(kettle, name).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn agent_function_markers_accept_only_known_names_and_exact_shell_pids() {
+        for name in ["claude", "codex"] {
+            for (value, expected) in [
+                (Some("0:12345"), AgentFunction::Kettle),
+                (Some("1:12345"), AgentFunction::Own),
+                (Some("0"), AgentFunction::Unchecked),
+                (Some("1"), AgentFunction::Unchecked),
+                (Some("0:12346"), AgentFunction::Unchecked),
+                (Some("1:12346"), AgentFunction::Unchecked),
+                (Some("0:012345"), AgentFunction::Unchecked),
+                (Some("1:012345"), AgentFunction::Unchecked),
+                (Some("0:+12345"), AgentFunction::Unchecked),
+                (Some("1:-12345"), AgentFunction::Unchecked),
+                (Some("00:12345"), AgentFunction::Unchecked),
+                (Some("01:12345"), AgentFunction::Unchecked),
+                (Some("2:12345"), AgentFunction::Unchecked),
+                (Some("0:12345x"), AgentFunction::Unchecked),
+                (Some("1:12345:0"), AgentFunction::Unchecked),
+                (Some("0:12345\n"), AgentFunction::Unchecked),
+                (Some("1:12345 "), AgentFunction::Unchecked),
+                (Some(" 0:12345"), AgentFunction::Unchecked),
+                (Some("0:"), AgentFunction::Unchecked),
+                (Some("1:4294967296"), AgentFunction::Unchecked),
+                (Some(""), AgentFunction::Unchecked),
+                (Some("2"), AgentFunction::Unchecked),
+                (Some("true"), AgentFunction::Unchecked),
+                (None, AgentFunction::Unchecked),
+            ] {
+                let var = |key: &str| {
+                    assert_eq!(key, format!("KETTLE_OWN_{}", name.to_ascii_uppercase()));
+                    value.map(std::ffi::OsString::from)
+                };
+                assert_eq!(
+                    agent_function_marker(&var, name, 12345),
+                    expected,
+                    "{name} {value:?}"
+                );
+                if expected != AgentFunction::Unchecked {
+                    assert_eq!(
+                        agent_function_marker(&var, name, 12346),
+                        AgentFunction::Unchecked,
+                        "child shell inherited {name} {value:?}"
+                    );
+                }
+            }
+        }
         assert_eq!(
-            fish_code(kettle, CODEX).unwrap(),
-            include_str!("../../../scripts/fixtures/shell-integration/codex-init.fish")
+            agent_function_marker(
+                &|_| panic!("unknown names must not read the environment"),
+                "agy",
+                12345
+            ),
+            AgentFunction::Unchecked
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            assert_eq!(
+                agent_function_marker(
+                    &|_| Some(std::ffi::OsString::from_vec(b"0:12345\xff".to_vec())),
+                    "codex",
+                    12345,
+                ),
+                AgentFunction::Unchecked
+            );
+        }
+    }
+
+    #[test]
+    fn wrapper_and_entry_paths_use_the_function_validation() {
+        for (path, error) in [
+            (Path::new("relative/kettle"), FunctionError::UnnamedKettle),
+            #[cfg(unix)]
+            (
+                Path::new("/x/AppTranslocation/y/kettle"),
+                FunctionError::Translocated,
+            ),
+        ] {
+            for name in ["claude", "codex"] {
+                assert_eq!(entry_script(path, name), Err(error));
+                for shell in [CodexShell::Bash, CodexShell::Zsh, CodexShell::Fish] {
+                    assert_eq!(wrapper_snippet(path, shell, name), Err(error));
+                }
+            }
+        }
     }
 
     /// The startup's files are installed, and what new panes are offered
@@ -510,13 +739,13 @@ mod tests {
             arguments: &[&str],
             input: &str,
         ) -> String {
-            self.launch(program, zdotdir, arguments, input, true)
+            self.launch(program, zdotdir, arguments, input, Some(&[]))
         }
 
         /// [`Self::run`] without Kettle's additions: the shell as it would
         /// be outside Kettle, its system configuration included.
         fn run_bare(&self, program: &str, arguments: &[&str]) -> String {
-            self.launch(program, None, arguments, "", false)
+            self.launch(program, None, arguments, "", None)
         }
 
         fn launch(
@@ -525,17 +754,18 @@ mod tests {
             zdotdir: Option<&str>,
             arguments: &[&str],
             input: &str,
-            kettle: bool,
+            kettle: Option<&[(&str, &str)]>,
         ) -> String {
             use std::io::Write as _;
             let _ = std::fs::remove_file(self.home.join("trace"));
-            let additions = kettle.then(|| self.additions(program, zdotdir));
+            let additions = kettle.map(|_| self.additions(program, zdotdir));
             let mut command = std::process::Command::new(program);
             command
                 .env_clear()
                 .env("HOME", &self.home)
                 .env("TERM", "dumb")
                 .env("PATH", "/usr/bin:/bin")
+                .envs(kettle.into_iter().flatten().copied())
                 .args(arguments)
                 .args(additions.iter().flat_map(|additions| &additions.args))
                 .stdin(std::process::Stdio::piped())
@@ -566,6 +796,276 @@ mod tests {
             .iter()
             .map(|directory| format!("{directory}/{program}"))
             .find(|path| Path::new(path).is_file())
+    }
+
+    #[cfg(unix)]
+    fn assert_shell_marker(output: &str, state: &str) {
+        let pid = output
+            .lines()
+            .find_map(|line| line.strip_prefix("shell_pid="))
+            .unwrap_or_else(|| panic!("missing shell PID: {output}"))
+            .parse::<u32>()
+            .unwrap();
+        let expected = if state.is_empty() {
+            String::new()
+        } else {
+            format!("{state}:{pid}")
+        };
+        assert!(
+            output
+                .lines()
+                .any(|line| line == format!("marker={expected}")),
+            "{output}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zsh_records_user_functions_aliases_and_overwrites_inherited_markers() {
+        let Some(zsh) = installed("zsh") else {
+            eprintln!("zsh is not installed; skipped");
+            return;
+        };
+        let scratch = Scratch::agents(Agents {
+            codex: true,
+            claude: true,
+        });
+        if scratch.additions(&zsh, None).env.is_empty() {
+            eprintln!("this system's zshenv keeps Kettle out of zsh; skipped");
+            return;
+        }
+        for name in ["claude", "codex"] {
+            let marker = format!("KETTLE_OWN_{}", name.to_ascii_uppercase());
+            for (rc, inherited, expected) in [
+                (String::new(), "1:999999", "0"),
+                (
+                    format!("{name}() {{ print -r -- user; }}\n"),
+                    "0:999999",
+                    "1",
+                ),
+                (format!("alias {name}='print -r -- user'\n"), "1:999999", ""),
+                (format!("autoload -Uz {name}\n"), "0:999999", "1"),
+            ] {
+                scratch.write(".zshrc", &rc);
+                let probe = format!(
+                    "printf '\\nshell_pid=%s\\n' \"$$\"\n\
+                     command /bin/sh -c 'printf \"\\nmarker=%s\\n\" \"${marker}\"'\n\
+                     print -r -- \"function=${{+functions[{name}]}} hook=${{+functions[_kettle_{name}]}}\"\n\
+                     exit\n"
+                );
+                let out =
+                    scratch.launch(&zsh, None, &["-i"], &probe, Some(&[(&marker, inherited)]));
+                assert_shell_marker(&out, expected);
+                assert!(out.contains("function=1 hook=0"), "{rc:?}: {out}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fish_records_user_functions_abbreviations_and_overwrites_inherited_markers() {
+        let Some(fish) = installed("fish") else {
+            eprintln!("fish is not installed; skipped");
+            return;
+        };
+        for name in ["claude", "codex"] {
+            for (config, autoload, inherited, expected) in [
+                (String::new(), false, "1:999999", "0"),
+                (
+                    format!("function {name}\n echo user\nend\n"),
+                    false,
+                    "0:999999",
+                    "1",
+                ),
+                (
+                    format!("abbr --add {name} echo user\n"),
+                    false,
+                    "1:999999",
+                    "0",
+                ),
+                (String::new(), true, "0:999999", "1"),
+            ] {
+                let scratch = Scratch::agents(Agents {
+                    codex: true,
+                    claude: true,
+                });
+                scratch.write(".config/fish/config.fish", &config);
+                if autoload {
+                    scratch.write(
+                        &format!(".config/fish/functions/{name}.fish"),
+                        &format!("function {name}\n echo user\nend\n"),
+                    );
+                }
+                let marker = format!("KETTLE_OWN_{}", name.to_ascii_uppercase());
+                let probe = format!(
+                    "echo shell_pid=$fish_pid; command /bin/sh -c 'printf \"marker=%s\\n\" \"${marker}\"'; \
+                     functions -q {name}; and echo function-present; {name}"
+                );
+                let out = scratch.launch(
+                    &fish,
+                    None,
+                    &["-i", "-c", &probe],
+                    "",
+                    Some(&[(&marker, inherited)]),
+                );
+                assert_shell_marker(&out, expected);
+                assert!(out.contains("function-present"), "{config:?}: {out}");
+                assert_eq!(
+                    out.contains("<agent-setup>"),
+                    expected == "0",
+                    "{config:?}: {out}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_and_entry_paths_with_quotes_and_newlines_are_valid_shell_syntax() {
+        let kettle = Path::new("/fixture/quote'and\nnewline\\/kettle");
+        for (program, shell, flag) in [
+            ("bash", CodexShell::Bash, "-n"),
+            ("zsh", CodexShell::Zsh, "-n"),
+            ("fish", CodexShell::Fish, "--no-execute"),
+            ("sh", CodexShell::Bash, "-n"),
+        ] {
+            let Some(program) = installed(program) else {
+                eprintln!("{program} is not installed; skipped");
+                continue;
+            };
+            for name in ["claude", "codex"] {
+                let mut scripts = vec![wrapper_snippet(kettle, shell, name).unwrap()];
+                if shell != CodexShell::Fish {
+                    scripts.push(entry_script(kettle, name).unwrap());
+                }
+                for script in scripts {
+                    let output = std::process::Command::new(&program)
+                        .args([flag, "-c", &script])
+                        .env_clear()
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{program}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrappers_and_entries_forward_arguments_environment_status_and_fallback() {
+        let Some(bash) = installed("bash") else {
+            eprintln!("bash is not installed; skipped");
+            return;
+        };
+        let Some(sh) = installed("sh") else {
+            eprintln!("sh is not installed; skipped");
+            return;
+        };
+        let base = kettle_test_support::private_tempdir("kettle-agent-wrapper-");
+        let bin = base.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let source = base.path().join("stand-in.sh");
+        let kettle = bin.join("quote'and\nnewline\\kettle");
+        std::fs::write(
+            &source,
+            "#!/bin/sh\nprintf 'kettle:%s\\n' \"$CODEX_HOME\"\nprintf '%s\\n' \"$@\"\nexit 37\n",
+        )
+        .unwrap();
+        kettle_test_support::copy_executable_fixture(&source, &kettle).unwrap();
+        std::fs::write(
+            &source,
+            "#!/bin/sh\nprintf 'plain:%s\\n' \"$CODEX_HOME\"\nprintf '%s\\n' \"$@\"\nexit 19\n",
+        )
+        .unwrap();
+        for name in ["claude", "codex"] {
+            kettle_test_support::copy_executable_fixture(&source, &bin.join(name)).unwrap();
+        }
+        let non_executable = bin.join("not-executable");
+        std::fs::write(&non_executable, "must not run\n").unwrap();
+        let missing = bin.join("missing");
+        let args = ["", "two words", "line\nbreak", "--"];
+        let home = base.path().join(".codex-work");
+        for name in ["claude", "codex"] {
+            for (path, pane, launched) in [
+                (kettle.as_path(), true, true),
+                (kettle.as_path(), false, false),
+                (non_executable.as_path(), true, false),
+                (missing.as_path(), true, false),
+            ] {
+                let wrapper = wrapper_snippet(path, CodexShell::Bash, name)
+                    .unwrap()
+                    .replace(
+                        "    command ",
+                        "    CODEX_HOME=\"$HOME/.codex-work\" command ",
+                    );
+                let wrapper = format!("{wrapper}{name} \"$@\"\n");
+                for (program, script) in
+                    [(&bash, wrapper), (&sh, entry_script(path, name).unwrap())]
+                {
+                    let mut command = std::process::Command::new(program);
+                    command
+                        .env_clear()
+                        .env("HOME", base.path())
+                        .env("PATH", &bin);
+                    // The entry inherits the prefix from its caller.
+                    if program == &sh {
+                        let entry = base.path().join(format!("{name}-entry"));
+                        std::fs::write(&entry, &script).unwrap();
+                        command.arg(entry).env("CODEX_HOME", &home);
+                        for filename in ["claude", "codex"] {
+                            let entry = base.path().join(filename);
+                            std::fs::write(&entry, &script).unwrap();
+                            let output = std::process::Command::new(&sh)
+                                .env_clear()
+                                .env("PATH", &bin)
+                                .env("KETTLE_PANE_ID", "fixture-pane")
+                                .arg(entry)
+                                .args(args)
+                                .output()
+                                .unwrap();
+                            assert_eq!(output.status.code(), Some(2), "{filename}");
+                            assert!(output.stdout.is_empty());
+                            assert_eq!(
+                                output.stderr,
+                                b"kettle entry script: do not name it claude or codex\n"
+                            );
+                        }
+                    } else {
+                        command.args(["-c", &script, "wrapper-test"]);
+                    }
+                    command.args(args);
+                    if pane {
+                        command.env("KETTLE_PANE_ID", "fixture-pane");
+                    }
+                    let output = command.output().unwrap();
+                    assert_eq!(output.status.code(), Some(if launched { 37 } else { 19 }));
+                    assert!(
+                        output.stderr.is_empty(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let mut expected = format!(
+                        "{}:{}\n",
+                        if launched { "kettle" } else { "plain" },
+                        home.display()
+                    );
+                    if launched {
+                        expected.push_str(&format!("agent-setup\n--launch-{name}\n--\n"));
+                    }
+                    expected.push_str(&args.join("\n"));
+                    expected.push('\n');
+                    assert_eq!(
+                        output.stdout,
+                        expected.as_bytes(),
+                        "{program} {path:?} pane={pane}"
+                    );
+                }
+            }
+        }
     }
 
     /// A pane's zsh runs the user's startup files once each, in zsh's own
