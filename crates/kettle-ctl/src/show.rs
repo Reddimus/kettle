@@ -120,6 +120,21 @@ impl InlineRefusal {
     }
 }
 
+/// The words for why a card an adapter's hook asked for did not come, its
+/// item on the shelf all the same. Fixed, so they can be told to a model.
+pub mod card_reason {
+    /// Kettle could not trace the call to a process in the pane, as for a
+    /// session that runs in a background daemon.
+    pub const UNTRACED: &str = "untraced";
+    /// The call is the pane's own, but no checked launch of its agent is on
+    /// record: it did not start through Kettle's launcher, or its launch
+    /// lapsed since, as when the agent or its pane's root changed.
+    pub const NOT_LAUNCHED: &str = "not_launched";
+    /// The agent is launched, but the pane cannot hold a card now: too
+    /// small, a full-screen program, or as many cards as it may have.
+    pub const PANE_CANNOT: &str = "pane_cannot";
+}
+
 /// An inline card's delivery, for the adapter that asked and never for the
 /// model: the message its harness prints once, as Kettle wrote it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -499,6 +514,11 @@ pub struct ShowResult {
     /// Why `kettle show --inline` got no card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_refused: Option<InlineRefusal>,
+    /// Why an adapter's hook card, which it asked for, did not come: one of
+    /// the words in [`card_reason`]. An open string, so that a Kettle that
+    /// adds a word does not break an older client reading the result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_reason: Option<String>,
     /// For a PDF: the page shown, from 0, and how many the document has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<ShowPage>,
@@ -658,6 +678,7 @@ impl ShowResult {
                 .collect(),
             inline: None,
             inline_refused: None,
+            card_reason: None,
             page: None,
             video: None,
             file: None,

@@ -781,6 +781,7 @@ fn tool_kettle_show(
             {
                 inbox.mark(artifact);
             }
+            let card_requested = card.is_some();
             let stored = match (card, &result.inline) {
                 (Some(id), Some(delivery)) if delivery.fits() => {
                     session.store_delivery(id, delivery.clone(), std::time::Instant::now())
@@ -790,7 +791,7 @@ fn tool_kettle_show(
             if stored {
                 show_sent_card(&result, name.as_deref().unwrap_or("diagram"))
             } else {
-                show_sent(&result)
+                show_sent_without_card(&result, card_requested)
             }
         }
         Ok(Err(_)) => show_failed(crate::show_cli::Refusal::UnknownReply),
@@ -845,6 +846,39 @@ fn show_sent(result: &kettle_ctl::show::ShowResult) -> Value {
     }
     if let Some(file) = &result.file {
         sent["structuredContent"]["file"] = serde_json::to_value(file).unwrap_or_default();
+    }
+    sent
+}
+
+fn card_reason_sentence(reason: &str) -> &'static str {
+    use kettle_ctl::show::card_reason::{NOT_LAUNCHED, PANE_CANNOT, UNTRACED};
+    match reason {
+        UNTRACED => {
+            "No card shows below this call: Kettle cannot tell which pane this session runs in. The item is on the shelf."
+        }
+        NOT_LAUNCHED => {
+            "No card shows below this call: Kettle has no checked launch for this session, which usually means it did not start through Kettle's launcher. The user can run kettle agent-setup --status. The item is on the shelf."
+        }
+        PANE_CANNOT => {
+            "No card shows below this call: the pane cannot hold one right now. The item is on the shelf."
+        }
+        _ => "No card shows below this call. The item is on the shelf.",
+    }
+}
+
+fn show_sent_without_card(result: &kettle_ctl::show::ShowResult, card_requested: bool) -> Value {
+    use kettle_ctl::show::card_reason::{NOT_LAUNCHED, PANE_CANNOT, UNTRACED};
+    let mut sent = show_sent(result);
+    if card_requested {
+        // A card that was asked for and did not come is said once, with the
+        // word for it when Kettle gave one and the plain line when it did not.
+        let reason = result.card_reason.as_deref().unwrap_or("");
+        if matches!(reason, UNTRACED | NOT_LAUNCHED | PANE_CANNOT) {
+            sent["structuredContent"]["card_reason"] = json!(reason);
+        }
+        if let Some(text) = sent["content"][0]["text"].as_str() {
+            sent["content"][0]["text"] = json!(format!("{text} {}", card_reason_sentence(reason)));
+        }
     }
     sent
 }
@@ -1885,6 +1919,112 @@ mod tests {
         assert_eq!(missing["isError"], json!(true), "the id is required");
     }
 
+    #[test]
+    fn a_card_reason_is_a_fixed_word_with_a_fixed_line() {
+        use kettle_ctl::show::card_reason::{NOT_LAUNCHED, PANE_CANNOT, UNTRACED};
+        let cases = [
+            (
+                UNTRACED,
+                "untraced",
+                "No card shows below this call: Kettle cannot tell which pane this session runs in. The item is on the shelf.",
+            ),
+            (
+                NOT_LAUNCHED,
+                "not_launched",
+                "No card shows below this call: Kettle has no checked launch for this session, which usually means it did not start through Kettle's launcher. The user can run kettle agent-setup --status. The item is on the shelf.",
+            ),
+            (
+                PANE_CANNOT,
+                "pane_cannot",
+                "No card shows below this call: the pane cannot hold one right now. The item is on the shelf.",
+            ),
+            (
+                "unknown/private123{$ENV}",
+                "unknown/private123{$ENV}",
+                "No card shows below this call. The item is on the shelf.",
+            ),
+        ];
+        let mut lines = std::collections::BTreeSet::new();
+        for (reason, word, expected) in cases {
+            assert_eq!(reason, word);
+            let line = card_reason_sentence(reason);
+            assert_eq!(line, expected);
+            assert!(line.is_ascii() && line.len() < 256);
+            assert!(
+                !line
+                    .bytes()
+                    .any(|byte| byte.is_ascii_digit() || b"/{$".contains(&byte))
+            );
+            assert!(lines.insert(line), "each reason has a distinct line");
+        }
+    }
+
+    #[test]
+    fn a_shelf_result_says_why_there_is_no_card() {
+        use kettle_ctl::show::card_reason::{NOT_LAUNCHED, PANE_CANNOT, UNTRACED};
+        let mut result = kettle_ctl::show::ShowResult::new(
+            (4, true, 2),
+            9,
+            kettle_media::MediaKind::Raster,
+            (640, 480),
+            &[],
+        );
+        let original = show_sent(&result);
+        // A card asked for with no word from Kettle still says it did not
+        // come, plainly and once; a session that asked for none hears nothing.
+        let plain = show_sent_without_card(&result, true);
+        assert!(plain["structuredContent"].get("card_reason").is_none());
+        assert_eq!(
+            plain["content"][0]["text"],
+            json!(format!(
+                "{} {}",
+                original["content"][0]["text"].as_str().unwrap(),
+                card_reason_sentence("")
+            ))
+        );
+        assert_eq!(show_sent_without_card(&result, false), original);
+        for reason in [
+            UNTRACED,
+            NOT_LAUNCHED,
+            PANE_CANNOT,
+            "unknown/private123{$ENV}",
+        ] {
+            result.card_reason = Some(reason.into());
+            let sent = show_sent_without_card(&result, true);
+            let mut expected = original.clone();
+            expected["content"][0]["text"] = json!(format!(
+                "{} {}",
+                original["content"][0]["text"].as_str().unwrap(),
+                card_reason_sentence(reason)
+            ));
+            if reason == "unknown/private123{$ENV}" {
+                assert!(sent["structuredContent"].get("card_reason").is_none());
+                assert!(!sent.to_string().contains(reason));
+            } else {
+                expected["structuredContent"]["card_reason"] = json!(reason);
+            }
+            assert_eq!(sent, expected);
+            assert_eq!(
+                show_sent_without_card(&result, false),
+                original,
+                "no card requested"
+            );
+        }
+    }
+
+    #[test]
+    fn a_show_result_accepts_old_clients_and_unknown_card_reasons() {
+        let mut value = json!({
+            "pane": 4, "verified": true, "window": 2, "item": 9,
+            "kind": "raster", "width": 640, "height": 480, "warnings": []
+        });
+        let old: kettle_ctl::show::ShowResult = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(old.card_reason, None);
+        value["card_reason"] = json!("a_future_reason");
+        let future: kettle_ctl::show::ShowResult = serde_json::from_value(value).unwrap();
+        assert_eq!(future.card_reason.as_deref(), Some("a_future_reason"));
+    }
+
     /// A card's text is the hook's, never the model's: the line says where
     /// the media shows, and nothing of the card is in the result.
     #[test]
@@ -1910,6 +2050,15 @@ mod tests {
         assert_eq!(sent["structuredContent"]["delivery"], "card");
         assert_eq!(sent["structuredContent"]["model_has_seen"], false);
         assert!(!show_sent(&result).to_string().contains("SECRET-ROWS"));
+        for reason in [kettle_ctl::show::card_reason::UNTRACED, "SECRET-ROWS"] {
+            result.card_reason = Some(reason.into());
+            assert_eq!(show_sent_card(&result, "plot.png"), sent);
+            let shelf = show_sent_without_card(&result, true);
+            let encoded = shelf.to_string();
+            assert!(!encoded.contains("SECRET-ROWS") && !encoded.contains('\u{10eeee}'));
+            assert!(!encoded.contains("abababababababababababababababab"));
+            assert!(!encoded.contains("plot.png"));
+        }
     }
 
     /// The model is told where the media went and that it has not seen it;
@@ -1927,6 +2076,7 @@ mod tests {
             warnings: vec!["font_fallback".into()],
             inline: None,
             inline_refused: None,
+            card_reason: None,
             page: None,
             video: None,
             file: None,

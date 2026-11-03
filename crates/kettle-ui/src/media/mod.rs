@@ -172,6 +172,9 @@ pub(crate) struct Draft {
     /// Why `kettle show --inline` gets no card, when that was decided at
     /// admission.
     pub inline_refused: Option<kettle_ctl::show::InlineRefusal>,
+    /// Why a card an adapter's hook asked for is not coming, when that was
+    /// decided at admission: one of [`kettle_ctl::show::card_reason`].
+    pub card_reason: Option<&'static str>,
     /// Diagrams copied or selected together, whose first the push renders:
     /// its item keeps them all as its gallery.
     pub gallery: Option<std::sync::Arc<Gallery>>,
@@ -611,6 +614,7 @@ mod tests {
                 provenance: Provenance::Verified,
                 inline: None,
                 inline_refused: None,
+                card_reason: None,
                 gallery: None,
             },
             ItemSource::sample(b"<svg/>").spec,

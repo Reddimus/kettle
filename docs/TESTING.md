@@ -100,6 +100,18 @@ Clippy for both crates with `--all-targets -- -D warnings`.
 
 ### Main gates
 
+The MCP unit tests in `crates/kettle/src/mcp_tools.rs` include
+`a_card_reason_is_a_fixed_word_with_a_fixed_line` for fixed ASCII wording,
+distinct lines under 256 bytes, and excluded characters.
+`a_shelf_result_says_why_there_is_no_card` checks all three known reasons,
+unknown-word privacy, and unchanged receipts when no card was requested.
+`a_show_result_accepts_old_clients_and_unknown_card_reasons` covers missing
+and future reason words during deserialization.
+`a_card_result_carries_none_of_the_cards_text` checks receipt privacy even
+with a reason set. `the_instructions_follow_the_placement` pins the guidance
+to say once that no card shows, without retrying or changing anything.
+Run these with `cargo test -p kettle --bin kettle mcp`.
+
 The MCP stdio integration suite exercises Codex guidance, turn-end-only fallback,
 one artifact per hook, deduplication after primary display, stable replacement
 keys and shutdown cleanup through the real server process and a fixture control
