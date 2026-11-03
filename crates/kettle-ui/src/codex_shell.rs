@@ -805,10 +805,67 @@ mod tests {
 
     #[cfg(unix)]
     fn installed(program: &str) -> Option<String> {
-        ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]
-            .iter()
-            .map(|directory| format!("{directory}/{program}"))
-            .find(|path| Path::new(path).is_file())
+        use std::os::unix::fs::PermissionsExt as _;
+        let search = std::env::var_os("PATH")?;
+        for directory in std::env::split_paths(&search) {
+            let path = if directory.is_absolute() {
+                directory.join(program)
+            } else {
+                std::env::current_dir().ok()?.join(directory).join(program)
+            };
+            let Ok(metadata) = path.metadata() else {
+                continue;
+            };
+            if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+                return path.to_str().map(str::to_owned);
+            }
+        }
+        None
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_shell_discovery_uses_path() {
+        const CHILD: &str = "KETTLE_TEST_SHELL_LOOKUP_CHILD";
+        if let Ok(expected) = std::env::var(CHILD) {
+            let actual = installed("sh").expect("shell on PATH");
+            assert!(Path::new(&actual).is_absolute());
+            assert_eq!(
+                std::fs::canonicalize(actual).unwrap(),
+                std::fs::canonicalize(expected).unwrap()
+            );
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = kettle_test_support::private_tempdir("kettle-shell-lookup-");
+        let bin = directory.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let program = bin.join("sh");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let blocked = directory.path().join("sh");
+        std::fs::write(&blocked, "not executable").unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for paths in [
+            std::env::join_paths([directory.path(), bin.as_path()]).unwrap(),
+            std::env::join_paths([Path::new("."), Path::new("bin")]).unwrap(),
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "codex_shell::tests::native_shell_discovery_uses_path",
+                ])
+                .current_dir(directory.path())
+                .env("PATH", paths)
+                .env(CHILD, &program)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
     }
 
     #[cfg(unix)]
