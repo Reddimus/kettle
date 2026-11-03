@@ -1631,6 +1631,10 @@ A path-filtered workflow may not run for a source-only change outside its filter
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on every PR and push
 to `main`. Its jobs are:
 
+Development and test builds use `line-tables-only` debug information to keep
+hosted-runner artifacts within disk limits while retaining source locations in
+backtraces. These workflow overrides apply to the dev and test profiles.
+
 | Job ID | Host | What it runs |
 | --- | --- | --- |
 | `fish-shell-integration` | Ubuntu 24.04 | Shell fixtures with Fish 3.7.x, 4.2.1, and 4.8.1; Apple payload fixture |
