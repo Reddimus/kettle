@@ -1,0 +1,9 @@
+function claude
+  # Put your account's environment variables before both commands below,
+  # for example: CODEX_HOME="$HOME/.codex-work" command ...
+  if set -q KETTLE_PANE_ID; and test -x '/fixture/kettle'
+    command '/fixture/kettle' agent-setup --launch-claude -- $argv
+  else
+    command claude $argv
+  end
+end

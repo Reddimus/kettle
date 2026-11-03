@@ -1,0 +1,11 @@
+#!/bin/sh
+# Hand the launch to Kettle's launcher so a program that starts codex
+# itself (for example ccx's realClaudePath setting) gets Kettle cards.
+# This entry script is experimental. It must NOT be named claude or codex
+# and must not sit in a PATH directory under either name.
+# It must be user-owned and not writable by others.
+if [ -n "${KETTLE_PANE_ID-}" ] && [ -x '/fixture/kettle' ]; then
+  exec '/fixture/kettle' agent-setup --launch-codex -- "$@"
+fi
+# Outside a Kettle pane, run whatever codex is first on PATH.
+exec codex "$@"
