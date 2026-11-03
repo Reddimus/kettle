@@ -1377,6 +1377,15 @@ mod tests {
     #[test]
     fn sandbox_pattern_calls_are_step_bounded() {
         const CHILD: &str = "KETTLE_LUA_PATTERN_RUNAWAY";
+        const PROGRESS: &str = "KETTLE_LUA_PATTERN_PROGRESS";
+        const CALLS: [&str; 5] = [
+            "string.match(s, p)",
+            "s:match(p)",
+            "string.find(s, p)",
+            "string.gmatch(s, p)()",
+            "string.gsub(s, p, '')",
+        ];
+        const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
         if let Ok(mode) = std::env::var(CHILD) {
             let sandbox = if mode == "safe" {
                 kettle_config::LuaSandbox::Safe
@@ -1384,14 +1393,8 @@ mod tests {
                 kettle_config::LuaSandbox::Restricted
             };
             let eng = LuaEngine::new_with_sandbox("Default", sandbox).unwrap();
-            for call in [
-                "string.match(s, p)",
-                "s:match(p)",
-                "string.find(s, p)",
-                "string.gmatch(s, p)()",
-                "string.gsub(s, p, '')",
-            ] {
-                let started = std::time::Instant::now();
+            let progress = std::env::var_os(PROGRESS).map(std::path::PathBuf::from);
+            for (index, call) in CALLS.iter().enumerate() {
                 let err = eng.eval_str(&format!(
                     "local s = string.rep('a', 100); local p = string.rep('a*', 24) .. 'b'; return {call}"
                 )).expect_err("pathological pattern must be stopped");
@@ -1399,15 +1402,23 @@ mod tests {
                     format!("{err:#}").contains("pattern too complex"),
                     "{err:#}"
                 );
-                assert!(
-                    started.elapsed() < std::time::Duration::from_millis(750),
-                    "{mode}: {call} took {:?}",
-                    started.elapsed()
-                );
+                if let Some(progress) = progress.as_ref() {
+                    std::fs::write(progress, [u8::try_from(index + 1).unwrap()])
+                        .expect("record completed native pattern call");
+                }
             }
             return;
         }
+        let directory = tempfile::tempdir().expect("private pattern progress directory");
         for mode in ["safe", "restricted"] {
+            let progress = directory.path().join(mode);
+            let read_progress = || {
+                let mut file = std::fs::File::open(&progress).ok()?;
+                let mut bytes = [0u8; 2];
+                let len = std::io::Read::read(&mut file, &mut bytes).ok()?;
+                let completed = usize::from(bytes[0]);
+                (len == 1 && completed > 0 && completed <= CALLS.len()).then_some(completed)
+            };
             let mut child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -1415,18 +1426,35 @@ mod tests {
                     "--nocapture",
                 ])
                 .env(CHILD, mode)
+                .env(PROGRESS, &progress)
                 .spawn()
                 .expect("spawn isolated pattern regression");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            // The error checks bound work; wall time also includes CPU scheduling.
+            // Rearm only after a required operation completes, never while it runs.
+            let mut completed = 0;
+            let mut deadline = std::time::Instant::now() + STALL_TIMEOUT;
             loop {
                 if let Some(status) = child.try_wait().unwrap() {
                     assert!(status.success(), "{mode}: {status}");
+                    assert_eq!(
+                        read_progress(),
+                        Some(CALLS.len()),
+                        "{mode}: isolated fixture must execute every native pattern call"
+                    );
                     break;
+                }
+                if let Some(next) = read_progress()
+                    && next > completed
+                {
+                    completed = next;
+                    deadline = std::time::Instant::now() + STALL_TIMEOUT;
                 }
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!("{mode}: native pattern call exceeded the isolated 4 second deadline");
+                    panic!(
+                        "{mode}: native pattern fixture stalled after {completed} completed calls"
+                    );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }

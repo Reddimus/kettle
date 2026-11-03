@@ -2449,6 +2449,15 @@ runs retain their recorded source and helper identities.
 window and retained-history states. They retain failed admissions and startup
 outliers and are explicitly excluded from calibrated performance standings.
 
+## Lua pattern fixture scheduling
+
+The isolated pattern regression requires the expected work-limit error from
+all five native call forms in each sandbox mode. Its four-second stalled-call
+watchdog advances only when another required call has completed. A final
+completion record and successful child exit are both required. The test reuses
+one engine per mode, retains runaway-child cleanup, and bounds progress reads
+to two bytes. Host scheduling time is not counted as extra pattern work.
+
 ## Settings accessibility values
 
 The settings-row regression checks a theme name, a numeric value and an empty

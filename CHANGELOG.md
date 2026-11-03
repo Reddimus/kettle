@@ -63,6 +63,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Maintenance
 
+- Keep Lua pattern regressions reliable under CPU contention with a stalled-call
+  watchdog and required completion records, while preserving their work-limit checks.
 - Verify pane-drag geometry across split rounding, wait for the Linux fork
   fixture to start before testing timeout cleanup, and recognize macOS's
   closed-peer response during control-connection stress checks.
