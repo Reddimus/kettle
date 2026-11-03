@@ -129,6 +129,23 @@ with a reason set. `the_instructions_follow_the_placement` pins the guidance
 to say once that no card shows, without retrying or changing anything.
 Run these with `cargo test -p kettle --bin kettle mcp`.
 
+On Linux, `file_hook_card_reports_a_lost_pickup_after_metadata_wait` and
+`file_hook_card_reports_a_changed_root_after_metadata_wait` in `kettle-ui`
+admit a live native fixture, wait for file metadata, then clear or replace the
+pane root before publication. They check that the successful file receipt
+reports `pane_cannot` when no card pickup can be issued. The portable file-card
+tests retain command-line delivery, current geometry and metadata-failure coverage.
+The theme-picker smoke uses a separate private configuration fixture (a native
+private directory on Windows), then archives its final config with the artifacts.
+Its helper regressions check Unix mode 0700 under umask 002, independence from
+artifact-directory permissions, and cleanup after failed entry on Windows.
+The split-titlebar smoke uses a non-login POSIX shell on Unix, so user startup
+files cannot replace its controlled titles. The theme context-menu check scrolls
+its row into view on short surfaces. Underline probes exclude the surface's
+one-pixel focus outline while retaining interior underline and leak detection.
+The Git streaming helper checks that both output pipes close after success and
+consumer failure.
+
 The MCP stdio integration suite exercises Codex guidance, turn-end-only fallback,
 one artifact per hook, deduplication after primary display, stable replacement
 keys and shutdown cleanup through the real server process and a fixture control

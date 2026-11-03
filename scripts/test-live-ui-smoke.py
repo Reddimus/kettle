@@ -3,6 +3,7 @@
 
 import ast
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -760,20 +761,106 @@ class LiveUiTests(unittest.TestCase):
                     with self.assertRaises(Launched):
                         scenario("unused", Path(directory))
 
-    def test_theme_picker_pins_english_menu_labels(self):
+    def test_split_titlebar_uses_a_non_login_posix_shell(self):
         class Configured(Exception):
             pass
         with tempfile.TemporaryDirectory() as directory:
             def launch(_kettle, cfg, *_args, **_kwargs):
+                lines = cfg.read_text().splitlines()
+                for setting in ("shell = /bin/sh", "login-shell = false", "shell-integration = false"):
+                    self.assertIn(setting, lines,
+                                  "Titlebar fixture inherited shell startup titles")
+                raise Configured()
+            with (
+                patch.object(checker.platform, "system", return_value="Darwin"),
+                patch.dict(os.environ, {"SHELL": "/usr/local/bin/fish"}),
+                patch.object(checker, "LiveKettle", side_effect=launch),
+            ):
+                with self.assertRaises(Configured):
+                    checker.run_split_titlebar("unused", Path(directory))
+
+    def test_theme_picker_cleans_private_windows_fixture_after_entry_failure(self):
+        class Configured(Exception):
+            pass
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            with (
+                patch.object(checker.platform, "system", return_value="Windows"),
+                patch.object(checker, "create_windows_private_directory", return_value=private) as create,
+                patch.object(checker, "LiveKettle", side_effect=Configured),
+            ):
+                with self.assertRaises(Configured):
+                    checker.run_theme_picker("unused", artifacts)
+            create.assert_called_once_with("kettle-theme-picker-")
+            self.assertFalse(private.exists())
+            configs = list(artifacts.glob("theme-picker-*/config"))
+            self.assertEqual(len(configs), 1)
+            self.assertIn("language = en", configs[0].read_text().splitlines())
+
+    def test_underline_probe_distinguishes_focus_border_from_real_line(self):
+        width, height = 8, 10
+        dark = bytes([8, 8, 8, 255]) * width
+        bright = bytes([122, 162, 247, 255]) * width
+        rows = [dark] * height
+        rows[0] = rows[-1] = bright
+
+        def hits(baseline):
+            return max((sum(checker.bright_at(rows, x, y) for x in range(width))
+                        for y in checker.underline_probe_rows(baseline, height)), default=0)
+
+        self.assertEqual(hits(0), 0, "Top focus outline counted as an underline")
+        self.assertEqual(hits(height - 3), 0, "Bottom focus outline counted as a leak")
+        rows[height - 3] = bright
+        self.assertEqual(hits(height - 3), width, "A real interior line must remain detectable")
+
+    def test_git_stream_closes_pipes_after_success_or_consumer_error(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                stdout, stderr = io.BytesIO(b"tracked-file"), io.BytesIO(b"diagnostic")
+                process = Mock(stdout=stdout, stderr=stderr)
+                process.wait.return_value = 0
+                consumed = []
+
+                def consume(chunk):
+                    if fail:
+                        raise RuntimeError("consumer failed")
+                    consumed.append(chunk)
+
+                with patch.object(checker.subprocess, "Popen", return_value=process):
+                    if fail:
+                        with self.assertRaisesRegex(RuntimeError, "consumer failed"):
+                            checker.stream_git_output(Path("unused"), [], checker.RepositoryProvenanceBudget(), consume)
+                    else:
+                        checker.stream_git_output(Path("unused"), [], checker.RepositoryProvenanceBudget(), consume)
+                        self.assertEqual(consumed, [b"tracked-file"])
+                self.assertTrue(stdout.closed, "Git stdout was left open")
+                self.assertTrue(stderr.closed, "Git stderr was left open")
+
+    def test_theme_picker_pins_english_menu_labels(self):
+        class Configured(Exception):
+            pass
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = Path(directory) / "shared" / "diagnostics"
+            artifacts.mkdir(parents=True)
+            def launch(_kettle, cfg, *_args, **_kwargs):
                 self.assertIn("language = en", cfg.read_text().splitlines(),
                               "Theme menu assertion inherited the host language")
+                if os.name != "nt":
+                    self.assertEqual(cfg.parent.stat().st_mode & 0o777, 0o700,
+                                     "Theme persistence fixture needs a private directory")
+                self.assertNotIn(artifacts, cfg.parents,
+                                 "Live config must not inherit artifact-directory permissions")
                 raise Configured()
             with (
                 patch.dict(os.environ, {"LANG": "es_ES.UTF-8"}),
                 patch.object(checker, "LiveKettle", side_effect=launch),
             ):
                 with self.assertRaises(Configured):
-                    checker.run_theme_picker("unused", Path(directory))
+                    checker.run_theme_picker("unused", artifacts)
 
     def test_toast_lifetime_includes_screenshot_time(self):
         import inspect
