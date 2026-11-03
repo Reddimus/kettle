@@ -3182,6 +3182,10 @@
           ],
           "description": "Optional fixed CLI inline-card refusal reason."
         },
+        "card_reason": {
+          "type": "string",
+          "description": "Optional fixed word for why an adapter hook card did not come: untraced, not_launched or pane_cannot. An open string, so a newer Kettle may add words."
+        },
         "page": {
           "$ref": "#/$defs/show_page"
         },

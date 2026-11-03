@@ -1927,6 +1927,7 @@ mod tests {
             warnings: vec!["font_fallback".into()],
             inline: None,
             inline_refused: None,
+            card_reason: None,
             page: None,
             video: None,
             file: None,
