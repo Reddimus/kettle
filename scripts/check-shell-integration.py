@@ -1585,11 +1585,12 @@ def check_codex_zsh(executable: str) -> None:
             home,
             borrowed(None),
             'print -r -- "ZDOTDIR=${ZDOTDIR-unset} saved=${KETTLE_ZDOTDIR_SET-gone}"\n'
-            'whence -w codex\ncodex "a b" "*" ""\nexit\n',
+            'whence -w codex\nprint -r -- "OWN=${KETTLE_OWN_CODEX-unset}"\ncodex "a b" "*" ""\nexit\n',
         )
         if (
             "ZDOTDIR=unset saved=gone" not in output
             or "codex: function" not in output
+            or "OWN=0" not in output
             or CODEX_FORWARDED not in output
             or trace != "zshenv\nzshrc\n"
         ):
@@ -1610,8 +1611,13 @@ def check_codex_zsh(executable: str) -> None:
         (home / ".zshrc").write_text(
             "fpath=($HOME/functions $fpath)\nautoload -Uz codex\n", encoding="utf-8"
         )
-        output, _ = codex_run([executable, "-i"], home, borrowed(None), "codex\nexit\n")
-        if "autoloaded" not in output or "<agent-setup>" in output:
+        output, _ = codex_run(
+            [executable, "-i"],
+            home,
+            {**borrowed(None), "KETTLE_OWN_CODEX": "0"},
+            'print -r -- "OWN=${KETTLE_OWN_CODEX-unset}"\ncodex\nexit\n',
+        )
+        if "autoloaded" not in output or "<agent-setup>" in output or "OWN=1" not in output:
             raise RuntimeError(f"Codex zsh autoloadable codex: {output!r}")
     print("Codex zsh startup: PASS")
 
@@ -1636,11 +1642,12 @@ def check_codex_fish(executable: str) -> None:
             output, _ = codex_run([*command, "-i", "-c", show_xdg], home, {})
             return next((line for line in output.splitlines() if line.startswith("XDG=")), output)
 
-        probe = f"{show_xdg}; type -t codex; codex 'a b' '*' ''"
-        output, trace = codex_run([*fish, "-i", "-c", probe], home, {})
+        probe = f"{show_xdg}; type -t codex; echo OWN=$KETTLE_OWN_CODEX; codex 'a b' '*' ''"
+        output, trace = codex_run([*fish, "-i", "-c", probe], home, {"KETTLE_OWN_CODEX": "1"})
         if (
             xdg([executable]) not in output.splitlines()
             or "function" not in output
+            or "OWN=0" not in output
             or CODEX_FORWARDED not in output
             or trace != "config\n"
         ):
@@ -1657,8 +1664,10 @@ def check_codex_fish(executable: str) -> None:
         (home / ".config" / "fish" / "functions" / "codex.fish").write_text(
             "function codex\n    echo mine\nend\n", encoding="utf-8"
         )
-        output, _ = codex_run([*fish, "-i", "-c", "codex"], home, {})
-        if "mine" not in output or "<agent-setup>" in output:
+        output, _ = codex_run(
+            [*fish, "-i", "-c", "echo OWN=$KETTLE_OWN_CODEX; codex"], home, {"KETTLE_OWN_CODEX": "0"}
+        )
+        if "mine" not in output or "<agent-setup>" in output or "OWN=1" not in output:
             raise RuntimeError(f"Codex fish autoloadable codex: {output!r}")
     print("Codex fish startup: PASS")
 
