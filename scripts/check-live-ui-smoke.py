@@ -14397,7 +14397,7 @@ def run_agent_tui(
                     status = "marker_missing"
                     reason = "done marker exit status was not visible in read_screen"
                 elif rc != 0:
-                    reason = f"{tool} exited {rc}; likely missing/expired external authentication"
+                    reason = f"{tool} exited {rc}; see the captured client output for the cause"
                 elif not marker_emitted:
                     status = "marker_missing"
                     reason = (

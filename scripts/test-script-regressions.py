@@ -292,6 +292,59 @@ items.addObject(item);
                         stress.s1_urandom(live)
                 live.ctl.assert_any_call('send_keys', params={'keys': ['ctrl+c']})
 
+    def run_pane_drag_block(self, marker, files):
+        script = (SCRIPTS / 'check-pane-drag-smoke.sh').read_text()
+        blocks = [part.split('\nPY\n', 1)[0]
+                  for part in script.split("<<'PY'\n")[1:]]
+        block, = [code for code in blocks if marker in code]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for name, value in files.items():
+                (root / name).write_text(json.dumps(value))
+            result = subprocess.run([sys.executable, '-', raw, '3'], input=block,
+                                    capture_output=True, text=True, timeout=10)
+            outputs = {p.name: json.loads(p.read_text()) for p in root.glob('*.json')}
+        return result, outputs
+
+    def pane_drag_fixture(self):
+        return [
+            {'id': 1, 'rect': {'x': 0, 'y': 0, 'width': 101, 'height': 50}},
+            {'id': 3, 'rect': {'x': 0, 'y': 50, 'width': 101, 'height': 50}},
+            {'id': 2, 'rect': {'x': 101, 'y': 0, 'width': 100, 'height': 100}},
+        ]
+
+    def test_pane_drag_targets_right_column_when_left_is_wider(self):
+        result, outputs = self.run_pane_drag_block(
+            '(out / "target.json").write_text', {'panes.json': self.pane_drag_fixture()})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs['target.json']['id'], 2)
+        point = json.loads(result.stdout)
+        self.assertGreater(point['x'], 101)
+        self.assertLess(point['x'], 201)
+
+    def test_pane_drag_rejects_reordered_ids_without_the_right_edge_layout(self):
+        panes = self.pane_drag_fixture()
+        files = {
+            'panes.json': panes,
+            'target.json': panes[2],
+            'geometry-pressed.json': {'pane_drag_armed': True, 'pane_drag_pane': 3},
+            'geometry-jittered.json': {'pane_drag_armed': True},
+            'geometry-dragging.json': {
+                'pane_drag_live': True, 'pane_drag_target': {'pane': 2, 'edge': 'right'}},
+            'geometry-released.json': {'panes': [panes[0], panes[2], panes[1]]},
+        }
+        valid = [
+            {'id': 1, 'rect': {'x': 0, 'y': 0, 'width': 101, 'height': 100}},
+            {'id': 2, 'rect': {'x': 101, 'y': 0, 'width': 50, 'height': 100}},
+            {'id': 3, 'rect': {'x': 151, 'y': 0, 'width': 50, 'height': 100}},
+        ]
+        result, _ = self.run_pane_drag_block('before = [p[', {
+            **files, 'geometry-released.json': {'panes': valid}})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result, _ = self.run_pane_drag_block('before = [p[', files)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('right-edge layout', result.stderr)
+
     def test_tearoff_failure_releases_button(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

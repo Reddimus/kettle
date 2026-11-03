@@ -984,7 +984,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Window close isolation | `just window-close-isolation-smoke` | One detached child's exit leaves the sibling OS window and pane alive; Linux needs xdotool | Linux X11/macOS |
 | Touchpad scroll | `just touchpad-scroll-smoke` | Fractional wheel deltas accumulate into scrolling through the real conversion path | Linux/macOS |
 | Tabbar click | `just tabbar-click-smoke` | Multi-tab click state with PNG and tab geometry evidence | Linux/macOS |
-| Pane drag | `just pane-drag-smoke` | Intended pane reorder gesture; currently known broken because ctl input cannot arm native drag | Linux/macOS |
+| Pane drag | `just pane-drag-smoke` | Shared pane drag via ctl input; checks arming, slop, right-column drop and final geometry | Linux/macOS |
 | Tear-off | `just tearoff-smoke` | Control-plane detach/broadcast, then real pointer tear/follow/redock/cancel on X11 | Linux/macOS control tier; X11 live tier |
 | Tab title | `just tab-title-smoke` | Cwd-derived title recovers from shell truncation | Linux/macOS |
 | Split titlebar | `just split-titlebar-smoke` | Cwd titles at both pane edges and focused/receiving/inactive colors | Linux/macOS |
@@ -1206,8 +1206,10 @@ in the test's launch shell. A reduced workload fails the gate.
 
 The tear-off recipe has two tiers. Its shell helper skips native pointer work
 outside X11. The control tier alone cannot prove the native drag gesture.
-The pane-drag recipe is explicitly known broken in Justfile.
-Do not count its expected failure as a pass.
+The pane-drag recipe uses the shared control/native gesture handlers. It selects
+the right column by position, since split rounding can make the left column
+wider, and verifies the final right-edge geometry as well as pane order.
+This control-plane check does not prove native pointer event delivery.
 
 The steady-upload case needs a focused window for blink and output phases.
 `--screenshots-only` runs the narrower screenshot phase for environments such
@@ -1246,6 +1248,10 @@ KETTLE_AGENT_AUTH_SMOKE=1 just agent-tui-smoke
 
 This path uses installed client credentials and makes real model calls.
 Confirm access before running it; its result is separate from offline coverage.
+Inspect each probe in `result.json`, even when the helper exits successfully:
+optional client failures do not fail the whole run. An `auth_failed` probe can
+also mean exhausted service quota or another client error. Read the captured
+client output to determine the cause before changing authentication.
 For configured Neovim/AstroNvim, the direct helper accepts `--astro-config` and
 `--nvim-data`. Supply your installed configuration/runtime directories.
 The helper copies them into an isolated sandbox before use.

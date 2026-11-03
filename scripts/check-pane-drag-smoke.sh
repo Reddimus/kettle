@@ -154,8 +154,8 @@ from pathlib import Path
 out, moving = Path(sys.argv[1]), int(sys.argv[2])
 panes = json.loads((out / "panes.json").read_text())
 others = [p for p in panes if p["id"] != moving]
-# The widest other pane, so the "right quarter" point is unambiguous.
-target = max(others, key=lambda p: p["rect"]["width"])
+# Split rounding can leave the left column one pixel wider than the right.
+target = max(others, key=lambda p: p["rect"]["x"] + p["rect"]["width"] / 2)
 r = target["rect"]
 (out / "target.json").write_text(json.dumps(target))
 print(json.dumps({
@@ -230,5 +230,14 @@ if after.index(moving) < after.index(target["id"]):
     raise SystemExit(
         f"pane-drag smoke: dropped right of pane {target['id']} but landed before it: {after}"
     )
+final = {p["id"]: p["rect"] for p in released["panes"]}
+mr, tr = final[moving], final[target["id"]]
+if not (
+    mr["width"] > 0 and tr["width"] > 0 and mr["height"] > 0 and tr["height"] > 0
+    and abs(mr["x"] - (tr["x"] + tr["width"])) <= 1.0
+    and abs(mr["y"] - tr["y"]) <= 1.0
+    and abs(mr["height"] - tr["height"]) <= 1.0
+):
+    raise SystemExit(f"pane-drag smoke: wrong right-edge layout: moving={mr}, target={tr}")
 print("pane-drag smoke: ok")
 PY
