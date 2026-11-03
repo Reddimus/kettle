@@ -1523,7 +1523,9 @@ existing plugin and signature checks, and `--launch-claude` runs it plainly.
 
 ### Wrapping your own claude or codex function
 
-Your own function, alias or fish abbreviation runs before Kettle's function.
+Kettle leaves your own function in place. Aliases and fish abbreviations
+expand command text before function lookup; they can still reach Kettle's
+function and do not count as your own function.
 If a Codex wrapper ends in `command codex`, it bypasses Kettle's launcher and
 gets no Kettle display server at all, so `kettle_show` is unavailable through
 this integration. On Linux, a Claude Code wrapper ending in `command claude`
@@ -1574,8 +1576,9 @@ The known integration point is ccx's `realClaudePath` setting, or its
 
 This ccx recipe is **experimental** and has not been verified against a real
 ccx run. Try it in a throwaway profile. The script must be user-owned and
-not writable by others. It must not be named `claude` or `codex`, nor sit in
-a `PATH` directory under either name, since its fallback could call itself.
+not writable by others. It refuses to run with exit status 2 and a stderr
+message when named `claude` or `codex`, since its fallback could call itself.
+It must not sit in a `PATH` directory under either name.
 Use a directory you own that others cannot write:
 
 ```sh
@@ -1594,7 +1597,7 @@ interactive session to get cards.
 
 | What you see | Cause | What to do |
 |---|---|---|
-| `Codex launch:` or `Claude Code launch:` says `your own ... function or alias runs first` | Your function, alias or abbreviation runs before Kettle's | Review `--print --agent codex --form wrapper` or the Claude equivalent and route your wrapper through the launcher |
+| `Codex launch:` or `Claude Code launch:` says `your own ... function runs first` | Your function takes precedence | Review `--print --agent codex --form wrapper` or the Claude equivalent and route your wrapper through the launcher |
 | Stderr says `Kettle does not know ...` | A Claude Code launch flag is unknown to Kettle | Check the supported flags above; use a supported interactive form or the shelf |
 | A version, executable or display-server notice | The launch failed a version or executable check, could not reach the server, or was declined | Check `--status`, supported versions, the native installation, and both agent-preview settings; start a new pane after enabling them |
 | A Claude Code background-daemon session stays shelf-only | The session cannot be traced to a pane | Keep the session interactive in the pane; no wrapper or launcher change fixes a daemon session |
@@ -1622,19 +1625,21 @@ Claude Code previews independently enable the `claude` function too:
   borrowed, so your configuration sees what it would without Kettle.
 
 Your own startup files run once each, in their usual order. A `codex` or
-`claude` function you define or can autoload still wins, as does your own alias
-or fish abbreviation. An alias also counts as your own command; zsh may
-define Kettle's function underneath it, but your alias still runs first.
+`claude` function you define or can autoload still wins. Aliases and fish
+abbreviations do not count as your own function. A fish abbreviation does
+not suppress Kettle's function. When zsh defines Kettle's function and an
+alias of that name exists, the launch is not checked: Kettle cannot know
+whether the expanded alias reaches the function.
 `kettle agent-setup --status` reports this in a Kettle pane with `Codex launch:`
 and `Claude Code launch:` lines. Each uses fixed wording for Kettle's function,
-your own function or alias, or a launch that was not checked. For either agent,
+your own function, or a launch that was not checked. For either agent,
 with `<name>` replaced by `codex` or `claude`, the wording is:
 
 | State | Launch text |
 |---|---|
 | Kettle's function | `Kettle's <name> function starts it, through agent-setup --launch-<name>` |
-| Your own command | `your own <name> function or alias runs first; it gets cards only if it ends in Kettle's launcher` |
-| Not checked | `not checked (only zsh and fish panes Kettle started are); a function of your own gets cards only if it ends in Kettle's launcher` |
+| Your own command | `your own <name> function runs first; it gets cards only if it ends in Kettle's launcher` |
+| Not checked | `not checked (only zsh and fish panes Kettle started are, and an alias is not); a function of your own gets cards only if it ends in Kettle's launcher` |
 
 The last two append `; kettle agent-setup --print --agent <name> --form wrapper
 prints one that ends in Kettle's launcher`. Codex's `Delivery:` line for your
@@ -1643,16 +1648,20 @@ own command says
 See the [wrapper guide](#wrapping-your-own-claude-or-codex-function).
 
 The one-shot startup hook sets `KETTLE_OWN_CLAUDE` and `KETTLE_OWN_CODEX` for
-the integrations offered: `0` when Kettle defined the function, or `1` when
-your function, zsh alias, fish abbreviation or autoloadable function wins.
+the integrations offered: `0:<pid>` when Kettle defined the function, or
+`1:<pid>` when your defined or autoloadable function wins. The PID is the
+defining shell's own decimal PID (`$$` in zsh, `$fish_pid` in fish). When zsh
+defines Kettle's function under an alias, it exports an empty value instead.
 The hook adds no per-prompt cost. These are forgeable hints used only to choose
 status text, never for card admission; status never prints their raw values.
-Missing values and values other than the literal `0` and `1` mean not checked.
-New panes strip inherited values before their startup hooks run. Only zsh
-and fish panes Kettle starts are checked. Bash uses printed functions only;
-nested shells and shells started with arguments are not checked, and a nested
-shell can inherit the outer shell's hint. Status does not inspect function
-bodies or track later changes to your functions.
+Only an exact `0:<pid>` or `1:<pid>` matching the status command's parent shell
+PID is checked. Missing, empty, bare `0`/`1`, malformed or non-Unicode values,
+including PIDs with leading zeros or signs, mean not checked. New panes strip
+inherited values before their startup hooks run. Only zsh and fish panes
+Kettle starts are checked. Bash uses printed functions only; nested shells
+and shells started with arguments are not checked. A child shell can inherit
+the exported hint, but its different PID makes status read it as not checked.
+Status does not inspect function bodies or track later changes to your functions.
 
 In zsh the definition waits in
 `precmd_functions`, so a `.zshrc` that replaces that list outright gets no

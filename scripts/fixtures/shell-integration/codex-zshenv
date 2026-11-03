@@ -18,9 +18,13 @@ if [[ -o interactive ]]; then
 codex() {
   command '/kettle-stand-in/bin/kettle' agent-setup --launch-codex -- "$@"
 }
-      'builtin' 'export' KETTLE_OWN_CODEX=$(( ${+aliases[codex]} ))
+      if (( ${+aliases[codex]} )); then
+        'builtin' 'export' KETTLE_OWN_CODEX=
+      else
+        'builtin' 'export' KETTLE_OWN_CODEX=0:$$
+      fi
     else
-      'builtin' 'export' KETTLE_OWN_CODEX=1
+      'builtin' 'export' KETTLE_OWN_CODEX=1:$$
     fi
   }
   'builtin' 'typeset' -ga precmd_functions

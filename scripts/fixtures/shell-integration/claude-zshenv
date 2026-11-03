@@ -18,9 +18,13 @@ if [[ -o interactive ]]; then
 claude() {
   command '/kettle-stand-in/bin/kettle' agent-setup --launch-claude -- "$@"
 }
-      'builtin' 'export' KETTLE_OWN_CLAUDE=$(( ${+aliases[claude]} ))
+      if (( ${+aliases[claude]} )); then
+        'builtin' 'export' KETTLE_OWN_CLAUDE=
+      else
+        'builtin' 'export' KETTLE_OWN_CLAUDE=0:$$
+      fi
     else
-      'builtin' 'export' KETTLE_OWN_CLAUDE=1
+      'builtin' 'export' KETTLE_OWN_CLAUDE=1:$$
     fi
   }
   'builtin' 'typeset' -ga precmd_functions

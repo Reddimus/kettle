@@ -1563,6 +1563,17 @@ def codex_run(
     return output, trace.read_text(encoding="utf-8") if trace.exists() else ""
 
 
+def assert_codex_marker(output: str, state: str, label: str) -> None:
+    """The marker names the defining shell, and remains exported to children."""
+    pid = re.search(r"(?m)^SHELL_PID=([1-9][0-9]*)$", output)
+    if pid is None:
+        raise RuntimeError(f"{label} omitted the shell's PID: {output!r}")
+    expected = f"{state}:{pid[1]}" if state else ""
+    for prefix in ("OWN=", "CHILD_OWN="):
+        if prefix + expected not in output.splitlines():
+            raise RuntimeError(f"{label} omitted {prefix + expected!r}: {output!r}")
+
+
 def check_codex_zsh(executable: str) -> None:
     """Kettle's .zshenv restores ZDOTDIR exactly, runs the user's startup
     files once each from where zsh would have found them, and defines codex
@@ -1580,17 +1591,22 @@ def check_codex_zsh(executable: str) -> None:
                 "KETTLE_ZDOTDIR_SET": "1" if original is not None else "",
             }
 
+        marker_probe = (
+            'printf "\\nSHELL_PID=%s\\n" "$$"\n'
+            'printf "\\nOWN=%s\\n" "${KETTLE_OWN_CODEX-unset}"\n'
+            'command sh -c \'printf "\\nCHILD_OWN=%s\\n" "$KETTLE_OWN_CODEX"\'\n'
+        )
         output, trace = codex_run(
             [executable, "-i"],
             home,
-            borrowed(None),
+            {**borrowed(None), "KETTLE_OWN_CODEX": "1:999999"},
             'print -r -- "ZDOTDIR=${ZDOTDIR-unset} saved=${KETTLE_ZDOTDIR_SET-gone}"\n'
-            'whence -w codex\nprint -r -- "OWN=${KETTLE_OWN_CODEX-unset}"\ncodex "a b" "*" ""\nexit\n',
+            'whence -w codex\n' + marker_probe + 'codex "a b" "*" ""\nexit\n',
         )
+        assert_codex_marker(output, "0", "Codex zsh startup")
         if (
             "ZDOTDIR=unset saved=gone" not in output
             or "codex: function" not in output
-            or "OWN=0" not in output
             or CODEX_FORWARDED not in output
             or trace != "zshenv\nzshrc\n"
         ):
@@ -1606,6 +1622,15 @@ def check_codex_zsh(executable: str) -> None:
         output, _ = codex_run([executable, "-c", "whence -w codex"], home, borrowed(None))
         if "codex: none" not in output:
             raise RuntimeError(f"Codex zsh non-interactive: {output!r}")
+        (home / ".zshrc").write_text("alias codex='codex --alias-arg'\n", encoding="utf-8")
+        output, _ = codex_run(
+            [executable, "-i"], home,
+            {**borrowed(None), "KETTLE_OWN_CODEX": "1:999999"},
+            marker_probe + 'print -r -- "FUNCTION=${+functions[codex]}"\ncodex\nexit\n',
+        )
+        assert_codex_marker(output, "", "Codex zsh alias")
+        if "FUNCTION=1" not in output or "<agent-setup><--launch-codex><--><--alias-arg>" not in output:
+            raise RuntimeError(f"Codex zsh alias did not reach Kettle's function: {output!r}")
         (home / "functions").mkdir()
         (home / "functions" / "codex").write_text("print -r -- autoloaded\n", encoding="utf-8")
         (home / ".zshrc").write_text(
@@ -1614,10 +1639,11 @@ def check_codex_zsh(executable: str) -> None:
         output, _ = codex_run(
             [executable, "-i"],
             home,
-            {**borrowed(None), "KETTLE_OWN_CODEX": "0"},
-            'print -r -- "OWN=${KETTLE_OWN_CODEX-unset}"\ncodex\nexit\n',
+            {**borrowed(None), "KETTLE_OWN_CODEX": "0:999999"},
+            marker_probe + 'codex\nexit\n',
         )
-        if "autoloaded" not in output or "<agent-setup>" in output or "OWN=1" not in output:
+        assert_codex_marker(output, "1", "Codex zsh autoloadable codex")
+        if "autoloaded" not in output or "<agent-setup>" in output:
             raise RuntimeError(f"Codex zsh autoloadable codex: {output!r}")
     print("Codex zsh startup: PASS")
 
@@ -1642,12 +1668,16 @@ def check_codex_fish(executable: str) -> None:
             output, _ = codex_run([*command, "-i", "-c", show_xdg], home, {})
             return next((line for line in output.splitlines() if line.startswith("XDG=")), output)
 
-        probe = f"{show_xdg}; type -t codex; echo OWN=$KETTLE_OWN_CODEX; codex 'a b' '*' ''"
-        output, trace = codex_run([*fish, "-i", "-c", probe], home, {"KETTLE_OWN_CODEX": "1"})
+        marker_probe = (
+            'echo SHELL_PID=$fish_pid; echo OWN=$KETTLE_OWN_CODEX; '
+            'command sh -c \'printf "CHILD_OWN=%s\\n" "$KETTLE_OWN_CODEX"\'; '
+        )
+        probe = f"{show_xdg}; type -t codex; {marker_probe}codex 'a b' '*' ''"
+        output, trace = codex_run([*fish, "-i", "-c", probe], home, {"KETTLE_OWN_CODEX": "1:999999"})
+        assert_codex_marker(output, "0", "Codex fish startup")
         if (
             xdg([executable]) not in output.splitlines()
             or "function" not in output
-            or "OWN=0" not in output
             or CODEX_FORWARDED not in output
             or trace != "config\n"
         ):
@@ -1661,13 +1691,23 @@ def check_codex_fish(executable: str) -> None:
         output, _ = codex_run([*fish, "-c", "type -q codex; and echo yes; or echo no"], home, {})
         if not output.rstrip().endswith("no"):
             raise RuntimeError(f"Codex fish non-interactive: {output!r}")
+        (home / ".config" / "fish" / "config.fish").write_text(
+            "abbr --add codex codex --alias-arg\n", encoding="utf-8"
+        )
+        output, _ = codex_run(
+            [*fish, "-i", "-c", probe], home, {"KETTLE_OWN_CODEX": "1:999999"}
+        )
+        assert_codex_marker(output, "0", "Codex fish abbreviation")
+        if "function" not in output or CODEX_FORWARDED not in output:
+            raise RuntimeError(f"Codex fish abbreviation suppressed Kettle's function: {output!r}")
         (home / ".config" / "fish" / "functions" / "codex.fish").write_text(
             "function codex\n    echo mine\nend\n", encoding="utf-8"
         )
         output, _ = codex_run(
-            [*fish, "-i", "-c", "echo OWN=$KETTLE_OWN_CODEX; codex"], home, {"KETTLE_OWN_CODEX": "0"}
+            [*fish, "-i", "-c", marker_probe + "codex"], home, {"KETTLE_OWN_CODEX": "0:999999"}
         )
-        if "mine" not in output or "<agent-setup>" in output or "OWN=1" not in output:
+        assert_codex_marker(output, "1", "Codex fish autoloadable codex")
+        if "mine" not in output or "<agent-setup>" in output:
             raise RuntimeError(f"Codex fish autoloadable codex: {output!r}")
     print("Codex fish startup: PASS")
 

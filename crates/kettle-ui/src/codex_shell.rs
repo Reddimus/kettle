@@ -96,11 +96,16 @@ pub fn wrapper_snippet(
     name: &str,
 ) -> Result<String, FunctionError> {
     let path = quoted_kettle_path(kettle, shell)?;
+    let profile = if name == "codex" {
+        "CODEX_HOME=\"$HOME/.codex-work\""
+    } else {
+        "CLAUDE_CONFIG_DIR=\"$HOME/.claude-work\""
+    };
     Ok(match shell {
         CodexShell::Bash | CodexShell::Zsh => format!(
             "{name}() {{\n\
              \x20 # Put your account's environment variables before both commands below,\n\
-             \x20 # for example: CODEX_HOME=\"$HOME/.codex-work\" command ...\n\
+             \x20 # for example: {profile} command ...\n\
              \x20 if [ -n \"${{KETTLE_PANE_ID-}}\" ] && [ -x {path} ]; then\n\
              \x20   command {path} agent-setup --launch-{name} -- \"$@\"\n\
              \x20 else\n\
@@ -111,7 +116,7 @@ pub fn wrapper_snippet(
         CodexShell::Fish => format!(
             "function {name}\n\
              \x20 # Put your account's environment variables before both commands below,\n\
-             \x20 # for example: CODEX_HOME=\"$HOME/.codex-work\" command ...\n\
+             \x20 # for example: {profile} command ...\n\
              \x20 if set -q KETTLE_PANE_ID; and test -x {path}\n\
              \x20   command {path} agent-setup --launch-{name} -- $argv\n\
              \x20 else\n\
@@ -133,6 +138,7 @@ pub fn entry_script(kettle: &Path, name: &str) -> Result<String, FunctionError> 
          # This entry script is experimental. It must NOT be named claude or codex\n\
          # and must not sit in a PATH directory under either name.\n\
          # It must be user-owned and not writable by others.\n\
+         case \"${{0##*/}}\" in claude|codex) echo \"kettle entry script: do not name it claude or codex\" >&2; exit 2 ;; esac\n\
          if [ -n \"${{KETTLE_PANE_ID-}}\" ] && [ -x {path} ]; then\n\
          \x20 exec {path} agent-setup --launch-{name} -- \"$@\"\n\
          fi\n\
@@ -150,10 +156,12 @@ pub enum AgentFunction {
 }
 
 /// Read only the literal markers for `claude` and `codex`; other names and
-/// values are unchecked. The marker must never be used for admission.
+/// values are unchecked. Only the defining shell's PID matches; inherited
+/// markers in child shells are unchecked. Never use the marker for admission.
 pub fn agent_function_marker(
     var: &dyn Fn(&str) -> Option<std::ffi::OsString>,
     name: &str,
+    shell_pid: u32,
 ) -> AgentFunction {
     let variable = match name {
         "claude" => "KETTLE_OWN_CLAUDE",
@@ -161,8 +169,8 @@ pub fn agent_function_marker(
         _ => return AgentFunction::Unchecked,
     };
     match var(variable).as_deref() {
-        Some(value) if value == "0" => AgentFunction::Kettle,
-        Some(value) if value == "1" => AgentFunction::Own,
+        Some(value) if value == format!("0:{shell_pid}").as_str() => AgentFunction::Kettle,
+        Some(value) if value == format!("1:{shell_pid}").as_str() => AgentFunction::Own,
         _ => AgentFunction::Unchecked,
     }
 }
@@ -252,9 +260,13 @@ fn zsh_definition(function: &str, name: &str) -> String {
          \x20   'builtin' 'unfunction' '_kettle_{name}'\n\
          \x20   if (( ! ${{+functions[{name}]}} )); then\n\
          {function}\
-         \x20     'builtin' 'export' {marker}=$(( ${{+aliases[{name}]}} ))\n\
+         \x20     if (( ${{+aliases[{name}]}} )); then\n\
+         \x20       'builtin' 'export' {marker}=\n\
+         \x20     else\n\
+         \x20       'builtin' 'export' {marker}=0:$$\n\
+         \x20     fi\n\
          \x20   else\n\
-         \x20     'builtin' 'export' {marker}=1\n\
+         \x20     'builtin' 'export' {marker}=1:$$\n\
          \x20   fi\n\
          \x20 }}\n\
          \x20 'builtin' 'typeset' -ga precmd_functions\n\
@@ -276,11 +288,11 @@ pub(crate) fn fish_code(executable: &Path, agents: Agents) -> Result<String, Fun
         let marker = format!("KETTLE_OWN_{}", name.to_ascii_uppercase());
         code.push_str(&format!(
             "if status is-interactive\n\
-             \x20 if functions -q {name}; or abbr -q {name}\n\
-             \x20   set -gx {marker} 1\n\
+             \x20 if functions -q {name}\n\
+             \x20   set -gx {marker} 1:$fish_pid\n\
              \x20 else\n\
              {function}\
-             \x20   set -gx {marker} 0\n\
+             \x20   set -gx {marker} 0:$fish_pid\n\
              \x20 end\n\
              end\n"
         ));
@@ -496,11 +508,29 @@ mod tests {
     }
 
     #[test]
-    fn agent_function_markers_accept_only_known_names_and_literal_values() {
+    fn agent_function_markers_accept_only_known_names_and_exact_shell_pids() {
         for name in ["claude", "codex"] {
             for (value, expected) in [
-                (Some("0"), AgentFunction::Kettle),
-                (Some("1"), AgentFunction::Own),
+                (Some("0:12345"), AgentFunction::Kettle),
+                (Some("1:12345"), AgentFunction::Own),
+                (Some("0"), AgentFunction::Unchecked),
+                (Some("1"), AgentFunction::Unchecked),
+                (Some("0:12346"), AgentFunction::Unchecked),
+                (Some("1:12346"), AgentFunction::Unchecked),
+                (Some("0:012345"), AgentFunction::Unchecked),
+                (Some("1:012345"), AgentFunction::Unchecked),
+                (Some("0:+12345"), AgentFunction::Unchecked),
+                (Some("1:-12345"), AgentFunction::Unchecked),
+                (Some("00:12345"), AgentFunction::Unchecked),
+                (Some("01:12345"), AgentFunction::Unchecked),
+                (Some("2:12345"), AgentFunction::Unchecked),
+                (Some("0:12345x"), AgentFunction::Unchecked),
+                (Some("1:12345:0"), AgentFunction::Unchecked),
+                (Some("0:12345\n"), AgentFunction::Unchecked),
+                (Some("1:12345 "), AgentFunction::Unchecked),
+                (Some(" 0:12345"), AgentFunction::Unchecked),
+                (Some("0:"), AgentFunction::Unchecked),
+                (Some("1:4294967296"), AgentFunction::Unchecked),
                 (Some(""), AgentFunction::Unchecked),
                 (Some("2"), AgentFunction::Unchecked),
                 (Some("true"), AgentFunction::Unchecked),
@@ -511,16 +541,24 @@ mod tests {
                     value.map(std::ffi::OsString::from)
                 };
                 assert_eq!(
-                    agent_function_marker(&var, name),
+                    agent_function_marker(&var, name, 12345),
                     expected,
                     "{name} {value:?}"
                 );
+                if expected != AgentFunction::Unchecked {
+                    assert_eq!(
+                        agent_function_marker(&var, name, 12346),
+                        AgentFunction::Unchecked,
+                        "child shell inherited {name} {value:?}"
+                    );
+                }
             }
         }
         assert_eq!(
             agent_function_marker(
                 &|_| panic!("unknown names must not read the environment"),
-                "agy"
+                "agy",
+                12345
             ),
             AgentFunction::Unchecked
         );
@@ -528,7 +566,11 @@ mod tests {
         {
             use std::os::unix::ffi::OsStringExt as _;
             assert_eq!(
-                agent_function_marker(&|_| Some(std::ffi::OsString::from_vec(vec![0xff])), "codex"),
+                agent_function_marker(
+                    &|_| Some(std::ffi::OsString::from_vec(b"0:12345\xff".to_vec())),
+                    "codex",
+                    12345,
+                ),
                 AgentFunction::Unchecked
             );
         }
@@ -757,6 +799,27 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn assert_shell_marker(output: &str, state: &str) {
+        let pid = output
+            .lines()
+            .find_map(|line| line.strip_prefix("shell_pid="))
+            .unwrap_or_else(|| panic!("missing shell PID: {output}"))
+            .parse::<u32>()
+            .unwrap();
+        let expected = if state.is_empty() {
+            String::new()
+        } else {
+            format!("{state}:{pid}")
+        };
+        assert!(
+            output
+                .lines()
+                .any(|line| line == format!("marker={expected}")),
+            "{output}"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn zsh_records_user_functions_aliases_and_overwrites_inherited_markers() {
         let Some(zsh) = installed("zsh") else {
@@ -774,23 +837,25 @@ mod tests {
         for name in ["claude", "codex"] {
             let marker = format!("KETTLE_OWN_{}", name.to_ascii_uppercase());
             for (rc, inherited, expected) in [
-                (String::new(), "1", "0"),
-                (format!("{name}() {{ print -r -- user; }}\n"), "0", "1"),
-                (format!("alias {name}='print -r -- user'\n"), "0", "1"),
-                (format!("autoload -Uz {name}\n"), "0", "1"),
+                (String::new(), "1:999999", "0"),
+                (
+                    format!("{name}() {{ print -r -- user; }}\n"),
+                    "0:999999",
+                    "1",
+                ),
+                (format!("alias {name}='print -r -- user'\n"), "1:999999", ""),
+                (format!("autoload -Uz {name}\n"), "0:999999", "1"),
             ] {
                 scratch.write(".zshrc", &rc);
                 let probe = format!(
-                    "command /bin/sh -c 'printf \"marker=%s\\n\" \"${marker}\"'\n\
+                    "printf '\\nshell_pid=%s\\n' \"$$\"\n\
+                     command /bin/sh -c 'printf \"\\nmarker=%s\\n\" \"${marker}\"'\n\
                      print -r -- \"function=${{+functions[{name}]}} hook=${{+functions[_kettle_{name}]}}\"\n\
                      exit\n"
                 );
                 let out =
                     scratch.launch(&zsh, None, &["-i"], &probe, Some(&[(&marker, inherited)]));
-                assert!(
-                    out.contains(&format!("marker={expected}\n")),
-                    "{rc:?}: {out}"
-                );
+                assert_shell_marker(&out, expected);
                 assert!(out.contains("function=1 hook=0"), "{rc:?}: {out}");
             }
         }
@@ -805,15 +870,20 @@ mod tests {
         };
         for name in ["claude", "codex"] {
             for (config, autoload, inherited, expected) in [
-                (String::new(), false, "1", "0"),
+                (String::new(), false, "1:999999", "0"),
                 (
                     format!("function {name}\n echo user\nend\n"),
                     false,
-                    "0",
+                    "0:999999",
                     "1",
                 ),
-                (format!("abbr --add {name} echo user\n"), false, "0", "1"),
-                (String::new(), true, "0", "1"),
+                (
+                    format!("abbr --add {name} echo user\n"),
+                    false,
+                    "1:999999",
+                    "0",
+                ),
+                (String::new(), true, "0:999999", "1"),
             ] {
                 let scratch = Scratch::agents(Agents {
                     codex: true,
@@ -827,7 +897,10 @@ mod tests {
                     );
                 }
                 let marker = format!("KETTLE_OWN_{}", name.to_ascii_uppercase());
-                let probe = format!("command /bin/sh -c 'printf \"marker=%s\\n\" \"${marker}\"'");
+                let probe = format!(
+                    "echo shell_pid=$fish_pid; command /bin/sh -c 'printf \"marker=%s\\n\" \"${marker}\"'; \
+                     functions -q {name}; and echo function-present; {name}"
+                );
                 let out = scratch.launch(
                     &fish,
                     None,
@@ -835,8 +908,11 @@ mod tests {
                     "",
                     Some(&[(&marker, inherited)]),
                 );
-                assert!(
-                    out.contains(&format!("marker={expected}\n")),
+                assert_shell_marker(&out, expected);
+                assert!(out.contains("function-present"), "{config:?}: {out}");
+                assert_eq!(
+                    out.contains("<agent-setup>"),
+                    expected == "0",
                     "{config:?}: {out}"
                 );
             }
@@ -934,13 +1010,34 @@ mod tests {
                     command
                         .env_clear()
                         .env("HOME", base.path())
-                        .env("PATH", &bin)
-                        .args(["-c", &script, "wrapper-test"])
-                        .args(args);
+                        .env("PATH", &bin);
                     // The entry inherits the prefix from its caller.
                     if program == &sh {
-                        command.env("CODEX_HOME", &home);
+                        let entry = base.path().join(format!("{name}-entry"));
+                        std::fs::write(&entry, &script).unwrap();
+                        command.arg(entry).env("CODEX_HOME", &home);
+                        for filename in ["claude", "codex"] {
+                            let entry = base.path().join(filename);
+                            std::fs::write(&entry, &script).unwrap();
+                            let output = std::process::Command::new(&sh)
+                                .env_clear()
+                                .env("PATH", &bin)
+                                .env("KETTLE_PANE_ID", "fixture-pane")
+                                .arg(entry)
+                                .args(args)
+                                .output()
+                                .unwrap();
+                            assert_eq!(output.status.code(), Some(2), "{filename}");
+                            assert!(output.stdout.is_empty());
+                            assert_eq!(
+                                output.stderr,
+                                b"kettle entry script: do not name it claude or codex\n"
+                            );
+                        }
+                    } else {
+                        command.args(["-c", &script, "wrapper-test"]);
                     }
+                    command.args(args);
                     if pane {
                         command.env("KETTLE_PANE_ID", "fixture-pane");
                     }

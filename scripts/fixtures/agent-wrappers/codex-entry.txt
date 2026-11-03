@@ -4,6 +4,7 @@
 # This entry script is experimental. It must NOT be named claude or codex
 # and must not sit in a PATH directory under either name.
 # It must be user-owned and not writable by others.
+case "${0##*/}" in claude|codex) echo "kettle entry script: do not name it claude or codex" >&2; exit 2 ;; esac
 if [ -n "${KETTLE_PANE_ID-}" ] && [ -x '/fixture/kettle' ]; then
   exec '/fixture/kettle' agent-setup --launch-codex -- "$@"
 fi

@@ -944,8 +944,10 @@ caller's environment pass through, and the agent supplies the exit status
 customizable wrapper, or an experimental POSIX entry script rendered by
 `codex_shell::wrapper_snippet` and `entry_script`. Each embeds this Kettle's
 absolute path. The wrapper and entry check the pane and executable before
-calling the launcher, otherwise they run the plain agent. Kettle edits none
-of the user's startup files or agent configuration.
+calling the launcher, otherwise they run the plain agent. The entry script
+refuses filenames `claude` and `codex` with exit status 2 and a stderr message
+to prevent resolving itself. Kettle edits none of the user's startup files or
+agent configuration.
 
 On Linux, `agent_setup::NoCard` names argument refusals, unreadable or
 unsupported versions, executable-check failures, an unavailable display
@@ -1049,13 +1051,20 @@ portable-pty passes to the default shell after its login `argv[0]`
 (`shell_arg`).
 
 The one-shot zsh and fish startup hooks also export `KETTLE_OWN_CODEX` and,
-on Linux when offered, `KETTLE_OWN_CLAUDE`. They write `0` for Kettle's
-function and `1` when the user's function, zsh alias, fish abbreviation or
-autoloadable function wins. A zsh alias can run before a Kettle function
-defined beneath it. `Mux::spawn_pane` strips both inherited variables for
-every new pane. `codex_shell::agent_function_marker` accepts only literal
-`0` and `1` as `AgentFunction::Kettle` and `Own`; everything else is
-`Unchecked`. This forgeable marker is diagnostic only, never admission.
+on Linux when offered, `KETTLE_OWN_CLAUDE`. They write `0:<pid>` for Kettle's
+function and `1:<pid>` when the user's defined or autoloadable function wins,
+using the defining shell's decimal PID (`$$` in zsh, `$fish_pid` in fish).
+Aliases and fish abbreviations do not count as user functions; fish checks
+only `functions -q`. If zsh defines Kettle's function under an alias, it
+exports an empty marker because the alias may or may not reach that function.
+`Mux::spawn_pane` strips both inherited variables for every new pane.
+`codex_shell::agent_function_marker` takes the status command's parent shell
+PID and accepts only exact `0:<pid>` and `1:<pid>` matches as
+`AgentFunction::Kettle` and `Own`. Bare values, different PIDs, leading zeros,
+signs, extra characters, empty and non-Unicode values are `Unchecked`; unknown
+agent names do not read the environment. Child shells inherit the exported
+value but read as `Unchecked` because their PID differs. This forgeable marker
+is diagnostic only, never admission.
 `agent_setup::launch_line` uses it only for fixed status text and never
 prints its value. The Codex `Delivery:` line avoids promising cards when
 the user's command runs first. There is no function-body inspection or
