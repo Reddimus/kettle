@@ -1060,6 +1060,32 @@ without changing the terminal.
 Xvfb fixture success does not establish official-client or GNOME Wayland
 acceptance. The viewer helper uses native X11 input.
 
+The Claude launcher unit tests in `crates/kettle/src/agent_setup.rs` cover
+switches, one-value, optional-value, and multi-value options, including aliases
+and inline values. They check that option values stay values, that optional
+and multi-value options stop before an argument starting with `-`, and that a
+prompt after multi-value options needs `--`. Refused groups cover print mode
+and its options, detached sessions, hooks-off modes, help and version output,
+subcommands, unknown options, missing values, extra prompts, and non-Unicode
+arguments. Notice tests check that only unknown options and hooks-off modes
+produce the fallback message, and that option values, prompts, control
+characters, and unsafe or overlong option names never leak into it.
+
+The drift guard classifies every option and subcommand in the captured Claude
+Code 2.1.317 `claude --help`, and reads each option's arity from its
+declaration (`<value>`, `[value]`, `<values...>` or none), so each option needs
+a matching arity or an explicit exclusion. To diff the capture against the
+installed CLI, opt in with:
+
+```sh
+cargo test -p kettle claude_help_matches_installed_cli -- --ignored
+```
+
+This check needs an installed Claude Code CLI. It checks help drift, not
+rendered-card acceptance. Native Linux verification must also check that the
+fallback notice appears only in an eligible Kettle pane with terminal stdin
+and stdout; non-terminal launches must stay silent.
+
 ### Read the result
 
 The helper's `all` case does not include every scenario.

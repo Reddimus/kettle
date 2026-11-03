@@ -6,6 +6,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- Give cards to interactive Claude Code launches on Linux using
+  `--dangerously-skip-permissions`, `--add-dir`, `--mcp-config`, `--ide`,
+  `--debug`, and the other supported interactive flags instead of silently
+  falling back to the media shelf (#759, #761). `--strict-mcp-config` stays
+  refused: it hides the plugin's MCP server, so `kettle_show` would not exist.
+- Say when an unknown option, `--bare`, `--safe-mode` or `--strict-mcp-config`
+  leaves an interactive Claude Code launch without Kettle cards. The stderr
+  notice never includes option values or prompts; images and diagrams still
+  reach the media shelf (#759, #761).
+
 ## [5.8.2] — 2026-11-02
 
 ### Maintenance
