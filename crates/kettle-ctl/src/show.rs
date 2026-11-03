@@ -126,8 +126,9 @@ pub mod card_reason {
     /// Kettle could not trace the call to a process in the pane, as for a
     /// session that runs in a background daemon.
     pub const UNTRACED: &str = "untraced";
-    /// The call is the pane's own, but its agent did not start through
-    /// Kettle's launcher.
+    /// The call is the pane's own, but no checked launch of its agent is on
+    /// record: it did not start through Kettle's launcher, or its launch
+    /// lapsed since, as when the agent or its pane's root changed.
     pub const NOT_LAUNCHED: &str = "not_launched";
     /// The agent is launched, but the pane cannot hold a card now: too
     /// small, a full-screen program, or as many cards as it may have.

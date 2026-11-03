@@ -857,7 +857,7 @@ fn card_reason_sentence(reason: &str) -> &'static str {
             "No card shows below this call: Kettle cannot tell which pane this session runs in. The item is on the shelf."
         }
         NOT_LAUNCHED => {
-            "No card shows below this call: this session did not start through Kettle's launcher. The user can run kettle agent-setup --status. The item is on the shelf."
+            "No card shows below this call: Kettle has no checked launch for this session, which usually means it did not start through Kettle's launcher. The user can run kettle agent-setup --status. The item is on the shelf."
         }
         PANE_CANNOT => {
             "No card shows below this call: the pane cannot hold one right now. The item is on the shelf."
@@ -869,7 +869,10 @@ fn card_reason_sentence(reason: &str) -> &'static str {
 fn show_sent_without_card(result: &kettle_ctl::show::ShowResult, card_requested: bool) -> Value {
     use kettle_ctl::show::card_reason::{NOT_LAUNCHED, PANE_CANNOT, UNTRACED};
     let mut sent = show_sent(result);
-    if card_requested && let Some(reason) = result.card_reason.as_deref() {
+    if card_requested {
+        // A card that was asked for and did not come is said once, with the
+        // word for it when Kettle gave one and the plain line when it did not.
+        let reason = result.card_reason.as_deref().unwrap_or("");
         if matches!(reason, UNTRACED | NOT_LAUNCHED | PANE_CANNOT) {
             sent["structuredContent"]["card_reason"] = json!(reason);
         }
@@ -1928,7 +1931,7 @@ mod tests {
             (
                 NOT_LAUNCHED,
                 "not_launched",
-                "No card shows below this call: this session did not start through Kettle's launcher. The user can run kettle agent-setup --status. The item is on the shelf.",
+                "No card shows below this call: Kettle has no checked launch for this session, which usually means it did not start through Kettle's launcher. The user can run kettle agent-setup --status. The item is on the shelf.",
             ),
             (
                 PANE_CANNOT,
@@ -1946,7 +1949,7 @@ mod tests {
             assert_eq!(reason, word);
             let line = card_reason_sentence(reason);
             assert_eq!(line, expected);
-            assert!(line.is_ascii() && line.len() < 160);
+            assert!(line.is_ascii() && line.len() < 256);
             assert!(
                 !line
                     .bytes()
@@ -1967,7 +1970,19 @@ mod tests {
             &[],
         );
         let original = show_sent(&result);
-        assert_eq!(show_sent_without_card(&result, true), original);
+        // A card asked for with no word from Kettle still says it did not
+        // come, plainly and once; a session that asked for none hears nothing.
+        let plain = show_sent_without_card(&result, true);
+        assert!(plain["structuredContent"].get("card_reason").is_none());
+        assert_eq!(
+            plain["content"][0]["text"],
+            json!(format!(
+                "{} {}",
+                original["content"][0]["text"].as_str().unwrap(),
+                card_reason_sentence("")
+            ))
+        );
+        assert_eq!(show_sent_without_card(&result, false), original);
         for reason in [
             UNTRACED,
             NOT_LAUNCHED,

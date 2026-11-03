@@ -195,8 +195,9 @@ impl App {
         #[cfg(target_os = "linux")]
         let _ = harness;
         // An adapter's hook asked for a card: a launch the caller's agent
-        // registered grants it, and without one the item still goes to the
-        // shelf, for a reason the receipt can name.
+        // registered grants it, and without one (never registered, or
+        // pruned since) the item still goes to the shelf, for a reason the
+        // receipt can name.
         #[cfg(target_os = "linux")]
         let (native_grant, card_reason) = match show
             .inline
@@ -1489,9 +1490,10 @@ impl App {
                     .as_ref()
                     .zip(pane.caller_root)
                     .is_some_and(|(grant, root)| grant.valid(route.pane, root));
-            // The caller was traced when it asked, and no longer is.
+            // The launch was on record when the call asked and no longer
+            // holds: its agent or its pane's root changed since.
             if !kept {
-                card_reason.get_or_insert(kettle_ctl::show::card_reason::UNTRACED);
+                card_reason.get_or_insert(kettle_ctl::show::card_reason::NOT_LAUNCHED);
             }
             kept
         });
@@ -1513,6 +1515,7 @@ impl App {
             }
         });
         let cli = inline.as_ref().is_some_and(|draft| draft.printer.is_some());
+        let hook_card = inline.as_ref().is_some_and(|draft| draft.printer.is_none());
         #[cfg(target_os = "linux")]
         let native_pickup = inline
             .as_ref()
@@ -1668,6 +1671,13 @@ impl App {
                 facts.why.as_str(),
             ),
         };
+        // A hook card that was asked for and is not coming, with no earlier
+        // word for it, is the pane's: it had no image, cell size or grid to
+        // place one, or no pickup could be issued. A file's card is placed
+        // later, by its facts.
+        if hook_card && delivery.is_none() && facts_query.is_none() {
+            card_reason.get_or_insert(kettle_ctl::show::card_reason::PANE_CANNOT);
+        }
         result.inline = delivery;
         result.inline_refused = inline_refused;
         result.card_reason = card_reason.map(Into::into);
@@ -1977,8 +1987,9 @@ fn finish_file_facts(
                         }
                         Err(refusal) if cli => result.inline_refused = Some(refusal),
                         Err(_) => {
-                            result.card_reason =
-                                Some(kettle_ctl::show::card_reason::PANE_CANNOT.into());
+                            result.card_reason.get_or_insert_with(|| {
+                                kettle_ctl::show::card_reason::PANE_CANNOT.into()
+                            });
                         }
                     }
                 }

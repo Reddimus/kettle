@@ -102,7 +102,7 @@ Clippy for both crates with `--all-targets -- -D warnings`.
 
 The MCP unit tests in `crates/kettle/src/mcp_tools.rs` include
 `a_card_reason_is_a_fixed_word_with_a_fixed_line` for fixed ASCII wording,
-distinct lines under 160 bytes, and excluded characters.
+distinct lines under 256 bytes, and excluded characters.
 `a_shelf_result_says_why_there_is_no_card` checks all three known reasons,
 unknown-word privacy, and unchanged receipts when no card was requested.
 `a_show_result_accepts_old_clients_and_unknown_card_reasons` covers missing
