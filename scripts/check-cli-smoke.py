@@ -15,7 +15,8 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parent.parent
-EXE = ROOT / "target" / "debug" / ("kettle.exe" if os.name == "nt" else "kettle")
+TARGET = ROOT / Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+EXE = TARGET / "debug" / ("kettle.exe" if os.name == "nt" else "kettle")
 
 
 def run(*arguments: str, environment: dict[str, str], expect: int = 0) -> str:
@@ -357,7 +358,7 @@ def main() -> int:
         if os.name != "nt":
             function = run("agent-setup", "--print", "--shell", "zsh",
                            environment=environment)
-            require("codex()" in function and "agent-setup --launch-codex" in function,
+            require("'codex'()" in function and "agent-setup --launch-codex" in function,
                     f"agent-setup --print printed: {function!r}")
             removal = run("agent-setup", "--uninstall", "--shell", "fish",
                           environment=environment)

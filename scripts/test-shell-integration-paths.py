@@ -61,11 +61,13 @@ printf 'PROVIDER_CALLS=%s;BUFFER=<%s>' $KETTLE_CALLS "$KETTLE_BUFFER"
 
     def test_interactive_default_and_vi_source_paths_with_spaces(self):
         with tempfile.TemporaryDirectory() as raw:
-            integration = Path(raw) / "Kettle Source's $integration"
-            integration.mkdir()
-            shutil.copy2(MODULE.INTEGRATION / "kettle.fish", integration / "kettle.fish")
-            with mock.patch.object(MODULE, "INTEGRATION", integration):
-                MODULE.check_fish(shutil.which("fish"))
+            for name in ("Kettle Source's $integration", "cx", "ctrl-x"):
+                with self.subTest(source_directory=name):
+                    integration = Path(raw) / name
+                    integration.mkdir()
+                    shutil.copy2(MODULE.INTEGRATION / "kettle.fish", integration / "kettle.fish")
+                    with mock.patch.object(MODULE, "INTEGRATION", integration):
+                        MODULE.check_fish(shutil.which("fish"))
 
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("pwsh"), "Unix pwsh required")

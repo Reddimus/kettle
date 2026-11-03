@@ -15,7 +15,7 @@ if [[ -o interactive ]]; then
     precmd_functions=(${precmd_functions:#_kettle_codex})
     'builtin' 'unfunction' '_kettle_codex'
     if (( ! ${+functions[codex]} )); then
-codex() {
+'codex'() {
   command '/kettle-stand-in/bin/kettle' agent-setup --launch-codex -- "$@"
 }
       if (( ${+aliases[codex]} )); then

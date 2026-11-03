@@ -1,4 +1,4 @@
-claude() {
+'claude'() {
   # Put your account's environment variables before both commands below,
   # for example: CLAUDE_CONFIG_DIR="$HOME/.claude-work" command ...
   if [ -n "${KETTLE_PANE_ID-}" ] && [ -x '/fixture/kettle' ]; then

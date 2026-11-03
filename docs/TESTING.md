@@ -10,6 +10,14 @@ produce a supported package. Record every skipped check and its reason.
 
 ## Run it
 
+The shell path regression runs Fish integration from directories containing
+spaces, quotes, `cx`, and `ctrl-x`. It verifies that source-location comments
+in `bind` output cannot disable correlation or change stock key bindings.
+Native bash and zsh tests also source generated agent functions and wrappers
+with existing aliases and verify that both the functions and aliases survive.
+Rust shell fixtures find executables through `PATH`, including custom prefixes
+and relative entries, and skip files without executable permission.
+
 Run commands from the repository root. [Justfile](../Justfile) defines the
 recipes; `just --list` shows those available on your host.
 Install the source-build dependencies in [INSTALL.md](INSTALL.md#from-source).
@@ -1622,6 +1630,10 @@ A path-filtered workflow may not run for a source-only change outside its filter
 
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on every PR and push
 to `main`. Its jobs are:
+
+Development and test builds use `line-tables-only` debug information to keep
+hosted-runner artifacts within disk limits while retaining source locations in
+backtraces. These workflow overrides apply to the dev and test profiles.
 
 | Job ID | Host | What it runs |
 | --- | --- | --- |

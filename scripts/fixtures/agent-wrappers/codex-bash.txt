@@ -1,4 +1,4 @@
-codex() {
+function codex {
   # Put your account's environment variables before both commands below,
   # for example: CODEX_HOME="$HOME/.codex-work" command ...
   if [ -n "${KETTLE_PANE_ID-}" ] && [ -x '/fixture/kettle' ]; then

@@ -15,7 +15,7 @@ if [[ -o interactive ]]; then
     precmd_functions=(${precmd_functions:#_kettle_claude})
     'builtin' 'unfunction' '_kettle_claude'
     if (( ! ${+functions[claude]} )); then
-claude() {
+'claude'() {
   command '/kettle-stand-in/bin/kettle' agent-setup --launch-claude -- "$@"
 }
       if (( ${+aliases[claude]} )); then

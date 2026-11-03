@@ -33,6 +33,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Preserve existing aliases when sourcing generated bash and zsh agent
+  functions or wrappers, instead of failing to parse the function declaration.
+- Keep Fish command correlation enabled when the integration's source path
+  contains `cx` or `ctrl-x`; source-location comments are not key bindings.
+
 - Give cards to interactive Claude Code launches on Linux using
   `--dangerously-skip-permissions`, `--add-dir`, `--mcp-config`, `--ide`,
   `--debug`, and the other supported interactive flags instead of silently
