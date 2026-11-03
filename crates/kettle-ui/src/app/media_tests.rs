@@ -630,3 +630,111 @@ fn regression_file_pickup_lifetime_starts_at_publication() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn file_hook_card_reports_a_lost_pickup_after_metadata_wait() {
+    check_file_hook_card_lost_pickup(true);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_hook_card_reports_a_changed_root_after_metadata_wait() {
+    check_file_hook_card_lost_pickup(false);
+}
+
+#[cfg(target_os = "linux")]
+fn check_file_hook_card_lost_pickup(clear_root: bool) {
+    use kettle_ctl::agent_launch::{CardCaller, HeldExecutable, LaunchFiles, LaunchScopes};
+    use kettle_ctl::show::InlineTarget;
+    let (mut media, mut ws, pane, mut query, woke) =
+        review_file_facts_fixture(Some(review_file_identity()));
+    let root = ws.mux.panes[&pane]
+        .caller_root
+        .expect("native fixture pane root");
+    let mut launches = LaunchScopes::default();
+    let now = std::time::Instant::now();
+    assert!(launches.register(
+        root,
+        pane,
+        root,
+        LaunchFiles {
+            target: InlineTarget::CodexHook,
+            native: Arc::new(HeldExecutable::open(std::path::Path::new("/bin/cat")).unwrap()),
+            launcher: None,
+        },
+        now,
+    ));
+    let chain = [
+        kettle_ctl::process::ProcessIdentity::new_for_tests(40, 400),
+        root,
+    ];
+    let grant = launches
+        .grant(
+            CardCaller {
+                target: InlineTarget::CodexHook,
+                owner: root,
+                chain: &chain,
+                pane,
+                pane_root: root,
+            },
+            now,
+        )
+        .expect("live launch before metadata wait");
+    let state = ws.mux.panes.get_mut(&pane).unwrap();
+    state.caller_root = Some(root);
+    let item = state.media_shelf.get(73).unwrap();
+    let image = item.card_image().unwrap();
+    let (delivery, pending) = super::media::prepare_card(
+        &mut media.cards,
+        (pane, &mut state.inline_cards, (80, 24), 0),
+        (8.0, 16.0),
+        (73, 0),
+        (item.kind, None, None),
+        &image,
+        crate::media::InlineDraft {
+            launch: Some(grant),
+            owner: root,
+            harness: kettle_render::CardHarness::CodexHook,
+            name: None,
+            printer: None,
+        },
+        now,
+    )
+    .unwrap();
+    assert!(delivery.is_none());
+    assert!(pending.is_some());
+    let (reply, received) = crossbeam_channel::bounded(1);
+    super::media::prepare_file_reply(
+        &mut query,
+        crate::media::Origin {
+            conn_id: 1,
+            request_id: 95,
+            reply,
+        },
+        kettle_ctl::show::ShowResult::file((pane, true, 1), 73, 0, "unsupported_media"),
+    );
+    query.reply.as_mut().unwrap().inline = pending;
+    assert!(media.request_facts(query, None, Arc::new(|| {})).is_ok());
+    woke.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    ws.mux.panes.get_mut(&pane).unwrap().caller_root = if clear_root {
+        None
+    } else {
+        Some(kettle_ctl::process::ProcessIdentity::new_for_tests(
+            root.pid(),
+            root.start() + 1,
+        ))
+    };
+    super::media::media_tick_ready(&mut media, &mut ws, &mut Default::default(), &mut launches);
+    let response = received
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(response.ok);
+    let result: kettle_ctl::show::ShowResult = serde_json::from_value(response.result).unwrap();
+    assert!(result.inline.is_none());
+    assert_eq!(result.file.as_ref().unwrap().bytes, 12345);
+    assert_eq!(
+        result.card_reason.as_deref(),
+        Some(kettle_ctl::show::card_reason::PANE_CANNOT)
+    );
+}

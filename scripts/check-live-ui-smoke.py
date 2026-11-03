@@ -1856,21 +1856,23 @@ def stream_git_output(
 
     def read_stdout() -> None:
         assert process.stdout is not None
-        try:
-            while chunk := process.stdout.read(COPY_CHUNK_BYTES):
-                budget.add_bytes(len(chunk), f"git {' '.join(args)}")
-                consume(chunk)
-        except BaseException as error:
-            errors.append(error)
-            process.kill()
+        with process.stdout:
+            try:
+                while chunk := process.stdout.read(COPY_CHUNK_BYTES):
+                    budget.add_bytes(len(chunk), f"git {' '.join(args)}")
+                    consume(chunk)
+            except BaseException as error:
+                errors.append(error)
+                process.kill()
 
     def read_stderr() -> None:
         assert process.stderr is not None
-        while chunk := process.stderr.read(4096):
-            # Retain only a bounded diagnostic tail while continuing to drain.
-            stderr.extend(chunk)
-            if len(stderr) > 16 * 1024:
-                del stderr[: len(stderr) - 16 * 1024]
+        with process.stderr:
+            while chunk := process.stderr.read(4096):
+                # Retain only a bounded diagnostic tail while continuing to drain.
+                stderr.extend(chunk)
+                if len(stderr) > 16 * 1024:
+                    del stderr[: len(stderr) - 16 * 1024]
 
     stdout_thread = threading.Thread(target=read_stdout, daemon=True)
     stderr_thread = threading.Thread(target=read_stderr, daemon=True)
@@ -3430,6 +3432,11 @@ def bright_at(rgba_rows: List[bytes], x: int, y: int) -> bool:
     off = x * 4
     r, g, b, a = row[off : off + 4]
     return a > 0 and (r * 299 + g * 587 + b * 114) >= 140_000
+
+
+def underline_probe_rows(baseline: int, height: int) -> range:
+    # The surface's one-pixel focus outline is not a terminal underline.
+    return range(max(1, baseline - 2), min(height - 1, baseline + 3))
 
 
 def bright_pixel_count(rgba_rows: List[bytes]) -> int:
@@ -7505,7 +7512,7 @@ def run_underline(kettle: str, root: Path) -> Path:
             baseline = int(round(origin_y + row * cell_h + cell_h - 2.0))
             best = 0
             best_y = baseline
-            for y in range(baseline - 2, baseline + 3):
+            for y in underline_probe_rows(baseline, height):
                 hits = sum(1 for col in sample_cols if bright_at(rgba_rows, int(origin_x + (col + 0.5) * cell_w), y))
                 if hits > best:
                     best = hits
@@ -7519,7 +7526,7 @@ def run_underline(kettle: str, root: Path) -> Path:
             baseline = int(round(origin_y + row * cell_h + cell_h - 2.0))
             best = 0
             best_y = baseline
-            for y in range(baseline - 2, baseline + 3):
+            for y in underline_probe_rows(baseline, height):
                 hits = sum(1 for col in sample_cols if bright_at(rgba_rows, int(origin_x + (col + 0.5) * cell_w), y))
                 if hits > best:
                     best = hits
@@ -7534,7 +7541,7 @@ def run_underline(kettle: str, root: Path) -> Path:
             baseline = int(round(origin_y + row * cell_h + cell_h - 2.0))
             best = 0
             best_y = baseline
-            for y in range(baseline - 2, baseline + 3):
+            for y in underline_probe_rows(baseline, height):
                 hits = sum(1 for col in sample_cols if bright_at(rgba_rows, int(origin_x + (col + 0.5) * cell_w), y))
                 if hits > best:
                     best = hits
@@ -7562,7 +7569,7 @@ def run_underline(kettle: str, root: Path) -> Path:
                 neighbor_baseline = int(round(origin_y + neighbor * cell_h + cell_h - 2.0))
                 neighbor_best = 0
                 neighbor_y = neighbor_baseline
-                for y in range(neighbor_baseline - 2, neighbor_baseline + 3):
+                for y in underline_probe_rows(neighbor_baseline, height):
                     hits = sum(1 for col in sample_cols if bright_at(rgba_rows, int(origin_x + (col + 0.5) * cell_w), y))
                     if hits > neighbor_best:
                         neighbor_best = hits
@@ -18188,6 +18195,8 @@ def run_split_titlebar(kettle: str, root: Path) -> Path:
             "\n".join(
                 [
                     "agent-server = full",
+                    *(["shell = /bin/sh", "login-shell = false", "shell-integration = false"]
+                      if platform.system() != "Windows" else []),
                     "tab-bar = always",
                     "tab-bar-position = top",
                     "status-bar = off",
@@ -19867,8 +19876,25 @@ def run_theme_picker(kettle: str, root: Path) -> Path:
     one "Theme…" row instead of a submenu of every theme.
     """
     out = root / f"theme-picker-{time.strftime('%Y%m%d-%H%M%S')}"
-    out.mkdir(parents=True, exist_ok=True)
-    cfg = out / "config"
+    out.mkdir(parents=True, mode=0o700, exist_ok=False)
+    with contextlib.ExitStack() as stack:
+        if platform.system() == "Windows":
+            fixture = create_windows_private_directory("kettle-theme-picker-")
+            stack.callback(shutil.rmtree, fixture)
+        else:
+            fixture = Path(stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="kettle-theme-picker-")
+            ))
+        try:
+            return _run_theme_picker_fixture(kettle, out, fixture)
+        finally:
+            cfg = fixture / "config"
+            if cfg.is_file():
+                shutil.copyfile(cfg, out / "config")
+
+
+def _run_theme_picker_fixture(kettle: str, out: Path, fixture: Path) -> Path:
+    cfg = fixture / "config"
     cfg.write_text(
         "\n".join(
             [
@@ -19961,6 +19987,7 @@ def run_theme_picker(kettle: str, root: Path) -> Path:
         my = float(surface["height"]) / 2  # type: ignore[index]
         live.ctl("send_mouse", params={"event": "click", "x": mx, "y": my, "button": "right"})
         time.sleep(0.3)
+        reveal_context_row(live, "Theme…")
         menu = picker(live, "menu").get("context_menu")
         rows = menu.get("rows", []) if isinstance(menu, dict) else []
         labels = [str(row.get("label", "")) for row in rows if isinstance(row, dict)]

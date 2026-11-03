@@ -33,6 +33,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Report why a file's hook card is unavailable when its pickup is lost while
+  Kettle waits for file metadata.
 - Preserve existing aliases when sourcing generated bash and zsh agent
   functions or wrappers, instead of failing to parse the function declaration.
 - Keep Fish command correlation enabled when the integration's source path
