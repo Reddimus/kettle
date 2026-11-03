@@ -1352,10 +1352,10 @@ impl App {
                     .nodes
                     .iter()
                     .find(|(id, _)| *id == focus)
-                    .map(|(_, node)| {
+                    .map(|(id, node)| {
                         serde_json::json!({
                             "role": format!("{:?}", node.role()).to_ascii_lowercase(),
-                            "label": node.label(),
+                            "label": modal_accessibility_diagnostic_label(&diagnostic_overlay, *id, node),
                         })
                     })
             });

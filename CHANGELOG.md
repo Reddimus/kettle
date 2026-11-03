@@ -33,6 +33,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Include current Settings values in macOS accessibility row names, so
+  assistive tools can read the theme, font size, and other selected values.
 - Match symbolic shortcuts such as imported Terminator `Ctrl+Plus` when
   Shift produces the symbol, while preserving explicit Shift bindings and
   the active layout's character.

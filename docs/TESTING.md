@@ -2449,6 +2449,16 @@ runs retain their recorded source and helper identities.
 window and retained-history states. They retain failed admissions and startup
 outliers and are explicitly excluded from calibrated performance standings.
 
+## Settings accessibility values
+
+The settings-row regression checks a theme name, a numeric value and an empty
+value. macOS list options expose their name as static text, so each non-empty
+value is included in that name. Linux retains the value description used by
+AT-SPI, and Windows retains its separate name and value. The native macOS
+check opens Settings and reads these row names through the accessibility tree;
+it does not establish VoiceOver speech output. Control diagnostics retain the
+field name alone, including on macOS.
+
 ## Configured-session and desktop acceptance, 2026-11-01
 
 On native macOS, the configured AstroNvim/LazyVCS copy completed a five-minute,
