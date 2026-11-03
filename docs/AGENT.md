@@ -397,8 +397,13 @@ so does closing their pane. A file's key defaults to its path, so showing a
 file again replaces its item in place, keeping the item id.
 
 The result is `{pane, verified, window, item, kind, width, height, warnings}`,
-`kind` being what the media turned out to be. A video (`kind: "video"`) is
-shown as its poster, the middle frame fitted to the lane, whose size
+`kind` being what the media turned out to be. Only when a hook session asked
+for a card and none came, the result adds `card_reason`: `untraced`,
+`not_launched` or `pane_cannot`. It is absent otherwise. This is an open
+string so older clients can accept future words; see
+[Why a card did not show](#why-a-card-did-not-show).
+A video (`kind: "video"`) is shown as its poster, the middle frame fitted
+to the lane, whose size
 `width` and `height` give; its result adds `video` with what the video is:
 `duration_ms`, its own `width` and `height` as shown, Kettle's name for the
 `codec` (`h264`, `vp8` and so on, or `unknown`), `fps_milli` when the stream
@@ -998,7 +1003,12 @@ sends anything. It finds its Kettle the strict way `kettle show` does, the one t
 server runs inside, and returns one plain line and status-only structured
 content (`status`, `delivery: "shelf"`, `pane`, `window`, `item`, `verified`,
 `kind`, `width`, `height`, `warnings`, `model_has_seen: false`), never the
-media. Failures are `isError` results in the fixed wording of [Showing
+media. When a hook session asked for a card and none came, a result with
+`card_reason` adds a fixed sentence saying no card shows. Its structured content also adds
+`card_reason` for the known words `untraced`, `not_launched` and `pane_cannot`.
+The field is an open string in the show result; the MCP receipt omits unknown
+words and uses a generic sentence. No reason field or sentence appears
+otherwise. Failures are `isError` results in the fixed wording of [Showing
 media](#showing-media), with structured content of `status: "failed"`, the
 fixed `code` and `reason` (Kettle's own, or the client's: `stdin_unreadable`,
 `unknown_refusal`, `unknown_reply`) and `model_has_seen: false`, and nothing
@@ -1009,8 +1019,8 @@ control and that it descends from or a live `KETTLE_PID` names, or
 a Mermaid file or making an image the user should see, by its absolute path;
 a useful diagram in the reply by its source in `mermaid`, keeping the source
 in the reply; not trivial diagrams. They also say to reuse `key`, that
-showing is not seeing, to tell the user once and not retry, and never to
-change configuration or install software. In tmux inside a Kettle pane,
+showing is not seeing, to tell the user once and not retry when no card shows,
+and never to change configuration or install software. In tmux inside a Kettle pane,
 known only by a live `KETTLE_PID` naming such a Kettle, they add that media
 goes to the pane tmux was started from, marked unverified, or is refused.
 Elsewhere, a Kettle that serves neither included, they say not to call it.
@@ -1601,6 +1611,9 @@ interactive session to get cards.
 | Stderr says `Kettle does not know ...` | A Claude Code launch flag is unknown to Kettle | Check the supported flags above; use a supported interactive form or the shelf |
 | A version, executable or display-server notice | The launch failed a version or executable check, could not reach the server, or was declined | Check `--status`, supported versions, the native installation, and both agent-preview settings; start a new pane after enabling them |
 | A Claude Code background-daemon session stays shelf-only | The session cannot be traced to a pane | Keep the session interactive in the pane; no wrapper or launcher change fixes a daemon session |
+| `card_reason: "untraced"`: "Kettle cannot tell which pane this session runs in." | The session runs in Claude Code's background daemon or cannot be traced to this pane | Restart the session in the pane in the foreground |
+| `card_reason: "not_launched"`: "this session did not start through Kettle's launcher." | The pane's own session bypassed the launcher | Use the launcher or route your wrapper through it; see [Wrapping your own Claude or Codex function](#wrapping-your-own-claude-or-codex-function). Check `kettle agent-setup --status` |
+| `card_reason: "pane_cannot"`: "the pane cannot hold one right now." | The launched session's pane cannot hold a card now | Enlarge the pane, leave the full-screen program, or wait |
 | ccx starts Claude Code without cards | ccx starts the executable itself and bypasses shell functions | In a throwaway profile, try the experimental entry script through `realClaudePath` or `CAS_REAL_CLAUDE_PATH`; real ccx acceptance is unverified |
 
 ### Kettle defines it for you

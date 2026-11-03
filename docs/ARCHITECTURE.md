@@ -924,8 +924,11 @@ place, so `finish_lane_render` first moves the posters of the item's cards
 (`InlineCards::set_poster`); a reload makes a new generation, which retires
 them as any replacement does. The message rides back to the adapter in
 `ShowResult::inline`; the MCP server keeps it in its `DisplaySession` for the
-hook's one-time `kettle_card`, which is answered outside the tool queue. The renderer reports
-each frame's accepted cards (`Renderer::painted_cards`), and their items count
+hook's one-time `kettle_card`, which is answered outside the tool queue.
+When a hook session asked for a card and none came, `ShowResult::card_reason`
+is an open string. The MCP shelf receipt emits only known reason words with
+fixed sentences, or a generic sentence for an unknown word, without card text.
+The renderer reports each frame's accepted cards (`Renderer::painted_cards`), and their items count
 as visible when pixels are released. The tick retires cards whose harness
 exited, whose pane closed, or whose item left the shelf or was replaced.
 

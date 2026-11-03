@@ -8,6 +8,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Explain missing hook cards in MCP shelf receipts with fixed `card_reason`
+  words and guidance, without exposing card text or unknown reason words (#760).
 - Document `agent-setup --launch-codex` and `--launch-claude` as stable
   wrapper interfaces, visible in help, preserving arguments, environment
   and the agent's exit status (#760).
