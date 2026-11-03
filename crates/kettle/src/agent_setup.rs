@@ -573,78 +573,277 @@ fn run_program(program: &str, args: Vec<OsString>) -> i32 {
     }
 }
 
+/// How many values a Claude Code option takes, as its own parser reads them
+/// (Claude Code 2.1.316).
 #[cfg(any(target_os = "linux", test))]
-fn claude_interactive(args: &[OsString]) -> bool {
-    let takes_value = |option: &str| {
-        matches!(
-            option,
-            "--model"
-                | "--effort"
-                | "--permission-mode"
-                | "--agent"
-                | "--agents"
-                | "--name"
-                | "-n"
-                | "--session-id"
-                | "--settings"
-                | "--setting-sources"
-                | "--system-prompt"
-                | "--append-system-prompt"
-        )
-    };
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Arity {
+    /// A switch.
+    None,
+    /// Exactly one value: `--flag value` or `--flag=value`.
+    One,
+    /// A value only if the next argument does not start with `-`.
+    Optional,
+    /// One or more values: every following argument that does not start with
+    /// `-`. A prompt after one needs `--` first.
+    Many,
+}
+
+/// Why a known option does not get a card.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Exclusion {
+    /// Print mode and the options that only apply to it.
+    Print,
+    /// A background, remote or tmux session, not one in this pane.
+    Detached,
+    /// Turns off plugin hooks, so `kettle_card` would never run.
+    HooksOff,
+    /// Help and version output.
+    Info,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Takes(Arity),
+    Excluded(Exclusion),
+}
+
+/// What Kettle does with a Claude Code option: `None` for one it does not
+/// know. A flag that keeps Claude interactive in this pane with plugin hooks
+/// on is `Takes`; the rest are `Excluded`, so that a new Claude option is a
+/// decision made here rather than a silent fall-through.
+#[cfg(any(target_os = "linux", test))]
+fn claude_flag(option: &str) -> Option<Flag> {
+    use Arity::{Many, None as Switch, One, Optional};
+    Some(match option {
+        "--continue"
+        | "-c"
+        | "--fork-session"
+        | "--verbose"
+        | "--dangerously-skip-permissions"
+        | "--allow-dangerously-skip-permissions"
+        | "--ide"
+        | "--chrome"
+        | "--no-chrome"
+        | "--strict-mcp-config"
+        | "--disable-slash-commands"
+        | "--ax-screen-reader"
+        | "--brief"
+        | "--exclude-dynamic-system-prompt-sections" => Flag::Takes(Switch),
+        "--model"
+        | "--effort"
+        | "--permission-mode"
+        | "--agent"
+        | "--agents"
+        | "--name"
+        | "-n"
+        | "--session-id"
+        | "--settings"
+        | "--setting-sources"
+        | "--system-prompt"
+        | "--append-system-prompt"
+        | "--plugin-dir"
+        | "--plugin-url"
+        | "--debug-file"
+        | "--autocompact"
+        | "--fallback-model"
+        | "--system-prompt-snapshot"
+        | "--remote-control-session-name-prefix" => Flag::Takes(One),
+        "--resume"
+        | "-r"
+        | "--debug"
+        | "-d"
+        | "--worktree"
+        | "-w"
+        | "--remote-control"
+        | "--from-pr"
+        | "--prompt-suggestions" => Flag::Takes(Optional),
+        "--add-dir" | "--allowedTools" | "--allowed-tools" | "--disallowedTools"
+        | "--disallowed-tools" | "--mcp-config" | "--tools" | "--betas" | "--file" => {
+            Flag::Takes(Many)
+        }
+        "-p"
+        | "--print"
+        | "--output-format"
+        | "--input-format"
+        | "--json-schema"
+        | "--max-budget-usd"
+        | "--include-partial-messages"
+        | "--include-hook-events"
+        | "--replay-user-messages"
+        | "--forward-subagent-text"
+        | "--permission-prompts"
+        | "--no-session-persistence" => Flag::Excluded(Exclusion::Print),
+        "--bg" | "--background" | "--cloud" | "--environment" | "--desktop" | "--teleport"
+        | "--tmux" => Flag::Excluded(Exclusion::Detached),
+        "--bare" | "--safe-mode" => Flag::Excluded(Exclusion::HooksOff),
+        "-h" | "--help" | "-v" | "--version" => Flag::Excluded(Exclusion::Info),
+        _ => return Option::None,
+    })
+}
+
+/// Claude Code's subcommands, with their aliases (2.1.316).
+#[cfg(any(target_os = "linux", test))]
+fn is_claude_subcommand(word: &str) -> bool {
+    matches!(
+        word,
+        "agents"
+            | "attach"
+            | "auth"
+            | "auto-mode"
+            | "doctor"
+            | "gateway"
+            | "import"
+            | "install"
+            | "logs"
+            | "mcp"
+            | "plugin"
+            | "plugins"
+            | "purge"
+            | "remote-control"
+            | "respawn"
+            | "rm"
+            | "setup-token"
+            | "stop"
+            | "kill"
+            | "ultrareview"
+            | "update"
+            | "upgrade"
+    )
+}
+
+/// Why a launch is not given Kettle's cards.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Eq, PartialEq)]
+enum Refusal {
+    /// An option Kettle does not know. Holds its name when that is plain
+    /// text safe to print, else nothing; never a value.
+    UnknownOption(String),
+    Excluded(Exclusion),
+    /// A subcommand, not a session.
+    Subcommand,
+    /// An argument that is not Unicode.
+    NotUnicode,
+    /// An option that needs a value and has none.
+    MissingValue,
+    /// More prompts than a session takes.
+    ExtraPrompt,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl Refusal {
+    fn unknown_option(name: &str) -> Self {
+        // Arguments are untrusted: print a name only if it can carry no
+        // control sequence or secret-shaped tail.
+        let plain = name.len() <= 40
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+        Self::UnknownOption(if plain {
+            name.to_owned()
+        } else {
+            String::new()
+        })
+    }
+
+    /// What to tell a user who started an interactive session and gets no
+    /// card, or `None` where the launch was never meant to have one: print
+    /// mode, a subcommand, help, a detached session, or a malformed launch
+    /// that Claude Code will itself report.
+    fn notice(&self) -> Option<String> {
+        let why = match self {
+            Self::UnknownOption(name) if name.is_empty() => {
+                "Kettle does not know one of its options".to_owned()
+            }
+            Self::UnknownOption(name) => format!("Kettle does not know {name}"),
+            Self::Excluded(Exclusion::HooksOff) => "this launch turns off plugin hooks".to_owned(),
+            _ => return None,
+        };
+        Some(format!(
+            "kettle agent-setup: starting Claude Code without Kettle cards: {why}; \
+             images and diagrams will go to the media shelf."
+        ))
+    }
+}
+
+/// The value at `index` if it is one: present, Unicode and not an option.
+#[cfg(any(target_os = "linux", test))]
+fn claude_value(args: &[OsString], index: usize) -> Result<Option<&str>, Refusal> {
+    match args.get(index).map(|value| value.to_str()) {
+        None => Ok(None),
+        Some(None) => Err(Refusal::NotUnicode),
+        Some(Some(value)) => Ok((!value.starts_with('-')).then_some(value)),
+    }
+}
+
+/// Whether `args` start an interactive Claude Code session in this pane, with
+/// plugin hooks on, and so can have a card scope; otherwise why not. Decided
+/// from the arguments alone, in one pass, reading values as Claude Code does.
+#[cfg(any(target_os = "linux", test))]
+fn claude_interactive(args: &[OsString]) -> Result<(), Refusal> {
     let mut prompt = false;
     let mut index = 0;
     while let Some(arg) = args.get(index) {
-        let Some(arg) = arg.to_str() else {
-            return false;
-        };
+        let arg = arg.to_str().ok_or(Refusal::NotUnicode)?;
+        index += 1;
         if arg == "--" {
-            return args[index + 1..]
-                .iter()
-                .all(|value| value.to_str().is_some())
-                && usize::from(prompt) + args.len() - index - 1 <= 1;
-        }
-        if takes_value(arg) {
-            if !args
-                .get(index + 1)
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| !value.is_empty() && !value.starts_with('-'))
-            {
-                return false;
+            let rest = &args[index..];
+            if rest.iter().any(|value| value.to_str().is_none()) {
+                return Err(Refusal::NotUnicode);
             }
-            index += 2;
-            continue;
+            return if usize::from(prompt) + rest.len() <= 1 {
+                Ok(())
+            } else {
+                Err(Refusal::ExtraPrompt)
+            };
         }
-        if let Some((option, value)) = arg.split_once('=')
-            && option.starts_with("--")
-            && takes_value(option)
-        {
-            if value.is_empty() {
-                return false;
-            }
-            index += 1;
-            continue;
-        }
-        match arg {
-            "--continue" | "-c" | "--fork-session" | "--verbose" => {}
-            "--resume" | "-r" => {
-                if args
-                    .get(index + 1)
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|value| !value.is_empty() && !value.starts_with('-'))
-                {
-                    index += 1;
+        if arg.starts_with('-') {
+            let (name, inline) = match arg.split_once('=') {
+                Some((name, value)) if name.starts_with("--") => (name, Some(value)),
+                _ => (arg, None),
+            };
+            let arity = match claude_flag(name) {
+                None => return Err(Refusal::unknown_option(name)),
+                Some(Flag::Excluded(why)) => return Err(Refusal::Excluded(why)),
+                Some(Flag::Takes(arity)) => arity,
+            };
+            match (arity, inline) {
+                (Arity::None, None) => {}
+                // `--ide=x` is not something Claude Code reads as `--ide`.
+                (Arity::None, Some(_)) => return Err(Refusal::unknown_option(name)),
+                (_, Some("")) => return Err(Refusal::MissingValue),
+                (_, Some(_)) => {}
+                (Arity::One, None) => match claude_value(args, index)? {
+                    Some(value) if !value.is_empty() => index += 1,
+                    _ => return Err(Refusal::MissingValue),
+                },
+                (Arity::Optional, None) => {
+                    if claude_value(args, index)?.is_some_and(|value| !value.is_empty()) {
+                        index += 1;
+                    }
+                }
+                (Arity::Many, None) => {
+                    if !claude_value(args, index)?.is_some_and(|value| !value.is_empty()) {
+                        return Err(Refusal::MissingValue);
+                    }
+                    while claude_value(args, index)?.is_some() {
+                        index += 1;
+                    }
                 }
             }
-            _ if arg.starts_with('-') => return false,
-            "mcp" | "auth" | "update" | "upgrade" | "install" | "doctor" | "setup-token"
-            | "plugin" | "plugins" | "agents" | "remote-control" => return false,
-            _ if prompt => return false,
-            _ => prompt = true,
+            continue;
         }
-        index += 1;
+        if is_claude_subcommand(arg) {
+            return Err(Refusal::Subcommand);
+        }
+        if prompt {
+            return Err(Refusal::ExtraPrompt);
+        }
+        prompt = true;
     }
-    true
+    Ok(())
 }
 
 fn launch_claude(argv: Vec<OsString>) -> i32 {
@@ -657,19 +856,29 @@ fn launch_claude(argv: Vec<OsString>) -> i32 {
             && std::io::stdout().is_terminal()
             && plugin.in_pane
             && !plugin.forbidden
-            && claude_interactive(&argv)
-            && let Some(version) = version_of(Path::new("claude"))
-            && let Some(native) = linux::prepare(
-                "claude",
-                kettle_ctl::show::InlineTarget::ClaudeHook,
-                &version,
-            )
-            && let Some(mut command) = native.command("claude")
         {
-            use std::os::unix::process::CommandExt as _;
-            let error = command.args(argv).exec();
-            eprintln!("kettle agent-setup: cannot start claude: {error}");
-            return 127;
+            match claude_interactive(&argv) {
+                Ok(()) => {
+                    if let Some(version) = version_of(Path::new("claude"))
+                        && let Some(native) = linux::prepare(
+                            "claude",
+                            kettle_ctl::show::InlineTarget::ClaudeHook,
+                            &version,
+                        )
+                        && let Some(mut command) = native.command("claude")
+                    {
+                        use std::os::unix::process::CommandExt as _;
+                        let error = command.args(argv).exec();
+                        eprintln!("kettle agent-setup: cannot start claude: {error}");
+                        return 127;
+                    }
+                }
+                Err(refusal) => {
+                    if let Some(notice) = refusal.notice() {
+                        eprintln!("{notice}");
+                    }
+                }
+            }
         }
     }
     run_program("claude", argv)
@@ -949,35 +1158,607 @@ fn print_status() {
 mod tests {
     use super::*;
 
+    // Claude Code 2.1.316 --help, including short aliases.
+    const ACCEPTED: &[&str] = &[
+        "--add-dir",
+        "--agent",
+        "--agents",
+        "--allow-dangerously-skip-permissions",
+        "--allowedTools",
+        "--allowed-tools",
+        "--append-system-prompt",
+        "--autocompact",
+        "--ax-screen-reader",
+        "--betas",
+        "--brief",
+        "--chrome",
+        "-c",
+        "--continue",
+        "--dangerously-skip-permissions",
+        "-d",
+        "--debug",
+        "--debug-file",
+        "--disable-slash-commands",
+        "--disallowedTools",
+        "--disallowed-tools",
+        "--effort",
+        "--exclude-dynamic-system-prompt-sections",
+        "--fallback-model",
+        "--file",
+        "--fork-session",
+        "--from-pr",
+        "--ide",
+        "--mcp-config",
+        "--model",
+        "-n",
+        "--name",
+        "--no-chrome",
+        "--permission-mode",
+        "--plugin-dir",
+        "--plugin-url",
+        "--prompt-suggestions",
+        "--remote-control",
+        "--remote-control-session-name-prefix",
+        "-r",
+        "--resume",
+        "--session-id",
+        "--setting-sources",
+        "--settings",
+        "--strict-mcp-config",
+        "--system-prompt",
+        "--system-prompt-snapshot",
+        "--tools",
+        "--verbose",
+        "-w",
+        "--worktree",
+    ];
+
+    const REFUSED: &[&str] = &[
+        "--bg",
+        "--background",
+        "--bare",
+        "--cloud",
+        "--desktop",
+        "--environment",
+        "--forward-subagent-text",
+        "-h",
+        "--help",
+        "--include-hook-events",
+        "--include-partial-messages",
+        "--input-format",
+        "--json-schema",
+        "--max-budget-usd",
+        "--no-session-persistence",
+        "--output-format",
+        "--permission-prompts",
+        "-p",
+        "--print",
+        "--replay-user-messages",
+        "--safe-mode",
+        "--teleport",
+        "--tmux",
+        "-v",
+        "--version",
+    ];
+
+    // Not yet allowed; see issue #759.
+    const UNDECIDED_FOR_NOW: &[&str] = &["--restricted"];
+
     #[test]
-    fn only_interactive_claude_invocations_are_admitted() {
+    fn no_value_claude_flags_are_admitted() {
+        for flag in [
+            "--dangerously-skip-permissions",
+            "--allow-dangerously-skip-permissions",
+            "--ide",
+            "--chrome",
+            "--no-chrome",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--ax-screen-reader",
+            "--brief",
+            "--exclude-dynamic-system-prompt-sections",
+            "--continue",
+            "-c",
+            "--fork-session",
+            "--verbose",
+        ] {
+            for args in [
+                vec![flag],
+                vec![flag, "hello"],
+                vec![flag, "--model", "opus"],
+                vec!["--model", "opus", flag, "hello"],
+            ] {
+                assert_eq!(claude_interactive(&argv(&args)), Ok(()), "{args:?}");
+            }
+        }
+        let args = ["--ide=x"];
+        assert_eq!(
+            claude_interactive(&argv(&args)),
+            Err(Refusal::UnknownOption("--ide".to_owned())),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn one_value_claude_flags() {
+        for flag in [
+            "--plugin-dir",
+            "--plugin-url",
+            "--debug-file",
+            "--autocompact",
+            "--fallback-model",
+            "--system-prompt-snapshot",
+            "--remote-control-session-name-prefix",
+            "--model",
+            "--effort",
+            "--permission-mode",
+            "--agent",
+            "--agents",
+            "--name",
+            "-n",
+            "--session-id",
+            "--settings",
+            "--setting-sources",
+            "--system-prompt",
+            "--append-system-prompt",
+        ] {
+            for args in [vec![flag, "value"], vec![flag, "value", "hello"]] {
+                assert_eq!(claude_interactive(&argv(&args)), Ok(()), "{args:?}");
+            }
+            for args in [vec![flag], vec![flag, ""], vec![flag, "-p"]] {
+                assert_eq!(
+                    claude_interactive(&argv(&args)),
+                    Err(Refusal::MissingValue),
+                    "{args:?}"
+                );
+            }
+            // Only long names support the --flag=value spelling.
+            if flag.starts_with("--") {
+                let inline = format!("{flag}=value");
+                for args in [vec![inline.as_str()], vec![inline.as_str(), "hello"]] {
+                    assert_eq!(claude_interactive(&argv(&args)), Ok(()), "{args:?}");
+                }
+                let inline = format!("{flag}=");
+                let args = [inline.as_str()];
+                assert_eq!(
+                    claude_interactive(&argv(&args)),
+                    Err(Refusal::MissingValue),
+                    "{args:?}"
+                );
+            }
+        }
+        for args in [
+            vec!["--plugin-dir", "a", "--plugin-dir", "b"],
+            vec!["--plugin-dir", "a", "--plugin-dir", "b", "hello"],
+        ] {
+            assert_eq!(claude_interactive(&argv(&args)), Ok(()), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn optional_value_claude_flags() {
+        for flag in [
+            "-d",
+            "--debug",
+            "-w",
+            "--worktree",
+            "--remote-control",
+            "--from-pr",
+            "--prompt-suggestions",
+            "-r",
+            "--resume",
+        ] {
+            for args in [
+                vec![flag],
+                vec![flag, "value"],
+                vec![flag, "value", "hello"],
+                vec![flag, "-c"],
+                vec![flag, "--model", "opus"],
+                vec![flag, ""],
+            ] {
+                assert_eq!(claude_interactive(&argv(&args)), Ok(()), "{args:?}");
+            }
+            let args = [flag, "", "hello"];
+            assert_eq!(
+                claude_interactive(&argv(&args)),
+                Err(Refusal::ExtraPrompt),
+                "{args:?}"
+            );
+            if flag.starts_with("--") {
+                let inline = format!("{flag}=value");
+                for args in [vec![inline.as_str()], vec![inline.as_str(), "hello"]] {
+                    assert_eq!(claude_interactive(&argv(&args)), Ok(()), "{args:?}");
+                }
+                let inline = format!("{flag}=");
+                let args = [inline.as_str()];
+                assert_eq!(
+                    claude_interactive(&argv(&args)),
+                    Err(Refusal::MissingValue),
+                    "{args:?}"
+                );
+            }
+        }
+        // Both have a worktree value followed by one prompt; only a third
+        // positional argument is an extra prompt.
+        for args in [
+            ["--worktree", "name", "hello"],
+            ["--worktree", "hello", "world"],
+        ] {
+            assert_eq!(claude_interactive(&argv(&args)), Ok(()), "{args:?}");
+        }
+        let args = ["--worktree", "hello", "world", "extra"];
+        assert_eq!(
+            claude_interactive(&argv(&args)),
+            Err(Refusal::ExtraPrompt),
+            "{args:?}"
+        );
+        let args = ["--worktree", "--tmux"];
+        assert_eq!(
+            claude_interactive(&argv(&args)),
+            Err(Refusal::Excluded(Exclusion::Detached)),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn variadic_claude_flags() {
+        for flag in [
+            "--add-dir",
+            "--allowedTools",
+            "--allowed-tools",
+            "--disallowedTools",
+            "--disallowed-tools",
+            "--mcp-config",
+            "--tools",
+            "--betas",
+            "--file",
+        ] {
+            for args in [
+                vec![flag, "a", "b"],
+                vec![flag, "a", "b", "--", "prompt"],
+                vec![flag, "a", "b", "prompt"],
+                vec![flag, "a", "mcp", "list"],
+                vec![flag, "a.json", "--ide"],
+            ] {
+                assert_eq!(claude_interactive(&argv(&args)), Ok(()), "{args:?}");
+            }
+            for args in [vec![flag], vec![flag, "-c"], vec![flag, ""]] {
+                assert_eq!(
+                    claude_interactive(&argv(&args)),
+                    Err(Refusal::MissingValue),
+                    "{args:?}"
+                );
+            }
+            let args = [flag, "a", "b", "--", "one", "two"];
+            assert_eq!(
+                claude_interactive(&argv(&args)),
+                Err(Refusal::ExtraPrompt),
+                "{args:?}"
+            );
+            let inline = format!("{flag}=");
+            let args = [inline.as_str()];
+            assert_eq!(
+                claude_interactive(&argv(&args)),
+                Err(Refusal::MissingValue),
+                "{args:?}"
+            );
+            // An inline value ends this option's value run.
+            let inline = format!("{flag}=a");
+            for args in [vec![inline.as_str()], vec![inline.as_str(), "b"]] {
+                assert_eq!(claude_interactive(&argv(&args)), Ok(()), "{args:?}");
+            }
+            let args = [inline.as_str(), "b", "c"];
+            assert_eq!(
+                claude_interactive(&argv(&args)),
+                Err(Refusal::ExtraPrompt),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refused_claude_groups() {
+        for (flags, reason) in [
+            (
+                &[
+                    "-p",
+                    "--print",
+                    "--output-format",
+                    "--input-format",
+                    "--json-schema",
+                    "--max-budget-usd",
+                    "--include-partial-messages",
+                    "--include-hook-events",
+                    "--replay-user-messages",
+                    "--forward-subagent-text",
+                    "--permission-prompts",
+                    "--no-session-persistence",
+                ][..],
+                Exclusion::Print,
+            ),
+            (
+                &[
+                    "--bg",
+                    "--background",
+                    "--cloud",
+                    "--environment",
+                    "--desktop",
+                    "--teleport",
+                    "--tmux",
+                ][..],
+                Exclusion::Detached,
+            ),
+            (&["--bare", "--safe-mode"][..], Exclusion::HooksOff),
+            (&["-h", "--help", "-v", "--version"][..], Exclusion::Info),
+        ] {
+            for flag in flags {
+                let args = [*flag];
+                assert_eq!(
+                    claude_interactive(&argv(&args)),
+                    Err(Refusal::Excluded(reason)),
+                    "{args:?}"
+                );
+            }
+        }
+        for args in [
+            ["--output-format=json"],
+            ["--input-format=stream-json"],
+            ["--json-schema={}"],
+            ["--max-budget-usd=1"],
+            ["--permission-prompts=host"],
+            ["--print=hello"],
+        ] {
+            assert_eq!(
+                claude_interactive(&argv(&args)),
+                Err(Refusal::Excluded(Exclusion::Print)),
+                "{args:?}"
+            );
+        }
+        let args = ["--tmux=classic"];
+        assert_eq!(
+            claude_interactive(&argv(&args)),
+            Err(Refusal::Excluded(Exclusion::Detached)),
+            "{args:?}"
+        );
+        for subcommand in [
+            "agents",
+            "attach",
+            "auth",
+            "auto-mode",
+            "doctor",
+            "gateway",
+            "import",
+            "install",
+            "logs",
+            "mcp",
+            "plugin",
+            "plugins",
+            "purge",
+            "remote-control",
+            "respawn",
+            "rm",
+            "setup-token",
+            "stop",
+            "kill",
+            "ultrareview",
+            "update",
+            "upgrade",
+        ] {
+            for args in [vec![subcommand], vec!["--continue", subcommand]] {
+                assert_eq!(
+                    claude_interactive(&argv(&args)),
+                    Err(Refusal::Subcommand),
+                    "{args:?}"
+                );
+            }
+        }
+        for flag in ["--unknown", "--restricted", "-x"] {
+            let args = [flag];
+            assert_eq!(
+                claude_interactive(&argv(&args)),
+                Err(Refusal::UnknownOption(flag.to_owned())),
+                "{args:?}"
+            );
+        }
+        let args = ["one", "two"];
+        assert_eq!(
+            claude_interactive(&argv(&args)),
+            Err(Refusal::ExtraPrompt),
+            "{args:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            for prefix in [vec![], vec!["--"], vec!["--model"], vec!["--add-dir", "a"]] {
+                let mut args = argv(&prefix);
+                args.push(OsString::from_vec(vec![0xff]));
+                assert_eq!(
+                    claude_interactive(&args),
+                    Err(Refusal::NotUnicode),
+                    "{args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn double_dash_claude() {
         for args in [
             vec![],
             vec!["hello"],
-            vec!["--continue"],
-            vec!["--resume", "session", "hello"],
-            vec!["--model", "opus", "hello"],
-            vec!["--effort=high"],
+            vec!["--"],
             vec!["--", "-p"],
+            vec!["--", "hello"],
+            vec!["--model", "opus", "--", "hello"],
         ] {
-            assert!(claude_interactive(&argv(&args)), "{args:?}");
+            assert_eq!(claude_interactive(&argv(&args)), Ok(()), "{args:?}");
         }
-        for args in [
-            vec!["-p", "hello"],
-            vec!["--print"],
-            vec!["mcp", "list"],
-            vec!["update"],
-            vec!["--background"],
-            vec!["--cloud", "hello"],
-            vec!["--safe-mode"],
-            vec!["--strict-mcp-config"],
-            vec!["--unknown"],
-            vec!["--model"],
-            vec!["--model", "-p"],
-            vec!["one", "two"],
+        let args = ["hello", "--", "world"];
+        assert_eq!(
+            claude_interactive(&argv(&args)),
+            Err(Refusal::ExtraPrompt),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn claude_no_card_notice_policy() {
+        for (args, refusal, has_notice) in [
+            (
+                vec!["--foo"],
+                Refusal::UnknownOption("--foo".to_owned()),
+                true,
+            ),
+            (vec!["--bare"], Refusal::Excluded(Exclusion::HooksOff), true),
+            (vec!["--print"], Refusal::Excluded(Exclusion::Print), false),
+            (vec!["--bg"], Refusal::Excluded(Exclusion::Detached), false),
+            (vec!["--help"], Refusal::Excluded(Exclusion::Info), false),
+            (vec!["mcp"], Refusal::Subcommand, false),
+            (vec!["--model"], Refusal::MissingValue, false),
+            (vec!["one", "two"], Refusal::ExtraPrompt, false),
         ] {
-            assert!(!claude_interactive(&argv(&args)), "{args:?}");
+            assert_eq!(claude_interactive(&argv(&args)), Err(refusal), "{args:?}");
+            let refusal = claude_interactive(&argv(&args)).unwrap_err();
+            let notice = refusal.notice();
+            assert_eq!(notice.is_some(), has_notice, "{args:?}");
+            if let Some(notice) = notice {
+                assert!(
+                    notice.starts_with(
+                        "kettle agent-setup: starting Claude Code without Kettle cards:"
+                    ),
+                    "{args:?}"
+                );
+                assert!(notice.contains("media shelf"), "{args:?}");
+            }
         }
+        let args = ["non-Unicode argument"];
+        assert_eq!(Refusal::NotUnicode.notice(), None, "{args:?}");
+        let plain = format!("--{}", "a".repeat(38));
+        for name in ["--foo", plain.as_str()] {
+            let args = [name];
+            assert_eq!(
+                Refusal::unknown_option(name),
+                Refusal::UnknownOption(name.to_owned()),
+                "{args:?}"
+            );
+            assert!(
+                Refusal::unknown_option(name)
+                    .notice()
+                    .unwrap()
+                    .contains(name),
+                "{args:?}"
+            );
+        }
+        let long = format!("--{}", "a".repeat(39));
+        for name in [
+            "--x\u{1b}[31m",
+            long.as_str(),
+            "--caf\u{e9}",
+            "--foo=secret-value",
+        ] {
+            let args = [name];
+            let refusal = Refusal::unknown_option(name);
+            assert_eq!(refusal, Refusal::UnknownOption(String::new()), "{args:?}");
+            assert!(!refusal.notice().unwrap().contains(name), "{args:?}");
+        }
+        // The classifier splits '=' before sanitizing the name.
+        let args = ["--foo=secret-value"];
+        let refusal = claude_interactive(&argv(&args)).unwrap_err();
+        assert_eq!(
+            refusal,
+            Refusal::UnknownOption("--foo".to_owned()),
+            "{args:?}"
+        );
+        let notice = refusal.notice().unwrap();
+        assert!(notice.contains("--foo"), "{args:?}");
+        assert!(!notice.contains("secret-value"), "{args:?}");
+    }
+
+    #[test]
+    fn claude_help_flags_are_all_classified() {
+        let mut seen = std::collections::HashSet::new();
+        for (flags, accepted) in [(ACCEPTED, true), (REFUSED, false)] {
+            for flag in flags {
+                let args = [*flag];
+                let classification = claude_flag(flag);
+                assert!(
+                    matches!(
+                        (classification, accepted),
+                        (Some(Flag::Takes(_)), true) | (Some(Flag::Excluded(_)), false)
+                    ),
+                    "{args:?}: {classification:?}"
+                );
+                assert!(seen.insert(flag), "{args:?}: duplicate help option");
+            }
+        }
+        for flag in UNDECIDED_FOR_NOW {
+            let args = [*flag];
+            assert_eq!(claude_flag(flag), None, "{args:?}");
+            assert!(seen.insert(flag), "{args:?}: duplicate help option");
+        }
+    }
+
+    fn claude_help_option_names(help: &str) -> Vec<&str> {
+        help.lines()
+            .skip_while(|line| *line != "Options:")
+            .skip(1)
+            .take_while(|line| line.is_empty() || line.starts_with(' '))
+            .filter_map(|line| line.strip_prefix("  -").map(|_| line.trim_start()))
+            .flat_map(|line| {
+                let names = line.split("  ").next().unwrap_or(line);
+                names.split(", ").filter_map(|name| {
+                    let name = name.split([' ', '\t']).next().unwrap_or(name);
+                    name.starts_with('-').then_some(name)
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn claude_help_option_names_handle_wrapped_descriptions() {
+        let help = "Usage: claude [options]\n\nOptions:\n  -d, --debug [filter]  Debug\n  --allowedTools, --allowed-tools <tools...>\n      Description mentioning --not-an-option\n  --ide  Connect\n\nCommands:\n  --not-an-option  Command\n";
+        let args = ["claude", "--help"];
+        assert_eq!(
+            claude_help_option_names(help),
+            [
+                "-d",
+                "--debug",
+                "--allowedTools",
+                "--allowed-tools",
+                "--ide"
+            ],
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the real Claude Code CLI; run with --ignored"]
+    fn claude_help_matches_installed_cli() {
+        let args = ["claude", "--help"];
+        let output = match std::process::Command::new(args[0]).arg(args[1]).output() {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("Skipping {args:?}: Claude Code CLI is not installed");
+                return;
+            }
+            Err(error) => panic!("{args:?}: {error}"),
+        };
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        let help = String::from_utf8(output.stdout).expect("Claude Code --help must be UTF-8");
+        let names = claude_help_option_names(&help);
+        assert!(!names.is_empty(), "{args:?}: no Options section found");
+        let unclassified: Vec<_> = names
+            .into_iter()
+            .filter(|name| {
+                !ACCEPTED.contains(name)
+                    && !REFUSED.contains(name)
+                    && !UNDECIDED_FOR_NOW.contains(name)
+            })
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "{args:?}: unclassified flags: {unclassified:?}"
+        );
     }
 
     fn fixture(name: &str) -> PathBuf {
