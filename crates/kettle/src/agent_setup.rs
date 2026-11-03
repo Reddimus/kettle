@@ -986,9 +986,16 @@ fn launch_claude(argv: Vec<OsString>) -> i32 {
                         &version,
                     )
                 })
-                .and_then(|native| native.command("claude").ok_or(NoCard::NotNative));
+                // The held executable stays alive with its command: the command
+                // names it by descriptor, which closing it would take away.
+                .and_then(|native| {
+                    native
+                        .command("claude")
+                        .map(|command| (native, command))
+                        .ok_or(NoCard::NotNative)
+                });
             match launch {
-                Ok(mut command) => {
+                Ok((_native, mut command)) => {
                     use std::os::unix::process::CommandExt as _;
                     let error = command.args(argv).exec();
                     eprintln!("kettle agent-setup: cannot start claude: {error}");
