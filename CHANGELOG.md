@@ -64,6 +64,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Maintenance
 
+- Exit real-Codex job-control probes with the client's `/quit` command instead
+  of assuming two Ctrl+C presses terminate an idle session.
 - Keep Lua pattern regressions reliable under CPU contention with a stalled-call
   watchdog and required completion records, while preserving their work-limit checks.
 - Verify pane-drag geometry across split rounding, wait for the Linux fork
