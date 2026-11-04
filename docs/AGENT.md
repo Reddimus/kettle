@@ -1591,10 +1591,15 @@ and executable checks, and `exec`s either the launcher or the plain agent.
 The known integration point is ccx's `realClaudePath` setting, or its
 `CAS_REAL_CLAUDE_PATH` environment variable.
 
-This ccx recipe is **experimental** and has not been verified against a real
-ccx run. Try it in a throwaway profile. The script must be user-owned and
-not writable by others. It refuses to run with exit status 2 and a stderr
-message when named `claude` or `codex`, since its fallback could call itself.
+This ccx recipe was verified on Ubuntu 26.04.1 with ccx 2.6.26 and Claude
+Code 2.1.317 on 2026-11-03, using a private profile and Xvfb. A real
+`kettle_show` call returned `delivery: "card"` without `card_reason` and
+rendered one inline SVG card through ccx's separate PTY. See the
+[acceptance scope](TESTING.md#ccx-entry-script-acceptance) before testing another
+version. Try the recipe in a throwaway profile first.
+
+The script must be user-owned and not writable by others. It refuses to run
+with exit status 2 and a stderr message when named `claude` or `codex`, since its fallback could call itself.
 It must not sit in a `PATH` directory under either name.
 Use a directory you own that others cannot write:
 
@@ -1610,6 +1615,14 @@ Alternatively, set `realClaudePath` to that script's absolute path in the
 throwaway profile. A wrapper still has to reach the launcher with an eligible
 interactive session to get cards.
 
+ccx also invokes the entry script for non-session calls, including version,
+authentication-status, and print probes; these use the plain-agent fallback.
+Kettle's `version_of` check resolves `claude` from `PATH`, while ccx uses
+`realClaudePath` to start the entry script. Those paths can differ: keep the
+intended native Claude installation on `PATH`, and give ccx the entry script's
+absolute path. The tested launch was accepted with ccx's Node process between
+the pane shell and Claude; ccx's separate PTY did not prevent the card.
+
 #### Why a card did not show
 
 | What you see | Cause | What to do |
@@ -1621,7 +1634,7 @@ interactive session to get cards.
 | `card_reason: "untraced"`: "Kettle cannot tell which pane this session runs in." | The session runs in Claude Code's background daemon or cannot be traced to this pane | Restart the session in the pane in the foreground |
 | `card_reason: "not_launched"`: "Kettle has no checked launch for this session, which usually means it did not start through Kettle's launcher." | The pane's own session has no checked launch on record: it bypassed the launcher, or its launch lapsed because the agent or its pane changed | Use the launcher or route your wrapper through it; see [Wrapping your own Claude or Codex function](#wrapping-your-own-claude-or-codex-function). Check `kettle agent-setup --status` |
 | `card_reason: "pane_cannot"`: "the pane cannot hold one right now." | The launched session's pane cannot hold a card now, including a file card whose pickup became unavailable while its metadata was being read | Enlarge the pane, leave the full-screen program, or wait; restart the agent through Kettle's launcher if its pane changed |
-| ccx starts Claude Code without cards | ccx starts the executable itself and bypasses shell functions | In a throwaway profile, try the experimental entry script through `realClaudePath` or `CAS_REAL_CLAUDE_PATH`; real ccx acceptance is unverified |
+| ccx starts Claude Code without cards | ccx starts the executable itself and bypasses shell functions | In a throwaway profile, use the entry script through `realClaudePath` or `CAS_REAL_CLAUDE_PATH`; keep native Claude on `PATH` and check the tested versions above |
 
 ### Kettle defines it for you
 

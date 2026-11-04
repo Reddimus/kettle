@@ -2587,3 +2587,48 @@ versions. The dependency contract rejects either half of a split SVG update.
 SVG 0.49 inherits parent baselines in formatted spans; native text metric tests
 compare that offset with the raw baseline shift. Filter-layer admission follows
 the renderer's rotation/skew decomposition before measuring intermediate layers.
+
+## ccx entry-script acceptance
+
+The 2026-11-03 native Dell acceptance ran on Ubuntu 26.04.1 at
+`4d0206a1c1e040e89a5c0b8bade02cc862c58ddd`, with its matching debug terminal
+and media-worker build. It used an owned checkout, private HOME and XDG state,
+and isolated Xvfb windows. The installed app, shell files, account settings,
+and other panes were preserved.
+
+| Check | Observed result |
+|---|---|
+| Native `just gauntlet` | Passed, including ownership-dependent tests |
+| Matching terminal/worker card smoke | Scoped cards passed; unscoped controls returned shelf with `not_launched` |
+| Printed wrapper and entry forms | Twelve alias-preservation, parsing, argument and exit-status cases passed |
+| Existing `codex()` function with fixture agent | One rendered card and the expected `CODEX_HOME`; the backup function returned shelf with `not_launched` |
+| Installed ccx 2.6.26 with fixture agent | Five interactive cases passed through its separate PTY: fresh, `--session-id`, `--resume`, `--continue`, and `--continue --fork-session`; each card retired when its session ended |
+| ccx non-session calls | `--version`, `auth status`, and `-p --no-session-persistence -- <prompt>` reached the plain fallback with their arguments |
+| Real ccx and Claude Code 2.1.317 | One explicitly approved user prompt called `kettle_show` on a sample SVG; the raw tool receipt reported `status: "sent"`, `delivery: "card"`, `kind: "svg"`, `verified: true`, `model_has_seen: false`, and no `card_reason`; one settled card and rendered colored pixels were captured |
+
+The real-client run used the retained 2.1.317 executable after the installed
+launcher updated to 2.1.318. It does not establish real-client acceptance for
+2.1.318, other ccx versions, macOS, background sessions, or every content type.
+One user prompt can cause multiple client requests; it is not a billing-request
+count. Recorded test agents exited before their private profiles were removed.
+
+To repeat the no-model card matrix with matching binaries:
+
+```sh
+cargo build -p kettle
+cargo build --profile media-worker -p kettle-media-worker
+env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/check-agent-cards-smoke.py \
+  --kettle ./target/debug/kettle \
+  --worker ./target/media-worker/kettle-media-worker --out /new/private/results
+```
+
+See the [entry-script recipe](AGENT.md#wrapping-your-own-claude-or-codex-function)
+for ccx. Redirect both ccx state and HOME when testing it: redirecting only
+`CLAUDE_CONFIG_DIR` does not isolate ccx's write-back to the user's default
+Claude files. Use fixture agents for flag and fallback coverage. Run a real
+account prompt only with explicit approval, preserve existing acknowledgement
+preferences in the temporary profile, and stop on login or trust dialogs.
+Keep credentials and raw account transcripts out of evidence; retain only the
+matching tool receipt fields, card geometry, screenshot, source revision, and
+owned-process cleanup result. Native ownership tests must see the host's real
+UIDs; a user namespace that reports `/` as UID 65534 is not a valid substitute.
