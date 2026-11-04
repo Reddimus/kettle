@@ -134,3 +134,17 @@ Follow [RELEASING.md](docs/RELEASING.md). It owns the two-PR procedure, strict
 validation, signed release commit/tag, packaging and native release gates.
 Use `scripts/release.sh` and `scripts/tag-release.sh`; do not replace the
 procedure with manual version edits or tagging.
+
+## Review fallback
+
+Greptile reviews ready PRs and new pushes first. When its App posts a credit
+refusal, the Review fallback workflow requests CodeRabbit using
+`review:greptile-quota-fallback`. CodeRabbit does not automatically review
+subsequent pushes; each needs another Greptile credit refusal.
+
+The label means a review was requested, not completed. Check feedback against
+the latest commit before merging. If CodeRabbit is rate-limited, rerun Review
+fallback from Actions with the PR number after its allowance refills.
+No paid review overages are enabled by this workflow.
+
+Test the helper with `node --test .github/scripts/review-fallback.test.cjs`.
