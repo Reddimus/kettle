@@ -17658,6 +17658,91 @@ def run_tearoff(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_window_app_id(kettle: str, root: Path) -> Path:
+    """New windows keep a renamed build's desktop identity after an update."""
+    if platform.system() != "Linux" or not os.environ.get("DISPLAY"):
+        raise SystemExit("window-app-id smoke requires Linux and an X11 display")
+    require_cmd("xdotool")
+    require_cmd("xprop")
+    out = root / f"window-app-id-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=False)
+    source = Path(kettle).resolve(strict=True)
+    cfg = out / "config"
+    write_fixture_config(
+        cfg,
+        "agent-server = full\nrecord = off\nrestore-session = false\n"
+        "update-policy = off\nshell-integration = false\nlogin-shell = false\n"
+        "ask-before-closing = never\n",
+    )
+    with tempfile.TemporaryDirectory(prefix="kettle-app-id-") as temporary:
+        scratch = Path(temporary)
+        executable = scratch / "kettle-fork"
+        shutil.copy2(source, executable)
+        worker = source.with_name("kettle-media-worker")
+        if worker.is_file():
+            shutil.copy2(worker, scratch / worker.name)
+        environment: Dict[str, Optional[str]] = {"SHELL": "/bin/sh"}
+        for key, leaf in (
+            ("HOME", "home"), ("TMPDIR", "tmp"),
+            ("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state"),
+            ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache"),
+            ("XDG_RUNTIME_DIR", "runtime"),
+        ):
+            path = scratch / leaf
+            path.mkdir(mode=0o700)
+            environment[key] = str(path)
+        for key in (
+            "ENV", "BASH_ENV", "WAYLAND_DISPLAY", "WAYLAND_SOCKET",
+            "DBUS_SESSION_BUS_ADDRESS", "KETTLE_RECORD", "KETTLE_RECORD_DIR",
+            "KETTLE_RECORD_RAW_INPUT", "KETTLE_PID", "KETTLE_WINDOW", "KETTLE_PANE",
+        ):
+            environment[key] = None
+
+        def window_classes(windows: Set[int]) -> Dict[int, str]:
+            values = {}
+            for window in sorted(windows):
+                result = run(["xprop", "-id", str(window), "WM_CLASS"], timeout=5)
+                if result.returncode or not result.stdout.startswith("WM_CLASS(STRING) = "):
+                    raise SystemExit(f"window-app-id smoke: cannot read WM_CLASS: {result}")
+                values[window] = result.stdout.strip()
+            return values
+
+        with LiveKettle(
+            str(executable), cfg, out / "kettle.log",
+            extra_args=["--new-process", "-e", "/bin/sh"], extra_env=environment,
+        ) as live:
+            before = wait_for_native_window_ids(
+                live.pid, lambda windows: len(windows) == 1, label="initial app-id window",
+            )
+            before_classes = window_classes(before)
+            expected = 'WM_CLASS(STRING) = "kettle-fork", "kettle-fork"'
+            if set(before_classes.values()) != {expected}:
+                raise SystemExit(f"window-app-id smoke: renamed build lost its name: {before_classes}")
+            executable.unlink()
+            deleted_path = os.readlink(f"/proc/{live.pid}/exe")
+            if not deleted_path.endswith(" (deleted)"):
+                raise SystemExit("window-app-id smoke: executable replacement was not exercised")
+            # Control clients still run from the untouched input binary.
+            live.kettle = str(source)
+            live.json_ctl("perform_action", {"action": "new_window"})
+            after = wait_for_native_window_ids(
+                live.pid, lambda windows: before < windows and len(windows) == 2,
+                label="new window after executable replacement",
+            )
+            after_classes = window_classes(after)
+            (out / "analysis.json").write_text(json.dumps({
+                "pid": live.pid, "before": before_classes, "after": after_classes,
+                "deleted_executable": deleted_path, "expected": expected,
+            }, indent=2) + "\n")
+            if set(after_classes.values()) != {expected}:
+                raise SystemExit(
+                    f"window-app-id smoke: new window changed its desktop identity: {after_classes}"
+                )
+        if live.proc is None or live.proc.poll() is None:
+            raise SystemExit("window-app-id smoke: isolated process was not reaped")
+    return out
+
+
 def run_window_close_isolation(kettle: str, root: Path) -> Path:
     """Terminate one detached window's child and prove its sibling survives.
 
@@ -21243,6 +21328,7 @@ def main() -> int:
             "interaction",
             "selection-autoscroll",
             "hover-wheel",
+            "window-app-id",
             "window-close-isolation",
             "touchpad-scroll",
             "session-check",
@@ -21475,6 +21561,9 @@ def main() -> int:
     if args.case == "window-close-isolation":
         out = run_window_close_isolation(args.kettle, root)
         print(f"window-close-isolation smoke: OK artifacts={out}")
+    if args.case == "window-app-id":
+        out = run_window_app_id(args.kettle, root)
+        print(f"window-app-id smoke: OK artifacts={out}")
     if args.case in ("touchpad-scroll", "all"):
         out = run_touchpad_scroll(args.kettle, root)
         print(f"touchpad-scroll smoke: OK artifacts={out}")

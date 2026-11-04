@@ -1014,6 +1014,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Default window size | `just default-window-size-smoke` | Monitor-fitted defaults and explicit sizing; needs a sufficiently wide monitor | Linux/macOS |
 | Line edit chords | `just line-edit-chords-smoke` | Text-action backspace, macOS default chord, and search word deletion | Linux/macOS |
 | Dock menu | `just dock-menu-smoke` | Real Dock rows, window list, minimized New Tab restoration and New Window effect; accessibility, plus an isolated bundle or no other Kettle instance | macOS |
+| Window app ID | `just window-app-id-smoke` | New windows retain a renamed build's X11 class after its executable is replaced; runs under private Xvfb | Linux; required in Linux CI |
 | Live stress | `just stress-live [S1 … S10]` | Floods, resize storms, 101 tabs and 151 panes, huge pastes and titles, config churn, hostile media and 64 control clients leave Kettle alive and answering; S6 replaces the clipboard, then restores it; S9 needs a working worker | Linux/macOS |
 | Underline scroll | `just underline-scroll-smoke` | Repeated git-diff/delta scrolling preserves underline pixels; needs git, delta, less | Linux/macOS |
 | Search history | - | Scrollback search status, cells, and highlight pixels; direct helper case | Linux/macOS; required in Linux CI |
@@ -2196,6 +2197,16 @@ reopen from the actual Dock. Verify the new version and PID, repeat without
 adding windows, and run a command in the old PTY. A metadata-only version
 fixture does not prove this behavior. Portable activation tests cover the
 focus-or-open request, recording identity and default-launch compatibility.
+
+The Linux window-app-ID smoke copies the selected binary to a private
+`kettle-fork` executable, reads its native `WM_CLASS`, unlinks only that copy,
+and creates another window in the same process. Both windows must retain
+`kettle-fork`, rather than adopting Linux's ` (deleted)` executable suffix.
+Control clients use the untouched input binary, and the fixture reaps its
+process before removing its private configuration. Portable Rust tests cover
+unavailable paths and a cached executable path surviving replacement. X11 and
+Wayland receive the same startup identity through winit's shared name field;
+the X11 test does not establish a native Wayland compositor observation.
 
 ### Shared modal editing and dismissal
 

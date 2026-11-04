@@ -21,6 +21,9 @@ split-exit-resize, program-key, color-scheme and steady-upload smokes during
 this audit. Renderer screenshots and control-API geometry remain separate
 from composited desktop captures.
 
+The later Linux startup-path correction has separate native X11 regression
+coverage. It does not establish a new composited macOS appearance run.
+
 A two-build private bundle test started packaged 5.8.2, replaced its bundle
 with packaged 5.9.0, then reopened it three times. The first reopen started
 one new-version window; later reopens reused it, and the old PTY remained

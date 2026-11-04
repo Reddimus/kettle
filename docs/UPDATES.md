@@ -18,6 +18,10 @@ build. Repeated reopens focus that build's existing window; old terminals keep
 running until you close them. If the running version predates this behavior,
 quit Kettle once to enable it.
 
+On Linux, new windows opened by an older running process retain its original
+desktop identity after the executable is replaced. They continue to group
+under the same taskbar icon, including when the binary has a custom name.
+
 > **Historical Windows bootstrap for v2.35:** releases before v2.35 did not include the
 > out-of-process helper/run-lock protocol and could not reliably replace a
 > mapped `kettle.exe`. Install v2.35 once with the bundled `install.ps1`; later
