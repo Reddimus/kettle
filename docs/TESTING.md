@@ -1177,8 +1177,9 @@ suppress Kettle's function. Rust reader tests cover PID mismatches in child
 shells. Its fish checks run only when fish is installed; the CI fish job exercises
 Fish 3.7, 4.2 and 4.8, and the Linux build job also installs fish. A real ccx
 run and real card delivery end to end through a user wrapper are not part of
-CI. Treat the ccx entry recipe as experimental until a manual run in a
-throwaway profile verifies it.
+CI. The [manual ccx acceptance](#ccx-entry-script-acceptance) records the
+verified entry recipe and tested versions; that scoped result does not make
+CI exercise the live integration.
 
 The drift guard classifies every option and subcommand in the captured Claude
 Code 2.1.317 `claude --help`, and reads each option's arity from its
