@@ -16,8 +16,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and the agent's exit status (#760).
 - Add `agent-setup --print --form wrapper` for user startup files and
   `--form entry` for programs that start an agent themselves. The ccx entry
-  recipe is experimental and has not been verified with a real run. Entry
-  scripts refuse to run when named `claude` or `codex` (#760).
+  recipe is verified on Ubuntu 26.04.1 with ccx 2.6.26 and Claude Code
+  2.1.317, including a real inline SVG card. Entry scripts refuse to run when
+  named `claude` or `codex` (#760).
 
 ### Changed
 
@@ -63,6 +64,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Maintenance
 
+- Exit real-Codex job-control probes with the client's `/quit` command instead
+  of assuming two Ctrl+C presses terminate an idle session.
 - Keep Lua pattern regressions reliable under CPU contention with a stalled-call
   watchdog and required completion records, while preserving their work-limit checks.
 - Verify pane-drag geometry across split rounding, wait for the Linux fork

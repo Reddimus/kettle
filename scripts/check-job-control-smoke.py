@@ -558,9 +558,12 @@ def run(args) -> Path:
             # The resume path must finish before another Ctrl+Z is sent.
             time.sleep(0.1)
         if args.codex:
-            keys("ctrl+c")
-            time.sleep(0.5)
-            keys("ctrl+c")
+            text("/quit")
+            wait_until(
+                lambda: re.search(r"(?m)^\u203a /quit[ \t]*$", screen()),
+                "Codex exit command",
+            )
+            keys("enter")
         else:
             keys("ctrl+q")
         wait_until(lambda: screen().endswith("JOB>"), "normal client exit")
