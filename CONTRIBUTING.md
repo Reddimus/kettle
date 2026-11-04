@@ -134,3 +134,39 @@ Follow [RELEASING.md](docs/RELEASING.md). It owns the two-PR procedure, strict
 validation, signed release commit/tag, packaging and native release gates.
 Use `scripts/release.sh` and `scripts/tag-release.sh`; do not replace the
 procedure with manual version edits or tagging.
+
+## Review fallback
+
+Greptile reviews ready PRs and new pushes first. Only its authenticated
+App's credit-refusal message on a default-branch PR enables CodeRabbit
+through the Review fallback workflow and `review:greptile-quota-fallback`
+label. CodeRabbit's open and push reviews are disabled; each backup request
+needs a Greptile credit refusal.
+
+A refusal reports exhausted organization credits, without a commit SHA. The
+workflow observes the current head; CodeRabbit may see a newer one. A
+completed Greptile review of the current head suppresses fallback and
+removes the opt-in label. Timeouts, generic failures, and an in-progress
+summary never enable it.
+
+The workflow records a reservation before adding the label to suppress
+duplicate automatic requests. Deduplication relies on GitHub comment-list
+visibility. If delivery fails or CodeRabbit is rate-limited, inspect the
+latest feedback, then retry Review fallback from Actions with the PR number.
+Historical retries stop after newer completed Greptile activity. Each event
+reconciles the full PR state, so a replaced queued event does not lose the
+credit refusal or recovery. The label
+means requested, not completed: verify the reviewed commit before merging.
+Skipped-review comments are disabled. Greptile footers stay visible so the
+workflow can recognize the reviewed commit.
+Maintainers can still request either reviewer manually. No paid review
+overages are enabled by this workflow.
+
+Test the helper with `node --test .github/scripts/review-fallback.test.cjs`.
+
+Greptile status comments must stay enabled: the fallback listens for its
+credit refusal. This repository enables them through `statusCommentsEnabled`.
+
+If Greptile shows exhausted credits only in its dashboard, no GitHub event can
+start the fallback. After verifying that refusal, comment `@coderabbitai full review`
+on the PR. Do not request a backup for timeouts or other errors.
