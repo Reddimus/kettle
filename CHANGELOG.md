@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.9.0] — 2026-11-03
+
 ### Added
 
 - Explain missing hook cards in MCP shelf receipts with fixed `card_reason`
