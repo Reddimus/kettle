@@ -33,13 +33,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Include current Settings values in macOS accessibility row names, so
+  assistive tools can read the theme, font size, and other selected values.
+- Match symbolic shortcuts such as imported Terminator `Ctrl+Plus` when
+  Shift produces the symbol, while preserving explicit Shift bindings and
+  the active layout's character.
 - Report why a file's hook card is unavailable when its pickup is lost while
   Kettle waits for file metadata.
 - Preserve existing aliases when sourcing generated bash and zsh agent
   functions or wrappers, instead of failing to parse the function declaration.
 - Keep Fish command correlation enabled when the integration's source path
   contains `cx` or `ctrl-x`; source-location comments are not key bindings.
-
+- Reconnect SSH sessions using the final `-F` configuration and preserve login
+  names containing `@`; suppress cloning when source bindings or Match tags
+  cannot be reproduced.
+- Refuse to reconnect container sessions with relative client configuration
+  paths, which would otherwise resolve against a different working directory.
+- Recognize PowerShell's `-ec` encoded-command alias as a one-shot command,
+  while keeping `-NoExit` sessions interactive.
 - Give cards to interactive Claude Code launches on Linux using
   `--dangerously-skip-permissions`, `--add-dir`, `--mcp-config`, `--ide`,
   `--debug`, and the other supported interactive flags instead of silently
@@ -49,6 +60,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   leaves an interactive Claude Code launch without Kettle cards. The stderr
   notice never includes option values or prompts; images and diagrams still
   reach the media shelf (#759, #761).
+
+### Maintenance
+
+- Keep Lua pattern regressions reliable under CPU contention with a stalled-call
+  watchdog and required completion records, while preserving their work-limit checks.
+- Verify pane-drag geometry across split rounding, wait for the Linux fork
+  fixture to start before testing timeout cleanup, and recognize macOS's
+  closed-peer response during control-connection stress checks.
+- Point failed client probes to their captured output without assuming an
+  authentication problem, and align the vendor soft-reset notes with DECSTR.
+- Preserve captured macOS clipboard items and formats during the raw-paste
+  smoke, and require a disposable desktop for other clipboard-replacing
+  cases. Reap a clipboard provider when writing its fixture fails, and verify
+  pasted command output independently of shell echo.
+- Verify both pasted video filenames even when long paths wrap across
+  terminal rows.
 
 ## [5.8.2] — 2026-11-02
 

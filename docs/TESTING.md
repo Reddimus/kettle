@@ -106,6 +106,23 @@ corresponding frame/reuse/wake invalidation rules. See
 for the reader analysis. Finish with full `kettle-core` and `kettle-ui` tests and
 Clippy for both crates with `--all-targets -- -D warnings`.
 
+### Symbol shortcuts
+
+`kettle-ui` keyboard regressions exercise imported `Ctrl+Plus` with a native
+Shift/`+`/unmodified-`=` event. They also retain explicit Shift precedence,
+letter chords, unshifted symbols and layout-specific punctuation. The control
+API's keybind dispatcher has no unmodified layout character, so it does not
+stand in for this native event check.
+
+### Remote session reproduction
+
+`cargo test -p kettle-remote` pins OpenSSH's last-`-F` precedence and final-`@`
+login split, binding/tag selection, absolute client configuration paths and
+PowerShell's `-ec`/`-NoExit` classification. The tests cover host-specific path
+semantics on every native CI runner. Native `ssh -G` configuration-only probes
+and PowerShell encoded commands can verify the client behavior without opening
+an SSH connection or starting an interactive shell.
+
 ### Main gates
 
 The MCP unit tests in `crates/kettle/src/mcp_tools.rs` include
@@ -222,6 +239,12 @@ Linux CI must also run the native exec teardown tests. The `kettle-state` test
 `private_create_falls_back_without_clobbering_or_relaxing_permissions` injects
 unsupported hard links and exercises the native atomic rename fallback,
 no-clobber behavior, and private-directory checks.
+
+The active-fork teardown fixture deliberately starts more slowly than its
+300 ms exec timeout. An injected test sink waits for eight complete PID records
+before entering the lifecycle loop, so teardown runs against an active session
+instead of racing fixture startup. This checks timeout cleanup, not startup
+latency; production exec code and its timeout remain unchanged.
 
 The Linux MCP supervisor regressions must run on a native Linux runner with
 `setsid`, `sh`, `sleep`, procfs and pidfds available:
@@ -959,15 +982,15 @@ Prerequisites beyond the desktop are included in the proof column.
 | Agent CLI | `just agent-cli-smoke` | Mandatory PTY/JSON/MCP probes plus available client version/help checks; no composer attachment proof | Linux/macOS; required in macOS CI |
 | Native titlebar | `just native-titlebar-smoke` | Light caption, traffic-light separation, resize, native fullscreen and restoration | macOS |
 | Modal shortcuts | `just modal-shortcuts-smoke` | Command chords do not act as ordinary modal letters | macOS |
-| Interaction | `just interaction-smoke` | Multiline input, wheel, selection/copy, tabs, context-menu split, and screenshots | Linux/macOS |
+| Interaction | `just interaction-smoke --isolated-clipboard` | Multiline input, wheel, selection/copy, tabs, context-menu split, and screenshots | Linux/macOS |
 | Selection autoscroll | `just selection-autoscroll-smoke` | Held selection scrolls at both vertical pane edges; native pointer on macOS, control path on Linux | Linux/macOS |
-| Image paste receipt | `just image-paste-receipt-smoke` | Bitmap paste and expanded, compact, hover-expanded receipts; replaces clipboard | Linux/macOS |
-| Video paste receipt | `just video-paste-receipt-smoke` | Two pasted video files produce bounded poster receipts; needs ffmpeg and worker | Linux/macOS |
+| Image paste receipt | `just image-paste-receipt-smoke --isolated-clipboard` | Bitmap paste and expanded, compact, hover-expanded receipts; replaces clipboard | Linux/macOS |
+| Video paste receipt | `just video-paste-receipt-smoke --isolated-clipboard` | Two pasted video files produce bounded poster receipts; needs ffmpeg and worker | Linux/macOS |
 | Hover wheel | `just hover-wheel-smoke` | Wheel targets hovered pane; no swapchain screenshot support required | Linux/macOS |
 | Window close isolation | `just window-close-isolation-smoke` | One detached child's exit leaves the sibling OS window and pane alive; Linux needs xdotool | Linux X11/macOS |
 | Touchpad scroll | `just touchpad-scroll-smoke` | Fractional wheel deltas accumulate into scrolling through the real conversion path | Linux/macOS |
 | Tabbar click | `just tabbar-click-smoke` | Multi-tab click state with PNG and tab geometry evidence | Linux/macOS |
-| Pane drag | `just pane-drag-smoke` | Intended pane reorder gesture; currently known broken because ctl input cannot arm native drag | Linux/macOS |
+| Pane drag | `just pane-drag-smoke` | Shared pane drag via ctl input; checks arming, slop, right-column drop and final geometry | Linux/macOS |
 | Tear-off | `just tearoff-smoke` | Control-plane detach/broadcast, then real pointer tear/follow/redock/cancel on X11 | Linux/macOS control tier; X11 live tier |
 | Tab title | `just tab-title-smoke` | Cwd-derived title recovers from shell truncation | Linux/macOS |
 | Split titlebar | `just split-titlebar-smoke` | Cwd titles at both pane edges and focused/receiving/inactive colors | Linux/macOS |
@@ -984,9 +1007,9 @@ Prerequisites beyond the desktop are included in the proof column.
 | Color scheme | `just color-scheme-smoke` | DEC 2031 subscriber receives light/dark changes | Linux/macOS |
 | Theme picker | `just theme-picker-smoke` | Preview, Esc restore, Enter persistence, Settings and menu entry points | Linux/macOS |
 | Remote links | `just remote-links-smoke` | Shift-picked missing path bypasses confirmation; tmux leg skips if unavailable | Linux/macOS |
-| Raw paste | `just raw-paste-smoke` | Multiline paste into an unbracketed shell proceeds; replaces clipboard | Linux/macOS |
+| Raw paste | `just raw-paste-smoke` | Multiline paste into an unbracketed shell proceeds; macOS restores its clipboard, other hosts need isolation | Linux/macOS |
 | Program keys | `just program-keys-smoke` | Client-owned Shift+Left reaches Kitty client, then returns to split resize | Linux/macOS |
-| Search selection | `just search-selection-smoke` | Open search bar preserves grid selection, copy, menus, focus, shortcuts, and Esc | Linux/macOS |
+| Search selection | `just search-selection-smoke --isolated-clipboard` | Open search bar preserves grid selection, copy, menus, focus, shortcuts, and Esc | Linux/macOS |
 | Bell flash | `just bell-flash-smoke` | Only ringing pane brightens, then pixels return to baseline | Linux/macOS |
 | Default window size | `just default-window-size-smoke` | Monitor-fitted defaults and explicit sizing; needs a sufficiently wide monitor | Linux/macOS |
 | Line edit chords | `just line-edit-chords-smoke` | Text-action backspace, macOS default chord, and search word deletion | Linux/macOS |
@@ -1178,6 +1201,28 @@ The helper's `all` case does not include every scenario.
 Dock, clipboard receipt, selection-autoscroll, hover-wheel, and window-isolation
 cases have explicit opt-ins. Use the table instead of treating `all` as a gate.
 
+Clipboard-replacing cases require `--isolated-clipboard`: `interaction`,
+`search-selection`, image/video paste receipts, `all`, and `raw-paste` outside
+macOS. Use it only on a disposable desktop, such as a separate Xvfb server;
+it does not create isolation. For example, with a built binary:
+
+```sh
+xvfb-run -a python3 scripts/check-live-ui-smoke.py --kettle target/release/kettle --isolated-clipboard raw-paste
+```
+
+The corresponding `just` recipes forward this option. macOS `raw-paste` instead
+uses the modal probe's bounded snapshot of every clipboard item and format.
+An uncapturable clipboard refuses the check before writing. Restoration only
+replaces the probe's own text and generation, preserving a later foreign copy.
+Startup failures do not read or replace the clipboard. Clipboard providers are
+terminated and reaped if writing the fixture fails. Raw paste requires standalone
+command output, so it works with shell echo disabled and cannot pass on
+command echo alone.
+Video receipt checks require both copied filenames, including names split
+across physical terminal rows.
+Shared fixture configs disable automatic copy-on-selection, so selection-only
+checks do not replace the clipboard when releasing a drag.
+
 `just stress-live` runs every scenario when given no names. Each one must
 leave Kettle alive with no panic in its log, answering `get_state` within 2 s
 and echoing a typed command within 1 s. The script's docstring lists the
@@ -1186,11 +1231,16 @@ pass criteria without a desktop.
 The tab scenario must reach 101 tabs and 151 panes and close back to one of
 each. Run it with enough process file handles, for example `ulimit -n 2048`
 in the test's launch shell. A reduced workload fails the gate.
+The control storm allows connection-cap closures. On macOS, closing an accepted
+socket can make `LOCAL_PEERPID` return `ENOTCONN` before a request is sent; only
+the native error 57 is accepted there. Other transport failures still fail.
 
 The tear-off recipe has two tiers. Its shell helper skips native pointer work
 outside X11. The control tier alone cannot prove the native drag gesture.
-The pane-drag recipe is explicitly known broken in Justfile.
-Do not count its expected failure as a pass.
+The pane-drag recipe uses the shared control/native gesture handlers. It selects
+the right column by position, since split rounding can make the left column
+wider, and verifies the final right-edge geometry as well as pane order.
+This control-plane check does not prove native pointer event delivery.
 
 The steady-upload case needs a focused window for blink and output phases.
 `--screenshots-only` runs the narrower screenshot phase for environments such
@@ -1229,6 +1279,10 @@ KETTLE_AGENT_AUTH_SMOKE=1 just agent-tui-smoke
 
 This path uses installed client credentials and makes real model calls.
 Confirm access before running it; its result is separate from offline coverage.
+Inspect each probe in `result.json`, even when the helper exits successfully:
+optional client failures do not fail the whole run. An `auth_failed` probe can
+also mean exhausted service quota or another client error. Read the captured
+client output to determine the cause before changing authentication.
 For configured Neovim/AstroNvim, the direct helper accepts `--astro-config` and
 `--nvim-data`. Supply your installed configuration/runtime directories.
 The helper copies them into an isolated sandbox before use.
@@ -2394,6 +2448,25 @@ runs retain their recorded source and helper identities.
 [The 2026-11-01 scaling observations](SCALING-2026-11-01.md) cover PTY, native
 window and retained-history states. They retain failed admissions and startup
 outliers and are explicitly excluded from calibrated performance standings.
+
+## Lua pattern fixture scheduling
+
+The isolated pattern regression requires the expected work-limit error from
+all five native call forms in each sandbox mode. Its four-second stalled-call
+watchdog advances only when another required call has completed. A final
+completion record and successful child exit are both required. The test reuses
+one engine per mode, retains runaway-child cleanup, and bounds progress reads
+to two bytes. Host scheduling time is not counted as extra pattern work.
+
+## Settings accessibility values
+
+The settings-row regression checks a theme name, a numeric value and an empty
+value. macOS list options expose their name as static text, so each non-empty
+value is included in that name. Linux retains the value description used by
+AT-SPI, and Windows retains its separate name and value. The native macOS
+check opens Settings and reads these row names through the accessibility tree;
+it does not establish VoiceOver speech output. Control diagnostics retain the
+field name alone, including on macOS.
 
 ## Configured-session and desktop acceptance, 2026-11-01
 

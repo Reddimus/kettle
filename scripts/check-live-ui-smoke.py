@@ -73,6 +73,11 @@ SPLIT_TITLEBAR_COLOR_HEX = {
 }
 
 
+def write_fixture_config(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    # Selection probes must not replace a desktop clipboard as a side effect.
+    path.write_text("copy-on-select = false\n" + text, encoding=encoding)
+
+
 def is_optional_remote_windows_screenshot_error(
     system: str,
     environment: Dict[str, str],
@@ -7160,7 +7165,8 @@ def run_tabbar(kettle: str, root: Path) -> Path:
     out = root / f"tabbar-click-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -7404,7 +7410,8 @@ def run_underline(kettle: str, root: Path) -> Path:
     svn_enabled = make_svn_fixture(svn_checkout)
     svn_fixture = svn_checkout if svn_enabled else None
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -14131,7 +14138,8 @@ def run_agent_tui(
         encoding="utf-8",
     )
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -14397,7 +14405,7 @@ def run_agent_tui(
                     status = "marker_missing"
                     reason = "done marker exit status was not visible in read_screen"
                 elif rc != 0:
-                    reason = f"{tool} exited {rc}; likely missing/expired external authentication"
+                    reason = f"{tool} exited {rc}; see the captured client output for the cause"
                 elif not marker_emitted:
                     status = "marker_missing"
                     reason = (
@@ -15046,7 +15054,8 @@ def run_search_history(kettle: str, root: Path) -> Path:
     out = root / f"search-history-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -15327,7 +15336,7 @@ def run_search_history(kettle: str, root: Path) -> Path:
     return out
 
 
-def run_search_selection(kettle: str, root: Path) -> Path:
+def run_search_selection(kettle: str, root: Path, *, isolated_clipboard: bool = False) -> Path:
     """Prove the grid stays mouse-interactive under an open search bar.
 
     Terminator parity: with Ctrl+Shift+F open, a drag on the grid selects
@@ -15337,11 +15346,13 @@ def run_search_selection(kettle: str, root: Path) -> Path:
     focus. Kettle's shortcuts (font zoom, split focus) still work while the
     bar is open. Esc closes the bar and leaves the selection alone.
     """
+    require_isolated_clipboard("search-selection", isolated_clipboard)
 
     out = root / f"search-selection-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -15360,7 +15371,6 @@ def run_search_selection(kettle: str, root: Path) -> Path:
                 "window-height = 34",
                 "search-wrap = true",
                 "search-case-sensitive = always",
-                "copy-on-select = false",
             ]
         )
         + "\n"
@@ -15750,7 +15760,8 @@ def run_bell_flash(kettle: str, root: Path) -> Path:
     out = root / f"bell-flash-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -15965,7 +15976,7 @@ def run_default_window_size(kettle: str, root: Path) -> Path:
             }
             log_file.touch(mode=0o600)
             log_file.chmod(0o600)
-        cfg.write_text("\n".join(base + extra) + "\n")
+        write_fixture_config(cfg, "\n".join(base + extra) + "\n")
         if diagnostic:
             cfg.chmod(0o600)
         started_ns = time.clock_gettime_ns(time.CLOCK_UPTIME_RAW) if diagnostic else None
@@ -16035,12 +16046,14 @@ def run_default_window_size(kettle: str, root: Path) -> Path:
     return out
 
 
-def run_image_paste_receipt(kettle: str, root: Path) -> Path:
+def run_image_paste_receipt(kettle: str, root: Path, *, isolated_clipboard: bool = False) -> Path:
     """Drive bitmap clipboard paste through the live UI and capture its states."""
+    require_isolated_clipboard("image-paste-receipt", isolated_clipboard)
     out = root / f"image-paste-receipt-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -16259,18 +16272,20 @@ def run_image_paste_receipt(kettle: str, root: Path) -> Path:
     return out
 
 
-def run_video_paste_receipt(kettle: str, root: Path) -> Path:
+def run_video_paste_receipt(kettle: str, root: Path, *, isolated_clipboard: bool = False) -> Path:
     """Paste an explicit video file list and capture the poster card.
 
     On macOS and Linux the poster comes from the media worker installed beside
     the Kettle under test, through its decoders (Apple's, or the user's
     ffmpeg); on Windows from the Shell.
     """
+    require_isolated_clipboard("video-paste-receipt", isolated_clipboard)
     out = root / f"video-paste-receipt-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     out.chmod(0o700)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -16429,7 +16444,9 @@ def run_video_paste_receipt(kettle: str, root: Path) -> Path:
             },
         )
         screen = live.json_ctl("read_screen")
-        if not any(path.name in json.dumps(screen) for path in fixtures):
+        # read_screen reports physical rows, including soft-wrapped filenames.
+        pasted = "".join(screen_text(screen).splitlines())
+        if not all(path.name in pasted for path in fixtures):
             raise SystemExit("video-paste-receipt smoke: pane did not receive the copied file list")
 
         (out / "expanded.geometry.json").write_text(
@@ -16656,7 +16673,8 @@ def run_hover_wheel(kettle: str, root: Path) -> Path:
     out = root / f"hover-wheel-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -16693,11 +16711,13 @@ def run_hover_wheel(kettle: str, root: Path) -> Path:
     return out
 
 
-def run_interaction(kettle: str, root: Path) -> Path:
+def run_interaction(kettle: str, root: Path, *, isolated_clipboard: bool = False) -> Path:
+    require_isolated_clipboard("interaction", isolated_clipboard)
     out = root / f"interaction-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -17270,7 +17290,8 @@ def run_selection_autoscroll(kettle: str, root: Path) -> Path:
     out = root / f"selection-autoscroll-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -17566,7 +17587,8 @@ def run_tearoff(kettle: str, root: Path) -> Path:
     out = root / f"tearoff-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -17663,7 +17685,8 @@ def run_window_close_isolation(kettle: str, root: Path) -> Path:
     out = root / f"window-close-isolation-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -17863,7 +17886,8 @@ def run_tab_title(kettle: str, root: Path) -> Path:
     out = root / f"tab-title-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -18191,7 +18215,8 @@ def run_split_titlebar(kettle: str, root: Path) -> Path:
         position_out = out / position
         position_out.mkdir()
         cfg = position_out / "config"
-        cfg.write_text(
+        write_fixture_config(
+            cfg,
             "\n".join(
                 [
                     "agent-server = full",
@@ -18260,7 +18285,8 @@ def run_zoom_keybind(kettle: str, root: Path) -> Path:
     out = root / f"zoom-keybind-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -18364,7 +18390,8 @@ def run_alt_arrow_zoom(kettle: str, root: Path) -> Path:
     out = root / f"alt-arrow-zoom-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -18589,7 +18616,8 @@ def run_dock_menu(kettle: str, root: Path) -> Path:
     out = root / f"dock-menu-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -18865,7 +18893,8 @@ def run_line_edit_chords(kettle: str, root: Path) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     darwin = platform.system() == "Darwin"
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -19011,7 +19040,8 @@ def _run_update_toast_fixture(kettle: str, out: Path, fixture: Path) -> Path:
     record = xdg / "kettle" / "update-check.json"
     delivery = record.with_name("update-toasts.json")
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "agent-server = full\ntab-bar = always\nrestore-session = false\n"
         "update-policy = notify\nupdate-check-interval-hours = 24\n"
         "window-width = 100\nwindow-height = 24\nreduce-motion = on\n"
@@ -19310,7 +19340,8 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
     out = root / f"text-presentation-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -19480,7 +19511,8 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
     out = root / f"steady-uploads-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -19815,7 +19847,8 @@ def run_color_scheme(kettle: str, root: Path) -> Path:
     out = root / f"color-scheme-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -19895,7 +19928,8 @@ def run_theme_picker(kettle: str, root: Path) -> Path:
 
 def _run_theme_picker_fixture(kettle: str, out: Path, fixture: Path) -> Path:
     cfg = fixture / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -20011,7 +20045,8 @@ def run_remote_links(kettle: str, root: Path) -> Path:
     out = root / f"remote-links-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(["agent-server = full", "restore-session = false", "update-check = false"])
         + "\n"
     )
@@ -20121,6 +20156,37 @@ def run_remote_links(kettle: str, root: Path) -> Path:
     return out
 
 
+def require_isolated_clipboard(case: str, isolated: bool) -> None:
+    if isolated or (case == "raw-paste" and platform.system() == "Darwin"):
+        return
+    raise SystemExit(
+        f"{case} smoke: use --isolated-clipboard only on a disposable desktop; "
+        "this probe replaces that desktop's clipboard"
+    )
+
+
+def clipboard_tools():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "kettle_smoke_clipboard", Path(__file__).with_name("smoke-clipboard.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def stop_clipboard_owner(owner: Optional[subprocess.Popen]) -> None:
+    if owner is None or owner.poll() is not None:
+        return
+    owner.terminate()
+    try:
+        owner.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        owner.kill()
+        owner.wait(timeout=3)
+
+
 def set_text_clipboard(text: str) -> Optional[subprocess.Popen]:
     """Replace the desktop clipboard with plain text for an explicit smoke.
     A Wayland or X11 provider must stay alive until Kettle reads it; the
@@ -20146,69 +20212,71 @@ def set_text_clipboard(text: str) -> Optional[subprocess.Popen]:
         )
     else:
         raise SystemExit("raw-paste smoke: no text clipboard writer (pbcopy, wl-copy or xclip)")
-    assert owner.stdin is not None
-    owner.stdin.write(data)
-    owner.stdin.close()
-    time.sleep(0.3)
+    try:
+        assert owner.stdin is not None
+        try:
+            owner.stdin.write(data)
+        finally:
+            owner.stdin.close()
+        time.sleep(0.3)
+    except BaseException:
+        stop_clipboard_owner(owner)
+        raise
     return owner
 
 
-def run_raw_paste(kettle: str, root: Path) -> Path:
+def run_raw_paste(kettle: str, root: Path, *, isolated_clipboard: bool = False) -> Path:
     """A multi-line paste into a shell without bracketed paste goes straight
     through, with no confirmation, and runs each line.
 
-    The smoke puts two commands on the desktop clipboard. On macOS it saves
-    the clipboard's text first and puts it back afterwards.
+    macOS snapshots every clipboard type and restores only the probe's own
+    write. Other hosts require a disposable display's isolated clipboard.
     """
+    require_isolated_clipboard("raw-paste", isolated_clipboard)
     out = root / f"raw-paste-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(["agent-server = full", "restore-session = false", "update-check = false"])
         + "\n"
     )
-    saved = None
-    if platform.system() == "Darwin":
-        saved = subprocess.run(["pbpaste"], capture_output=True, timeout=10).stdout
     markers = ("KETTLE_RAW_PASTE_ONE", "KETTLE_RAW_PASTE_TWO")
-    owner = None
-    try:
-        with LiveKettle(kettle, cfg, out / "kettle.log") as live:
-            time.sleep(1.0)
-            # /bin/sh (bash 3.2 as sh on macOS, dash on Debian) never turns
-            # bracketed paste on, so the paste reaches a raw prompt.
-            live.ctl(
-                "send_text",
-                params={"text": "env -i PATH=/usr/bin:/bin TERM=xterm-256color PS1='$ ' /bin/sh\nclear\n"},
-            )
-            time.sleep(0.8)
-            owner = set_text_clipboard("".join(f"echo {m}\n" for m in markers))
-            live.json_ctl("perform_action", {"action": "paste"})
-            time.sleep(0.4)
-            geo = live.json_ctl("ui_geometry")
-            (out / "paste.geometry.json").write_text(json.dumps(geo, indent=2) + "\n")
-            if modal_open(geo, "confirm_dialog"):
-                raise SystemExit("raw-paste smoke: a multi-line paste asked before pasting")
-            deadline = time.monotonic() + 10.0
-            while True:
-                text = screen_text(live.json_ctl("read_screen"))
-                # Each marker shows twice: the echoed command and its output.
-                if all(text.count(m) >= 2 for m in markers):
-                    break
-                if time.monotonic() > deadline:
-                    (out / "paste.screen.txt").write_text(text)
-                    raise SystemExit("raw-paste smoke: the pasted lines did not run")
-                time.sleep(0.1)
-    finally:
-        if owner is not None and owner.poll() is None:
-            owner.terminate()
+    text = "".join(f"printf '\\n%s\\n' {m}\n" for m in markers)
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        time.sleep(1.0)
+        live.ctl(
+            "send_text",
+            params={"text": "env -i PATH=/usr/bin:/bin TERM=xterm-256color PS1='$ ' /bin/sh\nclear\n"},
+        )
+        time.sleep(0.8)
+        probe = (
+            clipboard_tools().clipboard_probe(text)
+            if platform.system() == "Darwin"
+            else contextlib.nullcontext(True)
+        )
+        with probe as snapshot:
+            if not snapshot:
+                raise SystemExit("raw-paste smoke: clipboard snapshot unavailable; nothing replaced")
+            owner = set_text_clipboard(text)
             try:
-                owner.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                owner.kill()
-                owner.wait(timeout=3)
-        if saved is not None:
-            subprocess.run(["pbcopy"], input=saved, check=False, timeout=10)
+                live.json_ctl("perform_action", {"action": "paste"})
+                time.sleep(0.4)
+                geo = live.json_ctl("ui_geometry")
+                (out / "paste.geometry.json").write_text(json.dumps(geo, indent=2) + "\n")
+                if modal_open(geo, "confirm_dialog"):
+                    raise SystemExit("raw-paste smoke: a multi-line paste asked before pasting")
+                deadline = time.monotonic() + 10.0
+                while True:
+                    screen = screen_text(live.json_ctl("read_screen"))
+                    if all(marker in screen.splitlines() for marker in markers):
+                        break
+                    if time.monotonic() > deadline:
+                        (out / "paste.screen.txt").write_text(screen)
+                        raise SystemExit("raw-paste smoke: the pasted lines did not run")
+                    time.sleep(0.1)
+            finally:
+                stop_clipboard_owner(owner)
     (out / "analysis.json").write_text(json.dumps({"checked": ["raw-paste"]}, indent=2) + "\n")
     return out
 
@@ -20270,7 +20338,8 @@ def run_program_keys(kettle: str, root: Path) -> Path:
     out = root / f"program-keys-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -20402,7 +20471,8 @@ def run_zoomed_layout_keys(kettle: str, root: Path) -> Path:
     out = root / f"zoomed-layout-keys-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -20601,7 +20671,8 @@ def run_pane_focus_reports(kettle: str, root: Path) -> Path:
     out = root / f"pane-focus-reports-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -20720,7 +20791,8 @@ def run_split_exit_resize(kettle: str, root: Path) -> Path:
     out = root / f"split-exit-resize-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -20909,7 +20981,8 @@ def run_touchpad_scroll(kettle: str, root: Path) -> Path:
     out = root / f"touchpad-scroll-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
-    cfg.write_text(
+    write_fixture_config(
+        cfg,
         "\n".join(
             [
                 "agent-server = full",
@@ -21236,7 +21309,26 @@ def main() -> int:
             "be focused (Xvfb without a window manager)"
         ),
     )
+    parser.add_argument(
+        "--isolated-clipboard",
+        action="store_true",
+        help=(
+            "confirm a disposable desktop for clipboard-replacing cases: "
+            "interaction, search-selection, image/video receipts, all, and "
+            "raw-paste outside macOS; macOS raw-paste preserves captured formats"
+        ),
+    )
     args = parser.parse_args()
+
+    clipboard_cases = {
+        "interaction", "search-selection", "image-paste-receipt",
+        "video-paste-receipt", "raw-paste", "all",
+    }
+    if args.isolated_clipboard and args.case not in clipboard_cases:
+        parser.error("--isolated-clipboard applies only to clipboard-replacing cases")
+    if args.case in clipboard_cases:
+        require_isolated_clipboard(args.case, args.isolated_clipboard)
+
 
     if args.case == "self-test":
         live_helper_selftest()
@@ -21318,7 +21410,7 @@ def main() -> int:
         out = run_remote_links(args.kettle, root)
         print(f"remote-links smoke: OK artifacts={out}")
     if args.case in ("raw-paste", "all"):
-        out = run_raw_paste(args.kettle, root)
+        out = run_raw_paste(args.kettle, root, isolated_clipboard=args.isolated_clipboard)
         print(f"raw-paste smoke: OK artifacts={out}")
     if args.case in ("zoom-keybind", "all"):
         out = run_zoom_keybind(args.kettle, root)
@@ -21357,7 +21449,7 @@ def main() -> int:
         out = run_search_history(args.kettle, root)
         print(f"search-history smoke: OK artifacts={out}")
     if args.case in ("search-selection", "all"):
-        out = run_search_selection(args.kettle, root)
+        out = run_search_selection(args.kettle, root, isolated_clipboard=args.isolated_clipboard)
         print(f"search-selection smoke: OK artifacts={out}")
     if args.case in ("bell-flash", "all"):
         out = run_bell_flash(args.kettle, root)
@@ -21366,13 +21458,13 @@ def main() -> int:
         out = run_default_window_size(args.kettle, root)
         print(f"default-window-size smoke: OK artifacts={out}")
     if args.case == "image-paste-receipt":
-        out = run_image_paste_receipt(args.kettle, root)
+        out = run_image_paste_receipt(args.kettle, root, isolated_clipboard=args.isolated_clipboard)
         print(f"image-paste-receipt smoke: OK artifacts={out}")
     if args.case == "video-paste-receipt":
-        out = run_video_paste_receipt(args.kettle, root)
+        out = run_video_paste_receipt(args.kettle, root, isolated_clipboard=args.isolated_clipboard)
         print(f"video-paste-receipt smoke: OK artifacts={out}")
     if args.case in ("interaction", "all"):
-        out = run_interaction(args.kettle, root)
+        out = run_interaction(args.kettle, root, isolated_clipboard=args.isolated_clipboard)
         print(f"interaction smoke: OK artifacts={out}")
     if args.case == "selection-autoscroll":
         out = run_selection_autoscroll(args.kettle, root)

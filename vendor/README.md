@@ -140,10 +140,10 @@ date. Recheck that before upgrading a crate or dropping a patch.
   DECSTR (`CSI ! p`) is a soft reset. Besides turning mode 2031 off, it drops
   modifyOtherKeys back to level zero, clears the negotiation, restores the
   fallback flag from the config, and resets the scrolling region. It leaves
-  the screen, the scrollback and the title alone, and resets nothing else
-  DECSTR covers, such as SGR, origin mode, autowrap, cursor visibility,
-  insert mode, the cursor-key and keypad modes, the character sets and the
-  saved cursor. RIS restores the same modifyOtherKeys state and fallback flag.
+  the screen, the scrollback, the title and the cursor's position alone.
+  It also resets SGR, origin and insert modes, the cursor-key and keypad
+  modes, the character sets and the saved cursor, and restores autowrap and
+  cursor visibility. RIS restores the same modifyOtherKeys state and fallback flag.
   `ShellUser::from_env` in `tty/unix.rs` carries a scoped
   `#[allow(clippy::question_mark)]`. From Rust 1.97 that lint flags the
   function's three `match pw` fallbacks and suggests `pw?`, which does not

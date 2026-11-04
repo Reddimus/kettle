@@ -1532,6 +1532,22 @@ pub(super) fn accessibility_context_menu_item_index(id: NodeId, ws: &WindowState
         .then_some(index)
 }
 
+pub(super) fn modal_accessibility_diagnostic_label<'a>(
+    overlay: &'a Overlay,
+    id: NodeId,
+    node: &'a Node,
+) -> Option<&'a str> {
+    // Native row names can include values; control diagnostics expose names only.
+    if let Some(settings) = overlay.settings.as_ref() {
+        for (index, row) in settings.rows.iter().enumerate() {
+            if id == accessibility_modal_id(5, index + 2) {
+                return Some(row.label.as_str());
+            }
+        }
+    }
+    node.label()
+}
+
 pub(super) struct ModalAccessibilityProjection {
     pub(super) roots: Vec<NodeId>,
     pub(super) nodes: Vec<(NodeId, Node)>,
@@ -1840,12 +1856,22 @@ pub(super) fn modal_accessibility_projection(
         for (index, row) in settings.rows.iter().enumerate() {
             let id = accessibility_modal_id(5, index + 2);
             let mut node = Node::new(Role::ListBoxOption);
-            node.set_label(row.label.clone());
+            // macOS maps list options to static text and uses the label as
+            // AXValue, hiding a separate string value from the reader.
+            #[cfg(target_os = "macos")]
+            let label = if row.value.is_empty() {
+                row.label.clone()
+            } else {
+                format!("{}, {}", row.label, row.value)
+            };
+            #[cfg(not(target_os = "macos"))]
+            let label = row.label.clone();
+            node.set_label(label);
             node.set_value(row.value.clone());
             // AT-SPI exposes a string value only through text ranges, so Orca
             // would read the row's name alone; there the value is also the
-            // description, which Orca speaks after the name. macOS and
-            // Windows read the value itself.
+            // description, which Orca speaks after the name. Windows reads
+            // the value itself.
             #[cfg(all(unix, not(target_os = "macos")))]
             node.set_description(row.value.clone());
             if row.disabled {

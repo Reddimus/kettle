@@ -121,7 +121,7 @@ class ScriptRegressionTests(unittest.TestCase):
         modal = load('check-modal-shortcuts')
         with tempfile.TemporaryDirectory() as raw, \
              patch.object(modal, 'RecordedLive', side_effect=RuntimeError('startup')), \
-             patch.object(modal.subprocess, 'run') as run:
+             patch.object(subprocess, 'run') as run:
             with self.assertRaisesRegex(RuntimeError, 'startup'):
                 modal.check('kettle', Path(raw) / 'out')
         run.assert_not_called()
@@ -291,6 +291,230 @@ items.addObject(item);
                     with self.assertRaisesRegex(RuntimeError, 'S1 flood did not complete'):
                         stress.s1_urandom(live)
                 live.ctl.assert_any_call('send_keys', params={'keys': ['ctrl+c']})
+
+    def run_pane_drag_block(self, marker, files):
+        script = (SCRIPTS / 'check-pane-drag-smoke.sh').read_text()
+        blocks = [part.split('\nPY\n', 1)[0]
+                  for part in script.split("<<'PY'\n")[1:]]
+        block, = [code for code in blocks if marker in code]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for name, value in files.items():
+                (root / name).write_text(json.dumps(value))
+            result = subprocess.run([sys.executable, '-', raw, '3'], input=block,
+                                    capture_output=True, text=True, timeout=10)
+            outputs = {p.name: json.loads(p.read_text()) for p in root.glob('*.json')}
+        return result, outputs
+
+    def pane_drag_fixture(self):
+        return [
+            {'id': 1, 'rect': {'x': 0, 'y': 0, 'width': 101, 'height': 50}},
+            {'id': 3, 'rect': {'x': 0, 'y': 50, 'width': 101, 'height': 50}},
+            {'id': 2, 'rect': {'x': 101, 'y': 0, 'width': 100, 'height': 100}},
+        ]
+
+    def test_pane_drag_targets_right_column_when_left_is_wider(self):
+        result, outputs = self.run_pane_drag_block(
+            '(out / "target.json").write_text', {'panes.json': self.pane_drag_fixture()})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs['target.json']['id'], 2)
+        point = json.loads(result.stdout)
+        self.assertGreater(point['x'], 101)
+        self.assertLess(point['x'], 201)
+
+    def test_pane_drag_rejects_reordered_ids_without_the_right_edge_layout(self):
+        panes = self.pane_drag_fixture()
+        files = {
+            'panes.json': panes,
+            'target.json': panes[2],
+            'geometry-pressed.json': {'pane_drag_armed': True, 'pane_drag_pane': 3},
+            'geometry-jittered.json': {'pane_drag_armed': True},
+            'geometry-dragging.json': {
+                'pane_drag_live': True, 'pane_drag_target': {'pane': 2, 'edge': 'right'}},
+            'geometry-released.json': {'panes': [panes[0], panes[2], panes[1]]},
+        }
+        valid = [
+            {'id': 1, 'rect': {'x': 0, 'y': 0, 'width': 101, 'height': 100}},
+            {'id': 2, 'rect': {'x': 101, 'y': 0, 'width': 50, 'height': 100}},
+            {'id': 3, 'rect': {'x': 151, 'y': 0, 'width': 50, 'height': 100}},
+        ]
+        result, _ = self.run_pane_drag_block('before = [p[', {
+            **files, 'geometry-released.json': {'panes': valid}})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result, _ = self.run_pane_drag_block('before = [p[', files)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('right-edge layout', result.stderr)
+
+    def test_control_storm_accepts_darwin_closed_peer_error_only_on_darwin(self):
+        stress = load('check-stress-live')
+        error = 'control I/O error: Socket is not connected (os error 57)'
+
+        class ClosedPeer:
+            def json_ctl(self, _method):
+                raise SystemExit(error)
+
+        for host in ('darwin', 'linux', 'win32'):
+            with self.subTest(host=host), patch.object(stress.sys, 'platform', host):
+                row = stress.s10_ctl_storm(ClosedPeer())
+            self.assertEqual(row['ctl_ok'], 0)
+            self.assertEqual(row['ctl_refused_at_cap'], 1280 if host == 'darwin' else 0)
+            self.assertEqual(row['ctl_errors'], 0 if host == 'darwin' else 1280)
+        error = 'control I/O error: another transport failure'
+        with patch.object(stress.sys, 'platform', 'darwin'):
+            self.assertEqual(stress.s10_ctl_storm(ClosedPeer())['ctl_errors'], 1280)
+
+    def test_video_receipt_paste_accepts_wrapping_and_requires_both_files(self):
+        live = load('check-live-ui-smoke')
+
+        class Captured(Exception):
+            pass
+
+        for screen, complete in (('first-vi\ndeo.mp4 second-video.we\nbm', True),
+                                 ('first-video.mp4', False)):
+            with self.subTest(complete=complete), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                videos = [root / 'one.mp4', root / 'two.webm']
+                for path in videos:
+                    path.write_bytes(b'fixture')
+                fixture = Mock()
+                fixture.json_ctl.side_effect = lambda method, *_args, **_kwargs: (
+                    {'text': screen} if method == 'read_screen' else {'window_focused': True})
+                receipt = {'count': 2, 'openable': False, 'rect': {'x': 0, 'y': 0, 'width': 32, 'height': 32},
+                           'preview_rect': {'x': 0, 'y': 0, 'width': 16, 'height': 16}}
+                with patch.object(live.platform, 'system', return_value='Linux'), \
+                     patch.dict(os.environ, {'KETTLE_SMOKE_VIDEO_FIXTURES': os.pathsep.join(map(str, videos))}), \
+                     patch.object(live, 'LiveKettle', return_value=contextlib.nullcontext(fixture)), \
+                     patch.object(live, 'set_file_list_clipboard', return_value=None), \
+                     patch.object(live, 'wait_for_media_worker'), \
+                     patch.object(live, 'wait_for_media_receipt', return_value=({}, receipt)), \
+                     patch.object(live, 'capture_receipt_lane', side_effect=Captured):
+                    if complete:
+                        with self.assertRaises(Captured):
+                            live.run_video_paste_receipt('kettle', root, isolated_clipboard=True)
+                    else:
+                        with self.assertRaisesRegex(SystemExit, 'copied file list'):
+                            live.run_video_paste_receipt('kettle', root, isolated_clipboard=True)
+
+    def test_raw_paste_startup_failure_does_not_touch_the_clipboard(self):
+        live = load('check-live-ui-smoke')
+        with tempfile.TemporaryDirectory() as raw, \
+             patch.object(live.platform, 'system', return_value='Darwin'), \
+             patch.object(live, 'LiveKettle', side_effect=RuntimeError('startup')), \
+             patch.object(live.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, b'')) as run:
+            with self.assertRaisesRegex(RuntimeError, 'startup'):
+                live.run_raw_paste('kettle', Path(raw))
+        run.assert_not_called()
+
+    def test_raw_paste_requires_an_isolated_linux_clipboard_before_launch(self):
+        live = load('check-live-ui-smoke')
+        fixture = Mock()
+        fixture.json_ctl.side_effect = lambda method, *_args, **_kwargs: (
+            {'text': 'KETTLE_RAW_PASTE_ONE\nKETTLE_RAW_PASTE_TWO'}
+            if method == 'read_screen' else {})
+        with tempfile.TemporaryDirectory() as raw, \
+             patch.object(live.platform, 'system', return_value='Linux'), \
+             patch.object(live, 'LiveKettle', return_value=contextlib.nullcontext(fixture)) as start, \
+             patch.object(live, 'set_text_clipboard', return_value=None) as write, \
+             patch.object(live.time, 'sleep'):
+            with self.assertRaisesRegex(SystemExit, 'isolated-clipboard'):
+                live.run_raw_paste('kettle', Path(raw))
+            start.assert_not_called()
+            write.assert_not_called()
+            live.run_raw_paste('kettle', Path(raw), isolated_clipboard=True)
+            write.assert_called_once()
+
+    def test_raw_paste_requires_execution_output_instead_of_command_echo(self):
+        live = load('check-live-ui-smoke')
+        markers = ('KETTLE_RAW_PASTE_ONE', 'KETTLE_RAW_PASTE_TWO')
+        executed = '\n'.join(markers)
+        echoed = '\n'.join(f"printf '\\n%s\\n' {marker}" for marker in markers) * 2
+        for screen, ran in ((executed, True), (echoed, False)):
+            with self.subTest(executed=ran), tempfile.TemporaryDirectory() as raw:
+                fixture = Mock()
+                fixture.json_ctl.side_effect = lambda method, *_args, **_kwargs: (
+                    {'text': screen} if method == 'read_screen' else {})
+                with patch.object(live.platform, 'system', return_value='Linux'), \
+                     patch.object(live, 'LiveKettle', return_value=contextlib.nullcontext(fixture)), \
+                     patch.object(live, 'set_text_clipboard', return_value=None), \
+                     patch.object(live.time, 'sleep'), \
+                     patch.object(live.time, 'monotonic', side_effect=[0, 11]):
+                    if ran:
+                        live.run_raw_paste('kettle', Path(raw), isolated_clipboard=True)
+                    else:
+                        with self.assertRaisesRegex(SystemExit, 'pasted lines did not run'):
+                            live.run_raw_paste('kettle', Path(raw), isolated_clipboard=True)
+
+    def test_raw_paste_declines_an_uncapturable_mac_clipboard(self):
+        live = load('check-live-ui-smoke')
+        fixture = Mock()
+        fixture.json_ctl.side_effect = lambda method, *_args, **_kwargs: (
+            {'text': 'KETTLE_RAW_PASTE_ONE\nKETTLE_RAW_PASTE_TWO'}
+            if method == 'read_screen' else {})
+        tools = Mock()
+        tools.clipboard_probe.return_value = contextlib.nullcontext(False)
+        with tempfile.TemporaryDirectory() as raw, \
+             patch.object(live.platform, 'system', return_value='Darwin'), \
+             patch.object(live, 'LiveKettle', return_value=contextlib.nullcontext(fixture)), \
+             patch.object(live, 'clipboard_tools', return_value=tools, create=True), \
+             patch.object(live, 'set_text_clipboard', return_value=None) as write, \
+             patch.object(live.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, b'')), \
+             patch.object(live.time, 'sleep'):
+            with self.assertRaisesRegex(SystemExit, 'clipboard snapshot'):
+                live.run_raw_paste('kettle', Path(raw))
+            write.assert_not_called()
+
+    def test_text_clipboard_failed_write_reaps_its_owned_provider(self):
+        live = load('check-live-ui-smoke')
+        owner = Mock()
+        owner.stdin.write.side_effect = BrokenPipeError('provider exited')
+        owner.poll.return_value = None
+        with patch.object(live.platform, 'system', return_value='Linux'), \
+             patch.dict(os.environ, {'WAYLAND_DISPLAY': 'private-fixture'}), \
+             patch.object(live.shutil, 'which', return_value='/fixture/wl-copy'), \
+             patch.object(live.subprocess, 'Popen', return_value=owner), \
+             patch.object(live.time, 'sleep'):
+            with self.assertRaises(BrokenPipeError):
+                live.set_text_clipboard('fixture')
+        owner.terminate.assert_called_once()
+        owner.wait.assert_called_once_with(timeout=3)
+        owner.stdin.close.assert_called_once()
+
+    def test_clipboard_replacing_cases_require_isolation_before_any_side_effect(self):
+        live = load('check-live-ui-smoke')
+        with tempfile.TemporaryDirectory() as source:
+            videos = [Path(source) / 'one.mp4', Path(source) / 'two.webm']
+            for path in videos:
+                path.write_bytes(b'fixture')
+            for host in ('Darwin', 'Linux'):
+                for name in ('interaction', 'search_selection', 'image_paste_receipt', 'video_paste_receipt'):
+                    with self.subTest(host=host, case=name), tempfile.TemporaryDirectory() as raw, \
+                         patch.object(live.platform, 'system', return_value=host), \
+                         patch.dict(os.environ, {'KETTLE_SMOKE_VIDEO_FIXTURES': os.pathsep.join(map(str, videos))}), \
+                         patch.object(live, 'LiveKettle', side_effect=SystemExit('unsafe launch attempted')) as start, \
+                         patch.object(live, 'set_bitmap_clipboard') as bitmap, \
+                         patch.object(live, 'set_file_list_clipboard') as files:
+                        with self.assertRaisesRegex(SystemExit, 'isolated-clipboard'):
+                            getattr(live, 'run_' + name)('kettle', Path(raw))
+                        self.assertEqual(list(Path(raw).iterdir()), [])
+                        start.assert_not_called()
+                        bitmap.assert_not_called()
+                        files.assert_not_called()
+
+    def test_selection_autoscroll_fixture_does_not_auto_copy_to_the_desktop(self):
+        live = load('check-live-ui-smoke')
+
+        class Configured(Exception):
+            pass
+
+        def launch(_kettle, config, *_args, **_kwargs):
+            self.assertIn('copy-on-select = false', config.read_text().splitlines())
+            raise Configured()
+
+        with tempfile.TemporaryDirectory() as raw, \
+             patch.object(live.platform, 'system', return_value='Linux'), \
+             patch.object(live, 'LiveKettle', side_effect=launch):
+            with self.assertRaises(Configured):
+                live.run_selection_autoscroll('kettle', Path(raw))
 
     def test_tearoff_failure_releases_button(self):
         with tempfile.TemporaryDirectory() as raw:

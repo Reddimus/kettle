@@ -803,11 +803,14 @@ fn settings_rows_carry_their_values_for_every_screen_reader() {
             value_cols: 20,
             active_category: 0,
             background_page: false,
-            rows: vec![kettle_render::SettingsRow {
-                label: "Theme".into(),
-                value: "Builtin Dark".into(),
-                disabled: false,
-            }],
+            rows: [("Theme", "Builtin Dark"), ("Font size", "14"), ("Background image", "")]
+                .into_iter()
+                .map(|(label, value)| kettle_render::SettingsRow {
+                    label: label.into(),
+                    value: value.into(),
+                    disabled: false,
+                })
+                .collect(),
             focused_row: 0,
             title: "Settings".into(),
             hints: String::new(),
@@ -817,17 +820,44 @@ fn settings_rows_carry_their_values_for_every_screen_reader() {
     };
     let projection =
         super::modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &EN_TEXT);
-    let (_, row) = projection
+    let rows: Vec<_> = projection
         .nodes
         .iter()
-        .find(|(_, node)| node.role() == accesskit::Role::ListBoxOption)
-        .expect("a settings row");
-    assert_eq!(row.label(), Some("Theme"));
-    assert_eq!(row.value(), Some("Builtin Dark"));
-    // AT-SPI reads a string value only through text ranges, so there the
-    // value is also the description, which Orca speaks after the name.
-    let spoken = cfg!(all(unix, not(target_os = "macos"))).then_some("Builtin Dark");
-    assert_eq!(row.description(), spoken);
+        .filter(|(_, node)| node.role() == accesskit::Role::ListBoxOption)
+        .map(|(id, node)| (*id, node))
+        .collect();
+    assert_eq!(rows.len(), 3);
+    for ((id, row), (label, value)) in rows.iter().zip([
+        ("Theme", "Builtin Dark"),
+        ("Font size", "14"),
+        ("Background image", ""),
+    ]) {
+        let expected_label = if cfg!(target_os = "macos") && !value.is_empty() {
+            format!("{label}, {value}")
+        } else {
+            label.to_owned()
+        };
+        assert_eq!(row.label(), Some(expected_label.as_str()));
+        assert_eq!(row.value(), Some(value));
+        assert_eq!(
+            super::modal_accessibility_diagnostic_label(&overlay, *id, row),
+            Some(label),
+            "control diagnostics report the field name without its value"
+        );
+        // AT-SPI needs the separate description to speak the string value.
+        let spoken = cfg!(all(unix, not(target_os = "macos"))).then_some(value);
+        assert_eq!(row.description(), spoken);
+    }
+    let mut other = accesskit::Node::new(accesskit::Role::ListBoxOption);
+    other.set_label("Palette result");
+    assert_eq!(
+        super::modal_accessibility_diagnostic_label(
+            &overlay,
+            super::accessibility_modal_id(4, 2),
+            &other,
+        ),
+        Some("Palette result")
+    );
 }
 
 #[test]

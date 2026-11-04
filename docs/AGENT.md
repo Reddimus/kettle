@@ -1872,8 +1872,11 @@ compile-capable tmux with nonzero cell-pixel geometry additionally produces
 disabled, or unverified tmux build is skipped before the fixture.
 
 ```sh
-just interaction-smoke
+just interaction-smoke --isolated-clipboard
 ```
+
+Run this on a disposable desktop with an isolated clipboard. The option
+acknowledges that setup; it does not create isolation.
 
 Starts a real grid-renderer Kettle window and drives broader UI states through
 `kettle ctl`: multiline text entry, scrollback wheel movement, tab-bar `+`

@@ -820,6 +820,99 @@ fn toggles_run_once_per_press_while_held() {
 }
 
 #[test]
+fn imported_symbol_accelerators_match_consumed_shift() {
+    use super::resolve_keybind_action;
+    use kettle_config::{Action, Config};
+    use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+
+    let cfg = Config::parse_text("[keybindings]\nzoom_in = <Control>plus\n");
+    let matched = resolve_keybind_action(
+        &cfg.keybinds,
+        Some(&Key::Character("+".into())),
+        Some(&PhysicalKey::Code(KeyCode::Equal)),
+        ModifiersState::CONTROL | ModifiersState::SHIFT,
+        Some(&Key::Character("=".into())),
+    );
+    assert_eq!(
+        matched.map(|(_, action)| action),
+        Some(Action::IncreaseFontSize)
+    );
+}
+
+#[test]
+fn symbol_accelerators_preserve_explicit_shift_and_layout_meaning() {
+    use super::resolve_keybind_action;
+    use kettle_config::{Action, Bindings, Key as KKey, Mods, Trigger};
+    use winit::keyboard::{Key, ModifiersState};
+
+    let shifted = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    let mut bindings = Bindings::new();
+    bindings.insert(
+        Trigger::new(Mods::CTRL, KKey::Char('+')),
+        Action::IncreaseFontSize,
+    );
+    bindings.insert(
+        Trigger::new(Mods::CTRL | Mods::SHIFT, KKey::Char('+')),
+        Action::ResetFontSize,
+    );
+    let logical = Key::Character("+".into());
+    let base = Key::Character("=".into());
+    assert_eq!(
+        resolve_keybind_action(&bindings, Some(&logical), None, shifted, Some(&base))
+            .map(|(_, action)| action),
+        Some(Action::ResetFontSize),
+    );
+    bindings.remove(&Trigger::new(Mods::CTRL | Mods::SHIFT, KKey::Char('+')));
+    for (mods, unshifted) in [
+        (shifted, Some(&logical)),
+        (shifted, None),
+        (shifted | ModifiersState::ALT, Some(&base)),
+    ] {
+        assert_eq!(
+            resolve_keybind_action(&bindings, Some(&logical), None, mods, unshifted),
+            None,
+        );
+    }
+    assert_eq!(
+        resolve_keybind_action(
+            &bindings,
+            Some(&logical),
+            None,
+            ModifiersState::CONTROL,
+            Some(&logical)
+        )
+        .map(|(_, action)| action),
+        Some(Action::IncreaseFontSize),
+    );
+    bindings.clear();
+    bindings.insert(Trigger::new(Mods::CTRL, KKey::Char('a')), Action::NewTab);
+    assert_eq!(
+        resolve_keybind_action(
+            &bindings,
+            Some(&Key::Character("A".into())),
+            None,
+            shifted,
+            Some(&Key::Character("a".into()))
+        ),
+        None,
+    );
+    bindings.clear();
+    bindings.insert(Trigger::new(Mods::CTRL, KKey::Char(';')), Action::NewTab);
+    assert_eq!(
+        resolve_keybind_action(
+            &bindings,
+            Some(&Key::Character(";".into())),
+            None,
+            shifted,
+            Some(&Key::Character(",".into()))
+        )
+        .map(|(_, action)| action),
+        Some(Action::NewTab),
+        "use the layout's base character rather than a US punctuation table",
+    );
+}
+
+#[test]
 fn keybind_resolver_uses_logical_before_physical_fallback() {
     use super::resolve_keybind_action;
     use kettle_config::{Action, Bindings, Key as KKey, Mods, Trigger};

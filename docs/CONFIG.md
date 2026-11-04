@@ -526,6 +526,10 @@ names `plus`/`minus`/`equal` for `+`/`-`/`=`.
 
 GTK's accelerator syntax works too, unchanged from a Terminator config:
 `<Primary><Shift>t` is the same binding as `ctrl+shift+t`.
+A symbol binding such as `<Control>plus` also matches the Shift needed to
+produce `+` on the active layout. An explicit Shift chord takes precedence;
+Shift on letters or on a symbol the layout produces without Shift remains
+distinct. This needs the native event's unmodified layout character.
 
 A typo'd modifier (`cttrl+t`, `supre+t`) is rejected outright and
 flagged by `kettle --check-config` — it doesn't silently degrade

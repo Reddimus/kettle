@@ -741,7 +741,8 @@ class LiveUiTests(unittest.TestCase):
                     patch.object(checker, "LiveKettle", side_effect=launch),
                 ):
                     with self.assertRaises(Configured):
-                        scenario("unused", Path(directory))
+                        options = {"isolated_clipboard": True} if scenario is checker.run_interaction else {}
+                        scenario("unused", Path(directory), **options)
 
     def test_interaction_fixtures_select_posix_shell(self):
         class Launched(Exception):
@@ -759,7 +760,8 @@ class LiveUiTests(unittest.TestCase):
                     patch.object(checker, "LiveKettle", side_effect=launch),
                 ):
                     with self.assertRaises(Launched):
-                        scenario("unused", Path(directory))
+                        options = {"isolated_clipboard": True} if scenario is checker.run_interaction else {}
+                        scenario("unused", Path(directory), **options)
 
     def test_split_titlebar_uses_a_non_login_posix_shell(self):
         class Configured(Exception):
