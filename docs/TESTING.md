@@ -1652,6 +1652,8 @@ python3 scripts/check-job-control-smoke.py --kettle ./target/release/kettle --co
 `/absolute/path/to/codex` is a placeholder for your installed executable.
 The opt-in check uses local client configuration and authentication.
 It starts an idle session and submits no model prompt.
+After the suspend/resume cycles it sends the client's `/quit` command and
+verifies shell editing again; Ctrl+C can clear an idle composer without exiting.
 A trust or login dialog fails readiness; the harness does not approve it.
 Use a trusted working directory and inspect failure text before sharing it.
 

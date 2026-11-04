@@ -630,13 +630,19 @@ The race can happen on the first suspension and does not require `bg`.
 reproduction and protocol evidence. The upstream suspend race is discussed in
 [Codex #26564](https://github.com/openai/codex/issues/26564), with the related
 background ownership problem in [Codex #37088](https://github.com/openai/codex/issues/37088).
+Codex 0.166.0 passed three foreground suspend/resume cycles on macOS and Ubuntu
+in the 2026-11-03 native checks. That sample does not establish background ownership
+or exhaustive race coverage; the related background issue remains open.
+
 Kettle follows the client's negotiated modes. It does not clear them based on
 a process name or assume every foreground shell uses legacy keyboard input.
 
 See [Unix suspend/resume compatibility](TESTING.md#unix-suspendresume-compatibility)
 for the offline regression scenario and the explicit real-Codex probe. Until a
-fixed client is installed, exiting Codex normally avoids this suspension path.
-The fixed interactive TUI remains stopped after `bg`; use `fg` to resume it.
+fixed client is installed, exiting Codex normally with `/quit` avoids this
+suspension path.
+The corrected offline test client remains stopped after `bg`; use `fg` to
+resume an interactive TUI.
 
 At an empty shell prompt, `printf '\033c'; stty sane` restores terminal modes
 and shell editing. This clears the terminal display; the suspended job remains
