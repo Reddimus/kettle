@@ -17,5 +17,6 @@
     "enabled": false
   },
   "instructions": "Follow AGENTS.md and .github/review-policy.md. Reviews are read-only and advisory.",
-  "triggerOnDrafts": false
+  "triggerOnDrafts": false,
+  "statusCommentsEnabled": true
 }
