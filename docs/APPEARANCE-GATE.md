@@ -5,6 +5,39 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 5.9.0 preflight - 2026-11-03
+
+macOS 27.2, Apple silicon. The signed and notarized universal 5.9.0 candidate
+came from [main rehearsal 41776132487](https://github.com/Reddimus/kettle/actions/runs/41776132487)
+at `1fc228d0bb58`. Deep codesign, Gatekeeper, stapled-ticket validation, both
+universal architectures and the real private bundle-updater smoke passed.
+This package check does not establish native compositor appearance.
+
+Earlier native checks of the audited application sources covered Settings
+values in English and Spanish, font changes, search, the palette and About.
+The unchanged application sources
+also passed the interaction, rounded update-toast, text-presentation,
+split-exit-resize, program-key, color-scheme and steady-upload smokes during
+this audit. Renderer screenshots and control-API geometry remain separate
+from composited desktop captures.
+
+A two-build private bundle test started packaged 5.8.2, replaced its bundle
+with packaged 5.9.0, then reopened it three times. The first reopen started
+one new-version window; later reopens reused it, and the old PTY remained
+usable. This was native Finder/LaunchServices activation with an isolated
+bundle identifier and ad-hoc signatures, not a physical Dock-click or official
+signature test. Separately, the owner's actual Dock clicks started installed
+5.8.2 beside the existing 5.8.0 process; subsequent clicks were observed to
+focus the newer window. Both owner processes stayed open.
+
+Fresh composited appearance captures, Reduce Transparency, Dock and
+app-switcher pixels, VoiceOver speech and Japanese IME acceptance remain
+unrun. The current process and capture connector report no Screen Recording,
+Accessibility or event-synthesis access; the Computer Use Dock endpoint times
+out. Earlier 5.8.0 observations retain their original scope. No permission,
+screen-saver, owner-window or installed-application change was made for these
+checks. Physical Intel and mixed-DPI acceptance also remain unrun.
+
 ## 5.8.0 preflight - 2026-11-01
 
 macOS 27.2, Apple silicon, 1920x1080 at 1x. The signed and notarized universal
