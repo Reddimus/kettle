@@ -36,6 +36,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep new Linux windows under their original taskbar identity after an update
+  replaces the running executable, including renamed builds.
 - Include current Settings values in macOS accessibility row names, so
   assistive tools can read the theme, font size, and other selected values.
 - Match symbolic shortcuts such as imported Terminator `Ctrl+Plus` when

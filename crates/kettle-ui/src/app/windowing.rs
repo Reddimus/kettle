@@ -2,6 +2,54 @@
 
 use super::*;
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    test
+))]
+fn window_class_for_executable(executable: Option<&std::path::Path>) -> String {
+    executable
+        .and_then(|path| path.file_stem())
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "kettle".to_string())
+}
+
+#[cfg(test)]
+mod window_class_tests {
+    use super::window_class_for_executable;
+    use std::path::Path;
+
+    #[test]
+    fn a_named_build_keeps_its_class_after_its_cached_path_disappears() {
+        let root = kettle_test_support::private_tempdir("kettle-window-class-");
+        let executable = root.path().join("kettle-fork");
+        std::fs::write(&executable, b"old executable").unwrap();
+        assert_eq!(
+            window_class_for_executable(Some(&executable)),
+            "kettle-fork"
+        );
+        std::fs::rename(&executable, root.path().join("previous")).unwrap();
+        assert_eq!(
+            window_class_for_executable(Some(&executable)),
+            "kettle-fork"
+        );
+        std::fs::write(&executable, b"new executable").unwrap();
+        assert_eq!(
+            window_class_for_executable(Some(&executable)),
+            "kettle-fork"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_executable_uses_the_default_class() {
+        for executable in [None, Some(Path::new("")), Some(Path::new("/"))] {
+            assert_eq!(window_class_for_executable(executable), "kettle");
+        }
+    }
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn wayland_drag_destination(
     performed: bool,
@@ -237,11 +285,9 @@ impl App {
             // binary groups correctly in GNOME/KDE task switchers without
             // editing code. The canonical build is `kettle`, so this matches
             // `StartupWMClass=kettle` in packaging/linux/kettle.desktop exactly.
-            let wm_class = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "kettle".to_string());
+            // An update changes Linux's current_exe() to a deleted path.
+            // The process's existing startup snapshot keeps every window grouped.
+            let wm_class = window_class_for_executable(self.executable.as_deref());
             WindowAttributesExtX11::with_name(attrs, wm_class.clone(), wm_class)
         };
         attrs.with_visible(false)

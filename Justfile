@@ -500,7 +500,7 @@ gauntlet-full: gauntlet-strict full-native-gates
     @echo "This is not a PASS for native legs on other operating systems."
 
 [linux]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke confirmation-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke confirmation-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke window-app-id-smoke
     @echo "NOT APPLICABLE on Linux: macOS actool and native appearance gates."
 
 [macos]
@@ -991,6 +991,11 @@ hover-wheel-smoke:
 [unix]
 window-close-isolation-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release window-close-isolation
+
+# Keep new Linux windows under their original desktop identity after an update.
+[linux]
+window-app-id-smoke:
+    xvfb-run -a python3 scripts/check-live-ui-smoke.py --cargo-release window-app-id
 
 # Reproduce a Windows Precision Touchpad gesture: a stream of sub-detent wheel
 # deltas (the units winit actually reports) instead of pre-quantized whole
