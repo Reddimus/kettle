@@ -33,6 +33,10 @@ class LiveUiTests(unittest.TestCase):
         for windows in (False, True):
             if windows and not (shutil.which('pwsh') or shutil.which('powershell.exe')):
                 continue
+            # The POSIX variant needs a POSIX bash; Git Bash on a Windows host
+            # cannot take the host's drive paths.
+            if not windows and os.name == 'nt':
+                continue
             with self.subTest(windows=windows), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory) / 'sandbox'
                 root.mkdir()
@@ -114,7 +118,7 @@ class LiveUiTests(unittest.TestCase):
         self.assertEqual(launch.call_args.kwargs['extra_args'],
                          ['-e', 'bash', '--noprofile', '--norc'])
 
-    @unittest.skipUnless(shutil.which('bash'), 'requires Bash')
+    @unittest.skipUnless(shutil.which('bash') and os.name != 'nt', 'requires a POSIX Bash')
     def test_lazyvcs_git_overrides_cannot_modify_external_repository(self):
         self.check_lazyvcs_git_overrides(windows=False)
 
@@ -252,7 +256,7 @@ class LiveUiTests(unittest.TestCase):
         handle.signal.assert_called_once_with(signal.SIGKILL)
         handle.close.assert_called_once()
 
-    @unittest.skipUnless(shutil.which("bash"), "requires Bash")
+    @unittest.skipUnless(shutil.which("bash") and os.name != "nt", "requires a POSIX Bash")
     def test_wsl_config_probe_accepts_spaces_in_xdg_config_home(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / 'editor config'
