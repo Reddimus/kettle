@@ -790,6 +790,10 @@ percent (0.5) of its pixels differ or its size changed. A missing baseline is
 reported, never created. A change to a baseline belongs in the pull request
 that changes the UI, with the before and after images in its description.
 
+CI runs the English and Spanish matrix on Linux under Xvfb with software
+rendering and uploads the images as the `ui-states-*` artifact; when
+`tests/ui-states/linux` exists, it compares against those baselines.
+
 ## Diagram gate
 
 `just mermaid-check` runs [scripts/check-mermaid.py](../scripts/check-mermaid.py)
