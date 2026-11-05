@@ -959,14 +959,16 @@ fn sweep_interrupted_updates(parent: &Path, records: &Path) {
             )
             .and_then(|bundle| Ok(bundle.metadata()?))
             .ok();
-            if !transaction.bundle_matches(bundle_metadata.as_ref()) {
+            let bundle_matches = transaction.bundle_matches(bundle_metadata.as_ref());
+            if bundle_metadata.is_some() && !bundle_matches {
                 warn_unknown_leftover();
                 pending = true;
                 continue;
             }
-            // Nothing is extracted before the identity write. Without it,
-            // remove only an empty directory: ownership cannot authorize recursion.
-            let limits = if transaction.has_identity() {
+            // Without directory identity or a matching bundle, remove only an
+            // empty directory. This also recovers a sweep interrupted after
+            // deleting kettle.app but before deleting its enclosing directory.
+            let limits = if transaction.has_identity() && bundle_matches {
                 CLEANUP_LIMITS
             } else {
                 kettle_state::TreeRemovalLimits {
@@ -1972,6 +1974,108 @@ mod tests {
             Transaction::load_all(&records).is_empty(),
             "missing directories retire their records"
         );
+    }
+
+    #[test]
+    fn the_sweep_recovers_interrupted_bundle_deletion_and_reuses_transaction_slots() {
+        for prefix in [STAGED_PREFIX, PREVIOUS_PREFIX] {
+            let temp = kettle_test_support::private_tempdir("kettle-macos-interrupted-cleanup-");
+            let root = temp.path();
+            let records = root.join("update.transactions");
+            let live = root.join("kettle.app");
+            std::fs::create_dir(&live).unwrap();
+            let mut leftovers = Vec::new();
+            for slot in 0..8 {
+                let id = format!("interrupted-{slot}");
+                let mut staging = create_staging(root, &id).unwrap();
+                std::fs::create_dir(staging.bundle()).unwrap();
+                std::fs::write(staging.bundle().join("partial"), b"old bundle").unwrap();
+                staging
+                    .transaction
+                    .record_exchange(
+                        &std::fs::metadata(staging.bundle()).unwrap(),
+                        &std::fs::metadata(&live).unwrap(),
+                    )
+                    .unwrap();
+                let path = root.join(format!("{prefix}{id}"));
+                if prefix == PREVIOUS_PREFIX {
+                    std::fs::rename(&staging.path, &path).unwrap();
+                }
+                drop(staging);
+                // Model a sweep killed after removing the bundle, before rmdir.
+                std::fs::remove_dir_all(path.join(ARCHIVE_ROOT)).unwrap();
+                leftovers.push(path);
+            }
+            assert!(Transaction::create(&records, format!("{STAGED_PREFIX}overflow")).is_err());
+
+            sweep_interrupted_updates(root, &records);
+
+            for path in leftovers {
+                assert!(
+                    !path.exists(),
+                    "empty leftover survived: {}",
+                    path.display()
+                );
+            }
+            assert!(Transaction::load_all(&records).is_empty());
+            create_staging(root, "reused").unwrap().discard();
+            assert!(live.is_dir());
+        }
+    }
+
+    #[test]
+    fn interrupted_bundle_cleanup_preserves_unexpected_contents() {
+        for contents in [
+            "file",
+            "directory",
+            "bundle-file",
+            "bundle-symlink",
+            "bundle",
+        ] {
+            let temp = kettle_test_support::private_tempdir("kettle-macos-cleanup-contents-");
+            let root = temp.path();
+            let records = root.join("update.transactions");
+            let live = root.join("kettle.app");
+            std::fs::create_dir(&live).unwrap();
+            let mut staging = create_staging(root, "interrupted").unwrap();
+            std::fs::create_dir(staging.bundle()).unwrap();
+            staging
+                .transaction
+                .record_exchange(
+                    &std::fs::metadata(staging.bundle()).unwrap(),
+                    &std::fs::metadata(&live).unwrap(),
+                )
+                .unwrap();
+            // Keep the authorized inode allocated so a replacement cannot reuse it.
+            std::fs::rename(staging.bundle(), root.join("removed.app")).unwrap();
+            let path = staging.path.clone();
+            let unexpected = match contents {
+                "file" | "directory" => path.join("unexpected"),
+                _ => staging.bundle(),
+            };
+            match contents {
+                "file" | "bundle-file" => std::fs::write(&unexpected, b"keep").unwrap(),
+                "bundle-symlink" => std::os::unix::fs::symlink(&live, &unexpected).unwrap(),
+                _ => {
+                    std::fs::create_dir(&unexpected).unwrap();
+                    std::fs::write(unexpected.join("private"), b"keep").unwrap();
+                }
+            }
+            drop(staging);
+
+            for _ in 0..2 {
+                sweep_interrupted_updates(root, &records);
+                assert!(std::fs::symlink_metadata(&unexpected).is_ok(), "{contents}");
+                match contents {
+                    "file" | "bundle-file" => {
+                        assert_eq!(std::fs::read(&unexpected).unwrap(), b"keep");
+                    }
+                    "bundle-symlink" => assert_eq!(std::fs::read_link(&unexpected).unwrap(), live),
+                    _ => assert_eq!(std::fs::read(unexpected.join("private")).unwrap(), b"keep"),
+                }
+                assert_eq!(Transaction::load_all(&records).len(), 1);
+            }
+        }
     }
 
     #[test]
