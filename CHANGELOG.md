@@ -57,6 +57,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   worker commands, delayed video tracks keep their start time, still-image
   rotation comes from the right stream, and structural limits apply before
   native measurement.
+- Tabs and windows: vertical tabs stay clear of the status bar and search
+  bar, a hidden vertical tab bar no longer takes terminal width, the docking
+  marker follows the last visible tab, generated tab groups no longer collide
+  across windows, and closing a scaled-zoom tab restores the window font.
+- Input: Kitty keyboard mode gets release events for `send_keys`, keypad 5
+  with Num Lock off and Windows AltGr; pending releases are dropped when
+  reporting resets; and the mouse wheel runs focus cleanup when it switches
+  tabs.
+- Links and openers: a clicked link is checked against the pane it came from
+  before opening, custom URL handlers are bounded while their children run,
+  and the file manager's executable identity is verified.
+- Sessions: session files are checked for trust before restoring commands,
+  sessions that restore would reject are not autosaved, and repeated restore
+  failures no longer turn off saving.
+- Lua: finalizers stay under the instruction watchdog and sandboxed `io.read`
+  can no longer block the UI.
+- Shells: fish paths keep their backslashes, the real default shell is
+  detected on Windows instead of assuming PowerShell, and WSL working
+  directories apply to ordinary new tabs.
+- Settings: failed edits are no longer reported as applied, and closing a
+  window restores an uncommitted theme preview. The reconnect refusal notice
+  is translated.
 
 ## [5.9.0] — 2026-11-03
 
