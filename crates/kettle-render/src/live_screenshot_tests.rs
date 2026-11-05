@@ -619,3 +619,54 @@ fn user_selected_screenshot_accepts_a_public_existing_parent() {
         .expect("an explicit path may live under an ordinary user directory");
     assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
 }
+
+#[test]
+fn worker_startup_failure_keeps_screenshot_reservations_until_gpu_completion() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    struct Charge(Arc<AtomicUsize>);
+    impl Drop for Charge {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    let usage = Arc::new(AtomicUsize::new(2));
+    let waiting = Arc::new(Mutex::new(None));
+    let completion = waiting.clone();
+    let guard = super::screenshot::ScreenshotGpuGuard::new(
+        (Charge(usage.clone()), Charge(usage.clone())),
+        move |reservations| {
+            *completion.lock().unwrap() = Some(reservations);
+        },
+    );
+    let start_worker = || -> std::io::Result<()> {
+        let _job = guard;
+        Err(std::io::Error::other("injected thread startup failure"))
+    };
+    assert!(start_worker().is_err());
+    assert_eq!(
+        usage.load(Ordering::Acquire),
+        2,
+        "worker startup failure released in-flight screenshot accounting"
+    );
+    drop(waiting.lock().unwrap().take());
+    assert_eq!(usage.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn retired_screenshot_releases_reservations_without_deferral() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Charge(Arc<AtomicUsize>);
+    impl Drop for Charge {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    let usage = Arc::new(AtomicUsize::new(1));
+    super::screenshot::ScreenshotGpuGuard::new(Charge(usage.clone()), |_| {
+        panic!("completed GPU work must retire immediately");
+    })
+    .retired();
+    assert_eq!(usage.load(Ordering::Acquire), 0);
+}

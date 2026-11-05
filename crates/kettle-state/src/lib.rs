@@ -30,8 +30,8 @@ pub use private::{
     discard_created_private_file_checked, is_kettle_owned_dir_name, open_existing_private_file,
     open_private_file, open_private_file_append, open_trusted_file_read,
     open_trusted_file_read_following_leaf, remove_open_private_file, restrict_private_file,
-    stage_user_selected_file_new, truncate_private_file, validate_private_file_parent,
-    validate_trusted_directory,
+    stage_user_selected_file_new, stage_user_selected_file_replace, truncate_private_file,
+    validate_private_file_parent, validate_trusted_directory,
 };
 #[cfg(unix)]
 pub use tree::{

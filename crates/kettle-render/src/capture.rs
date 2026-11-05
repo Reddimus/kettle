@@ -9,6 +9,20 @@ use super::{
     resolve_headless_adapter, surface_clear_color, unpremultiply_rgba8,
 };
 
+pub(crate) fn persist_offscreen_screenshot_with(
+    out: &std::path::Path,
+    encode: impl FnOnce(&mut std::io::BufWriter<&std::fs::File>) -> Result<()>,
+) -> Result<()> {
+    use std::io::Write as _;
+    let staged = kettle_state::stage_user_selected_file_replace(out)?;
+    let mut writer = std::io::BufWriter::new(&*staged);
+    encode(&mut writer)?;
+    writer.flush()?;
+    drop(writer);
+    staged.publish()?;
+    Ok(())
+}
+
 pub(crate) fn screenshot_body_clip(
     x: f32,
     width: f32,
@@ -876,8 +890,11 @@ pub fn capture_png_with_annotation(
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        img.save(out)
-            .map_err(|e| anyhow!("write {}: {e}", out.display()))?;
+        let output_format = image::ImageFormat::from_path(out)?;
+        persist_offscreen_screenshot_with(out, |writer| {
+            img.write_to(writer, output_format)
+                .map_err(|e| anyhow!("write {}: {e}", out.display()))
+        })?;
         Ok((cols, rows))
     })
 }

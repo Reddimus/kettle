@@ -75,3 +75,40 @@ fn screenshot_pane_ink_stays_above_the_caption() {
         assert_eq!(plain, [x, 32.0, width, 168.0]);
     }
 }
+
+#[test]
+fn failed_offscreen_screenshot_preserves_destination() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("existing.png");
+    std::fs::write(&out, b"previous PNG").unwrap();
+    let result = super::capture::persist_offscreen_screenshot_with(&out, |writer| {
+        writer.write_all(b"partial PNG")?;
+        writer.flush()?;
+        Err(anyhow::anyhow!("injected encoder failure"))
+    });
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        b"previous PNG",
+        "failed encoding replaced the previous screenshot"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn offscreen_screenshot_atomically_replaces_destination() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("existing.png");
+    std::fs::write(&out, b"previous PNG").unwrap();
+    super::capture::persist_offscreen_screenshot_with(&out, |writer| {
+        writer.write_all(b"complete PNG")?;
+        writer.flush()?;
+        assert_eq!(std::fs::read(&out).unwrap(), b"previous PNG");
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"complete PNG");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}

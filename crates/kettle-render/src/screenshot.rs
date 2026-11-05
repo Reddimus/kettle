@@ -160,17 +160,48 @@ pub(crate) struct ScreenshotCaptureTarget {
     padded_bytes_per_row: u32,
 }
 
+// Rejected jobs can follow submitted GPU work. Keep their charges until GPU
+// completion unless the worker has already observed retirement.
+pub(crate) struct ScreenshotGpuGuard<T> {
+    resources: Option<T>,
+    defer: Option<Box<dyn FnOnce(T) + Send>>,
+}
+
+impl<T> ScreenshotGpuGuard<T> {
+    pub(crate) fn new(resources: T, defer: impl FnOnce(T) + Send + 'static) -> Self {
+        Self {
+            resources: Some(resources),
+            defer: Some(Box::new(defer)),
+        }
+    }
+
+    pub(crate) fn retired(mut self) {
+        self.defer = None;
+    }
+}
+
+impl<T> Drop for ScreenshotGpuGuard<T> {
+    fn drop(&mut self) {
+        if let Some(resources) = self.resources.take()
+            && let Some(defer) = self.defer.take()
+        {
+            defer(resources);
+        }
+    }
+}
+
+struct ScreenshotReservations {
+    _capture_gpu: kettle_core::GraphicsReservation,
+    _staging_gpu: kettle_core::GraphicsReservation,
+}
+
 pub(crate) struct PreparedScreenshot {
     staging: wgpu::Buffer,
     /// Keep the copy source and its transient reservation alive through the
     /// worker's bounded GPU wait. wgpu also retains the texture internally,
     /// but Kettle's accounting must cover the same lifetime.
     _capture_texture: wgpu::Texture,
-    _capture_gpu: kettle_core::GraphicsReservation,
-    /// The MAP_READ staging buffer is a second allocation, not part of the
-    /// capture texture. Charge it independently for the same in-flight
-    /// lifetime so the process GPU limit bounds actual screenshot resources.
-    _staging_gpu: kettle_core::GraphicsReservation,
+    gpu: ScreenshotGpuGuard<ScreenshotReservations>,
     width: u32,
     height: u32,
     unpadded_bytes_per_row: u32,
@@ -475,8 +506,7 @@ fn finish_live_screenshot_capture(job: ScreenshotJob) -> Result<ScreenshotPersis
     let PreparedScreenshot {
         staging,
         _capture_texture: capture_texture,
-        _capture_gpu: capture_gpu,
-        _staging_gpu: staging_gpu,
+        gpu,
         width,
         height,
         unpadded_bytes_per_row,
@@ -574,8 +604,7 @@ fn finish_live_screenshot_capture(job: ScreenshotJob) -> Result<ScreenshotPersis
     // the actual device lifetime rather than the unrelated PNG lifetime.
     drop(staging);
     drop(capture_texture);
-    drop(capture_gpu);
-    drop(staging_gpu);
+    gpu.retired();
 
     if request.is_cancelled() {
         return Err("screenshot request was cancelled".to_string());
@@ -1107,8 +1136,18 @@ impl Renderer {
         PreparedScreenshot {
             staging: capture.staging,
             _capture_texture: capture.texture,
-            _capture_gpu: capture.gpu,
-            _staging_gpu: capture.staging_gpu,
+            gpu: {
+                let queue = self.gpu.queue.clone();
+                ScreenshotGpuGuard::new(
+                    ScreenshotReservations {
+                        _capture_gpu: capture.gpu,
+                        _staging_gpu: capture.staging_gpu,
+                    },
+                    move |reservations| {
+                        queue.on_submitted_work_done(move || drop(reservations));
+                    },
+                )
+            },
             width: capture.width,
             height: capture.height,
             unpadded_bytes_per_row: capture.unpadded_bytes_per_row,

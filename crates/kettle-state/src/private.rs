@@ -127,10 +127,10 @@ fn publish_with_atomic_fallback(
 }
 
 /// An owner-only sibling file that is invisible at its requested destination
-/// until [`publish`](Self::publish) atomically creates that destination.
+/// until [`publish`](Self::publish) atomically publishes that destination.
 ///
-/// The staging leaf is removed on drop. Publication never replaces an existing
-/// entry and retains the platform's pinned parent capability across the final
+/// The staging leaf is removed on drop. Its constructor selects whether
+/// publication replaces an existing entry. The pinned parent capability spans the final
 /// link-or-rename operation, so a renamed parent cannot redirect the write.
 pub struct StagedUserSelectedFile {
     staged: Option<CreatedUserSelectedFile>,
@@ -168,9 +168,8 @@ impl StagedUserSelectedFile {
             .sync_all()
     }
 
-    /// Atomically create the requested destination from an already-synced
-    /// staging file and retire the sibling staging name. Existing destinations
-    /// are refused.
+    /// Atomically publish an already-synced staging file and retire its staging
+    /// name. The staging constructor determines whether existing leaves are replaced.
     pub fn publish_synced(mut self) -> Result<(), StagedFilePublishError> {
         let staged = self
             .staged
@@ -212,8 +211,8 @@ impl StagedUserSelectedFile {
         }
     }
 
-    /// Flush the staged inode, atomically create the requested destination,
-    /// and retire the sibling staging name. Existing destinations are refused.
+    /// Flush the staged inode, atomically publish the requested destination,
+    /// and retire the sibling staging name.
     pub fn publish(self) -> Result<(), StagedFilePublishError> {
         if let Err(error) = self.sync_for_publish() {
             return Err(StagedFilePublishError::not_published(with_cleanup_error(
@@ -912,28 +911,37 @@ pub fn create_user_selected_file_new(path: &Path) -> io::Result<CreatedUserSelec
 /// counterpart to `atomic_create_new`: it avoids buffering a potentially large
 /// export in RAM.
 pub fn stage_user_selected_file_new(path: &Path) -> io::Result<StagedUserSelectedFile> {
-    stage_user_selected_file_new_with(path, || {
-        let mut nonce = [0_u8; 16];
-        getrandom::fill(&mut nonce).map_err(|error| {
-            io::Error::other(format!(
-                "secure randomness for export staging failed: {error}"
-            ))
-        })?;
-        Ok(nonce)
-    })
+    stage_user_selected_file_new_with(path, export_nonce)
+}
+
+/// Stage an owner-only export beside `path`, atomically replacing its leaf on
+/// publication. Existing contents remain intact until the staged file is synced.
+pub fn stage_user_selected_file_replace(path: &Path) -> io::Result<StagedUserSelectedFile> {
+    stage_user_selected_file_new_with_mode(path, export_nonce, HardLinkMode::Native, true)
+}
+
+fn export_nonce() -> io::Result<[u8; 16]> {
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|error| {
+        io::Error::other(format!(
+            "secure randomness for export staging failed: {error}"
+        ))
+    })?;
+    Ok(nonce)
 }
 
 fn stage_user_selected_file_new_with(
     path: &Path,
     next_nonce: impl FnMut() -> io::Result<[u8; 16]>,
 ) -> io::Result<StagedUserSelectedFile> {
-    stage_user_selected_file_new_with_mode(path, next_nonce, HardLinkMode::Native)
+    stage_user_selected_file_new_with_mode(path, next_nonce, HardLinkMode::Native, false)
 }
 
 fn stage_user_selected_file_new_with_mode(
     path: &Path,
     mut next_nonce: impl FnMut() -> io::Result<[u8; 16]>,
     hard_link_mode: HardLinkMode,
+    replace: bool,
 ) -> io::Result<StagedUserSelectedFile> {
     const ATTEMPTS: usize = 32;
 
@@ -958,7 +966,8 @@ fn stage_user_selected_file_new_with_mode(
         }
         let staged_path = parent.join(format!(".kettle-export-{suffix}.tmp"));
         #[cfg(unix)]
-        match unix::stage_user_selected_file_at(&staged_path, &destination, hard_link_mode) {
+        match unix::stage_user_selected_file_at(&staged_path, &destination, hard_link_mode, replace)
+        {
             Ok(Some(staged)) => return Ok(staged),
             Ok(None) => continue,
             Err(error) => return Err(error),
@@ -977,6 +986,7 @@ fn stage_user_selected_file_new_with_mode(
             &destination,
             &staged,
             hard_link_mode,
+            replace,
         ) {
             Ok(publish) => return Ok(StagedUserSelectedFile::new(staged, publish)),
             Err(error) => {
@@ -1202,8 +1212,9 @@ fn create_user_selected_file_publish_impl(
     destination: &Path,
     file: &File,
     hard_link_mode: HardLinkMode,
+    replace: bool,
 ) -> io::Result<CreatedFilePublish> {
-    windows::create_user_selected_file_publish(staged, destination, file, hard_link_mode)
+    windows::create_user_selected_file_publish(staged, destination, file, hard_link_mode, replace)
 }
 
 #[cfg(windows)]
@@ -1303,10 +1314,15 @@ fn create_user_selected_file_publish_impl(
     destination: &Path,
     _file: &File,
     _hard_link_mode: HardLinkMode,
+    replace: bool,
 ) -> io::Result<CreatedFilePublish> {
     let staged = staged.to_path_buf();
     let destination = destination.to_path_buf();
     Ok(Box::new(move |_| {
+        if replace {
+            std::fs::rename(staged, destination)?;
+            return Ok(CreatedFilePublication::Renamed);
+        }
         std::fs::hard_link(staged, destination)?;
         Ok(CreatedFilePublication::Linked)
     }))
@@ -2759,6 +2775,7 @@ pub(crate) mod unix {
         staged_path: &Path,
         destination: &Path,
         hard_link_mode: HardLinkMode,
+        replace: bool,
     ) -> io::Result<Option<StagedUserSelectedFile>> {
         let parent_path = destination
             .parent()
@@ -2900,6 +2917,7 @@ pub(crate) mod unix {
             destination_leaf.to_os_string(),
             &staged,
             hard_link_mode,
+            replace,
         )?;
         Ok(Some(StagedUserSelectedFile::new(staged, publish)))
     }
@@ -2966,6 +2984,7 @@ pub(crate) mod unix {
         destination_leaf: OsString,
         file: &File,
         hard_link_mode: HardLinkMode,
+        replace: bool,
     ) -> io::Result<CreatedFilePublish> {
         let staged_c = c_name(&staged_leaf, "staged export file name")?;
         let destination_c = c_name(&destination_leaf, "export destination file name")?;
@@ -2978,7 +2997,7 @@ pub(crate) mod unix {
                 "staged export path no longer identifies the open file",
             ));
         }
-        if entry_stat(&parent, &destination_leaf)?.is_some() {
+        if !replace && entry_stat(&parent, &destination_leaf)?.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "export destination already exists",
@@ -2994,6 +3013,22 @@ pub(crate) mod unix {
                     "staged export changed before publication",
                 )
                 .into());
+            }
+            if replace {
+                // SAFETY: both directory fds stay open and both names are NUL-terminated.
+                if unsafe {
+                    libc::renameat(
+                        source_parent.as_raw_fd(),
+                        staged_c.as_ptr(),
+                        parent.as_raw_fd(),
+                        destination_c.as_ptr(),
+                    )
+                } != 0
+                {
+                    return Err(io::Error::last_os_error().into());
+                }
+                sync_directory(&parent).map_err(CreatedFilePublishError::published)?;
+                return Ok(CreatedFilePublication::Renamed);
             }
             // Prefer a hard link because it keeps the staging cleanup path
             // available until every postcondition is checked. Some ordinary
@@ -4338,6 +4373,7 @@ mod windows {
         destination: &Path,
         file: &File,
         hard_link_mode: HardLinkMode,
+        replace: bool,
     ) -> io::Result<CreatedFilePublish> {
         let requested_destination = destination.file_name().ok_or_else(|| {
             io::Error::new(
@@ -4393,12 +4429,13 @@ mod windows {
             ));
         }
         match std::fs::symlink_metadata(&destination) {
-            Ok(_) => {
+            Ok(_) if !replace => {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     "export destination already exists",
                 ));
             }
+            Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
@@ -4411,6 +4448,10 @@ mod windows {
                     "staged export changed before publication",
                 )
                 .into());
+            }
+            if replace {
+                rename_open_file(file, &destination_path[..destination_path.len() - 1], true)?;
+                return Ok(CreatedFilePublication::Renamed);
             }
             // Prefer a hard link so the staging name remains available through
             // the postcondition check. ReFS, FAT-family volumes, and some
@@ -4441,7 +4482,7 @@ mod windows {
                         "injected hard-link rejection",
                     )),
                 },
-                || rename_open_file_new(file, &destination_path[..destination_path.len() - 1]),
+                || rename_open_file(file, &destination_path[..destination_path.len() - 1], false),
             )?;
             let post_publish = (|| {
                 let published = inspect.open(&stable_destination)?;
@@ -5419,7 +5460,7 @@ mod windows {
         )
     }
 
-    fn rename_open_file_new(file: &File, destination_name: &[u16]) -> io::Result<()> {
+    fn rename_open_file(file: &File, destination_name: &[u16], replace: bool) -> io::Result<()> {
         let name_bytes = destination_name
             .len()
             .checked_mul(std::mem::size_of::<u16>())
@@ -5437,7 +5478,7 @@ mod windows {
         // SAFETY: the aligned buffer holds the header and all trailing UTF-16
         // code units. The caller provides a stable, non-NUL destination path.
         unsafe {
-            (*info).Anonymous.ReplaceIfExists = false;
+            (*info).Anonymous.ReplaceIfExists = replace;
             (*info).RootDirectory = std::ptr::null_mut();
             (*info).FileNameLength = u32::try_from(name_bytes).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, "destination is too long")
@@ -5451,7 +5492,7 @@ mod windows {
         let buffer_len = u32::try_from(total_bytes)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "destination is too long"))?;
         // SAFETY: the creation handle has DELETE access and `info` remains
-        // valid for the duration of this synchronous no-replace rename.
+        // valid for the duration of this synchronous rename.
         if unsafe {
             SetFileInformationByHandle(
                 file.as_raw_handle() as HANDLE,
@@ -5648,7 +5689,7 @@ mod windows {
                         "injected hard-link rejection",
                     )),
                 },
-                || rename_open_file_new(staged, &destination_name),
+                || rename_open_file(staged, &destination_name, false),
             )
         }
 
@@ -6656,6 +6697,27 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
+    fn staged_replacement_preserves_old_contents_until_publication() {
+        let root = crate::test_tempdir();
+        let destination = root.path().join("replace.png");
+        std::fs::write(&destination, b"previous").unwrap();
+        {
+            let mut staged = stage_user_selected_file_replace(&destination).unwrap();
+            staged.write_all(b"partial").unwrap();
+            staged.sync_for_publish().unwrap();
+            assert_eq!(std::fs::read(&destination).unwrap(), b"previous");
+        }
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        let mut staged = stage_user_selected_file_replace(&destination).unwrap();
+        staged.write_all(b"complete").unwrap();
+        staged.publish().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
     fn platform_atomic_rename_fallback_publishes_and_never_replaces() {
         let root = crate::test_tempdir();
         let destination = root.path().join("fallback.png");
@@ -6667,6 +6729,7 @@ mod tests {
                 Ok([nonce; 16])
             },
             HardLinkMode::ForceUnsupported,
+            false,
         )
         .unwrap();
         staged.write_all(b"complete").unwrap();
@@ -6682,6 +6745,7 @@ mod tests {
                 Ok([nonce; 16])
             },
             HardLinkMode::ForceUnsupported,
+            false,
         )
         .unwrap();
         staged.write_all(b"ours").unwrap();

@@ -147,3 +147,38 @@ fn recovery_keeps_unique_model_excluded_and_bounds_device_attempts() {
         (0..MAX_RECOVERY_ADAPTER_ATTEMPTS).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn device_failure_continues_backend_discovery_before_software() {
+    use super::gpu::try_discovered_devices;
+    for successful in [1, 3] {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = pollster::block_on(try_discovered_devices(
+            [(0, false), (1, false), (2, false), (0, true)],
+            |candidate| {
+                calls.borrow_mut().push(candidate);
+                std::future::ready(Ok(candidate))
+            },
+            |candidate| {
+                std::future::ready(
+                    if candidate
+                        == if successful == 1 {
+                            (1, false)
+                        } else {
+                            (0, true)
+                        }
+                    {
+                        Ok((candidate, ()))
+                    } else {
+                        Err(anyhow::anyhow!("injected device creation failure"))
+                    },
+                )
+            },
+        ));
+        assert!(
+            result.is_ok(),
+            "device failure stopped backend fallback: {result:?}"
+        );
+        assert_eq!(calls.borrow().len(), successful + 1);
+    }
+}
