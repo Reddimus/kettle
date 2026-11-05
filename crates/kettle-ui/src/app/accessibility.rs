@@ -2,6 +2,42 @@
 
 use super::*;
 
+pub(super) fn focus_settings_search_accessibility(
+    ws: &mut WindowState,
+    request: &ActionRequest,
+) -> bool {
+    if ws.confirm_dialog.is_none()
+        && ws.context_menu.is_none()
+        && ws.palette_input.is_none()
+        && ws.theme_picker_input.is_none()
+        && ws.settings_text_edit.is_none()
+        && ws.settings_nav.is_some()
+        && [
+            accessibility_modal_id(MODAL_KIND_SETTINGS_SEARCH, 1),
+            accessibility_modal_text_run_id(MODAL_KIND_SETTINGS_SEARCH),
+        ]
+        .contains(&request.target_node)
+        && matches!(
+            request.action,
+            AccessibilityAction::Focus
+                | AccessibilityAction::Click
+                | AccessibilityAction::SetValue
+                | AccessibilityAction::ReplaceSelectedText
+                | AccessibilityAction::SetTextSelection
+        )
+    {
+        if !ws.settings_nav.as_ref().unwrap().search_focused {
+            end_modal_composition(ws);
+        }
+        let nav = ws.settings_nav.as_mut().unwrap();
+        nav.search_focused = true;
+        nav.capturing = false;
+        true
+    } else {
+        false
+    }
+}
+
 impl App {
     /// The cards on screen that assistive technology can reach, in paint
     /// order: each placement's instance, where it is, and the shelf item it
@@ -1150,41 +1186,18 @@ impl App {
             }
             return;
         }
-        if ws.confirm_dialog.is_none()
-            && ws.context_menu.is_none()
-            && ws.palette_input.is_none()
-            && ws.theme_picker_input.is_none()
-            && ws.settings_text_edit.is_none()
-            && ws.settings_nav.is_some()
-            && [
-                accessibility_modal_id(MODAL_KIND_SETTINGS_SEARCH, 1),
-                accessibility_modal_text_run_id(MODAL_KIND_SETTINGS_SEARCH),
-            ]
-            .contains(&request.target_node)
+        if focus_settings_search_accessibility(ws, &request)
             && matches!(
                 request.action,
-                AccessibilityAction::Focus
-                    | AccessibilityAction::Click
-                    | AccessibilityAction::SetValue
-                    | AccessibilityAction::ReplaceSelectedText
-                    | AccessibilityAction::SetTextSelection
+                AccessibilityAction::Focus | AccessibilityAction::Click
             )
         {
-            if !ws.settings_nav.as_ref().unwrap().search_focused {
-                end_modal_composition(ws);
+            ws.accessibility_pending = true;
+            self.update_ime_cursor_area(ws);
+            if let Some(window) = &ws.window {
+                window.request_redraw();
             }
-            ws.settings_nav.as_mut().unwrap().search_focused = true;
-            if matches!(
-                request.action,
-                AccessibilityAction::Focus | AccessibilityAction::Click
-            ) {
-                ws.accessibility_pending = true;
-                self.update_ime_cursor_area(ws);
-                if let Some(window) = &ws.window {
-                    window.request_redraw();
-                }
-                return;
-            }
+            return;
         }
         if let Some(kind) = accessibility_modal_input_kind(ws)
             && [

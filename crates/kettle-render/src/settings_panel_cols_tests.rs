@@ -17,6 +17,7 @@ fn settings_slots_fit_english_spanish_and_measured_pseudo_text() {
     for tr in [
         Translator::new(Language::En),
         Translator::new(Language::Es),
+        #[cfg(debug_assertions)]
         Translator::pseudo(),
     ] {
         let set = SettingsOverlay {

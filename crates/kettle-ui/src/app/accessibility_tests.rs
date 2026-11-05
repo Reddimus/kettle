@@ -1140,6 +1140,7 @@ fn accessible_editor_characters_follow_graphemes() {
             prefix: String::new(),
             hint: String::new(),
             accent_palette: 0,
+            picker_header: false,
         }),
         ..Default::default()
     };
@@ -1274,7 +1275,7 @@ fn settings_search_and_row_descriptions_have_layout_bounds_and_text_actions() {
         text_field: Some(kettle_render::TextFieldOverlay {
             picker_header: false, text: "font".into(), cursor_byte: 4,
             selection: Some((0, 4)), rect: layout.search_rect, prefix: String::new(), hint: String::new(),
-            horizontal_scroll: 0, accent_palette: 0 }), ..Default::default()
+            horizontal_scroll: 0, accent_palette: 0, picker_header: false }), ..Default::default()
     };
     let projection = super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.0, 16.0), 1.0, &EN_TEXT);
     let search_id = super::accessibility_modal_id(super::MODAL_KIND_SETTINGS_SEARCH, 1);
@@ -1293,4 +1294,61 @@ fn settings_search_and_row_descriptions_have_layout_bounds_and_text_actions() {
     assert!(row.description().unwrap().contains("Set the terminal font size in points."));
     let r = layout.rows[0].rect;
     assert_eq!(row.bounds(), Some(accesskit::Rect::new(r.0 as f64, r.1 as f64, (r.0 + r.2) as f64, (r.1 + r.3) as f64)));
+}
+
+#[test]
+fn accessibility_search_focus_cancels_capture_and_routes_typing_to_query() {
+    use accesskit::{Action, ActionRequest};
+    use winit::keyboard::{Key, ModifiersState};
+    for action in [
+        Action::Focus,
+        Action::Click,
+        Action::SetValue,
+        Action::ReplaceSelectedText,
+        Action::SetTextSelection,
+    ] {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.settings_nav = Some(crate::settings::SettingsNav {
+            capturing: true,
+            ..Default::default()
+        });
+        let request = ActionRequest {
+            action,
+            target_tree: accesskit::TreeId::ROOT,
+            target_node: super::accessibility_modal_id(super::MODAL_KIND_SETTINGS_SEARCH, 1),
+            data: None,
+        };
+        assert!(super::accessibility::focus_settings_search_accessibility(
+            &mut ws, &request
+        ));
+        let nav = ws.settings_nav.as_mut().unwrap();
+        assert!(nav.search_focused);
+        assert!(
+            !nav.capturing,
+            "search focus must cancel chord capture for {action:?}"
+        );
+        assert_eq!(
+            nav.search_key(
+                &crate::settings::categories(&[]),
+                &Default::default(),
+                &EN_TEXT,
+                &Key::Character("f".into()),
+                ModifiersState::empty(),
+                false
+            ),
+            crate::settings::SearchRoute::Edit
+        );
+        assert!(!super::modals::edit_modal_text(
+            &mut ws,
+            &Key::Character("f".into()),
+            || None,
+            |_| false
+        ));
+        let text = crate::modal_input::accept_text(Some("f"), ws.mods).unwrap();
+        assert!(crate::modal_input::push_text(
+            super::modals::modal_editor_mut(&mut ws).unwrap(),
+            text
+        ));
+        assert_eq!(ws.settings_nav.as_ref().unwrap().query.text(), "f");
+    }
 }

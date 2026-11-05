@@ -2590,6 +2590,50 @@ mod search_tests {
     }
 
     #[test]
+    fn settings_pointer_paging_updates_navigation_until_both_ends_are_reachable() {
+        let cats = categories(&[]);
+        let cfg = Config::default();
+        for wheel in [false, true] {
+            let mut nav = SettingsNav::default();
+            let mut set = kettle_render::SettingsOverlay {
+                categories: cats.iter().map(|cat| EN.text(cat.name).into()).collect(),
+                ..Default::default()
+            };
+            for forward in [true, false] {
+                for _ in 0..cats.len() {
+                    set.active_category = nav.category;
+                    let layout =
+                        kettle_render::settings_layout(&set, (8.0, 16.0), (800.0, 600.0), 8.0);
+                    let arrow = if forward {
+                        layout.category_next
+                    } else {
+                        layout.category_previous
+                    };
+                    let Some((target, rect)) = arrow else {
+                        break;
+                    };
+                    let hit = layout.pointer_hit(
+                        (rect.0 + 1.0, rect.1 + 1.0),
+                        wheel.then_some(if forward { -1 } else { 1 }),
+                    );
+                    nav.apply_hit(&cats, &cfg, &EN, hit);
+                    assert_eq!(nav.category, target);
+                    assert!(nav.field < cats[target].fields.len());
+                    set.active_category = nav.category;
+                    assert!(
+                        kettle_render::settings_layout(&set, (8.0, 16.0), (800.0, 600.0), 8.0)
+                            .category_rects[target]
+                            .is_some()
+                    );
+                }
+                let layout = kettle_render::settings_layout(&set, (8.0, 16.0), (800.0, 600.0), 8.0);
+                let end = if forward { cats.len() - 1 } else { 0 };
+                assert!(layout.category_rects[end].is_some());
+            }
+        }
+    }
+
+    #[test]
     fn settings_every_field_has_short_english_and_spanish_descriptions() {
         for cat in categories(&[]) {
             for field in cat.fields {

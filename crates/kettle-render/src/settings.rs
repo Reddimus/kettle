@@ -71,11 +71,67 @@ pub struct SettingsLayout {
     pub search_rect: Rect4,
     pub title_rect: Rect4,
     pub category_rects: Vec<Option<Rect4>>,
+    pub category_previous: Option<(usize, Rect4)>,
+    pub category_next: Option<(usize, Rect4)>,
     pub rows: Vec<SettingsRowGeometry>,
     pub groups: Vec<(usize, Rect4)>,
     pub footer: Vec<(String, Rect4)>,
     pub empty_rect: Rect4,
     pub first_row: usize,
+}
+
+impl SettingsLayout {
+    /// Wheel notches are positive toward earlier categories, as for menu rows.
+    pub fn pointer_hit(&self, cursor: (f32, f32), wheel: Option<i32>) -> SettingsHit {
+        let hit = self.hit_test(cursor);
+        if self.sidebar_rect.is_none()
+            && matches!(hit, SettingsHit::Category(_))
+            && let Some(direction) = wheel
+        {
+            return self
+                .category_page(-direction.signum())
+                .map_or(SettingsHit::Inert, SettingsHit::Category);
+        }
+        hit
+    }
+
+    fn hit_test(&self, cursor: (f32, f32)) -> SettingsHit {
+        if !contains(self.rect, cursor) {
+            return SettingsHit::Outside;
+        }
+        if contains(self.search_rect, cursor) {
+            return SettingsHit::Search;
+        }
+        for (index, rect) in [self.category_previous, self.category_next]
+            .into_iter()
+            .flatten()
+        {
+            if contains(rect, cursor) {
+                return SettingsHit::Category(index);
+            }
+        }
+        for (i, rect) in self.category_rects.iter().enumerate() {
+            if rect.is_some_and(|rect| contains(rect, cursor)) {
+                return SettingsHit::Category(i);
+            }
+        }
+        for row in &self.rows {
+            if contains(row.rect, cursor) {
+                return SettingsHit::Field(row.index);
+            }
+        }
+        SettingsHit::Inert
+    }
+
+    fn category_page(&self, direction: i32) -> Option<usize> {
+        if direction < 0 {
+            self.category_previous.map(|(index, _)| index)
+        } else if direction > 0 {
+            self.category_next.map(|(index, _)| index)
+        } else {
+            None
+        }
+    }
 }
 
 fn inset((x, y, w, h): Rect4, padding: f32) -> Rect4 {
@@ -118,9 +174,17 @@ pub fn settings_layout(
     let w = (sw * 0.72).clamp(560.0, 980.0).min((sw - 32.0).max(0.0));
     let h = (sh * 0.78).clamp(360.0, 760.0).min((sh - 32.0).max(0.0));
     let rect = ((sw - w) * 0.5, (sh - h) * 0.5, w, h);
-    let pad = 12.0_f32.min(w / 8.0).min(h / 8.0);
-    let line = cell.1.max(1.0).min((h / 8.0).max(1.0));
+    // Short panels trade the repeated title and spacing for a complete field.
+    let compact = h < 240.0;
+    let pad = if compact { 4.0_f32 } else { 12.0_f32 }
+        .min(w / 8.0)
+        .min(h / 8.0);
+    let line = cell
+        .1
+        .max(1.0)
+        .min((h / if compact { 4.0 } else { 8.0 }).max(1.0));
     let control_h = line + 12.0;
+    let gap = if compact { 2.0 } else { 6.0 };
     let row_h = line * 2.0 + 16.0;
     let wide = w >= 640.0;
     let side_w = (w * 0.26).max(150.0);
@@ -131,12 +195,34 @@ pub fn settings_layout(
         rect
     };
     let inner = inset(content_rect, pad);
+    let shared_header = !wide && inner.3 < 2.0 * control_h + row_h + 2.0 * gap + 2.0;
     let search_rect = if wide {
         (rect.0 + pad, rect.1 + pad, side_w - pad * 2.0, control_h)
     } else {
-        (inner.0, inner.1, inner.2, control_h)
+        (
+            inner.0,
+            inner.1,
+            if shared_header {
+                inner.2 * 0.38
+            } else {
+                inner.2
+            },
+            control_h,
+        )
+    };
+    let strip = if shared_header {
+        (
+            inner.0 + search_rect.2 + 4.0,
+            inner.1,
+            inner.2 - search_rect.2 - 4.0,
+            control_h,
+        )
+    } else {
+        (inner.0, search_rect.1 + control_h + gap, inner.2, control_h)
     };
     let mut category_rects = vec![None; set.categories.len()];
+    let mut category_previous = None;
+    let mut category_next = None;
     if wide {
         let start = rect.1 + pad + control_h + 12.0;
         let capacity = ((h - pad - (start - rect.1)) / control_h).floor().max(0.0) as usize;
@@ -164,30 +250,57 @@ pub fn settings_layout(
             .iter()
             .map(|name| display_width(name) as f32 * text_cw + 16.0)
             .collect();
+        let overflow = widths.iter().sum::<f32>() > strip.2;
+        let arrow_w = if overflow {
+            (text_cw + 12.0).max(24.0).min(strip.2 / 3.0)
+        } else {
+            0.0
+        };
+        let strip_w = (strip.2 - 2.0 * arrow_w).max(0.0);
         let active = set.active_category.min(widths.len().saturating_sub(1));
         let mut first = active;
-        let mut used = widths.get(active).copied().unwrap_or(0.0).min(inner.2);
-        while first > 0 && used + widths[first - 1] <= inner.2 {
+        let mut used = widths.get(active).copied().unwrap_or(0.0).min(strip_w);
+        while first > 0 && used + widths[first - 1] <= strip_w {
             first -= 1;
             used += widths[first];
         }
-        let mut x = inner.0;
+        let mut x = strip.0 + arrow_w;
+        let category_y = strip.1;
+        let mut last = first;
         for i in first..widths.len() {
-            let width = widths[i].min(inner.2);
-            if x + width > inner.0 + inner.2 + 0.01 {
+            let width = widths[i].min(strip_w);
+            if x + width > strip.0 + arrow_w + strip_w + 0.01 {
                 break;
             }
-            category_rects[i] = Some((x, search_rect.1 + control_h + 6.0, width, control_h));
+            category_rects[i] = Some((x, category_y, width, control_h));
+            last = i;
             x += width;
+        }
+        if first > 0 {
+            category_previous = Some((first - 1, (strip.0, category_y, arrow_w, control_h)));
+        }
+        if last + 1 < widths.len() {
+            category_next = Some((
+                last + 1,
+                (strip.0 + strip.2 - arrow_w, category_y, arrow_w, control_h),
+            ));
         }
     }
     let title_y = if wide {
         inner.1
+    } else if shared_header {
+        inner.1 + control_h + gap
     } else {
-        search_rect.1 + 2.0 * control_h + 18.0
+        search_rect.1 + 2.0 * control_h + gap * 2.0 + if compact { 0.0 } else { 6.0 }
     };
-    let title_rect = (inner.0, title_y, inner.2, line * 1.25 + 6.0);
-    let rows_top = title_y + title_rect.3 + 8.0;
+    let title_rect = (
+        inner.0,
+        title_y,
+        inner.2,
+        if compact { 0.0 } else { line * 1.25 + 6.0 },
+    );
+    let rows_top = title_y + title_rect.3 + if compact { 0.0 } else { 8.0 };
+    let footer_gap = if compact { 2.0 } else { 12.0 };
     let mut footer_lines = wrapped_lines(&set.hints, inner.2, text_cw);
     if let Some(note) = &set.footer_note {
         footer_lines.extend(wrapped_lines(note, inner.2, text_cw));
@@ -206,8 +319,8 @@ pub fn settings_layout(
         .enumerate()
         .map(|(i, text)| (text, (inner.0, footer_top + i as f32 * line, inner.2, line)))
         .collect();
-    let available = (footer_top - 12.0 - rows_top).max(0.0);
-    let grouped = !set.search_query.is_empty();
+    let available = (footer_top - footer_gap - rows_top).max(0.0);
+    let grouped = !set.search_query.is_empty() && available >= row_h + line + 6.0;
     let focused = set.focused_row.min(set.rows.len().saturating_sub(1));
     let group_h = if grouped { line + 6.0 } else { 0.0 };
     let mut first = focused;
@@ -273,6 +386,8 @@ pub fn settings_layout(
         search_rect,
         title_rect,
         category_rects,
+        category_previous,
+        category_next,
         rows,
         groups,
         footer,
@@ -355,23 +470,7 @@ pub fn settings_hit_test_with_text_width(
     text_cw: f32,
 ) -> SettingsHit {
     let layout = settings_layout(set, cell, surface, text_cw);
-    if !contains(layout.rect, cursor) {
-        return SettingsHit::Outside;
-    }
-    if contains(layout.search_rect, cursor) {
-        return SettingsHit::Search;
-    }
-    for (i, rect) in layout.category_rects.iter().enumerate() {
-        if rect.is_some_and(|rect| contains(rect, cursor)) {
-            return SettingsHit::Category(i);
-        }
-    }
-    for row in &layout.rows {
-        if contains(row.rect, cursor) {
-            return SettingsHit::Field(row.index);
-        }
-    }
-    SettingsHit::Inert
+    layout.pointer_hit(cursor, None)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -412,7 +511,14 @@ pub(crate) fn settings_text_items(
             kind,
         });
     };
-    push(&set.title, layout.title_rect, SettingsTextKind::Title);
+    if layout.title_rect.3 > 0.0 {
+        push(&set.title, layout.title_rect, SettingsTextKind::Title);
+    }
+    for (text, arrow) in [("<", layout.category_previous), (">", layout.category_next)] {
+        if let Some((_, rect)) = arrow {
+            push(text, inset(rect, 4.0), SettingsTextKind::Heading);
+        }
+    }
     for (i, rect) in layout.category_rects.iter().enumerate() {
         if let Some(rect) = rect {
             push(

@@ -8,8 +8,10 @@ The centered window has a category sidebar and a search field. The right pane
 shows the category title, a short description under each option, and a value
 control. On/Off pills show boolean state, choices have arrows, and quantities
 show their units. Below a panel width of 640 pixels, categories become a
-horizontal strip above the options. Long labels, descriptions and values
-shorten with an ellipsis.
+horizontal strip above the options. When categories overflow, click the left
+or right overflow arrow, or scroll over the strip, to page toward earlier or
+later categories. The selected category stays visible. Long labels, descriptions
+and values shorten with an ellipsis.
 
 ## Finding an option
 
@@ -20,7 +22,8 @@ case and Spanish accents. Results stay grouped by category; **Enter** or
 **Down** moves from the search field into the results. Normal navigation and
 value editing work there too. A search with no matches shows **No settings
 match**. **Esc** clears the query; another **Esc** closes Settings. Clicking a
-category clears the search and opens that category.
+category clears the search and opens that category. Focusing Search through
+assistive technology cancels any pending keybinding capture.
 
 ## Navigating
 
@@ -52,7 +55,10 @@ apply immediately. A failed save reports that the setting was not applied; an in
 text edit stays open so you can retry. GPU changes apply after restarting Kettle. Completion changes
 apply to new shells. Opacity, background type, and blur may need a new window.
 The footer shows dependencies for the focused row and pending changes. Notes
-keep reserved space below scrolling fields in short windows.
+keep reserved space below scrolling fields when space permits. In short windows,
+the panel reduces spacing and hides the repeated category title to retain the
+focused option. At the shortest supported heights, Search and categories share
+one header row, and result group headings give way to the editable option.
 
 Labels and display values use sentence case. Theme and GPU names retain their
 spelling. Quantities use a space before the unit, for example `13 pt`, `6 px`,
@@ -211,3 +217,7 @@ and returns to it when it closes.
 > edit the config file directly (`keybind = ctrl+shift+e = split_right`,
 > `keybind = ctrl+shift+e = unbind`) and check your effective bindings any
 > time with `kettle --list-keybinds`.
+
+While Settings or a picker is open, the transient window-size chip is hidden.
+Picker cards reduce their outer spacing on short windows so the query header
+and at least one result remain visible down to a 120-pixel window height.

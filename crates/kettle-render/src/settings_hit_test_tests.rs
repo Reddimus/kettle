@@ -98,6 +98,12 @@ fn settings_panes_rows_chips_search_and_footer_do_not_overlap() {
             inside(layout.content_rect, layout.title_rect);
             let mut controls = vec![layout.search_rect, layout.title_rect];
             controls.extend(layout.category_rects.iter().flatten().copied());
+            controls.extend(
+                [layout.category_previous, layout.category_next]
+                    .into_iter()
+                    .flatten()
+                    .map(|(_, rect)| rect),
+            );
             for row in &layout.rows {
                 inside(layout.content_rect, row.rect);
                 inside(row.rect, row.label_rect);
@@ -222,5 +228,165 @@ fn settings_choice_chips_keep_both_arrows_when_values_are_shortened() {
             value.text
         );
         assert!(value.text.contains('…'));
+    }
+}
+
+#[test]
+fn short_settings_windows_keep_the_focused_row_editable() {
+    for surface in [
+        (800.0, 200.0),
+        (800.0, 120.0),
+        (360.0, 120.0),
+        (1280.0, 120.0),
+    ] {
+        for query in ["", "setting"] {
+            for focus in 0..12 {
+                let mut set = overlay();
+                set.focused_row = focus;
+                set.search_query = query.into();
+                let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0);
+                let row = layout
+                    .rows
+                    .iter()
+                    .find(|r| r.index == focus)
+                    .expect("short windows must retain the focused row");
+                inside(layout.rect, row.rect);
+                inside(row.rect, row.chip_rect);
+                disjoint(layout.search_rect, row.rect);
+                for category in layout.category_rects.iter().flatten() {
+                    disjoint(*category, row.rect);
+                }
+                let value = settings_value_rect(&set, 8.0, 16.0, surface.0, surface.1, 8.0);
+                inside(row.chip_rect, value);
+                assert!(value.2 > 0.0 && value.3 >= 16.0);
+                for (_, group) in &layout.groups {
+                    disjoint(*group, row.rect);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn narrow_settings_categories_are_reachable_through_pointer_transitions() {
+    for surface in [(800.0, 600.0), (560.0, 600.0)] {
+        let mut set = overlay();
+        let mut pending = vec![0];
+        let mut visited = vec![false; set.categories.len()];
+        while let Some(active) = pending.pop() {
+            if visited[active] {
+                continue;
+            }
+            visited[active] = true;
+            set.active_category = active;
+            let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0);
+            assert!(layout.category_rects[active].is_some());
+            let category_y = layout.category_rects[active].unwrap().1 + 1.0;
+            for x in 0..surface.0 as usize {
+                if let SettingsHit::Category(index) = settings_hit_test_with_text_width(
+                    &set,
+                    (8.0, 16.0),
+                    surface,
+                    (x as f32, category_y),
+                    8.0,
+                ) {
+                    if !visited[index] {
+                        pending.push(index);
+                    }
+                }
+            }
+        }
+        assert!(
+            visited.iter().all(|v| *v),
+            "unreachable categories: {visited:?}"
+        );
+    }
+}
+
+#[test]
+fn resize_chip_is_hidden_while_settings_or_a_picker_is_open() {
+    let mut overlay = super::Overlay {
+        resize_overlay: Some((100, 37)),
+        ..Default::default()
+    };
+    assert_eq!(overlay.visible_resize_overlay(), Some((100, 37)));
+    overlay.settings = Some(super::SettingsOverlay::default());
+    assert_eq!(overlay.visible_resize_overlay(), None);
+    overlay.settings = None;
+    for kind in 0..4 {
+        overlay.palette_query = (kind == 0).then(String::new);
+        overlay.ssh_query = (kind == 1).then(String::new);
+        overlay.layout_picker_query = (kind == 2).then(String::new);
+        overlay.theme_picker_query = (kind == 3).then(String::new);
+        assert_eq!(overlay.visible_resize_overlay(), None);
+    }
+    overlay.theme_picker_query = None;
+    assert_eq!(overlay.visible_resize_overlay(), Some((100, 37)));
+    overlay.context_menu = Some(super::ContextMenu {
+        picker_header_height: 30.0,
+        anchor: (176.0, 78.0),
+        rows: Vec::new(),
+        highlight: 0,
+        scroll_offset: 0,
+        panel_w_clamped: 448.0,
+        panel_h_clamped: 224.0,
+        a11y_label: None,
+    });
+    assert_eq!(overlay.visible_resize_overlay(), None);
+    overlay.context_menu.as_mut().unwrap().picker_header_height = 0.0;
+    assert_eq!(overlay.visible_resize_overlay(), Some((100, 37)));
+}
+
+#[test]
+fn category_arrows_and_wheel_page_forward_and_back_without_hiding_selection() {
+    for surface in [(800.0, 600.0), (560.0, 600.0), (360.0, 120.0)] {
+        for wheel in [false, true] {
+            let mut set = overlay();
+            for direction in [1, -1] {
+                for _ in 0..set.categories.len() {
+                    let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0);
+                    let arrow = if direction > 0 {
+                        layout.category_next
+                    } else {
+                        layout.category_previous
+                    };
+                    let Some((target, rect)) = arrow else {
+                        break;
+                    };
+                    let point = if wheel {
+                        let active = layout.category_rects[set.active_category].unwrap();
+                        (active.0 + 1.0, active.1 + 1.0)
+                    } else {
+                        (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0)
+                    };
+                    assert_eq!(
+                        layout.pointer_hit(point, wheel.then_some(-direction)),
+                        SettingsHit::Category(target)
+                    );
+                    assert!(
+                        (direction > 0 && target > set.active_category)
+                            || (direction < 0 && target < set.active_category)
+                    );
+                    set.active_category = target;
+                    assert!(
+                        settings_layout(&set, (8.0, 16.0), surface, 8.0).category_rects[target]
+                            .is_some()
+                    );
+                }
+                let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0);
+                if direction > 0 {
+                    assert!(layout.category_rects.last().unwrap().is_some());
+                    assert!(layout.category_next.is_none());
+                } else {
+                    assert!(layout.category_rects[0].is_some());
+                    assert!(layout.category_previous.is_none());
+                }
+                let active = layout.category_rects[set.active_category].unwrap();
+                assert_eq!(
+                    layout.pointer_hit((active.0 + 1.0, active.1 + 1.0), Some(-direction)),
+                    SettingsHit::Inert
+                );
+            }
+        }
     }
 }
