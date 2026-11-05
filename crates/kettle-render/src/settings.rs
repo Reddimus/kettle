@@ -331,7 +331,25 @@ pub fn settings_hit_test(
     cursor_x: f32,
     cursor_y: f32,
 ) -> SettingsHit {
-    let (cw, ch, sw, sh) = (cell_w, cell_h, surface_w, surface_h);
+    settings_hit_test_with_text_width(
+        set,
+        (cell_w, cell_h),
+        (surface_w, surface_h),
+        (cursor_x, cursor_y),
+        cell_w,
+    )
+}
+
+/// Hit testing with terminal panel cells and chrome text advances supplied separately.
+pub fn settings_hit_test_with_text_width(
+    set: &SettingsOverlay,
+    cell: (f32, f32),
+    surface: (f32, f32),
+    cursor: (f32, f32),
+    text_cw: f32,
+) -> SettingsHit {
+    let (cw, ch, sw, sh) = (cell.0, cell.1, surface.0, surface.1);
+    let (cursor_x, cursor_y) = cursor;
     let lines = settings_display_lines(set);
     let layout = settings_panel_layout(set, &lines, cw, ch, sw, sh);
     let (row_h, panel_w, panel_h, px, py) = (
@@ -355,18 +373,11 @@ pub fn settings_hit_test(
     };
     // Line 1 is the category-tab strip.
     if line == 1 {
-        let text_left = px + 16.0;
-        let strip_cols = ((panel_w - 32.0).max(cw) / cw).floor().max(1.0) as usize;
-        let visible_cols = if display_width(&lines[1]) > strip_cols {
-            strip_cols.saturating_sub(1) // the ellipsis is inert
-        } else {
-            strip_cols
-        };
         for i in 0..set.categories.len() {
-            let (col, width) = settings_tab_span(set, i);
-            let start = text_left + col as f32 * cw;
-            let end = text_left + (col + width).min(visible_cols) as f32 * cw;
-            if cursor_x >= start && cursor_x < end {
+            if let Some((x, _, w, _)) = settings_tab_rect(set, i, &lines, &layout, text_cw)
+                && cursor_x >= x
+                && cursor_x < x + w
+            {
                 return SettingsHit::Category(i);
             }
         }
@@ -377,4 +388,37 @@ pub fn settings_hit_test(
         return SettingsHit::Field(line - SETTINGS_FIELD_START);
     }
     SettingsHit::Inert
+}
+
+pub(crate) fn settings_tab_rect(
+    set: &SettingsOverlay,
+    index: usize,
+    lines: &[String],
+    layout: &SettingsPanelLayout,
+    text_cw: f32,
+) -> Option<Rect4> {
+    if !text_cw.is_finite()
+        || text_cw <= 0.0
+        || index >= set.categories.len()
+        || layout.first_line > 1
+        || 1 >= layout.first_line + layout.visible_lines
+    {
+        return None;
+    }
+    let strip_cols = ((layout.panel_w - 32.0).max(text_cw) / text_cw)
+        .floor()
+        .max(1.0) as usize;
+    let visible_cols = if display_width(&lines[1]) > strip_cols {
+        strip_cols.saturating_sub(1)
+    } else {
+        strip_cols
+    };
+    let (col, width) = settings_tab_span(set, index);
+    let visible_width = (col + width).min(visible_cols).saturating_sub(col);
+    (visible_width > 0).then_some((
+        layout.px + 16.0 + col as f32 * text_cw,
+        layout.py + 12.0 + (1 - layout.first_line) as f32 * layout.row_h,
+        visible_width as f32 * text_cw,
+        layout.row_h,
+    ))
 }

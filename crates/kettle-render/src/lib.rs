@@ -66,9 +66,9 @@ use geometry::{
     MACOS_WINDOW_CORNER_RADIUS_POINTS, OUTLINE_BOTTOM_LEFT, OUTLINE_BOTTOM_RIGHT,
     background_image_rect, cell_locked_pen_x, centered_text_origin, fair_placement_quotas,
     ime_preedit_rect, inline_image_clip, inline_placement_rect, live_surface_dimensions,
-    pane_backdrop_rect, pane_bottom_window_corner_mask, placement_is_visible,
-    placement_viewport_row, rect_covers_surface, rects_overlap, row_thumb_floor,
-    selection_row_span, visible_selection_rows,
+    pane_backdrop_rect, pane_bottom_window_corner_mask, pane_titlebar_rect,
+    placement_intersects_clip, placement_viewport_row, rect_covers_surface, rects_overlap,
+    row_thumb_floor, selection_row_span, visible_selection_rows,
 };
 pub use geometry::{Rect4, cap_axis_cells, pane_grid_origin};
 #[cfg(test)]
@@ -142,11 +142,11 @@ use search::{
 use search::{search_bar_text, search_editor_label, search_focused_label};
 use settings::{
     SETTINGS_FIELD_START, settings_display_lines, settings_fit_display_line,
-    settings_painted_lines, settings_panel_cols, settings_panel_layout, settings_tab_span,
+    settings_painted_lines, settings_panel_cols, settings_panel_layout, settings_tab_rect,
 };
 pub use settings::{
     SettingsHit, SettingsOverlay, SettingsPanelGeometry, SettingsRow, settings_hit_test,
-    settings_panel_geometry, settings_value_rect,
+    settings_hit_test_with_text_width, settings_panel_geometry, settings_value_rect,
 };
 #[cfg(test)]
 use settings::{settings_fit_line, settings_row_line};
@@ -342,6 +342,7 @@ pub struct Renderer {
     /// when this system has one. `None` leaves such cells on the platform
     /// fallback cascade.
     text_symbol_family: Option<&'static str>,
+    grapheme_text_cache: fonts::GraphemeTextCache,
     swash: SwashCache,
     atlas: TextAtlas,
     viewport: Viewport,
@@ -977,7 +978,9 @@ impl Renderer {
         // either 0.0 or ch+6.0; only do the mutation when active.
         if pane_titlebar_h > 0.0 {
             for (i, pv) in panes.iter().enumerate() {
-                let (_, _, rw, _) = pv.rect;
+                let Some((_, _, rw, titlebar_h)) = pv.titlebar else {
+                    continue;
+                };
                 let title: &str = if pv.title.trim().is_empty() {
                     "kettle"
                 } else {
@@ -1006,7 +1009,7 @@ impl Renderer {
                 );
                 let buf = &mut self.pane_titlebar_buffers[i];
                 buf.set_metrics(metrics);
-                buf.set_size(Some(rw), Some(pane_titlebar_h));
+                buf.set_size(Some(rw), Some(titlebar_h));
                 // `Buffer::set_text` re-shapes unconditionally, so gate it on
                 // text change and a steady title costs nothing.
                 if self.pane_titlebar_texts[i] != label {
@@ -1565,13 +1568,37 @@ impl Renderer {
         // Inline image instances share one renderer/window budget. Allocate it
         // across panes before iterating so pane order cannot monopolize all
         // slots. Offscreen placements consume no quota.
+        // Terminator parity (terminatorlib/config.py:74
+        // `handle_size`): split-divider width in px. -1 means
+        // "use theme default" (1.0 here), 0 draws no border (see
+        // below), and 1-50 are used as-is. Clamping was already done
+        // at parse time.
+        let bw = if cfg.handle_size < 0 {
+            1.0
+        } else {
+            cfg.handle_size as f32
+        };
+        let image_clip_for = |pane: &PaneView<'_>| {
+            pane_backdrop_rect(pane.terminal, bw).and_then(|body| {
+                inline_image_clip(
+                    body,
+                    pane_grid_origin(pane.terminal, (pad_x, pad_y)),
+                    (pane.snap.columns, pane.snap.screen_lines),
+                    (cw, ch),
+                )
+            })
+        };
         let placement_limit = self.graphics_budget.limits().placements;
         let visible_placement_counts = panes
             .iter()
             .map(|pane| {
+                let clip = image_clip_for(pane);
+                let origin = pane_grid_origin(pane.terminal, (pad_x, pad_y));
                 pane.images
                     .iter()
-                    .filter(|placement| placement_is_visible(pane.snap, placement))
+                    .filter(|placement| {
+                        placement_intersects_clip(pane.snap, placement, origin, (cw, ch), clip)
+                    })
                     .count()
             })
             .collect::<Vec<_>>();
@@ -1615,16 +1642,6 @@ impl Renderer {
             } else {
                 cfg.split_divider_color.unwrap_or(theme.palette[8])
             };
-            // Terminator parity (terminatorlib/config.py:74
-            // `handle_size`): split-divider width in px. -1 means
-            // "use theme default" (1.0 here), 0 draws no border (see
-            // below), and 1-50 are used as-is. Clamping was already done
-            // at parse time.
-            let bw = if cfg.handle_size < 0 {
-                1.0
-            } else {
-                cfg.handle_size as f32
-            };
             let corner_mask =
                 pane_bottom_window_corner_mask(pv.rect, (sw, sh), self.rounded_window_corners);
             if bw <= 0.0 {
@@ -1658,21 +1675,9 @@ impl Renderer {
                     pv.focused,
                     tabbar.broadcast,
                 );
-                // title_at_bottom selects the titlebar edge; terminal geometry comes from
-                // the shared pane partition.
-                let bar_y = if cfg.title_at_bottom {
-                    ry + rh - bw - pane_titlebar_h
-                } else {
-                    ry + bw
-                };
-                quads.push(rect(
-                    rx + bw,
-                    bar_y,
-                    rw - 2.0 * bw,
-                    pane_titlebar_h,
-                    bar_bg,
-                    1.0,
-                ));
+                if let Some((x, y, w, h)) = pane_titlebar_rect(pv.rect, pv.titlebar, bw) {
+                    quads.push(rect(x, y, w, h, bar_bg, 1.0));
+                }
             }
 
             let pane_has_search = overlay
@@ -1743,14 +1748,7 @@ impl Renderer {
             // Image placements, anchored history-aware so they scroll.
             {
                 let quota = placement_quotas[i];
-                let image_clip = pane_backdrop_rect(pv.terminal, bw).and_then(|pane_body| {
-                    inline_image_clip(
-                        pane_body,
-                        grid_origin,
-                        (pv.snap.columns, pv.snap.screen_lines),
-                        (cw, ch),
-                    )
-                });
+                let image_clip = image_clip_for(pv);
                 let mut draw = |p: &kettle_core::Placement| {
                     let Some(image_clip) = image_clip else {
                         return;
@@ -1776,7 +1774,15 @@ impl Renderer {
                     let mut ordered = pv
                         .images
                         .iter()
-                        .filter(|placement| placement_is_visible(pv.snap, placement))
+                        .filter(|placement| {
+                            placement_intersects_clip(
+                                pv.snap,
+                                placement,
+                                grid_origin,
+                                (cw, ch),
+                                image_clip,
+                            )
+                        })
                         .take(quota)
                         .collect::<Vec<_>>();
                     ordered.sort_by_key(|placement| placement.z);
@@ -1784,10 +1790,15 @@ impl Renderer {
                         draw(placement);
                     }
                 } else if quota == 1
-                    && let Some(placement) = pv
-                        .images
-                        .iter()
-                        .find(|placement| placement_is_visible(pv.snap, placement))
+                    && let Some(placement) = pv.images.iter().find(|placement| {
+                        placement_intersects_clip(
+                            pv.snap,
+                            placement,
+                            grid_origin,
+                            (cw, ch),
+                            image_clip,
+                        )
+                    })
                 {
                     draw(placement);
                 }
@@ -2665,7 +2676,9 @@ impl Renderer {
 
         if let Some(completion) = &overlay.completion
             && let Some(geometry) = completion_panel_geometry(completion, (cw, ch))
+                .map(|geometry| geometry.with_text_cell_width(cw, self.overlay_text_cell_width()))
         {
+            let text_cw = self.overlay_text_cell_width();
             let accent = self.ui_accent(cfg, theme);
             let palette = self.chrome_colors.completion(theme, accent);
             let count = geometry.rows;
@@ -2710,7 +2723,7 @@ impl Renderer {
             let count_line = fit_single_line_label(&count_source, count_columns);
             self.completion_header_buffer.set_metrics(metrics);
             self.completion_header_buffer.set_size(
-                Some((header_columns as f32 * cw).max(1.0)),
+                Some((header_columns as f32 * text_cw).max(1.0)),
                 Some(geometry.header.3),
             );
             if self.completion_header_text != header_line {
@@ -2726,7 +2739,7 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
             self.completion_count_buffer.set_metrics(metrics);
             self.completion_count_buffer.set_size(
-                Some((count_columns as f32 * cw).max(1.0)),
+                Some((count_columns as f32 * text_cw).max(1.0)),
                 Some(geometry.header.3),
             );
             if self.completion_count_text != count_line {
@@ -3470,7 +3483,9 @@ impl Renderer {
         }
         if let Some(completion) = &overlay.completion
             && let Some(geometry) = completion_panel_geometry(completion, (cw, ch))
+                .map(|geometry| geometry.with_text_cell_width(cw, self.overlay_text_cell_width()))
         {
+            let text_cw = self.overlay_text_cell_width();
             let (x, y, width, height) = geometry.rect;
             let accent = self.ui_accent(cfg, theme);
             let palette = self.chrome_colors.completion(theme, accent);
@@ -3591,13 +3606,14 @@ impl Renderer {
                 completion_header_columns(&geometry, &completion_header_count(completion));
             let header_dy = ((geometry.header.3 - ch) * 0.5).round();
             let header_x = geometry.label_x;
-            let count_x = x + width - (COMPLETION_PAD_COLUMNS + count_columns) as f32 * cw;
+            let count_x =
+                x + width - COMPLETION_PAD_COLUMNS as f32 * cw - count_columns as f32 * text_cw;
             menu_areas.push(TextArea {
                 buffer: &self.completion_header_buffer,
                 left: header_x,
                 top: geometry.header.1 + header_dy,
                 scale: 1.0,
-                bounds: clip(header_x, header_x + header_columns as f32 * cw),
+                bounds: clip(header_x, header_x + header_columns as f32 * text_cw),
                 default_color: gc(palette.header),
                 custom_glyphs: &[],
             });
@@ -3606,7 +3622,7 @@ impl Renderer {
                 left: count_x,
                 top: geometry.header.1 + header_dy,
                 scale: 1.0,
-                bounds: clip(count_x, count_x + count_columns as f32 * cw),
+                bounds: clip(count_x, count_x + count_columns as f32 * text_cw),
                 default_color: gc(palette.header),
                 custom_glyphs: &[],
             });
@@ -3651,7 +3667,9 @@ impl Renderer {
         // `pane_titlebar_buffers` shaped earlier in this pass.
         if pane_titlebar_h > 0.0 {
             for (i, pv) in panes.iter().enumerate() {
-                let (rx, ry, rw, rh) = pv.rect;
+                let Some((rx, ry, rw, titlebar_h)) = pv.titlebar else {
+                    continue;
+                };
                 // Matching fg variant for the three states, derived from the
                 // theme so the title text stays readable + on-theme. The
                 // focused and broadcast bars default to the window accent (see
@@ -3674,20 +3692,8 @@ impl Renderer {
                     tabbar.broadcast,
                 );
                 let fg = self.chrome_colors.text(fg, background);
-                // Text-area position mirrors the
-                // titlebar bar's y-position so the title text follows
-                // the bar to the bottom when title_at_bottom is
-                // true. 2px top padding matches the titlebar buffer population above.
-                let text_top = if cfg.title_at_bottom {
-                    ry + rh - pane_titlebar_h + 2.0
-                } else {
-                    ry + 2.0
-                };
-                let text_bot = if cfg.title_at_bottom {
-                    ry + rh
-                } else {
-                    ry + pane_titlebar_h
-                };
+                let text_top = ry + 2.0;
+                let text_bot = ry + titlebar_h;
                 areas.push(TextArea {
                     buffer: &self.pane_titlebar_buffers[i],
                     left: rx,
@@ -4082,25 +4088,14 @@ impl Renderer {
             menu_q.push(rect(px, py + panel_h - 2.0, panel_w, 2.0, acc, 1.0));
             menu_q.push(rect(px, py, 2.0, panel_h, acc, 1.0));
             menu_q.push(rect(px + panel_w - 2.0, py, 2.0, panel_h, acc, 1.0));
-            if layout.first_line <= 1 && 1 < layout.first_line + layout.visible_lines {
-                let strip_cols = ((panel_w - 32.0).max(cw) / cw).floor().max(1.0) as usize;
-                let visible_cols = if display_width(&lines[1]) > strip_cols {
-                    strip_cols.saturating_sub(1)
-                } else {
-                    strip_cols
-                };
-                let (col, width) = settings_tab_span(set, set.active_category);
-                let visible_width = (col + width).min(visible_cols).saturating_sub(col);
-                if visible_width > 0 {
-                    menu_q.push(rect(
-                        px + 16.0 + col as f32 * cw,
-                        py + 12.0 + (1 - layout.first_line) as f32 * row_h + row_h - 2.0,
-                        visible_width as f32 * cw,
-                        2.0,
-                        acc,
-                        1.0,
-                    ));
-                }
+            if let Some((x, y, w, h)) = settings_tab_rect(
+                set,
+                set.active_category,
+                lines,
+                &layout,
+                self.overlay_text_cell_width(),
+            ) {
+                menu_q.push(rect(x, y + h - 2.0, w, 2.0, acc, 1.0));
             }
             // Focused field-row highlight.
             let hi_line = SETTINGS_FIELD_START + set.focused_row;

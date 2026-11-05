@@ -106,6 +106,16 @@ pub(crate) enum CompletionPanelPlacement {
 }
 
 impl CompletionPanelGeometry {
+    pub(crate) fn with_text_cell_width(mut self, grid_cw: f32, text_cw: f32) -> Self {
+        if text_cw.is_finite() && text_cw > 0.0 && text_cw != grid_cw {
+            let columns = |width: f32| (width / text_cw).floor().max(0.0) as usize;
+            self.inner_columns = columns(self.inner_columns as f32 * grid_cw);
+            self.label_columns = columns(self.label_w);
+            self.description_columns = columns(self.description_w);
+        }
+        self
+    }
+
     /// Band occupied by the painted candidate rows.
     pub(crate) fn list_rect(&self) -> Rect4 {
         (
@@ -251,10 +261,17 @@ pub(crate) fn completion_panel_geometry(
     let padding_columns = 2 * COMPLETION_PAD_COLUMNS;
     let content_columns = padding_columns + label_columns + divider_columns + description_columns;
     // The header is part of the card, so it participates in the content fit.
-    let header_columns = padding_columns
-        + display_width(&completion_header_label(overlay))
-        + 2
-        + display_width(&completion_header_count(overlay));
+    let max_position = overlay
+        .candidates
+        .iter()
+        .map(|candidate| candidate.position.saturating_add(1))
+        .max()
+        .unwrap_or(0);
+    let count_columns = display_width(&format!("{max_position}/{}", overlay.total)).max(
+        display_width(&overlay.tr.completion_matches(overlay.total as u64)),
+    );
+    let header_columns =
+        padding_columns + display_width(&completion_header_label(overlay)) + 2 + count_columns;
     let columns = content_columns
         .max(header_columns)
         .clamp(COMPLETION_MIN_COLUMNS, COMPLETION_MAX_COLUMNS)

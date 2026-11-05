@@ -109,6 +109,116 @@ pub(crate) fn grapheme_text_family(
     None
 }
 
+type MarkFamilies = std::collections::HashMap<Vec<char>, Option<Arc<str>>>;
+
+#[derive(Default)]
+pub(crate) struct GraphemeTextCache {
+    families: std::collections::HashMap<Arc<str>, std::collections::HashMap<char, MarkFamilies>>,
+    len: usize,
+}
+
+impl GraphemeTextCache {
+    fn resolve_with(
+        &mut self,
+        primary: &str,
+        base: char,
+        marks: &[char],
+        resolve: impl FnOnce() -> Option<Arc<str>>,
+    ) -> Option<Arc<str>> {
+        if let Some(family) = self
+            .families
+            .get(primary)
+            .and_then(|bases| bases.get(&base))
+            .and_then(|entries| entries.get(marks))
+        {
+            return family.clone();
+        }
+        let family = resolve();
+        if self.len >= 1024 {
+            self.clear();
+        }
+        self.families
+            .entry(Arc::from(primary))
+            .or_default()
+            .entry(base)
+            .or_default()
+            .insert(marks.to_vec(), family.clone());
+        self.len += 1;
+        family
+    }
+
+    pub(crate) fn resolve(
+        &mut self,
+        fonts: &mut FontSystem,
+        primary: &str,
+        base: char,
+        marks: &[char],
+    ) -> Option<Arc<str>> {
+        self.resolve_with(primary, base, marks, || {
+            grapheme_text_family(fonts, primary, base, marks).map(Arc::from)
+        })
+    }
+
+    fn clear(&mut self) {
+        self.families.clear();
+        self.len = 0;
+    }
+}
+
+#[cfg(test)]
+mod grapheme_cache_tests {
+    use super::*;
+
+    #[test]
+    fn text_family_resolution_reuses_hits_and_misses_until_fonts_change() {
+        for found in [false, true] {
+            let mut cache = GraphemeTextCache::default();
+            let mut probes = 0;
+            let mut previous = None;
+            for _ in 0..100 {
+                let family = cache.resolve_with("primary", 'x', &['\u{fe0e}'], || {
+                    probes += 1;
+                    found.then(|| Arc::<str>::from("symbols"))
+                });
+                if let (Some(a), Some(b)) = (&previous, &family) {
+                    assert!(Arc::ptr_eq(a, b), "cached family names must be shared");
+                }
+                previous = family;
+            }
+            assert_eq!(
+                probes, 1,
+                "identical cells repeated font database resolution"
+            );
+            cache.clear();
+            cache.resolve_with("primary", 'x', &['\u{fe0e}'], || {
+                probes += 1;
+                None
+            });
+            assert_eq!(probes, 2, "font changes must invalidate cached misses too");
+        }
+    }
+    #[test]
+    fn text_family_cache_is_bounded_and_keys_include_family_and_cluster() {
+        let mut cache = GraphemeTextCache::default();
+        for n in 0..2050u32 {
+            cache.resolve_with("primary", char::from_u32(n).unwrap(), &[], || None);
+            assert!(cache.len <= 1024);
+        }
+        cache.resolve_with("primary", 'x', &[], || Some(Arc::from("one")));
+        assert_eq!(cache.resolve_with("other", 'x', &[], || None), None);
+        assert_eq!(
+            cache.resolve_with("primary", 'x', &['\u{fe0e}'], || None),
+            None
+        );
+        assert_eq!(
+            cache
+                .resolve_with("primary", 'x', &[], || panic!("cached"))
+                .as_deref(),
+            Some("one")
+        );
+    }
+}
+
 /// Whether this codepoint is emoji-capable, text by default, and occupies one
 /// column.
 ///
@@ -281,6 +391,7 @@ impl Renderer {
         ] {
             load_bundled_font(&mut self.font_system, face);
         }
+        self.grapheme_text_cache.clear();
         self.bundled_style_faces_loaded = true;
         self.pane_style_keys.fill(0);
         self.pane_line_keys.iter_mut().for_each(Vec::clear);

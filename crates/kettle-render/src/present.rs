@@ -1,5 +1,13 @@
 use kettle_core::{GraphicsBudget, GraphicsReservation};
 
+fn reserve_scene_target(budget: &GraphicsBudget, bytes: usize) -> Option<GraphicsReservation> {
+    const MAX_SCENE_TARGET_BYTES: usize = 256 * 1024 * 1024;
+    if bytes > MAX_SCENE_TARGET_BYTES {
+        return None;
+    }
+    budget.reserve_retained_gpu(bytes)
+}
+
 const SHADER: &str = r#"
 @group(0) @binding(0) var scene: texture_2d<f32>;
 @group(0) @binding(1) var scene_sampler: sampler;
@@ -148,7 +156,7 @@ impl PresentationPipeline {
             return false;
         };
         self.target = None;
-        let Some(gpu) = self.budget.reserve_gpu(bytes) else {
+        let Some(gpu) = reserve_scene_target(&self.budget, bytes) else {
             return false;
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -206,5 +214,36 @@ impl PresentationPipeline {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &target.bind_group, &[]);
         pass.draw(0..4, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presentation_budget_admits_a_6k_window_and_keeps_scope_accounting() {
+        let budget = GraphicsBudget::default();
+        let bytes = 6016 * 3384 * 4;
+        assert!(
+            budget.reserve_gpu(bytes).is_none(),
+            "terminal images retain their per-image cap"
+        );
+        let target = reserve_scene_target(&budget, bytes)
+            .expect("6K scene target must use the window resource limit");
+        let mut remaining = budget.limits().retained_bytes - bytes;
+        let mut pressure = Vec::new();
+        while remaining > 0 {
+            let chunk = remaining.min(budget.limits().image_bytes);
+            pressure.push(budget.reserve_gpu(chunk).unwrap());
+            remaining -= chunk;
+        }
+        assert!(
+            budget.reserve_gpu(1).is_none(),
+            "scene target must remain charged to its window"
+        );
+        drop(target);
+        assert!(budget.reserve_gpu(1).is_some());
+        assert!(reserve_scene_target(&budget, 256 * 1024 * 1024 + 1).is_none());
     }
 }

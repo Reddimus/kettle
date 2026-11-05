@@ -349,3 +349,39 @@ fn confirmation_panel_text_and_outline_are_readable_in_every_bundled_theme() {
         );
     }
 }
+
+#[test]
+fn repeated_title_placeholders_share_the_tab_lane() {
+    for format in [
+        "{title} / {title}",
+        "{{title}} {title}",
+        "{{{title}}} {title}",
+    ] {
+        for path in [None, Some("/long/path/abcdefghij")] {
+            let fitted = fit_tab_segment_title("abcdefghij", path, 0, format, 80.0, 8.0);
+            let label = kettle_config::template::fill(format, &[("title", &fitted)]);
+            assert!(
+                display_width(&label) <= 10,
+                "expanded tab label exceeds its lane: {label}"
+            );
+        }
+    }
+}
+
+#[test]
+fn narrow_pane_titles_fit_and_keep_the_bell() {
+    let bell = "\u{1f514}";
+    for budget in 0..20 {
+        let label = fit_pane_titlebar_title(None, "[RO] ", "shell", None, None, Some(bell), budget);
+        assert!(
+            display_width(&label) <= budget,
+            "pane title exceeds {budget} columns: {label}"
+        );
+        if budget >= display_width(bell) {
+            assert!(
+                label.ends_with(bell),
+                "pane title lost the bell at {budget} columns"
+            );
+        }
+    }
+}

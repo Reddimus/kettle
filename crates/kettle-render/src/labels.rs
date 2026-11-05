@@ -192,7 +192,12 @@ pub fn fit_tab_segment_title(
     let avail = (title_w.max(0.0) / cell_w.max(1.0)) as usize;
     let fixed_label = kettle_config::template::fill(tab_format, &[("n", &n), ("title", "")]);
     let fixed_w = display_width(&fixed_label);
-    let maxc = avail.saturating_sub(fixed_w);
+    let probe = kettle_config::template::fill(tab_format, &[("n", &n), ("title", "x")]);
+    let substitutions = display_width(&probe).saturating_sub(fixed_w);
+    let maxc = avail
+        .saturating_sub(fixed_w)
+        .checked_div(substitutions)
+        .unwrap_or(0);
     match path {
         Some(p) => fit_tab_path(p, maxc),
         None => fit_tab_title(title, maxc),
@@ -254,7 +259,24 @@ pub fn fit_pane_titlebar_title(
     // tab fitting and avoids rendering a shell's already-truncated cwd suffix
     // when Kettle also has OSC 7 cwd truth.
     let fixed = 2 + display_width(title_prefix) + display_width(&bell_part);
-    let title_budget = budget.saturating_sub(fixed).max(1);
+    if fixed > budget {
+        let bell = bell.unwrap_or("");
+        let fitted_bell = fit_single_line_label(bell, budget);
+        let bell_part = if !fitted_bell.is_empty() && budget > display_width(&fitted_bell) {
+            format!(" {fitted_bell}")
+        } else {
+            fitted_bell
+        };
+        let remaining = budget.saturating_sub(display_width(&bell_part));
+        let prefix = fit_single_line_label(title_prefix, remaining);
+        let title_budget = remaining.saturating_sub(display_width(&prefix));
+        let fitted_title = match title_path {
+            Some(path) => fit_tab_path(path, title_budget),
+            None => middle_ellipsis(title, title_budget),
+        };
+        return format!("{prefix}{fitted_title}{bell_part}");
+    }
+    let title_budget = budget.saturating_sub(fixed);
     let fitted_title = match title_path {
         Some(path) => fit_tab_path(path, title_budget),
         None => middle_ellipsis(title, title_budget),

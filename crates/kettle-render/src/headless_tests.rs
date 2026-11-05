@@ -578,6 +578,16 @@ fn printing_writes_nothing_through_the_queue_on_shared_memory() {
     assert!(after.mapped_writes > before.mapped_writes);
 }
 
+fn test_device_result<T, E: std::fmt::Debug>(result: std::result::Result<T, E>) -> Option<T> {
+    Some(result.expect("GPU test device request failed"))
+}
+
+#[test]
+#[should_panic(expected = "injected device failure")]
+fn device_creation_failure_is_not_a_gpu_test_skip() {
+    let _: Option<()> = test_device_result(Err("injected device failure"));
+}
+
 /// A device with the mapping feature, regardless of adapter type, for ring
 /// correctness tests. The live path still excludes discrete adapters.
 fn mapped_device() -> Option<(wgpu::Device, wgpu::Queue)> {
@@ -590,13 +600,14 @@ fn mapped_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         if !adapter.features().contains(required_features) {
             return None;
         }
-        adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                required_features,
-                ..Default::default()
-            })
-            .await
-            .ok()
+        test_device_result(
+            adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    required_features,
+                    ..Default::default()
+                })
+                .await,
+        )
     })
 }
 
@@ -978,10 +989,11 @@ fn every_pipeline_skips_an_unchanged_upload() {
         let (_instance, adapter) = crate::resolve_headless_adapter(&cfg, "upload-test")
             .await
             .ok()?;
-        adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .ok()
+        test_device_result(
+            adapter
+                .request_device(&wgpu::DeviceDescriptor::default())
+                .await,
+        )
     }) else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
@@ -1058,10 +1070,11 @@ fn a_pipeline_reports_what_it_uploaded() {
         let (_instance, adapter) = crate::resolve_headless_adapter(&cfg, "uploaded-test")
             .await
             .ok()?;
-        adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .ok()
+        test_device_result(
+            adapter
+                .request_device(&wgpu::DeviceDescriptor::default())
+                .await,
+        )
     }) else {
         eprintln!("no GPU adapter on this host; skipped");
         return;

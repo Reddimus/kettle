@@ -406,3 +406,27 @@ fn narrow_settings_rows_are_ellipsized_to_one_line() {
     assert_eq!(super::display_width(&fitted), 22);
     assert!(fitted.ends_with('…'));
 }
+
+#[test]
+fn settings_category_hits_follow_painted_text_at_scaled_cell_widths() {
+    let set = overlay();
+    for cw in [4.0, 16.0] {
+        let lines = settings_display_lines(&set);
+        let layout = settings_panel_layout(&set, &lines, cw, 16.0, 1600.0, 600.0);
+        for (index, column, width) in [(0, 0, 10), (1, 12, 8), (2, 22, 8)] {
+            let x = layout.px + 16.0 + (column as f32 + width as f32 * 0.5) * 8.0;
+            let y = layout.py + 12.0 + layout.row_h * 1.5;
+            assert_eq!(
+                super::settings_hit_test_with_text_width(
+                    &set,
+                    (cw, 16.0),
+                    (1600.0, 600.0),
+                    (x, y),
+                    8.0
+                ),
+                SettingsHit::Category(index),
+                "painted category center selected the wrong tab at terminal width {cw}"
+            );
+        }
+    }
+}

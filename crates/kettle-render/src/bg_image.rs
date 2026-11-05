@@ -4,6 +4,7 @@
 /// Bound dimensions and decoded RGBA storage before materializing a wallpaper.
 const MAX_BG_IMAGE_DIM: u32 = 8192;
 const MAX_BG_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_BG_ENCODED_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Total decoded animation storage and frame count. Keep the prefix that fits;
 /// clamp frame gaps so malformed delays cannot drive continuous redraws.
@@ -555,6 +556,9 @@ fn validate_webp_headers<R: std::io::Read + std::io::Seek>(reader: &mut R) -> st
         )
     };
     let end = reader.seek(SeekFrom::End(0))?;
+    if end > MAX_BG_ENCODED_BYTES {
+        return Err(invalid());
+    }
     reader.rewind()?;
     let mut header = [0; 12];
     reader.read_exact(&mut header)?;
@@ -595,6 +599,9 @@ impl<R: std::io::Read + std::io::Seek> WebpHeaders<'_, R> {
         let start = at.checked_add(8).filter(|&start| start <= end)?;
         let header = self.read::<8>(at)?;
         let size = u64::from(u32::from_le_bytes(header[4..].try_into().ok()?));
+        if size > MAX_BG_IMAGE_BYTES {
+            return None;
+        }
         let next = start.checked_add(size)?.checked_add(size % 2)?;
         (next <= end).then_some((header[..4].try_into().ok()?, start, size, next))
     }
@@ -748,6 +755,26 @@ mod tests {
         file.extend_from_slice(&(body.len() as u32).to_le_bytes());
         file.extend(body);
         file
+    }
+
+    #[test]
+    fn webp_preflight_rejects_oversized_encoded_payloads() {
+        use std::io::{Seek, SeekFrom, Write};
+        for size in [64 * 1024 * 1024 + 2u32, 128 * 1024 * 1024 + 2] {
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(b"RIFF").unwrap();
+            file.write_all(&(size + 12).to_le_bytes()).unwrap();
+            file.write_all(b"WEBPVP8 ").unwrap();
+            file.write_all(&size.to_le_bytes()).unwrap();
+            file.write_all(&[0x10, 0, 0, 0x9d, 1, 0x2a, 1, 0, 1, 0])
+                .unwrap();
+            file.set_len(u64::from(size) + 20).unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            assert!(
+                validate_webp_headers(&mut file).is_err(),
+                "small canvas accepted oversized encoded payload: {size}"
+            );
+        }
     }
 
     #[test]

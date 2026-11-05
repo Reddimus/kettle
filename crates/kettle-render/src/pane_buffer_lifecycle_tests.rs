@@ -1137,3 +1137,25 @@ fn font_invalidation_retains_pane_title_slots_until_reordering() {
     titles.truncate(1);
     assert_eq!(titles, [""]);
 }
+
+#[test]
+fn short_pane_titlebar_stays_inside_its_allocated_strip() {
+    for height in [16.0_f32, 60.0] {
+        let pane = (10.0, 50.0, 100.0, height);
+        for bottom in [false, true] {
+            let bar_h = 22.0_f32.min(height);
+            let bar_y = if bottom { 50.0 + height - bar_h } else { 50.0 };
+            let allocated = (10.0, bar_y, 100.0, bar_h);
+            let (x, y, w, h) = super::pane_titlebar_rect(pane, Some(allocated), 1.0).unwrap();
+            assert!(
+                x >= allocated.0
+                    && y >= allocated.1
+                    && x + w <= allocated.0 + allocated.2
+                    && y + h <= allocated.1 + allocated.3,
+                "titlebar paints outside its allocated strip: {:?}",
+                (x, y, w, h)
+            );
+        }
+        assert!(super::pane_titlebar_rect(pane, None, 1.0).is_none());
+    }
+}

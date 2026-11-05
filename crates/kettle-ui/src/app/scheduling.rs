@@ -719,6 +719,14 @@ impl App {
         } else {
             bg_anim_interval_raw
         };
+        let bg_retry_at = (!render_hidden)
+            .then(|| {
+                ws.renderer
+                    .as_ref()
+                    .and_then(|r| r.background_retry_deadline())
+            })
+            .flatten();
+        let bg_retry_due = bg_retry_at.is_some_and(|deadline| now >= deadline);
         // Edge-trigger the bg redraw. Request it ONLY when the displayed frame
         // index changes, since requesting it on every `about_to_wait` makes
         // winit redraw continuously. This mirrors how `blink_due` gates the
@@ -830,6 +838,7 @@ impl App {
             || term_anim
             || term_anim_finished
             || bg_frame_due
+            || bg_retry_due
             || autoscroll_active
             || coalesce_due
             || resize_chip_active
@@ -855,6 +864,12 @@ impl App {
             bg_anim_interval,
             blink_wait,
         );
+        if let Some(deadline) = bg_retry_at {
+            let next = deadline
+                .saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1));
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
         if let Some(next) = frame_recovery_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
