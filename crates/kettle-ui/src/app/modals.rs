@@ -2061,6 +2061,10 @@ impl App {
                 let ranked = rank_layouts(q, layouts);
                 let name = ranked.get(*sel).map(|&i| layouts[i].clone());
                 ws.layout_picker_input = None;
+                ws.accessibility_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
                 if let Some(name) = name {
                     let exe = std::env::current_exe()
                         .unwrap_or_else(|_| std::path::PathBuf::from("kettle"));

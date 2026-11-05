@@ -148,3 +148,49 @@ fn finding_layout_picker_reaps_its_children() {
     assert!(body.contains("std::thread::Builder::new()"));
 }
 
+#[test]
+fn review_activating_the_selected_layout_requests_a_frame() {
+    use super::{PickerPointer, apply_picker_pointer};
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.layout_picker_entries = vec!["alpha".into()];
+    ws.layout_picker_input = Some((Default::default(), 0));
+    let menu = picker_context_menu(
+        layout_picker_list("", 0, &ws.layout_picker_entries, &EN_TEXT),
+        (800.0, 600.0),
+        (8.0, 16.0),
+    )
+    .unwrap();
+    let row_h = 16.0 + kettle_render::menu::ROW_PAD;
+    let (inset, _) = kettle_render::menu::scroll_content(
+        menu.rows.len() as f32 * row_h,
+        menu.panel_h_clamped,
+        row_h,
+    );
+    ws.cursor.x = f64::from(menu.anchor.0 + 10.0);
+    ws.cursor.y = f64::from(menu.anchor.1 + inset + row_h * 0.5);
+    ws.accessibility_pending = false;
+    assert!(apply_picker_pointer(
+        &mut ws,
+        &menu,
+        16.0,
+        PickerPointer::Press
+    ));
+    assert!(
+        !ws.accessibility_pending,
+        "clicking the selected row does not repaint selection"
+    );
+    let body = finding_body(include_str!("modals.rs"), "layout_picker_key");
+    let enter = body
+        .split("Key::Named(NamedKey::Enter) => {")
+        .nth(1)
+        .unwrap();
+    let dismissed = enter
+        .split("ws.layout_picker_input = None;")
+        .nth(1)
+        .unwrap();
+    let before_launch = dismissed.split("if let Some(name) = name").next().unwrap();
+    assert!(
+        before_launch.contains("request_redraw()"),
+        "dismissal must request a frame even if the layout launch fails"
+    );
+}
