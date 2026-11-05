@@ -519,7 +519,7 @@ and confinement, described below.
   ones within the same number bound, or left out. A diagram that outlasts its
   deadline or resource policy, gets anything unchecked past the sanitizer,
   or makes the worker read or reach anything is in scope. A Markdown
-  gallery's fences are found by pulldown-cmark 0.13.4 in the worker, within
+  gallery's fences are found by pulldown-cmark 0.13.6 in the worker, within
   1 MiB, 32 pages and 64 KiB a page, under the same deadline; a document
   that gets past those caps, takes the parser past its deadline, or puts a
   page together from anything but one fence of the snapshot read is in scope.
