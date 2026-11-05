@@ -663,9 +663,19 @@ fn the_silent_preview_is_wired() {
             .unwrap_or_else(|| panic!("{name}"))
             .to_owned()
     };
-    assert!(body("finish_lane_render").contains(
-        "if let Some(ticket) = render.preview { return self.finish_lane_preview(ws, render, ticket, spec, result); } if let Some(ticket) = render.tile {"
-    ));
+    // Previews are routed first; every other lane render, tiles included, is
+    // then checked against the item's current generation.
+    let finish_render = body("finish_lane_render");
+    let preview = finish_render
+        .find("if let Some(ticket) = render.preview { return self.finish_lane_preview(ws, render, ticket, spec, result); }")
+        .expect("previews are routed first");
+    let generation = finish_render
+        .find("item.generation == render.generation")
+        .expect("stale generations are dropped");
+    let tile = finish_render
+        .find("if let Some(ticket) = render.tile {")
+        .expect("tiles are routed");
+    assert!(preview < generation && generation < tile);
     let finish = body("finish_lane_preview");
     for kept in ["item.pixels", "set_poster", "item.size", "item.video"] {
         assert!(!finish.contains(kept), "a preview touched {kept}");
