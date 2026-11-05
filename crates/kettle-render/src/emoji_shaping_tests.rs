@@ -82,6 +82,144 @@ fn emoji_sizing_respects_cluster_width() {
     );
 }
 
+fn assert_ligature_ink_is_preserved(text: &str) {
+    use super::batching::{GlyphPositioning, cell_locked_glyph_offset, emit_positioned_glyphs};
+    use super::glyphpipe::GlyphSlot;
+
+    let mut fonts = fixture_fonts();
+    let mut swash = SwashCache::new();
+    let attrs = Attrs::new().family(Family::Name(kettle_config::font::FAMILY));
+    let origin = (100.0, 50.0);
+    let cell_width = 9.6;
+    let mut failures = Vec::new();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        for clustered in [false, true] {
+            let mut buf = buffer(&mut fonts, text, &attrs);
+            if clustered {
+                let mut spans = AttrsList::new(&attrs);
+                for column in 0..text.len() {
+                    let cell = GridGlyphCell {
+                        column,
+                        width: 1,
+                        clustered: true,
+                        text_presentation: false,
+                        single_image: false,
+                    };
+                    spans.add_span(column..column + 1, &attrs.clone().metadata(cell.metadata()));
+                }
+                buf.lines[0].set_attrs_list(spans);
+                buf.shape_until_scroll(&mut fonts, false);
+            }
+            let positioning = match mode {
+                TextRendererMode::Grid => GlyphPositioning::Grid(cell_width),
+                TextRendererMode::Legacy if clustered => GlyphPositioning::GraphemeRows(cell_width),
+                TextRendererMode::Legacy => GlyphPositioning::Continuous,
+            };
+            let run = buf.layout_runs().next().unwrap();
+            let mut expected = Vec::new();
+            let mut empty_images = 0;
+            let mut left_overhangs = 0;
+            for glyph in run.glyphs {
+                assert_ne!(glyph.glyph_id, 0, "fixture must use real bundled glyphs");
+                let column = GridGlyphCell::from_metadata(glyph.metadata)
+                    .map_or(glyph.start, |cell| cell.column);
+                let off_x = if matches!(positioning, GlyphPositioning::Continuous) {
+                    origin.0
+                } else {
+                    cell_locked_glyph_offset(origin.0 + column as f32 * cell_width, glyph, glyph.x)
+                };
+                let physical = glyph.physical((off_x, origin.1), 1.0);
+                let image = swash.get_image(&mut fonts, physical.cache_key).as_ref();
+                let Some(image) = image.filter(|i| i.placement.width > 0 && i.placement.height > 0)
+                else {
+                    empty_images += 1;
+                    continue;
+                };
+                left_overhangs += usize::from(image.placement.left < 0);
+                expected.push((
+                    [
+                        (physical.x + image.placement.left) as f32,
+                        run.line_y.round() + (physical.y - image.placement.top) as f32,
+                    ],
+                    [image.placement.width as f32, image.placement.height as f32],
+                ));
+            }
+            assert!(
+                empty_images > 0 && left_overhangs > 0,
+                "{text:?}, {mode:?}, 2027={clustered}: fixture needs a calt spacer and left overhang"
+            );
+            let mut instances = Vec::new();
+            emit_positioned_glyphs(
+                &mut instances,
+                &buf,
+                origin,
+                cell_width,
+                positioning,
+                GColor::rgb(255, 255, 255),
+                &mut Vec::new(),
+                |key| {
+                    let image = swash.get_image(&mut fonts, key).as_ref()?;
+                    (image.placement.width > 0 && image.placement.height > 0).then_some(GlyphSlot {
+                        kind: 1,
+                        atlas_x: 0.0,
+                        atlas_y: 0.0,
+                        w: image.placement.width as f32,
+                        h: image.placement.height as f32,
+                        left: image.placement.left,
+                        top: image.placement.top,
+                    })
+                },
+            );
+            if instances.len() != expected.len() {
+                failures.push(format!(
+                    "{mode:?}, 2027={clustered}: emitted {} of {} non-empty images",
+                    instances.len(),
+                    expected.len(),
+                ));
+            }
+            for (index, (instance, (pos, size))) in instances.iter().zip(&expected).enumerate() {
+                if instance.pos != *pos
+                    || instance.size != *size
+                    || instance.uv != [0.0, 0.0]
+                    || instance.uv_size != *size
+                {
+                    failures.push(format!(
+                        "{mode:?}, 2027={clustered}, image {index}: expected pos={pos:?}, size={size:?}; \
+                         got pos={:?}, size={:?}, uv={:?}, uv_size={:?}",
+                        instance.pos, instance.size, instance.uv, instance.uv_size,
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{text:?}:\n{}", failures.join("\n"));
+}
+
+#[test]
+fn programming_ligature_double_slash_preserves_shaped_ink() {
+    assert_ligature_ink_is_preserved("a//b");
+}
+
+#[test]
+fn programming_ligature_arrow_preserves_shaped_ink() {
+    assert_ligature_ink_is_preserved("->");
+}
+
+#[test]
+fn programming_ligature_not_equal_preserves_shaped_ink() {
+    assert_ligature_ink_is_preserved("!=");
+}
+
+#[test]
+fn programming_ligature_triple_equal_preserves_shaped_ink() {
+    assert_ligature_ink_is_preserved("===");
+}
+
+#[test]
+fn programming_ligature_url_preserves_shaped_ink() {
+    assert_ligature_ink_is_preserved("https://x");
+}
+
 #[test]
 fn emoji_combining_mark_keeps_one_shared_transform_in_all_positioning_modes() {
     use super::batching::{GlyphPositioning, cell_locked_glyph_offset, emit_positioned_glyphs};

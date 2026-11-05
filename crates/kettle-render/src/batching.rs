@@ -582,11 +582,14 @@ pub(crate) fn emit_positioned_glyphs(
                 .checked_sub(1)?;
             (glyph.start < emoji_clusters[index].end).then_some(index)
         };
-        for glyphs in run
-            .glyphs
-            .chunk_by(|a, b| a.metadata == b.metadata && emoji_cluster(a) == emoji_cluster(b))
-        {
+        // Only emoji images share fitting and cell clipping. Text ligatures
+        // can extend left into preceding cells and must keep their full ink.
+        for glyphs in run.glyphs.chunk_by(|a, b| {
+            a.metadata == b.metadata
+                && emoji_cluster(a).is_some_and(|index| emoji_cluster(b) == Some(index))
+        }) {
             let first = &glyphs[0];
+            let cluster = emoji_cluster(first);
             let start = out.len();
             for glyph in glyphs {
                 let col = super::geometry::glyph_grid_col_with_metadata(
@@ -631,7 +634,7 @@ pub(crate) fn emit_positioned_glyphs(
                 });
             }
             let cell = super::geometry::GridGlyphCell::from_metadata(first.metadata);
-            if let Some(index) = emoji_cluster(first)
+            if let Some(index) = cluster
                 && glyphs.iter().all(|glyph| glyph.glyph_id != 0)
             {
                 let text = &run.text[emoji_clusters[index].clone()];
@@ -662,7 +665,8 @@ pub(crate) fn emit_positioned_glyphs(
                     ),
                 );
             }
-            if let Some(cw) = cell_w
+            if cluster.is_some()
+                && let Some(cw) = cell_w
                 && let Some(cell) = cell
                 && cell.clustered
             {
