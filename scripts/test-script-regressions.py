@@ -165,6 +165,13 @@ class ScriptRegressionTests(unittest.TestCase):
             continuous.extend([before, (key + 250_000_000, key + 260_000_000, position + 500)])
             paused.extend([before, (key + 250_000_000, key + 260_000_000, position)])
         avsync.require_seek_rewinds(good, keys)
+        late = []
+        for index, key in enumerate(keys):
+            position = 12000 + index * 9000
+            late.extend([(key - 250_000_000, key - 240_000_000, position),
+                         (key + 5_000_000, key + 6_000_000, position + 255),
+                         (key + 250_000_000, key + 260_000_000, position - 4500)])
+        avsync.require_seek_rewinds(late, keys)
         for observations in (continuous, paused, good[:-1]):
             with self.subTest(observations=observations):
                 with self.assertRaisesRegex(RuntimeError, 'rewind'):

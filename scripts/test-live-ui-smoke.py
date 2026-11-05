@@ -126,10 +126,14 @@ class LiveUiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             outside = Path(directory) / 'outside'
             outside.mkdir()
-            subprocess.run(['git', 'init', '-q', str(outside)], check=True)
-            subprocess.run(['git', '-C', str(outside), 'config', 'user.name', 'Original'], check=True)
+            # The setup must not inherit Git overrides either, or it would write
+            # to whatever repository they name before the check under test runs.
+            clean = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+            subprocess.run(['git', 'init', '-q', str(outside)], check=True, env=clean)
+            subprocess.run(['git', '-C', str(outside), 'config', 'user.name', 'Original'],
+                           check=True, env=clean)
             (outside / 'sentinel').write_bytes(b'private content')
-            subprocess.run(['git', '-C', str(outside), 'add', 'sentinel'], check=True)
+            subprocess.run(['git', '-C', str(outside), 'add', 'sentinel'], check=True, env=clean)
             before = {path: path.read_bytes() for path in [outside / '.git' / 'config', outside / '.git' / 'index']}
             fixture = Path(directory) / 'sandbox'
             command = checker.lazyvcs_repo_setup_command(str(fixture), 'FIXTURE123', windows=windows)

@@ -521,13 +521,18 @@ def require_seek_rewinds(observations: Sequence[Tuple[int, int, int]], keys: Seq
     for index, key in enumerate(keys, 1):
         before = [row for row in observations if key - 2_000_000_000 <= row[1] <= key]
         after = [row for row in observations if key <= row[0] <= key + 2_000_000_000]
-        if before and after:
-            a, b = before[-1], after[0]
-            elapsed_ms = ((b[0] + b[1]) - (a[0] + a[1])) / 2e6
-            rewind_ms = a[2] + elapsed_ms - b[2]
-            if b[2] < a[2] - 3000 and 4000 <= rewind_ms <= 6000:
-                continue
+        if before and any(rewound(before[-1], b) for b in after):
+            # The key's timestamp is taken before its event is posted, so the
+            # first samples after it can still show the old position.
+            continue
         raise RuntimeError(f"native seek {index} has no observed five-second rewind")
+
+
+def rewound(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> bool:
+    """Whether sample `b` sits about five seconds behind where `a` would have played to."""
+    elapsed_ms = ((b[0] + b[1]) - (a[0] + a[1])) / 2e6
+    rewind_ms = a[2] + elapsed_ms - b[2]
+    return b[2] < a[2] - 3000 and 4000 <= rewind_ms <= 6000
 
 
 def measure(kettle: Path, pid: int, probe: Path, out: Path) -> Dict:
