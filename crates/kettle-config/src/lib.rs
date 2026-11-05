@@ -2147,6 +2147,8 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
     let needle = normalize_key(key);
     let finite_scrollback = needle == "scrollback"
         && Config::parse_text(&candidate_line).scrollback != INFINITE_SCROLLBACK;
+    let enabled_bell =
+        needle == "bell" && Config::parse_text(&candidate_line).bell != BellMode::Off;
     let line_ending = preferred_line_ending(existing);
     let mut out = String::with_capacity(existing.len() + candidate_line.len() + 2);
     let mut replaced = false;
@@ -2161,6 +2163,12 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
         if section.applies()
             && finite_scrollback
             && parse_line_key(line).is_some_and(|key| normalize_key(key) == "scrollback_infinite")
+        {
+            continue;
+        }
+        if section.applies()
+            && enabled_bell
+            && parse_line_key(line).is_some_and(|key| normalize_key(key) == "force_no_bell")
         {
             continue;
         }
@@ -2227,7 +2235,7 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
 /// file doesn't accumulate stale duplicates for a re-rebound chord.
 pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Result<PathBuf> {
     let edit = ConfigEdit::begin(path)?;
-    let out = with_keybind(&edit.document.text, trigger, action)?;
+    let out = with_keybinds(&edit.document.text, &[(trigger, action)])?;
     edit.commit(&out)
 }
 
@@ -2241,26 +2249,26 @@ pub fn rebind_keybind(
     action: &str,
 ) -> std::io::Result<PathBuf> {
     let edit = ConfigEdit::begin(path)?;
-    let mut out = edit.document.text.clone();
-    for old in stale {
-        out = with_keybind(&out, old, "unbind")?;
-    }
-    out = with_keybind(&out, trigger, action)?;
+    let mut bindings: Vec<(&str, &str)> =
+        stale.iter().map(|old| (old.as_str(), "unbind")).collect();
+    bindings.push((trigger, action));
+    let out = with_keybinds(&edit.document.text, &bindings)?;
     edit.commit(&out)
 }
 
-/// `existing` with `keybind = <trigger>=<action>` added and any earlier
-/// binding of the same chord dropped.
-fn with_keybind(existing: &str, trigger: &str, action: &str) -> std::io::Result<String> {
-    validate_single_line("keybind trigger", trigger)?;
-    validate_single_line("keybind action", action)?;
-    let candidate_line = format!("keybind = {trigger}={action}\n");
-    if !Config::detect_malformed_values(&candidate_line).is_empty() {
+/// `existing` with the bindings added and any earlier bindings of the same
+/// chords dropped. The last binding of each chord wins.
+fn with_keybinds(existing: &str, bindings: &[(&str, &str)]) -> std::io::Result<String> {
+    let mut candidates = String::new();
+    for (trigger, action) in bindings {
+        validate_single_line("keybind trigger", trigger)?;
+        validate_single_line("keybind action", action)?;
+        candidates.push_str(&format!("keybind = {trigger}={action}\n"));
+    }
+    if !Config::detect_malformed_values(&candidates).is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!(
-                "refusing to persist `keybind = {trigger}={action}`: it is not a valid key binding"
-            ),
+            "refusing to persist invalid key bindings",
         ));
     }
     // Drop any existing `keybind` line whose trigger is the SAME chord, so a
@@ -2270,9 +2278,18 @@ fn with_keybind(existing: &str, trigger: &str, action: &str) -> std::io::Result<
     // That way the editor's canonical `Ctrl+Equal` and a hand-written `ctrl+=`
     // count as the same trigger, and a literal `=` chord (`ctrl+==action`)
     // de-dups correctly.
-    let want_trig = keybinds::parse_trigger(trigger.trim());
+    let mut wanted = HashSet::new();
+    let mut unique = Vec::new();
+    for &(trigger, action) in bindings.iter().rev() {
+        if let Some(parsed) = keybinds::parse_trigger(trigger.trim())
+            && !wanted.insert(parsed)
+        {
+            continue;
+        }
+        unique.push((trigger, action));
+    }
     let line_ending = preferred_line_ending(existing);
-    let mut out = String::with_capacity(existing.len() + candidate_line.len() + 2);
+    let mut out = String::with_capacity(existing.len() + candidates.len() + 2);
     let mut section = parse::Section::default();
     // The end of the last line Kettle reads. A binding that has to go before
     // an ignored tail goes here: any earlier spot would let a later Terminator
@@ -2287,12 +2304,11 @@ fn with_keybind(existing: &str, trigger: &str, action: &str) -> std::io::Result<
         }
         let drop = section.applies()
             && parse_line_key(line).is_some_and(|k| normalize_key(k) == "keybind")
-            && want_trig.is_some()
             && line
                 .split_once('=')
                 .and_then(|(_, v)| v.rsplit_once('='))
                 .and_then(|(t, _)| keybinds::parse_trigger(t.trim()))
-                == want_trig;
+                .is_some_and(|trigger| wanted.contains(&trigger));
         if !drop {
             out.push_str(segment);
             if section.applies() && parse_line_key(line).is_some() {
@@ -2300,23 +2316,21 @@ fn with_keybind(existing: &str, trigger: &str, action: &str) -> std::io::Result<
             }
         }
     }
-    if section.applies() {
-        ensure_blank_line_before_append(&mut out, line_ending);
-        out.push_str(&format!("keybind = {trigger}={action}"));
-        out.push_str(line_ending);
+    let tail = if section.applies() {
+        String::new()
     } else {
-        let tail = out.split_off(applied_end);
-        ensure_blank_line_before_append(&mut out, line_ending);
+        out.split_off(applied_end)
+    };
+    ensure_blank_line_before_append(&mut out, line_ending);
+    for (trigger, action) in unique.into_iter().rev() {
         out.push_str(&format!("keybind = {trigger}={action}{line_ending}"));
-        out.push_str(&tail);
     }
+    out.push_str(&tail);
     if Config::detect_malformed_values(&out).len() > Config::detect_malformed_values(existing).len()
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!(
-                "refusing to persist `keybind = {trigger}={action}`: it would introduce a malformed config value"
-            ),
+            "refusing to persist key bindings: it would introduce a malformed config value",
         ));
     }
     Ok(out)
@@ -2382,6 +2396,8 @@ struct ConfigDocument {
 }
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+const MAX_PROFILE_ENTRIES: usize = 4096;
+const MAX_PROFILES: usize = 1024;
 
 fn invalid_config_file(path: &Path) -> std::io::Error {
     std::io::Error::new(
@@ -3331,24 +3347,43 @@ impl Config {
         let Ok(rd) = std::fs::read_dir(&profiles_dir) else {
             return Vec::new();
         };
-        let mut names: Vec<String> = rd
-            .flatten()
-            .filter_map(|e| {
-                let p = e.path();
-                if !p.is_file() {
-                    return None;
-                }
-                let name = p.file_name()?.to_str()?;
-                name.strip_suffix(".config")
-                    .filter(|stem| {
-                        !stem.is_empty()
-                            && stem
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-                    })
-                    .map(str::to_string)
-            })
-            .collect();
+        let mut names = Vec::new();
+        for (scanned, entry) in rd.enumerate() {
+            if scanned == MAX_PROFILE_ENTRIES {
+                log::warn!(
+                    "profile listing refused: {} exceeds the {MAX_PROFILE_ENTRIES}-entry scan cap",
+                    profiles_dir.display()
+                );
+                return Vec::new();
+            }
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let file_name = entry.file_name();
+            let Some(stem) = file_name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".config"))
+                .filter(|stem| {
+                    !stem.is_empty()
+                        && stem
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                })
+            else {
+                continue;
+            };
+            if !entry.path().is_file() {
+                continue;
+            }
+            if names.len() == MAX_PROFILES {
+                log::warn!(
+                    "profile listing refused: {} exceeds the {MAX_PROFILES}-profile cap",
+                    profiles_dir.display()
+                );
+                return Vec::new();
+            }
+            names.push(stem.to_string());
+        }
         sort_profile_names(&mut names);
         names
     }
@@ -11406,6 +11441,51 @@ split_horiz = <Control><Shift>j
     }
 
     #[test]
+    fn listed_profiles_rejects_oversized_directories() {
+        const CHILD: &str = "KETTLE_TEST_PROFILE_BOUNDS_CHILD";
+        if let Some(expected) = std::env::var_os(CHILD) {
+            let expected: usize = expected.to_str().unwrap().parse().unwrap();
+            assert_eq!(
+                Config::list_profiles().len(),
+                expected,
+                "profile listing must reject overflow instead of returning a partial list"
+            );
+            return;
+        }
+        for (entries, profile_files, expected) in [(1024, true, 1024), (4096, false, 1)] {
+            let dir = tempdir_for("profile-listing-bounds");
+            let profiles = dir.join("kettle").join("profiles");
+            std::fs::create_dir_all(&profiles).unwrap();
+            std::fs::write(profiles.join("work.config"), "").unwrap();
+            let extension = if profile_files { "config" } else { "txt" };
+            for i in 1..entries {
+                std::fs::write(profiles.join(format!("p{i}.{extension}")), "").unwrap();
+            }
+            for (overflow, expected) in [(false, expected), (true, 0)] {
+                if overflow {
+                    std::fs::write(profiles.join(format!("overflow.{extension}")), "").unwrap();
+                }
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "config_tests::listed_profiles_rejects_oversized_directories",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, expected.to_string())
+                    .env("XDG_CONFIG_HOME", dir.path())
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn listed_profiles_round_trip_to_their_files() {
         const CHILD: &str = "KETTLE_TEST_PROFILE_LISTING_CHILD";
         if std::env::var_os(CHILD).is_some() {
@@ -11806,6 +11886,40 @@ split_horiz = <Control><Shift>j
             if original.contains("[[work]]") {
                 assert!(text.contains("[[work]]\npalette = Dracula\n"));
             }
+        }
+    }
+
+    #[test]
+    fn persist_enabled_bell_clears_force_no_bell_override() {
+        let dir = tempdir_for("bell-force-override");
+        let path = dir.join("config");
+        for original in [
+            "force-no-bell = true\nbell = off\n",
+            "bell = off\nforce_no_bell = True\nforce-no-bell = true\n",
+            "[profiles]\n[[default]]\nforce_no_bell = True\n\
+             [[work]]\nforce-no-bell = true\n",
+        ] {
+            for (value, expected) in [
+                ("visual", BellMode::Visual),
+                ("attention", BellMode::Attention),
+                ("both", BellMode::Both),
+            ] {
+                std::fs::write(&path, original).unwrap();
+                super::persist_config_toggle(&path, "bell", value).unwrap();
+                let cfg = Config::load_from(&path);
+                assert_eq!(cfg.bell, expected, "saved bell mode must survive reload");
+                assert!(!cfg.force_no_bell);
+                if original.contains("[[work]]") {
+                    assert!(
+                        std::fs::read_to_string(&path)
+                            .unwrap()
+                            .ends_with("[[work]]\nforce-no-bell = true\n")
+                    );
+                }
+            }
+            std::fs::write(&path, original).unwrap();
+            super::persist_config_toggle(&path, "bell", "off").unwrap();
+            assert!(Config::load_from(&path).force_no_bell);
         }
     }
 
@@ -12472,6 +12586,90 @@ split_horiz = <Control><Shift>j
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rebind_keybind_batches_large_action_binding_sets() {
+        let dir = tempdir_for("keybind-large-rebind");
+        let path = dir.join("config");
+        let mut original = "# unrelated settings\n".repeat(5000);
+        let stale: Vec<String> = (0..2048)
+            .map(|i| format!("Ctrl+{}", char::from_u32(0x4e00 + i).unwrap()))
+            .collect();
+        for chord in &stale {
+            original.push_str(&format!("keybind = {chord}=new_tab\n"));
+        }
+        assert!(Config::detect_malformed_values(&original).is_empty());
+        std::fs::write(&path, &original).unwrap();
+        let start = std::time::Instant::now();
+        super::rebind_keybind(&path, &stale, "Ctrl+Alt+R", "new_tab").unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "rebinding a bounded config must finish within 5 seconds, took {elapsed:?}"
+        );
+        let cfg = Config::load_from(&path);
+        for chord in &stale {
+            assert!(
+                !cfg.keybinds
+                    .contains_key(&keybinds::parse_trigger(chord).unwrap())
+            );
+        }
+        assert_eq!(
+            cfg.keybinds
+                .get(&keybinds::parse_trigger("Ctrl+Alt+R").unwrap()),
+            Some(&Action::NewTab)
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("bak")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn rebind_keybind_preserves_sections_and_last_semantic_binding() {
+        let dir = tempdir_for("keybind-batch-sections");
+        let path = dir.join("config");
+        for ending in ["\n", "\r\n"] {
+            let ignored = format!("[layouts]{ending}keybind = Ctrl+Alt+R=copy{ending}");
+            let original = format!(
+                "# keep{ending}keybind = Ctrl+Alt+R=split_right{ending}\
+                 [keybindings]{ending}new_tab = <Control>equal{ending}{ignored}"
+            );
+            std::fs::write(&path, &original).unwrap();
+            super::rebind_keybind(
+                &path,
+                &["Ctrl+Equal".into(), "ctrl+=".into(), "Ctrl+Alt+R".into()],
+                "ctrl+=",
+                "new_tab",
+            )
+            .unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(text.ends_with(&ignored), "{text:?}");
+            assert!(text.starts_with(&format!("# keep{ending}")));
+            let entries = parse::parse(&text);
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.key == "keybind")
+                    .count(),
+                2
+            );
+            let cfg = Config::load_from(&path);
+            assert_eq!(
+                cfg.keybinds
+                    .get(&keybinds::parse_trigger("Ctrl+Equal").unwrap()),
+                Some(&Action::NewTab)
+            );
+            assert!(
+                !cfg.keybinds
+                    .contains_key(&keybinds::parse_trigger("Ctrl+Alt+R").unwrap())
+            );
+            let error = super::rebind_keybind(&path, &["Ctrl+Equal".into()], "Ctrl+R", "invalid")
+                .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        }
     }
 
     #[test]
