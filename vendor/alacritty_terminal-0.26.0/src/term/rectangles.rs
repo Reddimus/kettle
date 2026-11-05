@@ -175,7 +175,10 @@ impl<T: EventListener> Term<T> {
             let wrap = self.grid[line][Column(self.columns() - 1)]
                 .flags
                 .contains(Flags::WRAPLINE);
-            self.erase_cells(line, area.columns.start, area.columns.end);
+            let erased = self.erase_cells(line, area.columns.start, area.columns.end);
+            for cell in &mut self.grid[line][erased] {
+                cell.flags.insert(Flags::DRAWN);
+            }
             self.grid[line][area.columns.clone()].fill(cell.clone());
             let last = Column(self.columns() - 1);
             self.grid[line][last].flags.set(Flags::WRAPLINE, wrap);
@@ -287,11 +290,14 @@ impl<T: EventListener> Term<T> {
             self.clear_linked_leading_wide_spacer(line, destination.columns.start, false);
             let last = Column(self.columns() - 1);
             let wrap = self.grid[line][last].flags.contains(Flags::WRAPLINE);
-            self.erase_cells(
+            let erased = self.erase_cells(
                 line,
                 destination.columns.start,
                 destination.columns.start + width,
             );
+            for cell in &mut self.grid[line][erased] {
+                cell.flags.insert(Flags::DRAWN);
+            }
             self.grid[line][destination.columns.start..destination.columns.start + width]
                 .clone_from_slice(cells);
             self.grid[line][last].flags.set(Flags::WRAPLINE, wrap);

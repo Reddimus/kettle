@@ -2,6 +2,9 @@ use super::*;
 
 impl<T> Term<T> {
     pub(super) fn clear_partial_wraps(&mut self) {
+        if !mem::take(&mut self.may_have_partial_wraps) {
+            return;
+        }
         for grid in [&mut self.grid, &mut self.inactive_grid] {
             for line in grid.topmost_line().0..grid.screen_lines() as i32 {
                 for cell in &mut grid[Line(line)][..] {

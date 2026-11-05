@@ -364,6 +364,44 @@ fn explicit_blank_operations_and_alignment_cells_accept_stream_attributes() {
 }
 
 #[test]
+fn rectangle_fill_wide_erasure_accepts_stream_attributes() {
+    for destination in [1, 2] {
+        let (mut term, mut parser) = terminal("界X");
+        parser.advance(
+            &mut term,
+            format!("\x1b[90;1;{destination};1;{destination}$x\x1b[1;1;1;2;7$r").as_bytes(),
+        );
+        for column in 0..2 {
+            let cell = &term.grid[Line(0)][Column(column)];
+            assert_eq!(cell.c, if column + 1 == destination { 'Z' } else { ' ' });
+            assert!(
+                cell.flags.contains(Flags::INVERSE),
+                "destination {destination}, column {column}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rectangle_copy_wide_erasure_accepts_stream_attributes() {
+    for destination in [1, 2] {
+        let (mut term, mut parser) = terminal("界X");
+        parser.advance(
+            &mut term,
+            format!("\x1b[1;3;1;3;1;1;{destination};1$v\x1b[1;1;1;2;7$r").as_bytes(),
+        );
+        for column in 0..2 {
+            let cell = &term.grid[Line(0)][Column(column)];
+            assert_eq!(cell.c, if column + 1 == destination { 'X' } else { ' ' });
+            assert!(
+                cell.flags.contains(Flags::INVERSE),
+                "destination {destination}, column {column}"
+            );
+        }
+    }
+}
+
+#[test]
 fn interior_wide_erasure_marks_both_erased_cells_for_stream_attributes() {
     for protection in ["", "\x1bV\x1bW"] {
         for column in [1, 2] {

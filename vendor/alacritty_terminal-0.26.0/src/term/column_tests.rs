@@ -20,6 +20,59 @@ fn row(term: &Term<VoidListener>, line: i32) -> String {
 }
 
 #[test]
+fn height_resize_does_not_dirty_unannotated_history() {
+    let mut term = Term::new(Config::default(), &TermSize::new(200, 4), VoidListener);
+    let mut parser: ansi::Processor = ansi::Processor::new();
+    for _ in 0..100 {
+        parser.advance(&mut term, b"x\r\n");
+    }
+    let oldest = term.grid.topmost_line();
+    assert_eq!(term.grid[oldest].occ, 1);
+
+    term.resize(TermSize::new(200, 5));
+
+    assert_eq!(
+        term.grid[term.grid.topmost_line()].occ,
+        1,
+        "untouched history was dirtied"
+    );
+}
+
+#[test]
+fn resize_clears_partial_wraps_in_inactive_history_and_mutable_grid() {
+    let (mut term, mut parser) = terminal();
+    parser.advance(
+        &mut term,
+        b"\x1b[r\x1b[1;3HABCDE\x1b[?69l\x1b[4;1H\n\x1b[?47h",
+    );
+    assert!(
+        term.inactive_grid[Line(-1)][..]
+            .iter()
+            .any(|cell| cell.flags.contains(Flags::PARTIAL_WRAPLINE))
+    );
+    term.resize(TermSize::new(8, 5));
+    for grid in [&term.grid, &term.inactive_grid] {
+        for line in grid.topmost_line().0..grid.screen_lines() as i32 {
+            assert!(
+                grid[Line(line)][..]
+                    .iter()
+                    .all(|cell| !cell.flags.contains(Flags::PARTIAL_WRAPLINE))
+            );
+        }
+    }
+
+    term.grid_mut()[Line(0)][Column(2)]
+        .flags
+        .insert(Flags::PARTIAL_WRAPLINE);
+    term.resize(TermSize::new(8, 6));
+    assert!(
+        !term.grid[Line(0)][Column(2)]
+            .flags
+            .contains(Flags::PARTIAL_WRAPLINE)
+    );
+}
+
+#[test]
 fn column_insert_and_delete_affect_only_the_scroll_rectangle() {
     for (command, expected) in [
         ("\x1b[2'}", ["ijk  lop", "qrs  twx"]),

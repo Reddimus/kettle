@@ -389,6 +389,7 @@ pub struct Term<T> {
     scroll_region: Range<Line>,
     protection_mode: ProtectionMode,
     horizontal_margins: Range<Column>,
+    may_have_partial_wraps: bool,
     conformance_level: u8,
     input_reset_generation: u64,
     keyboard_locked: bool,
@@ -403,7 +404,7 @@ pub struct Term<T> {
     grapheme_template: Cell,
     last_grapheme: Vec<char>,
     attribute_extent: u8,
-    saved_private_modes: Vec<(u16, bool)>,
+    saved_private_modes: Vec<(u16, Option<bool>)>,
 
     /// Modified terminal colors.
     colors: Colors,
@@ -745,6 +746,7 @@ impl<T> Term<T> {
             scroll_region,
             protection_mode: ProtectionMode::Off,
             horizontal_margins: Column(0)..Column(grid.columns()),
+            may_have_partial_wraps: false,
             conformance_level: 5,
             input_reset_generation: 0,
             keyboard_locked: false,
@@ -1078,6 +1080,8 @@ impl<T> Term<T> {
     /// Mutable access to the raw grid data structure.
     pub fn grid_mut(&mut self) -> &mut Grid<Cell> {
         self.stop_grapheme();
+        // Callers can insert partial-wrap flags through the raw grid.
+        self.may_have_partial_wraps = true;
         &mut self.grid
     }
 
@@ -1681,6 +1685,7 @@ impl<T> Term<T> {
         if margins.start == 0 && margins.end == self.columns() {
             self.grid.cursor_cell().flags.insert(Flags::WRAPLINE);
         } else {
+            self.may_have_partial_wraps = true;
             let line = self.grid.cursor.point.line;
             self.grid[line][margins.end - 1]
                 .flags
@@ -1867,9 +1872,9 @@ impl<T> Term<T> {
         }
     }
 
-    fn erase_cells(&mut self, line: Line, mut start: Column, mut end: Column) {
+    fn erase_cells(&mut self, line: Line, mut start: Column, mut end: Column) -> Range<Column> {
         if start >= end {
-            return;
+            return start..start;
         }
 
         let columns = self.columns();
@@ -1886,6 +1891,7 @@ impl<T> Term<T> {
         for cell in &mut row[start..end] {
             *cell = bg.into();
         }
+        start..end
     }
 
     /// Write `c` to the cell at the cursor position.
@@ -2257,7 +2263,15 @@ impl<T: EventListener> Term<T> {
             };
             let retained = retained_tail > 0;
             if retained && anchor.has_cell {
-                if c == '\u{fe0f}' && anchor.width == 1 {
+                if c == '\u{fe0f}'
+                    && anchor.width == 1
+                    && self
+                        .last_grapheme
+                        .iter()
+                        .copied()
+                        .find(|&c| grapheme::is_base(c))
+                        .is_some_and(grapheme::emoji_variation)
+                {
                     self.widen_grapheme(anchor);
                 } else {
                     if full {
@@ -3853,9 +3867,16 @@ impl<T: EventListener> Handler for Term<T> {
             return;
         }
         let state = match self.private_mode_state(mode) {
-            ModeState::Set => true,
-            ModeState::Reset => false,
-            ModeState::NotSupported | ModeState::PermanentlySet | ModeState::PermanentlyReset => return,
+            ModeState::Set => Some(true),
+            ModeState::Reset => Some(false),
+            ModeState::NotSupported | ModeState::PermanentlySet | ModeState::PermanentlyReset => {
+                return;
+            }
+        };
+        let state = if mode == PrivateMode::Unknown(41) {
+            self.morefix
+        } else {
+            state
         };
         if let Some(saved) = self
             .saved_private_modes
@@ -3876,9 +3897,10 @@ impl<T: EventListener> Handler for Term<T> {
             .find(|saved| saved.0 == mode.raw())
             .copied();
         match saved {
-            Some((_, true)) => self.set_private_mode(mode),
-            Some((_, false)) => self.unset_private_mode(mode),
-            None => (),
+            Some((41, state)) => self.morefix = state,
+            Some((_, Some(true))) => self.set_private_mode(mode),
+            Some((_, Some(false))) => self.unset_private_mode(mode),
+            _ => (),
         }
     }
 
@@ -4566,6 +4588,62 @@ mod tests {
         );
         assert!(term.mode.contains(TermMode::APP_CURSOR));
         assert!(term.reverse_wrap && term.extended_reverse_wrap);
+    }
+
+    #[test]
+    fn grapheme_vs16_only_widens_emoji_sequences() {
+        for (base, width) in [('A', 1), ('\u{e9}', 1), ('\u{2764}', 2)] {
+            let mut term = Term::new(Config::default(), &TermSize::new(20, 6), VoidListener);
+            let mut parser: Processor = Processor::new();
+            parser.advance(&mut term, format!("\x1b[?2027h{base}\u{fe0f}B").as_bytes());
+            assert_eq!(term.grid[Line(0)][Column(width)].c, 'B', "base {base:?}");
+            assert_eq!(
+                term.grid[Line(0)][Column(0)].zerowidth(),
+                Some(&['\u{fe0f}'][..])
+            );
+        }
+    }
+
+    #[test]
+    fn grapheme_nonemoji_vs16_does_not_scroll_at_right_edge() {
+        let mut term = Term::new(Config::default(), &TermSize::new(20, 6), VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, "\x1b[?2027h\x1b[6;20HA\u{fe0f}".as_bytes());
+        assert_eq!(term.grid.history_size(), 0, "VS16 scrolled a nonemoji base");
+        assert_eq!(term.grid.cursor.point, Point::new(Line(5), Column(19)));
+        assert!(term.grid.cursor.input_needs_wrap);
+        assert_eq!(term.grid[Line(5)][Column(19)].c, 'A');
+        assert!(
+            !term.grid[Line(5)][Column(19)]
+                .flags
+                .contains(Flags::WIDE_CHAR)
+        );
+        parser.advance(&mut term, b"B");
+        assert_eq!(term.grid.history_size(), 1);
+        assert_eq!(term.grid[Line(4)][Column(19)].c, 'A');
+        assert_eq!(term.grid[Line(5)][Column(0)].c, 'B');
+    }
+
+    #[test]
+    fn morefix_save_restore_preserves_negotiation_state() {
+        for (initial, expected) in [
+            ("", Point::new(Line(1), Column(0))),
+            ("\x1b[?41h", Point::new(Line(1), Column(8))),
+            ("\x1b[?41l", Point::new(Line(0), Column(19))),
+        ] {
+            for change in ["", "\x1b[?41h", "\x1b[?41l"] {
+                let mut term = Term::new(Config::default(), &TermSize::new(20, 6), VoidListener);
+                let mut parser: Processor = Processor::new();
+                parser.advance(
+                    &mut term,
+                    format!("{initial}\x1b[?41s{change}\x1b[?41rabcdefghijklmnopqrst\t").as_bytes(),
+                );
+                assert_eq!(
+                    term.grid.cursor.point, expected,
+                    "initial {initial:?}, change {change:?}"
+                );
+            }
+        }
     }
 
     #[test]
