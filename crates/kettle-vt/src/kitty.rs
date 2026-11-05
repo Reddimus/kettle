@@ -2208,56 +2208,73 @@ fn placement_params(kv: &HashMap<String, String>) -> PlacementParams {
 
 /// Inflate a zlib (`o=z`) kitty payload, never allocating more than `cap`
 /// bytes. A decompression bomb — a tiny compressed stream that inflates to
-/// gigabytes — returns `None` instead of OOMing/aborting the process.
+/// gigabytes — returns `InvalidImage` instead of OOMing/aborting the process.
+/// Reservation and allocation failures return `NoSpace`.
 /// The read loop stops at `cap`; one more byte after that proves the stream
 /// is over budget, so we reject it rather than silently truncate.
 fn inflate_bounded_with_budget(
     compressed: &[u8],
     cap: usize,
     budget: &GraphicsBudget,
-) -> Option<(Vec<u8>, GraphicsReservation)> {
+) -> Result<(Vec<u8>, GraphicsReservation), DecodeError> {
     if cap == 0 || cap > budget.limits().image_bytes {
-        return None;
+        return Err(DecodeError::InvalidImage);
     }
-    let mut reservation = budget.reserve_transient_cpu(cap)?;
+    let mut reservation = budget
+        .reserve_transient_cpu(cap)
+        .ok_or(DecodeError::NoSpace)?;
     let mut decoder = flate2::read::ZlibDecoder::new(compressed);
     let mut out = Vec::new();
     let mut chunk = [0u8; 8192];
     while out.len() < cap {
         let remaining = cap - out.len();
         let chunk_len = remaining.min(chunk.len());
-        let n = decoder.read(&mut chunk[..chunk_len]).ok()?;
+        let n = decoder
+            .read(&mut chunk[..chunk_len])
+            .map_err(|_| DecodeError::InvalidImage)?;
         if n == 0 {
             break;
         }
-        let needed = out.len().checked_add(n)?;
+        let needed = out.len().checked_add(n).ok_or(DecodeError::NoSpace)?;
         if needed > out.capacity() {
             // The cap lease covers the new allocation. A moving reallocation
             // also holds the old capacity until the allocator releases it.
             let _moving = if out.capacity() > 0 {
-                Some(budget.reserve_transient_cpu(out.capacity())?)
+                Some(
+                    budget
+                        .reserve_transient_cpu(out.capacity())
+                        .ok_or(DecodeError::NoSpace)?,
+                )
             } else {
                 None
             };
             let capacity = needed.max(out.capacity().saturating_mul(2)).min(cap);
-            out.try_reserve_exact(capacity - out.len()).ok()?;
+            out.try_reserve_exact(capacity - out.len())
+                .map_err(|_| DecodeError::NoSpace)?;
         }
         out.extend_from_slice(&chunk[..n]);
     }
     let mut extra = [0u8; 1];
-    if decoder.read(&mut extra).ok()? != 0 || out.is_empty() {
-        return None;
+    if decoder
+        .read(&mut extra)
+        .map_err(|_| DecodeError::InvalidImage)?
+        != 0
+        || out.is_empty()
+    {
+        return Err(DecodeError::InvalidImage);
     }
     if !reservation.shrink_to(out.capacity()) {
-        return None;
+        return Err(DecodeError::NoSpace);
     }
-    Some((out, reservation))
+    Ok((out, reservation))
 }
 
 #[cfg(test)]
 fn inflate_bounded(compressed: &[u8], cap: u64) -> Option<Vec<u8>> {
     let cap = usize::try_from(cap).ok()?;
-    inflate_bounded_with_budget(compressed, cap, &GraphicsBudget::default()).map(|(v, _)| v)
+    inflate_bounded_with_budget(compressed, cap, &GraphicsBudget::default())
+        .ok()
+        .map(|(v, _)| v)
 }
 
 #[cfg(test)]
@@ -2270,7 +2287,7 @@ fn decode_with_budget(control: &str, b64: &str, budget: &GraphicsBudget) -> Opti
     if b64.len() > budget.limits().transmission_bytes {
         return None;
     }
-    let (raw, reservation) = crate::decode_base64::decode(b64, budget)?;
+    let (raw, reservation) = crate::decode_base64::decode(b64, budget).ok()?;
     decode_raw_with_budget(parse_control(control), raw, reservation, budget).ok()
 }
 
@@ -2283,8 +2300,7 @@ fn decode_status(error: DecodeError) -> CommandStatus {
 
 fn decode_acc_with_budget(acc: Acc, budget: &GraphicsBudget) -> Result<ImageData, DecodeError> {
     let kv = parse_control(&acc.control);
-    let (raw, reservation) = crate::decode_base64::decode_bytes(acc.payload.bytes(), budget)
-        .ok_or(DecodeError::InvalidImage)?;
+    let (raw, reservation) = crate::decode_base64::decode_bytes(acc.payload.bytes(), budget)?;
     // The accumulator owns both payload capacity and its lease. Neither survives
     // into inflation or pixel decoding, including queries and animation frames.
     drop(acc);
@@ -2299,8 +2315,7 @@ fn decode_raw_with_budget(
 ) -> Result<ImageData, DecodeError> {
     let (raw, _raw_reservation) = if kv.get("o").is_some_and(|s| s == "z") {
         let (inflated, reservation) =
-            inflate_bounded_with_budget(&raw, budget.limits().image_bytes, budget)
-                .ok_or(DecodeError::InvalidImage)?;
+            inflate_bounded_with_budget(&raw, budget.limits().image_bytes, budget)?;
         drop(raw);
         drop(raw_reservation);
         if inflated.capacity() == inflated.len() {
@@ -2636,6 +2651,143 @@ mod tests {
         assert_eq!(first.transient_usage().0, held.bytes());
         drop((held, state, other));
         assert_eq!(first.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn base64_upload_pressure_reports_no_space() {
+        assert_upload_pressure_reports_no_space(false, 0);
+    }
+
+    #[test]
+    fn zlib_upload_reservation_pressure_reports_no_space() {
+        // Base64 fits, but the initial 16 KiB inflation lease does not.
+        assert_upload_pressure_reports_no_space(true, 8192);
+    }
+
+    #[test]
+    fn zlib_upload_growth_pressure_reports_no_space() {
+        // The inflation lease fits, but holding the old 8 KiB allocation does not.
+        assert_upload_pressure_reports_no_space(true, 20480);
+    }
+
+    fn assert_upload_pressure_reports_no_space(compressed: bool, headroom: usize) {
+        use std::io::Write;
+        let pixels = vec![7; 16384];
+        let raw = base64::engine::general_purpose::STANDARD.encode(&pixels);
+        let payload = if compressed {
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&pixels).unwrap();
+            base64::engine::general_purpose::STANDARD.encode(encoder.finish().unwrap())
+        } else {
+            raw.clone()
+        };
+        for action in ["t", "f"] {
+            for process_pressure in [false, true] {
+                let budget = GraphicsBudget::isolated(crate::GraphicsLimits {
+                    image_bytes: 16384,
+                    retained_bytes: 32768,
+                    transient_cpu_bytes: 49152,
+                    process_cpu_bytes: if process_pressure { 65536 } else { 131072 },
+                    ..crate::GraphicsLimits::default()
+                })
+                .unwrap();
+                let mut state = KittyState::new(budget.clone());
+                state.feed(&format!("a=t,i=1,f=32,s=128,v=32;{raw}"));
+                assert_eq!(state.image(1).unwrap().rgba.as_slice(), pixels);
+                let control = format!(
+                    "a={action},i={},f=32,s=128,v=32{}",
+                    if action == "t" { 2 } else { 1 },
+                    if compressed { ",o=z" } else { "" },
+                );
+                let result = state
+                    .feed_command(Command::parse(&format!("{control},m=1;{payload}")).unwrap());
+                assert!(matches!(result.completion, CommandCompletion::Partial));
+                let pressure_scope = if process_pressure {
+                    budget.terminal_scope()
+                } else {
+                    budget.clone()
+                };
+                let available = if process_pressure {
+                    budget.limits().process_cpu_bytes - budget.usage().0
+                } else {
+                    budget.limits().transient_cpu_bytes - budget.transient_usage().0
+                };
+                let held = pressure_scope
+                    .reserve_transient_cpu(available - headroom)
+                    .unwrap();
+                let finish = format!("a={action},i={},m=0;", if action == "t" { 2 } else { 1 });
+                let result = state.feed_command(Command::parse(&finish).unwrap());
+                let CommandCompletion::Finished(Some(reply)) = result.completion else {
+                    panic!("upload must finish with a reply");
+                };
+                assert_eq!(
+                    reply.status,
+                    CommandStatus::NoSpace,
+                    "{control}: process pressure={process_pressure}, headroom={headroom}",
+                );
+                assert!(state.image(2).is_none());
+                assert!(state.frames(1).is_empty());
+                assert_eq!(state.image(1).unwrap().rgba.as_slice(), pixels);
+                assert_eq!(budget.in_flight_usage(), (0, 0));
+                drop(held);
+                assert_eq!(budget.transient_usage().0, 0);
+                assert_eq!(budget.usage(), (16384, 16384, 0, 0));
+                state.feed(&format!("{control};{payload}"));
+                let image = if action == "t" {
+                    state.image(2).unwrap()
+                } else {
+                    &state.frames(1)[0].img
+                };
+                assert_eq!(image.rgba.as_slice(), pixels);
+                drop(state);
+                assert_eq!(budget.usage(), (0, 0, 0, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_uploads_report_invalid_image() {
+        use std::io::Write;
+        let compress = |bytes: &[u8]| {
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(bytes).unwrap();
+            base64::engine::general_purpose::STANDARD.encode(encoder.finish().unwrap())
+        };
+        let oversized = compress(&[0; 2048]);
+        let empty = compress(&[]);
+        for action in ["t", "f"] {
+            let budget = GraphicsBudget::isolated(crate::GraphicsLimits {
+                image_bytes: 1024,
+                ..crate::GraphicsLimits::default()
+            })
+            .unwrap();
+            let mut state = KittyState::new(budget.clone());
+            state.feed("a=t,i=1,f=32,s=1,v=1;AQIDBA==");
+            for (compression, payload) in [
+                ("", "AQIDBA=!"),
+                (",o=z", "AQIDBA=="),
+                (",o=z", oversized.as_str()),
+                (",o=z", empty.as_str()),
+            ] {
+                let body = format!("a={action},i=1,f=32,s=1,v=1{compression};{payload}");
+                let result = state.feed_command(Command::parse(&body).unwrap());
+                assert!(matches!(
+                    result.completion,
+                    CommandCompletion::Finished(Some(CommandReply {
+                        status: CommandStatus::InvalidImage,
+                        ..
+                    }))
+                ));
+                assert_eq!(state.image(1).unwrap().rgba.as_slice(), &[1, 2, 3, 4]);
+                assert!(state.frames(1).is_empty());
+                assert_eq!(budget.transient_usage().0, 0);
+                assert_eq!(budget.in_flight_usage(), (0, 0));
+            }
+            drop(state);
+            assert_eq!(budget.usage(), (0, 0, 0, 0));
+        }
     }
 
     #[test]
@@ -2978,8 +3130,9 @@ mod tests {
                 let expected = base64::engine::general_purpose::STANDARD
                     .decode(&clean)
                     .ok();
-                let actual =
-                    crate::decode_base64::decode(&wrapped, &budget).map(|(bytes, _)| bytes);
+                let actual = crate::decode_base64::decode(&wrapped, &budget)
+                    .ok()
+                    .map(|(bytes, _)| bytes);
                 assert_eq!(actual, expected, "{blocks} blocks, tail {tail}");
                 assert_eq!(budget.usage(), (0, 0, 0, 0));
             }

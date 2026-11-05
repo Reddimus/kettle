@@ -29,7 +29,7 @@ pub(crate) fn decode_with_budget(body: &str, budget: &GraphicsBudget) -> Option<
     if !inline {
         return None;
     }
-    let (bytes, _decoded_reservation) = crate::decode_base64::decode(b64, budget)?;
+    let (bytes, _decoded_reservation) = crate::decode_base64::decode(b64, budget).ok()?;
     ImageData::from_encoded_with_budget(&bytes, budget)
 }
 
