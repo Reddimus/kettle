@@ -1,3 +1,6 @@
+settings_field_restore_session = "Restaurar sesión"
+settings_description_field_restore_session = "Automático sigue los ajustes de macOS; no en otros sistemas."
+
 menu_category_close_confirmation = "Confirmación de cierre"
 confirm_paste_heading = "Confirmar pegado"
 confirm_paste_body = "Este pegado puede enviar comandos a la terminal. Vista previa: {preview}"

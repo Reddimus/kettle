@@ -579,7 +579,7 @@ pub(super) fn session_write_target(
 /// Is the default last-session (`session.json`) active for THIS launch?
 /// Drives BOTH the startup restore gate (whether to `load()`) and the
 /// `save_session` gate (whether to `save()` the default session). They MUST
-/// agree. If *load* is opt-in but *save* is not, a fresh, non-opted-in window
+/// agree. If loading is disabled but saving is enabled, a fresh window
 /// silently overwrites the saved layout that `--restore` exists to recover.
 /// Routing both through this one predicate keeps them symmetric.
 /// `--layout NAME` is independent (its own file, explicit intent) and never
@@ -590,8 +590,32 @@ pub(super) fn session_write_target(
 /// tabs, and saving would overwrite them (#575). Both wait until it exits.
 pub(super) fn should_restore_session(
     startup_restore: bool,
-    cfg_restore_session: bool,
+    cfg_restore_session: kettle_config::RestoreSession,
     another_build_running: bool,
 ) -> bool {
-    (startup_restore || cfg_restore_session) && !another_build_running
+    (startup_restore || restore_session_enabled(cfg_restore_session)) && !another_build_running
+}
+
+fn restore_session_enabled(policy: kettle_config::RestoreSession) -> bool {
+    #[cfg(target_os = "macos")]
+    if policy == kettle_config::RestoreSession::Auto {
+        use objc2_foundation_03::{NSBundle, NSGlobalDomain, NSNumber, NSString, NSUserDefaults};
+        let defaults = NSUserDefaults::standardUserDefaults();
+        let key = NSString::from_str("NSQuitAlwaysKeepsWindows");
+        let read = |domain: &NSString| {
+            let values = defaults.persistentDomainForName(domain)?;
+            let value = values.objectForKey(&key)?;
+            value
+                .downcast_ref::<NSNumber>()
+                .map(|n| n.boolValue())
+                .or_else(|| value.downcast_ref::<NSString>().map(|s| s.boolValue()))
+        };
+        let app = NSBundle::mainBundle()
+            .bundleIdentifier()
+            .and_then(|id| read(&id));
+        // SAFETY: Foundation exports this immutable domain name.
+        let global = read(unsafe { NSGlobalDomain });
+        return policy.resolve(true, app, global);
+    }
+    policy.resolve(false, None, None)
 }

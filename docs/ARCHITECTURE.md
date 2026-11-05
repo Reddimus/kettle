@@ -4430,11 +4430,15 @@ process. Labels, splits, new tabs, and ctl all use that one value. The
 session is **multi-window**: `Session` carries `windows: Vec<SWindow {
 tabs, active, geometry }>` and restore reopens *every* window at its
 (monitor-clamped) saved position. Replay on the next
-launch is **opt-in**: by default a new window opens fresh (a single pane
-in the default cwd, like every mainstream terminal), and the
-session is *saved* only in restore mode so a fresh window never clobbers
-a saved layout. Set `restore-session = true` (or pass `--restore` for a
-one-shot) to "continue where you left off":
+launch follows `restore-session = auto` by default. On macOS, `auto` reads
+`NSQuitAlwaysKeepsWindows` from the app's NSUserDefaults domain, then the global
+domain. A true value keeps windows; false corresponds to the checked "Close
+windows when quitting an application" box. If neither domain sets a value,
+windows are kept. On other platforms `auto` is false. `true` always enables
+restore and `false` always opens fresh; legacy boolean spellings still work.
+`--restore` enables restore for one launch and `--layout NAME` remains independent.
+The session is saved only in restore mode, so a fresh window never clobbers a
+saved layout. Privacy rules and crash recovery prompts do not change.
 
 Before creating any native window, renderer, or PTY, restore validates the
 entire normalized session: at most 16 non-empty windows and 256 pane leaves,
@@ -4463,8 +4467,8 @@ sequenceDiagram
     Mux->>FS: private staged sibling + file sync
     FS->>FS: atomic replace → session.json<br/>parent-directory sync
 
-    Note over App,FS: Next launch — restore is opt-in
-    App->>App: restore-session = true OR --restore?<br/>(else open a fresh single-pane window)
+    Note over App,FS: Next launch follows the resolved restore policy
+    App->>App: resolved restore-session OR --restore?<br/>(else open a fresh single-pane window)
     App->>FS: read session.json
     FS-->>App: windows → tab trees + per-pane cwds
     App->>Mux: rehydrate each window's split layout<br/>(at its monitor-clamped saved geometry)

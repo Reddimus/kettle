@@ -2567,3 +2567,9 @@ context = "crates/kettle-ui/src/settings.rs: Settings toggle for Unicode graphem
 
 [messages.settings_description_field_grapheme_clustering]
 context = "crates/kettle-ui/src/settings.rs: One-line Settings description. Joining includes families, skin tones and flags. Applies only to new terminals. English budget 70 characters."
+
+[messages.settings_field_restore_session]
+context = "crates/kettle-ui/src/settings.rs: label of the three-choice session restore policy."
+
+[messages.settings_description_field_restore_session]
+context = "crates/kettle-ui/src/settings.rs: description of Automatic, On and Off session restore, including macOS system preferences."

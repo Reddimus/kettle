@@ -43,6 +43,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- `restore-session` now defaults to `auto`: on macOS it follows "Close windows
+  when quitting an application" and restores when unchecked. Other platforms
+  still open fresh. `true`, `false` and legacy boolean spellings remain valid,
+  and Settings offers all three choices.
+
 - Automatic selection and search text colours meet 4.5:1 contrast against
   their highlight, including dim text and underlined links, while preserving
   readable cell colours and explicit highlight foregrounds.

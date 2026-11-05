@@ -4588,6 +4588,12 @@ class ConfigClosureTests(unittest.TestCase):
             for value in ('false', 'off', 'no', '0', 'disabled', 'disable', 'n'):
                 self.capture({'kettle': key + ' = ' + value})
 
+    def test_restore_session_auto_is_an_undeclared_persistent_input(self):
+        for key in ('restore-session', 'restore_session'):
+            for value in ('auto', 'AUTO', '" auto "'):
+                with self.subTest(key=key, value=value), self.assertRaises(standing.ConfigClosureError):
+                    self.capture({'kettle': key + ' = ' + value})
+
     def test_pr3_unresolved_environment_and_unknown_file_type_refuse(self):
         # Even an existing literal $HOME filename cannot certify an unresolved
         # environment reference as an ordinary declared asset.

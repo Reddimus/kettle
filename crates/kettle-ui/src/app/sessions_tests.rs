@@ -84,26 +84,28 @@ fn the_session_sweep_rides_existing_turns_and_never_schedules_one() {
     );
 }
 
-/// The default-session restore is opt-in. The same predicate gates BOTH
-/// the startup `load()` and the `save()` so they can't drift apart; an
-/// unconditional save lets a fresh window clobber the saved layout. (F,F),
-/// the default, means do NOT touch session.json; any opt-in (`--restore`
-/// one-shot OR `restore-session = true`) turns both load and save back on.
+/// The same predicate gates both default-session load and save. Disabling
+/// restore must leave session.json untouched so a fresh window cannot clobber
+/// the saved layout. --restore enables both for one launch.
 #[test]
 fn restore_session_gate_truth_table() {
     assert!(
-        !should_restore_session(false, false, false),
-        "fresh default: no load, no save"
+        !should_restore_session(false, kettle_config::RestoreSession::Never, false),
+        "explicit false: no load, no save"
     );
     assert!(
-        should_restore_session(true, false, false),
+        should_restore_session(true, kettle_config::RestoreSession::Never, false),
         "--restore one-shot"
     );
     assert!(
-        should_restore_session(false, true, false),
+        should_restore_session(false, kettle_config::RestoreSession::Always, false),
         "restore-session = true"
     );
-    assert!(should_restore_session(true, true, false));
+    assert!(should_restore_session(
+        true,
+        kettle_config::RestoreSession::Always,
+        false
+    ));
 }
 
 /// #575: after an update, the new build's first window opens while the old
@@ -112,6 +114,11 @@ fn restore_session_gate_truth_table() {
 #[test]
 fn config_restore_and_save_wait_for_another_build_to_exit() {
     for (startup_restore, cfg_restore) in [(false, true), (true, false), (true, true)] {
+        let cfg_restore = if cfg_restore {
+            kettle_config::RestoreSession::Always
+        } else {
+            kettle_config::RestoreSession::Never
+        };
         assert!(!should_restore_session(startup_restore, cfg_restore, true));
         assert!(should_restore_session(startup_restore, cfg_restore, false));
     }

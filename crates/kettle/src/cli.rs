@@ -216,10 +216,10 @@ pub(crate) struct Cli {
     pub(crate) layout: Option<String>,
 
     /// Restore the previous session (tabs, splits, working dirs) for this
-    /// launch. kettle opens a FRESH window by default (a single pane in the
-    /// default cwd), like every mainstream terminal; pass `--restore` for a
-    /// one-shot "continue where I left off" without setting
-    /// `restore-session = true` in your config.
+    /// launch, regardless of the `restore-session` policy. The default `auto`
+    /// follows the macOS keep-windows setting and opens fresh on other platforms.
+    /// Set `restore-session = true` to enable restore on every launch, or
+    /// `restore-session = false` to open fresh unless this flag is passed.
     #[arg(long, verbatim_doc_comment)]
     pub(crate) restore: bool,
 

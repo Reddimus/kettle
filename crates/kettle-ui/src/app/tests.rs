@@ -80,6 +80,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 pub(super) fn title_test_config() -> kettle_config::Config {
     kettle_config::Config {
+        restore_session: kettle_config::RestoreSession::Never,
         shell_integration: false,
         login_shell: false,
         ..kettle_config::Config::default()

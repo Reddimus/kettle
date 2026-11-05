@@ -198,6 +198,7 @@ pub fn description(field: &Field) -> Text {
         Text::SettingsFieldTabMinWidth => Text::SettingsDescriptionFieldTabMinWidth,
         Text::SettingsFieldTheme => Text::SettingsDescriptionFieldTheme,
         Text::SettingsFieldUpdateCheckInterval => Text::SettingsDescriptionFieldUpdateCheckInterval,
+        Text::SettingsFieldRestoreSession => Text::SettingsDescriptionFieldRestoreSession,
         Text::SettingsFieldUpdatePolicy => Text::SettingsDescriptionFieldUpdatePolicy,
         Text::SettingsFieldVimMenuNav => Text::SettingsDescriptionFieldVimMenuNav,
         Text::SettingsFieldWindowBlur => Text::SettingsDescriptionFieldWindowBlur,
@@ -762,6 +763,16 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "mouse-hide-while-typing",
                 ),
                 choice(
+                    T::SettingsFieldRestoreSession,
+                    "restore-session",
+                    &["auto", "true", "false"],
+                    &[
+                        Label::Text(T::SettingsValueAutomatic),
+                        Label::Text(T::SettingsValueOn),
+                        Label::Text(T::SettingsValueOff),
+                    ],
+                ),
+                choice(
                     T::SettingsFieldUpdatePolicy,
                     "update-policy",
                     &["off", "notify", "auto"],
@@ -1295,6 +1306,7 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             ScrollbarMode::Always => "always",
         }
         .to_string(),
+        "restore-session" => cfg.restore_session.token().to_string(),
         "update-policy" => match cfg.update_policy {
             UpdatePolicy::Off => "off",
             UpdatePolicy::Notify => "notify",
@@ -1481,6 +1493,25 @@ mod tests {
 
     const EN: Translator = Translator::new(Language::En);
     const ES: Translator = Translator::new(Language::Es);
+
+    #[test]
+    fn restore_session_settings_has_three_choices() {
+        let field = categories(&[])
+            .into_iter()
+            .flat_map(|c| c.fields)
+            .find(|f| f.key == "restore-session")
+            .expect("restore session in Settings");
+        let FieldKind::Choice { values, .. } = &field.kind else {
+            panic!("restore is a choice")
+        };
+        assert_eq!(*values, &["auto", "true", "false"]);
+        for (value, next) in [("auto", "true"), ("true", "false"), ("false", "auto")] {
+            let cfg = Config::parse_text(&format!("restore-session = {value}"));
+            assert_eq!(read_choice(&cfg, field.key), value);
+            assert_eq!(next_value(&cfg, &field, 1), next);
+        }
+        assert_ne!(EN.text(description(&field)), ES.text(description(&field)));
+    }
 
     #[test]
     fn c08_grapheme_setting_round_trips_in_both_languages() {

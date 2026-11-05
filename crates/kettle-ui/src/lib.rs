@@ -436,7 +436,7 @@ pub struct Options {
     /// the PTY fds, so running shells are not preserved. Unix-only.
     pub tab_handoff_fd: Option<TabHandoff>,
     /// `--restore` — restore the previous session (tabs/splits/dirs)
-    /// for THIS launch, regardless of the `restore-session` config default
+    /// for THIS launch, regardless of the resolved `restore-session` policy
     /// (which is off). A one-shot "continue where I left off" without editing
     /// config. `--layout`/`--tab-handoff` remain independent explicit paths.
     pub restore: bool,

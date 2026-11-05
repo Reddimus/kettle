@@ -4,7 +4,7 @@ use crate::quick_terminal::{Effect, Model};
 #[test]
 fn review_quick_cold_startup_hook_preserves_normal_session() {
     let cfg = Config {
-        restore_session: true,
+        restore_session: kettle_config::RestoreSession::Always,
         ..tests::title_test_config()
     };
     let startup = crate::Options {

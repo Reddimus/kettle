@@ -1,3 +1,6 @@
+settings_field_restore_session = "Restore session"
+settings_description_field_restore_session = "Automatic follows macOS window settings; off on other platforms."
+
 menu_category_close_confirmation = "Close confirmation"
 confirm_paste_heading = "Confirm paste"
 confirm_paste_body = "This paste may send commands to the terminal. Preview: {preview}"

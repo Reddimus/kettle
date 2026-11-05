@@ -1200,6 +1200,44 @@ pub enum ScrollbarMode {
     Always,
 }
 
+/// Policy for loading and saving the default last session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreSession {
+    /// Follow macOS window persistence; open fresh on other platforms.
+    Auto,
+    Always,
+    Never,
+}
+
+impl RestoreSession {
+    fn parse(value: &str) -> Option<Self> {
+        if value.trim().eq_ignore_ascii_case("auto") {
+            Some(Self::Auto)
+        } else {
+            parse_bool(value).map(|on| if on { Self::Always } else { Self::Never })
+        }
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "true",
+            Self::Never => "false",
+        }
+    }
+
+    /// Resolve without accessing OS state. App preferences override global
+    /// preferences, including an explicit false. macOS keeps windows when
+    /// neither domain defines NSQuitAlwaysKeepsWindows.
+    pub fn resolve(self, macos: bool, app: Option<bool>, global: Option<bool>) -> bool {
+        match self {
+            Self::Auto => macos && app.or(global).unwrap_or(true),
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
+
 /// Stable-channel update behavior for official installer-owned builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdatePolicy {
@@ -2028,13 +2066,10 @@ pub struct Config {
     /// hours (default 24 = daily). Floored at 1 to avoid hammering the feed.
     /// `update-policy = off` disables checking entirely regardless of this.
     pub update_check_interval_hours: u32,
-    /// Restore the previous session's tabs/splits/working-dirs on
-    /// launch. OFF by default — like every mainstream terminal (GNOME Terminal,
-    /// Windows Terminal, kitty, Alacritty, WezTerm, iTerm2), a new window/instance
-    /// opens FRESH (a single pane in the default cwd). Opt in with
-    /// `restore-session = true` (or the `--restore` flag) to continue where you
-    /// left off. The session is always SAVED so opt-in restore has state to load.
-    pub restore_session: bool,
+    /// Restore the previous session's windows, tabs, splits and working dirs.
+    /// Auto follows macOS window persistence and is false elsewhere. The
+    /// resolved policy gates both loading and saving the default session.
+    pub restore_session: RestoreSession,
     /// When the user types while scrolled back in scrollback, jump back to
     /// the bottom of the screen (Alacritty `scrolling.history.scroll_on_input`,
     /// xterm `scrollKey`). Default `true`.
@@ -3244,7 +3279,7 @@ impl Default for Config {
             copy_on_select: true,
             update_policy: UpdatePolicy::Auto,
             update_check_interval_hours: 24,
-            restore_session: false, // fresh-by-default; opt in to restore
+            restore_session: RestoreSession::Auto,
             scroll_on_keystroke: true,
             scroll_on_output: false,
             mouse_hide_while_typing: true,
@@ -3847,8 +3882,6 @@ impl Config {
         "agent_display_codex",
         "agent-display-agy",
         "agent_display_agy",
-        "restore-session",
-        "restore_session",
         "urgent-bell",
         "urgent_bell",
         "use-custom-command",
@@ -4278,6 +4311,7 @@ impl Config {
                 // recognizes. `BOOL_KEYS` lists both spellings of many keys,
                 // but the tokenizer yields only the hyphenated form, so compare
                 // each entry in that folded spelling.
+                "restore-session" | "restore_session" => RestoreSession::parse(v).is_some(),
                 "shell-integration" | "shell_integration" =>
                     v.eq_ignore_ascii_case("auto") || parse_bool(v).is_some(),
                 k if Self::BOOL_KEYS
@@ -5844,11 +5878,9 @@ impl Config {
                         _ => {}
                     }
                 }
-                // Opt IN to restoring the last session on launch
-                // (off by default — fresh windows, mainstream behavior).
                 "restore-session" | "restore_session" => {
-                    if let Some(b) = parse_bool(&e.value) {
-                        cfg.restore_session = b;
+                    if let Some(policy) = RestoreSession::parse(&e.value) {
+                        cfg.restore_session = policy;
                     }
                 }
                 "scroll-on-keystroke" | "scroll-on-input" => {
@@ -6893,20 +6925,72 @@ cell-height = 1.2\n";
         }
     }
 
-    /// Session restore is OPT-IN (fresh windows by default, like
-    /// mainstream terminals). Pin the default + that the bool key parses both
-    /// spellings, so a regression to always-restore is caught.
     #[test]
-    fn restore_session_defaults_off_and_parses() {
-        assert!(
-            !Config::default().restore_session,
-            "session restore must be OFF by default (fresh windows)"
-        );
-        assert!(Config::parse_text("restore-session = true\n").restore_session);
-        assert!(Config::parse_text("restore_session = true\n").restore_session);
-        assert!(!Config::parse_text("restore-session = false\n").restore_session);
-        // It is in BOOL_KEYS so `--check-config` validates it.
-        assert!(Config::BOOL_KEYS.contains(&"restore-session"));
+    fn restore_session_macos_defaults_decision() {
+        for (app, global, expected) in [
+            (None, None, true),
+            (Some(true), None, true),
+            (Some(false), None, false),
+            (None, Some(true), true),
+            (None, Some(false), false),
+            (Some(true), Some(false), true),
+            (Some(false), Some(true), false),
+            (Some(true), Some(true), true),
+            (Some(false), Some(false), false),
+        ] {
+            assert_eq!(
+                RestoreSession::Auto.resolve(true, app, global),
+                expected,
+                "{app:?} {global:?}"
+            );
+            assert!(RestoreSession::Always.resolve(true, app, global));
+            assert!(!RestoreSession::Never.resolve(true, app, global));
+        }
+    }
+
+    #[test]
+    fn restore_session_auto_is_false_off_macos() {
+        for app in [None, Some(false), Some(true)] {
+            for global in [None, Some(false), Some(true)] {
+                assert!(!RestoreSession::Auto.resolve(false, app, global));
+                assert!(RestoreSession::Always.resolve(false, app, global));
+                assert!(!RestoreSession::Never.resolve(false, app, global));
+            }
+        }
+    }
+
+    #[test]
+    fn restore_session_parses_auto_and_legacy_booleans() {
+        assert_eq!(format!("{:?}", Config::default().restore_session), "Auto");
+        for key in ["restore-session", "restore_session"] {
+            for (value, expected) in [
+                ("auto", "Auto"),
+                ("AUTO", "Auto"),
+                ("true", "Always"),
+                ("yes", "Always"),
+                ("on", "Always"),
+                ("1", "Always"),
+                ("enabled", "Always"),
+                ("enable", "Always"),
+                ("y", "Always"),
+                ("false", "Never"),
+                ("no", "Never"),
+                ("off", "Never"),
+                ("0", "Never"),
+                ("disabled", "Never"),
+                ("disable", "Never"),
+                ("n", "Never"),
+            ] {
+                let text = format!("{key} = {value}\n");
+                assert!(Config::detect_malformed_values(&text).is_empty(), "{text}");
+                assert_eq!(
+                    format!("{:?}", Config::parse_text(&text).restore_session),
+                    expected,
+                    "{text}"
+                );
+            }
+        }
+        assert!(!Config::detect_malformed_values("restore-session = maybe").is_empty());
     }
 
     /// Ghostty parity: `resize-overlay` defaults to `after-first`,

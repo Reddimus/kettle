@@ -985,6 +985,8 @@ def config_entries(text: str) -> list:
         value = config_unquote(value.strip(RUST_WHITESPACE))
         if key in ("include", "config-file", "lua-script") or not key:
             raise ConfigClosureError("config closure: undeclared include or script")
+        if key == "restore-session" and value.strip(RUST_WHITESPACE).translate(ASCII_LOWER) == "auto":
+            raise ConfigClosureError("config closure: undeclared persistent input")
         if key in ("restore-session", "always-split-with-profile") and value.strip(RUST_WHITESPACE).translate(
                 ASCII_LOWER) in ("true", "on", "yes", "1", "enabled", "enable", "y"):
             raise ConfigClosureError("config closure: undeclared persistent input")

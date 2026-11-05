@@ -35,7 +35,11 @@ fn startup_plan_truth_table() {
                             ..Default::default()
                         };
                         let cfg = kettle_config::Config {
-                            restore_session: restore_bits & 16 != 0,
+                            restore_session: if restore_bits & 16 != 0 {
+                                kettle_config::RestoreSession::Always
+                            } else {
+                                kettle_config::RestoreSession::Never
+                            },
                             window_state: state,
                             window_position_x: (position & 1 != 0).then_some(10),
                             window_position_y: (position & 2 != 0).then_some(10),
