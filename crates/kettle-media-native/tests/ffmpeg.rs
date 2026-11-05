@@ -933,6 +933,59 @@ fn a_session_decodes_from_its_start_at_its_rate() {
 }
 
 #[test]
+fn a_delayed_video_keeps_its_start_without_audio() {
+    let mut description = DESCRIPTION.to_vec();
+    description.extend([
+        "streams.stream.0.start_time=\"1.000000\"",
+        "streams.stream.1.codec_type=\"audio\"",
+        "format.duration=\"3.000000\"",
+    ]);
+    for audio in [AudioRequest::Off, AudioRequest::On] {
+        for start_ms in [0, 500] {
+            let fake = Fake::new(&description, &["1000,K_", "1100,__"], GOOD);
+            fake.audio_probe("exit 1");
+            let clip = Clip::mp4();
+            let mut playback = fake
+                .decoder()
+                .play(
+                    clip.input(),
+                    PlayRequest {
+                        max_width: 40,
+                        max_height: 30,
+                        start_ms,
+                        max_fps_milli: 10_000,
+                        audio,
+                    },
+                    later(),
+                )
+                .unwrap();
+            assert_eq!(playback.opened.start_ms, start_ms);
+            assert_eq!(
+                playback.opened.audio,
+                if audio == AudioRequest::Off {
+                    kettle_media::AudioStatus::Off
+                } else {
+                    kettle_media::AudioStatus::Unsupported
+                }
+            );
+            let frames = frames_of(&mut playback).unwrap();
+            assert_eq!(frames[0].0, start_ms);
+            assert!(
+                frames[0]
+                    .1
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|pixel| *pixel == [0, 0, 0, 255]),
+                "video must stay blank before its track starts"
+            );
+            assert_eq!(frames[1].0, 1000);
+            assert_eq!(&frames[1].1[..4], &[255, 0, 0, 255]);
+        }
+    }
+}
+
+#[test]
 fn a_session_keeps_video_when_first_audio_timestamps_are_unusable() {
     let mut description = DESCRIPTION.to_vec();
     description.push("streams.stream.1.codec_type=\"audio\"");
@@ -1441,6 +1494,32 @@ fn real_ffmpeg_keeps_audio_before_video_without_opening_deadlock() {
     );
     let clip = Clip::open(directory, path);
     for start_ms in [0, 500] {
+        let mut silent = decoder
+            .play(
+                clip.input(),
+                PlayRequest {
+                    max_width: 64,
+                    max_height: 48,
+                    start_ms,
+                    max_fps_milli: 10_000,
+                    audio: AudioRequest::Off,
+                },
+                later(),
+            )
+            .unwrap();
+        let silent_frames = frames_of(&mut silent).unwrap();
+        assert_eq!(silent_frames[0].0, start_ms);
+        assert!(
+            silent_frames[0]
+                .1
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [0, 0, 0, 255]),
+            "video must stay blank before its track starts"
+        );
+        assert_eq!(silent_frames[1].0, 1000);
+        assert_eq!(silent_frames.last().unwrap().0, 2900);
         let mut playback = play(&decoder, &clip, (64, 48), start_ms, 10_000).unwrap();
         assert_eq!(playback.opened.audio, kettle_media::AudioStatus::Ready);
         let mut audio = playback.audio.take().expect("decoded PCM");
