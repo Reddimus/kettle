@@ -2955,10 +2955,14 @@ impl App {
                 self.focused_seq = next;
                 record_window_focus(&mut self.window_focus_order, next);
             }
+            self.sync_macos_menu(None);
             return;
         }
         let mut ws = ws;
         self.sync_pane_focus_reports(&mut ws);
+        if seq == self.focused_seq {
+            self.sync_macos_menu(Some(&ws));
+        }
         self.windows.insert(seq, ws);
         self.window_focus_order
             .retain(|seq| self.windows.contains_key(seq));

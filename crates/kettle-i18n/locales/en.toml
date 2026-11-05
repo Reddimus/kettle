@@ -766,6 +766,41 @@ settings_a11y_search = "Search settings"
 settings_search_placeholder = "Search settings"
 settings_no_matches = "No settings match"
 
+macos_menu_app = "Kettle"
+
+macos_menu_shell = "Shell"
+
+macos_menu_edit = "Edit"
+
+macos_menu_view = "View"
+
+macos_menu_window = "Window"
+
+macos_menu_palette = "Command Palette…"
+
+macos_menu_theme = "Select Theme…"
+
+macos_menu_select_all = "Select All"
+
+macos_menu_find = "Find…"
+
+macos_menu_clear = "Clear Scrollback"
+
+macos_menu_font_increase = "Increase Font Size"
+
+macos_menu_font_decrease = "Decrease Font Size"
+
+macos_menu_font_reset = "Reset Font Size"
+
+macos_menu_zoom_pane = "Zoom Pane"
+
+macos_menu_fullscreen = "Enter Full Screen"
+
+macos_menu_next_tab = "Next Tab"
+
+macos_menu_previous_tab = "Previous Tab"
+
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"

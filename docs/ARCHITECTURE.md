@@ -296,11 +296,20 @@ layout and SSH pickers, the right-click menu with its Preferences submenu, the n
 dropdown, the About panel, the close, paste and key-rebind confirmations, the
 title editors, the search bar, the completion card, the paste receipts, the
 update toast, the screen-reader names, Kettle's desktop notifications, the
-macOS Dock menu and the macOS menu bar's application menu are on it. The
-application menu is Kettle's own (`macos_menu`): winit builds an English one
-as the app finishes launching, before the first `resumed`, and Kettle's
-replaces it there with the same rows, standard actions and key equivalents,
-so no chord that reaches the PTY changes. The Linux desktop entry carries its
+macOS Dock menu and the macOS menu bar are on it. The menu bar is Kettle's own
+(`macos_menu`): a pure, portable model defines the translated Kettle, Shell,
+Edit, View and Window menus, actions, separators, enabled state and live Cmd
+shortcut hints. AppKit installation replaces winit's startup menu on `resumed`
+and reconciles it after focused-window dispatch and config reload, registering
+Services and the Windows menu each time. Menu text follows the configured
+language on reload; other UI surfaces still require a restart. The root NSMenu
+only performs native application equivalents (unless the keymap owns them).
+Kettle equivalents are declined so the original event reaches winit's modal
+handlers, `resolve_keybind_action`, program-key yield rules and terminal writer,
+with its physical key, layout, repeat and release intact. Mouse menu choices
+send existing actions to the focused window through the event-loop proxy.
+Commands with no existing Kettle Action are omitted.
+The Linux desktop entry carries its
 Spanish beside its English; the CLI never takes a translator. Crates below the UI keep returning data: the
 reconnect row for a detected remote session is worded in `kettle-ui` from
 `kettle-remote`'s typed context. The palette ranks a query against the label shown and,

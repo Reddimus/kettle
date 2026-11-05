@@ -75,6 +75,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/menus.rs"),
         include_str!("app/modals.rs"),
         include_str!("app/notifications.rs"),
+        include_str!("app/native_menu.rs"),
         include_str!("app/output.rs"),
         include_str!("app/paste.rs"),
         include_str!("app/pickers.rs"),
@@ -304,6 +305,8 @@ pub enum UserEvent {
     /// exactly as `AccessibilityAction` is.
     #[cfg(target_os = "macos")]
     DockCommand(crate::macos_dock::DockCommand),
+    #[cfg(target_os = "macos")]
+    MenuCommand(kettle_config::Action),
     #[cfg(target_os = "macos")]
     DockReopen,
     #[cfg(target_os = "macos")]
@@ -649,8 +652,8 @@ impl ApplicationHandler<UserEvent> for App {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("resumed");
         // winit's English application menu is up by now; Kettle's, in the
-        // UI's language, takes its place once.
-        crate::macos_menu::install(&self.ui_text);
+        // configured language, takes its place and follows later reloads.
+        self.sync_macos_menu(None);
         let seq = self.focused_seq;
         let Some(mut ws) = self.windows.remove(&seq) else {
             return;
@@ -1145,3 +1148,5 @@ mod lane_control_tests;
 #[cfg(test)]
 #[path = "app/modal_editor_tests.rs"]
 mod modal_editor_tests;
+
+mod native_menu;

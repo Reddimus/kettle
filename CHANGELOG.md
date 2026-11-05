@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- On macOS, a complete menu bar: Kettle (with Settings…), Shell, Edit, View
+  and Window menus list every common action with the shortcut it is bound to
+  in your config, in English and Spanish, and macOS lists Kettle's windows in
+  the Window menu. Shortcuts chosen from the keyboard still go through
+  Kettle's own key handling, so a program that owns the keyboard keeps its
+  chords.
+
 ### Changed
 
 - The tab strip draws the active tab as a raised surface in the terminal's

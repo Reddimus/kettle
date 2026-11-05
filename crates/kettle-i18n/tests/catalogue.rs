@@ -14,6 +14,8 @@ fn every_static_message_has_clean_text_in_both_languages() {
         // Model-drafted Spanish is a draft, but it is never left as English,
         // except for words Spanish shares.
         let cognate = [
+            Text::MacosMenuApp,
+            Text::MacosMenuShell,
             Text::SettingsGpuKindVirtual,
             Text::SettingsGpuKindSoftware,
             Text::MediaViewerKindVideo,
@@ -180,6 +182,8 @@ fn no_spanish_message_is_left_in_english() {
     let english: toml::Table = include_str!("../locales/en.toml").parse().unwrap();
     let spanish: toml::Table = include_str!("../locales/es.toml").parse().unwrap();
     let cognates = [
+        "macos_menu_app",
+        "macos_menu_shell",
         "settings_gpu_kind_software",
         "settings_gpu_kind_virtual",
         "media_lane_video_time",

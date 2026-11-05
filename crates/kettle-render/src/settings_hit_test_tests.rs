@@ -289,10 +289,9 @@ fn narrow_settings_categories_are_reachable_through_pointer_transitions() {
                     surface,
                     (x as f32, category_y),
                     8.0,
-                ) {
-                    if !visited[index] {
-                        pending.push(index);
-                    }
+                ) && !visited[index]
+                {
+                    pending.push(index);
                 }
             }
         }

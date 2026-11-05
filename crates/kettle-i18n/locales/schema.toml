@@ -2372,3 +2372,54 @@ context = "crates/kettle-ui/src/settings.rs: Settings search empty result."
 
 [messages.settings_a11y_search]
 context = "crates/kettle-ui/src/app/accessibility.rs: Settings search TextInput name, read without the screen."
+
+[messages.macos_menu_app]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar app title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_shell]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar shell title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_edit]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar edit title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_view]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar view title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_window]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar window title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_palette]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar palette title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_theme]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar theme title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_select_all]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar select all title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_find]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar find title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_clear]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar clear title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_font_increase]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar font increase title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_font_decrease]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar font decrease title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_font_reset]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar font reset title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_zoom_pane]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar zoom pane title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_fullscreen]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar fullscreen title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_next_tab]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar next tab title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_previous_tab]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar previous tab title or command. Kettle is the product name; Shell names the shell menu."

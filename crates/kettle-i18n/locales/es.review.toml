@@ -22,6 +22,23 @@
 # panel and observed accessibility tree, including an independent second pass.
 
 [status]
+macos_menu_app = "draft"
+macos_menu_shell = "draft"
+macos_menu_edit = "draft"
+macos_menu_view = "draft"
+macos_menu_window = "draft"
+macos_menu_palette = "draft"
+macos_menu_theme = "draft"
+macos_menu_select_all = "draft"
+macos_menu_find = "draft"
+macos_menu_clear = "draft"
+macos_menu_font_increase = "draft"
+macos_menu_font_decrease = "draft"
+macos_menu_font_reset = "draft"
+macos_menu_zoom_pane = "draft"
+macos_menu_fullscreen = "draft"
+macos_menu_next_tab = "draft"
+macos_menu_previous_tab = "draft"
 settings_a11y_search = "draft"
 settings_description_field_agent_previews = "draft"
 settings_description_field_agent_previews_claude_code = "draft"

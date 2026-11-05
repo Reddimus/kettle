@@ -1140,7 +1140,6 @@ fn accessible_editor_characters_follow_graphemes() {
             prefix: String::new(),
             hint: String::new(),
             accent_palette: 0,
-            picker_header: false,
         }),
         ..Default::default()
     };
@@ -1275,7 +1274,7 @@ fn settings_search_and_row_descriptions_have_layout_bounds_and_text_actions() {
         text_field: Some(kettle_render::TextFieldOverlay {
             picker_header: false, text: "font".into(), cursor_byte: 4,
             selection: Some((0, 4)), rect: layout.search_rect, prefix: String::new(), hint: String::new(),
-            horizontal_scroll: 0, accent_palette: 0, picker_header: false }), ..Default::default()
+            horizontal_scroll: 0, accent_palette: 0 }), ..Default::default()
     };
     let projection = super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.0, 16.0), 1.0, &EN_TEXT);
     let search_id = super::accessibility_modal_id(super::MODAL_KIND_SETTINGS_SEARCH, 1);

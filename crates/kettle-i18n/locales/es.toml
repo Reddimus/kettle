@@ -767,6 +767,41 @@ settings_a11y_search = "Buscar configuración"
 settings_search_placeholder = "Buscar configuración"
 settings_no_matches = "No hay opciones que coincidan"
 
+macos_menu_app = "Kettle"
+
+macos_menu_shell = "Shell"
+
+macos_menu_edit = "Editar"
+
+macos_menu_view = "Ver"
+
+macos_menu_window = "Ventana"
+
+macos_menu_palette = "Paleta de comandos…"
+
+macos_menu_theme = "Seleccionar tema…"
+
+macos_menu_select_all = "Seleccionar todo"
+
+macos_menu_find = "Buscar…"
+
+macos_menu_clear = "Borrar el historial de la terminal"
+
+macos_menu_font_increase = "Aumentar el tamaño de letra"
+
+macos_menu_font_decrease = "Reducir el tamaño de letra"
+
+macos_menu_font_reset = "Restablecer el tamaño de letra"
+
+macos_menu_zoom_pane = "Ampliar panel"
+
+macos_menu_fullscreen = "Entrar en pantalla completa"
+
+macos_menu_next_tab = "Pestaña siguiente"
+
+macos_menu_previous_tab = "Pestaña anterior"
+
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"

@@ -2780,3 +2780,17 @@ cargo test -j 2 --locked --offline -p kettle-ui --lib accessibility_search_focus
 cargo test -j 2 --locked --offline -p kettle-render --release settings_slots_fit_english_spanish_and_measured_pseudo_text
 cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render --no-fail-fast
 ```
+
+### macOS menu bar regression coverage
+
+`cargo test -p kettle-ui macos_menu` runs the pure menu model on every platform:
+English and Spanish structure, translated titles and separators, action mapping,
+Cmd-only hints following remaps and unbinds, and focused-window availability.
+Source guards check that AppKit only performs native application equivalents,
+leaving Kettle shortcuts on the original keyboard dispatch and terminal-writer
+path, and that resume, focus/selection dispatch and config reload reconcile the
+menu while retaining Services and Windows registration. Existing keyboard tests
+exercise program-ownership yielding and terminal encoding. These checks do not
+establish live AppKit menu interaction; native CI must compile the AppKit layer,
+and an unlocked macOS session is needed for mouse, keyboard, Services and window
+list acceptance.

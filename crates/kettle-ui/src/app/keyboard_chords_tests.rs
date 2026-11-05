@@ -2006,3 +2006,29 @@ fn control_logical_key_preserves_uppercase_without_inferring_modifiers() {
         assert!(super::parse_ctl_logical_key(Some(&serde_json::json!(token))).is_err());
     }
 }
+
+/// The menu bar declines Kettle equivalents (the source guard lives beside
+/// its model tests), leaving this same resolver/yield/encoder path in charge.
+/// Cmd+1 on the current tab must still send a distinct key to a kitty pane.
+#[test]
+fn menu_bar_keeps_a_yielded_command_chord_encodable_for_the_pane() {
+    use super::{configured_program_key_rule, program_gets_chord, resolve_keybind_action};
+    use kettle_config::{Action, Config, Key as KKey, Mods, Trigger};
+    use kettle_core::TermMode;
+    use winit::keyboard::{Key, ModifiersState};
+
+    let trigger = Trigger::new(Mods::SUPER, KKey::Char('1'));
+    let mut cfg = Config::default();
+    // Supply the macOS default pair even when this portable test runs on Linux.
+    cfg.keybinds.insert(trigger, Action::GotoTab(0));
+    let key = Key::Character("1".into());
+    let (matched, action) = resolve_keybind_action(
+        &cfg.keybinds, Some(&key), None, ModifiersState::SUPER, Some(&key),
+    ).unwrap();
+    assert_eq!(matched, trigger);
+    let rule = configured_program_key_rule(&cfg, matched, &action, true).unwrap();
+    assert!(program_gets_chord(rule, &action, &claims(true), &one_tab()));
+    assert_eq!(crate::input::encode_key_press(
+        &key, ModifiersState::SUPER, TermMode::DISAMBIGUATE_ESC_CODES,
+    ), Some(b"\x1b[49;9u".to_vec()));
+}

@@ -68,7 +68,9 @@ lists every setting.
 
 macOS also has `Cmd+T`, `Cmd+D` and `Shift+Cmd+D` (split beside and
 below), `Cmd+C/V`, `Cmd+F` and `Cmd+,`. Run
-`kettle --list-keybinds` for the full map, and see
+`kettle --list-keybinds` for the full map. The macOS Shell, Edit, View and
+Window menus expose common actions and show their current Cmd shortcuts,
+including config overrides. See
 [Getting started](docs/GETTING-STARTED.md) for more.
 
 ## Agent previews
