@@ -118,6 +118,37 @@ pub(crate) fn install(
     identity: IdentityReader,
     keep_older: bool,
 ) -> Result<PathBuf, ()> {
+    install_with_cleanup(root, files, |directory| {
+        remove_stale(root, directory, files, identity, keep_older);
+        Ok(())
+    })
+}
+
+/// Startup variants can still be needed by a shell waiting in user startup.
+/// Refresh the verified directory's last-use time on every launch, and keep
+/// all variants used within a day plus four older variants.
+#[cfg(unix)]
+pub(crate) fn install_recent(root: &Path, files: &OwnedFiles) -> Result<PathBuf, ()> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    install_with_cleanup(root, files, |directory| {
+        let now = std::time::SystemTime::now();
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(directory)
+            .and_then(|held| held.set_modified(now))
+            .map_err(|_| ())?;
+        remove_expired_variants(root, directory, files, now);
+        Ok(())
+    })
+}
+
+#[cfg(unix)]
+fn install_with_cleanup(
+    root: &Path,
+    files: &OwnedFiles,
+    cleanup: impl FnOnce(&Path) -> Result<(), ()>,
+) -> Result<PathBuf, ()> {
     kettle_state::create_private_dirs(root).map_err(|_| ())?;
     // Never waits: this runs on the UI thread, and another Kettle can hold
     // the lock for as long as it is suspended. A busy lock asks for a retry.
@@ -134,7 +165,7 @@ pub(crate) fn install(
         write(root, &directory, files);
         verify(&directory, files)?;
     }
-    remove_stale(root, &directory, files, identity, keep_older);
+    cleanup(&directory)?;
     Ok(directory)
 }
 
@@ -393,6 +424,62 @@ fn remove_stale(
     }
 }
 
+#[cfg(unix)]
+fn remove_expired_variants(
+    root: &Path,
+    keep: &Path,
+    files: &OwnedFiles,
+    now: std::time::SystemTime,
+) {
+    use std::os::unix::fs::PermissionsExt as _;
+    const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+    const KEEP_EXPIRED: usize = 4;
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let prefix = format!("{}-", files.prefix);
+    let mut expired = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == keep {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with(".staging-") {
+            let _ = remove_tree(&path);
+            continue;
+        }
+        let Some(hash) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if hash.len() != 16 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        let Ok(metadata) = path.symlink_metadata() else {
+            continue;
+        };
+        if !metadata.is_dir()
+            || metadata.permissions().mode() & 0o777 != 0o500
+            || kettle_state::validate_trusted_directory(&path).is_err()
+        {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if now.duration_since(modified).is_ok_and(|age| age > DAY) {
+            expired.push((modified, path));
+        }
+    }
+    expired.sort_by(|a, b| b.cmp(a));
+    for (_, path) in expired.into_iter().skip(KEEP_EXPIRED) {
+        let _ = remove_tree(&path);
+    }
+}
+
 /// A Kettle version's numbered parts, for comparing; `None` for one that is
 /// not all numbers.
 pub(crate) fn version_key(version: &str) -> Option<Vec<u64>> {
@@ -581,6 +668,55 @@ mod tests {
     fn test_identity(directory: &Path) -> Option<(String, Option<String>)> {
         let version = std::fs::read_to_string(directory.join("version")).ok()?;
         Some(("/opt/kettle/bin/kettle".into(), Some(version.trim().into())))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recent_variants_expire_only_after_a_day_and_refresh_on_reuse() {
+        use std::time::{Duration, SystemTime};
+        let base = kettle_test_support::private_tempdir("kettle-owned-recent-");
+        let files = |n| {
+            OwnedFiles::new(
+                "startup",
+                String::new(),
+                "1".into(),
+                vec![("rc", format!("{n}"))],
+            )
+        };
+        let mut variants = Vec::new();
+        for n in 0..8 {
+            let contents = files(n);
+            let directory = install_recent(base.path(), &contents).unwrap();
+            variants.push((directory, contents));
+        }
+        for (directory, contents) in &variants {
+            assert_eq!(
+                verify(directory, contents),
+                Ok(()),
+                "recent variants exceed the expired cap safely"
+            );
+        }
+        let now = SystemTime::now();
+        for (index, (directory, _)) in variants.iter().enumerate() {
+            std::fs::File::open(directory)
+                .unwrap()
+                .set_modified(now - Duration::from_secs(2 * 86400 + index as u64))
+                .unwrap();
+        }
+        // This old variant is being offered to another starting shell now.
+        install_recent(base.path(), &variants[7].1).unwrap();
+        assert_eq!(verify(&variants[7].0, &variants[7].1), Ok(()));
+        for (index, (directory, contents)) in variants.iter().enumerate() {
+            if index < 4 || index == 7 {
+                assert_eq!(verify(directory, contents), Ok(()));
+            } else {
+                assert!(
+                    !directory.exists(),
+                    "expired variant {index} exceeds the cap"
+                );
+            }
+        }
+        remove_tree(base.path()).unwrap();
     }
 
     /// #575: after an update the old build's panes still read their files.

@@ -2853,10 +2853,18 @@ test substitutes for that rendering and assistive-technology pass.
 ### First-launch shell integration
 
 `cargo test -p kettle-ui shell_integration` exercises the checked private
-startup files with native Bash (including macOS 3.2), Zsh and Fish when installed.
-It checks user startup order, one-time sourcing and restoration of injected
-paths before child shells. `cargo test -p kettle-core automatic_tests` checks
-launch construction without a PTY. Command outcome tests cover duplicate and
+startup files with native modern Bash, Zsh and Fish when installed.
+It checks competing startup variants, compiled-only Zsh startup, earlier Fish
+`conf.d/00-env.fish` changes, and one-time loading before child shells. The Bash
+`ENV` tests check login state, logout processing, profile selection, suppression
+flags, custom rcfiles, restored `ENV`, disabled POSIX/`inherit_errexit` modes and
+startup declaration scope. On macOS, native system Bash 3.2 tests verify the
+untouched fallback with both default and explicit login launches; a separately
+installed modern Bash exercises automatic injection. Missing native interpreters
+are reported as skips. `owned_dir::tests::recent_variants_` checks the 24-hour
+mtime boundary, reuse refresh and the four-expired-variant cap.
+`cargo test -p kettle-core automatic_tests` checks launch construction and the
+macOS fallback without a PTY. Command outcome tests cover duplicate and
 unknown statuses, bounded retention and shared DPI-aware scrollbar rectangles;
 `repeated_output_starts_are_one_command` checks the reader's actual OSC path.
 Accessibility tests check English/Spanish exit-code descriptions against that

@@ -28,21 +28,29 @@ Previous/next-prompt navigation keeps its existing bindings and behavior.
   Your original `ZDOTDIR` (including unset or empty) is restored.
   A system zshenv that overrides `ZDOTDIR` or disables startup files prevents
   injection; use the manual snippet in that case.
-- Bash uses `--rcfile`, including macOS Bash 3.2. For a default or configured
-  login shell, the wrapper sources `/etc/profile` and the first readable
-  `.bash_profile`, `.bash_login` or `.profile`; for other panes it sources
-  `.bashrc`. It then loads Kettle's hooks. Login startup is reproduced by the
-  wrapper rather than Bash's login-shell mode.
+- Bash uses `--posix` with a private `ENV` startup file and `--login` for
+  login panes. The wrapper turns POSIX mode off, restores your `ENV`, then
+  sources `/etc/profile` and the first readable `.bash_profile`, `.bash_login`
+  or `.profile` for login shells; other panes read `.bashrc` or `--rcfile`'s
+  file. It honors `--noprofile` and `--norc`, then loads Kettle's hooks.
+  Login state and `.bash_logout` processing stay native. macOS system Bash
+  3.2.57 ignores this `ENV` route, so Kettle launches it untouched; use the
+  manual snippet below or a separately installed modern Bash for hooks.
 - Fish discovers a private `vendor_conf.d` file through `XDG_DATA_DIRS`.
-  That file restores the original variable before user configuration runs,
-  then loads Kettle's hooks at the first prompt, after user configuration.
+  That file removes only Kettle's entry from the current value, preserving
+  edits by earlier user snippets such as `conf.d/00-env.fish`. It clears
+  Kettle's exported helpers and loads hooks at the first prompt, after user
+  configuration. Earlier snippets run before this cleanup boundary.
 
 The files are private, checked for ownership, permissions and exact contents,
-and never added to your startup files. Borrowed paths are not exported to
-SSH, sudo or nested shells. A bare `command = bash`, `zsh` or `fish` also
-works; explicit commands with arguments and wrappers remain exact and need
-manual setup. Panes already open keep their existing hooks. If private files
-cannot be prepared safely, Kettle starts the shell without automatic hooks.
+and never added to your startup files. Zsh wrappers also load compiled-only
+`.zwc` startup files. Content-addressed variants used within 24 hours remain
+available to starting shells; cleanup retains up to four older variants.
+A bare `command = bash`, `zsh` or `fish` also works. Bash additionally accepts
+startup-only `-l`, `--login`, `--noprofile`, `--norc`, `--rcfile` and `--init-file`
+arguments. Scripts, other arguments and wrappers remain exact and need manual
+setup. Panes already open keep their existing hooks. If private files cannot
+be prepared safely, Kettle starts the shell without automatic hooks.
 
 The old Windows PowerShell bootstrap remains available in source; Windows
 releases ended in 3.3.0. WSL shells need manual setup inside their distribution.

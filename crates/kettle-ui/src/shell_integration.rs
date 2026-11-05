@@ -23,35 +23,62 @@ fn files(agent: &ShellStartup) -> Option<crate::owned_dir::OwnedFiles> {
     let env = format!("typeset -g +x __kettle_startup=${{ZDOTDIR%/zsh}}\n{user_env}{BORROW}");
     let user_file = |name: &str| {
         format!(
-            "{RESTORE}if [[ -r \"${{ZDOTDIR-$HOME}}/{name}\" ]]; then\n  builtin source -- \"${{ZDOTDIR-$HOME}}/{name}\"\nfi\n"
+            "{RESTORE}if [[ -r \"${{ZDOTDIR-$HOME}}/{name}\" || -r \"${{ZDOTDIR-$HOME}}/{name}.zwc\" ]]; then\n  builtin source -- \"${{ZDOTDIR-$HOME}}/{name}\"\nfi\n"
         )
     };
     let rc = format!(
         "{}if [[ -o login ]]; then\n{BORROW}else\n{LOAD}{CLEAN}fi\n",
         user_file(".zshrc")
     );
-    // Unset the one-shot flag before user startup can launch another shell.
-    let bashrc = r#"if [ "${KETTLE_BASH_LOGIN-}" = 1 ]; then
-  unset KETTLE_BASH_LOGIN
-  [ ! -r /etc/profile ] || . /etc/profile
-  if [ -r "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile"
-  elif [ -r "$HOME/.bash_login" ]; then . "$HOME/.bash_login"
-  elif [ -r "$HOME/.profile" ]; then . "$HOME/.profile"
-  fi
-else
-  unset KETTLE_BASH_LOGIN
-  [ ! -r "$HOME/.bashrc" ] || . "$HOME/.bashrc"
+    // --posix selects ENV without losing the shell's real login state.
+    let bashrc = r#"set +o posix
+shopt -u inherit_errexit 2>/dev/null || :
+declare +x __kettle_noprofile=${KETTLE_BASH_NOPROFILE-}
+declare +x __kettle_norc=${KETTLE_BASH_NORC-}
+declare +x __kettle_rcfile=${KETTLE_BASH_RCFILE-$HOME/.bashrc}
+if [[ -n $__kettle_rcfile && $__kettle_rcfile != */* ]]; then
+  __kettle_rcfile=./$__kettle_rcfile
 fi
-"#;
-    // The rcfile's directory is available without any exported helper path.
-    let bashrc = format!(
-        "{bashrc}\ndeclare -F __kettle_pc >/dev/null || builtin source -- \"${{BASH_SOURCE[0]%/*}}/kettle.bash\"\n"
-    );
-    let vendor = r#"if test "$KETTLE_XDG_DATA_DIRS_SET" = 1
-    set -gx XDG_DATA_DIRS "$KETTLE_XDG_DATA_DIRS"
+declare +x __kettle_hooks=${BASH_SOURCE[0]%/*}/kettle.bash
+if [ "${KETTLE_BASH_ENV_SET-}" = 1 ]; then
+  export ENV="$KETTLE_BASH_ENV"
 else
-    set -e XDG_DATA_DIRS
+  unset ENV
+fi
+unset KETTLE_BASH_ENV KETTLE_BASH_ENV_SET KETTLE_BASH_NOPROFILE KETTLE_BASH_NORC KETTLE_BASH_RCFILE
+if shopt -q login_shell; then
+  if [ "$__kettle_noprofile" != 1 ]; then
+    [ ! -r /etc/profile ] || . /etc/profile
+    if [ -r "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile"
+    elif [ -r "$HOME/.bash_login" ]; then . "$HOME/.bash_login"
+    elif [ -r "$HOME/.profile" ]; then . "$HOME/.profile"
+    fi
+  fi
+elif [ "$__kettle_norc" != 1 ]; then
+  [ ! -r "$__kettle_rcfile" ] || . "$__kettle_rcfile"
+fi
+declare -F __kettle_pc >/dev/null || builtin source -- "$__kettle_hooks"
+unset __kettle_noprofile __kettle_norc __kettle_rcfile __kettle_hooks
+"#
+    .to_owned();
+    let vendor = r#"set -l __kettle_xdg_entry (string replace -r '/fish/vendor_conf.d/[^/]+$' '' -- (status filename))
+if contains -- "$__kettle_xdg_entry" $XDG_DATA_DIRS
+    set -l __kettle_xdg_remaining
+    set -l __kettle_xdg_item
+    for __kettle_xdg_item in $XDG_DATA_DIRS
+        if test "$__kettle_xdg_item" != "$__kettle_xdg_entry"
+            set -a __kettle_xdg_remaining "$__kettle_xdg_item"
+        end
+    end
+    if test (count $__kettle_xdg_remaining) -gt 0
+        set -gx XDG_DATA_DIRS $__kettle_xdg_remaining
+    else if test "$KETTLE_XDG_DATA_DIRS_SET" = 1
+        set -gx XDG_DATA_DIRS ""
+    else
+        set -e XDG_DATA_DIRS
+    end
 end
+set -e __kettle_xdg_entry
 set -e KETTLE_XDG_DATA_DIRS
 set -e KETTLE_XDG_DATA_DIRS_SET
 if status is-interactive
@@ -99,6 +126,10 @@ end
     ))
 }
 
+fn install_files(root: &Path, files: &crate::owned_dir::OwnedFiles) -> Option<std::path::PathBuf> {
+    crate::owned_dir::install_recent(root, files).ok()
+}
+
 /// Prepare only when automatic integration is enabled; failure leaves the
 /// original startup untouched. Verification rejects links and writable files.
 pub(crate) fn for_new_pane(mut startup: ShellStartup, enabled: bool) -> ShellStartup {
@@ -108,7 +139,7 @@ pub(crate) fn for_new_pane(mut startup: ShellStartup, enabled: bool) -> ShellSta
             let root = crate::codex_shell::startup_root()?
                 .parent()?
                 .join("shell-integration");
-            let directory = crate::owned_dir::install(&root, &files, |_| None, true).ok()?;
+            let directory = install_files(&root, &files)?;
             crate::owned_dir::verify(&directory, &files).ok()?;
             Some(directory)
         })();
@@ -147,42 +178,11 @@ mod tests {
         let output = command.output().unwrap();
         assert!(
             output.status.success(),
-            "{shell}: {}",
+            "{shell} ({}): {}",
+            output.status,
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
-    #[test]
-    fn bash_32_rcfile_runs_user_startup_once_without_child_injection() {
-        let (temp, directory) = fixture();
-        let home = temp.path().join("home");
-        std::fs::create_dir(&home).unwrap();
-        std::fs::write(home.join(".bashrc"), "echo rc >> \"$HOME/trace\"\n").unwrap();
-        std::fs::write(
-            home.join(".bash_profile"),
-            "echo profile >> \"$HOME/trace\"\n. \"$HOME/.bashrc\"\n",
-        )
-        .unwrap();
-        for (login, expected) in [("0", "rc\n"), ("1", "profile\nrc\n")] {
-            let script = "declare -F __kettle_pc >/dev/null || exit 20; test -z \"${KETTLE_BASH_LOGIN+x}\"; /bin/bash --noprofile --norc -c 'test -z \"${KETTLE_BASH_LOGIN+x}\" && test -z \"${ENV+x}\" && test -z \"${BASH_ENV+x}\"'";
-            run(
-                "/bin/bash",
-                &[
-                    "--rcfile",
-                    directory.join("bashrc").to_str().unwrap(),
-                    "-ic",
-                    script,
-                ],
-                &home,
-                &[("KETTLE_BASH_LOGIN", login)],
-            );
-            assert_eq!(
-                std::fs::read_to_string(home.join("trace")).unwrap(),
-                expected
-            );
-            std::fs::remove_file(home.join("trace")).unwrap();
-        }
     }
 
     #[test]
@@ -298,6 +298,269 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(home.join("trace")).unwrap(),
             "config\n"
+        );
+    }
+
+    #[test]
+    fn bash_env_startup_preserves_login_logout_and_invocation_rules() {
+        let bash = if cfg!(target_os = "macos") {
+            "/opt/homebrew/bin/bash"
+        } else {
+            "/bin/bash"
+        };
+        if !Path::new(bash).is_file() {
+            eprintln!("ENV-capable Bash not installed; native injection skipped");
+            return;
+        }
+        let (temp, directory) = fixture();
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let checks = "[[ ! -o posix ]] || exit 31; shopt -q inherit_errexit 2>/dev/null && exit 34; [[ $ENV == /user/original ]] || exit 32; for v in ${!KETTLE_BASH_@}; do exit 33; done;";
+        for (name, text) in [
+            (
+                ".bash_profile",
+                format!(
+                    "{checks} declare -a user_startup_array=(profile); echo profile >> \"$HOME/trace\"\n"
+                ),
+            ),
+            (".bash_login", "echo login >> \"$HOME/trace\"\n".into()),
+            (".profile", "echo fallback >> \"$HOME/trace\"\n".into()),
+            (
+                ".bashrc",
+                format!(
+                    "{checks} declare -a user_startup_array=(rc); echo rc >> \"$HOME/trace\"\n"
+                ),
+            ),
+            ("custom-rc", "echo custom >> \"$HOME/trace\"\n".into()),
+            (".bash_logout", "echo logout >> \"$HOME/trace\"\n".into()),
+        ] {
+            std::fs::write(home.join(name), text).unwrap();
+        }
+        let custom_rc = home.join("custom-rc");
+        let default_rc = home.join(".bashrc");
+        for (login, noprofile, norc, custom, expected) in [
+            (true, false, false, false, "profile\nlogout\n"),
+            (true, true, false, false, "logout\n"),
+            (true, false, true, false, "profile\nlogout\n"),
+            (false, false, false, false, "rc\n"),
+            (false, false, true, false, ""),
+            (false, false, false, true, "custom\n"),
+        ] {
+            let scope_check = if !noprofile && login || !login && !norc && !custom {
+                "[[ ${user_startup_array[0]-} == profile || ${user_startup_array[0]-} == rc ]] || exit 40;"
+            } else {
+                ""
+            };
+            let script = format!(
+                "{checks} {scope_check} shopt -q inherit_errexit 2>/dev/null && exit 34; declare -F __kettle_pc >/dev/null || exit 35; shopt -q login_shell; test $? = {} || exit 36; \"$BASH\" --norc --noprofile -ic 'declare -F __kettle_pc >/dev/null && exit 37; test \"$ENV\" = /user/original' || exit 38; exit",
+                if login { 0 } else { 1 }
+            );
+            let mut args = vec!["--posix"];
+            if login {
+                args.push("--login");
+            }
+            if noprofile {
+                args.push("--noprofile");
+            }
+            if norc {
+                args.push("--norc");
+            }
+            args.extend(["-ic", &script]);
+            run(
+                bash,
+                &args,
+                &home,
+                &[
+                    ("ENV", directory.join("bashrc").to_str().unwrap()),
+                    ("KETTLE_BASH_ENV", "/user/original"),
+                    ("KETTLE_BASH_ENV_SET", "1"),
+                    ("KETTLE_BASH_NOPROFILE", if noprofile { "1" } else { "" }),
+                    ("KETTLE_BASH_NORC", if norc { "1" } else { "" }),
+                    (
+                        "KETTLE_BASH_RCFILE",
+                        if custom {
+                            custom_rc.to_str().unwrap()
+                        } else {
+                            default_rc.to_str().unwrap()
+                        },
+                    ),
+                ],
+            );
+            assert_eq!(
+                std::fs::read_to_string(home.join("trace")).unwrap_or_default(),
+                expected
+            );
+            let _ = std::fs::remove_file(home.join("trace"));
+        }
+        std::fs::remove_file(home.join(".bash_profile")).unwrap();
+        for expected in ["login\nlogout\n", "fallback\nlogout\n"] {
+            run(
+                bash,
+                &[
+                    "--posix",
+                    "--login",
+                    "-ic",
+                    "test -z \"${ENV+x}\" || exit 39; exit",
+                ],
+                &home,
+                &[("ENV", directory.join("bashrc").to_str().unwrap())],
+            );
+            assert_eq!(
+                std::fs::read_to_string(home.join("trace")).unwrap(),
+                expected
+            );
+            std::fs::remove_file(home.join("trace")).unwrap();
+            let _ = std::fs::remove_file(home.join(".bash_login"));
+        }
+        for (saved, condition) in [
+            (false, "test -z \"${ENV+x}\""),
+            (true, "test \"${ENV+x}:$ENV\" = x:"),
+        ] {
+            run(
+                bash,
+                &[
+                    "--posix",
+                    "--login",
+                    "--noprofile",
+                    "-ic",
+                    &format!("{condition} || exit 41; exit"),
+                ],
+                &home,
+                &[
+                    ("ENV", directory.join("bashrc").to_str().unwrap()),
+                    ("KETTLE_BASH_ENV_SET", if saved { "1" } else { "" }),
+                    ("KETTLE_BASH_ENV", ""),
+                    ("KETTLE_BASH_NOPROFILE", "1"),
+                ],
+            );
+        }
+        let _ = std::fs::remove_file(home.join("trace"));
+        run(
+            bash,
+            &[
+                "--posix",
+                "-ic",
+                "declare -F __kettle_pc >/dev/null || exit 42; exit 0",
+            ],
+            &home,
+            &[
+                ("ENV", directory.join("bashrc").to_str().unwrap()),
+                ("KETTLE_BASH_RCFILE", ""),
+            ],
+        );
+        assert!(
+            !home.join("trace").exists(),
+            "an empty rcfile does not mean .bashrc"
+        );
+        std::fs::create_dir(home.join("bin")).unwrap();
+        std::fs::write(home.join("bin/custom-rc"), "exit 43\n").unwrap();
+        let path = format!("{}/bin:/usr/bin:/bin", home.display());
+        run(
+            bash,
+            &[
+                "--posix",
+                "-ic",
+                "declare -F __kettle_pc >/dev/null || exit 44; exit 0",
+            ],
+            &home,
+            &[
+                ("ENV", directory.join("bashrc").to_str().unwrap()),
+                ("KETTLE_BASH_RCFILE", "custom-rc"),
+                ("PATH", &path),
+            ],
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("trace")).unwrap(),
+            "custom\n"
+        );
+    }
+
+    #[test]
+    fn competing_startup_variants_keep_the_first_shells_files() {
+        let temp = crate::test_tempdir();
+        let first = files(&ShellStartup::default()).unwrap();
+        let directory = install_files(temp.path(), &first).unwrap();
+        let second = files(&ShellStartup {
+            zsh: Some("/agent/changed".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let competing = install_files(temp.path(), &second).unwrap();
+        assert_ne!(directory, competing);
+        assert_eq!(crate::owned_dir::verify(&directory, &first), Ok(()));
+        assert!(directory.join("kettle.zsh").is_file());
+        crate::owned_dir::remove_tree(&directory).unwrap();
+        crate::owned_dir::remove_tree(&competing).unwrap();
+    }
+
+    #[test]
+    fn zsh_wrappers_load_compiled_only_startup_files() {
+        if !Path::new("/bin/zsh").is_file() {
+            eprintln!("zsh not installed; compiled startup skipped");
+            return;
+        }
+        let (temp, directory) = fixture();
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        for name in [".zprofile", ".zshrc", ".zlogin"] {
+            std::fs::write(home.join(name), format!("echo {name} >> \"$HOME/trace\"\n")).unwrap();
+            run(
+                "/bin/zsh",
+                &[
+                    "-fc",
+                    &format!("zcompile -- {}", quote(&home.join(name)).unwrap()),
+                ],
+                &home,
+                &[],
+            );
+            std::fs::remove_file(home.join(name)).unwrap();
+        }
+        run(
+            "/bin/zsh",
+            &["-lic", "(( $+functions[__kettle_precmd] )) || exit 21"],
+            &home,
+            &[
+                ("ZDOTDIR", directory.join("zsh").to_str().unwrap()),
+                ("KETTLE_ZDOTDIR_SET", ""),
+                ("KETTLE_ZDOTDIR", ""),
+            ],
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("trace")).unwrap_or_default(),
+            ".zprofile\n.zshrc\n.zlogin\n"
+        );
+    }
+
+    #[test]
+    fn fish_preserves_xdg_changes_from_earlier_user_snippets() {
+        let Some(fish) = ["/opt/homebrew/bin/fish", "/usr/bin/fish"]
+            .into_iter()
+            .find(|p| Path::new(p).is_file())
+        else {
+            eprintln!("fish not installed; early snippet skipped");
+            return;
+        };
+        let (temp, directory) = fixture();
+        let home = temp.path().join("home");
+        let config = home.join(".config/fish/conf.d");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("00-env.fish"),
+            "set -gx XDG_DATA_DIRS /user/changed\n",
+        )
+        .unwrap();
+        run(
+            fish,
+            &[
+                "-ic",
+                "test \"$XDG_DATA_DIRS\" = /user/changed; or exit 21; set -q KETTLE_XDG_DATA_DIRS; and exit 22; set -q KETTLE_XDG_DATA_DIRS_SET; and exit 23; emit fish_prompt; functions -q __kettle_osc7; or exit 24",
+            ],
+            &home,
+            &[
+                ("XDG_DATA_DIRS", directory.to_str().unwrap()),
+                ("KETTLE_XDG_DATA_DIRS_SET", "1"),
+                ("KETTLE_XDG_DATA_DIRS", "/original/share"),
+            ],
         );
     }
 

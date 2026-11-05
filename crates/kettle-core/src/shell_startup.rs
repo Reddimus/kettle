@@ -1,7 +1,7 @@
 //! Startup additions for a pane's bash, zsh or fish. Agent helpers and
 //! automatic integration share this launch boundary. Only the default shell
-//! or an explicit command naming a bare shell receives additions; wrappers
-//! and commands with arguments remain exact.
+//! or an explicit command naming a bare shell receives additions. Bash also
+//! accepts startup-only flags; wrappers, scripts and commands remain exact.
 
 use portable_pty::CommandBuilder;
 use std::ffi::{OsStr, OsString};
@@ -361,10 +361,54 @@ pub fn additions(program: &Path, zdotdir: Option<&OsStr>, startup: &ShellStartup
     }
 }
 
+/// Only startup flags are eligible; commands, scripts and mode changes stay exact.
+#[cfg(unix)]
+#[derive(Default)]
+struct BashInvocation {
+    login: bool,
+    noprofile: bool,
+    norc: bool,
+    rcfile: Option<OsString>,
+}
+
+#[cfg(unix)]
+impl BashInvocation {
+    fn parse(cmd: &CommandBuilder) -> Option<Self> {
+        let mut invocation = Self {
+            login: cmd.is_default_prog(),
+            ..Self::default()
+        };
+        let mut args = cmd.get_argv().iter().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.to_str()? {
+                "-l" | "--login" => invocation.login = true,
+                "--noprofile" => invocation.noprofile = true,
+                "--norc" => invocation.norc = true,
+                "--rcfile" | "--init-file" => invocation.rcfile = Some(args.next()?.clone()),
+                _ => return None,
+            }
+        }
+        Some(invocation)
+    }
+}
+
+// Apple's Bash 3.2 reads normal startup files even with --posix and ignores
+// ENV. Leave its launch untouched rather than lose login state or double-source.
+#[cfg(unix)]
+fn bash_ignores_posix_env(program: &Path) -> bool {
+    cfg!(target_os = "macos")
+        && matches!(
+            std::fs::canonicalize(program)
+                .unwrap_or_else(|_| program.to_owned())
+                .to_str(),
+            Some("/bin/bash" | "/usr/bin/bash")
+        )
+}
+
 /// Add `startup` to `cmd`, the command a pane runs. `explicit` is the
 /// program a `command` naming just a shell runs, and `None` when the pane
 /// runs the user's shell, which `cmd` then finds as it will at spawn. A
-/// command with arguments of its own gets nothing.
+/// command with arguments gets nothing unless they are only Bash startup flags.
 #[cfg(unix)]
 pub(crate) fn apply(cmd: &mut CommandBuilder, explicit: Option<&str>, startup: &ShellStartup) {
     if *startup == ShellStartup::default() {
@@ -376,35 +420,61 @@ pub(crate) fn apply(cmd: &mut CommandBuilder, explicit: Option<&str>, startup: &
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(program)),
         None if cmd.is_default_prog() => PathBuf::from(cmd.get_shell()),
-        None => return,
+        None => {
+            let Some(program) = cmd.get_argv().first().map(PathBuf::from) else {
+                return;
+            };
+            if program.file_name() != Some(OsStr::new("bash"))
+                || BashInvocation::parse(cmd).is_none()
+            {
+                return;
+            }
+            cmd.resolve_program().map(PathBuf::from).unwrap_or(program)
+        }
     };
     let mut startup = startup.clone();
     if let Some(directory) = &startup.integration {
         match program.file_name().and_then(OsStr::to_str) {
             Some("zsh") => startup.zsh = Some(directory.join("zsh")),
             Some("bash") => {
-                // Bash ignores --rcfile for login shells. The rcfile reproduces
-                // login startup before loading the integration instead.
-                let login =
-                    cmd.is_default_prog() || cmd.get_argv().iter().skip(1).any(|arg| arg == "-l");
-                if cmd.is_default_prog() {
-                    cmd.get_argv_mut().push(program.clone().into_os_string());
-                } else {
-                    cmd.get_argv_mut().retain(|arg| arg != "-l");
+                let Some(invocation) = BashInvocation::parse(cmd) else {
+                    return;
+                };
+                if bash_ignores_posix_env(&program) {
+                    return;
                 }
-                cmd.env("KETTLE_BASH_LOGIN", if login { "1" } else { "0" });
-                cmd.arg("--rcfile");
-                cmd.arg(directory.join("bashrc"));
+                let original = cmd.get_env("ENV").map(OsStr::to_owned);
+                cmd.env(
+                    "KETTLE_BASH_ENV_SET",
+                    if original.is_some() { "1" } else { "" },
+                );
+                cmd.env("KETTLE_BASH_ENV", original.unwrap_or_default());
+                cmd.env(
+                    "KETTLE_BASH_NOPROFILE",
+                    if invocation.noprofile { "1" } else { "" },
+                );
+                cmd.env("KETTLE_BASH_NORC", if invocation.norc { "1" } else { "" });
+                if let Some(rcfile) = invocation.rcfile {
+                    cmd.env("KETTLE_BASH_RCFILE", rcfile);
+                } else {
+                    cmd.env_remove("KETTLE_BASH_RCFILE");
+                }
+                cmd.env("ENV", directory.join("bashrc"));
+                let argv = cmd.get_argv_mut();
+                if argv.is_empty() {
+                    argv.push(program.clone().into_os_string());
+                }
+                // Long options must precede short options in Bash's parser.
+                argv.insert(1, "--posix".into());
+                if invocation.login {
+                    argv.insert(2, "--login".into());
+                }
             }
             Some("fish") => {
                 let original = cmd.get_env("XDG_DATA_DIRS").map(OsStr::to_owned);
                 cmd.env(
                     "KETTLE_XDG_DATA_DIRS_SET",
                     if original.is_some() { "1" } else { "" },
-                );
-                cmd.env(
-                    "KETTLE_XDG_DATA_DIRS",
-                    original.as_deref().unwrap_or_default(),
                 );
                 let mut value = directory.as_os_str().to_owned();
                 value.push(":");
@@ -899,23 +969,192 @@ mod automatic_tests {
     use super::*;
 
     #[test]
-    fn automatic_bash_uses_rcfile_and_reproduces_login_startup() {
+    fn automatic_bash_uses_env_and_keeps_login_flags() {
+        let startup = ShellStartup {
+            integration: Some("/private/startup".into()),
+            ..Default::default()
+        };
+        for flags in [
+            vec![],
+            vec!["-l"],
+            vec!["--login"],
+            vec!["--noprofile", "-l"],
+            vec!["--norc"],
+            vec!["--rcfile", "/user/custom rc"],
+            vec!["--init-file", "/user/other"],
+        ] {
+            let mut cmd = CommandBuilder::new("/custom/bash");
+            cmd.args(&flags);
+            cmd.env_remove("ENV");
+            apply(
+                &mut cmd,
+                if flags.is_empty() {
+                    Some("/custom/bash")
+                } else {
+                    None
+                },
+                &startup,
+            );
+            assert_eq!(cmd.get_argv()[1], OsStr::new("--posix"));
+            let login = flags.contains(&"-l") || flags.contains(&"--login");
+            assert_eq!(cmd.get_argv().iter().any(|arg| arg == "--login"), login);
+            assert_eq!(
+                cmd.get_env("ENV"),
+                Some(OsStr::new("/private/startup/bashrc"))
+            );
+            assert_eq!(cmd.get_env("KETTLE_BASH_ENV_SET"), Some(OsStr::new("")));
+            assert_eq!(
+                cmd.get_env("KETTLE_BASH_NOPROFILE"),
+                Some(OsStr::new(if flags.contains(&"--noprofile") {
+                    "1"
+                } else {
+                    ""
+                }))
+            );
+            assert_eq!(
+                cmd.get_env("KETTLE_BASH_NORC"),
+                Some(OsStr::new(if flags.contains(&"--norc") { "1" } else { "" }))
+            );
+            let expected_rc = if flags.contains(&"--rcfile") {
+                Some(OsStr::new("/user/custom rc"))
+            } else if flags.contains(&"--init-file") {
+                Some(OsStr::new("/user/other"))
+            } else {
+                None
+            };
+            assert_eq!(cmd.get_env("KETTLE_BASH_RCFILE"), expected_rc);
+        }
+    }
+
+    #[test]
+    fn automatic_bash_preserves_real_login_launch_and_env() {
         let startup = ShellStartup {
             integration: Some("/private/startup".into()),
             ..Default::default()
         };
         let mut cmd = CommandBuilder::new_default_prog();
         cmd.env("SHELL", "/bin/bash");
+        cmd.env("ENV", "/user/env");
         apply(&mut cmd, None, &startup);
-        assert!(!cmd.is_default_prog());
-        assert_eq!(
-            cmd.get_argv(),
-            &["/bin/bash", "--rcfile", "/private/startup/bashrc"].map(OsString::from)
-        );
-        assert_eq!(cmd.get_env("KETTLE_BASH_LOGIN"), Some(OsStr::new("1")));
-        let mut cmd = CommandBuilder::new("/bin/bash");
-        apply(&mut cmd, Some("/bin/bash"), &startup);
-        assert_eq!(cmd.get_env("KETTLE_BASH_LOGIN"), Some(OsStr::new("0")));
+        if cfg!(target_os = "macos") {
+            assert!(
+                cmd.is_default_prog(),
+                "system Bash 3.2 must be left untouched"
+            );
+            assert_eq!(cmd.get_env("ENV"), Some(OsStr::new("/user/env")));
+        } else {
+            assert!(cmd.get_argv().iter().any(|arg| arg == "--login"));
+            assert!(cmd.get_argv().iter().any(|arg| arg == "--posix"));
+            assert_eq!(
+                cmd.get_env("ENV"),
+                Some(OsStr::new("/private/startup/bashrc"))
+            );
+            assert_eq!(
+                cmd.get_env("KETTLE_BASH_ENV"),
+                Some(OsStr::new("/user/env"))
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_bash_modern_default_launch_stays_login() {
+        let bash = if cfg!(target_os = "macos") {
+            "/opt/homebrew/bin/bash"
+        } else {
+            "/bin/bash"
+        };
+        if !Path::new(bash).is_file() {
+            eprintln!("modern Bash not installed; default launch skipped");
+            return;
+        }
+        let startup = ShellStartup {
+            integration: Some("/private/startup".into()),
+            ..Default::default()
+        };
+        for original in [None, Some(""), Some("/user/original")] {
+            let mut cmd = CommandBuilder::new_default_prog();
+            cmd.env("SHELL", bash);
+            cmd.env_remove("ENV");
+            if let Some(value) = original {
+                cmd.env("ENV", value);
+            }
+            apply(&mut cmd, None, &startup);
+            assert_eq!(
+                cmd.get_argv(),
+                &[bash, "--posix", "--login"].map(OsString::from)
+            );
+            assert_eq!(
+                cmd.get_env("KETTLE_BASH_ENV_SET"),
+                Some(OsStr::new(if original.is_some() { "1" } else { "" }))
+            );
+            assert_eq!(
+                cmd.get_env("KETTLE_BASH_ENV"),
+                Some(OsStr::new(original.unwrap_or("")))
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_bash_32_fallback_retains_native_login_and_logout() {
+        use std::os::unix::process::CommandExt as _;
+        let temp = kettle_test_support::private_tempdir("kettle-bash32-login-");
+        for (file, marker) in [(".bash_profile", "profile"), (".bash_logout", "logout")] {
+            std::fs::write(
+                temp.join(file),
+                format!("echo {marker} >> \"$HOME/trace\"\n"),
+            )
+            .unwrap();
+        }
+        let startup = ShellStartup {
+            integration: Some("/private/startup".into()),
+            ..Default::default()
+        };
+        for default in [true, false] {
+            let mut cmd = if default {
+                CommandBuilder::new_default_prog()
+            } else {
+                CommandBuilder::new("/bin/bash")
+            };
+            if !default {
+                cmd.arg("-l");
+            }
+            cmd.env_clear();
+            cmd.env("SHELL", "/bin/bash");
+            cmd.env("HOME", temp.path());
+            cmd.env("PATH", "/usr/bin:/bin");
+            cmd.env("ENV", "/user/original");
+            let before = cmd.clone();
+            apply(
+                &mut cmd,
+                if default { None } else { Some("/bin/bash") },
+                &startup,
+            );
+            assert_eq!(
+                cmd, before,
+                "fallback must not borrow environment or alter arguments"
+            );
+            let mut native = std::process::Command::new("/bin/bash");
+            if default {
+                native.arg0("-bash");
+            } else {
+                native.args(&cmd.get_argv()[1..]);
+            }
+            let output = native.env_clear().envs(cmd.iter_full_env_as_str())
+                .args(["-ic", "shopt -q login_shell || exit 21; [[ ! -o posix && $ENV == /user/original ]] || exit 22; declare -F __kettle_pc >/dev/null && exit 23; exit 0"])
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                std::fs::read_to_string(temp.join("trace")).unwrap(),
+                "profile\nlogout\n"
+            );
+            std::fs::remove_file(temp.join("trace")).unwrap();
+        }
     }
 
     #[test]
@@ -936,10 +1175,7 @@ mod automatic_tests {
                 cmd.get_env("KETTLE_XDG_DATA_DIRS_SET"),
                 Some(OsStr::new(if original.is_some() { "1" } else { "" }))
             );
-            assert_eq!(
-                cmd.get_env("KETTLE_XDG_DATA_DIRS"),
-                Some(OsStr::new(original.unwrap_or("")))
-            );
+            assert_eq!(cmd.get_env("KETTLE_XDG_DATA_DIRS"), None);
             assert!(
                 cmd.get_env("XDG_DATA_DIRS")
                     .unwrap()
@@ -962,6 +1198,10 @@ mod automatic_tests {
         };
         for argv in [
             vec!["/bin/bash", "-c", "echo hello"],
+            vec!["/bin/bash", "--login", "-c", "echo hello"],
+            vec!["/bin/bash", "script.sh"],
+            vec!["/bin/bash", "--posix"],
+            vec!["/bin/bash", "--rcfile"],
             vec!["/usr/bin/ssh", "host"],
             vec!["/usr/bin/sudo", "bash"],
             vec!["/bin/sh"],
