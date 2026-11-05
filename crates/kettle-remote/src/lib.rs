@@ -153,13 +153,14 @@ impl ConnectionEnvironment {
 #[cfg(any(unix, test))]
 fn connection_environment_names(runtime: ContainerRuntime) -> &'static [&'static str] {
     match runtime {
-        ContainerRuntime::Kubectl => &["KUBECONFIG"],
+        ContainerRuntime::Kubectl => &["KUBECONFIG", "HOME"],
         ContainerRuntime::Docker => &[
             "DOCKER_HOST",
             "DOCKER_CONTEXT",
             "DOCKER_CONFIG",
             "DOCKER_TLS_VERIFY",
             "DOCKER_CERT_PATH",
+            "HOME",
         ],
         ContainerRuntime::Podman => &["CONTAINER_HOST", "CONTAINER_CONNECTION"],
         ContainerRuntime::Lxc => &[],
@@ -216,6 +217,11 @@ fn parse_connection_environment(bytes: &[u8], names: &[&str]) -> Option<Connecti
         }
     }
     for (name, value) in result.iter() {
+        if name == "HOME"
+            && value.is_some_and(|value| !connection_path_is_absolute_on(value, false))
+        {
+            return None;
+        }
         let Some(value) = value.filter(|value| !value.is_empty()) else {
             continue;
         };
@@ -1929,6 +1935,125 @@ fn posix_shell_runs_and_exits(rest: &[String], bash: bool) -> bool {
     false
 }
 
+fn non_posix_shell_runs_and_exits(rest: &[String], shell: &str) -> bool {
+    let (value_options, boolean_options, short_values, short_booleans): (
+        &[&str],
+        &[&str],
+        &str,
+        &str,
+    ) = match shell {
+        "fish" => (
+            &[
+                "init-command",
+                "debug",
+                "debug-output",
+                "features",
+                "profile",
+                "profile-startup",
+            ],
+            &["interactive", "login", "no-config", "private"],
+            "Cdp",
+            "ilNP",
+        ),
+        "nu" => (
+            &[
+                "include-path",
+                "config",
+                "env-config",
+                "plugin-config",
+                "table-mode",
+                "error-style",
+                "log-level",
+                "log-target",
+                "threads",
+            ],
+            &[
+                "interactive",
+                "login",
+                "no-config-file",
+                "no-history",
+                "no-std-lib",
+            ],
+            "I",
+            "iln",
+        ),
+        "elvish" => (
+            &["log", "rc", "db", "cpuprofile", "memprofile"],
+            &["norc", "nodb", "l"],
+            "",
+            "",
+        ),
+        "xonsh" => (
+            &["rc", "shell-type", "define"],
+            &[
+                "interactive",
+                "login",
+                "no-rc",
+                "no-script-cache",
+                "cache-everything",
+            ],
+            "D",
+            "il",
+        ),
+        "tcsh" | "csh" => (&[], &[], "", "bdefilmnqstvVxX"),
+        _ => return true,
+    };
+    let mut args = rest.iter().peekable();
+    let mut reads_stdin = false;
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            return !reads_stdin && args.next().is_some();
+        }
+        let Some(option) = arg.strip_prefix('-') else {
+            return !reads_stdin;
+        };
+        let (name, joined) = option
+            .trim_start_matches('-')
+            .split_once('=')
+            .map_or((option.trim_start_matches('-'), None), |(name, value)| {
+                (name, Some(value))
+            });
+        if (option.starts_with('-') || shell == "elvish") && value_options.contains(&name) {
+            if joined.is_none() {
+                if args.next().is_none() {
+                    return true;
+                }
+                // Xonsh's --rc consumes a list of startup files.
+                if shell == "xonsh" && name == "rc" {
+                    while args.peek().is_some_and(|value| !value.starts_with('-')) {
+                        args.next();
+                    }
+                }
+            }
+            continue;
+        }
+        if (option.starts_with('-') || shell == "elvish")
+            && boolean_options.contains(&name)
+            && joined.is_none()
+        {
+            continue;
+        }
+        if option.is_empty() || option.starts_with('-') {
+            return true;
+        }
+        for (index, flag) in option.char_indices() {
+            if short_values.contains(flag) {
+                if index + flag.len_utf8() == option.len() && args.next().is_none() {
+                    return true;
+                }
+                break;
+            }
+            if !short_booleans.contains(flag) {
+                return true;
+            }
+            if matches!(shell, "tcsh" | "csh") && matches!(flag, 'i' | 's') {
+                reads_stdin = true;
+            }
+        }
+    }
+    false
+}
+
 fn is_noninteractive_shell(argv: &[String]) -> bool {
     let base = argv0_basename(argv.first().map(String::as_str).unwrap_or(""));
     let rest = argv.get(1..).unwrap_or(&[]);
@@ -1938,14 +2063,8 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
         // The classic POSIX family, where `sh [options] command_file` is
         // standardized, so a bare operand is a script.
         "bash" | "zsh" | "sh" | "dash" | "ksh" => posix_shell_runs_and_exits(rest, base == "bash"),
-        // Everything else keeps the flags-only rule. Their option grammars
-        // carry value-taking flags this code has no table for (`fish -C`,
-        // `nu -I`, `elvish -log`, `xonsh --rc`, and tcsh's `-i` and `-s`, which
-        // suppress script interpretation outright). Reading one of those values
-        // as a script would push a shell a person is typing into onto the
-        // fallback path, and none of them is the shape that produced the bug.
         "tcsh" | "csh" | "fish" | "nu" | "elvish" | "xonsh" => {
-            rest.iter().any(|arg| shell_flag_carries_a_command(arg))
+            non_posix_shell_runs_and_exits(rest, &base)
         }
         // PowerShell: -Command / -c, -File, or -EncodedCommand / -e (each
         // prefix-abbreviated, case-insensitive), plus the -ec alias, run and exit
@@ -2679,6 +2798,7 @@ fn ssh_option_selects_endpoint(option: &str) -> bool {
             | "identityfile"
             | "certificatefile"
             | "identityagent"
+            | "identitiesonly"
             | "canonicalizehostname"
             | "canonicaldomains"
             | "controlpath"
@@ -2743,6 +2863,7 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
             }
             if let Some(bundle) = a.strip_prefix('-').filter(|rest| !rest.is_empty()) {
                 i += apply_short_option(
+                    runtime,
                     bundle,
                     argv.get(i + 1).map(String::as_str),
                     |name| container_global_option(runtime, name),
@@ -2801,6 +2922,7 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
         }
         if let Some(bundle) = a.strip_prefix('-').filter(|rest| !rest.is_empty()) {
             i += apply_short_option(
+                runtime,
                 bundle,
                 argv.get(i + 1).map(String::as_str),
                 |name| container_exec_option(runtime, name),
@@ -3152,6 +3274,7 @@ fn apply_long_option(
 
 /// Apply one `-abc`-style token, returning how many argv tokens it consumed.
 fn apply_short_option(
+    runtime: ContainerRuntime,
     bundle: &str,
     next: Option<&str>,
     lookup: impl Fn(&str) -> Option<(ContainerOptionSlot, bool)>,
@@ -3173,6 +3296,11 @@ fn apply_short_option(
     if let (Some(flag), Some(value)) = (short.flag, short.value)
         && let Some((slot, _)) = lookup(flag.encode_utf8(&mut found))
     {
+        let value = if runtime != ContainerRuntime::Lxc && !short.consumed_next {
+            value.strip_prefix('=').unwrap_or(value)
+        } else {
+            value
+        };
         apply_container_option(slot, value, parse);
     }
     if short.consumed_next { 2 } else { 1 }
@@ -4977,6 +5105,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ssh_identities_only_with_an_explicit_key_suppresses_reconnect() {
+        let key = host_path("/keys/prod");
+        for option in [
+            "IdentitiesOnly=yes",
+            "identitiesonly no",
+            "  IDENTITIESONLY = yes",
+        ] {
+            let argv = ["ssh", "-o", option, "-i", &key, "user@host"].map(String::from);
+            let ctx = detect_ssh(&argv).expect("SSH session");
+            assert_eq!(format_remote_title(&ctx), "ssh user@host");
+            assert_eq!(clone_session_command(&ctx), None, "{option}");
+        }
+    }
+
     /// Some options cannot be re-emitted faithfully: an `-o ProxyCommand` is
     /// an arbitrary shell command, `-W` makes the session a stdio forward
     /// rather than a shell, and a path outside the reproducible charset cannot
@@ -5396,6 +5539,102 @@ mod tests {
                 "/bin/sh"
             ]))
         );
+    }
+
+    #[test]
+    fn container_short_options_accept_joined_equals_values() {
+        let cases: &[(&[&str], &[&str])] = &[
+            (
+                &["docker", "-c=remote", "exec", "web", "sh"],
+                &[
+                    "docker",
+                    "--context",
+                    "remote",
+                    "exec",
+                    "-it",
+                    "web",
+                    "/bin/sh",
+                ],
+            ),
+            (
+                &["podman", "-c=remote", "exec", "web", "sh"],
+                &[
+                    "podman",
+                    "--connection",
+                    "remote",
+                    "exec",
+                    "-it",
+                    "web",
+                    "/bin/sh",
+                ],
+            ),
+            (
+                &[
+                    "kubectl",
+                    "-n=prod",
+                    "exec",
+                    "api-0",
+                    "-c=sidecar",
+                    "--",
+                    "sh",
+                ],
+                &[
+                    "kubectl",
+                    "--namespace",
+                    "prod",
+                    "exec",
+                    "-it",
+                    "api-0",
+                    "-c",
+                    "sidecar",
+                    "--",
+                    "/bin/sh",
+                ],
+            ),
+            (
+                &[
+                    "kubectl",
+                    "exec",
+                    "-n=prod",
+                    "-itc=sidecar",
+                    "api-0",
+                    "--",
+                    "sh",
+                ],
+                &[
+                    "kubectl",
+                    "--namespace",
+                    "prod",
+                    "exec",
+                    "-it",
+                    "api-0",
+                    "-c",
+                    "sidecar",
+                    "--",
+                    "/bin/sh",
+                ],
+            ),
+        ];
+        let argv = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for (args, expected) in cases {
+            let ctx = detect_container(&argv(args)).expect("container session");
+            assert_eq!(
+                clone_session_command(&ctx),
+                Some(session_command(expected)),
+                "{args:?}"
+            );
+        }
+        for args in [
+            &["kubectl", "exec", "-n", "=prod", "api-0", "--", "sh"][..],
+            &["kubectl", "exec", "-n==prod", "api-0", "--", "sh"],
+            &["kubectl", "exec", "-n=", "api-0", "--", "sh"],
+            &["lxc-attach", "-P=/srv/lxc", "-n", "web"],
+        ] {
+            let ctx = detect_container(&argv(args)).expect("container session");
+            assert_eq!(clone_session_command(&ctx), None, "{args:?}");
+        }
+        let ctx = detect_ssh(&argv(&["ssh", "-p=2222", "host"])).expect("SSH session");
+        assert_eq!(clone_session_command(&ctx), None);
     }
 
     /// An option VALUE after the subcommand must never pass for the container,
@@ -6227,12 +6466,58 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn reconnect_preserves_client_home_for_default_configuration() {
+        for client in ["kubectl", "docker"] {
+            let mut tree = MockProcessTree::new();
+            tree.add(100, None, &[client, "exec", "-it", "web", "sh"]);
+            tree.procs.get_mut(&100).unwrap().environment = Some(b"HOME=/profiles/prod\0".to_vec());
+            let ctx = detect_in_tree(100, &mut tree).unwrap();
+            let command = clone_session_command(&ctx).unwrap();
+            let mut inherited = std::collections::HashMap::from([
+                ("HOME", "/profiles/kettle"),
+                ("KUBECONFIG", "/kettle/config"),
+                ("DOCKER_CONFIG", "/kettle/docker"),
+            ]);
+            for (name, value) in command.environment.iter() {
+                match value {
+                    Some(value) => {
+                        inherited.insert(name, value);
+                    }
+                    None => {
+                        inherited.remove(name);
+                    }
+                }
+            }
+            assert_eq!(inherited.get("HOME"), Some(&"/profiles/prod"), "{client}");
+            let config = if client == "kubectl" {
+                "KUBECONFIG"
+            } else {
+                "DOCKER_CONFIG"
+            };
+            assert!(!inherited.contains_key(config), "{client}");
+            for home in ["relative", ""] {
+                tree.procs.get_mut(&100).unwrap().environment =
+                    Some(format!("HOME={home}\0").into_bytes());
+                let ctx = detect_in_tree(100, &mut tree).unwrap();
+                assert!(
+                    clone_session_command(&ctx).is_none(),
+                    "{client} HOME={home:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn reconnect_captures_only_client_connection_environment() {
         let bytes = b"KUBECONFIG=/private/cluster config\0DOCKER_HOST=tcp://remote:2376\0DOCKER_CONTEXT=prod\0DOCKER_CONFIG=/private/docker\0DOCKER_TLS_VERIFY=1\0DOCKER_CERT_PATH=/private/certs\0CONTAINER_HOST=ssh://remote\0CONTAINER_CONNECTION=prod\0PRIVATE_TOKEN=never-copy-me\0";
         for (client, expected) in [
             (
                 "kubectl",
-                vec![("KUBECONFIG", Some("/private/cluster config"))],
+                vec![
+                    ("KUBECONFIG", Some("/private/cluster config")),
+                    ("HOME", None),
+                ],
             ),
             (
                 "docker",
@@ -6242,6 +6527,7 @@ mod tests {
                     ("DOCKER_CONFIG", Some("/private/docker")),
                     ("DOCKER_TLS_VERIFY", Some("1")),
                     ("DOCKER_CERT_PATH", Some("/private/certs")),
+                    ("HOME", None),
                 ],
             ),
             (
@@ -6282,6 +6568,7 @@ mod tests {
                 ("DOCKER_CONFIG", None),
                 ("DOCKER_TLS_VERIFY", None),
                 ("DOCKER_CERT_PATH", None),
+                ("HOME", None),
             ]
         );
         for bytes in [
@@ -6319,6 +6606,7 @@ mod tests {
             ])
             .env_clear()
             .env("KUBECONFIG", "/client/cluster config")
+            .env("HOME", "/profiles/prod")
             .env("PRIVATE_TOKEN", "never-copy-me")
             .stdout(std::process::Stdio::null())
             .spawn()
@@ -6354,7 +6642,10 @@ mod tests {
             .expect("same-user environment");
         assert_eq!(
             environment.iter().collect::<Vec<_>>(),
-            [("KUBECONFIG", Some("/client/cluster config"))]
+            [
+                ("KUBECONFIG", Some("/client/cluster config")),
+                ("HOME", Some("/profiles/prod"))
+            ]
         );
         let sys = sysinfo::System::new();
         let environment = sys
@@ -6362,7 +6653,10 @@ mod tests {
             .expect("full-snapshot adapter environment");
         assert_eq!(
             environment.iter().collect::<Vec<_>>(),
-            [("KUBECONFIG", Some("/client/cluster config"))]
+            [
+                ("KUBECONFIG", Some("/client/cluster config")),
+                ("HOME", Some("/profiles/prod"))
+            ]
         );
         stop.0.kill().unwrap();
         stop.0.wait().unwrap();
@@ -6403,7 +6697,7 @@ mod tests {
         let env = read_linux_connection_environment(root.path(), 10, names).unwrap();
         assert_eq!(
             env.iter().collect::<Vec<_>>(),
-            [("KUBECONFIG", Some("/client/cluster"))]
+            [("KUBECONFIG", Some("/client/cluster")), ("HOME", None)]
         );
         std::fs::write(&path, vec![0; MAX_PROC_FILE_BYTES as usize + 1]).unwrap();
         assert!(read_linux_connection_environment(root.path(), 10, names).is_none());
@@ -7016,6 +7310,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn non_posix_shell_script_operands_are_not_cloned() {
+        let argv = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for args in [
+            &["fish", "/tmp/job.fish"][..],
+            &["fish", "-C", "set -x FOO 1", "/tmp/job.fish"],
+            &["fish", "--init-command=set -x FOO 1", "/tmp/job.fish"],
+            &["fish", "-Cinit", "--", "-job.fish"],
+            &["nu", "-I", "/modules", "/tmp/job.nu"],
+            &["nu", "--config", "/tmp/config.nu", "/tmp/job.nu"],
+            &["elvish", "-log", "/tmp/log", "/tmp/job.elv"],
+            &["xonsh", "--shell-type", "readline", "/tmp/job.xsh"],
+            &["tcsh", "-f", "/tmp/job.csh"],
+            &["csh", "--", "/tmp/job.csh"],
+        ] {
+            assert!(!shell_launch_is_interactive(&argv(args)), "{args:?}");
+            let mut tree = MockProcessTree::new();
+            tree.add(100, None, &["bash"]);
+            tree.add(200, Some(100), &["nvim"]);
+            tree.add(300, Some(200), args);
+            assert_eq!(find_foreground_shell(100, &mut tree), None, "{args:?}");
+        }
+        for args in [
+            &["fish", "-C", "echo -c"][..],
+            &["fish", "-Cinit"],
+            &["nu", "-I/modules"],
+            &["nu", "--include-path=/modules"],
+            &["elvish", "-log=/tmp/log"],
+            &["xonsh", "--rc", "one.xsh", "two.xsh", "-i"],
+        ] {
+            assert!(shell_launch_is_interactive(&argv(args)), "{args:?}");
+        }
+        for args in [
+            &["fish", "-C"][..],
+            &["nu", "-I"],
+            &["fish", "--unknown-option"],
+            &["elvish", "-compileonly"],
+            &["xonsh", "--help"],
+        ] {
+            assert!(!shell_launch_is_interactive(&argv(args)), "{args:?}");
+        }
+    }
+
     /// Truth table for the one-shot predicate across shell families.
     #[test]
     fn is_noninteractive_shell_truth_table() {
@@ -7099,9 +7436,7 @@ mod tests {
             &["bash", "-s"],
             &["bash", "-s", "worker"],
             &["bash", "--login"],
-            // Shells outside the POSIX family keep the flags-only rule,
-            // because their value-taking options have no table here and
-            // reading one as a script would strand an interactive shell.
+            // Each shell's value-taking options consume their own operands.
             &["fish", "-C", "init"],
             &["nu", "-I", "/modules"],
             &["elvish", "-log", "/tmp/elvish.log"],

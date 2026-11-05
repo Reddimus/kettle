@@ -17,7 +17,7 @@ const INITIAL_CHILD_SLOTS: usize = 64;
 #[derive(Default)]
 pub(crate) struct MacProcessTree {
     entries: HashMap<u32, MacProcessEntry>,
-    /// Roots whose subtree holds an argv this walk could not read whole. Only
+    /// Roots whose subtree this walk could not read whole. Only
     /// those panes keep their previous snapshot; the rest still publish.
     pub(crate) partial_roots: HashSet<u32>,
     /// Reused `KERN_PROCARGS2` buffer.
@@ -65,7 +65,17 @@ impl MacProcessTree {
         &mut self,
         roots: &[u32],
         budget: Duration,
+        now: impl FnMut() -> Instant,
+    ) -> bool {
+        self.refresh_roots_with_children(roots, budget, now, Self::list_children)
+    }
+
+    fn refresh_roots_with_children(
+        &mut self,
+        roots: &[u32],
+        budget: Duration,
         mut now: impl FnMut() -> Instant,
+        mut list_children: impl FnMut(&mut Self, u32, &mut Vec<u32>) -> Option<bool>,
     ) -> bool {
         let deadline = now() + budget;
         self.entries.clear();
@@ -108,7 +118,7 @@ impl MacProcessTree {
             }
             // libproc reports a missing pid as having no children, so only a
             // non-empty list proves the process is structure worth keeping.
-            let has_children = match self.list_children(pid, &mut children) {
+            let has_children = match list_children(self, pid, &mut children) {
                 Some(within_limits) => {
                     complete &= within_limits;
                     for &child in &children {
@@ -122,7 +132,10 @@ impl MacProcessTree {
                     }
                     !children.is_empty()
                 }
-                None => false,
+                None => {
+                    self.partial_roots.insert(root);
+                    false
+                }
             };
             // A vanished requested root has no edge worth keeping; a listed
             // descendant is still structure even when its argv is unreadable.
@@ -617,6 +630,35 @@ mod tests {
             matches!(&actual, ArgvRead::OverBudget),
             "unexpected near-budget argv classification: {actual:?}"
         );
+    }
+
+    #[test]
+    fn a_failed_child_query_holds_back_the_live_parents_pane() {
+        let pid = std::process::id();
+        let missing = 999_999;
+        let start = Instant::now();
+        let mut tree = MacProcessTree::default();
+        assert!(tree.refresh_roots_with_children(
+            &[pid, missing],
+            MAX_PROC_SCAN_DURATION,
+            || start,
+            |tree, queried, out| {
+                if queried == pid {
+                    out.clear();
+                    None
+                } else {
+                    tree.list_children(queried, out)
+                }
+            },
+        ));
+        assert!(tree.argv_of(pid).is_some(), "the parent is still live");
+        assert!(
+            tree.partial_roots.contains(&pid),
+            "a failed child query must hold back its pane"
+        );
+        assert!(!tree.partial_roots.contains(&missing));
+        assert!(tree.argv_of(missing).is_none());
+        assert!(!tree.timed_out);
     }
 
     #[test]
