@@ -4566,8 +4566,8 @@ mod windows {
         let result = (|| {
             require_regular_non_reparse(&file, &path)?;
             require_single_link(&file, &path)?;
-            if !owned_by_user_handle(&file, current_user.sid)?
-                || !has_current_user_only_dacl_handle(&file, current_user.sid)?
+            if !owned_by_any_handle_direct(&file, &[current_user.sid])?
+                || !has_current_user_only_dacl_direct(&file, current_user.sid)?
             {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -4648,7 +4648,9 @@ mod windows {
         let handle = unsafe {
             CreateFileW(
                 path_wide.as_ptr(),
-                desired_access | DELETE,
+                // Verify owner/DACL on this handle, including append-only
+                // creation handles, without reopening for ACL mutation.
+                desired_access | DELETE | READ_CONTROL,
                 sharing,
                 &attributes,
                 CREATE_NEW,
@@ -4665,8 +4667,8 @@ mod windows {
             require_regular_non_reparse(&file, &path)?;
             require_single_link(&file, &path)?;
             parent.verify()?;
-            if !owned_by_user_handle(&file, current_user.sid)?
-                || !has_current_user_only_dacl_handle(&file, current_user.sid)?
+            if !owned_by_any_handle_direct(&file, &[current_user.sid])?
+                || !has_current_user_only_dacl_direct(&file, current_user.sid)?
             {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -5478,7 +5480,14 @@ mod windows {
         // SAFETY: the aligned buffer holds the header and all trailing UTF-16
         // code units. The caller provides a stable, non-NUL destination path.
         unsafe {
-            (*info).Anonymous.ReplaceIfExists = replace;
+            if replace {
+                // Legacy replacement refuses an open destination even when
+                // its readers share deletion (for example NamedTempFile).
+                (*info).Anonymous.Flags =
+                    FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+            } else {
+                (*info).Anonymous.ReplaceIfExists = false;
+            }
             (*info).RootDirectory = std::ptr::null_mut();
             (*info).FileNameLength = u32::try_from(name_bytes).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, "destination is too long")
@@ -5496,7 +5505,11 @@ mod windows {
         if unsafe {
             SetFileInformationByHandle(
                 file.as_raw_handle() as HANDLE,
-                FileRenameInfo,
+                if replace {
+                    FileRenameInfoEx
+                } else {
+                    FileRenameInfo
+                },
                 info.cast(),
                 buffer_len,
             )
@@ -6087,12 +6100,9 @@ mod windows {
         Ok(unsafe { EqualSid(sid, current_user) } != 0)
     }
 
-    fn has_current_user_only_dacl_handle(file: &File, current_user: PSID) -> io::Result<bool> {
-        let handle = reopen_for_acl(file)?;
-        has_current_user_only_dacl_raw(handle.as_raw_handle() as HANDLE, current_user)
-    }
-
     fn has_current_user_only_dacl_direct(file: &File, current_user: PSID) -> io::Result<bool> {
+        // READ_CONTROL is sufficient for inspection. ReOpenFile is for files,
+        // so using the ACL-mutation reopen here would also reject directories.
         has_current_user_only_dacl_raw(file.as_raw_handle() as HANDLE, current_user)
     }
 
@@ -6117,11 +6127,6 @@ mod windows {
         }
         let descriptor = SecurityDescriptor(descriptor);
         dacl_is_current_user_only(descriptor.0, dacl, current_user)
-    }
-
-    fn owned_by_user_handle(file: &File, current_user: PSID) -> io::Result<bool> {
-        let handle = reopen_for_acl(file)?;
-        owned_by_any_raw(handle.as_raw_handle() as HANDLE, &[current_user])
     }
 
     fn owned_by_any_handle_direct(file: &File, expected_owners: &[PSID]) -> io::Result<bool> {
@@ -6163,20 +6168,20 @@ mod windows {
     #[cfg(test)]
     pub(super) fn has_current_user_only_dacl(file: &File) -> io::Result<bool> {
         let current_user = current_user_sid()?;
-        has_current_user_only_dacl_handle(file, current_user.sid)
+        has_current_user_only_dacl_direct(file, current_user.sid)
     }
 
     #[cfg(test)]
     pub(super) fn owned_by_current_user(file: &File) -> io::Result<bool> {
         let current_user = current_user_sid()?;
-        owned_by_user_handle(file, current_user.sid)
+        owned_by_any_handle_direct(file, &[current_user.sid])
     }
 
     #[cfg(test)]
     pub(super) fn owned_by_current_token_owner(file: &File) -> io::Result<bool> {
         let token = effective_token()?;
         let current_owner = token_owner_sid(&token)?;
-        owned_by_user_handle(file, current_owner.sid)
+        owned_by_any_handle_direct(file, &[current_owner.sid])
     }
 
     #[cfg(test)]
@@ -6642,12 +6647,20 @@ mod tests {
         create_private_dirs(&directory).unwrap();
         use std::os::windows::fs::OpenOptionsExt as _;
         use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL};
-        let handle = std::fs::OpenOptions::new()
-            .access_mode(READ_CONTROL)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(&directory)
-            .unwrap();
-        assert!(has_current_user_only_dacl(&handle).unwrap());
+        for path in [root.path().join("new"), directory.clone()] {
+            let handle = std::fs::OpenOptions::new()
+                .access_mode(READ_CONTROL)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(&path)
+                .expect("owner can open a newly created private directory with READ_CONTROL");
+            assert!(has_current_user_only_dacl(&handle).unwrap());
+            assert!(owned_by_current_user(&handle).unwrap());
+            // Exercise the kernel's access check as well as the exact DACL.
+            let child = path.join("child");
+            std::fs::create_dir(&child).expect("owner can create child directories");
+            std::fs::write(child.join("data"), b"private").expect("owner can create child files");
+            std::fs::write(path.join("data"), b"private").expect("owner can create files");
+        }
     }
 
     #[cfg(windows)]
@@ -6713,6 +6726,34 @@ mod tests {
         staged.write_all(b"complete").unwrap();
         staged.publish().unwrap();
         assert_eq!(std::fs::read(&destination).unwrap(), b"complete");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn staged_replacement_preserves_open_destination_handles() {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+
+        let root = crate::test_tempdir();
+        let destination = root.path().join("open.png");
+        let mut previous = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .unwrap();
+        previous.write_all(b"previous").unwrap();
+        let mut staged = stage_user_selected_file_replace(&destination).unwrap();
+        staged.write_all(b"complete").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous");
+
+        staged.publish().unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete");
+        previous.seek(SeekFrom::Start(0)).unwrap();
+        let mut old_bytes = Vec::new();
+        previous.read_to_end(&mut old_bytes).unwrap();
+        assert_eq!(old_bytes, b"previous");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
 

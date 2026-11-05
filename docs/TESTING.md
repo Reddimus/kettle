@@ -430,6 +430,20 @@ For private-path and trusted-decoder changes, repeat focused tests under
 umask `002`. Fixtures must create private roots explicitly rather than inherit
 ambient permissions. Existing unrelated directories must keep their modes.
 
+`kettle-state`'s Windows-only
+`private_directory_creation_uses_a_protected_current_user_dacl` checks both
+levels of a newly created directory tree through `READ_CONTROL` handles,
+verifies the current-user owner and protected full-access DACL, and creates
+child directories and files. Read-only verification must query the held
+directory rather than use the file-only `ReOpenFile` ACL-mutation path.
+`staged_replacement_preserves_open_destination_handles` checks atomic
+replacement while an existing reader retains the old bytes. The renderer's
+`offscreen_screenshot_replaces_an_open_file_in_the_system_temp_directory`
+exercises the same open-tempfile destination used by `bell_visual`,
+`menu_visual`, and `scrollbar_visual`, without needing a GPU. These tests run
+in the existing `windows-latest` workspace test job; a pass on Unix does not
+verify the Windows `FileRenameInfoEx` replacement semantics.
+
 `kettle-state`'s `trusted_leaf_follow_` tests cover relative config and Lua
 dotfile targets, writable link parents, link loops, and the link/component
 budgets. Run these on Unix and Windows; the Windows junction-chain test also

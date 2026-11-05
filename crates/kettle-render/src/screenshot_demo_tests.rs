@@ -112,3 +112,25 @@ fn offscreen_screenshot_atomically_replaces_destination() {
     assert_eq!(std::fs::read(&out).unwrap(), b"complete PNG");
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
+
+#[test]
+fn offscreen_screenshot_replaces_an_open_file_in_the_system_temp_directory() {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+
+    // The visual tests and --screenshot accept caller-selected destinations,
+    // including open files beneath the system temp directory on Windows.
+    let mut out = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+    out.write_all(b"previous PNG").unwrap();
+    super::capture::persist_offscreen_screenshot_with(out.path(), |writer| {
+        writer.write_all(b"complete PNG")?;
+        assert_eq!(std::fs::read(out.path()).unwrap(), b"previous PNG");
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(std::fs::read(out.path()).unwrap(), b"complete PNG");
+    out.seek(SeekFrom::Start(0)).unwrap();
+    let mut previous = Vec::new();
+    out.read_to_end(&mut previous).unwrap();
+    assert_eq!(previous, b"previous PNG");
+}
