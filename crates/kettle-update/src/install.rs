@@ -4939,7 +4939,7 @@ impl Transaction {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(windows, test))]
     fn install(
         &mut self,
         relative: &Path,
