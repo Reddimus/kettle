@@ -606,6 +606,8 @@ struct ReplaySafeCastWriter {
     file: File,
     pending: Vec<u8>,
     committed_len: u64,
+    #[cfg(test)]
+    fail_next_write: bool,
 }
 
 impl ReplaySafeCastWriter {
@@ -614,6 +616,8 @@ impl ReplaySafeCastWriter {
             file,
             pending: Vec::with_capacity(CAST_WRITE_BUFFER_BYTES),
             committed_len: 0,
+            #[cfg(test)]
+            fail_next_write: false,
         }
     }
 
@@ -621,7 +625,14 @@ impl ReplaySafeCastWriter {
         if self.pending.is_empty() {
             return Ok(());
         }
-        if let Err(write_error) = self.file.write_all(&self.pending) {
+        let result = (|| {
+            #[cfg(test)]
+            if std::mem::take(&mut self.fail_next_write) {
+                return Err(std::io::Error::other("injected recording write failure"));
+            }
+            self.file.write_all(&self.pending)
+        })();
+        if let Err(write_error) = result {
             let repair = self
                 .file
                 .set_len(self.committed_len)
@@ -2234,11 +2245,21 @@ mod tests {
             .iter()
             .find(|path| std::fs::metadata(path).unwrap().len() == 0)
             .unwrap();
-        writer.writer.as_mut().unwrap().file = std::fs::File::open(new_path).unwrap();
-        assert!(
+        // Windows cleanup needs DELETE access from the original creation handle.
+        writer.writer.as_mut().unwrap().fail_next_write = true;
+        writer
+            .writer
+            .as_ref()
+            .unwrap()
+            .file
+            .set_len(0)
+            .expect("write failure injection must preserve the writable creation handle");
+        assert_eq!(
             writer
                 .write_all(format!("{}\n", header_line(80, 24)).as_bytes())
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "injected recording write failure",
         );
         assert!(
             !new_path.exists(),
