@@ -1549,6 +1549,38 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn supplementary_groups_with(
+        mut query: impl FnMut(&mut [libc::gid_t]) -> io::Result<usize>,
+    ) -> io::Result<Vec<libc::gid_t>> {
+        let count = query(&mut [])?;
+        let mut groups = vec![0; count];
+        if count == 0 {
+            return Ok(groups);
+        }
+        let count = query(&mut groups)?;
+        groups.truncate(count);
+        Ok(groups)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supplementary_groups_handles_more_than_128_groups() {
+        let expected: Vec<libc::gid_t> = (0..257).collect();
+        let groups = supplementary_groups_with(|buffer| {
+            if buffer.is_empty() {
+                return Ok(expected.len());
+            }
+            if buffer.len() < expected.len() {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            buffer[..expected.len()].copy_from_slice(&expected);
+            Ok(expected.len())
+        })
+        .unwrap();
+        assert_eq!(groups, expected);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn preserves_existing_group() {
         use std::os::fd::AsRawFd as _;
@@ -1558,11 +1590,17 @@ mod tests {
         let path = dir.path().join("config");
         let file = File::create(&path).unwrap();
         let staging_group = file.metadata().unwrap().gid();
-        let mut groups = vec![0; 128];
-        // SAFETY: groups has capacity for the requested number of group IDs.
-        let count = unsafe { libc::getgroups(groups.len() as _, groups.as_mut_ptr()) };
-        assert!(count >= 0);
-        groups.truncate(count as usize);
+        let groups = supplementary_groups_with(|buffer| {
+            // SAFETY: buffer has room for the requested number of group IDs;
+            // a zero length queries the required count without writing IDs.
+            let count = unsafe { libc::getgroups(buffer.len() as _, buffer.as_mut_ptr()) };
+            if count < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(count as usize)
+            }
+        })
+        .unwrap();
         let Some(group) = groups.into_iter().find(|group| *group != staging_group) else {
             eprintln!("skipping: no supplementary group differs from the staging group");
             return;

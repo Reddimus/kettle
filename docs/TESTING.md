@@ -399,6 +399,14 @@ For private-path and trusted-decoder changes, repeat focused tests under
 umask `002`. Fixtures must create private roots explicitly rather than inherit
 ambient permissions. Existing unrelated directories must keep their modes.
 
+`kettle-state`'s `trusted_leaf_follow_` tests cover relative config and Lua
+dotfile targets, writable link parents, link loops, and the link/component
+budgets. Run these on Unix and Windows; the Windows junction-chain test also
+checks a junction replaceable through an Everyone-writable parent. File-symlink
+tests report a skip when Windows does not grant the required privilege; the
+junction test still runs without that privilege. The supplementary-group query
+test simulates 257 groups without changing the process credentials.
+
 Report the exact command, revision, host, and skipped coverage in a PR.
 Distinguish an offscreen render from a native window, and a fixture from an
 installed-package check. Do not claim another platform passed from compilation.

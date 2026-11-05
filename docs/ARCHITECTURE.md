@@ -395,9 +395,13 @@ Configuration reads carry provenance across the CLI/UI boundary. Default and
 named-profile paths open through `kettle-state` while their verified parent
 handles remain live; Unix rejects writable or untrusted directory edges,
 writable or multiply-linked leaves, and symlink substitution. Dotfile-manager
-leaf links remain supported, but the link object is owner/link-count checked
-and resolved relative to the held parent before the target receives the same
-full-chain verification. macOS also
+links remain supported through a shared component-by-component resolver.
+Each symbolic link or Windows junction is owner/link-count checked and followed
+only from a trusted parent that others cannot write. Relative targets are
+expanded before processing `..`; absolute targets restart at the root. The
+resolved prefix contains no links. Resolution holds checked link parents,
+follows at most 40 links, and budgets 4096 components across the original path
+and all targets before the final file receives full-chain verification. macOS also
 inspects each held object's extended ACL for mutation grants to untrusted
 identities; Windows applies the equivalent owner, reparse-point, hard-link, and
 mutation-DACL checks, including generic access masks. The config watcher uses
@@ -407,7 +411,7 @@ into a `RunCommand` trigger. An explicit `--config FILE` is represented as a
 separate provenance value and intentionally retains bounded regular-file
 loading for project/shared configs. A failed live read leaves the last
 known-good configuration installed rather than replacing it with defaults.
-Each filesystem guard retains only the immediate-parent capability used for
+Each Unix filesystem guard retains only the immediate-parent capability used for
 relative operations; ancestor identities are recorded and the complete chain
 is reopened and revalidated around publication. This keeps steady descriptor
 use O(1) per guard rather than O(path depth) without weakening path-swap checks.

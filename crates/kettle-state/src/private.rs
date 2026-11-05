@@ -481,20 +481,134 @@ pub fn open_trusted_file_read(path: &Path) -> io::Result<File> {
     open_trusted_file_read_impl(path)
 }
 
-/// Open an implicitly discovered trusted file, following at most its leaf link.
+/// Open an implicitly discovered trusted file through a checked link chain.
 ///
 /// A dotfile manager commonly installs `config` or `init.lua` as a symbolic
 /// link. Following that link is safe only when the link itself has trusted
 /// provenance: an older kettle may first repair a `0775` directory in which a
-/// group peer could already have planted a link. This operation validates and
-/// holds the requested leaf while resolving it, then applies
+/// group peer could already have planted a link. This operation validates each
+/// link and retains its checked parent while resolving the chain, then applies
 /// [`open_trusted_file_read`] to the resolved regular target. The returned path
 /// names the object represented by the returned handle and is suitable for
-/// diagnostics.
+/// diagnostics. Every link must be in a trusted directory that others cannot
+/// write. Resolution follows at most 40 links and inspects at most 4096 path
+/// components, including components introduced by link targets.
 pub fn open_trusted_file_read_following_leaf(
     path: &Path,
 ) -> io::Result<(File, std::path::PathBuf)> {
     open_trusted_file_read_following_leaf_impl(path)
+}
+
+#[cfg(any(unix, windows))]
+fn resolve_trusted_file_path(
+    path: &Path,
+    mut follow_link: impl FnMut(&Path) -> io::Result<std::path::PathBuf>,
+) -> io::Result<std::path::PathBuf> {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+    use std::path::{Component, PathBuf};
+
+    fn prepend(path: &Path, pending: &mut VecDeque<OsString>, total: &mut usize) -> io::Result<()> {
+        let mut added = Vec::new();
+        for component in path.components() {
+            *total += 1;
+            if *total > 4096 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "trusted path exceeds 4096 components",
+                ));
+            }
+            added.push(component.as_os_str().to_os_string());
+        }
+        for component in added.into_iter().rev() {
+            pending.push_front(component);
+        }
+        Ok(())
+    }
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        // Do not let GetFullPathName erase `..` before inspecting links.
+        if path.has_root() || matches!(path.components().next(), Some(Component::Prefix(_))) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "trusted path must be absolute or relative to the current directory",
+            ));
+        }
+        std::env::current_dir()?.join(path)
+    };
+    let mut resolved = PathBuf::new();
+    let mut pending = VecDeque::new();
+    let mut total = 0;
+    prepend(&absolute, &mut pending, &mut total)?;
+    let mut links = 0;
+    while let Some(component) = pending.pop_front() {
+        match Path::new(&component)
+            .components()
+            .next()
+            .expect("a component")
+        {
+            Component::Prefix(_) => resolved = PathBuf::from(&component),
+            Component::RootDir => resolved.push(&component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Every name in the prefix has already been checked for links.
+                resolved.pop();
+            }
+            Component::Normal(_) => {
+                let candidate = resolved.join(&component);
+                let metadata = std::fs::symlink_metadata(&candidate)?;
+                #[cfg(unix)]
+                let is_link = metadata.file_type().is_symlink();
+                #[cfg(windows)]
+                let is_link = {
+                    use std::os::windows::fs::MetadataExt as _;
+                    metadata.file_attributes()
+                        & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+                        != 0
+                };
+                if is_link {
+                    if links == 40 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "trusted path exceeds 40 links",
+                        ));
+                    }
+                    links += 1;
+                    let target = follow_link(&candidate)?;
+                    if target.as_os_str().is_empty() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "trusted link has an empty target",
+                        ));
+                    }
+                    if target.is_absolute() {
+                        resolved.clear();
+                    }
+                    #[cfg(windows)]
+                    if !target.is_absolute()
+                        && matches!(target.components().next(), Some(Component::Prefix(_)))
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "trusted link has a drive-relative target",
+                        ));
+                    }
+                    prepend(&target, &mut pending, &mut total)?;
+                } else {
+                    if !pending.is_empty() && !metadata.is_dir() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotADirectory,
+                            "trusted path has a non-directory intermediate component",
+                        ));
+                    }
+                    resolved.push(component);
+                }
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 /// Request `0700` for every newly created directory in the path. Existing
@@ -3322,57 +3436,46 @@ pub(crate) mod unix {
     pub(super) fn open_trusted_file_read_following_leaf(
         path: &Path,
     ) -> io::Result<(File, PathBuf)> {
-        let guard = PrivateParentGuard::new(path)?;
-        let requested = guard.path.join(&guard.leaf);
-        let before = entry_stat(guard.directory(), &guard.leaf)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("trusted path does not exist: {}", requested.display()),
-            )
+        let mut links = Vec::new();
+        let resolved = resolve_trusted_file_path(path, |requested| {
+            let guard = PrivateParentGuard::new(requested)?;
+            let before = entry_stat(guard.directory(), &guard.leaf)?.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "trusted link disappeared")
+            })?;
+            if before.st_mode & libc::S_IFMT != libc::S_IFLNK {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "trusted symbolic link changed while it was resolved",
+                ));
+            }
+            require_trusted_symbolic_link(before.st_uid, before.st_nlink, requested)?;
+            guard.verify_trusted_directory()?;
+            let target = read_link_at(&guard, requested)?;
+            guard.verify_trusted_directory()?;
+            let after = entry_stat(guard.directory(), &guard.leaf)?.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::PermissionDenied, "trusted link disappeared")
+            })?;
+            if FileIdentity::from_stat(&before) != FileIdentity::from_stat(&after) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "trusted symbolic link changed while it was resolved",
+                ));
+            }
+            links.push((guard, FileIdentity::from_stat(&before)));
+            Ok(target)
         })?;
-
-        if stat_is_regular(&before) {
-            drop(guard);
-            return Ok((open_trusted_file_read(&requested)?, requested));
-        }
-        if before.st_mode & libc::S_IFMT != libc::S_IFLNK {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "trusted path is not a regular file or symbolic link: {}",
-                    requested.display()
-                ),
-            ));
-        }
-        guard.require_leaf_policy(before.st_uid)?;
-        require_trusted_symbolic_link(before.st_uid, before.st_nlink, &requested)?;
-
-        // Read the link relative to the held immediate parent. Recheck both
-        // the parent chain and the link inode before trusting the selected
-        // target; a repair from 0775 to 0700 cannot bless a link a group peer
-        // planted before the repair.
-        let target = read_link_at(&guard, &requested)?;
-        guard.verify_directory()?;
-        let after = entry_stat(guard.directory(), &guard.leaf)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "trusted symbolic link disappeared while it was resolved",
-            )
-        })?;
-        if FileIdentity::from_stat(&before) != FileIdentity::from_stat(&after) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "trusted symbolic link changed while it was resolved",
-            ));
-        }
-        let target = if target.is_absolute() {
-            target
-        } else {
-            guard.path.join(target)
-        };
-        let target_guard = PrivateParentGuard::new(&target)?;
-        let resolved = target_guard.path.join(&target_guard.leaf);
         let file = open_trusted_file_read(&resolved)?;
+        for (guard, identity) in links {
+            guard.verify_trusted_directory()?;
+            if !entry_stat(guard.directory(), &guard.leaf)?
+                .is_some_and(|stat| FileIdentity::from_stat(&stat) == identity)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "trusted symbolic link changed while it was resolved",
+                ));
+            }
+        }
         Ok((file, resolved))
     }
 
@@ -3928,44 +4031,44 @@ mod windows {
         Ok(child)
     }
 
+    fn final_handle_path(parent: &File, flags: u32) -> io::Result<Vec<u16>> {
+        let mut capacity = 256_u32;
+        loop {
+            let mut path = vec![0_u16; capacity as usize];
+            // SAFETY: `parent` owns a valid handle and the output buffer
+            // has `capacity` writable UTF-16 code units.
+            let len = unsafe {
+                GetFinalPathNameByHandleW(
+                    parent.as_raw_handle() as HANDLE,
+                    path.as_mut_ptr(),
+                    capacity,
+                    flags,
+                )
+            };
+            if len == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if len < capacity {
+                path.truncate(len as usize);
+                return Ok(path);
+            }
+            capacity = len.checked_add(1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "final object path is too long")
+            })?;
+        }
+    }
+
     fn stable_child_path(parent: &File, name: &std::ffi::OsStr) -> io::Result<Vec<u16>> {
         // A volume-GUID path is derived from the already-held parent object,
         // avoiding a second resolution through a mutable drive-letter mapping.
         // The held ancestor chain is opened without FILE_SHARE_DELETE, so the
         // returned parent path cannot be renamed before publication.
-        fn query(parent: &File, flags: u32) -> io::Result<Vec<u16>> {
-            let mut capacity = 256_u32;
-            loop {
-                let mut path = vec![0_u16; capacity as usize];
-                // SAFETY: `parent` owns a valid handle and the output buffer
-                // has `capacity` writable UTF-16 code units.
-                let len = unsafe {
-                    GetFinalPathNameByHandleW(
-                        parent.as_raw_handle() as HANDLE,
-                        path.as_mut_ptr(),
-                        capacity,
-                        flags,
-                    )
-                };
-                if len == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                if len < capacity {
-                    path.truncate(len as usize);
-                    return Ok(path);
-                }
-                capacity = len.checked_add(1).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "final parent path is too long")
-                })?;
-            }
-        }
-
-        let mut parent_path = match query(parent, VOLUME_NAME_GUID) {
+        let mut parent_path = match final_handle_path(parent, VOLUME_NAME_GUID) {
             Ok(path) => path,
             Err(error) if error.raw_os_error() == Some(ERROR_PATH_NOT_FOUND as i32) => {
                 // SMB/UNC shares do not have volume-GUID names. Their opened
                 // final DOS/UNC path is the documented network fallback.
-                query(parent, 0)?
+                final_handle_path(parent, 0)?
             }
             Err(error) => return Err(error),
         };
@@ -4638,57 +4741,49 @@ mod windows {
     pub(super) fn open_trusted_file_read_following_leaf(
         path: &Path,
     ) -> io::Result<(File, PathBuf)> {
-        reject_parent_components(path)?;
-        let requested = std::path::absolute(path)?;
-        let parent = PrivateParentGuard::new(&requested)?;
-        let stable_path = std::ffi::OsString::from_wide(&parent.stable_path(&requested)?);
-        let mut options = std::fs::OpenOptions::new();
-        options
-            .access_mode(FILE_READ_ATTRIBUTES | READ_CONTROL)
-            // Deliberately omit delete sharing. While this handle lives, the
-            // requested reparse leaf cannot be renamed between validation and
-            // canonicalization.
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-        let requested_handle = options.open(&stable_path)?;
-        let information = file_information(&requested_handle)?;
-        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
-            drop(requested_handle);
-            drop(parent);
-            return Ok((open_trusted_file_read(&requested)?, requested));
-        }
-        if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "trusted file link resolves through a directory reparse point: {}",
-                    requested.display()
-                ),
-            ));
-        }
-        require_single_link(&requested_handle, &requested)?;
-        let current_user = current_user_sid()?;
-        let administrators = builtin_administrators_sid()?;
-        let system = well_known_sid(WinLocalSystemSid)?;
-        require_trusted_object_security(
-            &requested_handle,
-            &requested,
-            current_user.sid,
-            administrators.sid,
-            system.sid,
-            DANGEROUS_FILE_RIGHTS,
-            "trusted file link",
-        )?;
-        parent.verify()?;
-
-        // `requested_handle` denies delete sharing and the guard holds every
-        // ancestor without it, so this resolution is bound to the reparse
-        // object and directory chain just inspected rather than to a mutable
-        // drive-letter pathname.
-        let resolved = std::fs::canonicalize(&stable_path)?;
+        let mut links = Vec::new();
+        let resolved = resolve_trusted_file_path(path, |requested| {
+            let parent = PrivateParentGuard::new(requested)?;
+            let stable_path = std::ffi::OsString::from_wide(&parent.stable_path(requested)?);
+            let mut options = std::fs::OpenOptions::new();
+            options
+                .access_mode(FILE_READ_ATTRIBUTES | READ_CONTROL)
+                // Keep each reparse object and its parents from being renamed
+                // until the final target has been opened and verified.
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+            let link = options.open(&stable_path)?;
+            if file_information(&link)?.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "trusted reparse point changed while it was resolved",
+                ));
+            }
+            require_single_link(&link, requested)?;
+            let current_user = current_user_sid()?;
+            let administrators = builtin_administrators_sid()?;
+            let system = well_known_sid(WinLocalSystemSid)?;
+            require_trusted_object_security(
+                &link,
+                requested,
+                current_user.sid,
+                administrators.sid,
+                system.sid,
+                DANGEROUS_FILE_RIGHTS,
+                "trusted file link",
+            )?;
+            // read_link reads the reparse data rather than resolving the target.
+            // Unknown/non-name-surrogate tags fail closed here.
+            let target = std::fs::read_link(&stable_path)?;
+            parent.verify()?;
+            links.push((parent, link));
+            Ok(target)
+        })?;
         let file = open_trusted_file_read(&resolved)?;
-        parent.verify()?;
-        drop(requested_handle);
+        for (parent, _link) in &links {
+            parent.verify()?;
+        }
+        let resolved = PathBuf::from(std::ffi::OsString::from_wide(&final_handle_path(&file, 0)?));
         Ok((file, resolved))
     }
 
@@ -6135,7 +6230,7 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
+    use std::io::{Read as _, Write as _};
 
     /// A relative directory whose first component is new is created and
     /// reported as created. Syncing the new entry's parent once named the
@@ -7162,6 +7257,190 @@ mod tests {
         assert_eq!(resolved, target.canonicalize().unwrap());
     }
 
+    #[cfg(any(unix, windows))]
+    fn trusted_test_symlink(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        let result = std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        let result = std::os::windows::fs::symlink_file(target, link);
+        match result {
+            Ok(()) => true,
+            #[cfg(windows)]
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(1314) =>
+            {
+                eprintln!("skipping: file symlink privilege unavailable");
+                false
+            }
+            Err(error) => panic!("create trusted test symlink: {error}"),
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn trusted_leaf_follow_loads_relative_dotfile_targets() {
+        let root = crate::test_tempdir();
+        let config = root.path().join(".config/kettle");
+        let tracked = root.path().join("dotfiles/kettle");
+        create_private_dirs(&config).unwrap();
+        create_private_dirs(&tracked).unwrap();
+        for name in ["config", "init.lua"] {
+            let target = tracked.join(name);
+            let mut created = create_private_file_new(&target).unwrap();
+            created.write_all(b"tracked contents\n").unwrap();
+            drop(created);
+            let link = config.join(name);
+            if !trusted_test_symlink(&Path::new("../../dotfiles/kettle").join(name), &link) {
+                return;
+            }
+            let (mut file, resolved) = open_trusted_file_read_following_leaf(&link).unwrap();
+            let mut contents = String::new();
+            file.read_to_string(&mut contents).unwrap();
+            assert_eq!(contents, "tracked contents\n");
+            assert_eq!(resolved, target.canonicalize().unwrap());
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn trusted_leaf_follow_bounds_link_loops() {
+        let root = crate::test_tempdir();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        if !trusted_test_symlink(Path::new("second"), &first)
+            || !trusted_test_symlink(Path::new("first"), &second)
+        {
+            return;
+        }
+        let error = open_trusted_file_read_following_leaf(&first).unwrap_err();
+        assert!(error.to_string().contains("40 links"), "{error}");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn trusted_leaf_follow_enforces_link_and_component_limits() {
+        use std::path::PathBuf;
+
+        let root = crate::test_tempdir();
+        let root_path = root.path().canonicalize().unwrap();
+        let target = root_path.join("target");
+        drop(create_private_file_new(&target).unwrap());
+        let mut selected = PathBuf::from("target");
+        for index in 0..41 {
+            let name = format!("link-{index}");
+            let link = root_path.join(&name);
+            if !trusted_test_symlink(&selected, &link) {
+                return;
+            }
+            selected = PathBuf::from(name);
+            if index == 39 {
+                assert!(open_trusted_file_read_following_leaf(&link).is_ok());
+            }
+        }
+        let error = open_trusted_file_read_following_leaf(&root_path.join(selected)).unwrap_err();
+        assert!(error.to_string().contains("40 links"), "{error}");
+
+        let mut excessive = root_path;
+        for _ in 0..4096 {
+            excessive.push("unused/..");
+        }
+        let error = open_trusted_file_read_following_leaf(&excessive).unwrap_err();
+        assert!(error.to_string().contains("4096 components"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_leaf_follow_resolves_links_before_parent_components() {
+        use std::os::unix::fs::symlink;
+
+        let root = crate::test_tempdir();
+        let directory = root.path().join("dotfiles/nested");
+        create_private_dirs(&directory).unwrap();
+        let target = directory.parent().unwrap().join("config");
+        drop(create_private_file_new(&target).unwrap());
+        symlink("dotfiles/nested", root.path().join("selected")).unwrap();
+        let requested = root.path().join("selected/../config");
+        let (_, resolved) = open_trusted_file_read_following_leaf(&requested).unwrap();
+        assert_eq!(resolved, target.canonicalize().unwrap());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn trusted_leaf_follow_budgets_components_from_link_targets() {
+        let root = crate::test_tempdir();
+        create_private_dirs(&root.path().join("unused")).unwrap();
+        let link = root.path().join("expanded");
+        let target = "unused/../".repeat(64) + "expanded";
+        if !trusted_test_symlink(Path::new(&target), &link) {
+            return;
+        }
+        let error = open_trusted_file_read_following_leaf(&link).unwrap_err();
+        assert!(error.to_string().contains("4096 components"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_leaf_follow_checks_junction_chains() {
+        use std::process::{Command, Stdio};
+
+        let root = crate::test_tempdir();
+        let tracked = root.path().join("tracked");
+        let shared = root.path().join("shared");
+        create_private_dirs(&tracked).unwrap();
+        create_private_dirs(&shared).unwrap();
+        let target = tracked.join("init.lua");
+        let mut created = create_private_file_new(&target).unwrap();
+        created.write_all(b"trusted script\n").unwrap();
+        drop(created);
+        let selection = shared.join("selection");
+        assert!(
+            Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(&selection)
+                .arg(&tracked)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let requested = selection.join("init.lua");
+        let link = root.path().join("init.lua");
+        let has_link = trusted_test_symlink(&requested, &link);
+        assert!(
+            Command::new("icacls.exe")
+                .arg(&shared)
+                .args(["/grant", "*S-1-1-0:M"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+        if has_link {
+            let error = open_trusted_file_read_following_leaf(&link).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        }
+        assert!(open_trusted_file_read_following_leaf(&requested).is_err());
+        assert!(
+            Command::new("icacls.exe")
+                .arg(&shared)
+                .args(["/remove:g", "*S-1-1-0"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (mut file, resolved) = open_trusted_file_read_following_leaf(&requested).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "trusted script\n");
+        assert_eq!(resolved, target.canonicalize().unwrap());
+    }
+
     #[cfg(unix)]
     #[test]
     fn trusted_leaf_follow_rejects_links_through_a_writable_directory() {
@@ -7176,17 +7455,21 @@ mod tests {
         symlink(&target, writable.join("selected.lua")).unwrap();
         symlink(root.path(), writable.join("selected-directory")).unwrap();
 
-        for selected in [
-            writable.join("selected.lua"),
-            writable.join("selected-directory/trusted.lua"),
-        ] {
-            let link = root.path().join("init.lua");
-            symlink(&selected, &link).unwrap();
-            assert!(
-                open_trusted_file_read_following_leaf(&link).is_err(),
-                "trusted leaf accepted an attacker-controlled intermediate link"
-            );
-            std::fs::remove_file(&link).unwrap();
+        for mode in [0o777, 0o1777] {
+            std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(mode)).unwrap();
+            for selected in [
+                writable.join("selected.lua"),
+                writable.join("selected-directory/trusted.lua"),
+            ] {
+                assert!(open_trusted_file_read_following_leaf(&selected).is_err());
+                let link = root.path().join("init.lua");
+                symlink(&selected, &link).unwrap();
+                assert!(
+                    open_trusted_file_read_following_leaf(&link).is_err(),
+                    "trusted leaf accepted an attacker-controlled intermediate link"
+                );
+                std::fs::remove_file(&link).unwrap();
+            }
         }
     }
 
