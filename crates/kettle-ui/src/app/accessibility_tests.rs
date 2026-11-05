@@ -1073,3 +1073,32 @@ fn completion_accessibility_positions_are_zero_based() {
         assert!(node.position_in_set().unwrap() < 2);
     }
 }
+
+#[test]
+fn review_allocated_terminal_rows_do_not_alias_preview_lanes() {
+    let lanes: HashSet<_> = (1..128)
+        .flat_map(|pane| (0..32).map(move |part| super::accessibility_lane_id(pane, part).unwrap()))
+        .collect();
+    let mut allocated = HashSet::new();
+    for _ in 0..4096 {
+        let id = super::next_terminal_accessibility_row_id();
+        assert!(allocated.insert(id), "terminal row IDs must be unique");
+        assert!(
+            !lanes.contains(&id),
+            "allocated row {id:?} aliases a preview lane"
+        );
+        assert!(super::accessibility_lane_part(id).is_none());
+    }
+}
+
+#[test]
+fn review_terminal_row_allocator_allows_only_the_deprecated_atomic() {
+    let body = finding_body(
+        include_str!("accessibility.rs"),
+        "next_terminal_accessibility_row_id",
+    );
+    assert!(
+        body.contains("#[allow(deprecated)]\n    let id = NEXT"),
+        "the MSRV-compatible fetch_update call needs a statement-scoped allowance"
+    );
+}

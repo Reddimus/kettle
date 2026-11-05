@@ -164,20 +164,7 @@ impl App {
                 .entry(pane_id)
                 .or_insert_with(|| vec![accessibility_text_id(pane_id)]);
             let rows = text.split_inclusive('\n').count().max(1);
-            ids.resize_with(rows, || {
-                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-                let id = NEXT
-                    .fetch_update(
-                        std::sync::atomic::Ordering::Relaxed,
-                        std::sync::atomic::Ordering::Relaxed,
-                        |next| {
-                            next.checked_add(1)
-                                .filter(|next| *next < ACCESSIBILITY_TERMINAL_ROW_ID_MASK)
-                        },
-                    )
-                    .expect("terminal accessibility node IDs exhausted");
-                NodeId(ACCESSIBILITY_TERMINAL_ROW_ID_MASK | id)
-            });
+            ids.resize_with(rows, next_terminal_accessibility_row_id);
             ids.truncate(rows);
             let text_rect = (
                 x + self.cfg.padding_x,
@@ -1280,7 +1267,7 @@ pub(super) fn update_toast_nodes(
 pub(super) const ACCESSIBILITY_ROOT_ID: NodeId = NodeId(0);
 const ACCESSIBILITY_PANE_ID_MASK: u64 = 1 << 63;
 const ACCESSIBILITY_TEXT_ID_MASK: u64 = (1 << 63) | (1 << 62);
-const ACCESSIBILITY_TERMINAL_ROW_ID_MASK: u64 = 1 << 56;
+const ACCESSIBILITY_TERMINAL_ROW_ID_MASK: u64 = 1 << 55;
 const ACCESSIBILITY_SEARCH_ID_MASK: u64 = 1 << 61;
 pub(super) const ACCESSIBILITY_SEARCH_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK);
 const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 16);
@@ -1329,6 +1316,23 @@ pub(super) fn accessibility_completion_geometry_key(
 
 pub(super) fn accessibility_pane_id(pane_id: u64) -> NodeId {
     NodeId::from(ACCESSIBILITY_PANE_ID_MASK | pane_id)
+}
+
+pub(super) fn next_terminal_accessibility_row_id() -> NodeId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    // Rust 1.99 renames fetch_update; try_update is unavailable at the MSRV.
+    #[allow(deprecated)]
+    let id = NEXT
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |next| {
+                next.checked_add(1)
+                    .filter(|next| *next < ACCESSIBILITY_TERMINAL_ROW_ID_MASK)
+            },
+        )
+        .expect("terminal accessibility node IDs exhausted");
+    NodeId(ACCESSIBILITY_TERMINAL_ROW_ID_MASK | id)
 }
 
 pub(super) fn accessibility_text_id(pane_id: u64) -> NodeId {
