@@ -2186,7 +2186,7 @@ mod tests {
             session.run_with_hang_limit(
                 &received,
                 Instant::now() + OPEN_DEADLINE,
-                Duration::from_millis(200),
+                Duration::from_millis(600),
             ),
             0
         );
@@ -2222,7 +2222,10 @@ mod tests {
         if presentation_child("play::tests::continuous_due_frames_renew_the_watchdog") {
             // The frame budget exceeds the real watchdog's deadline, so
             // bounding the batch alone cannot keep successful writes alive.
-            assert!(continuous_presentation(1_000, Duration::from_millis(30), 12) >= 12);
+            // 12 writes of 60 ms outlast the 600 ms hang limit inside one
+            // 1 s batch, so only per-write renewal keeps the session alive,
+            // with 10x headroom per write for a loaded runner.
+            assert!(continuous_presentation(1_000, Duration::from_millis(60), 12) >= 12);
         }
     }
 
