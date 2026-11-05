@@ -851,6 +851,13 @@ impl AudioSource for AudioFrames {
     }
 }
 
+impl Drop for AudioFrames {
+    fn drop(&mut self) {
+        // SAFETY: only the decoder thread uses this reader after it starts reading.
+        unsafe { self.reader.cancelReading() };
+    }
+}
+
 impl VideoPlayer for AvFoundation {
     /// One reader from the start asked for to the end. A start past the
     /// video's last frame shows that frame, though the asset's sound runs
@@ -892,7 +899,8 @@ impl VideoPlayer for AvFoundation {
             .min(asset.video_end_ms.saturating_sub(frame_ms));
         let audio = match (request.audio, &asset.audio) {
             (AudioRequest::Off, _) | (_, None) => None,
-            (_, Some(track)) => AudioFrames::start(&asset, track, start_ms),
+            (_, Some(track)) => AudioFrames::start(&asset, track, start_ms)
+                .and_then(|source| crate::audio_decoder::AudioDecoder::start(source).ok()),
         };
         let opened = Opened {
             info,
