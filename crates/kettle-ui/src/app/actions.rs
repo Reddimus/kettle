@@ -1737,18 +1737,7 @@ impl App {
             //   visible + focused → hide
             //   visible + !focused → focus (don't hide)
             Action::ToggleWindowVisibility => {
-                if let Some(w) = &ws.window {
-                    let visible = w.is_visible().unwrap_or(true);
-                    let focused = w.has_focus();
-                    if !visible {
-                        w.set_visible(true);
-                        w.focus_window();
-                    } else if focused {
-                        w.set_visible(false);
-                    } else {
-                        w.focus_window();
-                    }
-                }
+                self.toggle_window_visibility(ws);
             }
             // Terminator parity (`detachable_tabs`): move the active tab into a
             // new window.

@@ -930,12 +930,8 @@ impl App {
             // fall-back to a new tab when a window cannot be created.
             #[cfg(target_os = "macos")]
             UserEvent::DockCommand(command) => {
-                if command == crate::macos_dock::DockCommand::NewTab
-                    && let Some(w) = &ws.window
-                {
-                    w.set_visible(true);
-                    w.set_minimized(false);
-                    w.focus_window();
+                if command == crate::macos_dock::DockCommand::NewTab {
+                    self.reveal_window(ws);
                 }
                 self.handle_action(ws, command.action(), _el);
             }

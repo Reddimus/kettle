@@ -6,11 +6,48 @@ pub(crate) mod hotkey;
 pub(crate) mod native;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// AppKit points on macOS; physical pixels on other platforms.
 pub(crate) struct Rect {
     pub x: i32,
     pub y: i32,
     pub width: u32,
     pub height: u32,
+}
+
+pub(crate) fn window_position(x: i32, y: i32) -> winit::dpi::Position {
+    if cfg!(target_os = "macos") {
+        winit::dpi::LogicalPosition::new(f64::from(x), f64::from(y)).into()
+    } else {
+        winit::dpi::PhysicalPosition::new(x, y).into()
+    }
+}
+
+pub(crate) fn window_size(rect: Rect) -> winit::dpi::Size {
+    if cfg!(target_os = "macos") {
+        winit::dpi::LogicalSize::new(f64::from(rect.width), f64::from(rect.height)).into()
+    } else {
+        winit::dpi::PhysicalSize::new(rect.width, rect.height).into()
+    }
+}
+
+pub(crate) trait GeometryWindow {
+    fn move_to(&self, position: winit::dpi::Position);
+    fn resize_to(&self, size: winit::dpi::Size);
+}
+
+impl GeometryWindow for winit::window::Window {
+    fn move_to(&self, position: winit::dpi::Position) {
+        self.set_outer_position(position);
+    }
+    fn resize_to(&self, size: winit::dpi::Size) {
+        let _ = self.request_inner_size(size);
+    }
+}
+
+pub(crate) fn place_window(window: &impl GeometryWindow, rect: Rect, position: (i32, i32)) {
+    // AppKit must move to the destination screen before changing content size.
+    window.move_to(window_position(position.0, position.1));
+    window.resize_to(window_size(rect));
 }
 
 pub(crate) fn geometry(screen: Rect, position: Position, percent: u8) -> Rect {
@@ -57,6 +94,24 @@ pub(crate) struct Model {
 }
 
 impl Model {
+    pub fn for_startup(quick: bool, window: u64) -> Self {
+        // Identity must precede every startup action that can save a session.
+        Self {
+            window: quick.then_some(window),
+            ..Self::default()
+        }
+    }
+
+    pub fn reveal(&mut self, can_return_focus: bool) -> Effect {
+        if self.visible {
+            Effect::None
+        } else {
+            self.visible = true;
+            self.can_return_focus = can_return_focus;
+            Effect::Show
+        }
+    }
+
     pub fn toggle(&mut self, can_return_focus: bool) -> Effect {
         if self.visible {
             self.visible = false;
@@ -64,9 +119,7 @@ impl Model {
                 return_focus: std::mem::take(&mut self.can_return_focus),
             }
         } else {
-            self.visible = true;
-            self.can_return_focus = can_return_focus;
-            Effect::Show
+            self.reveal(can_return_focus)
         }
     }
 
@@ -146,6 +199,54 @@ pub(crate) const FRAME: Duration = Duration::from_millis(10);
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn review_quick_cross_dpi_placement_moves_before_resize_without_animation() {
+        use std::cell::{Cell, RefCell};
+        use winit::dpi::{LogicalPosition, LogicalSize, Position, Size};
+        struct Window {
+            scale: Cell<f64>,
+            calls: RefCell<Vec<&'static str>>,
+            position: Cell<LogicalPosition<f64>>,
+            size: Cell<LogicalSize<f64>>,
+        }
+        impl GeometryWindow for Window {
+            fn move_to(&self, position: Position) {
+                self.calls.borrow_mut().push("move");
+                self.position.set(position.to_logical(self.scale.get()));
+                self.scale.set(2.0);
+            }
+            fn resize_to(&self, size: Size) {
+                self.calls.borrow_mut().push("resize");
+                self.size.set(size.to_logical(self.scale.get()));
+            }
+        }
+        let window = Window {
+            scale: Cell::new(1.0),
+            calls: RefCell::new(Vec::new()),
+            position: Cell::new(LogicalPosition::new(0.0, 0.0)),
+            size: Cell::new(LogicalSize::new(1.0, 1.0)),
+        };
+        let rect = Rect {
+            x: 1440,
+            y: -100,
+            width: 1512,
+            height: 392,
+        };
+        assert!(!animation_allowed(
+            false,
+            kettle_config::ReduceMotion::Off,
+            || true
+        ));
+        place_window(&window, rect, (rect.x, rect.y));
+        assert_eq!(*window.calls.borrow(), ["move", "resize"]);
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(window.position.get(), LogicalPosition::new(1440.0, -100.0));
+            assert_eq!(window.size.get(), LogicalSize::new(1512.0, 392.0));
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(window.size.get(), LogicalSize::new(756.0, 196.0));
+    }
     #[test]
     fn every_edge_and_center_fit_small_large_and_offset_screens() {
         for (x, y, width, height) in [

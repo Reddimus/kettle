@@ -91,13 +91,13 @@ pub(crate) fn active_screen() -> Option<Rect> {
         let screen = NSScreen::mainScreen(mtm)?;
         let frame = screen.frame();
         let primary = NSScreen::screens(mtm).first()?.frame();
-        let scale = screen.backingScaleFactor();
-        // AppKit uses a bottom-left origin in points; winit uses top-left physical pixels.
+        // Keep AppKit points throughout placement, including across screen scales.
+        // Winit logical positions use a top-left origin relative to the primary screen.
         Some(Rect {
-            x: (frame.origin.x * scale) as i32,
-            y: ((primary.size.height - frame.origin.y - frame.size.height) * scale) as i32,
-            width: (frame.size.width * scale) as u32,
-            height: (frame.size.height * scale) as u32,
+            x: frame.origin.x as i32,
+            y: (primary.size.height - frame.origin.y - frame.size.height) as i32,
+            width: frame.size.width as u32,
+            height: frame.size.height as u32,
         })
     }
     #[cfg(not(target_os = "macos"))]

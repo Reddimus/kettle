@@ -1890,12 +1890,7 @@ impl App {
         self.note_focus_change(target, pre_focus);
         target.dock_preview = None;
         self.resize_all(target);
-        if let Some(w) = &target.window {
-            w.set_visible(true);
-            w.set_minimized(false);
-            w.focus_window();
-            w.request_redraw();
-        }
+        self.reveal_window(target);
         self.ctl_broadcast(
             "tab_moved",
             None,
@@ -3022,16 +3017,20 @@ impl App {
         let target = self
             .windows
             .get(&self.focused_seq)
-            .or_else(|| self.windows.values().max_by_key(|window| window.seq));
-        if let Some(ws) = target
-            && let Some(window) = &ws.window
-        {
-            self.focused_seq = ws.seq;
-            record_window_focus(&mut self.window_focus_order, ws.seq);
-            window.set_visible(true);
-            window.set_minimized(false);
-            window.focus_window();
-            return true;
+            .or_else(|| self.windows.values().max_by_key(|window| window.seq))
+            .filter(|ws| ws.window.is_some())
+            .map(|ws| ws.seq);
+        if let Some(seq) = target {
+            if self.quick_terminal.model.window == Some(seq) && !self.quick_terminal.model.visible {
+                return self.toggle_quick_terminal(event_loop);
+            }
+            if let Some(mut ws) = self.windows.remove(&seq) {
+                self.reveal_window(&mut ws);
+                self.focused_seq = seq;
+                record_window_focus(&mut self.window_focus_order, seq);
+                self.finish_window_dispatch(event_loop, seq, ws);
+                return true;
+            }
         }
         self.open_window(event_loop, WindowOpen::Fresh { cwd }, None, None)
             .is_ok()

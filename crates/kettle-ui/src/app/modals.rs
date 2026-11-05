@@ -2,6 +2,10 @@
 
 use super::*;
 
+pub(super) fn capture_global_hotkey(ws: &WindowState, key: &Key) -> crate::settings::HotkeyCapture {
+    crate::settings::capture_hotkey(to_kkey(key), to_mods(held_modifiers(ws)))
+}
+
 pub(super) fn begin_settings_text_edit(
     key: &'static str,
     cur: &str,
@@ -1761,7 +1765,7 @@ impl App {
         // the config file so it survives restart.
         if capturing && cats[cat].fields[fld].key == "quick-terminal-hotkey" {
             use crate::settings::HotkeyCapture;
-            match crate::settings::capture_hotkey(to_kkey(key), to_mods(ws.mods)) {
+            match capture_global_hotkey(ws, key) {
                 HotkeyCapture::Pending => return,
                 HotkeyCapture::Cancel => {}
                 HotkeyCapture::Value(trigger) => {

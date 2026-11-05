@@ -29,8 +29,8 @@ impl App {
         }
         if let Some(rect) = self.quick_geometry(el) {
             attrs = attrs
-                .with_position(winit::dpi::PhysicalPosition::new(rect.x, rect.y))
-                .with_inner_size(winit::dpi::PhysicalSize::new(rect.width, rect.height));
+                .with_position(quick::window_position(rect.x, rect.y))
+                .with_inner_size(quick::window_size(rect));
         }
         attrs
     }
@@ -57,6 +57,11 @@ impl App {
                 .or_else(|| monitors.into_iter().next())?;
             let p = monitor.position();
             let s = monitor.size();
+            #[cfg(target_os = "macos")]
+            let (p, s) = (
+                p.to_logical::<i32>(monitor.scale_factor()),
+                s.to_logical::<u32>(monitor.scale_factor()),
+            );
             Some(Rect {
                 x: p.x,
                 y: p.y,
@@ -94,26 +99,68 @@ impl App {
         }
     }
 
+    fn capture_quick_focus(&mut self) {
+        if !std::mem::take(&mut self.quick_terminal.initial_focus) {
+            self.quick_terminal.previous = if self.quick_terminal.wayland {
+                Default::default()
+            } else {
+                quick::native::PreviousApp::capture()
+            };
+        }
+        self.quick_terminal.previous_window = self
+            .windows
+            .values()
+            .find(|ws| {
+                Some(ws.seq) != self.quick_terminal.model.window
+                    && ws.window.as_ref().is_some_and(|w| w.has_focus())
+            })
+            .map(|ws| ws.seq);
+    }
+
+    pub(super) fn reveal_window(&mut self, ws: &mut WindowState) {
+        if self.quick_terminal.model.window == Some(ws.seq) {
+            if !self.quick_terminal.model.visible {
+                self.capture_quick_focus();
+            }
+            let can_return = self.quick_terminal.previous.available()
+                || self.quick_terminal.previous_window.is_some();
+            self.quick_terminal.model.reveal(can_return);
+            self.quick_terminal.focus_check = None;
+        }
+        if let Some(window) = &ws.window {
+            window.set_visible(true);
+            window.set_minimized(false);
+            window.focus_window();
+            window.request_redraw();
+            ws.window_shown = true;
+        }
+    }
+
+    pub(super) fn toggle_window_visibility(&mut self, ws: &mut WindowState) {
+        let Some(window) = &ws.window else { return };
+        let visible = if self.quick_terminal.model.window == Some(ws.seq) {
+            self.quick_terminal.model.visible
+        } else {
+            window.is_visible().unwrap_or(true)
+        };
+        if visible && window.has_focus() {
+            window.set_visible(false);
+            if self.quick_terminal.model.window == Some(ws.seq)
+                && let Effect::Hide { return_focus } = self.quick_terminal.model.toggle(false)
+            {
+                self.hide_quick_terminal(return_focus);
+            }
+        } else {
+            self.reveal_window(ws);
+        }
+    }
+
     pub(super) fn toggle_quick_terminal(&mut self, el: &ActiveEventLoop) -> bool {
         if self.gpu.is_none() {
             return false;
         }
         if !self.quick_terminal.model.visible {
-            if !std::mem::take(&mut self.quick_terminal.initial_focus) {
-                self.quick_terminal.previous = if self.quick_terminal.wayland {
-                    Default::default()
-                } else {
-                    quick::native::PreviousApp::capture()
-                };
-            }
-            self.quick_terminal.previous_window = self
-                .windows
-                .values()
-                .find(|ws| {
-                    Some(ws.seq) != self.quick_terminal.model.window
-                        && ws.window.as_ref().is_some_and(|w| w.has_focus())
-                })
-                .map(|ws| ws.seq);
+            self.capture_quick_focus();
         }
         let seq = match self.quick_terminal.model.window {
             Some(seq) if self.windows.contains_key(&seq) => seq,
@@ -143,10 +190,6 @@ impl App {
                 if let Some(mut ws) = self.windows.remove(&seq) {
                     if let Some(window) = ws.window.as_ref() {
                         if let Some(rect) = rect {
-                            let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(
-                                rect.width,
-                                rect.height,
-                            ));
                             let (x, y) = self
                                 .quick_terminal
                                 .slide
@@ -154,7 +197,7 @@ impl App {
                                 .map_or((rect.x, rect.y), |slide| {
                                     slide.position(std::time::Instant::now()).0
                                 });
-                            window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                            quick::place_window(window.as_ref(), rect, (x, y));
                         }
                         window.set_minimized(false);
                         window.set_visible(true);
@@ -300,7 +343,7 @@ impl App {
                 .get(&slide.window)
                 .and_then(|ws| ws.window.as_ref())
             {
-                window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                window.set_outer_position(quick::window_position(x, y));
             }
             if done {
                 self.quick_terminal.slide = None;

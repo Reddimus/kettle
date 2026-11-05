@@ -78,7 +78,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-fn title_test_config() -> kettle_config::Config {
+pub(super) fn title_test_config() -> kettle_config::Config {
     kettle_config::Config {
         shell_integration: false,
         login_shell: false,
@@ -86,7 +86,7 @@ fn title_test_config() -> kettle_config::Config {
     }
 }
 
-fn title_test_argv() -> Vec<String> {
+pub(super) fn title_test_argv() -> Vec<String> {
     #[cfg(unix)]
     {
         vec!["/bin/cat".to_string()]

@@ -957,3 +957,17 @@ fn review_exact_startup_surface_retains_forty_rows_with_titlebar_tabs() {
         );
     }
 }
+
+#[test]
+fn only_quick_terminal_launches_read_the_previous_app_at_startup() {
+    // Capturing the previous app opens a display-server connection (X11 on
+    // Linux). An ordinary launch must not make it.
+    let src = production_source();
+    let startup = src.split("let quick_previous =").nth(1).unwrap();
+    let capture = startup.find("PreviousApp::capture()").unwrap();
+    assert!(
+        startup[..capture].contains("if startup.quick_terminal"),
+        "startup reads the previous app for every launch"
+    );
+}
+

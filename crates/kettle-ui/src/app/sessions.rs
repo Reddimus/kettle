@@ -156,6 +156,34 @@ impl App {
         }
     }
 
+    pub(super) fn snapshot_session<'a>(
+        ws: &'a WindowState,
+        others: impl Iterator<Item = &'a WindowState>,
+        quick_window: Option<u64>,
+        focus_order: &VecDeque<u64>,
+    ) -> Option<crate::session::Session> {
+        // Include the checked-out window; the save budget prefers recently
+        // focused nonempty windows without restricting window creation.
+        let mut wins: Vec<(u64, crate::session::SWindow)> = Vec::new();
+        for window in std::iter::once(ws).chain(others) {
+            if quick_window != Some(window.seq) {
+                wins.push((window.seq, Self::snapshot_window(window)));
+            }
+        }
+        if wins.is_empty() {
+            return None;
+        }
+        let windows = session_windows_for_save(wins, focus_order);
+        // Mirror the first retained window for older readers.
+        let s = crate::session::Session {
+            tabs: windows.first().map(|w| w.tabs.clone()).unwrap_or_default(),
+            active: windows.first().map(|w| w.active).unwrap_or(0),
+            theme: None,
+            windows,
+        };
+        Some(s)
+    }
+
     pub(super) fn save_session(&self, ws: &WindowState) {
         if self.session_load_failed {
             return;
@@ -173,31 +201,14 @@ impl App {
         if target == SessionWriteTarget::Skip {
             return;
         }
-        // Include the checked-out window; the save budget prefers recently
-        // focused nonempty windows without restricting window creation.
-        let mut wins: Vec<(u64, crate::session::SWindow)> = Vec::new();
-        for window in std::iter::once(ws).chain(self.windows.values()) {
-            if self.quick_terminal.model.window != Some(window.seq) {
-                wins.push((window.seq, Self::snapshot_window(window)));
-            }
-        }
-        if wins.is_empty() {
+        let Some(s) = Self::snapshot_session(
+            ws,
+            self.windows.values(),
+            self.quick_terminal.model.window,
+            &self.window_focus_order,
+        ) else {
             return;
-        }
-        let windows = session_windows_for_save(wins, &self.window_focus_order);
-        // Mirror the first retained window for older readers.
-        let mut s = crate::session::Session {
-            tabs: windows.first().map(|w| w.tabs.clone()).unwrap_or_default(),
-            active: windows.first().map(|w| w.active).unwrap_or(0),
-            theme: None,
-            windows,
         };
-        // Theme is config-governed (persisted to the config file via
-        // `persist_pref`), NOT stored in the session. A session-pinned theme
-        // would override the config/compile-time default on restore, so a
-        // default change (or a fresh-config user) would silently keep the old
-        // theme.
-        s.theme = None;
         // When launched with `--layout NAME`, save to the
         // named-layout file instead of the default session.json. Lets
         // the user maintain distinct workspaces ("dev", "ops", "docs")

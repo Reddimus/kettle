@@ -2914,6 +2914,19 @@ slide. Also check a taken hotkey, rebind/clear on reload, CapsLock/NumLock on X1
 window-list/cycling exclusion, English/Spanish Settings, and Wayland/Windows
 desktop shortcuts. A GUI-free test run does not establish these native behaviors.
 
+### Quick-terminal review regressions
+
+The `review_quick_` tests exercise cold-launch identity with a Lua startup
+`split_right`, real PTY splits and the production session snapshot/write path;
+reopen after hide, repeated focus and autohide; move-before-resize placement
+with a simulated 1x-to-2x scale change and animation disabled; physical Option
+capture independent of terminal modifier filtering; and Settings capture,
+config round trips and Carbon/X11 key mapping for shifted US punctuation.
+Source guards bind these seams to App construction, session saving and the
+existing reveal routes. They do not run a native event loop or register a live
+global shortcut. The placement test runs portably, with logical-coordinate
+assertions on macOS and physical-coordinate assertions on other platforms.
+
 ### Titlebar regression coverage
 
 The `review_` tests in `kettle-ui` and `kettle-render` cover strips below two

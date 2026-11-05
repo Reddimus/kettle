@@ -4753,7 +4753,11 @@ windows, so hiding preserves the same Mux and PTYs. The event-loop integration
 reuses window construction, renderer initialization, focus reports and frame
 scheduling. A 150 ms slide uses the shared system motion preference; no worker
 mutates window geometry. The quick workspace is excluded from normal saved
-sessions.
+sessions. The cold-launch quick-window identity is assigned when App is built,
+before Lua startup actions or session snapshots. Existing window activation
+paths update the same visibility/focus-return model. macOS screen selection,
+placement and animation use logical AppKit points, moving before resizing so
+mixed screen scales cannot reinterpret destination dimensions.
 
 `kettle quick-terminal` uses `kettle-ctl` activation with a validated
 `toggle_quick_terminal` action and the existing per-launch idempotency key,
@@ -4764,5 +4768,8 @@ never logged. An expired or absent token cannot bypass compositor focus policy.
 A new primary starts directly in its quick window. Native hotkey
 registrations are scoped resources: Carbon handlers on the macOS main thread,
 and an X11 connection whose passive grabs end when the registration drops.
+Settings capture reads physical modifiers, including composing Option, and
+canonicalizes shifted US punctuation to base keys plus Shift before persistence
+and native registration.
 Native callbacks only enqueue an event-loop toggle. Wayland and Windows use
 desktop shortcuts invoking the CLI.

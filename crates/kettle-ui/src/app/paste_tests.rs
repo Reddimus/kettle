@@ -809,8 +809,7 @@ fn media_receipt_wiring_fails_closed_and_keeps_diagnostics_private() {
         .expect("ctl perform-action body");
     assert!(
         action.contains("name == \"focus_window\"")
-            && action.contains("window.set_visible(true);")
-            && action.contains("window.focus_window();"),
+            && action.contains("self.reveal_window(ws);"),
         "live UI automation needs an idempotent focus action that never hides its target"
     );
     assert!(

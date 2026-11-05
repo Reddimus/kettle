@@ -712,7 +712,22 @@ impl QuickTerminalPosition {
 /// A global chord must include a modifier and round-trip through Settings.
 pub fn parse_quick_terminal_hotkey(value: &str) -> Option<keybinds::Trigger> {
     let trigger = keybinds::parse_trigger(value)?;
-    (!trigger.mods.is_empty()).then_some(trigger)
+    (!trigger.mods.is_empty()).then(|| normalize_quick_terminal_hotkey(trigger))
+}
+
+/// Canonical chord passed to native global-shortcut registration.
+pub fn normalize_quick_terminal_hotkey(mut trigger: keybinds::Trigger) -> keybinds::Trigger {
+    use keybinds::{Key, Mods};
+    if let Key::Char(symbol) = trigger.key
+        && let Some(base) = "~!@#$%^&*()_+{}|:\"<>?"
+            .chars()
+            .zip("`1234567890-=[]\\;',./".chars())
+            .find_map(|(shifted, base)| (symbol == shifted).then_some(base))
+    {
+        trigger.key = Key::Char(base);
+        trigger.mods |= Mods::SHIFT;
+    }
+    trigger
 }
 
 /// `gpu-power-preference`: which GPU wgpu should request the adapter from.

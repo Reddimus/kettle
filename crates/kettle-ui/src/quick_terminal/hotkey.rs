@@ -121,6 +121,18 @@ fn x11_keysym(key: Key) -> Option<u32> {
     })
 }
 
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+fn x11_keycode(first: u8, per_code: u8, symbols: &[u32], key: Key) -> Option<u8> {
+    if per_code == 0 {
+        return None;
+    }
+    let symbol = x11_keysym(key)?;
+    let offset = symbols
+        .chunks(usize::from(per_code))
+        .position(|keys| keys.first() == Some(&symbol))?;
+    first.checked_add(u8::try_from(offset).ok()?)
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) use macos::Registration;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -133,6 +145,7 @@ pub(crate) fn register(
     proxy: EventLoopProxy<UserEvent>,
     wayland: bool,
 ) -> Result<Option<Registration>, String> {
+    let trigger = kettle_config::normalize_quick_terminal_hotkey(trigger);
     if wayland || cfg!(windows) {
         static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -348,7 +361,6 @@ mod x11 {
     }
     impl Registration {
         pub fn new(trigger: Trigger, proxy: EventLoopProxy<UserEvent>) -> Result<Self, String> {
-            let symbol = x11_keysym(trigger.key).ok_or("unsupported X11 keysym")?;
             let (conn, _) = x11rb::connect(None).map_err(|e| e.to_string())?;
             let setup = conn.setup();
             let first = setup.min_keycode;
@@ -367,12 +379,13 @@ mod x11 {
             if mapping.keysyms_per_keycode == 0 {
                 return Err("empty X11 keyboard mapping".into());
             }
-            let code = mapping
-                .keysyms
-                .chunks(usize::from(mapping.keysyms_per_keycode))
-                .position(|keys| keys.first() == Some(&symbol))
-                .ok_or("key is absent from the X11 keyboard map")? as u8
-                + first;
+            let code = x11_keycode(
+                first,
+                mapping.keysyms_per_keycode,
+                &mapping.keysyms,
+                trigger.key,
+            )
+            .ok_or("key is absent from the X11 keyboard map")?;
             let mut mods = ModMask::default();
             for (modifier, mask) in [
                 (Mods::CTRL, ModMask::CONTROL),
@@ -504,6 +517,28 @@ mod x11 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn review_quick_captured_shifted_punctuation_maps_to_both_native_backends() {
+        use crate::settings::{HotkeyCapture, capture_hotkey};
+        for (symbol, base) in "~!@#$%^&*()_+{}|:\"<>?"
+            .chars()
+            .zip("`1234567890-=[]\\;',./".chars())
+        {
+            let HotkeyCapture::Value(Some(trigger)) =
+                capture_hotkey(Some(Key::Char(symbol)), Mods::CTRL | Mods::SHIFT)
+            else {
+                panic!("capture failed")
+            };
+            assert_eq!(trigger.key, Key::Char(base), "captured {symbol}");
+            assert_eq!(trigger.mods, Mods::CTRL | Mods::SHIFT);
+            assert_eq!(carbon_key(trigger.key), carbon_key(Key::Char(base)));
+            assert!(carbon_key(trigger.key).is_some());
+            let mapping = [base as u32, symbol as u32];
+            assert_eq!(x11_keycode(49, 2, &mapping, trigger.key), Some(49));
+            let parsed = kettle_config::parse_quick_terminal_hotkey(&trigger.label()).unwrap();
+            assert_eq!(parsed, trigger);
+        }
+    }
     #[test]
     fn x11_repeat_pairs_do_not_retoggle_but_distinct_presses_do() {
         let mut state = PressState::default();

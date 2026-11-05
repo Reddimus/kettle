@@ -82,6 +82,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/pointer.rs"),
         include_str!("app/preview.rs"),
         include_str!("app/preview_model.rs"),
+        include_str!("app/quick_terminal.rs"),
         include_str!("app/recording.rs"),
         include_str!("app/redraw.rs"),
         include_str!("app/remote.rs"),
@@ -668,6 +669,7 @@ impl ApplicationHandler<UserEvent> for App {
         let Some(mut ws) = self.windows.remove(&seq) else {
             return;
         };
+        let show_initial_quick = self.startup.quick_terminal && ws.window.is_none();
         self.resumed_inner(&mut ws, event_loop);
         self.sync_output_wake_gate(&ws);
         self.finish_window_dispatch(event_loop, seq, ws);
@@ -679,11 +681,7 @@ impl ApplicationHandler<UserEvent> for App {
         if self.quick_terminal.wayland && self.quick_terminal.initial_focus {
             self.quick_terminal.previous = Default::default();
         }
-        if self.startup.quick_terminal
-            && self.quick_terminal.model.window.is_none()
-            && self.gpu.is_some()
-        {
-            self.quick_terminal.model.window = Some(seq);
+        if show_initial_quick && !self.quick_terminal.model.visible && self.gpu.is_some() {
             self.toggle_quick_terminal(event_loop);
         }
         self.reconcile_quick_hotkey();
@@ -1179,3 +1177,6 @@ mod lane_control_tests;
 mod modal_editor_tests;
 
 mod native_menu;
+
+#[cfg(test)]
+mod quick_terminal_regression_tests;

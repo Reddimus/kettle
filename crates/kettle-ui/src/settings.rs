@@ -122,7 +122,9 @@ pub(crate) fn capture_hotkey(
     match key {
         Some(Key::Escape) if mods.is_empty() => HotkeyCapture::Cancel,
         Some(Key::Backspace | Key::Delete) if mods.is_empty() => HotkeyCapture::Value(None),
-        Some(key) if !mods.is_empty() => HotkeyCapture::Value(Some(Trigger::new(mods, key))),
+        Some(key) if !mods.is_empty() => HotkeyCapture::Value(Some(
+            kettle_config::normalize_quick_terminal_hotkey(Trigger::new(mods, key)),
+        )),
         _ => HotkeyCapture::Pending,
     }
 }

@@ -843,21 +843,7 @@ impl App {
                     //   hidden            → show + raise + focus
                     //   visible + focused → hide
                     //   visible + !focused → raise + focus (don't hide)
-                    if let Some(w) = &ws.window {
-                        let visible = w.is_visible().unwrap_or(true);
-                        let focused = w.has_focus();
-                        if !visible {
-                            w.set_visible(true);
-                            w.focus_window();
-                        } else if focused {
-                            w.set_visible(false);
-                        } else {
-                            // Visible but unfocused — bring to front +
-                            // focus, don't hide. The common "I clicked
-                            // away" case.
-                            w.focus_window();
-                        }
-                    }
+                    self.toggle_window_visibility(ws);
                 }
                 PendingRemoteCommand::NewTab { .. } => {
                     // Terminator parity (remote-control verb):

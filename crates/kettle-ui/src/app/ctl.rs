@@ -1769,12 +1769,10 @@ impl App {
         // event trails the native focus state, a smoke can hide the exact
         // window it is trying to raise. This control-only action never hides.
         if name == "focus_window" {
-            let Some(window) = ws.window.as_ref() else {
+            if ws.window.is_none() {
                 return Response::err(req.id, ec::INTERNAL, "target window is unavailable");
-            };
-            window.set_visible(true);
-            window.focus_window();
-            window.request_redraw();
+            }
+            self.reveal_window(ws);
             return Response::ok(
                 req.id,
                 serde_json::json!({

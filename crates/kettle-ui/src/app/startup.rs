@@ -316,7 +316,18 @@ impl App {
         // Enumerate the system fonts while the event loop starts (AppKit's
         // launch, on macOS) instead of after it.
         let mut font_preload = crate::font_preload::FontPreload::start();
-        let quick_previous = crate::quick_terminal::native::PreviousApp::capture();
+        // Only a quick-terminal launch returns focus to the app it came from.
+        // Reading that app talks to the display server (an X11 connection on
+        // Linux, which can start Xwayland on demand), so no other launch pays
+        // for it; under Wayland the compositor owns focus return.
+        let quick_previous = if startup.quick_terminal
+            && !(cfg!(all(unix, not(target_os = "macos")))
+                && std::env::var_os("WAYLAND_DISPLAY").is_some())
+        {
+            crate::quick_terminal::native::PreviousApp::capture()
+        } else {
+            Default::default()
+        };
         let initial_quick_focus = startup.quick_terminal;
         // Reclaim pasted-image directories from a run that died before its own
         // cleanup. Age-gated, so a sibling instance mid-session is untouched.
@@ -782,6 +793,7 @@ impl App {
             proxy,
             activation,
             quick_terminal: crate::quick_terminal::Runtime {
+                model: crate::quick_terminal::Model::for_startup(startup.quick_terminal, 1),
                 previous: quick_previous,
                 initial_focus: initial_quick_focus,
                 activation_token: startup.quick_terminal_activation_token.take(),
