@@ -1,4 +1,19 @@
 #[test]
+fn shortcut_hint_layout_uses_natural_chrome_text_advance() {
+    let src = include_str!("chrome.rs");
+    let horizontal = src
+        .split_once("fn tab_bar_at_height(")
+        .unwrap().1
+        .split_once("pub(super) fn title_edit_rect(")
+        .unwrap().0;
+    assert!(
+        horizontal.contains("let cell_w = self.overlay_text_cell_width(ws);"),
+        "Cmd+1 is shaped at natural font metrics, so its lane must use the chrome text advance"
+    );
+    assert!(!horizontal.contains("let cell_w = Self::cell_size(ws)"));
+}
+
+#[test]
 fn about_never_claims_current_without_a_verified_result() {
     // No record and no install facts: About says the status is unknown
     // rather than up to date.

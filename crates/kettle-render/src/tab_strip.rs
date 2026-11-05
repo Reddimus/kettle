@@ -130,6 +130,8 @@ pub(crate) fn horizontal_tab_quads(
     let mut quads = Vec::new();
     let bottom = pos == TabBarPos::Bottom;
     let hover = crate::color::over(chrome, theme.foreground, 0.06, false);
+    let divider =
+        crate::color::with_min_contrast(theme.palette[8], chrome, crate::chrome::ICON_CONTRAST);
     for (i, tab) in bar.segments.iter().enumerate() {
         let hovered = bar.hovered_tab_idx == Some(tab.idx);
         if tab.active || hovered {
@@ -155,7 +157,7 @@ pub(crate) fn horizontal_tab_quads(
                 y + 6.0,
                 1.0,
                 (h - 12.0).max(0.0),
-                theme.palette[8],
+                divider,
                 1.0,
             ));
         }
@@ -317,6 +319,118 @@ mod tests {
                     && y < q.pos[1] + q.size[1]
             })
             .map(|q| q.color)
+    }
+
+    #[test]
+    fn inactive_tab_separator_contrasts_with_resolved_chrome() {
+        use kettle_config::{BackgroundType, ChromeBackground, Config, Theme};
+
+        for name in ["Builtin Dark", "Builtin Light"] {
+            let theme = Theme::by_name(name);
+            let mut bar = TabBar::hidden();
+            for i in 0..3 {
+                bar.segments.push(crate::TabSeg {
+                    idx: i,
+                    rect: (i as f32 * 160.0, 0.0, 160.0, 28.0),
+                    title_rect: (i as f32 * 160.0 + 8.0, 0.0, 144.0, 28.0),
+                    hint: None,
+                    close: (0.0, 0.0, 0.0, 0.0),
+                    title: "shell".into(),
+                    path: None,
+                    active: i == 0,
+                    activity: TabActivity::Normal,
+                });
+            }
+            for background_type in [BackgroundType::Solid, BackgroundType::Image] {
+                for chrome_background in [
+                    ChromeBackground::Theme,
+                    ChromeBackground::Black,
+                    ChromeBackground::White,
+                    ChromeBackground::Auto,
+                ] {
+                    let cfg = Config {
+                        background_type,
+                        chrome_background,
+                        ..Config::default()
+                    };
+                    let chrome = crate::resolve_chrome_bg(&cfg, &theme, Some(theme.foreground));
+                    for pos in [TabBarPos::Top, TabBarPos::Bottom] {
+                        let quads = horizontal_tab_quads(
+                            &bar,
+                            &theme,
+                            theme.background,
+                            chrome,
+                            theme.accent,
+                            pos,
+                            1.0,
+                        );
+                        let divider = quads
+                            .iter()
+                            .find(|q| q.pos[0] == 319.0 && q.size[0] == 1.0)
+                            .expect("separator between the two inactive tabs");
+                        let rgb = Rgb::new(
+                            (divider.color[0] * 255.0).round() as u8,
+                            (divider.color[1] * 255.0).round() as u8,
+                            (divider.color[2] * 255.0).round() as u8,
+                        );
+                        assert!(
+                            crate::color::contrast_ratio(rgb, chrome)
+                                >= crate::chrome::ICON_CONTRAST,
+                            "{name}, {background_type:?}, {chrome_background:?}, {pos:?}: invisible separator"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shortcut_hint_fits_natural_advance_with_narrow_terminal_cells() {
+        use crate::{Attrs, Family, FontSystem, Metrics, Shaping, TextBuffer};
+
+        let mut fonts = FontSystem::new();
+        for face in kettle_config::font::all() {
+            crate::load_bundled_font(&mut fonts, face);
+        }
+        let metrics = Metrics::new(16.0, 20.0);
+        let mut buffer = TextBuffer::new(&mut fonts, metrics);
+        let attrs = Attrs::new().family(Family::Name(kettle_config::font::FAMILY));
+        buffer.set_text("M", &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut fonts, false);
+        let natural_advance = buffer.layout_runs().next().unwrap().line_w;
+        for cell_scale in [0.5, 1.0, 2.0] {
+            let terminal_cell_width = natural_advance * cell_scale;
+            let text_advance = terminal_cell_width / cell_scale;
+            let hint = tab_shortcut_hint(0, true).unwrap();
+            let content = horizontal_tab_content_layout(
+                (0.0, 0.0, 320.0, 32.0),
+                true,
+                true,
+                true,
+                "shell",
+                Some(&hint),
+                text_advance,
+            );
+            let lane = content.hint.expect("a wide tab has room for Cmd+1");
+            assert!((lane.2 - 5.0 * natural_advance).abs() < 0.001);
+            buffer.set_size(Some(lane.2), Some(lane.3));
+            buffer.set_text(&hint, &attrs, Shaping::Advanced, None);
+            buffer.shape_until_scroll(&mut fonts, false);
+            let runs: Vec<_> = buffer.layout_runs().collect();
+            assert_eq!(
+                runs.len(),
+                1,
+                "Cmd+1 must not wrap at cell-width={cell_scale}"
+            );
+            assert_eq!(
+                runs[0].glyphs.len(),
+                5,
+                "all hint glyphs must remain visible"
+            );
+            assert!(runs[0].line_w <= lane.2 + 0.001);
+            assert!(content.title.0 + content.title.2 < lane.0);
+            assert_eq!(lane.0 + lane.2, content.close.0);
+        }
     }
 
     #[test]

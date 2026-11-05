@@ -244,7 +244,7 @@ impl App {
                     ],
                 );
                 let hint = kettle_render::tab_shortcut_hint(i, cfg!(target_os = "macos"));
-                let cell_w = Self::cell_size(ws).map_or(8.0, |(cw, _)| cw);
+                let cell_w = self.overlay_text_cell_width(ws);
                 let content = kettle_render::horizontal_tab_content_layout(
                     rect,
                     i == active || hovered,
