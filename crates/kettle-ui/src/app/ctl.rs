@@ -2231,7 +2231,7 @@ impl App {
         if self.drag_split_divider(ws) {
             return;
         }
-        if self.picker_pointer(ws, PickerPointer::Hover) {
+        if self.picker_pointer(ws, PickerPointer::Hover, None) {
             return;
         }
         self.promote_tab_drag_if_needed(ws);
@@ -2290,7 +2290,7 @@ impl App {
         }
         let bar = self.tab_bar(ws);
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        if bcode == 0 && self.picker_pointer(ws, PickerPointer::Press) {
+        if bcode == 0 && self.picker_pointer(ws, PickerPointer::Press, Some(event_loop)) {
             return true;
         }
         if bcode == 0

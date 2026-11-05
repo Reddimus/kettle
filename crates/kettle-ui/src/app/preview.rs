@@ -2495,10 +2495,7 @@ impl App {
     ) -> Vec<kettle_render::MediaLanePanel> {
         self.pane_layout(ws, self.area(ws))
             .into_iter()
-            .filter(|(pane, _)| {
-                ws.preview_overlay
-                    .is_none_or(|open| !(open.theater || open.fullscreen) || open.pane == *pane)
-            })
+            .filter(|(pane, _)| lane_is_uncovered(ws.preview_overlay, *pane))
             .filter_map(|(pane, partition)| {
                 let (rect, collapsed) = self.preview_placement(ws, pane, partition)?;
                 self.preview_lane_panel(ws, pane, rect, collapsed)
@@ -2798,6 +2795,7 @@ impl App {
             }
             _ => None,
         };
+        lane.notice = lane_notice_with_action(panel.notice, lane.notice, tr);
         Some(lane)
     }
 
@@ -3013,6 +3011,9 @@ impl App {
         ws: &WindowState,
         pane: u64,
     ) -> Option<kettle_render::MediaLaneGeometry> {
+        if !lane_is_uncovered(ws.preview_overlay, pane) {
+            return None;
+        }
         let lane = self.preview_panel_of(ws, pane)?;
         self.preview_lane_geometry(ws, &lane)
     }

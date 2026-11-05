@@ -29,10 +29,6 @@ pub(super) fn update_ime_preedit(
     let owner = current_ime_owner(ws);
     let generation = ws.ime_focus_generation;
     if let Some(session) = ws.ime_preedit_owner.as_mut()
-        && matches!(
-            session.owner,
-            crate::window_state::ImePreeditOwner::Terminal(_)
-        )
         && (session.owner != owner || session.generation != generation)
     {
         if text.is_empty() && !session.empty_after_focus {

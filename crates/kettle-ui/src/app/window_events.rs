@@ -366,7 +366,7 @@ impl App {
                 if ws.context_menu.is_some() {
                     self.update_menu_highlight_from_cursor(ws);
                 } else {
-                    self.picker_pointer(ws, PickerPointer::Hover);
+                    self.picker_pointer(ws, PickerPointer::Hover, None);
                 }
                 // Terminator parity, terminatorlib/config.py:73
                 // `focus = sloppy`: focus-follows-mouse. The pane
@@ -601,7 +601,7 @@ impl App {
                 if bcode == 0 && self.modal_text_pointer(ws, true) {
                     return;
                 }
-                if bcode == 0 && self.picker_pointer(ws, PickerPointer::Press) {
+                if bcode == 0 && self.picker_pointer(ws, PickerPointer::Press, Some(event_loop)) {
                     return;
                 }
                 if bcode == 0

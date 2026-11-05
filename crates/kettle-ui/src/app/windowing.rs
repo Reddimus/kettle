@@ -931,19 +931,19 @@ impl App {
             } else {
                 0.0
             };
-        let band = tab_band_rect(
+        tab_band_rect(
             surface,
             self.cfg.tab_bar_pos,
             height,
             self.cfg.tab_bar_width,
             self.search_bar_h(ws),
+            if self.cfg.status_bar == kettle_config::StatusBarMode::Top {
+                self.status_bar_h(ws)
+            } else {
+                0.0
+            },
             bottom_status_height,
-        );
-        if self.cfg.tab_bar_pos.is_vertical() {
-            side_tab_band(band, self.cfg.status_bar, self.status_bar_h(ws))
-        } else {
-            band
-        }
+        )
     }
 
     fn tear_off_tab_band(&self, ws: &WindowState, surface: (u32, u32), height: f32) -> Rect {
@@ -952,19 +952,19 @@ impl App {
         } else {
             0.0
         };
-        let band = tab_band_rect(
+        tab_band_rect(
             surface,
             self.cfg.tab_bar_pos,
             height,
             self.cfg.tab_bar_width,
             0.0,
+            if self.cfg.status_bar == kettle_config::StatusBarMode::Top {
+                self.status_bar_h(ws)
+            } else {
+                0.0
+            },
             bottom_status,
-        );
-        if self.cfg.tab_bar_pos.is_vertical() {
-            side_tab_band(band, self.cfg.status_bar, self.status_bar_h(ws))
-        } else {
-            band
-        }
+        )
     }
 
     /// Insertion slot if the (approximated) screen

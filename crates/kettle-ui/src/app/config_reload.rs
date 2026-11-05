@@ -26,11 +26,10 @@ impl App {
     /// atomic `persist_config_toggle` helper. Resolves the path the same way
     /// `Action::EditConfig` does (`App::config_path`, then
     /// `Config::default_path`). Logs an I/O error so a transient FS issue
-    /// doesn't kill the menu dispatch; the in-memory change still applies.
+    /// doesn't kill the menu dispatch. Runtime updates belong to the caller.
     /// Returns `true` iff the value was written to the config file. Callers
     /// of user-initiated changes (theme picks, Settings) notify the user on
-    /// `false` so a change that's live this session but lost on restart isn't
-    /// silent.
+    /// `false`.
     pub(super) fn persist_pref(&self, key: &str, value: &str) -> bool {
         let Some(path) = self
             .config_path

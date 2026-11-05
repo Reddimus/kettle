@@ -550,3 +550,76 @@ fn closing_a_preview_owner_restores_the_shared_baseline() {
     begin_theme_picker(&mut survivor, restored);
     assert_eq!(survivor.theme_preview.as_ref().unwrap().0, baseline.0);
 }
+
+#[test]
+fn picker_result_presses_select_the_visible_row() {
+    use super::{PickerPointer, apply_picker_pointer, open_picker_list, picker_context_menu};
+    let cfg = kettle_config::Config {
+        ssh_hosts: vec![
+            ("alpha".into(), "ssh alpha".into()),
+            ("beta".into(), "ssh beta".into()),
+        ],
+        ..Default::default()
+    };
+    for kind in 0..4 {
+        let mut ws = WindowState::new(0, Mux::new());
+        match kind {
+            0 => ws.palette_input = Some((Default::default(), 0)),
+            1 => ws.theme_picker_input = Some(state("", 0, "Builtin Dark")),
+            2 => {
+                ws.layout_picker_entries = vec!["alpha".into(), "beta".into()];
+                ws.layout_picker_input = Some((Default::default(), 0));
+            }
+            _ => ws.ssh_input = Some((Default::default(), 0)),
+        }
+        let project = |ws: &WindowState| {
+            picker_context_menu(
+                open_picker_list(ws, &cfg, &ES, None).unwrap(),
+                (800.0, 600.0),
+                (8.0, 16.0),
+            )
+            .unwrap()
+        };
+        let menu = project(&ws);
+        let row_h = 16.0 + kettle_render::menu::ROW_PAD;
+        let (inset, _) = kettle_render::menu::scroll_content(
+            menu.rows.len() as f32 * row_h,
+            menu.panel_h_clamped,
+            row_h,
+        );
+        ws.cursor.x = f64::from(menu.anchor.0 + 10.0);
+        ws.cursor.y = f64::from(menu.anchor.1 + inset + row_h * 1.5);
+        assert!(
+            apply_picker_pointer(&mut ws, &menu, 16.0, PickerPointer::Press),
+            "picker result rows must accept primary presses"
+        );
+        assert_eq!(
+            project(&ws).highlight,
+            1,
+            "the pressed row must become selected"
+        );
+    }
+}
+
+#[test]
+fn picker_result_activation_uses_native_and_control_enter_routing() {
+    for source in [include_str!("window_events.rs"), include_str!("ctl.rs")] {
+        let code = kettle_test_support::code_only(source)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(code.contains("PickerPointer::Press, Some(event_loop)"));
+    }
+    let body = kettle_test_support::code_only(include_str!("pickers.rs"));
+    for handler in [
+        "self.palette_key(ws, &key, None, event_loop)",
+        "self.theme_picker_key(ws, &key, None)",
+        "self.layout_picker_key(ws, &key, None)",
+        "self.ssh_key(ws, &key, None)",
+    ] {
+        assert!(
+            body.contains(handler),
+            "picker activation must share {handler}"
+        );
+    }
+}

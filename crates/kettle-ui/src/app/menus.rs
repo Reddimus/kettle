@@ -1340,6 +1340,11 @@ impl App {
                 }
             }
         }
+        if ws.context_menu.is_none()
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
     }
 
     pub(super) fn context_menu_scroll_edge(&self, ws: &WindowState) -> Option<isize> {

@@ -1290,7 +1290,10 @@ pub(super) fn defer_authored_input(
         && input.key_releases.is_empty()
         && queued_prepare == prepare_input
         && queued.len() == targets.len()
-        && queued.iter().zip(targets).all(|(a, b)| a.0 == b.0)
+        && queued.iter().zip(targets).all(|(a, b)| {
+            a.0 == b.0
+                && a.1.len().saturating_add(b.1.len()) <= crate::mux::MAX_USER_INPUT_MESSAGE_BYTES
+        })
     {
         for (id, press) in &input.key_presses {
             if !key_presses.iter().any(|(kept, release)| {

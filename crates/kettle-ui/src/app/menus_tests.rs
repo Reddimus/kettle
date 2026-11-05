@@ -1314,3 +1314,12 @@ fn loading_shell_menu_survives_construction_and_can_refresh() {
     }
 }
 
+#[test]
+fn menu_copy_and_lua_dismissal_redraws_without_cursor_activity() {
+    let body = finding_body(include_str!("menus.rs"), "dispatch_context_menu_click");
+    let last_action = body.rfind("UrlHow::Preview").unwrap();
+    assert!(
+        body[last_action..].contains("request_redraw()"),
+        "menu dismissal must request a frame independently of action side effects or cursor blinking"
+    );
+}

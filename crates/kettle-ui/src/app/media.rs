@@ -1082,6 +1082,14 @@ impl App {
         if let Some(ticket) = render.preview {
             return self.finish_lane_preview(ws, render, ticket, spec, result);
         }
+        if !self
+            .window_by_seq(ws, render.window)
+            .and_then(|window| window.mux.panes.get(&render.pane))
+            .and_then(|pane| pane.media_shelf.get(render.item))
+            .is_some_and(|item| item.generation == render.generation)
+        {
+            return self.forget_lane_page(ws, &render);
+        }
         if let Some(ticket) = render.tile {
             return self.finish_lane_crop(ws, render, ticket, spec, result);
         }

@@ -541,6 +541,9 @@ plural = "count"
 context = "crates/kettle-ui/src/app.rs: desktop notification body. pane is a pane number. Keep send_text, an API name."
 args = [{ name = "pane", type = "u64" }]
 
+[messages.notify_body_setting_not_applied]
+context = "Settings save failure; the requested setting was not applied. The inline text editor remains open for retry."
+
 [messages.notify_body_not_saved]
 context = "crates/kettle-ui/src/app.rs: desktop notification body."
 

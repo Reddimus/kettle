@@ -310,7 +310,7 @@ impl App {
         let strip_rows = ((sh - lead) / height).floor().max(0.0) as usize;
         let rows = strip_rows;
         let layout = side_tab_rows(labels.len(), active, rows);
-        let row_y = |row: usize| lead + row as f32 * height;
+        let row_y = |row: usize| strip_y + lead + row as f32 * height;
         // Rows scrolled out of view are parked off-screen, kept in the segment
         // list as the horizontal bar keeps its own.
         let shown = layout.first..layout.first + layout.shown;
@@ -319,7 +319,7 @@ impl App {
             .enumerate()
             .map(|(i, label)| {
                 let seg_y = if shown.contains(&i) {
-                    strip_y + row_y(layout.top + i - layout.first)
+                    row_y(layout.top + i - layout.first)
                 } else {
                     PARKED_TAB
                 };
@@ -362,13 +362,13 @@ impl App {
             .collect();
         // `+` is left out of a strip with no row to spare for it.
         let plus_y = if layout.plus < rows {
-            strip_y + row_y(layout.plus)
+            row_y(layout.plus)
         } else {
             PARKED_TAB
         };
         let arrow = |row: usize| {
             if layout.arrows {
-                (strip_x, strip_y + row_y(row), strip_w, height)
+                (strip_x, row_y(row), strip_w, height)
             } else {
                 (0.0, 0.0, 0.0, 0.0)
             }
@@ -401,7 +401,7 @@ impl App {
             // that slot is scrolled out of view.
             insert_marker: ws.dock_preview.map(|idx| {
                 let slot = idx.min(labels.len()).clamp(shown.start, shown.end);
-                let iy = (strip_y + row_y(layout.top + slot - layout.first))
+                let iy = row_y(layout.top + slot - layout.first)
                     .min(strip_y + sh - kettle_render::tab_drag::INSERT_MARKER_PX)
                     .max(strip_y);
                 (
@@ -993,24 +993,4 @@ pub(super) fn tab_title_rect(
 /// menu, even on a bash-only Ubuntu.
 fn new_tab_dropdown_visible() -> bool {
     true
-}
-
-pub(super) fn side_tab_band(band: Rect, status: kettle_config::StatusBarMode, height: f32) -> Rect {
-    use kettle_config::StatusBarMode;
-    let (x, y, width, available) = band;
-    let reserved = if status == StatusBarMode::Off {
-        0.0
-    } else {
-        height.min(available).max(0.0)
-    };
-    (
-        x,
-        y + if status == StatusBarMode::Top {
-            reserved
-        } else {
-            0.0
-        },
-        width,
-        (available - reserved).max(0.0),
-    )
 }

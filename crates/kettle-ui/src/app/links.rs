@@ -285,14 +285,25 @@ fn spawn_file_link_opener(
     }
 }
 
+static CUSTOM_URL_HANDLERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_CUSTOM_URL_HANDLERS: usize = 4;
+
 // Start the waiter before its child so a thread-spawn failure cannot lose a child handle.
 pub(super) fn spawn_custom_url_handler(cmd: &str, target: &str) -> std::io::Result<()> {
+    let slot =
+        take_opener_slot(&CUSTOM_URL_HANDLERS, MAX_CUSTOM_URL_HANDLERS).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "too many custom URL handlers running",
+            )
+        })?;
     let cmd = cmd.to_string();
     let target = target.to_string();
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("kettle-url-handler".into())
         .spawn(move || {
+            let _slot = slot;
             match std::process::Command::new(&cmd)
                 .arg(&target)
                 .stdin(std::process::Stdio::null())

@@ -1993,3 +1993,16 @@ fn synthetic_keys_release_kitty_events_within_the_same_byte_budget() {
     assert!(release < send.find("p.feed_key_inputs(&encoded_keys)").unwrap());
     assert!(send[release..].contains("extend_ctl_send_key_bytes(&mut bytes, &release)"));
 }
+
+#[test]
+fn control_logical_key_preserves_uppercase_without_inferring_modifiers() {
+    use winit::keyboard::Key;
+    assert_eq!(
+        super::parse_ctl_logical_key(Some(&serde_json::json!("N"))),
+        Ok(Some(Key::Character("N".into()))),
+        "uppercase logical identity must not imply an explicit modifier"
+    );
+    for token in ["ctrl+N", "shift+n", "alt+enter"] {
+        assert!(super::parse_ctl_logical_key(Some(&serde_json::json!(token))).is_err());
+    }
+}

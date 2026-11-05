@@ -1128,6 +1128,7 @@ fn finding_tab_pointer_uses_painted_band() {
         24.0,
         180.0,
         0.0,
+        0.0,
         22.0,
     );
     assert!(super::rect_contains(band, 400.0, 560.0));
@@ -1148,3 +1149,38 @@ fn finding_synthetic_divider_drag_uses_native_handlers() {
     assert!(include_str!("window_events.rs").contains("if self.drag_split_divider(ws)"));
 }
 
+#[test]
+fn wheel_tab_switch_reconciles_composition_focus() {
+    let body = finding_body(include_str!("pointer.rs"), "dispatch_wheel");
+    let switch = body
+        .split("if self.cursor_in_tab_bar(ws)")
+        .nth(1)
+        .unwrap()
+        .split("let zoom_owns_wheel")
+        .next()
+        .unwrap();
+    assert!(
+        switch.contains("let pre = self.focus_key(ws)"),
+        "wheel tab switching must capture the old focus owner"
+    );
+    assert!(
+        switch.contains("self.note_focus_change(ws, pre)"),
+        "wheel tab switching must invalidate the previous composition"
+    );
+}
+
+#[test]
+fn wheel_font_change_clears_the_scaled_zoom_baseline() {
+    let body = finding_body(include_str!("pointer.rs"), "dispatch_wheel");
+    let change = body
+        .split("r.set_font_size(new);")
+        .nth(1)
+        .unwrap()
+        .split("self.resize_all(ws)")
+        .next()
+        .unwrap();
+    assert!(
+        change.contains("ws.scaled_zoom_prev_font_size = None"),
+        "manual wheel font changes must survive leaving ScaledZoom"
+    );
+}

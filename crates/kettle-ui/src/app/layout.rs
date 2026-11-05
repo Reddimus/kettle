@@ -34,14 +34,15 @@ pub(super) fn should_zoom_font(ctrl: bool, notches: i32, disabled: bool) -> Opti
 pub const VERTICAL_TAB_STRIP_W: f32 = 180.0;
 
 /// The tab bar's band: where it draws and where a dragged tab docks. A bottom
-/// bar sits above the search bar and a bottom status bar, and a side strip
-/// stops above the search bar, so the docking target matches what is painted.
+/// bar sits above the search bar and a bottom status bar. A side strip excludes
+/// search and status bands, so the docking target matches what is painted.
 pub(super) fn tab_band_rect(
     surface: (u32, u32),
     pos: TabBarPos,
     height: f32,
     strip_width: f32,
     search_height: f32,
+    top_status_height: f32,
     bottom_status_height: f32,
 ) -> Rect {
     let (sw, sh) = (surface.0 as f32, surface.1 as f32);
@@ -53,8 +54,16 @@ pub(super) fn tab_band_rect(
             sw,
             height,
         ),
-        TabBarPos::Left => (0.0, 0.0, strip_width, sh - search_height),
-        TabBarPos::Right => (sw - strip_width, 0.0, strip_width, sh - search_height),
+        TabBarPos::Left | TabBarPos::Right => (
+            if pos == TabBarPos::Left {
+                0.0
+            } else {
+                sw - strip_width
+            },
+            top_status_height,
+            strip_width,
+            (sh - top_status_height - search_height - bottom_status_height).max(0.0),
+        ),
     }
 }
 
@@ -141,8 +150,16 @@ pub(super) fn content_rect_for_with_strip(
         } else {
             0.0
         });
-    let left_offset = if tb_on_left { strip_w } else { 0.0 };
-    let right_offset = if tb_on_right { strip_w } else { 0.0 };
+    let left_offset = if tb_on_left && bands.tab_bar_h > 0.0 {
+        strip_w
+    } else {
+        0.0
+    };
+    let right_offset = if tb_on_right && bands.tab_bar_h > 0.0 {
+        strip_w
+    } else {
+        0.0
+    };
     let content_h = (sh - top_offset - bot_offset).max(1.0);
     let content_w = (sw - left_offset - right_offset).max(1.0);
     (left_offset, top_offset, content_w, content_h)

@@ -37,7 +37,7 @@ const PTY_INPUT_QUEUE_DEPTH: usize = 64;
 const PTY_INPUT_WRITE_CHUNK_BYTES: usize = 8 * 1024;
 // `LOCAL_PASTE_MAX` is 4 MiB; leave room for the bracketed-paste envelope and
 // a small amount of already-queued interactive input.
-const MAX_USER_INPUT_MESSAGE_BYTES: usize = kettle_core::term::MAX_LOCAL_ECHO_BYTES;
+pub(crate) const MAX_USER_INPUT_MESSAGE_BYTES: usize = kettle_core::term::MAX_LOCAL_ECHO_BYTES;
 const MAX_QUEUED_USER_INPUT_BYTES: usize = MAX_USER_INPUT_MESSAGE_BYTES + 64 * 1024;
 // A 1 MiB OSC 52 clipboard payload expands to roughly 1.34 MiB after base64.
 const MAX_PROTOCOL_REPLY_MESSAGE_BYTES: usize = 2 * 1024 * 1024;

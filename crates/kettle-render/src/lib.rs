@@ -1255,15 +1255,8 @@ impl Renderer {
             // background as a column matching the strip rect
             // instead of a full-width horizontal stripe.
             if cfg.tab_bar_pos.is_vertical() {
-                // Derive the strip's x + width from the first
-                // segment (the UI's tab-bar layout already hands us
-                // correct per-segment rects). new_tab anchors at the same x/w.
-                let (sx, _, swid, _) = tabbar
-                    .segments
-                    .first()
-                    .map(|s| s.rect)
-                    .unwrap_or(tabbar.new_tab);
-                quads.push(rect(sx, 0.0, swid, sh, chrome_strip_bg, 1.0));
+                let (x, y, width, height) = tabbar.band;
+                quads.push(rect(x, y, width, height, chrome_strip_bg, 1.0));
             } else {
                 quads.push(rect(0.0, by, sw, tabbar.height, chrome_strip_bg, 1.0));
             }

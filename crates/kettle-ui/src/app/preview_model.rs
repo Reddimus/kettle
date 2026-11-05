@@ -1,5 +1,9 @@
 use super::*;
 
+pub(super) fn lane_is_uncovered(overlay: Option<crate::media::Overlay>, pane: u64) -> bool {
+    overlay.is_none_or(|open| !(open.theater || open.fullscreen) || open.pane == pane)
+}
+
 /// A sender line naming `program` and its `signer`, with where each sits in
 /// it. The line is rendered once more per part with a control character in
 /// that part's place, which no sanitized text holds, to find it in any
@@ -499,6 +503,16 @@ pub(super) fn chosen_canvas(
     panel: &crate::window_state::PreviewPanel,
 ) -> kettle_render::MediaCanvas {
     panel.canvas.unwrap_or_else(|| preview_canvas(item, panel))
+}
+
+pub(super) fn lane_notice_with_action(
+    action: Option<crate::window_state::LaneNotice>,
+    steady: Option<String>,
+    tr: &kettle_i18n::Translator,
+) -> Option<String> {
+    action
+        .map(|notice| lane_notice_text(notice, tr).to_string())
+        .or(steady)
 }
 
 /// What a lane says in place of its hint after `notice`.

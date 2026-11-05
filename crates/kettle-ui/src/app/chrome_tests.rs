@@ -450,7 +450,7 @@ fn the_side_tab_bar_places_rows_through_side_tab_rows() {
     // A title editor takes the top row of the window, strip included, so the
     // rows start below it rather than under it.
     assert!(body.contains("let lead = self.vertical_title_edit_h(ws);"));
-    assert!(body.contains("let row_y = |row: usize| lead + row as f32 * height;"));
+    assert!(body.contains("let row_y = |row: usize| strip_y + lead + row as f32 * height;"));
     assert!(body.contains("let strip_rows = ((sh - lead) / height).floor()"));
     // A strip with no room keeps its plus button out of view.
     assert!(body.contains("let plus_y = if layout.plus < rows {"));
@@ -625,33 +625,6 @@ fn finding_narrow_vertical_tabs_remain_selectable() {
     assert!(body.contains("tab_title_rect(rect, close, closable)"));
 }
 
-
-#[test]
-fn side_tabs_reserve_top_and_bottom_status_bands() {
-    use kettle_config::StatusBarMode;
-    let raw = (0.0, 0.0, 180.0, 574.0);
-    for (mode, expected) in [
-        (StatusBarMode::Top, (0.0, 22.0, 180.0, 552.0)),
-        (StatusBarMode::Bottom, (0.0, 0.0, 180.0, 552.0)),
-    ] {
-        let band = super::side_tab_band(raw, mode, 22.0);
-        assert_eq!(
-            band, expected,
-            "side-tab painting and pointer bands must exclude status text"
-        );
-        let status_y = if mode == StatusBarMode::Top {
-            10.0
-        } else {
-            563.0
-        };
-        assert!(!super::rect_contains(band, 90.0, status_y));
-        let rows = (band.3 / 24.0).floor() as usize;
-        let layout = super::side_tab_rows(40, 0, rows);
-        assert!(band.1 + (layout.plus + 1) as f32 * 24.0 <= band.1 + band.3);
-    }
-    assert_eq!(super::side_tab_band(raw, StatusBarMode::Off, 0.0), raw);
-}
-
 #[test]
 fn docking_append_marker_follows_the_last_visible_tab() {
     let marker = kettle_render::tab_drag::INSERT_MARKER_PX;
@@ -675,4 +648,22 @@ fn docking_append_marker_follows_the_last_visible_tab() {
         x + layout.width,
         "an insertion before a hidden tab must follow the visible predecessor"
     );
+}
+
+#[test]
+fn vertical_tab_band_excludes_status_bands() {
+    use kettle_config::TabBarPos;
+    for pos in [TabBarPos::Left, TabBarPos::Right] {
+        let band = super::tab_band_rect((800, 600), pos, 24.0, 180.0, 78.0, 0.0, 22.0);
+        assert_eq!(
+            band.1 + band.3,
+            500.0,
+            "vertical tabs must stop above bottom status and search"
+        );
+        let top = super::tab_band_rect((800, 600), pos, 24.0, 180.0, 0.0, 22.0, 0.0);
+        assert_eq!(top.1, 22.0, "vertical tabs must start below top status");
+        assert_eq!(top.3, 578.0);
+        assert!(!super::rect_contains(top, top.0 + 10.0, 10.0));
+        assert!(super::rect_contains(top, top.0 + 10.0, 30.0));
+    }
 }

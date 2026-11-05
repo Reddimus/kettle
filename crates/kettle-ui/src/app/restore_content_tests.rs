@@ -20,3 +20,25 @@ fn restored_auto_tabs_reserve_chrome_before_spawning() {
     assert_eq!(empty.for_restore(TabBarMode::Auto, 1, 16.0).tab_bar_h, 0.0);
     assert_eq!(empty.for_restore(TabBarMode::Off, 2, 16.0).tab_bar_h, 0.0);
 }
+
+#[test]
+fn hidden_side_tabs_leave_the_full_terminal_width() {
+    for position in [TabBarPos::Left, TabBarPos::Right] {
+        for bands in [
+            ContentBands::default(),
+            ContentBands::default().for_restore(TabBarMode::Auto, 1, 16.0),
+        ] {
+            assert_eq!(
+                content_rect_for_with_strip(
+                    (800, 600),
+                    bands,
+                    position,
+                    kettle_config::StatusBarMode::Off,
+                    180.0,
+                ),
+                (0.0, 0.0, 800.0, 600.0),
+                "hidden side tabs must not reserve a strip"
+            );
+        }
+    }
+}

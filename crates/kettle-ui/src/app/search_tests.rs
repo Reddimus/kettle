@@ -850,6 +850,7 @@ fn bottom_dock_band_follows_search_and_bottom_status_chrome() {
                 24.0,
                 180.0,
                 search_height,
+                0.0,
                 bottom_status_height,
             );
             let visible_center = 600.0 - search_height - bottom_status_height - 12.0;
@@ -867,18 +868,18 @@ fn bottom_dock_band_follows_search_and_bottom_status_chrome() {
 fn side_dock_bands_exclude_search_without_moving_the_top_band() {
     use super::{TabBarPos, dist_to_rect, tab_band_rect};
     for pos in [TabBarPos::Left, TabBarPos::Right] {
-        let band = tab_band_rect((800, 600), pos, 24.0, 180.0, 78.0, 22.0);
+        let band = tab_band_rect((800, 600), pos, 24.0, 180.0, 78.0, 0.0, 22.0);
         let x = if matches!(pos, TabBarPos::Left) {
             90.0
         } else {
             710.0
         };
-        assert_eq!(dist_to_rect(x, 510.0, band), 0.0);
+        assert_eq!(dist_to_rect(x, 490.0, band), 0.0);
         assert!(dist_to_rect(x, 560.0, band) > 0.0);
-        assert_eq!(band.3, 522.0);
+        assert_eq!(band.3, 500.0);
     }
     assert_eq!(
-        tab_band_rect((800, 600), TabBarPos::Top, 24.0, 180.0, 78.0, 22.0),
+        tab_band_rect((800, 600), TabBarPos::Top, 24.0, 180.0, 78.0, 0.0, 22.0),
         (0.0, 0.0, 800.0, 24.0),
     );
 }

@@ -6871,12 +6871,19 @@ impl Terminal {
                                             }
                                         }
                                         Chunk::Notification { title, body } => {
-                                            if let Ok(mut q) = protocol_notifications.lock() {
+                                            let wake = if let Ok(mut q) = protocol_notifications.lock() {
+                                                let wake = q.is_empty();
                                                 if q.len() >= 32 {
                                                     let d = q.len() - 31;
                                                     q.drain(0..d);
                                                 }
                                                 q.push(ProtocolNotification { title, body });
+                                                wake
+                                            } else {
+                                                false
+                                            };
+                                            if wake {
+                                                proxy.wake_owner();
                                             }
                                         }
                                         Chunk::Completion(update) => {

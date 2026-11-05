@@ -636,3 +636,59 @@ fn ready_preview_overlay_ends_divider_drags() {
     );
 }
 
+#[test]
+fn ssh_creation_reports_tab_add_only_on_success() {
+    let body = finding_body(include_str!("modals.rs"), "ssh_key");
+    let creation = body
+        .split(".new_ssh_tab_geometry(")
+        .nth(1)
+        .unwrap()
+        .split("self.resize_all(ws);")
+        .next()
+        .unwrap();
+    assert_eq!(
+        creation.matches("self.fire_tab_add_event(ws)").count(),
+        1,
+        "successful SSH tabs must emit one tab-add event"
+    );
+    assert!(
+        creation.contains("Ok(_) => self.fire_tab_add_event(ws)"),
+        "failed SSH creation must not emit tab-add"
+    );
+}
+
+#[test]
+fn failed_settings_saves_do_not_claim_session_application_or_discard_text() {
+    let source = include_str!("modals.rs");
+    for function in ["settings_adjust", "settings_text_key"] {
+        let body = finding_body(source, function);
+        assert!(
+            !body.contains("Text::NotifyBodyNotSaved"),
+            "{function} must not claim an unsaved edit was applied for this session"
+        );
+    }
+    let body = finding_body(source, "settings_text_key");
+    let enter = body
+        .split("Key::Named(NamedKey::Enter)")
+        .nth(1)
+        .unwrap()
+        .split("Key::Character")
+        .next()
+        .unwrap();
+    assert!(
+        enter
+            .find("ws.settings_text_edit = None")
+            .is_some_and(|close| enter.find("self.persist_pref").unwrap() < close),
+        "the inline editor must retain its buffer until persistence succeeds"
+    );
+    assert!(
+        enter
+            .split("if !self.persist_pref")
+            .nth(1)
+            .unwrap()
+            .split("ws.settings_text_edit = None")
+            .next()
+            .unwrap()
+            .contains("return;")
+    );
+}

@@ -545,6 +545,29 @@ pub(super) fn open_picker_list(
     }
 }
 
+fn picker_result_row(menu: &ContextMenu, cell_h: f32, cursor: (f64, f64)) -> Option<usize> {
+    let (px, py) = (cursor.0 as f32, cursor.1 as f32);
+    let (x, y) = menu.anchor;
+    let row_h = cell_h + kettle_render::menu::ROW_PAD;
+    let (inset, content_h) = kettle_render::menu::scroll_content(
+        menu.rows.len() as f32 * row_h,
+        menu.panel_h_clamped,
+        row_h,
+    );
+    if px < x || px >= x + menu.panel_w_clamped || py < y + inset || py >= y + inset + content_h {
+        return None;
+    }
+    let row = ((py - y - inset) / row_h).floor() as usize;
+    if (row + 1) as f32 * row_h > content_h {
+        return None;
+    }
+    let index = menu.scroll_offset.checked_add(row)?;
+    menu.rows
+        .get(index)
+        .filter(|row| row.enabled && !row.separator)
+        .map(|_| index)
+}
+
 pub(super) fn apply_picker_pointer(
     ws: &mut WindowState,
     menu: &ContextMenu,
@@ -560,26 +583,32 @@ pub(super) fn apply_picker_pointer(
     let row_h = cell_h + kettle_render::menu::ROW_PAD;
     let (inset, content_h) =
         kettle_render::menu::scroll_content(menu.rows.len() as f32 * row_h, h, row_h);
-    let delta = match event {
-        PickerPointer::Wheel(delta) => delta,
-        _ if inset > 0.0 && py < y + inset => -1,
-        _ if inset > 0.0 && py >= y + inset + content_h => 1,
-        _ => return false,
-    };
-    let visible = ((content_h / row_h).floor() as usize)
-        .max(1)
-        .min(menu.rows.len());
-    let max_offset = menu.rows.len().saturating_sub(visible);
-    let offset = menu
-        .scroll_offset
-        .saturating_add_signed(delta)
-        .min(max_offset);
-    // The picker viewport follows selection. Crossing the cut edge selects
-    // the newly exposed row and keeps keyboard/preview routing in sync.
-    let selected = if offset == menu.scroll_offset {
-        menu.highlight
+    let selected = if matches!(event, PickerPointer::Press)
+        && let Some(row) = picker_result_row(menu, cell_h, (ws.cursor.x, ws.cursor.y))
+    {
+        row
     } else {
-        offset + visible - 1
+        let delta = match event {
+            PickerPointer::Wheel(delta) => delta,
+            _ if inset > 0.0 && py < y + inset => -1,
+            _ if inset > 0.0 && py >= y + inset + content_h => 1,
+            _ => return false,
+        };
+        let visible = ((content_h / row_h).floor() as usize)
+            .max(1)
+            .min(menu.rows.len());
+        let max_offset = menu.rows.len().saturating_sub(visible);
+        let offset = menu
+            .scroll_offset
+            .saturating_add_signed(delta)
+            .min(max_offset);
+        // The picker viewport follows selection. Crossing the cut edge selects
+        // the newly exposed row and keeps keyboard/preview routing in sync.
+        if offset == menu.scroll_offset {
+            menu.highlight
+        } else {
+            offset + visible - 1
+        }
     };
     let selection = if let Some((_, selected)) = ws.palette_input.as_mut() {
         selected
@@ -604,7 +633,12 @@ pub(super) fn apply_picker_pointer(
 }
 
 impl App {
-    pub(super) fn picker_pointer(&self, ws: &mut WindowState, event: PickerPointer) -> bool {
+    pub(super) fn picker_pointer(
+        &mut self,
+        ws: &mut WindowState,
+        event: PickerPointer,
+        event_loop: Option<&ActiveEventLoop>,
+    ) -> bool {
         if ws.context_menu.is_some() {
             return false;
         }
@@ -625,7 +659,27 @@ impl App {
         let Some(menu) = picker_context_menu(list, surface, cell) else {
             return false;
         };
+        let activate = matches!(event, PickerPointer::Press)
+            && picker_result_row(&menu, cell.1, (ws.cursor.x, ws.cursor.y)).is_some();
         let handled = apply_picker_pointer(ws, &menu, cell.1, event);
+        if handled
+            && activate
+            && let Some(event_loop) = event_loop
+        {
+            end_modal_composition(ws);
+            let mods = std::mem::replace(&mut ws.mods, ModifiersState::empty());
+            let key = Key::Named(NamedKey::Enter);
+            if ws.palette_input.is_some() {
+                self.palette_key(ws, &key, None, event_loop);
+            } else if ws.theme_picker_input.is_some() {
+                self.theme_picker_key(ws, &key, None);
+            } else if ws.layout_picker_input.is_some() {
+                self.layout_picker_key(ws, &key, None);
+            } else if ws.ssh_input.is_some() {
+                self.ssh_key(ws, &key, None);
+            }
+            ws.mods = mods;
+        }
         handled || matches!(event, PickerPointer::Wheel(_))
     }
 }

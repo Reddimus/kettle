@@ -1300,3 +1300,42 @@ fn deferred_key_releases_survive_coalesced_presses_and_pane_migration() {
     );
 }
 
+#[test]
+fn coalesced_input_never_exceeds_one_pty_message() {
+    use super::{QueuedPasteContent, defer_authored_input};
+    let queued = |content| key_release_test_paste(7, content);
+    let mut queue = std::collections::VecDeque::from([queued(QueuedPasteContent::Image {
+        id: 1,
+        fallback: String::new(),
+        path: None,
+    })]);
+    let limit = kettle_core::term::MAX_LOCAL_ECHO_BYTES;
+    let size = limit / 2 + 1;
+    for byte in *b"ab" {
+        assert_eq!(
+            defer_authored_input(
+                &mut queue,
+                queued(QueuedPasteContent::Input {
+                    targets: vec![(7, vec![byte; size])],
+                    prepare_input: true,
+                })
+            ),
+            Some(PaneInputResult::Queued)
+        );
+    }
+    let mut delivered = Vec::new();
+    for paste in &queue {
+        if let QueuedPasteContent::Input { targets, .. } = &paste.content {
+            for (_, bytes) in targets {
+                assert!(
+                    bytes.len() <= limit,
+                    "admitted input must remain within the PTY message limit when replayed"
+                );
+                delivered.extend_from_slice(bytes);
+            }
+        }
+    }
+    assert_eq!(delivered.len(), size * 2);
+    assert!(delivered[..size].iter().all(|byte| *byte == b'a'));
+    assert!(delivered[size..].iter().all(|byte| *byte == b'b'));
+}

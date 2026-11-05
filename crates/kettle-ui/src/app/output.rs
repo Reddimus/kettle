@@ -304,7 +304,7 @@ impl App {
             let exited = pane.term.take_exited();
             // Drain the optional output sidechannel before regular events.
             if let Some(out_rx) = &pane.output_rx {
-                while let Ok(chunk) = out_rx.try_recv() {
+                for chunk in output_chunks_ready(out_rx) {
                     output_chunks.push((pane_id, chunk));
                 }
             }
