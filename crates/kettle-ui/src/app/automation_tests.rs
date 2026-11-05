@@ -583,9 +583,10 @@ fn trigger_capture_groups_substitute_into_argv() {
 #[test]
 fn finding_trigger_snapshots_reconstruct_graphemes() {
     let source = include_str!("automation.rs");
-    let body = finding_body(source, "trigger_snapshot");
+    let body = source.split("fn trigger_grid_snapshot(").nth(1).unwrap()
+        .split("\n}\n").next().unwrap();
     assert!(
-        body.contains("append_row_text"),
+        body.contains("row_text_into"),
         "trigger snapshots must skip wide spacers and retain combining marks"
     );
 }
@@ -691,4 +692,40 @@ fn trigger_capture_expansion_rejects_oversized_arguments_and_argv() {
         panic!("bounded argv must still expand");
     };
     assert_eq!(argv, ["notify".to_string(), text]);
+}
+
+#[test]
+fn consumed_trigger_match_does_not_fire_for_unrelated_output() {
+    use super::automation::{TriggerMatches, trigger_grid_snapshot};
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let term = Arc::new(std::sync::Mutex::new(alacritty_terminal::Term::new(
+        alacritty_terminal::term::Config::default(),
+        &kettle_core::term::TermSize::new(20, 5),
+        kettle_core::EventProxy::new(tx, Arc::new(|| {})),
+    )));
+    let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+    let triggers = super::compile_triggers(&[kettle_config::OutputTrigger {
+        pattern: "ERROR".into(),
+        action: kettle_config::TriggerAction::Urgency,
+    }]);
+    let mut consumed = TriggerMatches::default();
+    parser.advance(&mut *term.lock().unwrap(), b"ER");
+    assert!(
+        consumed
+            .next(1, &trigger_grid_snapshot(&term).unwrap(), &triggers)
+            .is_none()
+    );
+    parser.advance(&mut *term.lock().unwrap(), b"ROR\r\n");
+    assert!(
+        consumed
+            .next(1, &trigger_grid_snapshot(&term).unwrap(), &triggers)
+            .is_some()
+    );
+    parser.advance(&mut *term.lock().unwrap(), b".");
+    assert!(
+        consumed
+            .next(1, &trigger_grid_snapshot(&term).unwrap(), &triggers)
+            .is_none(),
+        "unrelated output must not rerun a consumed screen match"
+    );
 }

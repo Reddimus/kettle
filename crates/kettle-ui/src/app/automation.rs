@@ -2,25 +2,115 @@
 
 use super::*;
 
-pub(super) fn trigger_snapshot(terminal: &kettle_core::Terminal) -> Option<String> {
-    let t = terminal.term.lock().ok()?;
-    use kettle_core::Dimensions;
+#[derive(Debug)]
+pub(super) struct TriggerSnapshot {
+    text: String,
+    positions: Vec<(u64, usize)>,
+    alternate: bool,
+}
+
+impl std::ops::Deref for TriggerSnapshot {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+pub(super) fn trigger_snapshot(terminal: &kettle_core::Terminal) -> Option<TriggerSnapshot> {
+    trigger_grid_snapshot(&terminal.term)
+}
+
+pub(super) fn trigger_grid_snapshot(
+    terminal: &kettle_core::term::SharedTerm,
+) -> Option<TriggerSnapshot> {
+    let t = terminal.lock().ok()?;
     let rows = t.screen_lines();
     let cols = t.columns();
     let from = rows.saturating_sub(50);
-    let mut s = String::with_capacity((rows - from) * cols);
+    let grid = t.grid();
+    // Include evicted history rows so scrolling cannot reuse a consumed row id.
+    let screen_top = grid
+        .history_origin()
+        .saturating_add(grid.history_size() as u64);
+    let mut snapshot = TriggerSnapshot {
+        text: String::new(),
+        positions: Vec::new(),
+        alternate: t.mode().contains(kettle_core::TermMode::ALT_SCREEN),
+    };
+    let mut row = String::new();
+    let mut columns = Vec::new();
     for r in from..rows {
-        kettle_core::grid_text::append_row_text(t.grid(), r as i32, cols, &mut s);
-        // Trim the row's grid padding BEFORE the newline, or a
-        // capture group like `(.+)$` embeds up to a full row of
-        // trailing spaces in the spawned command's argv. The
-        // previous row already ends in '\n', so the trim never
-        // eats earlier rows.
-        let keep = s.trim_end_matches(' ').len();
-        s.truncate(keep);
-        s.push('\n');
+        kettle_core::grid_text::row_text_into(grid, r as i32, cols, &mut row, &mut columns);
+        let keep = row.trim_end_matches(' ').len();
+        let line = screen_top.saturating_add(r as u64);
+        snapshot.text.push_str(&row[..keep]);
+        snapshot
+            .positions
+            .extend(columns[..keep].iter().map(|&col| (line, col)));
+        snapshot
+            .positions
+            .push((line, columns.get(keep).copied().unwrap_or(cols)));
+        snapshot.text.push('\n');
     }
-    Some(s)
+    snapshot
+        .positions
+        .push((screen_top.saturating_add(rows as u64), 0));
+    Some(snapshot)
+}
+
+const MAX_CONSUMED_TRIGGER_MATCHES: usize = 4096;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TriggerMatchKey {
+    pane: u64,
+    alternate: bool,
+    start: (u64, usize),
+    end: (u64, usize),
+    text_hash: u64,
+}
+
+#[derive(Default)]
+pub(super) struct TriggerMatches {
+    consumed: VecDeque<TriggerMatchKey>,
+}
+
+impl TriggerMatches {
+    pub(super) fn next(
+        &mut self,
+        pane: u64,
+        snapshot: &TriggerSnapshot,
+        triggers: &[(regex::Regex, kettle_config::TriggerAction)],
+    ) -> Option<kettle_config::TriggerAction> {
+        use std::hash::{Hash, Hasher};
+        for (regex, action) in triggers {
+            for caps in regex.captures_iter(&snapshot.text) {
+                let matched = caps.get(0).expect("regex capture zero");
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                matched.as_str().hash(&mut hash);
+                let key = TriggerMatchKey {
+                    pane,
+                    alternate: snapshot.alternate,
+                    start: snapshot.positions[matched.start()],
+                    end: snapshot.positions[matched.end()],
+                    text_hash: hash.finish(),
+                };
+                if let Some(index) = self.consumed.iter().position(|old| *old == key) {
+                    self.consumed.remove(index);
+                    self.consumed.push_back(key);
+                    continue;
+                }
+                let Some(action) = trigger_action(&caps, action) else {
+                    continue;
+                };
+                if self.consumed.len() == MAX_CONSUMED_TRIGGER_MATCHES {
+                    self.consumed.pop_front();
+                }
+                self.consumed.push_back(key);
+                return Some(action);
+            }
+        }
+        None
+    }
 }
 
 impl App {
@@ -669,14 +759,19 @@ impl App {
         // only — scanning the whole scrollback every wakeup would
         // burn CPU on a chatty pane. Last 50 rows is the typical
         // "what just happened" window.
-        let snapshots: Vec<String> = ws
+        let snapshots: Vec<_> = ws
             .mux
             .panes
-            .values()
-            .filter_map(|pane| trigger_snapshot(&pane.term))
+            .iter()
+            .filter_map(|(&pane_id, pane)| {
+                trigger_snapshot(&pane.term).map(|snapshot| (pane_id, snapshot))
+            })
             .collect();
-        for snap in &snapshots {
-            if let Some(action) = match_triggers(snap, &self.compiled_triggers) {
+        for (pane, snap) in &snapshots {
+            if let Some(action) = self
+                .trigger_matches
+                .next(*pane, snap, &self.compiled_triggers)
+            {
                 match action {
                     kettle_config::TriggerAction::Urgency => {
                         if let Some(w) = &ws.window {
@@ -804,29 +899,30 @@ pub(super) fn resolved_init_lua_script(
         })
 }
 
-/// Scan `text` for any compiled trigger match, returning the
-/// first action that fires. Pure helper used by `App::run_triggers` and
-/// the drift guard. Returns `None` when no trigger fires so the caller
-/// can skip the urgency-attention call.
+/// Match without occurrence tracking for capture-expansion tests.
+#[cfg(test)]
 pub(super) fn match_triggers(
     text: &str,
     triggers: &[(regex::Regex, kettle_config::TriggerAction)],
 ) -> Option<kettle_config::TriggerAction> {
-    triggers.iter().find_map(|(re, action)| {
-        let caps = re.captures(text)?;
-        Some(match action {
-            // The matched pattern's capture groups substitute into the
-            // command's argv (`{0}` whole match, `{1}`… numbered groups),
-            // like `cmd.format(*groups)` in Terminator's `run_cmd_on_match.py`.
-            kettle_config::TriggerAction::RunCommand(argv) => {
-                let Some(argv) = substitute_trigger_groups(argv, &caps) else {
-                    log::warn!("trigger run-command skipped: expanded argv exceeds byte limits");
-                    return None;
-                };
-                kettle_config::TriggerAction::RunCommand(argv)
-            }
-            other => other.clone(),
-        })
+    triggers
+        .iter()
+        .find_map(|(re, action)| trigger_action(&re.captures(text)?, action))
+}
+
+fn trigger_action(
+    caps: &regex::Captures<'_>,
+    action: &kettle_config::TriggerAction,
+) -> Option<kettle_config::TriggerAction> {
+    Some(match action {
+        kettle_config::TriggerAction::RunCommand(argv) => {
+            let Some(argv) = substitute_trigger_groups(argv, caps) else {
+                log::warn!("trigger run-command skipped: expanded argv exceeds byte limits");
+                return None;
+            };
+            kettle_config::TriggerAction::RunCommand(argv)
+        }
+        other => other.clone(),
     })
 }
 
@@ -1245,4 +1341,98 @@ pub(super) fn initialize_remote_spool(
         return Ok(());
     }
     file.set_len(0)
+}
+
+#[cfg(test)]
+mod trigger_occurrence_tests {
+    use super::*;
+
+    fn terminal() -> kettle_core::term::SharedTerm {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        Arc::new(std::sync::Mutex::new(alacritty_terminal::Term::new(
+            alacritty_terminal::term::Config {
+                scrolling_history: 2,
+                ..Default::default()
+            },
+            &kettle_core::term::TermSize::new(20, 5),
+            kettle_core::EventProxy::new(tx, Arc::new(|| {})),
+        )))
+    }
+
+    #[test]
+    fn consumed_trigger_identity_survives_scrolling_and_distinguishes_rewrites_and_panes() {
+        let term = terminal();
+        let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+        let triggers = compile_triggers(&[kettle_config::OutputTrigger {
+            pattern: "ERR[0-9]".into(),
+            action: kettle_config::TriggerAction::Urgency,
+        }]);
+        let mut consumed = TriggerMatches::default();
+        let mut advance = |bytes: &[u8]| parser.advance(&mut *term.lock().unwrap(), bytes);
+        advance(b"\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\nERR1\r\n\r\n");
+        let first = trigger_grid_snapshot(&term).unwrap();
+        assert!(consumed.next(1, &first, &triggers).is_some());
+        assert!(consumed.next(1, &first, &triggers).is_none());
+        assert!(
+            consumed.next(2, &first, &triggers).is_some(),
+            "another pane is independent"
+        );
+        advance(b"\r\n\r\n.");
+        assert!(term.lock().unwrap().grid().history_origin() > 0);
+        let scrolled = trigger_grid_snapshot(&term).unwrap();
+        assert!(scrolled.contains("ERR1"));
+        assert!(
+            consumed.next(1, &scrolled, &triggers).is_none(),
+            "scrolling keeps document row identity"
+        );
+        advance(b"\x1b[1;1HERR1");
+        assert!(
+            consumed
+                .next(1, &trigger_grid_snapshot(&term).unwrap(), &triggers)
+                .is_none(),
+            "identical rewrite is consumed"
+        );
+        advance(b"\rERR2");
+        assert!(
+            consumed
+                .next(1, &trigger_grid_snapshot(&term).unwrap(), &triggers)
+                .is_some(),
+            "changed match text is new"
+        );
+        advance(b" ERR2");
+        assert!(
+            consumed
+                .next(1, &trigger_grid_snapshot(&term).unwrap(), &triggers)
+                .is_some(),
+            "another column span is new"
+        );
+    }
+
+    #[test]
+    fn consumed_trigger_lru_retains_recent_matches_and_is_bounded() {
+        let triggers = compile_triggers(&[kettle_config::OutputTrigger {
+            pattern: "ERROR".into(),
+            action: kettle_config::TriggerAction::Urgency,
+        }]);
+        let snapshot = |line| TriggerSnapshot {
+            text: "ERROR".into(),
+            alternate: false,
+            positions: (0..=5).map(|column| (line, column)).collect(),
+        };
+        let mut consumed = TriggerMatches::default();
+        for line in 0..MAX_CONSUMED_TRIGGER_MATCHES as u64 {
+            assert!(consumed.next(1, &snapshot(line), &triggers).is_some());
+        }
+        assert!(consumed.next(1, &snapshot(0), &triggers).is_none());
+        assert!(consumed.next(1, &snapshot(4096), &triggers).is_some());
+        assert_eq!(consumed.consumed.len(), MAX_CONSUMED_TRIGGER_MATCHES);
+        assert!(
+            consumed.next(1, &snapshot(0), &triggers).is_none(),
+            "a recent hit survives eviction"
+        );
+        assert!(
+            consumed.next(1, &snapshot(1), &triggers).is_some(),
+            "least recently used entry was evicted"
+        );
+    }
 }
