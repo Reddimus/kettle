@@ -81,7 +81,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `background` / `foreground` | color | from theme | Hex/`#rgb`/`rgb:`/X11 name |
 | `cursor-color` | color | from theme | The block cursor color. `cursor-bg-color` and `cursor_bg_color` are aliases |
 | `cursor-fg-color` | color | from theme | The glyph color under a focused block cursor. The block is filled with `cursor-color` and its glyph is recolored to this value |
-| `selection-background` / `selection-foreground` | color | from theme | Selection fills meet 3:1 against the terminal background. An explicit foreground is preserved; otherwise text keeps its colour when it meets 4.5:1 against the effective fill, then prefers the theme background or foreground, with contrast adjustment as a fallback |
+| `selection-background` / `selection-foreground` | color | from theme | Selection fills meet 3:1 against the terminal background. A `selection-foreground` set in your config is used as given. Otherwise text uses the theme's selection foreground or its own colour when that meets 4.5:1 against the effective fill, then the theme background or foreground, with contrast adjustment as a fallback |
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
 | `search-foreground` / `search-background` | color | from theme | Current search-match + quick-select highlight. The background defaults to the theme's yellow `palette[3]`. Automatic search text keeps its colour at 4.5:1 against that fill, then prefers the theme background or foreground, with contrast adjustment as a fallback. Quick-select labels default to the theme background. An explicit search foreground is preserved |
 | `scrollback` | int / `infinite` | `10000` | Line-count history cap; `0`, `infinite` or `unlimited` = effectively unbounded before the byte cap is applied |
@@ -519,12 +519,12 @@ moves a key into the main table without changing its parser arm.
 ### Selection and history controls
 
 Faint selection fills are strengthened to at least 3:1 against the terminal
-background. Without an explicit `selection-foreground` in the theme or config,
-selected text keeps its cell colour when it meets 4.5:1 against the effective
-selection fill. Otherwise Kettle uses the theme background or foreground,
-whichever first meets 4.5:1, and adjusts the cell colour if neither passes.
-This also applies to dim text and underlined links. Explicit selection
-foregrounds are preserved. Non-current search matches use the same rules,
+background. Unless your config sets `selection-foreground`, selected text uses
+the theme's selection foreground, then its own cell colour, whichever first
+meets 4.5:1 against the effective selection fill. Otherwise Kettle uses the
+theme background or foreground, whichever first meets 4.5:1, and adjusts the
+cell colour if neither passes. This also applies to dim text and underlined
+links. A `selection-foreground` in your config is used as given. Non-current search matches use the same rules,
 with fills meeting 3:1 against each cell background. The current match uses
 the same automatic text contrast rule against its search fill, unless
 `search-foreground` is explicit, and also has an underline. The optional

@@ -18,6 +18,9 @@ pub struct Theme {
     pub selection_foreground: Rgb,
     /// Whether a valid selection foreground was supplied by the theme or config.
     pub selection_foreground_explicit: bool,
+    /// Whether the user's config (not the theme) set the selection foreground.
+    /// A user's colour is drawn as given; a theme's must still be readable.
+    pub selection_foreground_user: bool,
     /// The theme's UI-chrome accent (focus border, active tab,
     /// status bar). Most themes don't declare one and default it to `palette[4]`
     /// (their ANSI blue, the conventional focus color) — including the shipped
@@ -59,6 +62,7 @@ impl Default for Theme {
             selection_background: Rgb::new(0x58, 0x5b, 0x70),
             selection_foreground: Rgb::new(0xcd, 0xd6, 0xf4),
             selection_foreground_explicit: true,
+            selection_foreground_user: false,
             // Catppuccin Mocha signature mauve (its named brand accent).
             accent: Rgb::new(0xcb, 0xa6, 0xf7),
         }
@@ -131,6 +135,7 @@ impl Theme {
     pub fn parse(text: &str) -> Theme {
         let mut t = Theme {
             selection_foreground_explicit: false,
+            selection_foreground_user: false,
             ..Theme::default()
         };
         // Track whether the theme declared its own accent. Ghostty

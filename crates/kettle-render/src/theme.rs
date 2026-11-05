@@ -427,7 +427,7 @@ pub(crate) fn highlight_colors_cached(
             let bg = cache.resolve(theme.selection_background, background, 3.0);
             (
                 theme
-                    .selection_foreground_explicit
+                    .selection_foreground_user
                     .then_some(theme.selection_foreground),
                 bg,
             )
@@ -436,9 +436,16 @@ pub(crate) fn highlight_colors_cached(
     if let Some(fg) = explicit {
         return (fg, bg);
     }
-    // Preserve readable cell colours, then prefer the theme's own neutrals.
-    // Cache the comparisons too: repeated palette colours share this hot path.
-    for fg in [foreground, theme.background, theme.foreground] {
+    // A theme's own selection foreground comes first but must stay readable on
+    // the (possibly strengthened) fill; then readable cell colours, then the
+    // theme's neutrals. Cache the comparisons: palette colours share this path.
+    let theme_choice = (!matches!(highlight, CellHighlight::Search(true))
+        && theme.selection_foreground_explicit)
+        .then_some(theme.selection_foreground);
+    for fg in theme_choice
+        .into_iter()
+        .chain([foreground, theme.background, theme.foreground])
+    {
         if cache.resolve(fg, bg, 4.5) == fg {
             return (fg, bg);
         }
@@ -614,6 +621,7 @@ mod selection_contrast_tests {
     fn inactive_search_fills_contrast_with_each_cell_background() {
         let theme = kettle_config::Theme {
             selection_foreground_explicit: false,
+            selection_foreground_user: false,
             ..kettle_config::Theme::default()
         };
         let cfg = kettle_config::Config::default();
@@ -644,6 +652,7 @@ mod selection_contrast_tests {
             selection_background: Rgb::new(24, 24, 24),
             selection_foreground: Rgb::new(220, 220, 220),
             selection_foreground_explicit: false,
+            selection_foreground_user: false,
             ..kettle_config::Theme::default()
         };
         let (fg, bg) = selection_colors(&theme, theme.background);

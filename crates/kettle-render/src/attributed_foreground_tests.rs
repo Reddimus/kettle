@@ -378,31 +378,55 @@ fn automatic_highlight_text_reaches_contrast_when_theme_neutrals_cannot() {
 }
 
 #[test]
-fn explicit_highlight_foregrounds_are_preserved_even_with_low_contrast() {
+fn config_highlight_foregrounds_are_preserved_and_theme_ones_stay_readable() {
+    // A theme's own selection foreground is preferred, but an unreadable one
+    // (the shipped TokyoNight Night pairs pale text with a fill that must be
+    // strengthened to 3:1) gives way to a colour that reaches 4.5:1.
     let theme = Theme::parse("selection-background = #ffffff\nselection-foreground = #eeeeee\n");
     let cfg = Config {
         search_background: Some(Rgb::new(255, 255, 255)),
         search_foreground: Some(Rgb::new(240, 240, 240)),
         ..Config::default()
     };
-    for (highlight, expected) in [
-        (CellHighlight::Selection, theme.selection_foreground),
-        (CellHighlight::Search(false), theme.selection_foreground),
-        (CellHighlight::Search(true), cfg.search_foreground.unwrap()),
-    ] {
-        assert_eq!(
-            resolved_cell_foreground(
-                theme.foreground,
-                theme.background,
-                highlight,
-                true,
-                true,
-                &cfg,
-                &theme
-            ),
-            expected,
+    for highlight in [CellHighlight::Selection, CellHighlight::Search(false)] {
+        let fg = resolved_cell_foreground(
+            theme.foreground,
+            theme.background,
+            highlight,
+            true,
+            true,
+            &cfg,
+            &theme,
         );
+        assert_ne!(fg, theme.selection_foreground);
+        assert!(color::contrast_ratio(fg, Rgb::new(255, 255, 255)) >= 4.5);
     }
+    let readable = Theme::parse("selection-background = #ffffff\nselection-foreground = #102030\n");
+    assert_eq!(
+        resolved_cell_foreground(
+            readable.foreground,
+            readable.background,
+            CellHighlight::Selection,
+            true,
+            true,
+            &cfg,
+            &readable
+        ),
+        readable.selection_foreground,
+        "a readable theme foreground is kept"
+    );
+    assert_eq!(
+        resolved_cell_foreground(
+            theme.foreground,
+            theme.background,
+            CellHighlight::Search(true),
+            true,
+            true,
+            &cfg,
+            &theme
+        ),
+        cfg.search_foreground.unwrap(),
+    );
 
     for text in [
         "selection-background = #ffffff\nselection-foreground = #eeeeee\ntheme = Dracula\n",
