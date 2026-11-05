@@ -6,6 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- On macOS, `Cmd+D` splits beside and `Shift+Cmd+D` splits below, as in
+  iTerm2, Ghostty and Warp. `Shift+Cmd+D` no longer closes a pane; panes
+  close with `Ctrl+Shift+W`, and `keybind = cmd+shift+d=close_pane` restores
+  the old chord.
+- Reopening Search selects the remembered query, so typing replaces it
+  instead of appending to it.
+- A tab with a single pane no longer draws a frame around it; pane borders
+  appear once a tab is split, and while broadcast input is on.
+
 ### Security
 
 - Update pulldown-cmark to 0.13.6, fixing quadratic parsing of nested image
