@@ -37,7 +37,8 @@ if [ ! -f "$EFI_VARS" ]; then
     trap 'rm -f "$vars_tmp"' EXIT
     trap 'exit 1' HUP INT TERM
     cp "${KETTLE_VM_EFI_VARS_TEMPLATE:-/opt/homebrew/share/qemu/edk2-arm-vars.fd}" "$vars_tmp"
-    mv "$vars_tmp" "$EFI_VARS"
+    # Publish without replacing storage another launcher may already be using.
+    ln "$vars_tmp" "$EFI_VARS" 2>/dev/null || [ -f "$EFI_VARS" ]
   )
 fi
 chmod 600 "$EFI_VARS"
@@ -76,14 +77,14 @@ fi
 exec qemu-system-aarch64 \
   -machine virt,accel=hvf,highmem=on \
   -cpu host -smp "$CPUS" -m "$MEM_MB" \
-  -drive "if=pflash,format=raw,readonly=on,file=$EFI_CODE" \
-  -drive "if=pflash,format=raw,file=$EFI_VARS" \
-  -drive "if=none,id=hd0,file=$DISK,format=qcow2,discard=unmap,cache=writeback" \
+  -drive "if=pflash,format=raw,readonly=on,file=${EFI_CODE//,/,,}" \
+  -drive "if=pflash,format=raw,file=${EFI_VARS//,/,,}" \
+  -drive "if=none,id=hd0,file=${DISK//,/,,},format=qcow2,discard=unmap,cache=writeback" \
   -device virtio-blk-pci,drive=hd0 \
   -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" \
   -device virtio-net-pci,netdev=net0 \
   -device virtio-serial-pci \
-  -chardev "socket,path=$QGA_SOCKET,server=on,wait=off,id=qga0" \
+  -chardev "socket,path=${QGA_SOCKET//,/,,},server=on,wait=off,id=qga0" \
   -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
   -device qemu-xhci -device usb-kbd -device usb-tablet \
   -device virtio-rng-pci \

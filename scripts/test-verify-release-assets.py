@@ -7,9 +7,13 @@ import copy
 from contextlib import redirect_stderr
 import importlib.util
 from io import StringIO
+import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 
 
@@ -60,6 +64,85 @@ class ReleaseAssetTests(unittest.TestCase):
 
     def test_exact_draft_is_accepted(self):
         MODULE.verify(self.payload, tag="v2.43.0", paths=self.paths)
+
+    def test_cli_checks_the_expected_release_state(self):
+        response = self.root / "response.json"
+        for expected, draft, accepted in (
+            (None, True, True),
+            (None, False, False),
+            ("draft", True, True),
+            ("draft", False, False),
+            ("published", False, True),
+            ("published", True, False),
+            ("published", None, False),
+            ("published", 0, False),
+        ):
+            with self.subTest(expected=expected, draft=draft):
+                payload = copy.deepcopy(self.payload)
+                payload["draft"] = draft
+                response.write_text(json.dumps(payload), encoding="utf-8")
+                args = ["--api-json", str(response), "--tag", "v2.43.0"]
+                for path in self.paths:
+                    args.extend(["--asset", str(path)])
+                if expected is not None:
+                    args.extend(["--expected-state", expected])
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), *args],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0 if accepted else 2, result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "the publish step uses Bash")
+    def test_publish_workflow_verifies_draft_and_public_assets(self):
+        workflow = (SCRIPT.parent.parent / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        step = workflow.split(
+            "      - name: Upload a complete draft, verify it, then publish once\n", 1
+        )[1].split("        run: |\n", 1)[1].split("\n  # Moves", 1)[0]
+        step = textwrap.dedent(step)
+        files = step.split("files=(\n", 1)[1].split(")", 1)[0].split()
+        paths = [self.root / name for name in files]
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"asset fixture")
+        (self.root / "scripts").mkdir()
+        (self.root / "scripts/verify-release-assets.py").write_bytes(SCRIPT.read_bytes())
+        response = self.root / "response.json"
+        calls = self.root / "calls"
+        stub = '''
+gh() {
+  printf '%s\\n' "$*" >> "$CALLS"
+  case "$*" in
+    'api --paginate '*) printf '42 %s\\n' "$DRAFT" ;;
+    'api repos/fixture/kettle/releases/42') cat "$RESPONSE" ;;
+    'release upload '*|'api -X PATCH '*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+sleep() { :; }
+'''
+        for draft in (True, False):
+            with self.subTest(draft=draft):
+                payload = copy.deepcopy(self.payload)
+                payload["draft"] = draft
+                payload["assets"] = [
+                    {"name": name, "state": "uploaded", **record}
+                    for name, record in MODULE.local_assets(paths).items()
+                ]
+                response.write_text(json.dumps(payload), encoding="utf-8")
+                calls.write_text("", encoding="utf-8")
+                result = subprocess.run(
+                    ["bash", "-c", stub + step], cwd=self.root,
+                    env={**os.environ, "GITHUB_REF_NAME": "v2.43.0",
+                         "GITHUB_REPOSITORY": "fixture/kettle", "CALLS": str(calls),
+                         "RESPONSE": str(response), "DRAFT": str(draft).lower()},
+                    capture_output=True, text=True, check=False, timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                commands = calls.read_text(encoding="utf-8")
+                self.assertEqual("release upload " in commands, draft)
+                self.assertEqual("api -X PATCH " in commands, draft)
 
     def test_release_identity_and_state_are_fail_closed(self):
         for field, value in (

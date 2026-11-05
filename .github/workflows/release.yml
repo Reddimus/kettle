@@ -899,6 +899,9 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
               > "$release_assets_json"
             verify_args=()
+            if [ -n "$already_public" ]; then
+              verify_args+=(--expected-state published)
+            fi
             for file in "${files[@]}"; do
               verify_args+=(--asset "$file")
             done
