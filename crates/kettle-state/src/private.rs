@@ -7341,10 +7341,16 @@ mod tests {
         let error = open_trusted_file_read_following_leaf(&root_path.join(selected)).unwrap_err();
         assert!(error.to_string().contains("40 links"), "{error}");
 
-        let mut excessive = root_path;
+        // Built as a string: PathBuf::push normalizes `..` away on a Windows
+        // verbatim (`\\?\`) path, which would leave no components to count.
+        let mut excessive = root_path.into_os_string();
         for _ in 0..4096 {
-            excessive.push("unused/..");
+            for component in ["unused", ".."] {
+                excessive.push(std::path::MAIN_SEPARATOR_STR);
+                excessive.push(component);
+            }
         }
+        let excessive = PathBuf::from(excessive);
         let error = open_trusted_file_read_following_leaf(&excessive).unwrap_err();
         assert!(error.to_string().contains("4096 components"), "{error}");
     }
