@@ -107,6 +107,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A new window whose shell clears the screen at startup no longer gains a
+  blank line above the prompt when the window grows.
 - Arch and Homebrew packages ship the renderer license texts from the
   release archive under `share/doc/kettle`, and the manual page describes
   the macOS self-update path and its Homebrew refusal.

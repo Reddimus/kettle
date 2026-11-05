@@ -22,6 +22,23 @@ impl GridCell for usize {
     }
 }
 
+// Clearing an empty screen keeps nothing, with or without history, while a
+// line of content is kept through its last non-empty row.
+#[test]
+fn clear_viewport_moves_only_content_into_history() {
+    let mut grid = Grid::<usize>::new(5, 3, 10_000);
+    grid.clear_viewport();
+    assert_eq!(grid.history_size(), 0, "a blank screen without history");
+
+    grid[Line(1)][Column(0)] = 7;
+    grid.clear_viewport();
+    assert_eq!(grid.history_size(), 2, "content through its line");
+    assert_eq!(grid[Line(-1)][Column(0)], 7);
+
+    grid.clear_viewport();
+    assert_eq!(grid.history_size(), 2, "a blank screen with history");
+}
+
 // Scrolling a region below the top adds no history, so a scrolled-back
 // viewport stays put and never passes the history there is.
 #[test]

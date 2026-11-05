@@ -214,3 +214,28 @@ fn grid_and_pixel_generations_are_atomic_under_concurrent_resize_and_read() {
     }
     writer.join().unwrap();
 }
+
+/// A shell's startup `clear` on a fresh screen must not leave a blank line in
+/// history: growing the window would pull it back above the prompt.
+#[test]
+fn clearing_a_fresh_screen_keeps_the_prompt_on_the_top_row_after_growing() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut terminal = Term::new(
+        TermConfig::default(),
+        &TermSize::new(80, 24),
+        EventProxy::new(tx, Arc::new(|| {})),
+    );
+    let mut processor: Processor = Processor::new();
+    processor.advance(&mut terminal, b"\x1b[H\x1b[2Jprompt$ ");
+    assert_eq!(terminal.grid().history_size(), 0);
+    terminal.resize(TermSize::new(80, 27));
+    let top: String = (0..7)
+        .map(|column| {
+            terminal.grid()[alacritty_terminal::index::Line(0)]
+                [alacritty_terminal::index::Column(column)]
+            .c
+        })
+        .collect();
+    assert_eq!(top, "prompt$");
+    assert_eq!(terminal.grid().cursor.point.line.0, 0);
+}

@@ -378,16 +378,23 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         T: ResetDiscriminant<D>,
         D: PartialEq,
     {
-        // Determine how many lines to scroll up by.
+        // Determine how many lines to scroll up by: through the last visible
+        // line holding content. Without history the backward walk ends on the
+        // top line rather than above it, so count only a line where content
+        // was actually found; an empty screen moves nothing into history.
         let end = Point::new(Line(self.lines as i32 - 1), Column(self.columns()));
         let mut iter = self.iter_from(end);
+        let mut last_content = None;
         while let Some(cell) = iter.prev() {
-            if !cell.is_empty() || cell.point.line < 0 {
+            if cell.point.line < 0 {
+                break;
+            }
+            if !cell.is_empty() {
+                last_content = Some(cell.point.line);
                 break;
             }
         }
-        debug_assert!(iter.point.line >= -1);
-        let positions = (iter.point.line.0 + 1) as usize;
+        let positions = last_content.map_or(0, |line| (line.0 + 1) as usize);
         let region = Line(0)..Line(self.lines as i32);
 
         // Clear the viewport.

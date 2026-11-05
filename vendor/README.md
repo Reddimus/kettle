@@ -178,6 +178,11 @@ date. Recheck that before upgrading a crate or dropping a patch.
     cursor's own row. Upstream sent all of them through CUP, which adds the
     top margin again under origin mode.
   - ED 1 with the cursor on the second row clears the first row too.
+  - ED 2 on a screen with no content and no history moves nothing into
+    history. Upstream's backward scan stopped on the top row instead of
+    above it and pushed that empty row, so a shell's startup `clear`
+    followed by a taller window pulled a blank line back above the prompt.
+    `grid/tests.rs` covers an empty screen, content, and existing history.
 
   Upstream `master` still had all seven of these bugs on 2026-10-16.
   Three more from the 5.7.0 audit, not yet checked against upstream:
