@@ -5,7 +5,9 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
-use super::private_group::{GroupFacts, is_private_group};
+use super::private_group::{
+    GroupFacts, MAX_NSSWITCH_BYTES, is_private_group, passwd_enumeration_is_exhaustive,
+};
 use crate::process::{self, ProcessIdentity};
 
 const MAX_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
@@ -212,6 +214,20 @@ fn access_acl_allows_owner_write(file: &File, metadata: &Metadata) -> bool {
 /// [`is_private_group`] for `owner` and `gid` as the system's user and group
 /// databases name them. An entry that cannot be read counts as shared.
 fn private_group_of(owner: u32, gid: u32) -> bool {
+    use std::io::Read as _;
+
+    let config = (|| -> io::Result<String> {
+        let mut config = String::new();
+        File::open("/etc/nsswitch.conf")?
+            .take(MAX_NSSWITCH_BYTES as u64 + 1)
+            .read_to_string(&mut config)?;
+        Ok(config)
+    })();
+    let enumeration_is_exhaustive =
+        passwd_enumeration_is_exhaustive(config.as_deref().map_err(io::Error::kind));
+    if !enumeration_is_exhaustive {
+        return false;
+    }
     const BUFFER: usize = 16 * 1024;
     let mut user_buffer = vec![0 as libc::c_char; BUFFER];
     let mut group_buffer = vec![0 as libc::c_char; BUFFER];
@@ -290,6 +306,7 @@ fn private_group_of(owner: u32, gid: u32) -> bool {
             gid,
             group_name,
             group_has_members,
+            enumeration_is_exhaustive,
         },
         owner,
         accounts,
@@ -407,6 +424,7 @@ mod tests {
             gid: 1000,
             group_name: b"kevin",
             group_has_members: false,
+            enumeration_is_exhaustive: true,
         };
         assert!(is_private_group(
             &private,

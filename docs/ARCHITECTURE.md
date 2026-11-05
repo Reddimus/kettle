@@ -359,6 +359,11 @@ terminal logs, screenshots, pasted images, and runtime/GPU/crash diagnostics
 share these primitives. Advisory locks let callers serialize compound
 operations; configuration persistence holds one across the complete read,
 validate, backup, and replacement transaction.
+Windows lock creation requests DELETE access and shares deletion from the
+first handle while retaining the private creation checks. Retirement reopens
+that held object and uses POSIX deletion while the exclusive lock remains
+held. Volumes without POSIX deletion keep the reusable lock file; a waiter
+holding a retired object receives the retryable retired-lock error.
 
 Screenshot persistence has two deliberately separate policies. UI/default
 screenshots are private state and therefore require Kettle-owned, verified
@@ -3101,7 +3106,13 @@ pane child. The npm route additionally checks Node and its immediate native
 child. Executable and npm metadata checks inspect access ACLs through the
 open descriptor before accepting private-group write bits. Named users other
 than the owner or root, and named groups other than that private group, must
-have no effective write grant. This is owner-enabled local provenance, not
+have no effective write grant. The primary-group scan requires an exhaustive
+local passwd database: every `passwd:` NSS source must be `files`, `compat`,
+`systemd`, `altfiles`, or `extrausers`. Missing `nsswitch.conf` uses glibc's
+`files` default; unknown sources, duplicate passwd rules, malformed or
+unreadable configuration, and files over 64 KiB refuse the exception. A clean
+`getpwent` EOF alone cannot establish that NSS enumerated every account.
+This is owner-enabled local provenance, not
 vendor authentication.
 
 Rendering retains a launch witness and rechecks it before registering a card.
