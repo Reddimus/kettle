@@ -266,15 +266,10 @@ fn private_group_of(owner: u32, gid: u32) -> bool {
         }
     }
     // SAFETY: this mutex serializes the process-wide passwd enumeration.
-    unsafe {
-        *libc::__errno_location() = 0;
-        libc::setpwent();
-    }
+    // setpwent returns nothing and may leave errno set by an NSS module even
+    // when it succeeds, so errno is not read here.
+    unsafe { libc::setpwent() };
     let _passwd = Passwd;
-    // SAFETY: errno is thread-local; a failed setpwent cannot establish exclusivity.
-    if unsafe { *libc::__errno_location() } != 0 {
-        return false;
-    }
     let accounts = std::iter::from_fn(|| {
         // SAFETY: the cursor is serialized, errno is thread-local, and the
         // numeric fields are copied before the next call invalidates the record.
@@ -282,8 +277,7 @@ fn private_group_of(owner: u32, gid: u32) -> bool {
             *libc::__errno_location() = 0;
             let account = libc::getpwent();
             if account.is_null() {
-                let error = *libc::__errno_location();
-                (error != 0).then(|| Err(io::Error::from_raw_os_error(error)))
+                passwd_end(*libc::__errno_location())
             } else {
                 Some(Ok(((*account).pw_uid, (*account).pw_gid)))
             }
@@ -300,6 +294,16 @@ fn private_group_of(owner: u32, gid: u32) -> bool {
         owner,
         accounts,
     )
+}
+
+/// What a null `getpwent` means. glibc's NSS modules (files, systemd) report
+/// the end of the database with errno left at 0, ENOENT or ESRCH; any other
+/// errno is a failed read, which cannot establish that a group is private.
+fn passwd_end(errno: i32) -> Option<io::Result<(u32, u32)>> {
+    match errno {
+        0 | libc::ENOENT | libc::ESRCH => None,
+        error => Some(Err(io::Error::from_raw_os_error(error))),
+    }
 }
 
 fn native_header(header: &[u8; 64]) -> bool {
@@ -336,6 +340,17 @@ mod tests {
     fn write(path: &Path, bytes: &[u8], mode: u32) {
         std::fs::write(path, bytes).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn passwd_end_of_database_is_not_a_read_failure() {
+        // glibc's NSS modules leave ENOENT or ESRCH behind at the end of the
+        // database; reading that as a failure made every user private group
+        // look shared, and every group-writable executable unusable.
+        for errno in [0, libc::ENOENT, libc::ESRCH] {
+            assert!(super::passwd_end(errno).is_none(), "errno {errno}");
+        }
+        assert!(matches!(super::passwd_end(libc::EIO), Some(Err(_))));
     }
 
     #[test]
