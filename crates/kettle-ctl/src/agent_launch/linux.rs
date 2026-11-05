@@ -49,6 +49,30 @@ pub struct HeldExecutable {
 }
 
 impl HeldExecutable {
+    /// Hold the running test binary, which inherits the build's umask. Under
+    /// umask 002 it is group-writable, acceptable only through a provable
+    /// private group; where that proof is unavailable (for example an `sss`
+    /// passwd source) refusing it is the correct result, and a test that
+    /// needs a held image cannot run.
+    #[cfg(test)]
+    pub(crate) fn test_binary() -> Option<Self> {
+        let exe = std::env::current_exe().unwrap();
+        match Self::open(&exe) {
+            Ok(held) => Some(held),
+            Err(error) => {
+                let file = File::open(&exe).unwrap();
+                let metadata = file.metadata().unwrap();
+                assert!(
+                    metadata.mode() & 0o020 != 0
+                        && !owned_and_writable_by_owner_alone(&file, &metadata),
+                    "the test binary was refused for another reason: {error}"
+                );
+                eprintln!("skipped: the group-writable test binary has no provable private group");
+                None
+            }
+        }
+    }
+
     pub fn open(path: &Path) -> io::Result<Self> {
         if !path.is_absolute() || path.as_os_str().as_bytes().len() > 4096 {
             return Err(io::Error::new(
@@ -373,8 +397,9 @@ mod tests {
     #[test]
     fn a_held_executable_matches_only_its_exact_running_process() {
         let me = process::current().unwrap().identity;
-        let held = HeldExecutable::open(&std::env::current_exe().unwrap())
-            .expect("hold native executable");
+        let Some(held) = HeldExecutable::test_binary() else {
+            return;
+        };
         assert!(held.matches(me));
         assert!(!held.matches(ProcessIdentity::new_for_tests(me.pid(), me.start() + 1)));
         assert!(!held.matches(ProcessIdentity::new_for_tests(0, me.start())));
@@ -384,7 +409,9 @@ mod tests {
     fn descriptor_transfer_is_bound_to_the_checked_peer_and_exact_file() {
         use std::os::fd::AsRawFd as _;
         let me = process::current().unwrap().identity;
-        let held = HeldExecutable::open(&std::env::current_exe().unwrap()).unwrap();
+        let Some(held) = HeldExecutable::test_binary() else {
+            return;
+        };
         let descriptor = u32::try_from(held.as_fd().as_raw_fd()).unwrap();
         let transferred = HeldExecutable::from_peer(me, descriptor, held.stamp())
             .expect("transfer held descriptor");

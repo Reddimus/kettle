@@ -11702,6 +11702,17 @@ split_horiz = <Control><Shift>j
         kettle_test_support::private_tempdir(&format!("kettle-cfg-{test_name}-"))
     }
 
+    /// Write a config fixture owner-only, as Kettle's own files are, so a
+    /// reload through the trusted loader does not depend on the umask.
+    fn write_private_fixture(path: &std::path::Path, text: impl AsRef<[u8]>) {
+        std::fs::write(path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
     #[test]
     fn config_editors_preserve_ignored_sections_and_save_applying_values() {
         for prefix in [
@@ -11904,7 +11915,7 @@ split_horiz = <Control><Shift>j
                 ("attention", BellMode::Attention),
                 ("both", BellMode::Both),
             ] {
-                std::fs::write(&path, original).unwrap();
+                write_private_fixture(&path, original);
                 super::persist_config_toggle(&path, "bell", value).unwrap();
                 let cfg = Config::load_from(&path);
                 assert_eq!(cfg.bell, expected, "saved bell mode must survive reload");
@@ -11917,7 +11928,7 @@ split_horiz = <Control><Shift>j
                     );
                 }
             }
-            std::fs::write(&path, original).unwrap();
+            write_private_fixture(&path, original);
             super::persist_config_toggle(&path, "bell", "off").unwrap();
             assert!(Config::load_from(&path).force_no_bell);
         }
@@ -12600,7 +12611,7 @@ split_horiz = <Control><Shift>j
             original.push_str(&format!("keybind = {chord}=new_tab\n"));
         }
         assert!(Config::detect_malformed_values(&original).is_empty());
-        std::fs::write(&path, &original).unwrap();
+        write_private_fixture(&path, &original);
         let start = std::time::Instant::now();
         super::rebind_keybind(&path, &stale, "Ctrl+Alt+R", "new_tab").unwrap();
         let elapsed = start.elapsed();
@@ -12636,7 +12647,7 @@ split_horiz = <Control><Shift>j
                 "# keep{ending}keybind = Ctrl+Alt+R=split_right{ending}\
                  [keybindings]{ending}new_tab = <Control>equal{ending}{ignored}"
             );
-            std::fs::write(&path, &original).unwrap();
+            write_private_fixture(&path, &original);
             super::rebind_keybind(
                 &path,
                 &["Ctrl+Equal".into(), "ctrl+=".into(), "Ctrl+Alt+R".into()],
