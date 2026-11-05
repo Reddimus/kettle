@@ -5,6 +5,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
+use super::private_group::{GroupFacts, is_private_group};
 use crate::process::{self, ProcessIdentity};
 
 const MAX_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
@@ -208,24 +209,6 @@ fn access_acl_allows_owner_write(file: &File, metadata: &Metadata) -> bool {
     })
 }
 
-/// The owner and group facts the private-group rule reads.
-#[derive(Debug, PartialEq, Eq)]
-struct GroupFacts<'a> {
-    owner_name: &'a [u8],
-    owner_primary_gid: u32,
-    gid: u32,
-    group_name: &'a [u8],
-    group_has_members: bool,
-}
-
-/// A user private group: the owner's primary group, named after the owner,
-/// listing no supplementary members.
-fn is_private_group(facts: &GroupFacts) -> bool {
-    facts.owner_primary_gid == facts.gid
-        && facts.group_name == facts.owner_name
-        && !facts.group_has_members
-}
-
 /// [`is_private_group`] for `owner` and `gid` as the system's user and group
 /// databases name them. An entry that cannot be read counts as shared.
 fn private_group_of(owner: u32, gid: u32) -> bool {
@@ -271,13 +254,52 @@ fn private_group_of(owner: u32, gid: u32) -> bool {
             !group.gr_mem.is_null() && !(*group.gr_mem).is_null(),
         )
     };
-    is_private_group(&GroupFacts {
-        owner_name,
-        owner_primary_gid: user.pw_gid,
-        gid,
-        group_name,
-        group_has_members,
-    })
+    static PASSWD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_guard) = PASSWD.lock() else {
+        return false;
+    };
+    struct Passwd;
+    impl Drop for Passwd {
+        fn drop(&mut self) {
+            // SAFETY: the serialized passwd enumeration is finished.
+            unsafe { libc::endpwent() };
+        }
+    }
+    // SAFETY: this mutex serializes the process-wide passwd enumeration.
+    unsafe {
+        *libc::__errno_location() = 0;
+        libc::setpwent();
+    }
+    let _passwd = Passwd;
+    // SAFETY: errno is thread-local; a failed setpwent cannot establish exclusivity.
+    if unsafe { *libc::__errno_location() } != 0 {
+        return false;
+    }
+    let accounts = std::iter::from_fn(|| {
+        // SAFETY: the cursor is serialized, errno is thread-local, and the
+        // numeric fields are copied before the next call invalidates the record.
+        unsafe {
+            *libc::__errno_location() = 0;
+            let account = libc::getpwent();
+            if account.is_null() {
+                let error = *libc::__errno_location();
+                (error != 0).then(|| Err(io::Error::from_raw_os_error(error)))
+            } else {
+                Some(Ok(((*account).pw_uid, (*account).pw_gid)))
+            }
+        }
+    });
+    is_private_group(
+        &GroupFacts {
+            owner_name,
+            owner_primary_gid: user.pw_gid,
+            gid,
+            group_name,
+            group_has_members,
+        },
+        owner,
+        accounts,
+    )
 }
 
 fn native_header(header: &[u8; 64]) -> bool {
@@ -371,7 +393,11 @@ mod tests {
             group_name: b"kevin",
             group_has_members: false,
         };
-        assert!(is_private_group(&private));
+        assert!(is_private_group(
+            &private,
+            1000,
+            [Ok((1000, 1000))].into_iter()
+        ));
         for shared in [
             GroupFacts {
                 gid: 100,
@@ -390,7 +416,10 @@ mod tests {
                 ..private
             },
         ] {
-            assert!(!is_private_group(&shared), "{shared:?}");
+            assert!(
+                !is_private_group(&shared, 1000, [Ok((1000, 1000))].into_iter()),
+                "{shared:?}"
+            );
         }
     }
 

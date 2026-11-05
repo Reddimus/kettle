@@ -166,12 +166,7 @@ pub(crate) fn ensure_owned_dir(dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 pub(crate) fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        kettle_state::create_private_dirs(dir)?;
-    }
-    #[cfg(not(unix))]
-    std::fs::create_dir_all(dir)?;
+    kettle_state::create_private_dirs(dir)?;
     if !private_dir_is_valid(dir) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -196,7 +191,7 @@ pub(crate) fn private_dir_is_valid(dir: &std::path::Path) -> bool {
     }
     #[cfg(windows)]
     {
-        discovery::owned_by_current_user(dir)
+        kettle_state::validate_private_directory(dir).is_ok()
     }
 }
 
@@ -217,6 +212,27 @@ pub(crate) fn test_scratch_root() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod private_directory_owner_tests {
+    #[cfg(windows)]
+    #[test]
+    fn a_current_user_owned_directory_with_everyone_write_is_refused() {
+        let root = kettle_test_support::private_tempdir("kettle-ctl-directory-dacl");
+        let directory = root.path().join("control");
+        super::ensure_private_dir(&directory).unwrap();
+        assert!(super::private_dir_is_valid(&directory));
+        let status = std::process::Command::new("icacls")
+            .arg(&directory)
+            .args(["/grant", "*S-1-1-0:(W)"])
+            .status()
+            .expect("grant Everyone write on the fixture");
+        assert!(status.success());
+        assert!(super::discovery::owned_by_current_user(&directory));
+        assert!(
+            !super::private_dir_is_valid(&directory),
+            "a current-user owner does not make an Everyone-writable directory private"
+        );
+        assert!(super::ensure_private_dir(&directory).is_err());
+    }
+
     #[test]
     fn discovery_and_presence_share_the_crate_privacy_helpers() {
         let discovery = include_str!("discovery.rs");
