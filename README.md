@@ -13,6 +13,8 @@ documents and videos your coding agents make right in the chat.
 ![Kettle on macOS with terminal output beside an SVG preview](docs/images/kettle-hero.png)
 
 Native macOS window, TokyoNight Night. [Capture notes](docs/images/README.md).
+On macOS, top tabs now share the titlebar; `macos-titlebar-style = native`
+restores the separate native caption.
 
 ## Install
 

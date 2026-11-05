@@ -1768,13 +1768,23 @@ report successful reply delivery after either bounded path loses a query.
 
 ## In-process multi-window
 
-On macOS, decorated windows keep AppKit's title, traffic lights, drag region,
-shadow, and rounded window mask. Winit applies native blur to the window without
-adding frame subviews, which can disrupt AppKit's light caption. AppKit owns the
-opaque titlebar and follows Kettle's selected light or dark appearance. Kettle's
-background color backs the content during resize. Blur is enabled only when
-the renderer's creation-time surface is translucent. Reduce Transparency makes
-the window opaque again. Borderless windows retain their sharp-alpha fallback.
+On macOS, `macos-titlebar-style = tabs` creates decorated windows with a
+transparent titlebar, hidden native title and full-size content view. AppKit
+retains traffic lights, shadow and rounded window mask. The top strip owns the
+titlebar pixels, painting the same opaque chrome behind the controls and tabs.
+`app::titlebar` queries AppKit's titlebar height and traffic-light frames, with
+28 pt and 78 pt fallbacks, scaled to physical pixels. Fullscreen retains the
+top band without the traffic-light inset. One tab remains visible and centred
+as the title. Empty strip space starts a native window drag; a double-click
+uses `AppleActionOnDoubleClick`, defaulting to zoom. Tabs retain their separate
+reorder/tear-off/re-dock gestures.
+
+`native`, non-top tabs and disabled tabs keep the separate AppKit caption and
+content view below it. Borderless windows retain their sharp-alpha fallback.
+Config reload synchronizes the native style before laying out the content.
+Winit applies blur without frame subviews; Reduce Transparency makes the
+window opaque. Native material synchronization preserves the full-size style's
+transparent titlebar instead of restoring an opaque AppKit caption.
 
 Windows applies the same raised surface and a contrast-checked text color
 through DWM while requesting its system backdrop. Linux probes the live
@@ -1784,12 +1794,12 @@ and replacing pane-base pass. That floor is applied only to the swapchain
 render, so offscreen screenshots retain the configured alpha and config files
 are never rewritten.
 
-The content view is deliberately *not* full-size: tabs, terminal cells, pointer
-hit-testing, and ctl geometry all stay below the traffic lights without a
-platform-specific synthetic inset. Extending the renderer under the titlebar
-would require compensating every one of those coordinate systems for AppKit's
-content layout rect; no such hidden geometry shift is introduced for a cosmetic
-fix.
+The shared tab band supplies painting, pointer hit tests, accessibility, ctl
+geometry, IME placement, docking and tear-off placement. Content and status
+bands reserve its height once; the traffic-light inset restricts tab and dock
+geometry without shifting terminal columns. Tab text fits within the fixed
+band even at large terminal font zoom. The native style retains its previous
+content origin below AppKit's caption.
 
 The generated application icon uses the historical, font-independent `>_`
 mark on every platform. Dark appearance uses a TokyoNight blue system-masked

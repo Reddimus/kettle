@@ -986,6 +986,12 @@ impl App {
         let cell_w = target.renderer.as_ref().map(|r| r.cell_w).unwrap_or(8.0);
         let cell_h = target.renderer.as_ref().map(|r| r.cell_h).unwrap_or(16.0);
         let bar = self.tab_bar(target);
+        let tab_cell_w = if bar.in_titlebar {
+            self.overlay_text_cell_width(target)
+                * kettle_render::tab_text_scale(bar.height, self.overlay_text_line_height(target))
+        } else {
+            cell_w
+        };
         let segments: Vec<serde_json::Value> = bar
             .segments
             .iter()
@@ -996,7 +1002,7 @@ impl App {
                     seg.idx,
                     &self.cfg.tab_format,
                     seg.title_rect.2,
-                    cell_w,
+                    tab_cell_w,
                 );
                 serde_json::json!({
                     "index": seg.idx,
@@ -1611,6 +1617,7 @@ impl App {
         if let serde_json::Value::Object(fields) = &mut geometry {
             if let Some(serde_json::Value::Object(tab_bar)) = fields.get_mut("tab_bar") {
                 tab_bar.insert("update_chip".into(), serde_json::Value::Null);
+                tab_bar.insert("in_titlebar".into(), bar.in_titlebar.into());
             }
             // The update notice in its own field, so live smokes can check its
             // state independently of toast visibility.

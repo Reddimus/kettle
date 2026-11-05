@@ -38,6 +38,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- On macOS, top tabs share the titlebar by default, with a centred title for a
+  single tab, native window dragging, and the system double-click action on
+  empty strip space. `macos-titlebar-style = native` restores the separate
+  caption; bottom, side and hidden tabs and borderless windows keep their
+  previous chrome. Tab controls have at least 20 pt hit targets and 4.5:1
+  glyph contrast.
 - The tab strip appears only with more than one tab by default. Set
   `tab-bar = always` to keep it in a single-tab window.
 - Search shows the current match and total (3/122) next to the query, has a

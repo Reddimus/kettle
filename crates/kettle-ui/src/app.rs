@@ -93,6 +93,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/startup.rs"),
         include_str!("app/system_opener.rs"),
         include_str!("app/title.rs"),
+        include_str!("app/titlebar.rs"),
         include_str!("app/update_toast.rs"),
         include_str!("app/notices.rs"),
         include_str!("app/window_events.rs"),
@@ -200,8 +201,10 @@ mod preview;
 mod search;
 mod sessions;
 mod system_opener;
+mod titlebar;
 mod update_toast;
 mod windowing;
+use titlebar::*;
 
 #[cfg(test)]
 mod macos_chrome_policy_tests;

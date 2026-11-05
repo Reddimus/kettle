@@ -29,7 +29,9 @@ pub use text_field::{TextFieldLayout, TextFieldOverlay, text_field_labels, text_
 mod settings;
 mod tab_strip;
 mod terminal;
-pub use tab_strip::{HorizontalTabContent, horizontal_tab_content_layout, tab_shortcut_hint};
+pub use tab_strip::{
+    HorizontalTabContent, horizontal_tab_content_layout, tab_shortcut_hint, tab_text_scale,
+};
 mod theme;
 
 use background::{BgImageAnim, BgImageWorker, starfield_time};
@@ -2368,6 +2370,20 @@ impl Renderer {
                 layout
             });
 
+        let (tab_metrics, tab_cw, tab_ch) = if tabbar.in_titlebar {
+            let text_scale = tab_text_scale(tabbar.height, metrics.line_height);
+            let tab_metrics = Metrics::new(
+                metrics.font_size * text_scale,
+                metrics.line_height * text_scale,
+            );
+            (
+                tab_metrics,
+                self.overlay_text_cell_width() * text_scale,
+                tab_metrics.line_height,
+            )
+        } else {
+            (metrics, cw, ch)
+        };
         // Tab-bar text: one buffer per segment + the `+` button.
         let have_tabs = tabbar.height > 0.0 && !tabbar.segments.is_empty();
         if have_tabs {
@@ -2394,7 +2410,7 @@ impl Renderer {
                 let (_, _, title_w, title_h) = s.title_rect;
                 if let Some((hint_rect, hint)) = &s.hint {
                     let buf = &mut self.tab_hint_buffers[bi];
-                    buf.set_metrics(metrics);
+                    buf.set_metrics(tab_metrics);
                     buf.set_size(Some(hint_rect.2), Some(hint_rect.3));
                     buf.set_text(
                         hint,
@@ -2419,7 +2435,7 @@ impl Renderer {
                     s.idx,
                     &cfg.tab_format,
                     title_w,
-                    cw,
+                    tab_cw,
                 );
                 let n = (s.idx + 1).to_string();
                 let body =
@@ -2429,7 +2445,7 @@ impl Renderer {
                 // give it a real button chip background.
                 let label = body;
                 let buf = &mut self.tab_buffers[bi];
-                buf.set_metrics(metrics);
+                buf.set_metrics(tab_metrics);
                 buf.set_size(Some(title_w), Some(title_h));
                 // Re-shape only when the label actually changed.
                 if self.tab_texts[bi] != label {
@@ -2445,7 +2461,7 @@ impl Renderer {
             }
             // Shared `✕` glyph buffer for every tab's close button.
             // Sized once; positioned per-tab via TextArea below.
-            self.tab_close_buffer.set_metrics(metrics);
+            self.tab_close_buffer.set_metrics(tab_metrics);
             self.tab_close_buffer
                 .set_size(Some(tabbar.height), Some(tabbar.height));
             // Constant glyph, shaped once per font family.
@@ -2466,7 +2482,7 @@ impl Renderer {
             self.tab_close_buffer
                 .shape_until_scroll(&mut self.font_system, false);
             // `+` button glyph.
-            self.tabbar_buffer.set_metrics(metrics);
+            self.tabbar_buffer.set_metrics(tab_metrics);
             self.tabbar_buffer
                 .set_size(Some(tabbar.new_tab.2), Some(tabbar.height));
             // Constant glyph, shaped once per font family.
@@ -2484,7 +2500,7 @@ impl Renderer {
             // The `▾` dropdown arrow, shaped in its own buffer so it
             // lands inside `new_tab_menu` (left of `+`). Skipped when disabled.
             if tabbar.new_tab_menu.2 > 0.0 {
-                self.new_tab_arrow_buffer.set_metrics(metrics);
+                self.new_tab_arrow_buffer.set_metrics(tab_metrics);
                 self.new_tab_arrow_buffer
                     .set_size(Some(tabbar.new_tab_menu.2), Some(tabbar.height));
                 // Constant glyph, shaped once per font family.
@@ -2506,7 +2522,7 @@ impl Renderer {
             // overflows.
             let (back, forward) = scroll_arrow_glyphs(cfg.tab_bar_pos.is_vertical());
             if tabbar.scroll_left.2 > 0.0 {
-                self.scroll_left_buffer.set_metrics(metrics);
+                self.scroll_left_buffer.set_metrics(tab_metrics);
                 self.scroll_left_buffer
                     .set_size(Some(tabbar.scroll_left.2), Some(tabbar.scroll_left.3));
                 if self.scroll_left_text != back {
@@ -2522,7 +2538,7 @@ impl Renderer {
                     .shape_until_scroll(&mut self.font_system, false);
             }
             if tabbar.scroll_right.2 > 0.0 {
-                self.scroll_right_buffer.set_metrics(metrics);
+                self.scroll_right_buffer.set_metrics(tab_metrics);
                 self.scroll_right_buffer
                     .set_size(Some(tabbar.scroll_right.2), Some(tabbar.scroll_right.3));
                 if self.scroll_right_text != forward {
@@ -3908,8 +3924,11 @@ impl Renderer {
                 } else {
                     self.chrome_colors.muted(fg, tab_background)
                 };
-                let (centered_left, label_top) =
-                    tab_strip::tab_label_origin(s.title_rect, &self.tab_texts[bi], (cw, ch));
+                let (centered_left, label_top) = tab_strip::tab_label_origin(
+                    s.title_rect,
+                    &self.tab_texts[bi],
+                    (tab_cw, tab_ch),
+                );
                 areas.push(TextArea {
                     buffer: &self.tab_buffers[bi],
                     left: centered_left,
@@ -3929,7 +3948,7 @@ impl Renderer {
                     areas.push(TextArea {
                         buffer: &self.tab_hint_buffers[bi],
                         left: hint_rect.0,
-                        top: hint_rect.1 + ((hint_rect.3 - ch) * 0.5).max(0.0),
+                        top: hint_rect.1 + ((hint_rect.3 - tab_ch) * 0.5).max(0.0),
                         scale: 1.0,
                         bounds: text_bounds_for_rect(*hint_rect),
                         default_color: gc(hint_fg),
@@ -4014,8 +4033,9 @@ impl Renderer {
                     };
                     (self.chrome_colors.muted(fg, background), background)
                 };
-                let close_fg = self.chrome_colors.icon(close_fg, close_background);
-                let (close_left, close_top) = centered_text_origin((cx, cy, ccw, cch), (cw, ch));
+                let close_fg = self.chrome_colors.text(close_fg, close_background);
+                let (close_left, close_top) =
+                    centered_text_origin((cx, cy, ccw, cch), (tab_cw, tab_ch));
                 areas.push(TextArea {
                     buffer: &self.tab_close_buffer,
                     left: close_left,
@@ -4052,12 +4072,12 @@ impl Renderer {
                 }
             };
             let background = toolbar_background(&mut self.chrome_colors, tabbar.hovered_new_tab);
-            let plus_fg = self.chrome_colors.icon(plus_fg, background);
+            let plus_fg = self.chrome_colors.text(plus_fg, background);
             let plus_w = self
                 .tabbar_buffer
                 .layout_runs()
                 .next()
-                .map_or(cw, |run| run.line_w);
+                .map_or(tab_cw, |run| run.line_w);
             // The cap owns the outside two pixels. Center against the remaining
             // content box so it does not make the glyph read one pixel right.
             let plus_content = if matches!(cfg.tab_bar_pos, kettle_config::TabBarPos::Left) {
@@ -4074,7 +4094,7 @@ impl Renderer {
                     nh,
                 )
             };
-            let (plus_left, plus_top) = centered_text_origin(plus_content, (plus_w, ch));
+            let (plus_left, plus_top) = centered_text_origin(plus_content, (plus_w, tab_ch));
             areas.push(TextArea {
                 buffer: &self.tabbar_buffer,
                 left: plus_left,
@@ -4095,13 +4115,14 @@ impl Renderer {
                 };
                 let background =
                     toolbar_background(&mut self.chrome_colors, tabbar.hovered_new_tab_menu);
-                let arrow_fg = self.chrome_colors.icon(arrow_fg, background);
+                let arrow_fg = self.chrome_colors.text(arrow_fg, background);
                 let arrow_w = self
                     .new_tab_arrow_buffer
                     .layout_runs()
                     .next()
-                    .map_or(cw, |run| run.line_w);
-                let (arrow_left, arrow_top) = centered_text_origin((ax, ay, aw, ah), (arrow_w, ch));
+                    .map_or(tab_cw, |run| run.line_w);
+                let (arrow_left, arrow_top) =
+                    centered_text_origin((ax, ay, aw, ah), (arrow_w, tab_ch));
                 areas.push(TextArea {
                     buffer: &self.new_tab_arrow_buffer,
                     left: arrow_left,
@@ -4124,8 +4145,8 @@ impl Renderer {
                 }
                 let (ax, _, aw, _) = rect;
                 let (left, top, bounds) = if vertical {
-                    let glyph_w = buffer.layout_runs().next().map_or(cw, |run| run.line_w);
-                    let (left, top) = centered_text_origin(rect, (glyph_w, ch));
+                    let glyph_w = buffer.layout_runs().next().map_or(tab_cw, |run| run.line_w);
+                    let (left, top) = centered_text_origin(rect, (glyph_w, tab_ch));
                     (left, top, text_bounds_for_rect(rect))
                 } else {
                     let bounds = TextBounds {

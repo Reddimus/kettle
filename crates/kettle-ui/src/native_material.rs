@@ -526,7 +526,11 @@ fn sync_macos_window_background(
     };
     ns_window.setOpaque(opaque);
     ns_window.setBackgroundColor(Some(&background));
-    ns_window.setTitlebarAppearsTransparent(false);
+    // Full-size content owns the titlebar pixels; material sync must preserve it.
+    let fullsize = ns_window
+        .styleMask()
+        .contains(objc2_app_kit::NSWindowStyleMask::FullSizeContentView);
+    ns_window.setTitlebarAppearsTransparent(fullsize);
 }
 
 #[cfg(target_os = "windows")]

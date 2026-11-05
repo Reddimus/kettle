@@ -97,7 +97,14 @@ fn startup_cells_to_logical_px(cfg: &Config, cols: u32, rows: u32) -> (f64, f64)
     let mut width = f64::from(cols) * STARTUP_GEOMETRY_CELL_W + f64::from(cfg.padding_x) * 2.0;
     let mut height = f64::from(rows) * STARTUP_GEOMETRY_CELL_H + f64::from(cfg.padding_y) * 2.0;
 
-    if matches!(cfg.tab_bar, TabBarMode::Always) {
+    let titlebar_tabs = cfg!(target_os = "macos")
+        && !cfg.borderless
+        && cfg.macos_titlebar_style == kettle_config::MacosTitlebarStyle::Tabs
+        && cfg.tab_bar_pos == TabBarPos::Top
+        && cfg.tab_bar != TabBarMode::Off;
+    if titlebar_tabs {
+        height += 28.0;
+    } else if matches!(cfg.tab_bar, TabBarMode::Always) {
         match cfg.tab_bar_pos {
             TabBarPos::Top | TabBarPos::Bottom => {
                 height += f64::from(tab_bar_height(
@@ -1190,6 +1197,10 @@ impl App {
             }
         };
         self.apply_post_create(&window);
+        #[cfg(target_os = "macos")]
+        {
+            ws.macos_titlebar_tabs = macos_titlebar_policy(&self.cfg) == MacosTitlebarPolicy::Tabs;
+        }
         ws.native_fullscreen = Some(crate::native_fullscreen::NativeFullscreen::install(
             &window,
             ws.seq,

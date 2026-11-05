@@ -66,6 +66,7 @@ impl App {
                     ws.dpi_resize_surface_suspended = true;
                     return;
                 }
+                self.sync_macos_titlebar(ws);
                 // AppKit can briefly restore its stale standard frame. Wait
                 // for the window-local restore before reflowing terminal grids.
                 if ws
@@ -705,6 +706,9 @@ impl App {
                 let in_bar = |r: kettle_render::Rect4, px: f32, py: f32| {
                     px >= r.0 && px < r.0 + r.2 && py >= r.1 && py < r.1 + r.3
                 };
+                if bcode == 0 && self.press_titlebar_space(ws, &bar, px, py) {
+                    return;
+                }
                 if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
                     if bcode == 0 && bar.new_tab_menu.2 > 0.0 && in_bar(bar.new_tab_menu, px, py) {
                         // The `▾` dropdown — open the shell chooser

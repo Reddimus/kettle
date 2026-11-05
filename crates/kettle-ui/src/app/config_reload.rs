@@ -438,6 +438,7 @@ impl App {
         if font_size_changed {
             ws.scaled_zoom_prev_font_size = None;
         }
+        self.sync_macos_titlebar(ws);
         self.resize_all(ws);
         let direction_changed = sync_reloaded_search_preferences(
             &mut ws.search,

@@ -844,6 +844,8 @@ pub(crate) struct WindowState {
     /// layer tree before the view goes.
     pub(crate) cursor_layer: Option<crate::macos_cursor_layer::CursorLayer>,
     pub(crate) native_fullscreen: Option<crate::native_fullscreen::NativeFullscreen>,
+    pub(crate) macos_titlebar_tabs: bool,
+    pub(crate) titlebar_click: Option<(std::time::Instant, f32, f32)>,
     pub(crate) native_caption_drag: Option<crate::native_drag::NativeCaptionDrag>,
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) native_material: Option<crate::native_material::NativeMaterial>,
@@ -1498,6 +1500,8 @@ impl WindowState {
             window: None,
             native_fullscreen: None,
             native_caption_drag: None,
+            macos_titlebar_tabs: false,
+            titlebar_click: None,
             native_material: None,
             accessibility: None,
             accessibility_key: None,

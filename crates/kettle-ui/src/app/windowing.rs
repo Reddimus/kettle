@@ -189,12 +189,7 @@ impl App {
         }
         #[cfg(target_os = "macos")]
         {
-            // Keep AppKit's title, traffic lights, rounded mask and drag region.
-            // Native material stays below this caption; AppKit draws the
-            // opaque control strip in the selected light or dark appearance.
-            // Full-size content would instead put tabs and cells under the
-            // traffic lights, changing geometry and pointer hit-testing.
-            attrs = apply_macos_window_chrome(attrs, self.cfg.borderless);
+            attrs = apply_macos_window_chrome(attrs, &self.cfg);
         }
         // Terminator parity, terminatorlib/config.py:75 +
         // 78. `borderless` removes OS chrome; `always-on-top` keeps
@@ -460,6 +455,7 @@ impl App {
         ws.renderer = Some(renderer);
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
+        self.sync_macos_titlebar(&mut ws);
         ws.native_caption_drag = ws
             .window
             .as_deref()
@@ -720,6 +716,21 @@ impl App {
             .min(f64::from(size.height) - 24.0);
         let strip_w = f64::from(self.cfg.tab_bar_width).max(8.0);
         let destination_band = self.tear_off_tab_band(ws, (size.width, size.height), bar_h as f32);
+        let in_seg_x = if ws.macos_titlebar_tabs {
+            let controls = 2.0 * bar_h as f32;
+            let strip = (destination_band.2 - controls).max(0.0);
+            let layout = titlebar_tab_layout(
+                1,
+                0,
+                (strip, controls, destination_band.0),
+                bar_h as f32,
+                self.cfg.tab_min_width,
+                self.cfg.scroll_tabbar,
+            );
+            f64::from(destination_band.0 + layout.xs[0].unwrap_or(0.0)) + in_seg_x
+        } else {
+            in_seg_x
+        };
         let grab = match self.cfg.tab_bar_pos {
             TabBarPos::Top => (ftc.0 + in_seg_x, ftc.1 + bar_h * 0.5),
             TabBarPos::Bottom => (
@@ -919,10 +930,7 @@ impl App {
         if matches!(self.cfg.tab_bar, TabBarMode::Off) {
             return None;
         }
-        let height = tab_bar_height(
-            Self::cell_size(ws).map_or(16.0, |(_, ch)| ch),
-            self.cfg.tab_bar_pos,
-        );
+        let height = self.tab_strip_height(ws);
         Some(self.tab_band(ws, height))
     }
 
@@ -939,7 +947,7 @@ impl App {
             } else {
                 0.0
             };
-        tab_band_rect(
+        let band = tab_band_rect(
             surface,
             self.cfg.tab_bar_pos,
             height,
@@ -951,7 +959,8 @@ impl App {
                 0.0
             },
             bottom_status_height,
-        )
+        );
+        inset_titlebar_band(band, self.macos_titlebar_band(ws))
     }
 
     fn tear_off_tab_band(&self, ws: &WindowState, surface: (u32, u32), height: f32) -> Rect {
@@ -960,7 +969,7 @@ impl App {
         } else {
             0.0
         };
-        tab_band_rect(
+        let band = tab_band_rect(
             surface,
             self.cfg.tab_bar_pos,
             height,
@@ -972,7 +981,8 @@ impl App {
                 0.0
             },
             bottom_status,
-        )
+        );
+        inset_titlebar_band(band, self.macos_titlebar_band(ws))
     }
 
     /// Insertion slot if the (approximated) screen
@@ -1005,10 +1015,7 @@ impl App {
         if dist_to_rect(cx, cy, band) > 0.0 {
             return None;
         }
-        let height = tab_bar_height(
-            Self::cell_size(w).map_or(16.0, |(_, ch)| ch),
-            self.cfg.tab_bar_pos,
-        );
+        let height = self.tab_strip_height(w);
         let bar = self.tab_bar_at_height(w, height);
         let vertical = self.cfg.tab_bar_pos.is_vertical();
         dock_insertion_tab(&bar.segments, vertical, if vertical { cy } else { cx })
@@ -1986,14 +1993,20 @@ pub(super) enum MacosTitlebarPolicy {
     /// Keep AppKit's geometry and controls on an opaque native surface whose
     /// light or dark appearance follows Kettle's theme hint.
     ThemeMatchedNative,
+    Tabs,
     /// Borderless windows have no native titlebar to configure.
     NotApplicable,
 }
 
 #[cfg(any(test, target_os = "macos"))]
-pub(super) fn macos_titlebar_policy(borderless: bool) -> MacosTitlebarPolicy {
-    if borderless {
+pub(super) fn macos_titlebar_policy(cfg: &Config) -> MacosTitlebarPolicy {
+    if cfg.borderless {
         MacosTitlebarPolicy::NotApplicable
+    } else if cfg.macos_titlebar_style == kettle_config::MacosTitlebarStyle::Tabs
+        && cfg.tab_bar_pos == TabBarPos::Top
+        && cfg.tab_bar != TabBarMode::Off
+    {
+        MacosTitlebarPolicy::Tabs
     } else {
         MacosTitlebarPolicy::ThemeMatchedNative
     }
@@ -2002,14 +2015,18 @@ pub(super) fn macos_titlebar_policy(borderless: bool) -> MacosTitlebarPolicy {
 #[cfg(target_os = "macos")]
 pub(super) fn apply_macos_window_chrome(
     attrs: winit::window::WindowAttributes,
-    borderless: bool,
+    cfg: &Config,
 ) -> winit::window::WindowAttributes {
     use winit::platform::macos::WindowAttributesExtMacOS as _;
 
-    match macos_titlebar_policy(borderless) {
+    match macos_titlebar_policy(cfg) {
         // Create the caption opaque from the first frame. The material effect
         // stays inside the content rect below it.
         MacosTitlebarPolicy::ThemeMatchedNative => attrs.with_titlebar_transparent(false),
+        MacosTitlebarPolicy::Tabs => attrs
+            .with_titlebar_transparent(true)
+            .with_fullsize_content_view(true)
+            .with_title_hidden(true),
         MacosTitlebarPolicy::NotApplicable => attrs.with_decorations(false),
     }
 }

@@ -2,6 +2,11 @@
 use crate::{Rect4, TabBar, batching::rect, labels::display_width, quad::QuadInstance};
 use kettle_config::{Rgb, TabBarPos};
 
+/// Fit chrome text into a fixed titlebar band even when terminal text is zoomed.
+pub fn tab_text_scale(band_height: f32, line_height: f32) -> f32 {
+    (band_height.max(1.0) / line_height.max(1.0)).min(1.0)
+}
+
 pub struct HorizontalTabContent {
     pub title: Rect4,
     pub close: Rect4,
@@ -169,6 +174,19 @@ pub(crate) fn horizontal_tab_quads(
 mod tests {
     use super::*;
     use crate::TabActivity;
+
+    #[test]
+    fn fixed_titlebar_text_fits_at_large_terminal_zoom() {
+        for scale in [1.0, 2.0] {
+            for height in [12.0, 28.0, 48.0, 96.0] {
+                let line = height * scale;
+                let factor = tab_text_scale(28.0 * scale, line);
+                assert!(factor > 0.0 && factor <= 1.0);
+                assert!(line * factor <= 28.0 * scale);
+                assert_eq!(factor, if height <= 28.0 { 1.0 } else { 28.0 / height });
+            }
+        }
+    }
 
     #[test]
     fn horizontal_content_places_controls_only_when_visible() {

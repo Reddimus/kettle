@@ -1081,7 +1081,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Live renderer | `just live-render-smoke` | Grid cursor blink changes only a cursor-sized region | Linux/macOS |
 | Agent TUI | `just agent-tui-smoke` | Shell, installed clients, tmux, and clean/configured Neovim states; optional clients can skip | Linux/macOS |
 | Agent CLI | `just agent-cli-smoke` | Mandatory PTY/JSON/MCP probes plus available client version/help checks; no composer attachment proof | Linux/macOS; required in macOS CI |
-| Native titlebar | `just native-titlebar-smoke` | Light caption, traffic-light separation, resize, native fullscreen and restoration | macOS |
+| Native titlebar | `just native-titlebar-smoke` | Both titlebar styles: traffic-light separation, single-tab centring, geometry, resize, native fullscreen and restoration | macOS |
 | Modal shortcuts | `just modal-shortcuts-smoke` | Command chords do not act as ordinary modal letters | macOS |
 | Interaction | `just interaction-smoke --isolated-clipboard` | Multiline input, wheel, selection/copy, tabs, context-menu split, and screenshots | Linux/macOS |
 | Selection autoscroll | `just selection-autoscroll-smoke` | Held selection scrolls at both vertical pane edges; native pointer on macOS, control path on Linux | Linux/macOS |

@@ -352,7 +352,11 @@ impl App {
         // A restored tab has no lanes: each pane's terminal is its leaf less
         // its titlebar.
         let bands = self.content_bands(ws).for_restore(
-            self.cfg.tab_bar,
+            if ws.macos_titlebar_tabs {
+                TabBarMode::Always
+            } else {
+                self.cfg.tab_bar
+            },
             session.tabs.len(),
             Self::cell_size(ws).map_or(16.0, |(_, height)| height),
             self.cfg.tab_bar_pos,

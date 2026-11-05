@@ -371,6 +371,7 @@ fn startup_keeps_the_remote_spool_while_another_build_runs() {
 #[test]
 fn startup_geometry_cells_convert_to_inner_size() {
     let mut cfg = kettle_config::Config {
+        macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
         window_width: Some(120),
         window_height: Some(40),
         ..Default::default()
@@ -413,16 +414,38 @@ fn startup_geometry_cells_convert_to_inner_size() {
     );
 }
 
+#[test]
+fn startup_titlebar_tabs_reserve_the_single_tab_band() {
+    let mut cfg = kettle_config::Config {
+        window_width: Some(120), window_height: Some(40),
+        tab_bar: kettle_config::TabBarMode::Auto,
+        status_bar: kettle_config::StatusBarMode::Bottom,
+        ..Default::default()
+    };
+    assert_eq!(startup_inner_size_px(&cfg), Some((976,
+        if cfg!(target_os = "macos") { 706 } else { 678 })));
+    cfg.macos_titlebar_style = kettle_config::MacosTitlebarStyle::Native;
+    assert_eq!(startup_inner_size_px(&cfg), Some((976, 678)));
+    cfg.borderless = true;
+    cfg.macos_titlebar_style = kettle_config::MacosTitlebarStyle::Tabs;
+    assert_eq!(startup_inner_size_px(&cfg), Some((976, 678)));
+}
+
 /// A fresh window with no configured size opens at the 160x45 default
-/// grid (1296x736 logical px with the default chrome), fitted to 90 % x
-/// 85 % of the monitor. The numbers below are the ones the docs quote.
+/// grid (1296x736 logical px with a native titlebar and the single-tab strip
+/// hidden), fitted to 90 % x 85 % of the monitor. The numbers below are the
+/// ones the docs quote; the macOS titlebar-tabs band is covered by
+/// `startup_titlebar_tabs_reserve_the_single_tab_band`.
 #[test]
 fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
     use super::{
         STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS, StartupMonitor, default_startup_inner_size,
         startup_inner_size,
     };
-    let cfg = kettle_config::Config::default();
+    let cfg = kettle_config::Config {
+        macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
+        ..Default::default()
+    };
     assert_eq!((STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS), (160, 45));
     assert_eq!(
         default_startup_inner_size(&cfg, None),
@@ -454,6 +477,7 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
     let explicit = kettle_config::Config {
         window_width: Some(400),
         window_height: Some(200),
+        macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
         ..Default::default()
     };
     let tiny = Some(StartupMonitor::from_physical(640, 480, 1.0));

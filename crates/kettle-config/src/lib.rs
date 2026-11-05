@@ -498,6 +498,14 @@ impl RecordMode {
     }
 }
 
+/// macOS window chrome. Ignored on other platforms.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MacosTitlebarStyle {
+    #[default]
+    Tabs,
+    Native,
+}
+
 /// When the tab bar is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarMode {
@@ -1368,6 +1376,7 @@ pub struct Config {
     pub record_max_directory_bytes: Option<u64>,
     pub tab_bar: TabBarMode,
     pub tab_bar_pos: TabBarPos,
+    pub macos_titlebar_style: MacosTitlebarStyle,
     /// Status-bar mode. See [`StatusBarMode`].
     pub status_bar: StatusBarMode,
     /// Terminator parity (terminatorlib/config.py:75
@@ -3032,6 +3041,7 @@ impl Default for Config {
             record_max_directory_bytes: None,
             tab_bar: TabBarMode::Auto,
             tab_bar_pos: TabBarPos::Top,
+            macos_titlebar_style: MacosTitlebarStyle::Tabs,
             status_bar: StatusBarMode::Off,
             borderless: false,
             always_on_top: false,
@@ -4236,6 +4246,9 @@ impl Config {
                         "smart" | "auto" | "always" | "sensitive" | "never" | "insensitive"
                     ) || parse_bool(v).is_some()
                 }
+                "macos-titlebar-style" => matches!(
+                    v.to_ascii_lowercase().as_str(), "tabs" | "native"
+                ),
                 "tab-bar" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "off" | "none" | "false" | "auto" | "always"
@@ -4843,6 +4856,12 @@ impl Config {
                     {
                         cfg.record_max_directory_bytes = Some(n as u64);
                     }
+                }
+                "macos-titlebar-style" => {
+                    cfg.macos_titlebar_style = match e.value.to_ascii_lowercase().as_str() {
+                        "native" => MacosTitlebarStyle::Native,
+                        _ => MacosTitlebarStyle::Tabs,
+                    };
                 }
                 "tab-bar" => {
                     cfg.tab_bar = match e.value.to_ascii_lowercase().as_str() {
@@ -7854,6 +7873,25 @@ cell-height = 1.2\n";
             Config::parse_text("tab-bar-position = bottom").tab_bar_pos,
             TabBarPos::Bottom
         );
+    }
+
+    #[test]
+    fn macos_titlebar_style_parses_and_validates() {
+        assert_eq!(
+            Config::default().macos_titlebar_style,
+            MacosTitlebarStyle::Tabs
+        );
+        for (value, style) in [
+            ("tabs", MacosTitlebarStyle::Tabs),
+            ("native", MacosTitlebarStyle::Native),
+        ] {
+            let text = format!("macos-titlebar-style = {value}");
+            let (cfg, unknown) = Config::parse_collect(&text);
+            assert!(unknown.is_empty());
+            assert!(Config::detect_malformed_values(&text).is_empty());
+            assert_eq!(cfg.macos_titlebar_style, style);
+        }
+        assert!(!Config::detect_malformed_values("macos-titlebar-style = wrong").is_empty());
     }
 
     #[test]

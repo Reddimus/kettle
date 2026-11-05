@@ -133,5 +133,45 @@ class FullscreenTests(unittest.TestCase):
         self.assertEqual(window.actions, ["toggle_fullscreen", "toggle_fullscreen"])
 
 
+class TitlebarGeometryTests(unittest.TestCase):
+    def fixture(self, scale=1):
+        def rect(x, y, width, height):
+            return dict(x=x * scale, y=y * scale, width=width * scale, height=height * scale)
+        return {
+            "scale_factor": scale, "fullscreen": False,
+            "surface": {"width": 800 * scale, "height": 600 * scale},
+            "content": rect(0, 28, 800, 572),
+            "tab_bar": {"in_titlebar": True, "y": 0, "height": 28 * scale,
+                        "band": rect(78, 0, 722, 28),
+                        "new_tab": rect(772, 0, 28, 28),
+                        "new_tab_menu": rect(744, 0, 28, 28),
+                        "segments": [{"rect": rect(240, 0, 320, 28),
+                                      "title_rect": rect(300, 0, 200, 28),
+                                      "close": rect(532, 0, 28, 28),
+                                      "fitted_title": "shell"}]},
+        }
+
+    def test_titlebar_geometry_uses_scaled_band(self):
+        for scale in (1, 2):
+            geometry = self.fixture(scale)
+            checker.titlebar_geometry(geometry)
+            geometry["fullscreen"] = True
+            geometry["tab_bar"]["band"]["x"] = 0
+            checker.titlebar_geometry(geometry)
+
+    def test_titlebar_geometry_rejects_overlap_missing_title_and_small_controls(self):
+        for mutate in (
+            lambda g: g["content"].update(y=0),
+            lambda g: g["tab_bar"]["segments"][0]["rect"].update(x=0),
+            lambda g: g["tab_bar"]["segments"][0]["title_rect"].update(x=0),
+            lambda g: g["tab_bar"]["segments"][0].update(fitted_title=""),
+            lambda g: g["tab_bar"]["new_tab"].update(width=16),
+        ):
+            geometry = self.fixture()
+            mutate(geometry)
+            with self.assertRaises(AssertionError):
+                checker.titlebar_geometry(geometry)
+
+
 if __name__ == "__main__":
     unittest.main()
