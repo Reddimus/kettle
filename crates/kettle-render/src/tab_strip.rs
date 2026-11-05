@@ -79,7 +79,7 @@ pub(crate) fn rounded_fill(
     bounds: Rect4,
     radius: f32,
     corners: (bool, bool),
-    fill: Rgb,
+    fill: (Rgb, f32),
     accent: Option<(Rgb, f32, bool)>,
 ) {
     let (x, y, w, h) = bounds;
@@ -90,7 +90,7 @@ pub(crate) fn rounded_fill(
     let rows = radius.ceil().max(1.0) as usize;
     let band = radius / rows as f32;
     let stripe = |q: &mut Vec<QuadInstance>, bx, by, bw, bh| {
-        q.push(rect(bx, by, bw, bh, fill, 1.0));
+        q.push(rect(bx, by, bw, bh, fill.0, fill.1));
         if let Some((color, thickness, bottom)) = accent {
             let a = if bottom {
                 (y + h - thickness).max(by)
@@ -123,16 +123,27 @@ pub(crate) fn rounded_fill(
     }
 }
 
+pub(crate) struct HorizontalTabQuads {
+    pub chrome: Vec<QuadInstance>,
+    /// Translucent tab backgrounds, including their opaque accent line.
+    /// Use the terminal's replacing base layer unless a wallpaper is present.
+    pub surface: Vec<QuadInstance>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn horizontal_tab_quads(
     bar: &TabBar,
+    band: Rect4,
     theme: &kettle_config::Theme,
-    background: Rgb,
+    background: (Rgb, f32),
     chrome: Rgb,
     accent: Rgb,
     pos: TabBarPos,
     scale: f32,
-) -> Vec<QuadInstance> {
+) -> HorizontalTabQuads {
     let mut quads = Vec::new();
+    let mut band = vec![rect(band.0, band.1, band.2, band.3, chrome, 1.0)];
+    let mut surface = Vec::new();
     let bottom = pos == TabBarPos::Bottom;
     let hover = crate::color::over(chrome, theme.foreground, 0.06, false);
     let divider =
@@ -140,14 +151,26 @@ pub(crate) fn horizontal_tab_quads(
     for (i, tab) in bar.segments.iter().enumerate() {
         let hovered = bar.hovered_tab_idx == Some(tab.idx);
         if tab.active || hovered {
+            let start = quads.len();
             rounded_fill(
                 &mut quads,
                 tab.rect,
                 6.0 * scale,
                 (!bottom, bottom),
-                if tab.active { background } else { hover },
+                if tab.active { background } else { (hover, 1.0) },
                 tab.active.then_some((accent, 2.0, bottom)),
             );
+            if tab.active && background.1 < 1.0 {
+                // Cut with the actual surface slices so the rounded corners'
+                // outside stays chrome without painting beneath the tab.
+                for quad in quads.drain(start..) {
+                    crate::quad::exclude_rect(
+                        &mut band,
+                        (quad.pos[0], quad.pos[1], quad.size[0], quad.size[1]),
+                    );
+                    surface.push(quad);
+                }
+            }
         }
         if !tab.active
             && !hovered
@@ -167,7 +190,11 @@ pub(crate) fn horizontal_tab_quads(
             ));
         }
     }
-    quads
+    band.extend(quads);
+    HorizontalTabQuads {
+        chrome: band,
+        surface,
+    }
 }
 
 #[cfg(test)]
@@ -340,6 +367,106 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_translucent_active_surface_matches_terminal_alpha() {
+        use kettle_config::{BackgroundType, Config, Theme};
+
+        for name in ["TokyoNight Night", "TokyoNight Day"] {
+            let theme = Theme::by_name(name);
+            assert_eq!(theme.is_dark(), name == "TokyoNight Night");
+            for pos in [TabBarPos::Top, TabBarPos::Bottom] {
+                for scale in [1.0, 1.5, 2.0] {
+                    let mut bar = TabBar::hidden();
+                    let bounds = (78.0 * scale, 20.0, 160.0 * scale, 28.0 * scale);
+                    bar.segments.push(crate::TabSeg {
+                        idx: 0,
+                        rect: bounds,
+                        title_rect: bounds,
+                        hint: None,
+                        close: (0.0, 0.0, 0.0, 0.0),
+                        title: String::new(),
+                        path: None,
+                        active: true,
+                        activity: TabActivity::Normal,
+                    });
+                    for (background_type, opacity, darkness) in [
+                        (BackgroundType::Solid, 1.0, 0.5),
+                        (BackgroundType::Solid, 0.86, 0.5),
+                        (BackgroundType::Transparent, 0.86, 0.5),
+                        (BackgroundType::Solid, 0.0, 0.5),
+                    ] {
+                        let cfg = Config {
+                            background_type,
+                            background_opacity: opacity,
+                            background_darkness: darkness,
+                            ..Config::default()
+                        };
+                        let alpha = crate::composed_bg_alpha(&cfg) as f32;
+                        let chrome = theme.palette[8];
+                        let band = (0.0, 20.0, 400.0 * scale, 28.0 * scale);
+                        let quads = horizontal_tab_quads(
+                            &bar,
+                            band,
+                            &theme,
+                            (theme.background, alpha),
+                            chrome,
+                            theme.accent,
+                            pos,
+                            scale,
+                        );
+                        let (x, y, w, h) = bounds;
+                        let middle = (x + w * 0.5, y + h * 0.5);
+                        let expected = rect(0.0, 0.0, 1.0, 1.0, theme.background, alpha).color;
+                        if alpha == 1.0 {
+                            assert!(quads.surface.is_empty());
+                            assert_eq!(quads.chrome[0].pos, [band.0, band.1]);
+                            assert_eq!(quads.chrome[0].size, [band.2, band.3]);
+                            assert!(quads.chrome.iter().all(|q| q.color[3] == 1.0));
+                            assert_eq!(sample(&quads.chrome, middle.0, middle.1), Some(expected));
+                        } else {
+                            assert!(sample(&quads.chrome, middle.0, middle.1).is_none());
+                            assert_eq!(sample(&quads.surface, middle.0, middle.1), Some(expected));
+                            // Every surface pixel has a chrome hole; outside the rounded
+                            // silhouette the band still covers the titlebar and strip.
+                            for py in y as u32..(y + h) as u32 {
+                                for px in 0..band.2 as u32 {
+                                    let (px, py) = (px as f32 + 0.5, py as f32 + 0.5);
+                                    assert_ne!(
+                                        sample(&quads.surface, px, py).is_some(),
+                                        sample(&quads.chrome, px, py).is_some(),
+                                        "{name}, {pos:?}, alpha={alpha}, scale={scale}, {px},{py}"
+                                    );
+                                }
+                            }
+                        }
+                        let edge = if pos == TabBarPos::Top {
+                            y + 0.5
+                        } else {
+                            y + h - 0.5
+                        };
+                        let accent_layer = if alpha == 1.0 {
+                            &quads.chrome
+                        } else {
+                            &quads.surface
+                        };
+                        assert_eq!(
+                            sample(accent_layer, middle.0, edge),
+                            Some(rect(0.0, 0.0, 1.0, 1.0, theme.accent, 1.0).color)
+                        );
+                        assert_eq!(
+                            sample(&quads.chrome, x + 0.1, edge),
+                            Some(rect(0.0, 0.0, 1.0, 1.0, chrome, 1.0).color)
+                        );
+                        assert_eq!(
+                            sample(&quads.chrome, 10.0, middle.1),
+                            Some(rect(0.0, 0.0, 1.0, 1.0, chrome, 1.0).color)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn inactive_tab_separator_contrasts_with_resolved_chrome() {
         use kettle_config::{BackgroundType, ChromeBackground, Config, Theme};
 
@@ -375,14 +502,16 @@ mod tests {
                     for pos in [TabBarPos::Top, TabBarPos::Bottom] {
                         let quads = horizontal_tab_quads(
                             &bar,
+                            (0.0, 0.0, 480.0, 28.0),
                             &theme,
-                            theme.background,
+                            (theme.background, 1.0),
                             chrome,
                             theme.accent,
                             pos,
                             1.0,
                         );
                         let divider = quads
+                            .chrome
                             .iter()
                             .find(|q| q.pos[0] == 319.0 && q.size[0] == 1.0)
                             .expect("separator between the two inactive tabs");
@@ -473,40 +602,44 @@ mod tests {
                 let accent = theme.palette[4];
                 let q = horizontal_tab_quads(
                     &bar,
+                    (0.0, 0.0, 480.0, 28.0),
                     &theme,
-                    theme.background,
+                    (theme.background, 1.0),
                     theme.palette[0],
                     accent,
                     pos,
                     1.0,
                 );
+                let q = &q.chrome[1..];
                 assert_eq!(
-                    sample(&q, 80.0, 14.0),
+                    sample(q, 80.0, 14.0),
                     Some(rect(0.0, 0.0, 1.0, 1.0, theme.background, 1.0).color)
                 );
                 let edge = if pos == TabBarPos::Top { 0.5 } else { 27.5 };
                 assert_eq!(
-                    sample(&q, 80.0, edge),
+                    sample(q, 80.0, edge),
                     Some(rect(0.0, 0.0, 1.0, 1.0, accent, 1.0).color)
                 );
-                assert!(sample(&q, 0.1, edge).is_none());
-                assert!(sample(&q, 0.1, 28.0 - edge).is_some());
-                assert!(sample(&q, 240.0, 14.0).is_none());
-                assert!(sample(&q, 159.5, 14.0).is_some());
-                assert!(sample(&q, 319.5, 14.0).is_some());
+                assert!(sample(q, 0.1, edge).is_none());
+                assert!(sample(q, 0.1, 28.0 - edge).is_some());
+                assert!(sample(q, 240.0, 14.0).is_none());
+                assert!(sample(q, 159.5, 14.0).is_some());
+                assert!(sample(q, 319.5, 14.0).is_some());
                 bar.hovered_tab_idx = Some(1);
                 let hover = horizontal_tab_quads(
                     &bar,
+                    (0.0, 0.0, 480.0, 28.0),
                     &theme,
-                    theme.background,
+                    (theme.background, 1.0),
                     theme.palette[0],
                     accent,
                     pos,
                     1.0,
                 );
-                assert!(sample(&hover, 240.0, 14.0).is_some());
+                let hover = &hover.chrome[1..];
+                assert!(sample(hover, 240.0, 14.0).is_some());
                 // Separator at the hovered tab's trailing edge disappears.
-                assert_ne!(sample(&hover, 319.5, 14.0), sample(&q, 319.5, 14.0));
+                assert_ne!(sample(hover, 319.5, 14.0), sample(q, 319.5, 14.0));
             }
         }
     }

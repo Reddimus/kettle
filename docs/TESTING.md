@@ -73,6 +73,16 @@ require a GPU adapter and report a skip when none is available. Run
 to see those skips, then run the same command without the filter for both full
 crate suites.
 
+The renderer's `horizontal_translucent_active_surface` tests check that active
+horizontal tabs use the terminal background colour and composed alpha. Quad
+coverage checks the rounded chrome hole, opaque band at alpha 1, accent line,
+top and bottom bars, dark and light themes, and fractional display scaling.
+The headless pixel test compares tab and terminal RGBA at opacity 0.86 for
+titlebar and ordinary strips; it prints `TAB_SURFACE_GPU_SKIP` without an
+adapter. Run
+`cargo test -j 2 --locked --offline -p kettle-render horizontal_translucent_active_surface -- --nocapture`,
+then the full `kettle-render` and `kettle-ui` suites.
+
 The renderer recovery tests include successful device creation on a backend
 that failed while drawing, checking that another backend is tried first.
 `python3 scripts/test-install-media.py` interrupts uninstall after each recovery

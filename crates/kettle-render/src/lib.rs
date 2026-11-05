@@ -1256,8 +1256,6 @@ impl Renderer {
             if cfg.tab_bar_pos.is_vertical() {
                 let (x, y, width, height) = tabbar.band;
                 quads.push(rect(x, y, width, height, chrome_strip_bg, 1.0));
-            } else {
-                quads.push(rect(0.0, by, sw, tabbar.height, chrome_strip_bg, 1.0));
             }
             let tab_accent = if tabbar.broadcast {
                 theme.palette[3]
@@ -1265,15 +1263,24 @@ impl Renderer {
                 self.ui_accent(cfg, theme)
             };
             if !cfg.tab_bar_pos.is_vertical() {
-                quads.extend(tab_strip::horizontal_tab_quads(
+                let tabs = tab_strip::horizontal_tab_quads(
                     tabbar,
+                    (0.0, by, sw, tabbar.height),
                     theme,
-                    default_bg,
+                    (default_bg, composed_bg_alpha(cfg) as f32),
                     chrome_strip_bg,
                     tab_accent,
                     cfg.tab_bar_pos,
                     self.scale,
-                ));
+                );
+                // Replacing the shared base avoids applying terminal alpha twice.
+                // Wallpaper panes blend their tint over the wallpaper instead.
+                if background_has_wallpaper(cfg) {
+                    quads.extend(tabs.surface);
+                } else {
+                    pane_bases.extend(tabs.surface);
+                }
+                quads.extend(tabs.chrome);
             } else {
                 for s in &tabbar.segments {
                     // Vertical tabs: use the
@@ -1439,7 +1446,7 @@ impl Renderer {
                             bounds,
                             6.0 * self.scale,
                             (true, true),
-                            hover,
+                            (hover, 1.0),
                             None,
                         );
                     }
@@ -3234,7 +3241,14 @@ impl Renderer {
             let (x, y, w, h) = pill.rect;
             let fill = color::with_min_contrast(theme.palette[0], theme.background, 3.0);
             let ink = color::with_min_contrast(theme.foreground, fill, 4.5);
-            tab_strip::rounded_fill(&mut menu_q, (x, y, w, h), h / 2.0, (true, true), fill, None);
+            tab_strip::rounded_fill(
+                &mut menu_q,
+                (x, y, w, h),
+                h / 2.0,
+                (true, true),
+                (fill, 1.0),
+                None,
+            );
             menu_areas.push(TextArea {
                 buffer,
                 left: pill.text_origin.0,
@@ -3957,7 +3971,7 @@ impl Renderer {
                             (centered_left - 10.0, ty_px + th * 0.5 - 3.0, 6.0, 6.0),
                             3.0,
                             (true, true),
-                            color,
+                            (color, 1.0),
                             None,
                         );
                     }
@@ -3992,7 +4006,10 @@ impl Renderer {
                         ),
                         6.0 * self.scale,
                         (true, true),
-                        color::over(tab_background, theme.foreground, 0.06, false),
+                        (
+                            color::over(tab_background, theme.foreground, 0.06, false),
+                            1.0,
+                        ),
                         None,
                     );
                 }

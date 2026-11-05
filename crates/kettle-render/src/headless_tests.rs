@@ -3521,6 +3521,63 @@ fn disabled_wallpaper_discards_late_worker_frames() {
 }
 
 #[test]
+fn horizontal_translucent_active_surface_matches_terminal_pixels() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(400, 160) else {
+        eprintln!("TAB_SURFACE_GPU_SKIP: no adapter");
+        return;
+    };
+    cfg.background_opacity = 0.86;
+    cfg.close_button_on_tab = false;
+    let snap = snapshot_of(20, 4, b"\x1b[?25l");
+    for name in ["TokyoNight Night", "TokyoNight Day"] {
+        cfg.theme = kettle_config::Theme::by_name(name);
+        for pos in [
+            kettle_config::TabBarPos::Top,
+            kettle_config::TabBarPos::Bottom,
+        ] {
+            cfg.tab_bar_pos = pos;
+            for in_titlebar in [false, true] {
+                let y = if pos == kettle_config::TabBarPos::Bottom {
+                    132.0
+                } else {
+                    0.0
+                };
+                let mut tabs = TabBar::hidden();
+                tabs.y = y;
+                tabs.height = 28.0;
+                tabs.in_titlebar = in_titlebar;
+                tabs.band = (0.0, y, 400.0, 28.0);
+                tabs.segments.push(TabSeg {
+                    idx: 0,
+                    rect: (78.0, y, 160.0, 28.0),
+                    title_rect: (86.0, y, 100.0, 28.0),
+                    hint: None,
+                    close: (0.0, 0.0, 0.0, 0.0),
+                    title: String::new(),
+                    path: None,
+                    active: true,
+                    activity: TabActivity::Normal,
+                });
+                let mut terminal = pane(&snap, 400, 160);
+                terminal.rect = (0.0, if y == 0.0 { 28.0 } else { 0.0 }, 400.0, 132.0);
+                terminal.terminal = terminal.rect;
+                let shot =
+                    capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
+                let background = shot.get_pixel(300, 80);
+                assert_eq!(background[3], (0.86_f32 * 255.0).round() as u8);
+                assert_eq!(
+                    shot.get_pixel(158, y as u32 + 14),
+                    background,
+                    "{name}, {pos:?}, titlebar={in_titlebar}: tab and terminal RGBA must match"
+                );
+            }
+        }
+    }
+    eprintln!("TAB_SURFACE_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+}
+
+#[test]
 fn regression_active_close_glyph_contrasts_with_its_tab_surface() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 160) else {
