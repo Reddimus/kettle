@@ -258,6 +258,40 @@ fn probe() {
     let dir = PathBuf::from(std::env::var_os(DIR).unwrap());
     let held = File::open(dir.join("held.bin")).unwrap();
     match scenario.as_str() {
+        #[cfg(target_os = "linux")]
+        "priority" | "priority_control" => {
+            // SAFETY: this disposable probe creates its own group for cleanup.
+            assert_eq!(unsafe { libc::setpgid(0, 0) }, 0);
+            let mut bystander = Command::new("/bin/cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let pid = bystander.id();
+            // SAFETY: getpriority only reads the live bystander's nice value.
+            let before = unsafe { libc::getpriority(libc::PRIO_PROCESS, pid) };
+            if scenario == "priority" {
+                confined(sandbox::confine(&Policy::default()));
+            }
+            // SAFETY: only this disposable bystander can be affected if the
+            // filter is missing; the parent kills the probe's group afterwards.
+            let changed = unsafe { libc::setpriority(libc::PRIO_PROCESS, pid, 19) };
+            report(
+                "priority_other",
+                if changed == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                },
+            );
+            // SAFETY: the bystander has not been reaped and getpriority only reads.
+            let after = unsafe { libc::getpriority(libc::PRIO_PROCESS, pid) };
+            println!("probe:nice_before={before}");
+            println!("probe:nice_after={after}");
+            drop(bystander.stdin.take());
+            bystander.wait().unwrap();
+        }
         "control" => attempt(&dir, &held),
         "confined" => {
             let policy = Policy {
@@ -727,4 +761,23 @@ fn deadline_failure(can_reap: bool) -> &'static str {
 fn deadline_failure_accounts_for_a_denied_child_kill() {
     assert_eq!(deadline_failure(false), "Some(RenderResource)");
     assert_eq!(deadline_failure(true), "Some(RenderTimeout)");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unrelated_process_keeps_its_priority() {
+    if !available() {
+        return;
+    }
+    let dir = files();
+    let control = run("priority_control", dir.path());
+    assert_eq!(control["priority_other"], "ok");
+    assert_eq!(control["nice_after"], "19");
+    let result = run("priority", dir.path());
+    assert_eq!(result["confine"], "ok");
+    assert_eq!(result["priority_other"], format!("denied {}", libc::EPERM));
+    assert_eq!(
+        result["nice_after"], result["nice_before"],
+        "sandbox changed an unrelated process's nice value"
+    );
 }
