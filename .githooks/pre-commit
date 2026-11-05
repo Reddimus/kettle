@@ -8,7 +8,7 @@
 # (CHANGELOG.md, README.md, docs/*, packaging/*, .github/*,
 # .githooks/*, NOTICE, LICENSE, SECURITY.md, CODE_OF_CONDUCT.md,
 # CONTRIBUTING.md, deny.toml, .gitignore) so doc-only / CI-only /
-# license-only edits stay fast.
+# license-only edits stay fast, except for inputs embedded by builds or tests.
 #
 # Paths NOT excluded (and thus trigger the gauntlet):
 #   - crates/**/*.rs
@@ -42,8 +42,17 @@ set -euo pipefail
 # import, etc). --no-renames lists a rename as its deletion and its
 # addition: moving a source file under docs/ removes the source.
 non_doc=$(git diff --cached --name-only --no-renames --diff-filter=ACMD \
-    | grep -vE '^(CHANGELOG\.md|README\.md|docs/|packaging/|\.github/|\.githooks/|NOTICE|LICENSE|SECURITY\.md|CODE_OF_CONDUCT\.md|CONTRIBUTING\.md|deny\.toml|\.gitignore)' \
-    || true)
+    | while IFS= read -r path; do
+        case "$path" in
+            README.md|docs/kettle.example.config|docs/CONFIG.md|docs/AGENT.md|docs/SHELL-INTEGRATION.md|docs/examples/init.lua|\
+            packaging/linux/kettle-256.png|packaging/linux/kettle-light-256.png|packaging/linux/kettle.desktop|\
+            packaging/linux/kettle.1|packaging/macos/Info.plist|packaging/windows/kettle.ico)
+                printf '%s\n' "$path" ;;
+            CHANGELOG.md|docs/*|packaging/*|.github/*|.githooks/*|NOTICE|LICENSE|SECURITY.md|CODE_OF_CONDUCT.md|CONTRIBUTING.md|deny.toml|.gitignore)
+                ;;
+            *) printf '%s\n' "$path" ;;
+        esac
+    done)
 
 if [ -z "$non_doc" ]; then
     echo "pre-commit: doc-only change; skipping gauntlet (use --no-verify to skip on code changes too)" >&2

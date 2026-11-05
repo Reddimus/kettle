@@ -251,8 +251,8 @@ class MediaInstallTests(unittest.TestCase):
     )
     def test_local_install_recipes_build_both_binaries(self):
         expected = [
-            "cargo build --locked --release -p kettle",
-            "cargo build --locked --profile media-worker -p kettle-media-worker",
+            "cargo build --locked --release -p kettle --target-dir target",
+            "cargo build --locked --profile media-worker -p kettle-media-worker --target-dir target",
         ]
         for recipe in ("install-local", "install-recording"):
             with self.subTest(recipe=recipe):
@@ -274,6 +274,49 @@ class MediaInstallTests(unittest.TestCase):
                     sum(command.startswith("cargo build ") for command in commands),
                     2,
                 )
+
+    @unittest.skipUnless(shutil.which("just"), "requires just")
+    def test_local_install_ignores_external_target_directory(self):
+        source = self.root / "recipes"
+        scripts = source / "scripts"
+        scripts.mkdir(parents=True)
+        justfile = (ROOT / "Justfile").read_text()
+        # Exercise the Linux recipes on either supported Unix development host.
+        (source / "Justfile").write_text(justfile.replace("[linux]\ninstall-", "[unix]\ninstall-"))
+        cargo = source / "cargo"
+        cargo.write_text(
+            "#!/bin/sh\nset -eu\n"
+            'target_dir=$CARGO_TARGET_DIR\nprofile=release\nbinary=kettle\n'
+            'while [ "$#" -gt 0 ]; do\n'
+            'case "$1" in\n'
+            '  --target-dir) target_dir=$2; shift ;;\n'
+            '  --profile) profile=$2; binary=kettle-media-worker; shift ;;\n'
+            'esac\nshift\ndone\n'
+            'mkdir -p "$target_dir/$profile"\n'
+            'printf fresh > "$target_dir/$profile/$binary"\n'
+        )
+        cargo.chmod(0o755)
+        installer = scripts / "install.sh"
+        installer.write_text(
+            '#!/bin/sh\nset -eu\n'
+            'for binary in target/release/kettle target/media-worker/kettle-media-worker; do\n'
+            '  test "$(cat "$binary")" = fresh || { echo "stale artifact: $binary" >&2; exit 1; }\n'
+            'done\n'
+        )
+        installer.chmod(0o755)
+        for recipe in ("install-local", "install-recording"):
+            with self.subTest(recipe=recipe):
+                for relative in ("release/kettle", "media-worker/kettle-media-worker"):
+                    stale = source / "target" / relative
+                    stale.parent.mkdir(parents=True, exist_ok=True)
+                    stale.write_text("stale")
+                result = subprocess.run(
+                    ["just", recipe], cwd=source,
+                    env={**os.environ, "PATH": f"{source}:{os.environ['PATH']}",
+                         "CARGO_TARGET_DIR": str(self.root / "external target")},
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_source_growth_is_rejected_before_writing_past_the_plan(self):
         source = self.root / "growing-source"

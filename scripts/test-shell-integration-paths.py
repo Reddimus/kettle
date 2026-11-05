@@ -23,6 +23,36 @@ SPEC.loader.exec_module(MODULE)
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("fish"), "Unix Fish required")
 class FishIntegrationPathTests(unittest.TestCase):
+    def test_fish3_leaves_literal_shift_tab_unbound(self):
+        executable = os.environ.get("KETTLE_FISH_37", shutil.which("fish"))
+        with tempfile.TemporaryDirectory() as raw:
+            integration = Path(raw) / "kettle.fish"
+            source = (MODULE.INTEGRATION / "kettle.fish").read_text()
+            # Exercise the 3.7 compatibility branch even on current Fish.
+            integration.write_text(source.replace(
+                "(string split . -- $version)", "(string split . -- 3.7.1)"
+            ))
+            result = MODULE.run(
+                [executable, "--no-config", "--interactive", "-c", r'''
+set -g TERM_PROGRAM kettle
+set -g KETTLE_COMPLETION_OVERLAY 1
+set -e TMUX STY
+function bind
+    if contains -- shift-tab $argv; and contains -- __kettle_complete_previous $argv
+        printf LITERAL_SHIFT_TAB_BOUND
+    end
+    builtin bind $argv
+end
+source $argv[1]
+bind --user -M default (printf '\e[Z')
+''', str(integration)],
+                "Fish 3.7 literal Shift-Tab compatibility", announce=False,
+            )
+            self.assertNotIn(b"LITERAL_SHIFT_TAB_BOUND", result,
+                             "Fish 3.7 must leave ordinary shift-tab text insertable")
+            self.assertIn(b"__kettle_complete_previous", result,
+                          "the raw Shift-Tab sequence must remain bound")
+
     def test_newline_to_space_edit_invalidates_completion_cycle(self):
         result = MODULE.run(
             [
@@ -72,6 +102,24 @@ printf 'PROVIDER_CALLS=%s;BUFFER=<%s>' $KETTLE_CALLS "$KETTLE_BUFFER"
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("pwsh"), "Unix pwsh required")
 class PowerShellAcceptanceTests(unittest.TestCase):
+    def test_markers_precede_direct_prompt_output(self):
+        result = MODULE.run(
+            [shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
+             str(MODULE.FIXTURES / "powershell-prompt.ps1"), "-IntegrationPath",
+             str(MODULE.INTEGRATION / "kettle.ps1")],
+            "PowerShell direct prompt output", announce=False,
+        )
+        MODULE.assert_powershell_prompt_order(result)
+
+    def test_cwd_report_without_computername(self):
+        result = MODULE.run(
+            [shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
+             str(MODULE.FIXTURES / "powershell-cwd.ps1"), "-IntegrationPath",
+             str(MODULE.INTEGRATION / "kettle.ps1")],
+            "PowerShell cwd hostname", announce=False,
+        )
+        self.assertIn(b"KETTLE_POWERSHELL_CWD_OK", result)
+
     def test_incomplete_block_does_not_start_command_during_editing(self):
         self.check_command_start("")
 

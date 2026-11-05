@@ -423,6 +423,8 @@ macos-avsync-self-test:
 # window ownership, with fake tools standing in for the desktop.
 [unix]
 script-fixture-self-test:
+    python3 scripts/test-pre-commit.py
+    python3 scripts/test-just-recipes.py
     python3 scripts/perf/kettle-live-probes-self-test.py
     python3 scripts/test-pageup-stress.py
     python3 scripts/test-menu-screenshot.py
@@ -527,16 +529,16 @@ live-ui-helper-selftest:
 # Justfile to `/tmp` on Linux/macOS and `$env:TEMP` on Windows). Pass
 # `OUT=path` to override. `cargo run` handles the `.exe` suffix on Windows.
 screenshot OUT=(TMPDIR / "kettle.png"):
-    cargo run --release -p kettle -- --screenshot {{OUT}}
-    @echo "wrote {{OUT}}"
+    cargo run --release -p kettle -- --screenshot {{if os_family() == "windows" { "'" + replace(OUT, "'", "''") + "'" } else { quote(OUT) }}}
+    @echo {{if os_family() == "windows" { "'wrote " + replace(OUT, "'", "''") + "'" } else { quote("wrote " + OUT) }}}
 
 # Render the synthetic right-click context menu — useful for visually
 # verifying menu rendering changes. Pixel-level CI smoke
 # (tests/menu_visual.rs) covers the regression class; this gives you
 # a PNG to eyeball when tweaking colors / padding / etc.
 menu OUT=(TMPDIR / "kettle-menu.png"):
-    cargo run --release -p kettle -- --screenshot-menu {{OUT}}
-    @echo "wrote {{OUT}}"
+    cargo run --release -p kettle -- --screenshot-menu {{if os_family() == "windows" { "'" + replace(OUT, "'", "''") + "'" } else { quote(OUT) }}}
+    @echo {{if os_family() == "windows" { "'wrote " + replace(OUT, "'", "''") + "'" } else { quote("wrote " + OUT) }}}
 
 # Run a real windowed kettle under Xvfb for a few seconds and assert it
 # neither panics nor exits with an unexpected code. `xvfb-run` is
@@ -803,10 +805,15 @@ uninstall:
 # gap. Run after any change you want reflected in the installed app — and after
 # every release cut — to keep the installed app synced to the repo.
 #
-# `--skip-build` after the `release` dependency keeps local deployment from
-# compiling the same release binary twice.
+# Build where install.sh reads, regardless of the caller's CARGO_TARGET_DIR.
+[private]
 [linux]
-install-local: release media-worker
+install-build:
+    cargo build --locked --release -p kettle --target-dir target
+    cargo build --locked --profile media-worker -p kettle-media-worker --target-dir target
+
+[linux]
+install-local: install-build
     ./scripts/install.sh --skip-build
     @echo "local install synced to the current release build"
 
@@ -815,7 +822,7 @@ install-local: release media-worker
 # now ships in every build, so this is a normal release build — equivalently,
 # set `record = on` + `record-dir` in the config file.
 [linux]
-install-recording RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"): release media-worker
+install-recording RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"): install-build
     ./scripts/install.sh --skip-build --record-dir={{quote(RECORD_DIR)}}
     @printf 'recording install synced to %s\n' {{quote(RECORD_DIR)}}
 
@@ -892,7 +899,7 @@ native-titlebar-smoke: release
 
 # Native checker semantics can be tested without a desktop.
 native-titlebar-self-test:
-    python3 scripts/test-native-titlebar.py
+    {{scope_python}} scripts/test-native-titlebar.py
 
 [unix]
 wayland-first-frame-self-test:
