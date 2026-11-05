@@ -566,6 +566,22 @@ the same process account, failed decode/growth rollback, shared query/staging
 ceilings, and iTerm2's bounded base64 stage. These are CPU accounting checks;
 they do not require a GPU or live UI.
 
+### Placement depth, screenshot retirement, and resize capture
+
+`kettle-core`'s `anonymous_relative_depth_admission_uses_its_own_parent` and
+`relative_replacement_preserves_anonymous_descendant_depth` exercise anonymous
+relative placement admission and replacement. The shell-backed column-reflow
+capture test runs only on Unix; `local_column_reflow_invalidates_active_and_finished_capture_without_a_shell`
+checks the same invalidation through the local geometry commit on every platform.
+
+`kettle-render`'s `idle_ticks_retire_failed_worker_charges_without_new_screenshot_admission`
+uses a controlled completion callback and real budget reservations. It checks that
+idle ticks keep polling until both charges retire, even while a retry cannot be
+admitted. `idle_gpu_ticks_retire_a_screenshot_after_worker_startup_failure` checks
+actual queue completion without mapped uploads or another submission; it skips
+when no GPU adapter is available. A source guard pins polling and its next wake
+to the UI tick, independent of frame visibility and screenshot admission.
+
 ### Drift guards and source scans
 
 Some contracts cross files or cannot be exercised cheaply in every unit test.

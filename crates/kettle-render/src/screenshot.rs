@@ -190,9 +190,39 @@ impl<T> Drop for ScreenshotGpuGuard<T> {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct ScreenshotRetirements(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl ScreenshotRetirements {
+    pub(crate) fn track(&self) -> ScreenshotRetirement {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        ScreenshotRetirement(self.0.clone())
+    }
+
+    pub(crate) fn poll_with(&self, mut poll: impl FnMut()) -> Option<std::time::Duration> {
+        if self.0.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            return None;
+        }
+        poll();
+        (self.0.load(std::sync::atomic::Ordering::Acquire) != 0)
+            .then_some(std::time::Duration::from_millis(50))
+    }
+}
+
+pub(crate) struct ScreenshotRetirement(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for ScreenshotRetirement {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 struct ScreenshotReservations {
     _capture_gpu: kettle_core::GraphicsReservation,
     _staging_gpu: kettle_core::GraphicsReservation,
+    // Start tracking before dispatch: a worker can defer its charges after the
+    // UI has gone idle. Keep ticking until either it or the callback retires.
+    _retirement: ScreenshotRetirement,
 }
 
 pub(crate) struct PreparedScreenshot {
@@ -942,6 +972,14 @@ pub(crate) fn crop_screenshot(
 }
 
 impl Renderer {
+    /// Poll unretired screenshot work even when no frame or new capture can
+    /// be admitted. The caller must schedule the returned delay while idle.
+    pub fn poll_screenshot_retirements(&self) -> Option<std::time::Duration> {
+        self.screenshot_retirements.poll_with(|| {
+            let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        })
+    }
+
     /// Queue a screenshot request for the next frame. At most one capture may
     /// be pending or in flight; callers receive the original request back when
     /// the bounded worker is busy so they can report an explicit error.
@@ -1142,6 +1180,7 @@ impl Renderer {
                     ScreenshotReservations {
                         _capture_gpu: capture.gpu,
                         _staging_gpu: capture.staging_gpu,
+                        _retirement: self.screenshot_retirements.track(),
                     },
                     move |reservations| {
                         queue.on_submitted_work_done(move || drop(reservations));

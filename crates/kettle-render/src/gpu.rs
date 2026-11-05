@@ -916,6 +916,7 @@ impl Renderer {
             live_background_opacity_floor: None,
             pending_screenshot: None,
             screenshot_worker: None,
+            screenshot_retirements: Default::default(),
         })
     }
 

@@ -670,3 +670,134 @@ fn retired_screenshot_releases_reservations_without_deferral() {
     .retired();
     assert_eq!(usage.load(Ordering::Acquire), 0);
 }
+
+#[test]
+fn idle_screenshot_retirement_is_polled_by_the_tick() {
+    let source = include_str!("../../kettle-ui/src/app/scheduling.rs");
+    assert!(
+        source.contains("Renderer::poll_screenshot_retirements"),
+        "idle ticks must poll screenshot retirement independently of admission"
+    );
+    assert!(
+        source.contains(".chain(screenshot_retirement_wait)"),
+        "unretired captures must schedule another tick"
+    );
+}
+
+#[test]
+fn idle_ticks_retire_failed_worker_charges_without_new_screenshot_admission() {
+    use super::screenshot::{ScreenshotGpuGuard, ScreenshotRetirements};
+    use std::sync::{Arc, Mutex};
+
+    let budget = kettle_core::GraphicsBudget::independent(Default::default()).unwrap();
+    let bytes = budget.limits().process_gpu_bytes / 2;
+    let retirements = ScreenshotRetirements::default();
+    let callback = Arc::new(Mutex::new(None));
+    let waiting = callback.clone();
+    let guard = ScreenshotGpuGuard::new(
+        (
+            budget.reserve_transient_gpu(bytes).unwrap(),
+            budget.reserve_transient_gpu(bytes).unwrap(),
+            retirements.track(),
+        ),
+        move |resources| {
+            *waiting.lock().unwrap() =
+                Some(Box::new(move || drop(resources)) as Box<dyn FnOnce() + Send>);
+        },
+    );
+    let start_worker = || -> std::io::Result<()> {
+        let _job = guard;
+        Err(std::io::Error::other("injected thread startup failure"))
+    };
+    assert!(start_worker().is_err());
+    assert!(
+        budget.reserve_transient_gpu(bytes).is_none(),
+        "retry is blocked before any new submission"
+    );
+
+    // The first idle tick precedes GPU completion and must schedule a wake.
+    // The next tick's poll delivers completion; no new admission or submit runs.
+    let mut polls = 0;
+    let mut tick = || {
+        retirements.poll_with(|| {
+            polls += 1;
+            if polls == 2 {
+                callback.lock().unwrap().take().unwrap()();
+            }
+        })
+    };
+    assert_eq!(tick(), Some(std::time::Duration::from_millis(50)));
+    assert!(budget.reserve_transient_gpu(bytes).is_none());
+    assert_eq!(tick(), None);
+    assert!(
+        budget.reserve_transient_gpu(bytes * 2).is_some(),
+        "both reservations must retire while idle"
+    );
+    assert_eq!(
+        retirements.poll_with(|| panic!("no idle polling after retirement")),
+        None
+    );
+}
+
+#[test]
+fn idle_gpu_ticks_retire_a_screenshot_after_worker_startup_failure() {
+    use super::{Renderer, ScreenshotRequest};
+    let _serialized = crate::gpu_tests::gpu_test_guard();
+    let cfg = crate::gpu_tests::gpu_test_config();
+    let Some(mut renderer) =
+        Renderer::headless_for_tests_with_mapping(&cfg, 64, 1, 1.0, false, false)
+            .expect("headless renderer builds")
+    else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let budget = kettle_core::GraphicsBudget::independent(Default::default()).unwrap();
+    renderer.graphics_budget = budget.clone();
+    let capture = renderer.create_screenshot_target([64, 1]).unwrap();
+    let held = budget
+        .reserve_transient_gpu(budget.limits().process_gpu_bytes - 512)
+        .unwrap();
+    let mut encoder = renderer
+        .gpu
+        .device
+        .create_command_encoder(&Default::default());
+    let prepared = renderer.prepare_texture_screenshot(
+        capture,
+        ScreenshotRequest {
+            out_path: test_tempdir().path().join("never-written.png"),
+            output_policy: ScreenshotOutputPolicy::UserSelected,
+            crop: None,
+            completion: None,
+            cancellation: None,
+            recovery_wake: None,
+        },
+        &mut encoder,
+        true,
+    );
+    renderer.gpu.queue.submit([encoder.finish()]);
+    // An unsuccessful thread spawn drops the unsent job after submission.
+    let start_worker = || -> std::io::Result<()> {
+        let _unsent_job = prepared;
+        Err(std::io::Error::other("injected thread startup failure"))
+    };
+    assert!(start_worker().is_err());
+    assert!(
+        renderer.create_screenshot_target([64, 1]).is_err(),
+        "retry must initially be blocked by the deferred charges"
+    );
+    assert!(renderer.screenshot_worker.is_none());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // No rendering, new submission, mapping or successful admission drives this.
+    while renderer.poll_screenshot_retirements().is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "idle polling failed to retire the screenshot"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        renderer.create_screenshot_target([64, 1]).is_ok(),
+        "idle ticks must restore screenshot admission"
+    );
+    drop(held);
+}
