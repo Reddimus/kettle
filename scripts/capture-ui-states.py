@@ -114,16 +114,19 @@ def capture_state(smoke, kettle: str, out: Path, name: str, language: str, theme
         os.chmod(scratch, 0o700)
         home = scratch / "home"
         home.mkdir(mode=0o700)
-        # `command` names a program, so the shell's flags live in a wrapper.
+        # `command` names a program, so the shell's flags live in a wrapper,
+        # and a fixed prompt and title live in its rc file: images must not
+        # carry the account's shell setup, the host name or the scratch path.
+        rc = scratch / "shell.rc"
+        rc.write_text("PS1='$ '\nPROMPT_COMMAND='printf \"\\033]0;shell\\007\"'\n",
+                      encoding="utf-8")
         shell = scratch / "shell.sh"
-        shell.write_text("#!/bin/sh\nexec bash --noprofile --norc\n", encoding="utf-8")
+        shell.write_text(f"#!/bin/sh\nexec bash --noprofile --rcfile '{rc}' -i\n",
+                         encoding="utf-8")
         os.chmod(shell, 0o700)
         cfg = scratch / "kettle.cfg"
         write_config(cfg, language, theme, shell)
         env = private_env(home)
-        # The config's plain shell gets a fixed prompt, so images do not
-        # depend on the account's shell, its startup files or the host name.
-        env["PS1"] = "$ "
         with smoke.LiveKettle(kettle, cfg, scratch / "kettle.log", extra_env=env) as live:
             width, height = SIZES[size]
             live.json_ctl("resize_window", {"width": width, "height": height})
