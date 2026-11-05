@@ -284,9 +284,10 @@ fn resolve_launch_recording(
     if let Some(target) = target {
         return kettle_ui::RecordingPolicy::Enabled { target, raw_input };
     }
-    let config = resolve_config_path(cli)
+    let mut config = resolve_config_path(cli)
         .map(|path| load_resolved_config(cli, &path))
         .unwrap_or_default();
+    config.record_raw_input |= raw_input;
     kettle_ui::RecordingPolicy::from_config(&config)
 }
 
@@ -1664,7 +1665,19 @@ fn write_default_config(
         // Private from creation: `--write-default-config` is often the very
         // first thing to make `~/.config/kettle`, so it decides the mode every
         // later private path under it is checked against.
-        kettle_state::create_private_dirs(dir).map_err(|e| {
+        let created = if trust == kettle_config::ConfigTrust::ExplicitPath {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                builder.mode(0o700);
+            }
+            builder.create(dir)
+        } else {
+            kettle_state::create_private_dirs(dir)
+        };
+        created.map_err(|e| {
             anyhow::anyhow!("could not create config directory {}: {e}", dir.display())
         })?;
     }
@@ -2192,6 +2205,35 @@ mod record_target_tests {
     use std::path::PathBuf;
 
     #[test]
+    fn regression_raw_input_overrides_apply_to_config_recording() {
+        let root = kettle_test_support::private_tempdir("kettle-record-raw-override-");
+        let config = root.path().join("config");
+        std::fs::write(
+            &config,
+            "record = on\nrecord-dir = recordings\nrecord-raw-input = off\n",
+        )
+        .unwrap();
+        for flag in [false, true] {
+            let mut args = vec!["kettle", "--config", config.to_str().unwrap()];
+            if flag {
+                args.push("--record-raw-input");
+            }
+            let cli = Cli::try_parse_from(args).unwrap();
+            let policy = super::resolve_launch_recording(&cli, None, None, (!flag).then_some("1"));
+            assert!(
+                matches!(
+                    policy,
+                    kettle_ui::RecordingPolicy::Enabled {
+                        raw_input: true,
+                        ..
+                    }
+                ),
+                "raw-input override was lost for config-enabled recording: {policy:?}"
+            );
+        }
+    }
+
+    #[test]
     fn config_recording_policy_is_fingerprinted_and_passed_to_ui() {
         let root = kettle_test_support::private_tempdir("kettle-record-policy-");
         let config = root.path().join("config");
@@ -2713,6 +2755,50 @@ mod tests {
             DefaultConfigWrite::Written
         );
         use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regression_explicit_config_preserves_shared_kettle_namespace() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let Some(base) = std::env::var_os("KETTLE_SHARED_CONFIG_ROOT") else {
+            let root = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::regression_explicit_config_preserves_shared_kettle_namespace",
+                    "--nocapture",
+                ])
+                .env("KETTLE_SHARED_CONFIG_ROOT", root.path())
+                .env("XDG_CONFIG_HOME", root.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "shared-namespace child failed: {status}");
+            return;
+        };
+        let namespace = std::path::PathBuf::from(base).join("kettle");
+        assert!(kettle_state::is_kettle_owned_dir_name(&namespace));
+        let team = namespace.join("team");
+        std::fs::create_dir_all(&team).unwrap();
+        for directory in [&namespace, &team] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o775)).unwrap();
+        }
+        let path = team.join("project.config");
+        assert_eq!(
+            write_default_config(&path, kettle_config::ConfigTrust::ExplicitPath).unwrap(),
+            DefaultConfigWrite::Written
+        );
+        for directory in [&namespace, &team] {
+            assert_eq!(
+                std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o775,
+                "explicit config tightened a shared namespace"
+            );
+        }
         assert_eq!(
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600

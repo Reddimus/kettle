@@ -8515,6 +8515,11 @@ impl Terminal {
         self.latched.take_clipboard_events()
     }
 
+    /// Whether the bounded semantic queue has lost a terminal reply request.
+    pub fn has_lost_replies(&self) -> bool {
+        self.latched.has_lost_replies()
+    }
+
     /// Whether the reader finished: the PTY closed after the last of its
     /// output crossed the parser. Taken once; the owner applies exit policy
     /// after handling the replies queued before it.

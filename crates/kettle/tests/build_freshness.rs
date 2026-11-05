@@ -116,6 +116,11 @@ fn source_libraries_rebuild_only_when_inputs_change() {
     let patched = root.join("vendor/patched/src/lib.rs");
     fs::create_dir_all(patched.parent().unwrap()).unwrap();
     fs::write(&patched, "pub fn patched() {}\n").unwrap();
+    for asset in ["assets/themes/example", "assets/fonts/example.ttf"] {
+        let path = root.join(asset);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "compiled asset\n").unwrap();
+    }
     let first = build(&root);
     first.libraries_are_fresh(false);
     let mut hash = first.hash;
@@ -137,6 +142,11 @@ fn source_libraries_rebuild_only_when_inputs_change() {
 
     fs::write(root.join("README.md"), "not a protocol input\n").unwrap();
     unchanged(&root, &hash);
+    for asset in ["assets/themes/example", "assets/fonts/example.ttf"] {
+        fs::write(root.join(asset), "changed asset\n").unwrap();
+        changed(&root, &mut hash);
+        unchanged(&root, &hash);
+    }
     fs::write(&patched, "pub fn patched() { }\n").unwrap();
     changed(&root, &mut hash);
     unchanged(&root, &hash);

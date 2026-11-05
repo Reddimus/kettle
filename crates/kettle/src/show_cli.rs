@@ -107,12 +107,11 @@ pub fn run_show(args: ShowArgs) -> i32 {
 /// the same, so the exit code is still 0, and standard error says the card is
 /// missing.
 fn print_card(out: &mut impl Write, card: &str) -> i32 {
-    if out
-        .write_all(card.as_bytes())
-        .and_then(|()| out.flush())
-        .is_err()
-    {
-        eprintln!("kettle show: could not print the card; the item is on the shelf");
+    if write_shown(out, card.as_bytes()).is_err() {
+        let _ = write_shown(
+            &mut std::io::stderr().lock(),
+            b"kettle show: could not print the card; the item is on the shelf\n",
+        );
     }
     0
 }
@@ -129,14 +128,23 @@ fn print_shelved(
     note: Option<&str>,
 ) -> i32 {
     if let Some(note) = note {
-        let _ = err
-            .write_all(format!("kettle show: {note}\n").as_bytes())
-            .and_then(|()| err.flush());
+        let _ = write_shown(err, format!("kettle show: {note}\n").as_bytes());
     }
-    let _ = out
-        .write_all(format!("{confirmation}\n").as_bytes())
-        .and_then(|()| out.flush());
+    let _ = write_shown(out, format!("{confirmation}\n").as_bytes());
     0
+}
+
+fn write_shown(out: &mut impl Write, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        // Show exits after this confirmation. macOS delivers pipe signals to
+        // the process, so a thread-local mask cannot preserve its success.
+        // SAFETY: SIGPIPE and SIG_IGN are valid signal and handler values.
+        if unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) } == libc::SIG_ERR {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    out.write_all(bytes).and_then(|()| out.flush())
 }
 
 /// A `kettle show` that put its item on the shelf, and why it printed no
@@ -731,6 +739,76 @@ mod tests {
         let (mut out, mut err) = (terminal.clone(), terminal.clone());
         print_shelved(&mut out, &mut err, "Sent to the shelf.", None);
         assert_eq!(&*terminal.0.borrow(), b"Sent to the shelf.\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn regression_closed_confirmation_pipe_preserves_success() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("ready");
+        let release = root.path().join("release");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "show_cli::tests::closed_pipe_confirmation_helper",
+                "--nocapture",
+            ])
+            .env("KETTLE_SHOW_PIPE_FIXTURE", root.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if !ready.exists() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("confirmation helper did not start");
+        }
+        drop(child.stdout.take());
+        std::fs::write(release, b"").unwrap();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("confirmation helper did not stop");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "closed confirmation pipe terminated show: {status}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn closed_pipe_confirmation_helper() {
+        let Some(root) = std::env::var_os("KETTLE_SHOW_PIPE_FIXTURE") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        std::fs::write(root.join("ready"), b"").unwrap();
+        while !root.join("release").exists() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // SAFETY: this isolated fixture restores main's normal CLI disposition.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        let status = print_shelved(
+            &mut std::io::stdout().lock(),
+            &mut std::io::sink(),
+            "Sent.",
+            None,
+        );
+        std::process::exit(status);
     }
 
     /// A card that cannot be printed still exits 0: the item is on the

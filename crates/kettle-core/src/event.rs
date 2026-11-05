@@ -259,6 +259,7 @@ impl ClipboardJournal {
 /// otherwise fill the bounded event queue faster than a slow frame drains it.
 #[derive(Default)]
 pub(crate) struct LatchedEvents {
+    reply_loss: AtomicBool,
     bell: AtomicBool,
     cursor_blinking_changed: AtomicBool,
     exited: AtomicBool,
@@ -267,6 +268,10 @@ pub(crate) struct LatchedEvents {
 }
 
 impl LatchedEvents {
+    pub(crate) fn has_lost_replies(&self) -> bool {
+        self.reply_loss.load(Ordering::Acquire)
+    }
+
     pub(crate) fn take_bell(&self) -> bool {
         self.bell.swap(false, Ordering::AcqRel)
     }
@@ -339,6 +344,11 @@ pub struct EventProxy {
 }
 
 impl EventProxy {
+    /// Whether terminal reply admission has failed.
+    pub fn has_lost_replies(&self) -> bool {
+        self.latched.has_lost_replies()
+    }
+
     pub fn new(tx: Sender<TermEvent>, waker: Waker) -> Self {
         Self {
             tx,
@@ -445,6 +455,7 @@ impl EventListener for EventProxy {
                 self.wake_owner();
             }
             Err(crossbeam_channel::TrySendError::Full(_)) => {
+                self.latched.reply_loss.store(true, Ordering::Release);
                 // Only replies to the program's queries (and the advisory
                 // child-exit status) reach the queue. The parser calls this
                 // while holding the terminal mutex, so it must not block, and

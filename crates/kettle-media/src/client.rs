@@ -160,6 +160,14 @@ pub struct RenderControl {
 }
 
 impl RenderControl {
+    /// Observe the request owner's cancellation flag without a polling bridge.
+    pub fn with_cancel_flag(cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            cancelled,
+            ..Self::default()
+        }
+    }
+
     /// Includes queueing, file checks, both startup attempts and rendering.
     pub fn with_deadline(deadline: Instant) -> Self {
         Self {

@@ -167,7 +167,7 @@ fn pretty(method: &str, request_params: &Value, result: &Value) -> String {
                         p["tab"],
                         p["cols"],
                         p["rows"],
-                        p["cwd"].as_str().unwrap_or("?"),
+                        visible_path(p["cwd"].as_str().unwrap_or("?")),
                         p["title"].as_str().unwrap_or(""),
                     ));
                 }
@@ -200,6 +200,9 @@ fn pretty(method: &str, request_params: &Value, result: &Value) -> String {
                 .and_then(|t| t.as_str())
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("{result}\n"));
+            if result.get("text_truncated").and_then(Value::as_bool) == Some(true) {
+                out.push_str("\n[screen text truncated; content omitted]\n");
+            }
             out.push_str(&page_notice(request_params, result));
             out
         }
@@ -282,6 +285,18 @@ fn pretty(method: &str, request_params: &Value, result: &Value) -> String {
     }
 }
 
+fn visible_path(path: &str) -> String {
+    let mut out = String::new();
+    for ch in path.chars() {
+        if ch.is_control() {
+            out.extend(ch.escape_default());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn page_notice(request_params: &Value, result: &Value) -> String {
     if result.get("truncated").and_then(Value::as_bool) != Some(true) {
         return String::new();
@@ -316,6 +331,18 @@ mod tests {
     }
 
     #[test]
+    fn regression_pane_directories_escape_terminal_controls() {
+        let result = serde_json::json!({"panes": [{
+            "id": 1, "tab": 0, "cols": 80, "rows": 24,
+            "cwd": "/tmp/\u{1b}[2Jline\nnext", "title": "safe"
+        }]});
+        let output = pretty("list_panes", &serde_json::json!({}), &result);
+        assert!(!output.contains('\u{1b}'), "cwd emitted a terminal escape");
+        assert_eq!(output.lines().count(), 1, "cwd injected an output line");
+        assert!(output.contains(r"\u{1b}[2Jline\nnext"), "{output:?}");
+    }
+
+    #[test]
     fn paged_pretty_output_explains_continuation() {
         let result = serde_json::json!({
             "panes": [],
@@ -326,6 +353,22 @@ mod tests {
         let output = pretty("list_panes", &serde_json::json!({}), &result);
         assert!(output.contains(r#""cursor":"10""#));
         assert!(output.contains(r#""snapshot":"abc""#));
+    }
+
+    #[test]
+    fn regression_screen_text_omissions_are_disclosed_on_every_page() {
+        for more in [false, true] {
+            let result = serde_json::json!({
+                "text": "partial row", "text_truncated": true,
+                "truncated": more, "next_cursor": "1", "snapshot": "stable"
+            });
+            let output = pretty("read_screen", &serde_json::json!({}), &result);
+            assert!(
+                output.contains("[screen text truncated; content omitted]"),
+                "screen text omission was silent: {output:?}"
+            );
+            assert_eq!(output.contains("[more:"), more);
+        }
     }
 
     #[test]

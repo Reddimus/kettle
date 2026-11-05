@@ -152,8 +152,7 @@ const CANCELLED_TOOL_TEARDOWN_LIMIT: Duration = Duration::from_secs(10);
 struct WriterProgress {
     /// Set while `write_message` has been entered and has not returned.
     in_write: AtomicBool,
-    /// Incremented after each completed write, so "parked in ONE write" is
-    /// distinguishable from "writing steadily".
+    /// Incremented after each successful byte write or message completion.
     completed: AtomicU64,
     failure: Mutex<Option<String>>,
 }
@@ -274,7 +273,11 @@ pub fn run_mcp_with(
             let mut output = output;
             while let Ok(message) = responses_rx.recv() {
                 writer_progress.in_write.store(true, Ordering::Release);
-                let wrote = write_message(&mut output, &message);
+                let wrote = write_message_progress(&mut output, &message, |bytes| {
+                    writer_progress
+                        .completed
+                        .fetch_add(bytes as u64, Ordering::Release);
+                });
                 if let Err(error) = &wrote {
                     crate::exec::consume_pending_sigpipe(error);
                     *writer_progress
@@ -322,6 +325,7 @@ pub fn run_mcp_with(
     let mut lifecycle = Lifecycle::Uninitialized;
     let mut stdout_stalled = stdout_stall_detector(&progress, STDOUT_STALL_LIMIT);
     let mut stalled = false;
+    let mut input_failed = false;
     loop {
         if responses_tx.peer_gone() || stdout_stalled() {
             stalled = true;
@@ -344,6 +348,7 @@ pub fn run_mcp_with(
             }
             Err(ReadLineError::Io(error)) => {
                 eprintln!("kettle mcp: stdin read failed: {error}");
+                input_failed = true;
                 break;
             }
         };
@@ -461,7 +466,7 @@ pub fn run_mcp_with(
         return 1;
     }
     let _ = writer.join();
-    0
+    i32::from(input_failed)
 }
 
 /// Cancel every pending tool call and wait up to `limit` for `workers` to
@@ -1251,7 +1256,16 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
+#[cfg(test)]
 fn write_message(writer: &mut impl Write, message: &Value) -> std::io::Result<()> {
+    write_message_progress(writer, message, |_| {})
+}
+
+fn write_message_progress(
+    writer: &mut impl Write,
+    message: &Value,
+    mut progress: impl FnMut(usize),
+) -> std::io::Result<()> {
     let mut bytes = serde_json::to_vec(message).map_err(std::io::Error::other)?;
     if bytes.len() > MAX_MCP_RESPONSE_BYTES {
         let id = message.get("id").cloned().unwrap_or(Value::Null);
@@ -1277,8 +1291,19 @@ fn write_message(writer: &mut impl Write, message: &Value) -> std::io::Result<()
             .map_err(std::io::Error::other)?;
         }
     }
-    writer.write_all(&bytes)?;
-    writer.write_all(b"\n")?;
+    bytes.push(b'\n');
+    let mut remaining = bytes.as_slice();
+    while !remaining.is_empty() {
+        match writer.write(&remaining[..remaining.len().min(8192)]) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(written) => {
+                remaining = &remaining[written..];
+                progress(written);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
     writer.flush()
 }
 
@@ -1349,6 +1374,87 @@ fn read_capped_line(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, ReadLi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regression_mcp_input_io_errors_fail_after_draining_responses() {
+        struct FailsAfterInput(std::io::Cursor<Vec<u8>>);
+        impl std::io::Read for FailsAfterInput {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.position() as usize == self.0.get_ref().len() {
+                    Err(std::io::Error::other("fixture input failure"))
+                } else {
+                    self.0.read(bytes)
+                }
+            }
+        }
+        impl BufRead for FailsAfterInput {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                if self.0.position() as usize == self.0.get_ref().len() {
+                    Err(std::io::Error::other("fixture input failure"))
+                } else {
+                    self.0.fill_buf()
+                }
+            }
+            fn consume(&mut self, count: usize) {
+                self.0.consume(count);
+            }
+        }
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+        impl Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let input = format!(
+            "{}\n",
+            json!({"jsonrpc":"2.0", "id":0, "method":"initialize",
+            "params":init_params(MCP_PROTOCOL_VERSION)})
+        );
+        let captured = Captured::default();
+        let code = run_mcp_with(
+            FailsAfterInput(std::io::Cursor::new(input.into_bytes())),
+            captured.clone(),
+            ToolSelection::Full,
+        );
+        let bytes = captured.0.lock().unwrap();
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["id"], 0, "accepted response was lost");
+        assert_ne!(code, 0, "stdin I/O failure returned success");
+    }
+
+    #[test]
+    fn regression_short_writes_keep_a_slow_mcp_reader_alive() {
+        struct SlowWriter;
+        impl Write for SlowWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(4));
+                Ok(bytes.len().min(64))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let input = format!(
+            "{}\n",
+            json!({
+                "jsonrpc": "2.0", "id": "x".repeat(16 * 1024), "method": "initialize",
+                "params": init_params(MCP_PROTOCOL_VERSION)
+            })
+        );
+        let started = Instant::now();
+        let code = run_mcp_with(
+            std::io::Cursor::new(input.into_bytes()),
+            SlowWriter,
+            ToolSelection::Full,
+        );
+        assert_eq!(code, 0, "steady short writes were misclassified as stalled");
+        assert!(started.elapsed() > STDOUT_STALL_LIMIT);
+    }
 
     /// Discovery is this session's alone, never reused, in both modes, as
     /// what it says depends on where the server runs; display mode speaks

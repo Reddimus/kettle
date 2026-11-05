@@ -1246,6 +1246,13 @@ fn claude_integration() -> bool {
 /// hedged and nothing but a fixed line is printed.
 fn launch_line(name: &str, marker: kettle_ui::codex_shell::AgentFunction) -> String {
     use kettle_ui::codex_shell::AgentFunction;
+    if name == "claude" && cfg!(target_os = "macos") {
+        return match marker {
+            AgentFunction::Kettle => format!("Kettle's {name} function starts it, through agent-setup --launch-{name}"),
+            AgentFunction::Own => "your own claude function runs first; macOS checks Claude's signature for cards".into(),
+            AgentFunction::Unchecked => "not checked (only zsh and fish panes Kettle started are, and an alias is not); macOS checks Claude's signature for cards".into(),
+        };
+    }
     let fix = format!(
         "kettle agent-setup --print --agent {name} --form wrapper prints one that ends in \
          Kettle's launcher"
@@ -2228,6 +2235,20 @@ update|upgrade
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn regression_claude_status_describes_signature_admission() {
+        use kettle_ui::codex_shell::AgentFunction;
+        for marker in [AgentFunction::Own, AgentFunction::Unchecked] {
+            let line = launch_line("claude", marker);
+            assert!(
+                line.contains("signature"),
+                "macOS Claude status omits signature admission: {line}"
+            );
+            assert!(!line.contains("only if it ends"), "{line}");
+        }
+    }
+
     #[test]
     fn status_says_who_owns_the_agent_function_without_echoing_anything() {
         use kettle_ui::codex_shell::AgentFunction;
@@ -2236,17 +2257,31 @@ update|upgrade
             assert!(kettle.contains(&format!("--launch-{name}")), "{kettle}");
             let own = launch_line(name, AgentFunction::Own);
             assert!(own.contains("your own"), "{own}");
-            assert!(
-                own.contains("only if it ends in Kettle's launcher"),
-                "{own}"
-            );
-            assert!(
-                own.contains(&format!("--print --agent {name} --form wrapper")),
-                "{own}"
-            );
+            if name == "claude" && cfg!(target_os = "macos") {
+                assert!(
+                    own.contains("macOS checks Claude's signature for cards"),
+                    "{own}"
+                );
+            } else {
+                assert!(
+                    own.contains("only if it ends in Kettle's launcher"),
+                    "{own}"
+                );
+                assert!(
+                    own.contains(&format!("--print --agent {name} --form wrapper")),
+                    "{own}"
+                );
+            }
             let unchecked = launch_line(name, AgentFunction::Unchecked);
             assert!(unchecked.starts_with("not checked"), "{unchecked}");
-            assert!(unchecked.contains("--form wrapper"), "{unchecked}");
+            if name == "claude" && cfg!(target_os = "macos") {
+                assert!(
+                    unchecked.contains("macOS checks Claude's signature for cards"),
+                    "{unchecked}"
+                );
+            } else {
+                assert!(unchecked.contains("--form wrapper"), "{unchecked}");
+            }
         }
     }
 

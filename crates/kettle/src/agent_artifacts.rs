@@ -35,6 +35,20 @@ pub(crate) fn key(path: &Path) -> String {
     format!("artifact:{:016x}", hash.finish())
 }
 
+fn supported_path(path: &Path) -> bool {
+    if path.to_str().is_none() {
+        return false;
+    }
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "svg" | "png" | "jpg" | "jpeg" | "webp" | "gif" | "mp4" | "webm" | "pdf" | "mmd"
+            )
+        })
+}
+
 impl Inbox {
     pub(crate) fn new() -> std::io::Result<Self> {
         let directory = tempfile::Builder::new()
@@ -61,17 +75,14 @@ impl Inbox {
         if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_BYTES {
             return None;
         }
-        let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-        if !matches!(
-            extension.as_str(),
-            "svg" | "png" | "jpg" | "jpeg" | "webp" | "gif" | "mp4" | "webm" | "pdf" | "mmd"
-        ) {
+        if !supported_path(path) {
             return None;
         }
-        // Each hook inspects at most MAX_ENTRIES metadata records, with
-        // no image reads on the agent's critical path. Media's descriptor
-        // attestation is the final rendering boundary. Unix ctime also
-        // detects a rewrite whose author preserved mtime and size.
+        Self::metadata_fingerprint(&meta)
+    }
+
+    fn metadata_fingerprint(meta: &std::fs::Metadata) -> Option<u64> {
+        // Unix ctime also detects rewrites preserving mtime and size.
         let mut hasher = DefaultHasher::new();
         meta.len().hash(&mut hasher);
         meta.modified().ok()?.hash(&mut hasher);
@@ -97,6 +108,41 @@ impl Inbox {
             fingerprint: self.fingerprint(&path)?,
             path,
         })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn fallback_source(
+        &self,
+        path: &Path,
+    ) -> Option<(kettle_ctl::show::ShowSource, std::fs::File)> {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
+            .open(path)
+            .ok()?;
+        let meta = file.metadata().ok()?;
+        let fingerprint = Self::metadata_fingerprint(&meta)?;
+        if !meta.is_file() || self.seen.get(path) != Some(&fingerprint) {
+            return None;
+        }
+        let source = kettle_ctl::show::ShowSource::File {
+            path: kettle_media::NativePath::from_path(path).ok()?,
+            attestation: kettle_media::ExternalAttested {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            },
+            kind: kettle_ctl::show::FileKind::Classified,
+        };
+        Some((source, file))
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn fallback_source(
+        &self,
+        _path: &Path,
+    ) -> Option<(kettle_ctl::show::ShowSource, std::fs::File)> {
+        None
     }
 
     fn paths(&self) -> Option<Vec<PathBuf>> {
@@ -155,6 +201,49 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn regression_fallback_rejects_replacement_after_admission() {
+        let mut inbox = Inbox::new().unwrap();
+        let path = inbox.path().join("plot.png");
+        std::fs::write(&path, b"original").unwrap();
+        let admitted = inbox.next().unwrap();
+        let (_source, _opened) = inbox.fallback_source(&admitted).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), b"external").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &path).unwrap();
+        assert!(
+            inbox.fallback_source(&admitted).is_none(),
+            "fallback followed replacement symlink"
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        assert!(
+            inbox.fallback_source(&admitted).is_none(),
+            "fallback admitted a fresh identity"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_artifact_names_are_refused() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"/inbox/\xff.png"));
+        assert!(!supported_path(path), "non-Unicode artifact admitted");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_unicode_artifacts_are_not_admitted() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let mut inbox = Inbox::new().unwrap();
+        let path = inbox.path().join(std::ffi::OsStr::from_bytes(b"\xff.png"));
+        std::fs::write(&path, b"image").unwrap();
+        assert!(inbox.next().is_none(), "non-Unicode artifact admitted");
+        assert!(inbox.capture(&path).is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn primary_path_aliases_share_the_inbox_key_without_following_file_links() {
