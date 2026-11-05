@@ -707,6 +707,7 @@ impl Renderer {
         let menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let rounded_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
+        let picker_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
         let toast_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
         let confirmation_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
@@ -823,6 +824,7 @@ impl Renderer {
             hint_buffers: Vec::new(),
             context_menu_buffers: Vec::new(),
             context_menu_texts: Vec::new(),
+            context_menu_match_keys: Vec::new(),
             context_menu_hint_buffers: Vec::new(),
             context_menu_hint_texts: Vec::new(),
             settings_buffers: Vec::new(),
@@ -868,6 +870,7 @@ impl Renderer {
             menu_text_renderer,
             rounded_surfaces,
             toast_surfaces,
+            picker_surfaces,
             transport_surface_count: 0,
             confirmation_text_renderer,
             confirmation_text,

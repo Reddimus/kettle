@@ -37,6 +37,7 @@ pub(crate) fn context_menu_text_damage_key(
             row.separator.hash(&mut hash);
             row.enabled.hash(&mut hash);
             row.hint.hash(&mut hash);
+            row.matched_chars.hash(&mut hash);
         }
     }
     hash.finish()
@@ -175,6 +176,7 @@ impl Renderer {
             self.overlay_quads.upload_counts(),
             self.menu_quads.upload_counts(),
             self.rounded_surfaces.upload_counts(),
+            self.picker_surfaces.upload_counts(),
             self.toast_surfaces.upload_counts(),
             self.imgs.upload_counts(),
             self.card_base.upload_counts(),
@@ -356,6 +358,7 @@ impl Renderer {
         // Menu chrome sits above terminal content. The receipt thumbnail is
         // then composited below the shared chrome-text pass, so its own labels
         // and the context-menu labels both remain readable above images.
+        self.picker_surfaces.draw_range(&mut pass, 0..u32::MAX);
         self.menu_quads.draw(&mut pass);
         self.media_receipt_img.draw(&mut pass);
         self.toast_surfaces.draw_range(&mut pass, 0..u32::MAX);

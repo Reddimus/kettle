@@ -109,6 +109,7 @@ fn modal_accessibility_names_follow_the_ui_language() {
             panel_w_clamped: 100.0,
             panel_h_clamped: 100.0,
             a11y_label: None,
+            picker_header_height: 0.0,
         }),
         ..kettle_render::Overlay::default()
     };

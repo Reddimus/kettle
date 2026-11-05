@@ -45,8 +45,8 @@ fn picker_candidates_are_vertical_rows_and_selection_scrolls_into_view() {
         &kettle_i18n::Translator::new(kettle_i18n::Language::En),
         None,
     );
-    let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0))
-        .expect("a 320x160 surface fits a picker row above its input lane");
+    let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), 0.0)
+        .expect("a 320x160 surface fits a picker card");
 
     assert!(
         menu.rows.len() > 20,
@@ -65,8 +65,8 @@ fn picker_candidates_are_vertical_rows_and_selection_scrolls_into_view() {
         "command rows must carry live keybind hints in the menu hint column"
     );
     assert!(
-        menu.anchor.1 + menu.panel_h_clamped <= 160.0 - (16.0 + 10.0),
-        "the vertical list must stay above the bottom input lane"
+        menu.anchor.1 + menu.panel_h_clamped <= 144.0,
+        "the card must stay inside the surface's bottom margin"
     );
 }
 
@@ -158,6 +158,7 @@ fn review_activating_the_selected_layout_requests_a_frame() {
         layout_picker_list("", 0, &ws.layout_picker_entries, &EN_TEXT),
         (800.0, 600.0),
         (8.0, 16.0),
+        0.0,
     )
     .unwrap();
     let row_h = 16.0 + kettle_render::menu::ROW_PAD;
@@ -193,4 +194,136 @@ fn review_activating_the_selected_layout_requests_a_frame() {
         before_launch.contains("request_redraw()"),
         "dismissal must request a frame even if the layout launch fails"
     );
+}
+
+#[test]
+fn picker_card_geometry_is_centered_below_chrome() {
+    for (surface, expected_width) in [
+        ((1280.0, 820.0), 716.8),
+        ((640.0, 820.0), 360.0),
+        ((360.0, 600.0), 328.0),
+    ] {
+        let menu = picker_context_menu(
+            layout_picker_list("", 0, &["one".into(), "two".into()], &EN_TEXT),
+            surface,
+            (8.0, 16.0),
+            0.0,
+        )
+        .unwrap();
+        assert!((menu.panel_w_clamped - expected_width).abs() < 0.01);
+        assert!((menu.anchor.0 * 2.0 + menu.panel_w_clamped - surface.0).abs() < 0.01);
+        assert!((menu.anchor.1 - (surface.1 * 0.08 + 30.0)).abs() < 0.01);
+        assert_eq!(menu.panel_h_clamped, 56.0);
+    }
+}
+
+#[test]
+fn picker_header_and_rows_share_geometry_below_top_chrome() {
+    for surface in [
+        (1280.0, 820.0),
+        (640.0, 820.0),
+        (360.0, 600.0),
+        (1920.0, 1080.0),
+    ] {
+        for top in [0.0, 46.0] {
+            for cell in [(8.0, 16.0), (16.0, 32.0)] {
+                let geometry = super::picker_card_geometry(surface, cell, top, 2).unwrap();
+                let (x, y, w, h) = geometry.header;
+                assert_eq!(geometry.rows, (x, y + h, w, 2.0 * (cell.1 + 12.0)));
+                assert!((2.0 * x + w - surface.0).abs() < 0.01);
+                assert!(x >= 16.0 && w <= 720.0 && w >= 360.0_f32.min(surface.0 - 32.0));
+                assert!((y - top - 24.0_f32.max((surface.1 - top) * 0.08)).abs() < 0.01);
+                assert_eq!(h, cell.1 + 14.0);
+            }
+        }
+    }
+    for surface in [(f32::NAN, 600.0), (800.0, 40.0), (20.0, 600.0)] {
+        assert!(super::picker_card_geometry(surface, (8.0, 16.0), 0.0, 2).is_none());
+    }
+}
+
+#[test]
+fn picker_press_and_diagnostics_use_the_card_rows() {
+    use super::{PickerPointer, apply_picker_pointer};
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.layout_picker_input = Some((Default::default(), 0));
+    let menu = picker_context_menu(
+        layout_picker_list("", 0, &["alpha".into(), "beta".into()], &EN_TEXT),
+        (800.0, 600.0),
+        (8.0, 16.0),
+        46.0,
+    )
+    .unwrap();
+    assert_eq!(menu.anchor.0, 176.0);
+    assert!((menu.anchor.1 - 120.32).abs() < 0.01);
+    ws.cursor.x = 186.0;
+    ws.cursor.y = 162.32;
+    assert!(apply_picker_pointer(
+        &mut ws,
+        &menu,
+        16.0,
+        PickerPointer::Press
+    ));
+    assert_eq!(ws.layout_picker_input.as_ref().unwrap().1, 1);
+    ws.cursor.y = 100.0;
+    assert!(!apply_picker_pointer(
+        &mut ws,
+        &menu,
+        16.0,
+        PickerPointer::Press
+    ));
+    assert!(!apply_picker_pointer(
+        &mut ws,
+        &menu,
+        16.0,
+        PickerPointer::Wheel(1)
+    ));
+    let overlay = kettle_render::Overlay {
+        context_menu: Some(menu),
+        ..Default::default()
+    };
+    let diagnostic = super::ctl::picker_diagnostic_geometry(&overlay).unwrap();
+    assert_eq!(diagnostic["rect"]["width"], 448.0);
+    assert_eq!(diagnostic["rect"]["height"], 86.0);
+    assert!((diagnostic["rect"]["y"].as_f64().unwrap() - 90.32).abs() < 0.01);
+    assert_eq!(diagnostic["rows"][1]["index"], 1);
+    assert!((diagnostic["rows"][1]["rect"]["y"].as_f64().unwrap() - 148.32).abs() < 0.01);
+    assert!(!diagnostic.to_string().contains("alpha"));
+}
+
+#[test]
+fn palette_ranges_follow_translated_labels_and_truncation() {
+    let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    let list = command_picker_list("ct", 0, &kettle_config::keybinds::defaults(), &es, None);
+    for row in &list.rows {
+        assert_eq!(
+            row.matched_chars,
+            kettle_config::palette::matched_char_positions("ct", &row.label).map(|positions| {
+                positions
+                    .into_iter()
+                    .map(|index| index..index + 1)
+                    .collect()
+            })
+        );
+    }
+    let mut row = ContextMenuRow {
+        label: "año abcdefghijklmnop".into(),
+        matched_chars: Some(vec![0..3, 6..19]),
+        hint: String::new(),
+        enabled: true,
+        separator: false,
+    };
+    fit_context_menu_row(&mut row, 6);
+    assert_eq!(row.label, "año a…");
+    assert_eq!(row.matched_chars, Some(std::iter::once(0..3).collect()));
+    let empty = command_picker_list(
+        "zzzzzzzzz",
+        0,
+        &kettle_config::keybinds::defaults(),
+        &es,
+        None,
+    );
+    assert_eq!(empty.rows.len(), 1);
+    assert!(!empty.rows[0].enabled);
+    assert!(empty.rows[0].matched_chars.is_none());
 }

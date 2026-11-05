@@ -19,6 +19,9 @@ pub struct HintLabel {
 /// enable Copy based on whether a selection exists); the renderer
 /// stays agnostic of the `Action` enum that drives them.
 pub struct ContextMenuRow {
+    /// Matched Unicode scalar ranges in the displayed label. Ordinary menus
+    /// leave this absent and retain their default text color.
+    pub matched_chars: Option<Vec<std::ops::Range<usize>>>,
     pub label: String,
     /// `true` when the row is a horizontal separator rather than a
     /// selectable item. The renderer draws a thin divider line and
@@ -54,6 +57,8 @@ pub fn menu_row_chars(row: &ContextMenuRow) -> usize {
 /// and SSH pickers. The UI clamps the anchor and remains the source of truth
 /// for selection and dispatch; the renderer owns only shared list paint.
 pub struct ContextMenu {
+    /// Picker header above `anchor`; zero for ordinary context menus.
+    pub picker_header_height: f32,
     /// Top-left of the panel in surface pixels (already clamped).
     pub anchor: (f32, f32),
     pub rows: Vec<ContextMenuRow>,
@@ -76,6 +81,57 @@ pub struct ContextMenu {
     pub panel_h_clamped: f32,
     /// What a screen reader calls the menu, when it is not the terminal's.
     pub a11y_label: Option<String>,
+}
+
+impl ContextMenu {
+    pub fn rows_rect(&self) -> Rect4 {
+        (
+            self.anchor.0,
+            self.anchor.1,
+            self.panel_w_clamped,
+            self.panel_h_clamped,
+        )
+    }
+
+    pub fn card_rect(&self) -> Rect4 {
+        let (x, y, w, h) = self.rows_rect();
+        (
+            x,
+            y - self.picker_header_height,
+            w,
+            h + self.picker_header_height,
+        )
+    }
+
+    /// Only fully painted picker rows have pointer/accessibility targets.
+    pub fn visible_row_rect(&self, index: usize) -> Option<Rect4> {
+        if self.picker_header_height <= 0.0
+            || index < self.scroll_offset
+            || index >= self.rows.len()
+        {
+            return None;
+        }
+        // Text metrics can differ from physical cell height when cell-height
+        // is configured; the picker header retains the latter.
+        let row_h = self.picker_header_height - menu::PICKER_HEADER_PAD + menu::ROW_PAD;
+        let height = |row: &ContextMenuRow| if row.separator { menu::SEP_H } else { row_h };
+        let natural_h: f32 = self.rows.iter().map(height).sum();
+        let (inset, content_h) = menu::scroll_content(natural_h, self.panel_h_clamped, row_h);
+        let offset: f32 = self.rows[self.scroll_offset..index]
+            .iter()
+            .map(height)
+            .sum();
+        let h = height(&self.rows[index]);
+        if offset + h > content_h {
+            return None;
+        }
+        Some((
+            self.anchor.0,
+            self.anchor.1 + inset + offset,
+            self.panel_w_clamped,
+            h,
+        ))
+    }
 }
 
 /// Width shared by context-menu buffer preparation, text placement, chrome,
@@ -1191,39 +1247,50 @@ pub(crate) fn menu_chrome_quads(
     let (clipped_top, clipped_bottom) =
         context_menu_clip_indicators(&menu.rows, menu.scroll_offset, content_h, row_h, sep_h);
 
-    // Soft drop shadow — offset 4 px down-right at low opacity for
-    // depth (GTK / iTerm2 convention).
-    out.push(rect(
-        ax + 4.0,
-        ay + 4.0,
-        panel_w,
-        panel_h,
-        Rgb::new(0, 0, 0),
-        0.35,
-    ));
-    // Panel background — theme.background opaque so the menu inherits
-    // the pane bg color the user is calibrated for.
-    out.push(rect(ax, ay, panel_w, panel_h, theme.background, 1.0));
-    // 1-px border in dim chrome, each edge separate so a future tweak
-    // can color them individually if needed.
-    out.push(rect(ax, ay, panel_w, 1.0, theme.palette[8], 0.65));
-    out.push(rect(
-        ax,
-        ay + panel_h - 1.0,
-        panel_w,
-        1.0,
-        theme.palette[8],
-        0.65,
-    ));
-    out.push(rect(ax, ay, 1.0, panel_h, theme.palette[8], 0.65));
-    out.push(rect(
-        ax + panel_w - 1.0,
-        ay,
-        1.0,
-        panel_h,
-        theme.palette[8],
-        0.65,
-    ));
+    if menu.picker_header_height > 0.0 {
+        out.push(rect(
+            ax + 1.0,
+            ay,
+            panel_w - 2.0,
+            1.0,
+            theme.palette[8],
+            0.65,
+        ));
+    } else {
+        // Soft drop shadow — offset 4 px down-right at low opacity for
+        // depth (GTK / iTerm2 convention).
+        out.push(rect(
+            ax + 4.0,
+            ay + 4.0,
+            panel_w,
+            panel_h,
+            Rgb::new(0, 0, 0),
+            0.35,
+        ));
+        // Panel background — theme.background opaque so the menu inherits
+        // the pane bg color the user is calibrated for.
+        out.push(rect(ax, ay, panel_w, panel_h, theme.background, 1.0));
+        // 1-px border in dim chrome, each edge separate so a future tweak
+        // can color them individually if needed.
+        out.push(rect(ax, ay, panel_w, 1.0, theme.palette[8], 0.65));
+        out.push(rect(
+            ax,
+            ay + panel_h - 1.0,
+            panel_w,
+            1.0,
+            theme.palette[8],
+            0.65,
+        ));
+        out.push(rect(ax, ay, 1.0, panel_h, theme.palette[8], 0.65));
+        out.push(rect(
+            ax + panel_w - 1.0,
+            ay,
+            1.0,
+            panel_h,
+            theme.palette[8],
+            0.65,
+        ));
+    }
 
     // Per-row highlight + separators. Skip scrolled-off
     // rows; stop drawing when we'd go past panel_h.
@@ -1283,6 +1350,9 @@ pub(crate) fn menu_chrome_quads(
             out.push(rect(center - width * 0.5, y, width, step_h, arrow, 1.0));
         }
     }
+    if menu.picker_header_height > 0.0 {
+        clip_picker_bottom_corners(&mut out, menu.card_rect());
+    }
     out
 }
 
@@ -1321,6 +1391,7 @@ pub(crate) fn push_input_bar(
 // `kettle-ui` reads the same values through `kettle_render::menu` instead
 // of redeclaring them.
 pub mod menu {
+    pub const PICKER_HEADER_PAD: f32 = 14.0;
     /// Vertical padding inside each context-menu row. Cell height +
     /// `ROW_PAD` = total row height (~28-32 px on default cell
     /// metrics, a comfortable click target).
@@ -1404,4 +1475,119 @@ pub mod tab_drag {
     pub const DOCK_HIGHLIGHT_BORDER_PX: f32 = 2.0;
     /// Accent border opacity.
     pub const DOCK_HIGHLIGHT_BORDER_ALPHA: f32 = 0.55;
+}
+
+/// The rich-text spans use scalar positions, never UTF-8 byte offsets.
+pub(crate) fn menu_label_spans(row: &ContextMenuRow) -> Vec<(&str, bool)> {
+    if row.matched_chars.is_none() {
+        return vec![(&row.label, false)];
+    }
+    row.label
+        .char_indices()
+        .enumerate()
+        .map(|(index, (byte, ch))| {
+            (
+                &row.label[byte..byte + ch.len_utf8()],
+                row.matched_chars
+                    .as_ref()
+                    .is_some_and(|ranges| ranges.iter().any(|range| range.contains(&index))),
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn menu_match_key(row: &ContextMenuRow, accent: Rgb) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::hash::DefaultHasher::new();
+    row.matched_chars.hash(&mut hash);
+    if row
+        .matched_chars
+        .as_ref()
+        .is_some_and(|ranges| !ranges.is_empty())
+    {
+        (accent.r, accent.g, accent.b).hash(&mut hash);
+    }
+    hash.finish()
+}
+
+pub(crate) fn picker_surfaces(
+    menu: &ContextMenu,
+    theme: &kettle_config::Theme,
+    cw: f32,
+) -> Option<[crate::rounded_surface::RoundedSurface; 2]> {
+    if menu.picker_header_height <= 0.0 {
+        return None;
+    }
+    let (x, rows_y) = menu.anchor;
+    let y = rows_y - menu.picker_header_height;
+    let w = context_menu_panel_width(menu, cw);
+    let h = menu.picker_header_height + menu.panel_h_clamped;
+    let rgba = |c: Rgb, a| {
+        [
+            c.r as f32 / 255.0,
+            c.g as f32 / 255.0,
+            c.b as f32 / 255.0,
+            a,
+        ]
+    };
+    let shape = |x, y, fill, stroke, border| crate::rounded_surface::RoundedSurface {
+        pos: [x, y],
+        size: [w, h],
+        fill,
+        stroke,
+        params: [8.0, border, 0.0, 0.0],
+    };
+    Some([
+        shape(
+            x + 4.0,
+            y + 4.0,
+            rgba(Rgb::new(0, 0, 0), 0.35),
+            [0.0; 4],
+            0.0,
+        ),
+        shape(
+            x,
+            y,
+            rgba(theme.background, 1.0),
+            rgba(theme.palette[8], 0.65),
+            1.0,
+        ),
+    ])
+}
+
+/// Row quads sit above the rounded surface, so clip the last row's tint and
+/// rail to its inner corners instead of squaring off the card when selected.
+fn clip_picker_bottom_corners(quads: &mut Vec<QuadInstance>, (x, y, w, h): Rect4) {
+    let bottom = y + h - 1.0;
+    let radius = 7.0_f32.min((w - 2.0) * 0.5).max(0.0);
+    let corner_top = bottom - radius;
+    let original = std::mem::take(quads);
+    for quad in original {
+        let end = quad.pos[1] + quad.size[1];
+        if end <= corner_top {
+            quads.push(quad);
+            continue;
+        }
+        let mut push = |top: f32, end: f32, inset: f32| {
+            let top = top.max(quad.pos[1]);
+            let end = end.min(quad.pos[1] + quad.size[1]);
+            let left = quad.pos[0].max(x + 1.0 + inset);
+            let right = (quad.pos[0] + quad.size[0]).min(x + w - 1.0 - inset);
+            if end > top && right > left {
+                quads.push(QuadInstance {
+                    pos: [left, top],
+                    size: [right - left, end - top],
+                    ..quad
+                });
+            }
+        };
+        push(quad.pos[1], corner_top, 0.0);
+        for step in 0..radius.ceil() as usize {
+            let top = corner_top + step as f32;
+            let end = (top + 1.0).min(bottom);
+            let dy = ((top + end) * 0.5 - corner_top).min(radius);
+            let inset = radius - (radius * radius - dy * dy).max(0.0).sqrt();
+            push(top, end, inset);
+        }
+    }
 }

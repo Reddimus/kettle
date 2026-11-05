@@ -182,12 +182,14 @@ fn context_menu_hover_preserves_text_damage_key() {
         anchor: (20.0, 30.0),
         rows: vec![
             super::ContextMenuRow {
+                matched_chars: None,
                 label: "Copy".to_string(),
                 separator: false,
                 enabled: true,
                 hint: "Ctrl+Shift+C".to_string(),
             },
             super::ContextMenuRow {
+                matched_chars: None,
                 label: "Paste".to_string(),
                 separator: false,
                 enabled: true,
@@ -199,6 +201,7 @@ fn context_menu_hover_preserves_text_damage_key() {
         panel_w_clamped: 240.0,
         panel_h_clamped: 120.0,
         a11y_label: None,
+        picker_header_height: 0.0,
     };
     let foreground = kettle_config::Rgb::new(220, 220, 220);
     let background = kettle_config::Rgb::new(20, 20, 20);
@@ -211,6 +214,13 @@ fn context_menu_hover_preserves_text_damage_key() {
         "highlight motion changes quads, not shaped menu text"
     );
 
+    assert!(menu.rows.iter().all(|row| row.matched_chars.is_none()));
+    menu.rows[0].matched_chars = Some(std::iter::once(0..1).collect());
+    assert_ne!(
+        super::context_menu_text_damage_key(Some(&menu), foreground, background),
+        initial
+    );
+    menu.rows[0].matched_chars = None;
     menu.scroll_offset = 1;
     assert_ne!(
         super::context_menu_text_damage_key(Some(&menu), foreground, background),

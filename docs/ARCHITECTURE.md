@@ -1691,9 +1691,9 @@ restored titles instead of opening an empty editor.
 shaping and grapheme-cluster helpers. Selection spans, caret positions,
 horizontal scrolling and pointer stops all come from that shaped buffer.
 Prefix and hint text have separate clipped slots of at most 30% of the field
-each. A key hint that does not fit drops its middle segments, then its leading
-ones, before its last, so a narrow window still shows `Esc cancel`; only that
-segment alone is ever cut with an ellipsis. Settings computes the inline
+each outside pickers. Picker headers keep the complete right-aligned key hint
+only when it fits beside the query; otherwise they drop it. Other fields drop
+hint segments before truncating the final segment with an ellipsis. Settings computes the inline
 value slot from the same column budgets and scrolling layout as its row painter.
 The UI projects IME preedit over the selected range or at the caret, retains
 the suffix, and commits through the same editor. IME candidate placement shapes
@@ -1704,8 +1704,13 @@ committed text.
 
 Transient popups share one outside-press dispatch and consume the dismissing
 click: context menus, the command palette, theme/layout pickers, SSH, title
-editing and quick-select hints. A picker's input lane and results panel together
-count as inside. Any pointer press cancels a keyboard-only hint. Settings closes
+editing and quick-select hints. The command palette and theme, layout and SSH
+pickers share one top-centred rounded card below the top chrome. Its query header
+and results use one geometry for paint, pointer input, control diagnostics,
+AccessKit bounds and the IME caret. Command labels accent the characters matched
+by the same fuzzy matcher used for ranking; English alias matches in Spanish
+have no accent unless the displayed label also matches. The whole card counts
+as inside. Any pointer press cancels a keyboard-only hint. Settings closes
 on a press outside its panel; an active path editor or keybinding capture instead
 cancels only that capture on a press outside its focused row. Confirmation dialogs
 keep their question and consume outside presses. The search lane and vi mode keep

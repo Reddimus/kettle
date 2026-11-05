@@ -118,6 +118,16 @@ pub(super) fn command_picker_list(
         .map(|&index| {
             let (label, action) = &commands[index];
             ContextMenuRow {
+                matched_chars: kettle_config::palette::matched_char_positions(
+                    query,
+                    label.shown(tr),
+                )
+                .map(|positions| {
+                    positions
+                        .into_iter()
+                        .map(|index| index..index + 1)
+                        .collect()
+                }),
                 label: label.shown(tr).to_string(),
                 separator: false,
                 enabled: true,
@@ -128,6 +138,7 @@ pub(super) fn command_picker_list(
     if rows.is_empty() {
         PickerList {
             rows: vec![ContextMenuRow {
+                matched_chars: None,
                 label: tr
                     .text(kettle_i18n::Text::PickerNoMatchingCommand)
                     .to_string(),
@@ -155,6 +166,7 @@ pub(super) fn layout_picker_list(
     let rows = ranked
         .iter()
         .map(|&index| ContextMenuRow {
+            matched_chars: None,
             label: layouts[index].clone(),
             separator: false,
             enabled: true,
@@ -169,6 +181,7 @@ pub(super) fn layout_picker_list(
         };
         PickerList {
             rows: vec![ContextMenuRow {
+                matched_chars: None,
                 label: tr.text(label).to_string(),
                 separator: false,
                 enabled: false,
@@ -249,6 +262,7 @@ pub(super) fn theme_picker_list(
                 ""
             };
             ContextMenuRow {
+                matched_chars: None,
                 label: tr.theme_name(name).to_string(),
                 separator: false,
                 enabled: true,
@@ -259,6 +273,7 @@ pub(super) fn theme_picker_list(
     if rows.is_empty() {
         return PickerList {
             rows: vec![ContextMenuRow {
+                matched_chars: None,
                 label: tr.text(Text::PickerNoMatchingTheme).to_string(),
                 separator: false,
                 enabled: false,
@@ -381,6 +396,7 @@ pub(super) fn ssh_picker_list(
     let rows = ranked
         .iter()
         .map(|&index| ContextMenuRow {
+            matched_chars: None,
             label: hosts[index].0.clone(),
             separator: false,
             enabled: true,
@@ -390,6 +406,7 @@ pub(super) fn ssh_picker_list(
     if rows.is_empty() {
         PickerList {
             rows: vec![ContextMenuRow {
+                matched_chars: None,
                 label: tr
                     .text(if hosts.is_empty() {
                         kettle_i18n::Text::PickerNoConfiguredHosts
@@ -438,54 +455,79 @@ pub(super) fn picker_scroll_offset(
         .min(row_count - visible)
 }
 
-/// Place a picker list above its bottom input lane using the same rows, width
-/// budget, clipping, selection rail, and overflow cues as the context menu.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PickerGeometry {
+    pub(super) header: (f32, f32, f32, f32),
+    pub(super) rows: (f32, f32, f32, f32),
+}
+
+/// Physical menu pixels: fixed padding follows the menu painter, while cell
+/// metrics and top chrome already include the window's scale.
+pub(super) fn picker_card_geometry(
+    surface: (f32, f32),
+    cell: (f32, f32),
+    top_chrome: f32,
+    row_count: usize,
+) -> Option<PickerGeometry> {
+    let (sw, sh) = surface;
+    let (_, ch) = cell;
+    if ![sw, sh, cell.0, ch, top_chrome]
+        .into_iter()
+        .all(f32::is_finite)
+        || sw <= 32.0
+        || ch <= 0.0
+        || cell.0 <= 0.0
+        || row_count == 0
+    {
+        return None;
+    }
+    let max_width = (sw - 32.0).max(0.0);
+    let width = (sw * 0.56).clamp(360.0_f32.min(max_width), 720.0_f32.min(max_width));
+    let x = (sw - width) * 0.5;
+    let remaining = (sh - top_chrome).max(0.0);
+    let y = top_chrome + 24.0_f32.max(remaining * 0.08);
+    let header_h = ch + kettle_render::menu::PICKER_HEADER_PAD;
+    let row_h = ch + kettle_render::menu::ROW_PAD;
+    let available = sh - 16.0 - y - header_h;
+    if available < row_h {
+        return None;
+    }
+    let rows_h = (row_count.min(PICKER_MAX_VISIBLE_ROWS) as f32 * row_h).min(available);
+    Some(PickerGeometry {
+        header: (x, y, width, header_h),
+        rows: (x, y + header_h, width, rows_h),
+    })
+}
+
+/// The results rectangle shares its x and width with the query header.
 pub(super) fn picker_context_menu(
     mut list: PickerList,
     surface: (f32, f32),
     cell: (f32, f32),
+    top_chrome: f32,
 ) -> Option<ContextMenu> {
-    let (surface_w, surface_h) = surface;
-    let (cell_w, cell_h) = cell;
-    let input_height = cell_h + 10.0;
-    let list_surface = (surface_w, (surface_h - input_height - 4.0).max(0.0));
-    if !context_menu_surface_can_fit_row(list_surface, cell) || list.rows.is_empty() {
-        return None;
-    }
-
-    let row_height = cell_h + kettle_render::menu::ROW_PAD;
-    let max_columns = list
-        .rows
-        .iter()
-        .map(kettle_render::menu_row_chars)
-        .max()
-        .unwrap_or(0) as f32;
-    let natural_width = kettle_render::menu::panel_width(max_columns, cell_w);
-    let natural_height = row_height * list.rows.len().min(PICKER_MAX_VISIBLE_ROWS) as f32;
-    let panel = clamp_context_menu_panel((natural_width, natural_height), list_surface);
-    let max_columns = kettle_render::menu::panel_columns(panel.0, cell_w);
+    let geometry = picker_card_geometry(surface, cell, top_chrome, list.rows.len())?;
+    let (x, y, width, height) = geometry.rows;
+    let row_height = cell.1 + kettle_render::menu::ROW_PAD;
+    let max_columns = kettle_render::menu::panel_columns(width, cell.0);
     for row in &mut list.rows {
         fit_context_menu_row(row, max_columns);
     }
     let (_, content_h) = kettle_render::menu::scroll_content(
         row_height * list.rows.len() as f32,
-        panel.1,
+        height,
         row_height,
     );
     let scroll_offset = picker_scroll_offset(list.rows.len(), list.selected, content_h, row_height);
-    let requested_anchor = (
-        (surface_w - panel.0) * 0.5,
-        (list_surface.1 - panel.1 - 4.0).max(4.0),
-    );
-    let anchor = clamp_context_menu_anchor(requested_anchor, panel, list_surface);
     Some(ContextMenu {
-        anchor,
+        anchor: (x, y),
         rows: list.rows,
         highlight: list.selected,
         scroll_offset,
-        panel_w_clamped: panel.0,
-        panel_h_clamped: panel.1,
+        panel_w_clamped: width,
+        panel_h_clamped: height,
         a11y_label: None,
+        picker_header_height: geometry.header.3,
     })
 }
 
@@ -495,12 +537,13 @@ pub(super) fn picker_overlay_context_menu(
     pickers: [Option<PickerList>; 4],
     surface: (f32, f32),
     cell: (f32, f32),
+    top_chrome: f32,
 ) -> Option<ContextMenu> {
     pickers
         .into_iter()
         .flatten()
         .next()
-        .and_then(|list| picker_context_menu(list, surface, cell))
+        .and_then(|list| picker_context_menu(list, surface, cell, top_chrome))
 }
 
 #[derive(Clone, Copy)]
@@ -633,6 +676,19 @@ pub(super) fn apply_picker_pointer(
 }
 
 impl App {
+    pub(super) fn picker_top_chrome(&self, ws: &WindowState) -> f32 {
+        let tabs = if self.cfg.tab_bar_pos == kettle_config::TabBarPos::Top {
+            self.tab_bar_h(ws)
+        } else {
+            0.0
+        };
+        tabs + if self.cfg.status_bar == kettle_config::StatusBarMode::Top {
+            self.status_bar_h(ws)
+        } else {
+            0.0
+        }
+    }
+
     pub(super) fn picker_pointer(
         &mut self,
         ws: &mut WindowState,
@@ -656,7 +712,8 @@ impl App {
             })
             .unwrap_or((800.0, 600.0));
         let cell = self.menu_cell(ws);
-        let Some(menu) = picker_context_menu(list, surface, cell) else {
+        let Some(menu) = picker_context_menu(list, surface, cell, self.picker_top_chrome(ws))
+        else {
             return false;
         };
         let activate = matches!(event, PickerPointer::Press)

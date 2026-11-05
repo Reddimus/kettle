@@ -11,6 +11,21 @@
 /// is found in order; higher = better. An empty pattern matches everything
 /// with a neutral score so callers can show the full list.
 pub fn score(pattern: &str, candidate: &str) -> Option<i32> {
+    score_with_matches(pattern, candidate, |_| {})
+}
+
+/// Unicode scalar positions chosen by the same greedy subsequence as scoring.
+pub fn matched_char_positions(pattern: &str, candidate: &str) -> Option<Vec<usize>> {
+    let mut positions = Vec::new();
+    score_with_matches(pattern, candidate, |index| positions.push(index))?;
+    Some(positions)
+}
+
+fn score_with_matches(
+    pattern: &str,
+    candidate: &str,
+    mut matched: impl FnMut(usize),
+) -> Option<i32> {
     if pattern.is_empty() {
         return Some(0);
     }
@@ -51,6 +66,7 @@ pub fn score(pattern: &str, candidate: &str) -> Option<i32> {
         if prev_match == Some(ci.saturating_sub(1)) && ci > 0 {
             bonus += 4;
         }
+        matched(ci);
         total += bonus;
         prev_match = Some(ci);
         pi += 1;

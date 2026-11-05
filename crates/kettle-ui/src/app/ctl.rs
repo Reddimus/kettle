@@ -1282,6 +1282,7 @@ impl App {
             })
             .cloned();
         let diagnostic_overlay = self.overlay(target, false);
+        let picker = picker_diagnostic_geometry(&diagnostic_overlay);
         let settings = diagnostic_overlay.settings.as_ref().map(|settings| {
             let geometry = kettle_render::settings_panel_geometry(
                 settings,
@@ -1550,6 +1551,12 @@ impl App {
                 // (macOS). Timing, geometry and counts only.
                 "cursor_blink": self.cursor_blink_diagnostics(target),
         });
+        geometry["picker"] = picker.into();
+        geometry["text_field"] = diagnostic_overlay
+            .text_field
+            .as_ref()
+            .map(|field| serde_json::json!({"rect": rect_json(field.rect)}))
+            .into();
         geometry["confirmation"] = serde_json::json!(confirmation);
         if let serde_json::Value::Object(fields) = &mut geometry {
             if let Some(serde_json::Value::Object(tab_bar)) = fields.get_mut("tab_bar") {
@@ -3674,4 +3681,23 @@ pub(super) fn ctl_input_error(result: PaneInputResult) -> Option<(&'static str, 
             "pane input transport failed; the pane is being closed",
         )),
     }
+}
+
+/// Geometry diagnostics omit query contents and command labels.
+pub(super) fn picker_diagnostic_geometry(overlay: &Overlay) -> Option<serde_json::Value> {
+    let menu = overlay
+        .context_menu
+        .as_ref()
+        .filter(|menu| menu.picker_header_height > 0.0)?;
+    let rect_json = |(x, y, w, h): kettle_render::Rect4| serde_json::json!({"x": x, "y": y, "width": w, "height": h});
+    Some(serde_json::json!({
+        "rect": rect_json(menu.card_rect()),
+        "rows_rect": rect_json(menu.rows_rect()),
+        "rows": menu.rows.iter().enumerate().filter_map(|(index, row)| {
+            menu.visible_row_rect(index).map(|rect| serde_json::json!({
+                "index": index, "rect": rect_json(rect), "enabled": row.enabled,
+                "selected": index == menu.highlight,
+            }))
+        }).collect::<Vec<_>>(),
+    }))
 }

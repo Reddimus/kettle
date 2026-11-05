@@ -184,6 +184,7 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
         context_menu: Some(kettle_render::ContextMenu {
             anchor: (0.0, 0.0),
             a11y_label: None,
+            picker_header_height: 0.0,
             rows: [
                 ("Copy", false, true),
                 ("", true, false),
@@ -193,6 +194,7 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
             .into_iter()
             .map(
                 |(label, separator, enabled)| kettle_render::ContextMenuRow {
+                    matched_chars: None,
                     label: label.into(),
                     separator,
                     enabled,
@@ -282,6 +284,8 @@ fn ui_geometry_exposes_modal_accessibility_and_settings_scroll_without_values() 
         "\"visible_lines\":",
         "\"focused_rect\":",
         "\"accessibility\": accessibility",
+        "geometry[\"picker\"] = picker",
+        "geometry[\"text_field\"] = diagnostic_overlay",
         "\"render_uploads\": target.renderer.as_ref().map(",
         "\"frames_presented\": u.frames_presented",
         "\"buffer_writes\": u.buffer_writes",
@@ -721,6 +725,7 @@ fn accessibility_reactivation_invalidates_published_tree() {
 #[test]
 fn modal_text_inputs_expose_their_text_and_selection() {
     let field = |text: &str, cursor_byte, selection| kettle_render::TextFieldOverlay {
+        picker_header: false,
         text: text.into(),
         cursor_byte,
         selection,
@@ -963,6 +968,7 @@ fn settings_inline_edit_exposes_text_caret_and_actions() {
             footer_note: None,
         }),
         text_field: Some(kettle_render::TextFieldOverlay {
+            picker_header: false,
             text: "/tmp/image.png".into(),
             cursor_byte: 4,
             selection: Some((4, 14)),
@@ -1167,4 +1173,76 @@ fn accessibility_editor_runs_keep_oversized_graphemes_atomic() {
     editor.move_right(false, false);
     editor.move_right(false, false);
     assert_eq!(editor.cursor(), 402);
+}
+
+#[test]
+fn picker_accessibility_bounds_follow_header_rows_and_scroll() {
+    let menu = picker_context_menu(
+        layout_picker_list(
+            "",
+            20,
+            &(0..30)
+                .map(|index| format!("layout-{index}"))
+                .collect::<Vec<_>>(),
+            &EN_TEXT,
+        ),
+        (640.0, 820.0),
+        (8.0, 16.0),
+        46.0,
+    )
+    .unwrap();
+    let card_rect = menu.card_rect();
+    let header = (card_rect.0, card_rect.1, card_rect.2, 30.0);
+    let overlay = kettle_render::Overlay {
+        layout_picker_query: Some(String::new()),
+        text_field: Some(kettle_render::TextFieldOverlay {
+            picker_header: true,
+            rect: header,
+            text: String::new(),
+            cursor_byte: 0,
+            selection: None,
+            prefix: String::new(),
+            hint: String::new(),
+            horizontal_scroll: 0,
+            accent_palette: 0,
+        }),
+        context_menu: Some(menu),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (640.0, 820.0), (8.0, 24.0), 1.0, &EN_TEXT);
+    let bounds = |(x, y, w, h): kettle_render::Rect4| {
+        accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
+    };
+    let input = projection
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == accesskit::Role::TextInput)
+        .unwrap();
+    assert_eq!(input.1.bounds(), Some(bounds(header)));
+    let menu = overlay.context_menu.as_ref().unwrap();
+    for (index, _) in menu.rows.iter().enumerate() {
+        let node = &projection
+            .nodes
+            .iter()
+            .find(|(id, _)| {
+                *id == super::accessibility_modal_id(super::MODAL_KIND_LAYOUTS, index + 3)
+            })
+            .unwrap()
+            .1;
+        assert_eq!(
+            node.bounds(),
+            menu.visible_row_rect(index).map(bounds)
+        );
+        assert_eq!(
+            node.is_hidden(),
+            menu.visible_row_rect(index).is_none()
+        );
+    }
+    let dialog = projection
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == accesskit::Role::Dialog)
+        .unwrap();
+    assert_eq!(dialog.1.bounds(), Some(bounds(card_rect)));
 }

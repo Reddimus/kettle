@@ -268,6 +268,7 @@ impl App {
                 [palette_picker, theme_picker, layout_picker, ssh_picker],
                 surface,
                 self.menu_cell(ws),
+                self.picker_top_chrome(ws),
             )
         });
         // Marshal the in-progress Edit-title state for

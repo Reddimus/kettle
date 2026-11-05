@@ -651,6 +651,7 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
         ],
         (480.0, 240.0),
         (8.0, 16.0),
+        0.0,
     )
     .expect("an active command picker must install the shared vertical panel");
 
@@ -665,6 +666,7 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
         [None, Some(themes), None, None],
         (480.0, 240.0),
         (8.0, 16.0),
+        0.0,
     )
     .expect("an active theme picker must install the shared vertical panel");
     assert_eq!(menu.rows.len(), kettle_config::Theme::list().len());
@@ -1171,6 +1173,7 @@ fn oversized_menu_hint_is_removed_before_label_ellipsis() {
     use unicode_width::UnicodeWidthStr as _;
 
     let mut row = ContextMenuRow {
+        matched_chars: None,
         label: "Visible label".to_string(),
         separator: false,
         enabled: true,

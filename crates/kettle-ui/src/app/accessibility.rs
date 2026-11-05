@@ -1738,7 +1738,13 @@ fn push_picker_accessibility(
     let container_id = accessibility_modal_id(kind, 0);
     let input_id = accessibility_modal_id(kind, 1);
     let list_id = accessibility_modal_id(kind, 2);
+    let bounds = |(x, y, w, h): kettle_render::Rect4| {
+        accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
+    };
     let mut input = Node::new(Role::TextInput);
+    if let Some(field) = field {
+        input.set_bounds(bounds(field.rect));
+    }
     input.set_label(label);
     input.set_value(query);
     push_text_input_run(
@@ -1760,6 +1766,11 @@ fn push_picker_accessibility(
             let id = accessibility_modal_id(kind, index + 3);
             let mut option = Node::new(Role::ListBoxOption);
             option.set_label(row.label.clone());
+            if let Some(rect) = menu.visible_row_rect(index) {
+                option.set_bounds(bounds(rect));
+            } else {
+                option.set_hidden();
+            }
             // The painted hint, such as a shortcut or a theme's appearance.
             if !row.hint.is_empty() {
                 option.set_description(row.hint.clone());
@@ -1776,6 +1787,9 @@ fn push_picker_accessibility(
         }
     }
     let mut list = Node::new(Role::ListBox);
+    if let Some(menu) = menu {
+        list.set_bounds(bounds(menu.rows_rect()));
+    }
     list.set_label(tr.picker_a11y_results(label));
     list.set_children(list_children);
     projection.nodes.push((list_id, list));
@@ -1783,7 +1797,7 @@ fn push_picker_accessibility(
     let mut dialog = Node::new(Role::Dialog);
     dialog.set_label(label);
     dialog.set_children([input_id, list_id]);
-    dialog.set_bounds(full_bounds);
+    dialog.set_bounds(menu.map_or(full_bounds, |menu| bounds(menu.card_rect())));
     projection.roots.push(container_id);
     projection.nodes.push((container_id, dialog));
     if projection.focus.is_none() {

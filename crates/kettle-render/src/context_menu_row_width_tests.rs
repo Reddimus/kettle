@@ -13,6 +13,7 @@ fn menu_width_and_inverse_share_one_formula() {
 #[test]
 fn row_budget_uses_display_columns() {
     let row = ContextMenuRow {
+        matched_chars: None,
         label: "主题 👩‍💻".to_string(),
         separator: false,
         enabled: true,
@@ -29,6 +30,7 @@ fn row_budget_uses_display_columns() {
 #[test]
 fn app_clamped_width_is_authoritative_for_every_render_pass() {
     let row = ContextMenuRow {
+        matched_chars: None,
         label: "short".to_string(),
         separator: false,
         enabled: true,
@@ -42,6 +44,7 @@ fn app_clamped_width_is_authoritative_for_every_render_pass() {
         panel_w_clamped: 237.5,
         panel_h_clamped: 0.0,
         a11y_label: None,
+        picker_header_height: 0.0,
     };
     assert_eq!(context_menu_panel_width(&menu, 9.6), 237.5);
 }
@@ -52,6 +55,7 @@ fn scroll_indicators_follow_the_remaining_suffix() {
         .into_iter()
         .enumerate()
         .map(|(index, separator)| ContextMenuRow {
+            matched_chars: None,
             label: format!("row {index}"),
             separator,
             enabled: !separator,
@@ -89,6 +93,7 @@ fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
     let menu = ContextMenu {
         anchor: (0.0, 0.0),
         rows: vec![ContextMenuRow {
+            matched_chars: None,
             label: String::new(),
             separator: true,
             enabled: false,
@@ -99,6 +104,7 @@ fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
         panel_w_clamped: 1.0,
         panel_h_clamped: 1.0,
         a11y_label: None,
+        picker_header_height: 0.0,
     };
     let theme = kettle_config::Theme::default();
     let quads = menu_chrome_quads(
@@ -155,6 +161,7 @@ fn cut_menu_paints_arrow_inside_reserved_strip() {
         anchor: (10.0, 10.0),
         rows: (0..20)
             .map(|_| ContextMenuRow {
+                matched_chars: None,
                 label: "Command".into(),
                 hint: String::new(),
                 separator: false,
@@ -166,6 +173,7 @@ fn cut_menu_paints_arrow_inside_reserved_strip() {
         panel_w_clamped: 200.0,
         panel_h_clamped: 200.0,
         a11y_label: None,
+        picker_header_height: 0.0,
     };
     let arrows = |menu: &ContextMenu| {
         menu_chrome_quads(
@@ -200,6 +208,7 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
             anchor: (10.0, 10.0),
             rows: (0..10)
                 .map(|_| ContextMenuRow {
+                    matched_chars: None,
                     label: "row".into(),
                     separator: false,
                     enabled: true,
@@ -211,6 +220,7 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
             panel_w_clamped: 200.0,
             panel_h_clamped: panel_h,
             a11y_label: None,
+            picker_header_height: 0.0,
         };
         let (inset, _) = menu::scroll_content(280.0, panel_h, 28.0);
         // Shadow, panel and four border quads precede the two arrows.
@@ -238,5 +248,80 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn ordinary_menu_spans_keep_default_color_and_unicode_matches_use_scalars() {
+    let mut row = ContextMenuRow {
+        label: "Cerrar pestaña".into(),
+        hint: String::new(),
+        separator: false,
+        enabled: true,
+        matched_chars: None,
+    };
+    assert_eq!(
+        super::overlays::menu_label_spans(&row),
+        vec![("Cerrar pestaña", false)]
+    );
+    let accent = kettle_config::Rgb::new(1, 2, 3);
+    let plain_key = super::overlays::menu_match_key(&row, accent);
+    row.matched_chars = Some(std::iter::once(11..13).collect());
+    let spans = super::overlays::menu_label_spans(&row);
+    assert_eq!(
+        spans
+            .iter()
+            .filter(|(_, matched)| *matched)
+            .map(|(text, _)| *text)
+            .collect::<String>(),
+        "añ"
+    );
+    assert_ne!(plain_key, super::overlays::menu_match_key(&row, accent));
+    assert_ne!(
+        super::overlays::menu_match_key(&row, accent),
+        super::overlays::menu_match_key(&row, kettle_config::Rgb::new(3, 2, 1))
+    );
+}
+
+#[test]
+fn picker_surface_encloses_header_and_selection_stays_inside_rounded_corners() {
+    let theme = kettle_config::Theme::default();
+    let menu = ContextMenu {
+        anchor: (140.0, 100.0),
+        rows: vec![ContextMenuRow {
+            label: "one".into(),
+            separator: false,
+            enabled: true,
+            hint: String::new(),
+            matched_chars: None,
+        }],
+        highlight: 0,
+        scroll_offset: 0,
+        panel_w_clamped: 360.0,
+        panel_h_clamped: 28.0,
+        picker_header_height: 30.0,
+        a11y_label: None,
+    };
+    let surfaces = super::overlays::picker_surfaces(&menu, &theme, 8.0).unwrap();
+    assert_eq!(surfaces[1].pos, [140.0, 70.0]);
+    assert_eq!(surfaces[1].size, [360.0, 58.0]);
+    assert_eq!(surfaces[1].params[..2], [8.0, 1.0]);
+    let quads = menu_chrome_quads(
+        &menu,
+        &theme,
+        theme.accent,
+        8.0,
+        16.0,
+        &mut super::chrome::Colors::default(),
+        true,
+    );
+    assert!(quads.iter().any(|quad| quad.pos[1] > 125.0));
+    for quad in quads.iter().filter(|quad| quad.pos[1] > 125.0) {
+        assert!(
+            quad.pos[0] > 141.0,
+            "the selected rail must not square off the lower corner"
+        );
+        assert!(quad.pos[0] + quad.size[0] < 499.0);
+        assert!(quad.pos[1] + quad.size[1] <= 127.0);
     }
 }

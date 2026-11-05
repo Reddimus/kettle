@@ -1506,24 +1506,28 @@ impl App {
                 .zip(hints)
                 .map(|(it, hint)| match it {
                     ContextMenuItem::Item { label, enabled, .. } => ContextMenuRow {
+                        matched_chars: None,
                         label: (*label).to_string(),
                         separator: false,
                         enabled: *enabled,
                         hint,
                     },
                     ContextMenuItem::DynamicItem { label, enabled, .. } => ContextMenuRow {
+                        matched_chars: None,
                         label: label.clone(),
                         separator: false,
                         enabled: *enabled,
                         hint,
                     },
                     ContextMenuItem::Separator => ContextMenuRow {
+                        matched_chars: None,
                         label: String::new(),
                         separator: true,
                         enabled: false,
                         hint: String::new(),
                     },
                     ContextMenuItem::LuaItem { label, .. } => ContextMenuRow {
+                        matched_chars: None,
                         label: label.clone(),
                         separator: false,
                         enabled: true,
@@ -1531,12 +1535,14 @@ impl App {
                     },
                     ContextMenuItem::ConfigItem { label, .. }
                     | ContextMenuItem::ReconnectItem { label, .. } => ContextMenuRow {
+                        matched_chars: None,
                         label: label.clone(),
                         separator: false,
                         enabled: true,
                         hint: String::new(),
                     },
                     ContextMenuItem::Submenu { label, .. } => ContextMenuRow {
+                        matched_chars: None,
                         // Append "▸" to signal "this row opens a submenu".
                         label: format!("{label} ▸"),
                         separator: false,
@@ -1548,6 +1554,7 @@ impl App {
                     // submenu's items in.
                     ContextMenuItem::ProfileChoice { label, .. }
                     | ContextMenuItem::WindowChoice { label, .. } => ContextMenuRow {
+                        matched_chars: None,
                         label: label.clone(),
                         separator: false,
                         enabled: true,
@@ -1555,6 +1562,7 @@ impl App {
                     },
                     // New-tab ▾ shell choice — a normal clickable row.
                     ContextMenuItem::NewTabShell { label, .. } => ContextMenuRow {
+                        matched_chars: None,
                         label: label.clone(),
                         separator: false,
                         enabled: true,
@@ -1563,6 +1571,7 @@ impl App {
                     // URL-aware leading rows ("Open Link" /
                     // "Copy Link Address") — normal clickable rows.
                     ContextMenuItem::UrlItem { label, .. } => ContextMenuRow {
+                        matched_chars: None,
                         label: (*label).to_string(),
                         separator: false,
                         enabled: true,
@@ -1571,6 +1580,7 @@ impl App {
                     // A card's media rows — normal clickable rows.
                     ContextMenuItem::Media { label, .. }
                     | ContextMenuItem::Preview { label, .. } => ContextMenuRow {
+                        matched_chars: None,
                         label: (*label).to_string(),
                         separator: false,
                         enabled: true,
@@ -1579,6 +1589,7 @@ impl App {
                     // Dropdown parity: Info renders as a dimmed
                     // (disabled-style) static line.
                     ContextMenuItem::Info { label } => ContextMenuRow {
+                        matched_chars: None,
                         label: label.clone(),
                         separator: false,
                         enabled: false,
@@ -1605,6 +1616,7 @@ impl App {
             panel_w_clamped,
             panel_h_clamped,
             a11y_label: ws.context_menu_a11y_label.clone(),
+            picker_header_height: 0.0,
         })
     }
 
@@ -2792,7 +2804,17 @@ pub(super) fn fit_context_menu_row(row: &mut ContextMenuRow, max_columns: usize)
     } else {
         hint_columns
     };
-    row.label = ellipsize_menu_label(&row.label, max_columns.saturating_sub(hint_columns));
+    let fitted = ellipsize_menu_label(&row.label, max_columns.saturating_sub(hint_columns));
+    if fitted != row.label {
+        let kept = fitted.chars().count().saturating_sub(1);
+        if let Some(ranges) = &mut row.matched_chars {
+            ranges.retain_mut(|range| {
+                range.end = range.end.min(kept);
+                range.start < range.end
+            });
+        }
+    }
+    row.label = fitted;
 }
 
 pub(super) fn scale_context_menu_anchor(

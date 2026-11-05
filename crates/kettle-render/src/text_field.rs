@@ -7,6 +7,9 @@ use crate::search::{
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextFieldOverlay {
+    /// A contained picker header keeps the complete hint only when the query
+    /// and a caret-sized gap fit beside it.
+    pub picker_header: bool,
     pub text: String,
     pub cursor_byte: usize,
     pub selection: Option<(usize, usize)>,
@@ -26,20 +29,31 @@ pub struct TextFieldLayout {
     pub selection: Vec<Rect4>,
 }
 
-/// The prefix and hint as painted: each fitted to at most 30% of the field,
-/// the prefix with an ellipsis and the key hint by dropping segments before
-/// its way out. Measuring and painting both use these strings, so a long or
-/// translated label is shortened instead of overflowing its slot.
+/// Prefixes fit at most 30% of the field. Picker headers show the whole hint
+/// beside a fitting query or drop it; other fields fit hints by segments.
+/// Measuring and painting share these strings and their clipped slots.
 pub fn text_field_labels(field: &TextFieldOverlay, cw: f32) -> (String, String) {
     let budget = if cw > 0.0 {
         (field.rect.2.max(0.0) * 0.3 / cw).floor() as usize
     } else {
         0
     };
-    (
-        super::fit_single_line_label(&field.prefix, budget),
-        super::fit_key_hint(&field.hint, budget),
-    )
+    let prefix = super::fit_single_line_label(&field.prefix, budget);
+    let hint = if field.picker_header {
+        let needed = super::display_width(&prefix)
+            + super::display_width(&field.text).max(1)
+            + 2
+            + super::display_width(&field.hint)
+            + 2;
+        if needed as f32 * cw <= field.rect.2 && !field.hint.is_empty() {
+            format!("{}  ", field.hint)
+        } else {
+            String::new()
+        }
+    } else {
+        super::fit_key_hint(&field.hint, budget)
+    };
+    (prefix, hint)
 }
 
 pub fn text_field_rects(field: &TextFieldOverlay, cw: f32) -> [Rect4; 3] {
@@ -202,6 +216,7 @@ mod tests {
             {
                 for horizontal_scroll in [0, 1, 20] {
                     let field = TextFieldOverlay {
+                        picker_header: false,
                         text: text.into(),
                         cursor_byte: cursor,
                         selection: Some((0, text.len())),
@@ -277,6 +292,7 @@ mod tests {
                 .chain([text.len()])
             {
                 let field = TextFieldOverlay {
+                    picker_header: false,
                     text: text.into(),
                     cursor_byte: cursor,
                     selection: Some((0, cursor)),
@@ -323,6 +339,7 @@ mod tests {
         let cw = 8.0;
         for width in [120.0, 400.0, 875.0, 2000.0] {
             let field = TextFieldOverlay {
+                picker_header: false,
                 text: "spilt".into(),
                 cursor_byte: 3,
                 selection: None,
@@ -382,6 +399,7 @@ mod tests {
             let tr = kettle_i18n::Translator::new(language);
             for width in [0.0, 1.0, 40.0, 300.0, 800.0] {
                 let field = TextFieldOverlay {
+                    picker_header: false,
                     text: String::new(),
                     cursor_byte: 0,
                     selection: None,
@@ -397,6 +415,39 @@ mod tests {
                 assert!((hint.0 + hint.2 - width).abs() < 0.001);
                 assert!(editor.2 >= width * 0.39);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod picker_header_tests {
+    use super::*;
+    #[test]
+    fn picker_hint_is_complete_or_absent_without_overlapping_query() {
+        for hint in [
+            "Enter run · Tab/↑↓ select · Esc cancel",
+            "Enter ejecutar · Tab/↑↓ seleccionar · Esc cancelar",
+        ] {
+            let mut field = TextFieldOverlay {
+                picker_header: true,
+                text: "año".into(),
+                cursor_byte: 4,
+                selection: None,
+                horizontal_scroll: 0,
+                rect: (16.0, 70.0, 720.0, 30.0),
+                prefix: "  ⌘ ".into(),
+                hint: hint.into(),
+                accent_palette: 5,
+            };
+            assert_eq!(text_field_labels(&field, 8.0).1.trim_end(), hint);
+            let slots = text_field_rects(&field, 8.0);
+            assert!(slots[1].2 >= 5.0 * 8.0);
+            assert_eq!(slots[1].0 + slots[1].2, slots[2].0);
+            field.rect.2 = 328.0;
+            assert!(text_field_labels(&field, 8.0).1.is_empty());
+            field.rect.2 = 720.0;
+            field.text = "query".repeat(30);
+            assert!(text_field_labels(&field, 8.0).1.is_empty());
         }
     }
 }

@@ -160,7 +160,9 @@ impl App {
         } else {
             field_hit
                 || open_picker_list(ws, &self.cfg, &self.ui_text, self.update_notice().as_ref())
-                    .and_then(|list| picker_context_menu(list, surface, (cw, ch)))
+                    .and_then(|list| {
+                        picker_context_menu(list, surface, (cw, ch), self.picker_top_chrome(ws))
+                    })
                     .is_some_and(|menu| {
                         rect_contains(
                             (
@@ -220,6 +222,13 @@ impl App {
             rect = self.title_edit_rect(ws);
             kettle_render::title_edit_prefix(title_edit_label(state.scope, &self.ui_text))
         };
+        let picker = ws.palette_input.is_some()
+            || ws.theme_picker_input.is_some()
+            || ws.layout_picker_input.is_some()
+            || ws.ssh_input.is_some();
+        if picker {
+            rect = picker_card_geometry((sw, sh), (cw, ch), self.picker_top_chrome(ws), 1)?.header;
+        }
         if ws.settings_text_edit.is_none() {
             use kettle_i18n::Text as T;
             let hints: &[(&str, T)] = if ws.palette_input.is_some() {
@@ -254,6 +263,7 @@ impl App {
         }
         let (text, cursor_byte, selection) = project_modal_editor(editor, ws.ime_preedit.as_ref());
         let mut field = kettle_render::TextFieldOverlay {
+            picker_header: picker,
             text,
             cursor_byte,
             selection,
@@ -302,7 +312,17 @@ impl App {
         };
         let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
         let slot = kettle_render::text_field_rects(&field, self.overlay_text_cell_width(ws))[1];
-        if press && !rect_contains(slot, x, y) {
+        if press
+            && !rect_contains(
+                if field.picker_header {
+                    field.rect
+                } else {
+                    slot
+                },
+                x,
+                y,
+            )
+        {
             return false;
         }
         if ws.ime_preedit.is_some() {
@@ -332,7 +352,7 @@ impl App {
         let layout = renderer.measure_text_field(&field);
         let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
         let (ex, ey, ew, eh) = layout.editor;
-        if press && !(x >= ex && x < ex + ew && y >= ey && y < ey + eh) {
+        if press && !field.picker_header && !(x >= ex && x < ex + ew && y >= ey && y < ey + eh) {
             return false;
         }
         let byte = crate::text_editor::nearest_stop_byte(&layout.stops, x).unwrap_or(0);

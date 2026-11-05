@@ -526,6 +526,7 @@ pub struct Renderer {
     context_menu_buffers: Vec<TextBuffer>,
     /// Last shaped text per menu row; unchanged rows skip reshaping.
     context_menu_texts: Vec<String>,
+    context_menu_match_keys: Vec<u64>,
     /// Dropdown-parity: one buffer per row's right-aligned shortcut
     /// hint (empty-hint rows shape nothing). Pooled like its sibling.
     context_menu_hint_buffers: Vec<TextBuffer>,
@@ -637,6 +638,7 @@ pub struct Renderer {
     menu_text_renderer: TextRenderer,
     rounded_surfaces: rounded_surface::RoundedSurfacePipeline,
     toast_surfaces: rounded_surface::RoundedSurfacePipeline,
+    picker_surfaces: rounded_surface::RoundedSurfacePipeline,
     transport_surface_count: u32,
     confirmation_text_renderer: TextRenderer,
     confirmation_text: confirm::ConfirmText,
@@ -2577,6 +2579,8 @@ impl Renderer {
             // render passes share this helper so text, chrome, and hit testing
             // cannot drift by a fractional cell after ellipsis.
             let panel_w = context_menu_panel_width(menu, cw);
+            let accent = self.ui_accent(cfg, theme);
+            self.context_menu_match_keys.resize(menu.rows.len(), 0);
             // Row height matches a comfortable click target (~28-32 px
             // on default cell metrics).
             let row_h = ch + 12.0;
@@ -2590,13 +2594,33 @@ impl Renderer {
                 // Re-shape only when the row's label actually changed. An open
                 // menu's rows are byte-stable, so blink/hover-driven redraws
                 // need no reshape.
-                if self.context_menu_texts[i] != row.label {
-                    buf.set_text(
-                        &row.label,
-                        &Attrs::new().family(Family::Name(&family)),
-                        Shaping::Advanced,
-                        None,
-                    );
+                let match_key = overlays::menu_match_key(row, accent);
+                if self.context_menu_texts[i] != row.label
+                    || self.context_menu_match_keys[i] != match_key
+                {
+                    let base = Attrs::new().family(Family::Name(&family));
+                    if row.matched_chars.is_none() {
+                        buf.set_text(&row.label, &base, Shaping::Advanced, None);
+                    } else {
+                        let spans = overlays::menu_label_spans(row);
+                        buf.set_rich_text(
+                            spans.iter().map(|(text, matched)| {
+                                (
+                                    *text,
+                                    if *matched {
+                                        base.clone()
+                                            .color(GColor::rgb(accent.r, accent.g, accent.b))
+                                    } else {
+                                        base.clone()
+                                    },
+                                )
+                            }),
+                            &base,
+                            Shaping::Advanced,
+                            None,
+                        );
+                    }
+                    self.context_menu_match_keys[i] = match_key;
                     self.context_menu_texts[i].clone_from(&row.label);
                 }
                 buf.shape_until_scroll(&mut self.font_system, false);
@@ -4154,7 +4178,11 @@ impl Renderer {
         }
 
         if let (Some(field), Some(layout)) = (&overlay.text_field, &field_layout) {
-            if overlay.settings.is_none() {
+            let picker = overlay
+                .context_menu
+                .as_ref()
+                .is_some_and(|menu| menu.picker_header_height > 0.0);
+            if overlay.settings.is_none() && !picker {
                 push_input_bar(
                     &mut menu_q,
                     field.rect,
@@ -4181,7 +4209,18 @@ impl Renderer {
                         right: (slot.0 + slot.2) as i32,
                         bottom: (slot.1 + slot.3) as i32,
                     },
-                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    default_color: {
+                        let color = if picker {
+                            if index == 2 {
+                                self.chrome_colors.muted(theme.foreground, theme.background)
+                            } else {
+                                self.chrome_colors.text(theme.foreground, theme.background)
+                            }
+                        } else {
+                            fg
+                        };
+                        GColor::rgb(color.r, color.g, color.b)
+                    },
                     custom_glyphs: &[],
                 });
             }
@@ -4441,6 +4480,11 @@ impl Renderer {
                 lane.pane.hash(&mut h);
                 if let Some(text) = self.lane_texts.get(&lane.pane) {
                     text.shaped().hash(&mut h);
+                }
+            }
+            if let Some(menu) = overlay.context_menu.as_ref() {
+                for row in &menu.rows {
+                    overlays::menu_match_key(row, self.ui_accent(cfg, theme)).hash(&mut h);
                 }
             }
             context_menu_text_damage_key(
@@ -4807,6 +4851,18 @@ impl Renderer {
             &self.gpu.queue,
             [sw, sh],
             toast_surfaces
+                .as_ref()
+                .map_or(&[][..], |surfaces| &surfaces[..]),
+        );
+        let picker_surfaces = overlay
+            .context_menu
+            .as_ref()
+            .and_then(|menu| overlays::picker_surfaces(menu, theme, cw));
+        self.picker_surfaces.upload(
+            &self.gpu.device,
+            &self.gpu.queue,
+            [sw, sh],
+            picker_surfaces
                 .as_ref()
                 .map_or(&[][..], |surfaces| &surfaces[..]),
         );
