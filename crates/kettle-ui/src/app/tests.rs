@@ -371,6 +371,7 @@ include!("media_tests.rs");
 include!("menus_tests.rs");
 include!("modals_tests.rs");
 include!("notifications_tests.rs");
+include!("native_menu_tests.rs");
 include!("output_tests.rs");
 include!("paste_tests.rs");
 include!("pickers_tests.rs");

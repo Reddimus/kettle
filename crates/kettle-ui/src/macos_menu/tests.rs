@@ -329,7 +329,8 @@ fn native_equivalents_cannot_shadow_configured_chords() {
 #[test]
 fn menu_equivalents_leave_yielded_keys_on_the_original_pane_path() {
     let native = kettle_test_support::production_source(include_str!("native.rs"));
-    let route = native
+    let equivalents = kettle_test_support::production_source(include_str!("equivalents.rs"));
+    let route = equivalents
         .split("fn perform_key_equivalent(")
         .nth(1)
         .unwrap()
@@ -337,6 +338,8 @@ fn menu_equivalents_leave_yielded_keys_on_the_original_pane_path() {
         .next()
         .unwrap();
     assert!(route.contains("self.ivars().performKeyEquivalent(event)"));
+    assert!(route.contains(".servicesMenu()"));
+    assert!(route.contains("services.performKeyEquivalent(event)"));
     assert!(!route.contains("super"));
     assert!(native.contains("native.addItem(&make_item(mtm, title, selector, *shortcut))"));
     assert!(native.contains("if matches!(command, Command::Kettle(_))"));

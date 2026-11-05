@@ -2786,11 +2786,21 @@ cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render --no-fail-fast
 `cargo test -p kettle-ui macos_menu` runs the pure menu model on every platform:
 English and Spanish structure, translated titles and separators, action mapping,
 Cmd-only hints following remaps and unbinds, and focused-window availability.
-Source guards check that AppKit only performs native application equivalents,
+`cargo test -p kettle-ui menu_paste_availability` exercises writable local and
+cross-window broadcast recipients, read-only focus, and group exclusions using
+the same recipient selection as paste delivery.
+Source guards check that AppKit only performs native application and Services equivalents,
 leaving Kettle shortcuts on the original keyboard dispatch and terminal-writer
 path, and that resume, focus/selection dispatch and config reload reconcile the
-menu while retaining Services and Windows registration. Existing keyboard tests
-exercise program-ownership yielding and terminal encoding. These checks do not
-establish live AppKit menu interaction; native CI must compile the AppKit layer,
-and an unlocked macOS session is needed for mouse, keyboard, Services and window
-list acceptance.
+menu while retaining Services and Windows registration.
+`cargo test -p kettle-ui --test macos_menu_native` runs the production menu subclass
+on the process main thread on macOS. It dispatches synthetic AppKit key events
+to native commands and a nested, registered Services menu, checks disabled
+Services items, and verifies that enabled and disabled Kettle equivalents are
+declined. It uses a process-local Services fixture without installing a Quick
+Action; other platforms report this test as skipped. The harness-free executable
+also honors a test-name substring filter.
+Existing keyboard tests exercise program-ownership yielding and terminal
+encoding. These checks do not establish physical keyboard delivery or live
+Quick Action invocation; an unlocked macOS session is needed for mouse,
+keyboard, System Settings Services shortcuts and window list acceptance.

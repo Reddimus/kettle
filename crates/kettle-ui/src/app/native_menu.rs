@@ -21,10 +21,37 @@ impl App {
                         })
                     }),
                     smart_copy: self.cfg.smart_copy,
-                    writable: pane.is_some_and(|pane| !pane.read_only && !pane.pty_input_failed()),
+                    writable: ws.is_some_and(|ws| paste_is_writable(ws, self.windows.values())),
                     renderer: ws.is_some_and(|ws| ws.renderer.is_some()),
                 };
             crate::macos_menu::sync(&self.proxy, &self.cfg, context);
         }
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn paste_is_writable<'a>(
+    ws: &WindowState,
+    other_windows: impl Iterator<Item = &'a WindowState>,
+) -> bool {
+    let writable = |pane: &Pane| !pane.read_only && !pane.pty_input_failed();
+    if !ws.mux.is_broadcast_on() {
+        return ws
+            .mux
+            .active_focus()
+            .and_then(|id| ws.mux.panes.get(&id))
+            .is_some_and(writable);
+    }
+    let any_writable = |mux: &Mux, targets: Vec<u64>| {
+        targets
+            .into_iter()
+            .any(|id| mux.panes.get(&id).is_some_and(writable))
+    };
+    any_writable(&ws.mux, ws.mux.broadcast_target_ids())
+        || (Mux::scope_crosses_windows(&ws.mux.broadcast)
+            && other_windows
+                .filter(|other| other.seq != ws.seq)
+                .any(|other| {
+                    any_writable(&other.mux, other.mux.foreign_target_ids(&ws.mux.broadcast))
+                }))
 }

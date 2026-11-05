@@ -2,14 +2,18 @@
 use std::cell::RefCell;
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol, Sel};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{ClassType, DeclaredClass, declare_class, msg_send_id, mutability, sel};
-use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem};
+use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSString};
 use winit::event_loop::EventLoopProxy;
 
 use super::{Command, Key, Menu, Mods, NativeAction, Row, Trigger};
 use crate::app::UserEvent;
+
+#[path = "equivalents.rs"]
+mod equivalents;
+use equivalents::new_menu;
 
 struct State {
     model: Vec<Menu>,
@@ -52,36 +56,6 @@ declare_class!(
                     let _ = state.proxy.send_event(UserEvent::MenuCommand(action.clone()));
                 }
             });
-        }
-    }
-);
-
-declare_class!(
-    struct MenuBar;
-    // SAFETY: declare_class provides NSMenu layout and main-thread-only AppKit access.
-    unsafe impl ClassType for MenuBar {
-        type Super = NSMenu;
-        type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "KettleMenuBar";
-    }
-    impl DeclaredClass for MenuBar {
-        // An isolated menu containing only native application commands. Calling
-        // super would also perform Kettle equivalents before winit can yield.
-        type Ivars = Retained<NSMenu>;
-    }
-    // SAFETY: NSObject's protocol implementation is inherited unchanged.
-    unsafe impl NSObjectProtocol for MenuBar {}
-    // SAFETY: this override has NSMenu's BOOL(NSEvent*) signature.
-    unsafe impl MenuBar {
-        #[method(performKeyEquivalent:)]
-        fn perform_key_equivalent(&self, event: &NSEvent) -> Bool {
-            // Only the native About/Hide/Quit menu can consume an equivalent.
-            // Every Kettle equivalent returns NO here and follows the original
-            // NSApplication -> NSWindow -> winit KeyboardInput path, even when
-            // its menu item is disabled. The original event retains keyboard
-            // layout, physical code, repeat and modifiers, as well as key-up.
-            // SAFETY: the ivar is a live NSMenu and event is AppKit's original event.
-            Bool::new(unsafe { self.ivars().performKeyEquivalent(event) })
         }
     }
 );
@@ -150,12 +124,6 @@ fn make_item(
     };
     item.setKeyEquivalentModifierMask(flags);
     item
-}
-
-fn new_menu(mtm: MainThreadMarker, native: &Retained<NSMenu>) -> Retained<MenuBar> {
-    let menu = mtm.alloc::<MenuBar>().set_ivars(native.clone());
-    // SAFETY: this is a newly allocated NSMenu subclass with initialized ivars.
-    unsafe { msg_send_id![super(menu), init] }
 }
 
 pub(super) fn sync(proxy: &EventLoopProxy<UserEvent>, model: Vec<Menu>) {
