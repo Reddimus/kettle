@@ -56,6 +56,7 @@ mod ctl_server;
 // The system fonts, loaded on a thread while the event loop starts.
 mod font_preload;
 mod gpu_diagnostics;
+mod gpu_discovery;
 mod input;
 mod lua;
 mod lua_pattern;

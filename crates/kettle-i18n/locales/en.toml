@@ -626,6 +626,7 @@ settings_note_restart = "Restart Kettle or open a new window to apply pending ch
 settings_press_chord = "Press a chord, Esc to cancel"
 settings_value_always = "Always"
 settings_value_attention = "Attention"
+settings_value_detecting = "Detecting..."
 settings_value_automatic = "Automatic"
 settings_value_automatic_from_wallpaper = "Automatic (from wallpaper)"
 settings_value_automatic_multiple_tabs = "Automatic (multiple tabs)"

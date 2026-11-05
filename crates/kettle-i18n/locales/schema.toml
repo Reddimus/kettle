@@ -1560,6 +1560,9 @@ context = "crates/kettle-ui/src/settings.rs read(): Settings value."
 [messages.settings_value_attention]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value. Bell behavior: requests the user's attention, for example by bouncing the Dock icon."
 
+[messages.settings_value_detecting]
+context = "Settings GPU discovery is still running on a background worker."
+
 [messages.settings_value_automatic]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value. Kettle or the system decides."
 

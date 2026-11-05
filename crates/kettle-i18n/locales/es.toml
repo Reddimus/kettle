@@ -627,6 +627,7 @@ settings_note_restart = "Reiniciar Kettle o abrir una ventana nueva para aplicar
 settings_press_chord = "Pulsar una combinación de teclas; Esc para cancelar"
 settings_value_always = "Siempre"
 settings_value_attention = "Llamar la atención"
+settings_value_detecting = "Detectando..."
 settings_value_automatic = "Automático"
 settings_value_automatic_from_wallpaper = "Automático (según el fondo)"
 settings_value_automatic_multiple_tabs = "Automática (varias pestañas)"

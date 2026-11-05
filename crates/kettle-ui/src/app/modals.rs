@@ -676,7 +676,10 @@ impl App {
                         .settings_text_edit
                         .as_ref()
                         .is_some_and(|e| e.key == f.key);
-                    let value = if editing {
+                    let value = if f.key == "gpu" && self.gpu_discovery_pending {
+                        tr.text(kettle_i18n::Text::SettingsValueDetecting)
+                            .to_string()
+                    } else if editing {
                         String::new()
                     } else if i == fld && nav.capturing {
                         // Capture prompt on the focused keybind row.
@@ -687,7 +690,8 @@ impl App {
                     kettle_render::SettingsRow {
                         label: tr.text(f.label).to_string(),
                         value,
-                        disabled: crate::settings::field_disabled(&self.cfg, f.key),
+                        disabled: crate::settings::field_disabled(&self.cfg, f.key)
+                            || (f.key == "gpu" && self.gpu_discovery_pending),
                     }
                 })
                 .collect(),
@@ -812,7 +816,9 @@ impl App {
                 if f < fcount {
                     let key = cats[cat].fields[f].key;
                     // A dimmed/inapplicable row is a no-op (but consumes the click).
-                    if !crate::settings::field_disabled(&self.cfg, key) {
+                    if !crate::settings::field_disabled(&self.cfg, key)
+                        && !(key == "gpu" && self.gpu_discovery_pending)
+                    {
                         if let Some(nav) = ws.settings_nav.as_mut() {
                             nav.field = f;
                             nav.capturing = false;
@@ -1795,7 +1801,9 @@ impl App {
     ) {
         let field = &cats[cat].fields[fld];
         // A gated/inapplicable row never changes (it's drawn dimmed).
-        if crate::settings::field_disabled(&self.cfg, field.key) {
+        if crate::settings::field_disabled(&self.cfg, field.key)
+            || (field.key == "gpu" && self.gpu_discovery_pending)
+        {
             return;
         }
         if crate::settings::is_keybind(field) {

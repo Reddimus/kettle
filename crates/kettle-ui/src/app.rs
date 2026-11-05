@@ -210,6 +210,8 @@ mod ctl_target_param_tests;
 pub enum UserEvent {
     Wakeup,
     ShellsDetected,
+    GpusDetected(Vec<(String, String)>),
+    CardsTipClaimed(bool),
     /// The paste encoder finished a clipboard image's PNG.
     PastedImageEncoded,
     #[cfg(target_os = "linux")]
@@ -352,6 +354,7 @@ pub struct App {
     /// Seq of the window that has (or most recently had) OS focus. Routes
     /// window-less events (UserEvent wakeups, remote/ctl/Lua commands).
     focused_seq: u64,
+    window_focus_order: VecDeque<u64>,
     /// Next `WindowState::seq` to assign (consumed by `open_window`).
     next_window_seq: u64,
     /// The shared GPU context, cached when window 1's renderer comes up
@@ -364,12 +367,9 @@ pub struct App {
     /// Decided before the first spawn consumes command/cwd.
     launch_override: bool,
     pre_launch_eligible: bool,
-    /// Detected GPUs as `(token, label)` pairs for the Settings →
-    /// Graphics device picker. Enumerated ONCE when the settings overlay first
-    /// opens (a wgpu instance + adapter walk is ~tens of ms — too heavy per
-    /// frame) and cached for the session; `categories()` reads it. Empty until
-    /// the overlay is first opened (the picker then shows just "Automatic").
+    /// Settings adapter choices, filled by the process-wide discovery worker.
     gpu_choices: Vec<(String, String)>,
+    gpu_discovery_pending: bool,
     /// The UI's language, fixed for the process. Kettle-owned text goes
     /// through it; terminal content, user names and config values do not.
     ui_text: kettle_i18n::Translator,
@@ -514,6 +514,7 @@ pub struct App {
     /// construction (and after live reload). Invalid patterns are logged via
     /// `log::warn!` and dropped.
     compiled_triggers: Vec<(regex::Regex, kettle_config::TriggerAction)>,
+    trigger_matches: TriggerMatches,
     /// Last trigger fire, or `None` before the first fire / after a
     /// config reload. Dedupes a fast-arriving match flood without fabricating
     /// an `Instant` before the OS monotonic clock's origin.
@@ -678,6 +679,18 @@ impl ApplicationHandler<UserEvent> for App {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("user_event");
         match ev {
+            UserEvent::CardsTipClaimed(claimed) => self.cards_tip_claimed(claimed),
+            UserEvent::GpusDetected(choices) => {
+                self.gpu_choices = choices;
+                self.gpu_discovery_pending = false;
+                for ws in self.windows.values() {
+                    if ws.settings_nav.is_some()
+                        && let Some(window) = &ws.window
+                    {
+                        window.request_redraw();
+                    }
+                }
+            }
             UserEvent::ShellsDetected => {
                 let Some(shells) = kettle_core::term::cached_shells() else {
                     return;

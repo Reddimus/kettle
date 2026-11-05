@@ -1026,19 +1026,18 @@ impl App {
             // → Settings / palette "Open settings").
             Action::OpenSettings => {
                 self.close_all_modals(ws);
-                // Enumerate GPUs once for the Graphics device picker and cache
-                // them for the session; a wgpu adapter walk is too heavy to
-                // repeat per frame.
-                if self.gpu_choices.is_empty() {
-                    self.gpu_choices = kettle_render::detect_gpus()
-                        .into_iter()
-                        .map(|g| {
-                            (
-                                format!("{:x}:{:x}:{}", g.vendor, g.device, g.name),
-                                format!("{} ({})", g.name, g.kind),
-                            )
-                        })
-                        .collect();
+                if let Some(choices) = crate::gpu_discovery::GPU_DISCOVERY.cached() {
+                    self.gpu_choices = choices.clone();
+                    self.gpu_discovery_pending = false;
+                } else {
+                    self.gpu_discovery_pending = true;
+                    let proxy = self.proxy.clone();
+                    crate::gpu_discovery::GPU_DISCOVERY.request(
+                        crate::gpu_discovery::detect_choices,
+                        move |choices| {
+                            let _ = proxy.send_event(UserEvent::GpusDetected(choices));
+                        },
+                    );
                 }
                 ws.settings_restart_pending = false;
                 ws.settings_nav = Some(crate::settings::SettingsNav::default());
