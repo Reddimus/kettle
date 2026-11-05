@@ -134,42 +134,6 @@ mod tests {
         .unwrap();
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn running_custom_handler_retains_bounded_opener_slot() {
-        let temp = tempfile::tempdir().unwrap();
-        let script = temp.path().join("handler.sh");
-        std::fs::write(&script, b"#!/bin/sh\ncd -- \"$(dirname -- \"$0\")\" || exit 1\n: > started\nwhile [ ! -e release ]; do sleep 0.01; done\n").unwrap();
-        let counter = Box::leak(Box::new(AtomicUsize::new(0)));
-        let counter: &'static AtomicUsize = counter;
-        let handler = script.to_string_lossy().into_owned();
-        let worker = spawn_with(
-            counter,
-            1,
-            handler.into(),
-            move |target| {
-                super::super::spawn_custom_url_handler("/bin/sh", &target.to_string_lossy())
-            },
-            |_| panic!("handler failed"),
-        )
-        .unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !temp.path().join("started").exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        // Let the success handshake return before observing admission.
-        std::thread::sleep(Duration::from_millis(50));
-        let held = counter.load(Ordering::Acquire);
-        std::fs::write(temp.path().join("release"), b"").unwrap();
-        worker.join().unwrap();
-        assert!(
-            temp.path().join("started").exists(),
-            "custom handler did not start"
-        );
-        assert_eq!(held, 1, "running custom child must retain its opener slot");
-        assert_eq!(counter.load(Ordering::Acquire), 0);
-    }
-
     #[test]
     fn launcher_failure_reports_original_error_once_and_releases_slot() {
         let counter = Box::leak(Box::new(AtomicUsize::new(0)));

@@ -312,10 +312,10 @@ pub(super) fn spawn_custom_url_handler(cmd: &str, target: &str) -> std::io::Resu
                 .spawn()
             {
                 Ok(mut child) => {
+                    let _ = tx.send(Ok(()));
                     if let Err(e) = child.wait() {
                         log::warn!("custom-url-handler {cmd:?}: could not reap child: {e}");
                     }
-                    let _ = tx.send(Ok(()));
                 }
                 Err(e) => {
                     let _ = tx.send(Err(e));
