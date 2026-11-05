@@ -2833,6 +2833,35 @@ mod tests {
     }
 
     #[test]
+    fn documented_output_hook_does_not_notify_on_compilation_progress() {
+        for progress in [b"Compiling\n".as_slice(), b"Compiling\r".as_slice()] {
+            let eng = LuaEngine::new("Default").expect("init");
+            let hook = include_str!("../../../docs/examples/init.lua")
+                .lines()
+                .skip_while(|line| !line.starts_with("local last_notify"))
+                .take_while(|line| !line.starts_with("-- 4."))
+                .collect::<Vec<_>>()
+                .join("\n");
+            eng.eval_str(&hook).expect("documented output hook");
+            eng.fire_event(&LuaEvent::Output(7, progress.to_vec()));
+            let commands = eng.drain_commands();
+            assert!(
+                commands.is_empty(),
+                "compilation progress must not announce build completion: {commands:?}"
+            );
+            eng.fire_event(&LuaEvent::Output(7, b"BUILD SUCCESSFUL\n".to_vec()));
+            let commands = eng.drain_commands();
+            assert!(
+                matches!(
+                    commands.as_slice(),
+                    [LuaCommand::Notify { body, .. }] if body == "Build done in pane 7"
+                ),
+                "build completion after progress must notify: {commands:?}"
+            );
+        }
+    }
+
+    #[test]
     fn documented_output_hook_reassembles_chunks_per_pane() {
         let eng = LuaEngine::new("Default").expect("init");
         let hook = include_str!("../../../docs/examples/init.lua")
