@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -100,8 +101,17 @@ def build_manifest(
         raise ValueError(f"stable tag must be vMAJOR.MINOR.PATCH, got {tag!r}")
     if int(match.group(1)) < 4:
         raise ValueError("the three-target manifest is valid only for v4.0.0 and later")
-    if not published_at or any(char in published_at for char in "\r\n"):
-        raise ValueError("published-at must be a non-empty single-line timestamp")
+    if not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
+        r"(?:\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])", published_at
+    ):
+        raise ValueError("published-at must be an RFC 3339 timestamp")
+    try:
+        timestamp = datetime.datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+        if timestamp.year < 1970:
+            raise ValueError("year predates 1970")
+    except ValueError as error:
+        raise ValueError("published-at must be an RFC 3339 timestamp within client bounds") from error
     by_target = dict(assets)
     if len(by_target) != len(assets) or set(by_target) != set(EXPECTED_NAMES):
         raise ValueError("exactly one artifact for every supported target is required")

@@ -1017,6 +1017,8 @@ def check_fish(executable: str) -> None:
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
 
     env = os.environ.copy()
+    env.pop("TMUX", None)
+    env.pop("STY", None)
     env.update(
         TERM="xterm-256color",
         TERM_PROGRAM="kettle",

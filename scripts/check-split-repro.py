@@ -53,6 +53,10 @@ CHURN = (
 )
 
 
+class PaneGone(RuntimeError):
+    pass
+
+
 def ctl(kettle: str, pid: int, method: str, *, params: Optional[Dict] = None,
         timeout: float = 10.0) -> Dict:
     argv = [kettle, "ctl", "--pid", str(pid), method, "--raw"]
@@ -60,6 +64,8 @@ def ctl(kettle: str, pid: int, method: str, *, params: Optional[Dict] = None,
         argv += ["--json", json.dumps(params)]
     cp = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     if cp.returncode != 0:
+        if "server error [no_such_pane]:" in cp.stderr:
+            raise PaneGone(cp.stderr.strip())
         raise RuntimeError(f"kettle ctl {method} failed: {cp.stderr.strip()}")
     return json.loads(cp.stdout) if cp.stdout.strip() else {}
 
@@ -241,23 +247,30 @@ def main() -> int:
 
             new = next((p for p in observed if p.get("id") != base.get("id")), None)
             token = f"KETTLE_SPLIT_ALIVE_{cycle}"
-            subprocess.run(
-                [args.kettle, "ctl", "--pid", str(pid), "send_text", "--json",
-                 json.dumps({"pane": new.get("id"), "text": f"echo {token}\r"})],
-                check=True, capture_output=True, text=True)
-            alive, watch = False, time.monotonic() + 5.0
-            while time.monotonic() < watch:
-                screen = str(ctl(args.kettle, pid, "read_screen",
-                                 params={"pane": new.get("id")}).get("text", ""))
-                if screen.count(token) >= 2:   # the echo of the line, then its output
-                    alive = True
-                    break
-                time.sleep(0.1)
-            if not alive:
+            try:
+                ctl(args.kettle, pid, "send_text",
+                    params={"pane": new.get("id"), "text": f"echo {token}\r"})
+                alive, watch = False, time.monotonic() + 5.0
+                while time.monotonic() < watch:
+                    screen = str(ctl(args.kettle, pid, "read_screen",
+                                     params={"pane": new.get("id")}).get("text", ""))
+                    if screen.count(token) >= 2:   # the echo of the line, then its output
+                        alive = True
+                        break
+                    time.sleep(0.1)
+            except PaneGone:
                 bundle = capture(out, cycle, args.kettle, pid, base,
-                                 panes(args.kettle, pid),
-                                 "the new pane exists but never ran a command",
-                                 log)
+                                 first_sighting or observed,
+                                 "the new pane appeared and died during the liveness check", log)
+                print(f"split repro: REPRODUCED on cycle {cycle}: {bundle}")
+                return REPRODUCED
+            if not alive:
+                remaining = panes(args.kettle, pid)
+                gone = not any(p.get("id") == new.get("id") for p in remaining)
+                bundle = capture(out, cycle, args.kettle, pid, base,
+                                 (first_sighting or observed) if gone else remaining,
+                                 "the new pane appeared and died during the liveness check" if gone
+                                 else "the new pane exists but never ran a command", log)
                 print(f"split repro: REPRODUCED on cycle {cycle}: {bundle}")
                 return REPRODUCED
 

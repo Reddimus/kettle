@@ -62,6 +62,8 @@ class LiveKettle:
                         str(self.config),
                         "--agent-server",
                         "full",
+                        "-e",
+                        "/bin/sh",
                     ],
                     stdout=log_f,
                     stderr=subprocess.STDOUT,
@@ -172,7 +174,7 @@ def make_scrollback(live: LiveKettle) -> None:
     command = (
         "for i in $(seq 1 1600); do "
         "printf '\\033[4mKETTLE_PERF_SCROLL_%04d\\033[24m underlined-link https://example.invalid/%04d\\n' \"$i\" \"$i\"; "
-        "done; printf 'KETTLE_PERF_SCROLL_DONE\\n'"
+        "done; printf 'KETTLE_PERF_SCROLL_%s\\n' DONE"
     )
     live.ctl("send_text", params={"text": command}, timeout=5.0)
     live.ctl("send_keys", params={"keys": ["enter"]}, timeout=5.0)

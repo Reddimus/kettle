@@ -19844,7 +19844,8 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
             mark = "KETTLE_STEADY_" + "DONE"
             live.ctl(
                 "send_text",
-                params={"text": f"head -c 2000000 /dev/zero | tr '\\0' x | fold -w 99; echo {mark}\r"},
+                params={"text": "awk 'BEGIN {for (i=0;i<2000000;i++) {printf \"x\"; "
+                        "if (i%99==98) printf \"\\n\"}}' && printf '\\nKETTLE_STEADY_%s\\n' DONE\r"},
             )
             deadline = time.monotonic() + 60.0
             while mark not in screen_text(live.json_ctl("read_screen")):
@@ -20299,7 +20300,7 @@ def run_remote_links(kettle: str, root: Path) -> Path:
                 live.ctl(
                     "send_text",
                     params={
-                        "text": f"{tmux} -S {socket} -f /dev/null "
+                        "text": f"{shell_quote(tmux)} -S {shell_quote(str(socket))} -f /dev/null "
                         f"new-session -s smoke \"{plain_shell('screen')}\"\n"
                     },
                 )

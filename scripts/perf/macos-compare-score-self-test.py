@@ -191,6 +191,25 @@ class ProcessCleanupTests(unittest.TestCase):
         start = source.index(marker) + len(marker)
         return source[start:source.index('\n' + delimiter + '\n', start)]
 
+    def test_fast_exit_before_registration_uses_valid_completion_marker(self):
+        for marker, expected in [('0\n', 0), ('7\n', 7), ('oops7\n', 1), ('', 1)]:
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                wrapper = root / 'bounded-run'
+                wrapper.write_text(self.embedded('bounded_run', 'EOF'))
+                registry = root / 'registry.py'
+                registry.write_text('import time\ntime.sleep(0.3)\n')
+                child = root / 'child.py'
+                child.write_text('import os, sys\nfrom pathlib import Path\n'
+                                 'Path(os.environ["COMPLETION_MARKER"]).write_text(sys.argv[1])\n')
+                result = subprocess.run(
+                    ['bash', str(wrapper), '2', str(root / 'pids'), sys.executable, str(child), marker],
+                    env=dict(os.environ, PROCESS_REGISTRY=str(registry), MARKER_DIR=raw),
+                    capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, expected,
+                                 'completed child was rejected before identity registration: ' + result.stderr)
+                self.assertFalse(list(root.glob('direct-result-*')))
+
     def test_registration_timeout_reaps_unregistered_child(self):
         for behavior in ('timeout', 'empty'):
             with self.subTest(behavior=behavior), tempfile.TemporaryDirectory() as raw:

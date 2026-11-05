@@ -284,7 +284,7 @@ def check(kettle, worker, out, case):
             binary = media.stage(Path(kettle), Path(worker), root / "bin")
             config = root / "kettle.conf"
             config.write_text(
-                "restore-session = false\nupdate-policy = off\nrecord = off\n"
+                "restore-session = false\nupdate-policy = off\nrecord = off\nlanguage = en\n"
                 "shell = /bin/sh\nlogin-shell = false\nshell-integration = false\n"
                 "agent-server = full\nagent-display = true\ncursor-blink = false\n"
                 "window-width = 120\nwindow-height = 40\nstatus-bar = off\n"

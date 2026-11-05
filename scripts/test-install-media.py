@@ -1,12 +1,15 @@
 """Hermetic paired-binary installation and removal tests."""
 
 import json
+import hashlib
+import importlib.util
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +52,35 @@ class MediaInstallTests(unittest.TestCase):
             text=True,
             timeout=30,
         )
+
+    def test_managed_hash_stops_at_recorded_size_when_file_grows(self):
+        spec = importlib.util.spec_from_file_location('installer', ROOT / 'scripts/install-unix.py')
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        path = self.root / 'managed'
+        path.write_bytes(b'old')
+        path.chmod(0o600)
+        record = {'path': 'managed', 'mode': 0o600, 'size': 3,
+                  'sha256': hashlib.sha256(b'old').hexdigest()}
+        root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        original_read = os.read
+        requests, received = [], []
+        def growing_read(handle, size):
+            if not requests:
+                with path.open('ab') as output:
+                    output.write(b'x' * 65536)
+            requests.append(size)
+            data = original_read(handle, size)
+            received.append(len(data))
+            return data
+        try:
+            with patch.object(installer.os, 'read', side_effect=growing_read):
+                with self.assertRaises(installer.InstallerError):
+                    installer._verify_file(root_fd, record)
+            self.assertLessEqual(sum(received), 4, 'hashing read past recorded size plus one byte')
+            self.assertLessEqual(max(requests), 4)
+        finally:
+            os.close(root_fd)
 
     def test_source_build_uses_the_artifacts_it_installs(self):
         source = self.root / "source"
@@ -673,6 +705,19 @@ module._uninstall(arguments)
                 removed = self.uninstall()
                 self.assertEqual(removed.returncode, 0, removed.stderr)
                 self.assertFalse((self.prefix / "share/kettle").exists())
+
+    def test_repeated_interrupted_plans_keep_receipt_readable(self):
+        for attempt in range(3):
+            files = [(f'share/kettle/file-{index}', f'plan-{attempt}'.encode()) for index in range(100)]
+            killed = self.helper(*files, kill_at=1)
+            self.assertEqual(killed.returncode, 9, killed.stderr)
+            receipt = json.loads((self.prefix / 'share/kettle/install-pending.json').read_text())
+            self.assertLessEqual(len(receipt['files']), 256,
+                                 'installer published a receipt its reader rejects')
+        retried = self.helper(*files)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        removed = self.uninstall()
+        self.assertEqual(removed.returncode, 0, removed.stderr)
 
     def test_retry_preserves_pending_files_omitted_from_new_plan(self):
         self.assertEqual(self.helper().returncode, 0)

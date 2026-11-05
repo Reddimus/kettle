@@ -61,9 +61,9 @@ def diagram_count(text: str) -> int:
 
 def tracked_markdown() -> list[Path]:
     out = subprocess.run(
-        ["git", "ls-files", "*.md"], capture_output=True, text=True, check=True
-    ).stdout.split()
-    return [Path(p) for p in out]
+        ["git", "ls-files", "-z", "*.md"], capture_output=True, text=True, check=True
+    ).stdout.rstrip("\0").split("\0")
+    return [Path(p) for p in out if p]
 
 
 def find_chrome() -> str | None:

@@ -59,7 +59,8 @@ def scenario(binary, out, case, language):
             "accent-color = auto\nask-before-closing = never\n"
             f"language = {language}\n"
         )
-        env = {"SHELL": "/bin/sh", "ENV": None, "BASH_ENV": None}
+        env = {"SHELL": "/bin/sh", "ENV": None, "BASH_ENV": None,
+               "WAYLAND_DISPLAY": None, "WAYLAND_SOCKET": None}
         for name in ("CONFIG", "STATE", "DATA", "CACHE", "RUNTIME"):
             path = root / name.lower()
             path.mkdir(mode=0o700)

@@ -36,9 +36,10 @@ just macos-compare-score-self-test
 
 `macos-avsync.py` measures how far a video's sound and picture drift apart
 while it plays in a lane, using real presentation times rather than decoder
-timestamps. It plays a fixture out loud: 40 s of black at 30 frames a
-second, with a white frame pair and a 20 ms 1 kHz click at 0.5 s past each
-second. `avsync-probe` (`macos-avsync/avsync-probe.swift`) streams the
+timestamps. It plays a fixture out loud: 70 s of black at 30 frames a
+second, with white frame pairs and 20 ms 1 kHz clicks at seeded irregular
+intervals (seed 216, distinct spacings of 18 to 77 frames). `avsync-probe`
+(`macos-avsync/avsync-probe.swift`) streams the
 lane's picture and the system's sound through ScreenCaptureKit, both
 stamped on the host clock. For each flash it records when the window server
 displayed it, and for each click when the system mix had it.
@@ -51,8 +52,9 @@ just macos-avsync-self-test     # GUI-free; CI runs it
 
 Each run launches a Kettle of its own with an isolated configuration. The
 script presses the lane's play control natively, gives the lane the keyboard
-through ctl, and steps the video back five seconds with a native Left at 10,
-16 and 22 s. A control client may neither start nor step a video, which is
+through ctl, and steps the video back five seconds with a native Left at
+14, 28 and 42 s from capture start. A control client may neither start nor
+step a video, which is
 why those presses are native. The sync error is E = t_video_display −
 t_audio_output, positive when the sound is early, and the target is
 −125 ms ≤ E ≤ +45 ms after ITU-R BT.1359-1's detectability thresholds. That

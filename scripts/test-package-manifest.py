@@ -255,6 +255,45 @@ class PackageManifestTests(unittest.TestCase):
                     self.fail(f"valid relative path failed round trip: {error}")
                 self.assertEqual((output / name).read_bytes(), b"boundary")
 
+    @unittest.skipIf(os.name == "nt", "Linux hard-linked payload")
+    def test_pack_round_trips_hard_linked_regular_files(self):
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            root = temporary / 'package'
+            root.mkdir(mode=0o755)
+            self.package(root)
+            os.link(root / 'kettle', root / 'duplicate')
+            MODULE.generate(root, LINUX_TARGET, VERSION)
+            archive = temporary / 'archive.tar.gz'
+            MODULE.pack_archive(archive, root, LINUX_TARGET, VERSION)
+            output = temporary / 'output'
+            try:
+                MODULE.extract_archive(archive, output, LINUX_TARGET, VERSION)
+            except ValueError as error:
+                self.fail(f'packer produced an archive its extractor rejects: {error}')
+            self.assertEqual((output / 'duplicate').read_bytes(), (root / 'kettle').read_bytes())
+            self.assertNotEqual((output / 'duplicate').stat().st_ino, (output / 'kettle').stat().st_ino)
+
+    @unittest.skipIf(os.name == "nt", "Linux package round trip")
+    def test_total_limit_includes_encoded_manifest(self):
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            root = temporary / 'package'
+            root.mkdir(mode=0o755)
+            self.package(root)
+            manifest = MODULE.build_manifest(root, LINUX_TARGET, VERSION)
+            total = sum(record['size'] for record in manifest['files']) + len(MODULE.encode(manifest))
+            with mock.patch.object(MODULE, 'MAX_TOTAL_BYTES', total - 1):
+                with self.assertRaisesRegex(ValueError, 'safety limit'):
+                    MODULE.generate(root, LINUX_TARGET, VERSION)
+                self.assertFalse((root / MODULE.MANIFEST_NAME).exists())
+            with mock.patch.object(MODULE, 'MAX_TOTAL_BYTES', total):
+                MODULE.generate(root, LINUX_TARGET, VERSION)
+                MODULE.verify(root, LINUX_TARGET, VERSION)
+                archive = temporary / 'archive.tar.gz'
+                MODULE.pack_archive(archive, root, LINUX_TARGET, VERSION)
+                MODULE.extract_archive(archive, temporary / 'output', LINUX_TARGET, VERSION)
+
     def test_generation_is_deterministic_and_verifiable(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

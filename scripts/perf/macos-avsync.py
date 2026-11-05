@@ -380,8 +380,10 @@ def lane_target(geometry: Dict) -> Tuple[Tuple[float, float, float, float], Tupl
         raise ValueError("the lane's image or the window origin is not reported")
     ox, oy = origin["x"] / scale, origin["y"] / scale
     image, play = lane["image"], lane["controls"]["play"]
-    rect = (ox + image["x"], oy + image["y"], image["width"], image["height"])
-    centre = (ox + play["x"] + play["width"] / 2, oy + play["y"] + play["height"] / 2)
+    rect = (ox + image["x"] / scale, oy + image["y"] / scale,
+            image["width"] / scale, image["height"] / scale)
+    centre = (ox + (play["x"] + play["width"] / 2) / scale,
+              oy + (play["y"] + play["height"] / 2) / scale)
     return rect, centre, lane.get("playback") or {}
 
 
@@ -471,10 +473,20 @@ def launch(kettle: Path, home: Path) -> int:
     if not in_gui_session():
         # A shell outside the GUI session reaches it through launchd.
         command = ["launchctl", "asuser", str(os.getuid()), *command]
-    log = open(home / "kettle.log", "ab")
-    subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-    pid = int(wait_for("Kettle's pid", lambda: pid_file.exists() and pid_file.read_text().strip()))
-    wait_for("Kettle's control server", lambda: ctl(str(kettle), pid, "ui_geometry", "--raw"))
+    with open(home / "kettle.log", "ab") as log:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                   start_new_session=True)
+        try:
+            pid = int(wait_for("Kettle's pid", lambda: pid_file.exists() and pid_file.read_text().strip()))
+            wait_for("Kettle's control server", lambda: ctl(str(kettle), pid, "ui_geometry", "--raw"))
+        except BaseException:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            raise
     return pid
 
 
@@ -505,6 +517,19 @@ def prepare(kettle: Path, pid: int, fixture: Path) -> None:
     wait_for("the fixture's lane", lambda: lane_target(ctl(k, pid, "ui_geometry", "--raw")))
 
 
+def require_seek_rewinds(observations: Sequence[Tuple[int, int, int]], keys: Sequence[int]) -> None:
+    for index, key in enumerate(keys, 1):
+        before = [row for row in observations if key - 2_000_000_000 <= row[1] <= key]
+        after = [row for row in observations if key <= row[0] <= key + 2_000_000_000]
+        if before and after:
+            a, b = before[-1], after[0]
+            elapsed_ms = ((b[0] + b[1]) - (a[0] + a[1])) / 2e6
+            rewind_ms = a[2] + elapsed_ms - b[2]
+            if b[2] < a[2] - 3000 and 4000 <= rewind_ms <= 6000:
+                continue
+        raise RuntimeError(f"native seek {index} has no observed five-second rewind")
+
+
 def measure(kettle: Path, pid: int, probe: Path, out: Path) -> Dict:
     """One capture of the lane, from its play press through three seeks."""
     k = str(kettle)
@@ -527,7 +552,18 @@ def measure(kettle: Path, pid: int, probe: Path, out: Path) -> Dict:
                 raise RuntimeError(f"the press did not start the video with its sound: {heard}")
             # The lane takes the keyboard for the arrows to reach it.
             ctl(k, pid, "perform_action", "--text", "focus_preview")
-            probe_run.wait(timeout=CAPTURE_SECONDS + 30)
+            observations = []
+            deadline = time.monotonic() + CAPTURE_SECONDS + 30
+            while probe_run.poll() is None:
+                if time.monotonic() > deadline:
+                    raise RuntimeError("avsync-probe did not finish before its deadline")
+                started = uptime_ns()
+                playback = lane_target(ctl(k, pid, "ui_geometry", "--raw"))[2]
+                finished = uptime_ns()
+                if isinstance(playback.get("position_ms"), int):
+                    observations.append((started, finished, playback["position_ms"]))
+                time.sleep(0.25)
+            probe_run.wait(timeout=10)
         finally:
             if probe_run.poll() is None:
                 probe_run.terminate()
@@ -541,7 +577,9 @@ def measure(kettle: Path, pid: int, probe: Path, out: Path) -> Dict:
         loaded = load(capture)
         if len(loaded.run.get("keys_ns") or []) != len(SEEKS_AT):
             raise RuntimeError("not every seek was pressed")
+        require_seek_rewinds(observations, loaded.run["keys_ns"])
         result = judge(loaded, loaded.run.get("click_ns"), loaded.run["keys_ns"])
+        result["playback_observations"] = observations
         result["output_latency"] = loaded.run["output_latency"]
     finally:
         (capture / "audio.f32").unlink(missing_ok=True)
@@ -747,7 +785,7 @@ def self_test() -> int:
         ],
     }
     rect, centre, playback = lane_target(geometry)
-    check(rect == (110.0, 70.0, 300, 150) and centre == (150.0, 60.0) and playback == {},
+    check(rect == (105.0, 60.0, 150.0, 75.0) and centre == (125.0, 55.0) and playback == {},
           f"lane target: {rect} {centre} {playback}")
     geometry["preview_lanes"].append(geometry["preview_lanes"][0])
     try:

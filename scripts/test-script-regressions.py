@@ -77,6 +77,118 @@ class ScriptRegressionTests(unittest.TestCase):
         self.assertEqual(cli.EXE, executable)
         self.assertIn('--message-format=json-render-diagnostics', build.call_args.args[0])
 
+    def steady_output_command(self):
+        tree = ast.parse((SCRIPTS / 'check-live-ui-smoke.py').read_text())
+        function = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                        and n.name == 'run_steady_uploads')
+        commands = [n for n in ast.walk(function) if isinstance(n, ast.Dict)
+                    and any(isinstance(k, ast.Constant) and k.value == 'text' for k in n.keys)]
+        for node in commands:
+            value = node.values[0]
+            text = eval(compile(ast.Expression(value), '<fixture>', 'eval'),
+                        {'mark': 'KETTLE_STEADY_DONE', 'index': 1})
+            if '2000000' in text or '20000' in text:
+                return text.rstrip('\r')
+        self.fail('missing large-output command')
+
+    def test_steady_output_requires_success_and_output_only_marker(self):
+        command = self.steady_output_command()
+        self.assertNotIn('KETTLE_STEADY_DONE', command,
+                         'command echo contains the completion marker')
+        result = subprocess.run(['/bin/sh', '-c', command], capture_output=True, check=True)
+        self.assertTrue(result.stdout.endswith(b'\nKETTLE_STEADY_DONE\n'))
+        self.assertEqual(result.stdout.count(b'x'), 2000000)
+        with tempfile.TemporaryDirectory() as raw:
+            for tool in ('head', 'awk'):
+                path = Path(raw) / tool
+                path.write_text('#!/bin/sh\nexit 1\n')
+                path.chmod(0o700)
+            result = subprocess.run(['/bin/sh', '-c', command], capture_output=True,
+                                    env={**os.environ, 'PATH': raw})
+        self.assertNotIn(b'KETTLE_STEADY_DONE', result.stdout)
+
+    def test_remote_links_quotes_tmux_executable(self):
+        live = load('check-live-ui-smoke')
+        tree = ast.parse((SCRIPTS / 'check-live-ui-smoke.py').read_text())
+        value = next(n for n in ast.walk(tree) if isinstance(n, ast.JoinedStr)
+                     and any(isinstance(v, ast.Constant) and ' -S ' in str(v.value)
+                             for v in n.values)
+                     and any(isinstance(v, ast.Constant) and 'new-session -s smoke' in str(v.value)
+                             for v in n.values))
+        executable = "/Users/A B/bin/tmux"
+        command = eval(compile(ast.Expression(value), '<fixture>', 'eval'),
+                       {**vars(live), 'tmux': executable, 'socket': Path('/tmp/socket'),
+                        'plain_shell': lambda term: '/bin/sh'})
+        self.assertEqual(shlex.split(command)[0], executable)
+
+    def test_tab_transfer_uses_isolated_x11_and_restores_wayland(self):
+        transfer = load('check-tab-window-transfer')
+        class Launched(Exception):
+            pass
+        seen = {}
+        def launch(*args, **kwargs):
+            seen.update({key: os.environ.get(key) for key in ('WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'DISPLAY')})
+            raise Launched()
+        with tempfile.TemporaryDirectory() as raw,              patch.dict(os.environ, {'WAYLAND_DISPLAY': '/tmp/wayland', 'WAYLAND_SOCKET': '7', 'DISPLAY': ':99'}),              patch.object(transfer.live, 'LiveKettle', side_effect=launch):
+            with self.assertRaises(Launched):
+                transfer.scenario('kettle', Path(raw), 'empty', 'en')
+            self.assertEqual(seen, {'WAYLAND_DISPLAY': None, 'WAYLAND_SOCKET': None, 'DISPLAY': ':99'})
+            self.assertEqual(os.environ['WAYLAND_DISPLAY'], '/tmp/wayland')
+            self.assertEqual(os.environ['WAYLAND_SOCKET'], '7')
+
+    def test_avsync_readme_describes_current_fixture(self):
+        readme = (SCRIPTS / 'perf/README.md').read_text()
+        section = readme.split('## macOS A/V sync', 1)[1].split('## macOS standing', 1)[0]
+        for text in ('70 s of black', 'seeded irregular', 'seed 216', '18 to 77 frames',
+                     '14, 28 and 42 s from capture start'):
+            self.assertIn(text, section)
+
+    def test_avsync_recorded_keys_without_rewinds_cannot_pass(self):
+        avsync = load('perf/macos-avsync')
+        process = Mock(returncode=0)
+        process.poll.return_value = 0
+        capture = Mock(run={'keys_ns': [14_000_000_000, 28_000_000_000, 42_000_000_000],
+                            'click_ns': 1_500_000_000, 'output_latency': {}})
+        with tempfile.TemporaryDirectory() as raw,              patch.object(avsync, 'lane_target', side_effect=[((0, 0, 1, 1), (0, 0), {}),
+                 ((0, 0, 1, 1), (0, 0), {'state': 'playing', 'sound': 'heard'})]),              patch.object(avsync, 'raise_window'), patch.object(avsync.time, 'sleep'),              patch.object(avsync.subprocess, 'Popen', return_value=process),              patch.object(avsync, 'ctl', return_value={}),              patch.object(avsync, 'load', return_value=capture),              patch.object(avsync, 'judge', return_value={'pass': True}):
+            with self.assertRaisesRegex(RuntimeError, 'rewind'):
+                avsync.measure(Path('kettle'), 42, Path('probe'), Path(raw))
+
+    def test_avsync_requires_actual_backward_position_at_each_key(self):
+        avsync = load('perf/macos-avsync')
+        keys = [14_000_000_000, 28_000_000_000, 42_000_000_000]
+        good, continuous, paused = [], [], []
+        for index, key in enumerate(keys):
+            position = 12000 + index * 9000
+            before = (key - 250_000_000, key - 240_000_000, position)
+            good.extend([before, (key + 250_000_000, key + 260_000_000, position - 4500)])
+            continuous.extend([before, (key + 250_000_000, key + 260_000_000, position + 500)])
+            paused.extend([before, (key + 250_000_000, key + 260_000_000, position)])
+        avsync.require_seek_rewinds(good, keys)
+        for observations in (continuous, paused, good[:-1]):
+            with self.subTest(observations=observations):
+                with self.assertRaisesRegex(RuntimeError, 'rewind'):
+                    avsync.require_seek_rewinds(observations, keys)
+
+    def test_avsync_launch_failure_reaps_child_and_closes_log(self):
+        avsync = load('perf/macos-avsync')
+        for failed_probe in (1, 2):
+            for stubborn in (False, True):
+                with self.subTest(probe=failed_probe, stubborn=stubborn), tempfile.TemporaryDirectory() as raw:
+                    process = Mock(pid=123)
+                    process.poll.return_value = None
+                    if stubborn:
+                        process.wait.side_effect = [subprocess.TimeoutExpired('kettle', 5), 0]
+                    log = io.BytesIO()
+                    with patch.object(avsync, 'in_gui_session', return_value=True),                          patch.object(avsync.subprocess, 'Popen', return_value=process),                          patch.object(avsync, 'open', return_value=log, create=True),                          patch.object(avsync, 'wait_for', side_effect=([RuntimeError('startup')] if failed_probe == 1
+                             else ['123', RuntimeError('startup')])):
+                        with self.assertRaisesRegex(RuntimeError, 'startup'):
+                            avsync.launch(Path('kettle'), Path(raw))
+                    process.terminate.assert_called_once()
+                    process.wait.assert_called()
+                    self.assertEqual(process.kill.call_count, int(stubborn))
+                    self.assertTrue(log.closed)
+
     def test_search_result_waits_for_highlight_geometry_after_navigation(self):
         live = load('check-live-ui-smoke')
         pending = {'has_match': True, 'status': 'Match', 'match_rects': []}
@@ -248,6 +360,9 @@ items.addObject(item);
             with self.subTest(name=name):
                 self.assert_english_config(name)
 
+    def test_media_viewer_config_language(self):
+        self.assert_english_config('check-media-viewer-smoke')
+
     def test_image_paste_config_language(self):
         self.assert_english_config('check-image-paste-parity')
 
@@ -280,6 +395,15 @@ items.addObject(item);
         self.assertTrue(command.endswith('\n'))
         self.assertEqual(shlex.split(command), [media.KETTLE, 'show', str(path)])
 
+    def test_mermaid_preserves_tracked_filename_boundaries(self):
+        mermaid = load('check-mermaid')
+        names = ['docs/viewer notes.md', 'docs/quote".md', 'docs/line\nbreak.md']
+        def listing(argv, **kwargs):
+            output = '\0'.join(names) + '\0' if '-z' in argv else '\n'.join(names) + '\n'
+            return subprocess.CompletedProcess(argv, 0, output, '')
+        with patch.object(mermaid.subprocess, 'run', side_effect=listing):
+            self.assertEqual(mermaid.tracked_markdown(), list(map(Path, names)))
+
     def test_mermaid_keeps_failure_before_launch_skip(self):
         mermaid = load('check-mermaid')
         with tempfile.TemporaryDirectory() as raw:
@@ -301,6 +425,21 @@ items.addObject(item);
             self.assertEqual(code, 1, 'known diagram failure was skipped')
             self.assertIn('diagram parser error', output.getvalue())
 
+    def test_fish_pty_does_not_inherit_multiplexer(self):
+        shell = load('check-shell-integration')
+        tree = ast.parse((SCRIPTS / 'check-shell-integration.py').read_text())
+        function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'check_fish')
+        start = next(i for i, n in enumerate(function.body) if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == 'env' for t in n.targets))
+        end = next(i for i in range(start, len(function.body)) if isinstance(function.body[i], ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == 'process' for t in function.body[i].targets))
+        namespace = vars(shell).copy()
+        with patch.dict(os.environ, {'TMUX': 'outer', 'STY': 'outer'}, clear=True):
+            exec(compile(ast.Module(function.body[start:end], type_ignores=[]), '<fixture>', 'exec'), namespace)
+            self.assertNotIn('TMUX', namespace['env'])
+            self.assertNotIn('STY', namespace['env'])
+            self.assertEqual(os.environ['TMUX'], 'outer')
+
     def test_username_completion_prefix_is_native_singleton(self):
         shell = load('check-shell-integration')
         def complete(args, **kwargs):
@@ -312,6 +451,45 @@ items.addObject(item);
             self.assertEqual(shell.username_completion_prefix('fish', 'kevin'), 'kev')
         with patch.object(shell.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
             self.assertIsNone(shell.username_completion_prefix('fish', 'kevin'))
+
+    def test_split_late_pane_death_is_captured_but_transport_errors_propagate(self):
+        split = load('check-split-repro')
+        base, child = {'id': 1}, {'id': 2, 'argv': ['transient-helper']}
+        for failure in ('send_text', 'read_screen', 'timeout', 'transport'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as raw:
+                counts = {'panes': 0, 'clock': 0}
+                def clock():
+                    counts['clock'] += 0.5
+                    return counts['clock']
+                def request(argv, **kwargs):
+                    method = argv[4] if len(argv) > 4 and argv[1] == 'ctl' else ''
+                    if method == 'list_panes':
+                        counts['panes'] += 1
+                        value = {'panes': [base] if counts['panes'] <= 2 or
+                                 (failure == 'timeout' and counts.get('liveness')) else [base, child]}
+                    elif method == failure or (failure == 'transport' and method == 'send_text'):
+                        error = 'control I/O error' if failure == 'transport' else 'server error [no_such_pane]: gone'
+                        if kwargs.get('check'):
+                            raise subprocess.CalledProcessError(1, argv, stderr=error)
+                        return subprocess.CompletedProcess(argv, 1, '', error)
+                    else:
+                        if method == 'send_text':
+                            counts['liveness'] = True
+                        value = {}
+                    return subprocess.CompletedProcess(argv, 0, json.dumps(value), '')
+                with patch.object(sys, 'argv', ['split', '--cycles', '1', '--out-dir', raw]),                      patch.object(split.subprocess, 'run', side_effect=request),                      patch.object(split.subprocess, 'Popen', side_effect=lambda *args, **kwargs:
+                         (kwargs['stdout'].close(), Mock(pid=123))[1]),                      patch.object(split, 'start_workload'),                      patch.object(split.time, 'monotonic', side_effect=clock),                      patch.object(split.time, 'sleep'),                      patch.object(split, 'capture', return_value=Path(raw)) as capture,                      contextlib.redirect_stdout(io.StringIO()):
+                    if failure == 'transport':
+                        with self.assertRaisesRegex(RuntimeError, 'control I/O error'):
+                            split.main()
+                        capture.assert_not_called()
+                    else:
+                        try:
+                            code = split.main()
+                        except (RuntimeError, subprocess.CalledProcessError) as error:
+                            self.fail(f'pane disappearance escaped without capture: {error}')
+                        self.assertEqual(code, split.REPRODUCED)
+                        self.assertIn(child, capture.call_args.args[5])
 
     def test_churn_uses_compatible_shell_and_requires_acknowledgement(self):
         split = load('check-split-repro')
@@ -327,6 +505,33 @@ items.addObject(item);
              patch.object(split, 'ctl', return_value={'text': 'echo KETTLE_CHURN_READY'}):
             with self.assertRaisesRegex(RuntimeError, 'churn.*start'):
                 split.start_workload('kettle', 123, False)
+
+    def test_title_limit_observed_before_flood_and_each_command_completed(self):
+        stress = load('check-stress-live')
+        class Fixture:
+            def __init__(self):
+                self.stage = 0
+                self.reads = [0, 0, 0]
+                self.command = ''
+            def ctl(self, method, params):
+                self.stage += 1
+                self.command = params['text']
+            def json_ctl(self, method):
+                if method == 'read_screen':
+                    self.reads[self.stage] += 1
+                    suffix = 'LARGE' if self.stage == 1 else 'FLOOD'
+                    return {'text': self.command if self.reads[self.stage] == 1
+                            else 'KETTLE_S7_' + suffix + '_DONE'}
+                if method == 'list_tabs':
+                    return {'tabs': [{'title': 'T' * (stress.MAX_TITLE_CHARS + 1)
+                                     if self.stage == 1 else 'title 9999'}]}
+                return {}
+        fixture = Fixture()
+        with patch.object(stress, 'probe_during', return_value=0.1), patch.object(stress.time, 'sleep'):
+            row = stress.s7_titles(fixture)
+        self.assertIn('a title past its cap', stress.failures(row))
+        self.assertGreaterEqual(fixture.reads[1], 2, 'oversized title completion was not observed')
+        self.assertGreaterEqual(fixture.reads[2], 2, 'title flood completion was not observed')
 
     def test_flood_timeout_and_echoed_marker_fail_with_cleanup(self):
         stress = load('check-stress-live')

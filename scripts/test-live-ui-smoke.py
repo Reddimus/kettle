@@ -341,7 +341,7 @@ class LiveUiTests(unittest.TestCase):
 
             def ctl(self, action, params):
                 command = params["text"]
-                if command.startswith("head -c"):
+                if command.startswith("awk "):
                     self.text = "KETTLE_STEADY_DONE"
                     return
                 suffix = command.rsplit(" ", 1)[1].strip()
