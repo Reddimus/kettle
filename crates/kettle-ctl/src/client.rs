@@ -339,6 +339,11 @@ impl Client {
     }
 
     fn usable(&self) -> Result<(), CtlError> {
+        if std::process::id() != self.owner_pid {
+            return Err(CtlError::Unusable(
+                "a connection inherited from another process".to_string(),
+            ));
+        }
         match &self.abandoned {
             Some(reason) => Err(CtlError::Unusable(reason.clone())),
             None => Ok(()),
@@ -392,11 +397,6 @@ impl Client {
         cancelled: Option<&AtomicBool>,
     ) -> Result<Value, CtlError> {
         self.usable()?;
-        if std::process::id() != self.owner_pid {
-            return Err(CtlError::Unusable(
-                "a connection inherited from another process".to_string(),
-            ));
-        }
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             return Err(CtlError::Cancelled);
         }
@@ -1029,6 +1029,43 @@ mod tests {
             lines.recv_timeout(Duration::from_millis(200)).is_err(),
             "nothing reached the server"
         );
+    }
+
+    #[test]
+    fn an_inherited_client_rejects_events_without_consuming_them() {
+        let event = Event::new("pane_created", Some(7), json!({"pane_id": 7}));
+        let mut client = Client {
+            writer: None,
+            reader: None,
+            read_buffer: serde_json::to_vec(&event).unwrap(),
+            read_scan_offset: 0,
+            queued_events: VecDeque::new(),
+            queued_event_bytes: 0,
+            next_id: 1,
+            abandoned: None,
+            claim: None,
+            claim_sent: false,
+            owner_pid: std::process::id(),
+        };
+        client.read_buffer.push(b'\n');
+        let owner = client.owner_pid;
+        client.owner_pid = owner.wrapping_add(1);
+        assert!(
+            matches!(client.next_event(), Err(CtlError::Unusable(_))),
+            "an inherited client must reject subscription reads"
+        );
+        client.owner_pid = owner;
+        let event = client.next_event().unwrap().expect("event remains unread");
+        assert_eq!(event.event, "pane_created");
+        assert_eq!(event.data["pane_id"], 7);
+
+        client.queued_events.push_back((event, 17));
+        client.queued_event_bytes = 17;
+        client.owner_pid = owner.wrapping_add(1);
+        assert!(matches!(client.next_event(), Err(CtlError::Unusable(_))));
+        assert_eq!(client.queued_event_bytes, 17);
+        client.owner_pid = owner;
+        assert_eq!(client.next_event().unwrap().unwrap().event, "pane_created");
     }
 
     #[test]

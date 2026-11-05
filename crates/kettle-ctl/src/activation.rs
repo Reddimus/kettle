@@ -253,6 +253,8 @@ struct OtherBuildState {
     locks: Vec<PathBuf>,
     // An incomplete scan cannot authorize shared-state writes.
     rescan: Option<ActivationPaths>,
+    entries: Option<std::fs::ReadDir>,
+    incomplete: bool,
 }
 
 impl OtherBuilds {
@@ -264,8 +266,8 @@ impl OtherBuilds {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(paths) = &state.rescan {
-            *state = scan_other_builds(paths);
+        if let Some(paths) = state.rescan.clone() {
+            advance_other_builds(&paths, &mut state);
         }
         state.locks.retain(|lock| {
             !matches!(
@@ -393,9 +395,8 @@ fn try_become_primary_with(
     }))
 }
 
-/// How many other builds' lock files one sweep handles. Every name in the
-/// private registry directory is read, but only lock files count, so other
-/// entries cannot keep a sweep from ever completing.
+/// How many directory entries one sweep batch handles, including errors and
+/// unrelated names.
 const MAX_SWEEP_ENTRIES: usize = 256;
 
 /// Removes the activation files of builds that are no longer running and
@@ -415,23 +416,39 @@ fn sweep_other_builds(paths: &ActivationPaths) -> OtherBuilds {
 
 fn scan_other_builds(paths: &ActivationPaths) -> OtherBuildState {
     let mut state = OtherBuildState {
-        locks: Vec::new(),
         rescan: Some(paths.clone()),
+        ..OtherBuildState::default()
     };
-    let entries = match std::fs::read_dir(&paths.base) {
-        Ok(entries) => entries,
-        // No activation directory: no other build ever started here.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            state.rescan = None;
-            return state;
-        }
-        Err(_) => return state,
+    advance_other_builds(paths, &mut state);
+    state
+}
+
+fn advance_other_builds(paths: &ActivationPaths, state: &mut OtherBuildState) {
+    let mut entries = match state.entries.take() {
+        Some(entries) => entries,
+        None => match std::fs::read_dir(&paths.base) {
+            Ok(entries) => {
+                state.locks.clear();
+                state.incomplete = false;
+                entries
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                state.rescan = None;
+                state.locks.clear();
+                return;
+            }
+            Err(_) => return,
+        },
     };
-    let mut incomplete = false;
-    let mut locks_seen = 0;
-    for entry in entries {
+    for _ in 0..MAX_SWEEP_ENTRIES {
+        let Some(entry) = entries.next() else {
+            if !state.incomplete {
+                state.rescan = None;
+            }
+            return;
+        };
         let Ok(entry) = entry else {
-            incomplete = true;
+            state.incomplete = true;
             continue;
         };
         let name = entry.file_name();
@@ -441,23 +458,23 @@ fn scan_other_builds(paths: &ActivationPaths) -> OtherBuildState {
         if build == Some(paths.build) {
             continue;
         }
-        locks_seen += 1;
-        if locks_seen > MAX_SWEEP_ENTRIES {
-            incomplete = true;
-            break;
-        }
         let lock_path = entry.path();
         // Only regular files: never follow a symlink someone left here.
         match std::fs::symlink_metadata(&lock_path) {
             Ok(meta) if meta.file_type().is_file() => {}
             Ok(_) => continue,
             Err(_) => {
-                incomplete = true;
+                state.incomplete = true;
                 continue;
             }
         }
         match kettle_state::ExclusiveFileLock::try_acquire(&lock_path) {
-            Ok(None) => state.locks.push(lock_path),
+            Ok(None) if state.locks.len() < MAX_SWEEP_ENTRIES => {
+                if !state.locks.contains(&lock_path) {
+                    state.locks.push(lock_path);
+                }
+            }
+            Ok(None) => state.incomplete = true,
             Ok(Some(lock)) => {
                 #[cfg(unix)]
                 for endpoint in other_build_endpoints(paths, build) {
@@ -468,15 +485,12 @@ fn scan_other_builds(paths: &ActivationPaths) -> OtherBuildState {
                 let _ = lock.remove(&lock_path);
             }
             Err(error) => {
-                incomplete = true;
+                state.incomplete = true;
                 log::debug!("activation sweep skipped {}: {error}", lock_path.display());
             }
         }
     }
-    if !incomplete {
-        state.rescan = None;
-    }
-    state
+    state.entries = Some(entries);
 }
 
 /// The build an activation lock file belongs to: `Some(None)` for the
@@ -1577,8 +1591,7 @@ mod tests {
         assert!(!sweep_other_builds(&paths).running());
     }
 
-    /// Other entries in the registry directory do not count against the
-    /// sweep's bound, so many of them cannot keep it from completing.
+    /// Bounded batches still finish when the registry has many unrelated entries.
     #[test]
     fn many_other_entries_do_not_keep_a_sweep_incomplete() {
         let dir = kettle_test_support::private_tempdir("kettle-activation-crowded-");
@@ -1594,6 +1607,25 @@ mod tests {
         );
         let paths = activation_paths(&dir, build('a'));
         assert!(!sweep_other_builds(&paths).running());
+    }
+
+    #[test]
+    fn unrelated_entries_leave_a_bounded_sweep_incomplete() {
+        let dir = kettle_test_support::private_tempdir("kettle-activation-budget-");
+        for index in 0..MAX_SWEEP_ENTRIES * 3 {
+            std::fs::write(dir.join(format!("{index}.json")), b"{}").unwrap();
+        }
+        let paths = activation_paths(&dir, build('a'));
+        let others = sweep_other_builds(&paths);
+        assert!(
+            others.0.lock().unwrap().rescan.is_some(),
+            "unrelated entries must exhaust the sweep budget"
+        );
+        assert!(others.running(), "one more batch must remain incomplete");
+        for _ in 0..3 {
+            others.running();
+        }
+        assert!(!others.running(), "bounded batches must eventually finish");
     }
 
     #[cfg(unix)]
