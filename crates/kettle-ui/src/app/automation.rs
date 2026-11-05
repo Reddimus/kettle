@@ -149,11 +149,11 @@ impl App {
             let Some(origin_window) = self
                 .pending_lua_commands
                 .front()
-                .map(PendingLuaCommand::origin_window)
+                .map(PendingLuaCommand::required_window)
             else {
                 break;
             };
-            if origin_window != ws.seq {
+            if let Some(origin_window) = origin_window.filter(|origin| *origin != ws.seq) {
                 if !self.windows.contains_key(&origin_window) {
                     log::warn!(
                         "dropping queued Lua command because its originating window \
@@ -479,11 +479,11 @@ impl App {
             let Some(origin_window) = self
                 .pending_remote_commands
                 .front()
-                .map(PendingRemoteCommand::origin_window)
+                .map(PendingRemoteCommand::required_window)
             else {
                 break;
             };
-            if origin_window != ws.seq {
+            if let Some(origin_window) = origin_window.filter(|origin| *origin != ws.seq) {
                 if !self.windows.contains_key(&origin_window) {
                     log::warn!(
                         "dropping queued remote command because its originating window \
@@ -816,11 +816,29 @@ pub(super) fn match_triggers(
             // command's argv (`{0}` whole match, `{1}`… numbered groups),
             // like `cmd.format(*groups)` in Terminator's `run_cmd_on_match.py`.
             kettle_config::TriggerAction::RunCommand(argv) => {
-                kettle_config::TriggerAction::RunCommand(substitute_trigger_groups(argv, &caps))
+                let Some(argv) = substitute_trigger_groups(argv, &caps) else {
+                    log::warn!("trigger run-command skipped: expanded argv exceeds byte limits");
+                    return None;
+                };
+                kettle_config::TriggerAction::RunCommand(argv)
             }
             other => other.clone(),
         })
     })
+}
+
+const MAX_TRIGGER_ARG_BYTES: usize = 64 << 10;
+const MAX_TRIGGER_ARGV_BYTES: usize = 1 << 20;
+
+fn push_trigger_arg_piece(out: &mut String, piece: &str, total: &mut usize) -> Option<()> {
+    let arg_bytes = out.len().checked_add(piece.len())?;
+    let argv_bytes = total.checked_add(piece.len())?;
+    if arg_bytes > MAX_TRIGGER_ARG_BYTES || argv_bytes > MAX_TRIGGER_ARGV_BYTES {
+        return None;
+    }
+    out.push_str(piece);
+    *total = argv_bytes;
+    Some(())
 }
 
 /// Replace `{0}`/`{1}`… in each argv element with the trigger match's
@@ -831,48 +849,46 @@ pub(super) fn match_triggers(
 /// Matched output can inject an argument's value but never new arguments or
 /// shell metacharacters (the spawn is `std::process::Command`, no shell).
 /// Pure (unit-tested).
-fn substitute_trigger_groups(argv: &[String], caps: &regex::Captures) -> Vec<String> {
-    argv.iter()
-        .map(|a| {
-            if !a.contains('{') {
-                return a.clone();
-            }
-            // Single left-to-right pass over the template. Substituted text is
-            // emitted verbatim and never re-scanned, so a capture whose matched
-            // text contains `{2}` cannot expand again with attacker-controlled
-            // content.
-            let bytes = a.as_bytes();
-            let mut out = String::with_capacity(a.len());
-            let mut i = 0;
-            while i < bytes.len() {
-                if bytes[i] == b'{' {
-                    let mut j = i + 1;
-                    while j < bytes.len() && bytes[j].is_ascii_digit() {
-                        j += 1;
-                    }
-                    if j > i + 1
-                        && j < bytes.len()
-                        && bytes[j] == b'}'
-                        && let Ok(idx) = a[i + 1..j].parse::<usize>()
-                        && idx < caps.len()
-                    {
-                        out.push_str(caps.get(idx).map(|m| m.as_str()).unwrap_or(""));
-                        i = j + 1;
-                        continue;
-                    }
-                    // Not a valid in-range placeholder: the `{` stays
-                    // literal (an out-of-range `{9}` keeps the typo visible).
-                    out.push('{');
-                    i += 1;
-                } else {
-                    let ch = a[i..].chars().next().expect("in-bounds char");
-                    out.push(ch);
-                    i += ch.len_utf8();
+fn substitute_trigger_groups(argv: &[String], caps: &regex::Captures) -> Option<Vec<String>> {
+    let mut expanded = Vec::new();
+    let mut total = 0usize;
+    for arg in argv {
+        // Include each argument's terminating NUL in the aggregate budget.
+        total = total
+            .checked_add(1)
+            .filter(|bytes| *bytes <= MAX_TRIGGER_ARGV_BYTES)?;
+        let mut out = String::new();
+        let bytes = arg.as_bytes();
+        // Captured text is appended verbatim and never scanned for placeholders.
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'{' {
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 1
+                    && j < bytes.len()
+                    && bytes[j] == b'}'
+                    && let Ok(idx) = arg[i + 1..j].parse::<usize>()
+                    && idx < caps.len()
+                {
+                    push_trigger_arg_piece(
+                        &mut out,
+                        caps.get(idx).map(|m| m.as_str()).unwrap_or(""),
+                        &mut total,
+                    )?;
+                    i = j + 1;
+                    continue;
                 }
             }
-            out
-        })
-        .collect()
+            let end = i + arg[i..].chars().next().expect("in-bounds char").len_utf8();
+            push_trigger_arg_piece(&mut out, &arg[i..end], &mut total)?;
+            i = end;
+        }
+        expanded.push(out);
+    }
+    Some(expanded)
 }
 const MAX_PENDING_LUA_COMMANDS: usize = 1024;
 const MAX_PENDING_LUA_SEND_BYTES: usize = 8 << 20;
@@ -913,14 +929,23 @@ pub(super) enum PendingLuaCommand {
 }
 
 impl PendingLuaCommand {
-    fn origin_window(&self) -> u64 {
-        match self {
+    pub(super) fn required_window(&self) -> Option<u64> {
+        if matches!(
+            self,
+            Self::SendText {
+                target_pane: Some(_),
+                ..
+            }
+        ) {
+            return None;
+        }
+        Some(match self {
             Self::SendText { origin_window, .. }
             | Self::ExecAction { origin_window, .. }
             | Self::Notify { origin_window, .. }
             | Self::CallbackStopped { origin_window, .. }
             | Self::SetTheme { origin_window, .. } => *origin_window,
-        }
+        })
     }
 
     fn send_len(&self) -> usize {
@@ -953,12 +978,21 @@ pub(super) enum PendingRemoteCommand {
 }
 
 impl PendingRemoteCommand {
-    fn origin_window(&self) -> u64 {
-        match self {
+    pub(super) fn required_window(&self) -> Option<u64> {
+        if matches!(
+            self,
+            Self::SendText {
+                target_pane: Some(_),
+                ..
+            }
+        ) {
+            return None;
+        }
+        Some(match self {
             Self::SendText { origin_window, .. }
             | Self::ToggleWindow { origin_window }
             | Self::NewTab { origin_window } => *origin_window,
-        }
+        })
     }
 }
 

@@ -515,3 +515,38 @@ fn translated_theme_query_previews_its_canonical_theme() {
         assert_eq!(preview, canonical);
     }
 }
+
+#[test]
+fn closing_a_preview_owner_restores_the_shared_baseline() {
+    let source = production_source();
+    let finish = source.split("fn finish_window_dispatch(").nth(1).unwrap();
+    let close = finish
+        .split("if take_window_close_request(")
+        .nth(1)
+        .unwrap();
+    assert!(close.find("cancel_theme_preview(&mut ws)").unwrap() < close.find("drop(ws)").unwrap());
+    let mut owner = WindowState::new(1, Mux::new());
+    let mut survivor = WindowState::new(2, Mux::new());
+    let baseline = (
+        "TokyoNight Night".to_string(),
+        Theme::by_name("TokyoNight Night"),
+    );
+    begin_theme_picker(&mut owner, baseline.clone());
+    owner.theme_picker_input.as_mut().unwrap().query = "Dracula".into();
+    let preview = theme_preview_change(
+        &mut owner,
+        &kettle_config::Config {
+            theme_name: baseline.0.clone(),
+            ..Default::default()
+        },
+        &EN,
+    )
+    .unwrap();
+    assert_ne!(preview.0, baseline.0);
+    let restored =
+        super::cancel_theme_preview(&mut owner).expect("closing must restore the preview baseline");
+    assert!(owner.theme_picker_input.is_none());
+    assert!(owner.theme_preview.is_none());
+    begin_theme_picker(&mut survivor, restored);
+    assert_eq!(survivor.theme_preview.as_ref().unwrap().0, baseline.0);
+}

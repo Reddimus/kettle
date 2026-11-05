@@ -869,6 +869,8 @@ fn docked_paste_owners_are_dismissed_independently_on_input() {
         last_output_at: None,
         last_seen_at: None,
         bell: false,
+        scaled_zoom_owner: false,
+        generated_group_name: None,
         lanes: Default::default(),
     };
     ws.adopt_moved_paste_state(donor.take_moved_paste_state(&tab, now));

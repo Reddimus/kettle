@@ -2,6 +2,10 @@
 
 use super::*;
 
+pub(super) fn diagnostic_titlebar_bell(icon_enabled: bool, bell: bool) -> Option<&'static str> {
+    (icon_enabled && bell).then_some("\u{1f514}")
+}
+
 /// One page of a `read_screen` snapshot: lines `page.offset..end` of `total`,
 /// within `MAX_CTL_TEXT_PAGE_BYTES`. A first line longer than that is cut at a
 /// character boundary (`text_truncated`). `whole` returns every line instead.
@@ -1092,7 +1096,7 @@ impl App {
                     let (cols, rows) = self.grid_of(target, partition.terminal);
                     let size_text =
                         (!self.cfg.title_hide_sizetext).then(|| format!("{}x{}", cols, rows));
-                    let bell: Option<&str> = None;
+                    let bell = diagnostic_titlebar_bell(self.cfg.icon_bell, pane.bell);
                     let budget = (rect.2 / cell_w.max(1.0)).floor().max(1.0) as usize;
                     let group = pane.group_name.as_deref().filter(|g| !g.is_empty());
                     let fitted_title = kettle_render::fit_pane_titlebar_title(
@@ -2927,6 +2931,12 @@ impl App {
                     return Response::err(req.id, ec::BAD_PARAMS, message);
                 }
                 encoded_keys.push(b);
+                if let Some(release) = crate::input::encode_key_release(key, *mods, mode) {
+                    if let Err(message) = extend_ctl_send_key_bytes(&mut bytes, &release) {
+                        return Response::err(req.id, ec::BAD_PARAMS, message);
+                    }
+                    encoded_keys.push(release);
+                }
             } else {
                 let message = if mode.intersects(kettle_core::TermMode::KITTY_KEYBOARD_PROTOCOL) {
                     format!(
@@ -3137,6 +3147,10 @@ impl App {
                 return;
             }
         };
+        if self.preview_holds_keyboard(ws, pane) {
+            let _ = reply.send(Response::err(req.id, ec::BUSY, PREVIEW_HOLDS_KEYBOARD));
+            return;
+        }
         if self.pending_runs.contains_key(&pane) {
             let _ = reply.send(Response::err(
                 req.id,

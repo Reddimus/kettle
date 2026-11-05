@@ -262,17 +262,9 @@ impl App {
             // Tear-off UX: pre-tear ghost escalation.
             tear_lift: self.tear_lift_for(ws),
             // Re-dock: vertical insertion line at the docked tab's landing slot,
-            // anchored to the target tab's on-screen x when visible (overflow
-            // scrolling), else to the leftmost visible edge.
+            // anchored to the visible edge before or after the landing slot.
             insert_marker: ws.dock_preview.map(|idx| {
-                let x = layout
-                    .xs
-                    .get(idx)
-                    .copied()
-                    .flatten()
-                    .or_else(|| layout.xs.iter().copied().flatten().next())
-                    .unwrap_or(0.0)
-                    .clamp(0.0, strip - kettle_render::tab_drag::INSERT_MARKER_PX);
+                let x = horizontal_tab_insert_x(&layout, idx, strip);
                 (x, y, kettle_render::tab_drag::INSERT_MARKER_PX, height)
             }),
             // Tear-off UX: the dock-highlight canvas.
@@ -307,7 +299,7 @@ impl App {
     /// vertically, each `cfg.tab_bar_width` × `tab_bar_h`, with the new-tab
     /// `+` below them. Rows that do not fit scroll; see [`side_tab_rows`].
     pub(super) fn tab_bar_vertical(&self, ws: &WindowState, band: Rect, height: f32) -> TabBar {
-        let (strip_x, _, strip_w, sh) = band;
+        let (strip_x, strip_y, strip_w, sh) = band;
         let labels = ws.mux.tab_labels(&self.ui_text);
         let active = ws.mux.active;
         let now = std::time::Instant::now();
@@ -327,7 +319,7 @@ impl App {
             .enumerate()
             .map(|(i, label)| {
                 let seg_y = if shown.contains(&i) {
-                    row_y(layout.top + i - layout.first)
+                    strip_y + row_y(layout.top + i - layout.first)
                 } else {
                     PARKED_TAB
                 };
@@ -370,23 +362,20 @@ impl App {
             .collect();
         // `+` is left out of a strip with no row to spare for it.
         let plus_y = if layout.plus < rows {
-            row_y(layout.plus)
+            strip_y + row_y(layout.plus)
         } else {
             PARKED_TAB
         };
         let arrow = |row: usize| {
             if layout.arrows {
-                (strip_x, row_y(row), strip_w, height)
+                (strip_x, strip_y + row_y(row), strip_w, height)
             } else {
                 (0.0, 0.0, 0.0, 0.0)
             }
         };
         TabBar {
             height,
-            // `y` is the *band start* (top of the strip) for the
-            // renderer; for vertical strips the band spans the
-            // whole window height, so `y = 0`.
-            y: 0.0,
+            y: strip_y,
             segments,
             new_tab: (strip_x, plus_y, strip_w, height),
             // No dropdown arrow on vertical bars — the bottom-of-
@@ -412,9 +401,9 @@ impl App {
             // that slot is scrolled out of view.
             insert_marker: ws.dock_preview.map(|idx| {
                 let slot = idx.min(labels.len()).clamp(shown.start, shown.end);
-                let iy = row_y(layout.top + slot - layout.first)
-                    .min(sh - kettle_render::tab_drag::INSERT_MARKER_PX)
-                    .max(0.0);
+                let iy = (strip_y + row_y(layout.top + slot - layout.first))
+                    .min(strip_y + sh - kettle_render::tab_drag::INSERT_MARKER_PX)
+                    .max(strip_y);
                 (
                     strip_x,
                     iy,
@@ -591,6 +580,37 @@ impl App {
 /// shown, chosen so the active tab is visible (pinned to the trailing edge once
 /// it scrolls past the first page). Pure (no `&self`, renderer, or winit), so
 /// it is unit-testable.
+pub(super) fn horizontal_tab_insert_x(layout: &TabStripLayout, index: usize, strip: f32) -> f32 {
+    layout
+        .xs
+        .get(index)
+        .copied()
+        .flatten()
+        .or_else(|| {
+            layout
+                .xs
+                .iter()
+                .enumerate()
+                .take(index)
+                .rev()
+                .find_map(|(previous, x)| {
+                    x.map(|x| {
+                        x + if previous + 1 == layout.xs.len() {
+                            layout.last_width
+                        } else {
+                            layout.width
+                        }
+                    })
+                })
+        })
+        .or_else(|| layout.xs.iter().copied().flatten().next())
+        .unwrap_or(0.0)
+        .clamp(
+            0.0,
+            (strip - kettle_render::tab_drag::INSERT_MARKER_PX).max(0.0),
+        )
+}
+
 pub(super) struct TabStripLayout {
     /// Per-tab width for every tab EXCEPT the last one.
     pub(super) width: f32,
@@ -973,4 +993,24 @@ pub(super) fn tab_title_rect(
 /// menu, even on a bash-only Ubuntu.
 fn new_tab_dropdown_visible() -> bool {
     true
+}
+
+pub(super) fn side_tab_band(band: Rect, status: kettle_config::StatusBarMode, height: f32) -> Rect {
+    use kettle_config::StatusBarMode;
+    let (x, y, width, available) = band;
+    let reserved = if status == StatusBarMode::Off {
+        0.0
+    } else {
+        height.min(available).max(0.0)
+    };
+    (
+        x,
+        y + if status == StatusBarMode::Top {
+            reserved
+        } else {
+            0.0
+        },
+        width,
+        (available - reserved).max(0.0),
+    )
 }

@@ -418,6 +418,12 @@ impl App {
             ));
             r.set_cell_scale(self.cfg.cell_width, self.cfg.cell_height);
             r.set_background_compositing(&self.cfg);
+        } else if ws.renderer_recovery.is_some() {
+            ws.renderer_recovery_font_size = recovery_font_size_after_reload(
+                ws.renderer_recovery_font_size,
+                font_size_changed,
+                self.cfg.font_size,
+            );
         }
         // A configured size change invalidates the pre-scaled-zoom baseline;
         // a no-op reload must preserve both it and the live runtime zoom.
@@ -612,13 +618,42 @@ pub(super) fn config_watch_paths(
 ) -> std::io::Result<Vec<std::path::PathBuf>> {
     let requested = std::path::absolute(path)?;
     let mut paths = vec![requested.clone()];
-    match std::fs::canonicalize(&requested) {
-        Ok(target) if target != requested => paths.push(target),
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    let mut current = requested;
+    for _ in 0..40 {
+        let resolved = match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => std::fs::canonicalize(parent)?.join(name),
+            _ => current.clone(),
+        };
+        if !paths.contains(&resolved) {
+            paths.push(resolved.clone());
+        }
+        let metadata = match std::fs::symlink_metadata(&resolved) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(paths),
+            Err(error) => return Err(error),
+        };
+        if !metadata.file_type().is_symlink() {
+            return Ok(paths);
+        }
+        let target = std::fs::read_link(&resolved)?;
+        current = if target.is_absolute() {
+            target
+        } else {
+            resolved
+                .parent()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "config symlink has no parent",
+                    )
+                })?
+                .join(target)
+        };
     }
-    Ok(paths)
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "too many config symlink redirects",
+    ))
 }
 
 pub(super) fn config_watcher(
@@ -697,5 +732,17 @@ pub(super) fn reloaded_font_size(
         configured
     } else {
         runtime.unwrap_or(configured)
+    }
+}
+
+pub(super) fn recovery_font_size_after_reload(
+    pending: Option<f32>,
+    configured_changed: bool,
+    configured: f32,
+) -> Option<f32> {
+    if configured_changed {
+        Some(configured)
+    } else {
+        pending
     }
 }

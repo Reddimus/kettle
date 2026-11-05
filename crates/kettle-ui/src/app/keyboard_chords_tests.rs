@@ -1246,6 +1246,8 @@ fn adaptive_alt_focus_falls_through_while_zoom_hides_siblings() {
         focus: 2,
         title_override: None,
         zoomed: false,
+        scaled_zoom_owner: false,
+        generated_group_name: None,
         lanes: Default::default(),
         last_output_at: None,
         last_seen_at: None,
@@ -1946,3 +1948,48 @@ fn keybind_rebind_at_the_size_cap_leaves_the_config_unchanged() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
 }
 
+
+#[test]
+fn synthetic_keys_release_kitty_events_within_the_same_byte_budget() {
+    use kettle_core::TermMode;
+    use winit::keyboard::{Key, ModifiersState, NamedKey};
+    let key = Key::Character("a".into());
+    let mods = ModifiersState::empty();
+    let mode = TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_EVENT_TYPES;
+    let release = crate::input::encode_key_release(&key, mods, mode);
+    assert_eq!(
+        release.as_deref(),
+        Some(&b"\x1b[97;1:3u"[..]),
+        "synthetic Kitty keys must emit their negotiated release"
+    );
+    assert_eq!(
+        crate::input::encode_key_release(&key, mods, TermMode::empty()),
+        None
+    );
+    assert_eq!(
+        crate::input::encode_key_release(
+            &Key::Named(NamedKey::Enter),
+            mods,
+            TermMode::REPORT_EVENT_TYPES
+        ),
+        None
+    );
+    let press = crate::input::encode_key_press(&key, mods, mode).unwrap();
+    let mut budget = vec![0; super::MAX_CTL_SEND_KEY_BYTES - press.len()];
+    super::extend_ctl_send_key_bytes(&mut budget, &press).unwrap();
+    assert!(
+        super::extend_ctl_send_key_bytes(&mut budget, &release.unwrap()).is_err(),
+        "release bytes must count toward the atomic batch limit"
+    );
+    let source = production_source();
+    let send = source
+        .split("fn ctl_send_keys(")
+        .nth(1)
+        .unwrap()
+        .split("fn ctl_resolve_pane(")
+        .next()
+        .unwrap();
+    let release = send.find("encode_key_release(key, *mods, mode)").unwrap();
+    assert!(release < send.find("p.feed_key_inputs(&encoded_keys)").unwrap());
+    assert!(send[release..].contains("extend_ctl_send_key_bytes(&mut bytes, &release)"));
+}

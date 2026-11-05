@@ -400,7 +400,7 @@ fn accessibility_hashes_the_visible_completion_projection() {
         .and_then(|rest| rest.split("fn accessibility_key").next())
         .expect("accessibility_tree body");
     assert!(
-        tree.contains("row.set_position_in_set(candidate.position + 1)")
+        tree.contains("completion_accessibility_row(")
             && tree.contains("list.set_size_of_set(completion.total)")
             && tree.contains("completion_overlay_rect(completion, self.menu_cell(ws))"),
         "assistive technology must hear each visible row's absolute position and the full set size"
@@ -881,7 +881,7 @@ fn accessibility_key_tracks_the_modal_text_caret_and_selection() {
 #[test]
 fn modal_text_runs_cannot_collide_with_rows_or_decode_as_buttons() {
     use super::{
-        MODAL_KIND_LAYOUTS, MODAL_KIND_PALETTE, MODAL_KIND_SSH, MODAL_KIND_THEMES,
+        MODAL_KIND_LAYOUTS, MODAL_KIND_PALETTE, MODAL_KIND_SETTINGS, MODAL_KIND_SSH, MODAL_KIND_THEMES,
         MODAL_KIND_TITLE, accessibility_confirm_button_index, accessibility_modal_id,
         accessibility_modal_text_run_id,
     };
@@ -891,6 +891,7 @@ fn modal_text_runs_cannot_collide_with_rows_or_decode_as_buttons() {
         MODAL_KIND_SSH,
         MODAL_KIND_TITLE,
         MODAL_KIND_THEMES,
+        MODAL_KIND_SETTINGS,
     ];
     let runs: Vec<_> = kinds.iter().map(|&kind| accessibility_modal_text_run_id(kind)).collect();
     for (index, run) in runs.iter().enumerate() {
@@ -934,5 +935,141 @@ fn modal_text_actions_reach_the_open_editor() {
         "reset_modal_results(ws);",
     ] {
         assert!(action.contains(line), "{line}");
+    }
+}
+
+#[test]
+fn settings_inline_edit_exposes_text_caret_and_actions() {
+    let mut ws = WindowState::new(1, Mux::new());
+    ws.settings_text_edit = Some(crate::settings::SettingsTextEdit {
+        key: "background-image",
+        buf: "/tmp/image.png".into(),
+    });
+    let overlay = kettle_render::Overlay {
+        settings: Some(kettle_render::SettingsOverlay {
+            categories: vec!["Background".into()],
+            active_category: 0,
+            label_cols: 20,
+            value_cols: 20,
+            background_page: true,
+            rows: vec![kettle_render::SettingsRow {
+                label: "Background image".into(),
+                value: String::new(),
+                disabled: false,
+            }],
+            focused_row: 0,
+            title: "Settings".into(),
+            hints: String::new(),
+            footer_note: None,
+        }),
+        text_field: Some(kettle_render::TextFieldOverlay {
+            text: "/tmp/image.png".into(),
+            cursor_byte: 4,
+            selection: Some((4, 14)),
+            horizontal_scroll: 0,
+            rect: (10.0, 20.0, 400.0, 24.0),
+            prefix: String::new(),
+            hint: String::new(),
+            accent_palette: 0,
+        }),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    let (id, input) = projection
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == accesskit::Role::TextInput)
+        .expect("Settings inline edit must expose a TextInput");
+    assert_eq!(projection.focus, Some(*id));
+    assert_eq!(input.value(), Some("/tmp/image.png"));
+    let kind = super::accessibility_modal_input_kind(&ws)
+        .expect("Settings editor must accept accessibility actions");
+    assert_eq!(*id, super::accessibility_modal_id(kind, 1));
+    let run_id = super::accessibility_modal_text_run_id(kind);
+    let run = &projection
+        .nodes
+        .iter()
+        .find(|(id, _)| *id == run_id)
+        .unwrap()
+        .1;
+    assert_eq!(run.value(), input.value());
+    let selection = input.text_selection().unwrap();
+    assert_eq!(
+        (
+            selection.anchor.character_index,
+            selection.focus.character_index
+        ),
+        (14, 4)
+    );
+    for action in [
+        accesskit::Action::SetValue,
+        accesskit::Action::ReplaceSelectedText,
+        accesskit::Action::SetTextSelection,
+    ] {
+        assert!(input.supports_action(action));
+    }
+    super::modal_editor_mut(&mut ws)
+        .unwrap()
+        .replace_all("new.png", crate::modal_input::MAX_MODAL_INPUT_BYTES);
+    assert_eq!(
+        ws.settings_text_edit.as_ref().unwrap().buf.text(),
+        "new.png"
+    );
+}
+
+#[test]
+fn terminal_accessibility_keeps_each_row_on_its_own_line() {
+    let ids = [
+        accesskit::NodeId(1),
+        accesskit::NodeId(2),
+        accesskit::NodeId(3),
+    ];
+    let runs =
+        super::terminal_accessibility_runs("first\n\nthird", (10.0, 20.0, 80.0, 60.0), 20.0, &ids);
+    assert_eq!(
+        runs.len(),
+        3,
+        "each terminal row needs a separate accessible line"
+    );
+    for (index, ((id, node), value)) in runs.iter().zip(["first\n", "\n", "third"]).enumerate() {
+        assert_eq!(*id, ids[index]);
+        assert_eq!(node.value(), Some(value));
+        assert_eq!(
+            node.character_lengths()
+                .iter()
+                .map(|&n| n as usize)
+                .sum::<usize>(),
+            value.len()
+        );
+        assert_eq!(
+            node.bounds(),
+            Some(accesskit::Rect::new(
+                10.0,
+                20.0 + index as f64 * 20.0,
+                90.0,
+                40.0 + index as f64 * 20.0
+            ))
+        );
+        assert!(node.previous_on_line().is_none() && node.next_on_line().is_none());
+    }
+}
+
+#[test]
+fn completion_accessibility_positions_are_zero_based() {
+    for position in 0..2 {
+        let candidate = kettle_render::CompletionOverlayRow {
+            label: format!("result {position}"),
+            description: String::new(),
+            position,
+        };
+        let node =
+            super::completion_accessibility_row(&candidate, position == 0, (0.0, 0.0, 100.0, 20.0));
+        assert_eq!(
+            node.position_in_set(),
+            Some(position),
+            "completion positions must stay zero-based"
+        );
+        assert!(node.position_in_set().unwrap() < 2);
     }
 }

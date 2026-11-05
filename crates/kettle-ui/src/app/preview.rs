@@ -2,6 +2,20 @@
 
 use super::*;
 
+pub(super) fn pane_preview_holds_keyboard(
+    ws: &WindowState,
+    windows: &std::collections::BTreeMap<u64, WindowState>,
+    pane: u64,
+) -> bool {
+    if ws.mux.panes.contains_key(&pane) {
+        return ws.preview_focus.is_some();
+    }
+    windows
+        .values()
+        .find(|window| window.mux.panes.contains_key(&pane))
+        .is_some_and(|window| window.preview_focus.is_some())
+}
+
 impl App {
     /// Note the card a primary press at the pointer would take, for the hand
     /// cursor and the hover outline: one settled under it, with no Shift,
@@ -1924,13 +1938,7 @@ impl App {
 
     /// Whether a preview lane holds the keyboard in the window `pane` is in.
     pub(super) fn preview_holds_keyboard(&self, ws: &WindowState, pane: u64) -> bool {
-        if ws.mux.panes.contains_key(&pane) {
-            return ws.preview_focus.is_some();
-        }
-        self.windows
-            .values()
-            .find(|window| window.mux.panes.contains_key(&pane))
-            .is_some_and(|window| window.preview_focus.is_some())
+        pane_preview_holds_keyboard(ws, &self.windows, pane)
     }
 
     /// Keep preview focus while its item is visible and only its own menu covers it.

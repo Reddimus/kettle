@@ -622,3 +622,73 @@ fn trigger_grid_snapshot_preserves_wide_and_combining_text() {
     mux.kill_children();
 }
 
+
+#[test]
+fn pinned_sends_survive_their_origin_window_closing() {
+    let lua = PendingLuaCommand::SendText {
+        origin_window: 1,
+        target_pane: Some(42),
+        bytes: Arc::from(&b"retained"[..]),
+    };
+    let remote = PendingRemoteCommand::SendText {
+        origin_window: 1,
+        target_pane: Some(42),
+        bytes: Arc::from(&b"retained"[..]),
+    };
+    assert_eq!(
+        lua.required_window(),
+        None,
+        "a pinned Lua send must follow its pane after docking closes the origin"
+    );
+    assert_eq!(
+        remote.required_window(),
+        None,
+        "a pinned remote send must follow its pane after docking closes the origin"
+    );
+    let unresolved = PendingLuaCommand::SendText {
+        origin_window: 1,
+        target_pane: None,
+        bytes: Arc::from(&b"new"[..]),
+    };
+    assert_eq!(unresolved.required_window(), Some(1));
+    assert_eq!(
+        PendingLuaCommand::ExecAction {
+            origin_window: 1,
+            action: Action::NewTab
+        }
+        .required_window(),
+        Some(1)
+    );
+    assert_eq!(
+        PendingRemoteCommand::NewTab { origin_window: 1 }.required_window(),
+        Some(1)
+    );
+}
+
+#[test]
+fn trigger_capture_expansion_rejects_oversized_arguments_and_argv() {
+    use kettle_config::{OutputTrigger, TriggerAction};
+    let text = "x".repeat(40 * 1024);
+    for argv in [
+        vec!["notify".into(), "{0}{0}".into()],
+        vec!["{0}".into(); 30],
+        vec!["x".repeat(64 * 1024 + 1)],
+    ] {
+        let triggers = super::compile_triggers(&[OutputTrigger {
+            pattern: "x+".into(),
+            action: TriggerAction::RunCommand(argv),
+        }]);
+        assert!(
+            super::match_triggers(&text, &triggers).is_none(),
+            "expanded trigger argv must obey per-argument and aggregate byte caps"
+        );
+    }
+    let triggers = super::compile_triggers(&[OutputTrigger {
+        pattern: "x+".into(),
+        action: TriggerAction::RunCommand(vec!["notify".into(), "{0}".into()]),
+    }]);
+    let Some(TriggerAction::RunCommand(argv)) = super::match_triggers(&text, &triggers) else {
+        panic!("bounded argv must still expand");
+    };
+    assert_eq!(argv, ["notify".to_string(), text]);
+}

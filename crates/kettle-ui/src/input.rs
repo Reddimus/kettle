@@ -734,6 +734,16 @@ pub fn encode_key_press(key: &Key, mods: ModifiersState, mode: TermMode) -> Opti
     encode_kitty_key_event(&synthetic_key_event(key, mods), mods, mode)
 }
 
+/// Encode the negotiated release for a synthetic key token.
+pub fn encode_key_release(key: &Key, mods: ModifiersState, mode: TermMode) -> Option<Vec<u8>> {
+    if !mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL) {
+        return None;
+    }
+    let mut event = synthetic_key_event(key, mods);
+    event.state = ElementState::Released;
+    encode_kitty_key_event(&event, mods, mode)
+}
+
 /// Whether [`encode_key_press`] uses a Kitty sequence instead of the legacy
 /// xterm encoding. Callers use this to avoid applying legacy Backspace/Delete
 /// byte remaps to an already encoded CSI-u sequence.

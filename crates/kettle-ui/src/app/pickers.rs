@@ -345,6 +345,11 @@ pub(super) fn theme_preview_change(
     }
 }
 
+pub(super) fn cancel_theme_preview(ws: &mut WindowState) -> Option<(String, kettle_config::Theme)> {
+    ws.theme_picker_input = None;
+    ws.theme_preview.take()
+}
+
 /// End an input-method composition when the modal that owned it closes (see
 /// `remember_closing_key`). A late Commit no longer matches the focus
 /// generation, so it is dropped instead of typed into whatever the modal

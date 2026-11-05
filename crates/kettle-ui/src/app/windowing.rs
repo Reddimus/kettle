@@ -502,6 +502,8 @@ impl App {
                 scaled_zoom_prev_font_size,
                 ..
             } => {
+                let scaled_zoom_prev_font_size =
+                    scaled_zoom_prev_font_size.filter(|_| dt.tab.scaled_zoom_owner);
                 ws.scaled_zoom_prev_font_size = scaled_zoom_prev_font_size;
                 ws.mux.attach_tab(dt, None);
                 ws.adopt_moved_paste_state(*paste);
@@ -929,14 +931,19 @@ impl App {
             } else {
                 0.0
             };
-        tab_band_rect(
+        let band = tab_band_rect(
             surface,
             self.cfg.tab_bar_pos,
             height,
             self.cfg.tab_bar_width,
             self.search_bar_h(ws),
             bottom_status_height,
-        )
+        );
+        if self.cfg.tab_bar_pos.is_vertical() {
+            side_tab_band(band, self.cfg.status_bar, self.status_bar_h(ws))
+        } else {
+            band
+        }
     }
 
     fn tear_off_tab_band(&self, ws: &WindowState, surface: (u32, u32), height: f32) -> Rect {
@@ -945,14 +952,19 @@ impl App {
         } else {
             0.0
         };
-        tab_band_rect(
+        let band = tab_band_rect(
             surface,
             self.cfg.tab_bar_pos,
             height,
             self.cfg.tab_bar_width,
             0.0,
             bottom_status,
-        )
+        );
+        if self.cfg.tab_bar_pos.is_vertical() {
+            side_tab_band(band, self.cfg.status_bar, self.status_bar_h(ws))
+        } else {
+            band
+        }
     }
 
     /// Insertion slot if the (approximated) screen
@@ -1819,11 +1831,13 @@ impl App {
     pub(super) fn dock_tab_into(
         &mut self,
         target: &mut WindowState,
-        dt: crate::mux::DetachedTab,
+        mut dt: crate::mux::DetachedTab,
         paste: crate::window_state::MovedPasteState,
         idx: usize,
         from_seq: u64,
     ) {
+        // Docking keeps the destination font; the source owns its baseline.
+        dt.tab.scaled_zoom_owner = false;
         let pre_focus = self.focus_key(target);
         let landed = target.mux.attach_tab(dt, Some(idx));
         target.adopt_moved_paste_state(paste);
@@ -2861,6 +2875,15 @@ impl App {
         seq: u64,
         mut ws: WindowState,
     ) {
+        let previous = if ws.renderer.is_some() {
+            take_orphaned_scaled_zoom_font(&mut ws)
+        } else {
+            None
+        };
+        if let (Some(renderer), Some(previous)) = (ws.renderer.as_mut(), previous) {
+            renderer.set_font_size(previous);
+            self.resize_all(&mut ws);
+        }
         if modal_editor(&ws).is_some() {
             self.sync_modal_editor_scroll(&mut ws);
             self.update_ime_cursor_area(&mut ws);
@@ -2887,6 +2910,9 @@ impl App {
                 .is_some_and(|t| t.seq == seq || t.carrier == seq)
             {
                 self.abandon_torn_drag(None);
+            }
+            if let Some((name, theme)) = cancel_theme_preview(&mut ws) {
+                self.set_runtime_theme_state(&ws, name, theme);
             }
             drop(ws);
             self.hoover_mapped_groups();

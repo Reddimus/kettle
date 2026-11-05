@@ -1208,33 +1208,7 @@ impl App {
         // hazard with the GPU objects) turns that infinite hang into a clean,
         // actionable exit. `done` is set the instant init returns — success OR
         // a quick failure — so only a true never-returns hang trips it.
-        let gpu_init_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        {
-            let gpu_init_done = gpu_init_done.clone();
-            // If the watchdog thread can't be spawned, proceed without it
-            // rather than failing init.
-            let _ = std::thread::Builder::new()
-                .name("kettle-gpu-init-watchdog".into())
-                .spawn(move || {
-                    if gpu_init_timed_out(
-                        &gpu_init_done,
-                        std::time::Duration::from_secs(GPU_INIT_TIMEOUT_SECS),
-                        std::time::Duration::from_millis(100),
-                    ) {
-                        log::error!(
-                            "GPU initialization did not finish within {GPU_INIT_TIMEOUT_SECS}s — \
-                             your graphics driver may be hung or unresponsive. Try updating the \
-                             GPU driver; on Linux you can force software rendering with \
-                             `LIBGL_ALWAYS_SOFTWARE=1` or pick another backend via \
-                             `WGPU_BACKEND=gl`. Exiting so kettle doesn't hang invisibly."
-                        );
-                        // exit() skips destructors, so run_with's guard never
-                        // flushes this startup's trace.
-                        crate::startup_trace::flush();
-                        std::process::exit(1);
-                    }
-                });
-        }
+        let gpu_init_watchdog = GpuInitWatchdog::arm();
         let init_result = {
             let runtime_tracker = self.runtime_tracker.clone();
             let _phase = runtime_tracker.enter("gpu_init");
@@ -1251,7 +1225,7 @@ impl App {
         // Disarm the watchdog the moment init returns, on BOTH the success and
         // the quick-failure path, so a clean renderer-init error below never
         // gets a spurious "timed out" report behind it.
-        gpu_init_done.store(true, std::sync::atomic::Ordering::Release);
+        drop(gpu_init_watchdog);
         let renderer = match init_result {
             Ok(r) => r,
             Err(e) => {

@@ -288,3 +288,49 @@ fn no_update_state_changes_content_rect() {
     assert!(!src.contains("update_banner_h"));
 }
 
+
+#[test]
+fn closing_scaled_zoom_owner_restores_baseline_with_another_tab_remaining() {
+    let tab = |pane, owner| crate::mux::Tab {
+        root: crate::mux::Node::Leaf(pane),
+        focus: pane,
+        title_override: None,
+        zoomed: owner,
+        last_output_at: None,
+        last_seen_at: None,
+        bell: false,
+        generated_group_name: None,
+        scaled_zoom_owner: owner,
+        lanes: Default::default(),
+    };
+    let mut ws = WindowState::new(1, Mux::new());
+    ws.mux.tabs = vec![tab(1, true), tab(2, false), tab(3, false)];
+    ws.scaled_zoom_prev_font_size = Some(12.0);
+    ws.mux.active = 2;
+    assert!(!ws.mux.close_tab());
+    assert_eq!(
+        super::take_orphaned_scaled_zoom_font(&mut ws),
+        None,
+        "closing another tab must preserve the owner's zoom"
+    );
+    ws.mux.active = 0;
+    assert!(ws.mux.move_active_tab(1));
+    assert!(!ws.mux.close_tab());
+    assert_eq!(ws.mux.tabs.len(), 1);
+    assert_eq!(
+        super::take_orphaned_scaled_zoom_font(&mut ws),
+        Some(12.0),
+        "closing the scaled-zoom owner must restore the font"
+    );
+    assert!(ws.scaled_zoom_prev_font_size.is_none());
+    let source = production_source();
+    assert!(
+        source.contains(".filter(|_| dt.tab.scaled_zoom_owner)"),
+        "tearing another tab must not transfer the owner's baseline"
+    );
+    let finish = source.split("fn finish_window_dispatch(").nth(1).unwrap();
+    assert!(
+        finish.find("set_font_size(previous)").unwrap()
+            < finish.find("self.resize_all(&mut ws)").unwrap()
+    );
+}

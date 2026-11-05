@@ -85,12 +85,31 @@ fn live_gpu_context_uses_event_loop_owned_display_handle() {
     assert!(
         recovery_body.contains("Self::stash_renderer_for_gpu_recovery(ws)")
             && recovery_body.contains("Self::stash_renderer_for_gpu_recovery(other)")
-            && recovery_body.matches("restore_recovery_state(").count() == 2
+            && recovery_body.matches("restore_gpu_renderer_state(").count() == 2
             && recovery_body
                 .matches("finish_gpu_renderer_recovery(")
                 .count()
                 == 2,
         "GPU recovery must retain, restore, and reflow every window around the atomic rebuild"
+    );
+    let restore = src
+        .split("fn restore_gpu_renderer_state(")
+        .nth(1)
+        .unwrap()
+        .split("\n}\n")
+        .next()
+        .unwrap();
+    assert_eq!(
+        restore
+            .matches("renderer.restore_recovery_state(snapshot)")
+            .count(),
+        1
+    );
+    assert!(
+        restore.find("restore_recovery_state(snapshot)").unwrap()
+            < restore
+                .find("set_font_family(cfg.font_family.clone())")
+                .unwrap()
     );
 }
 
@@ -289,3 +308,34 @@ fn command_deadlines_are_maintained_before_gpu_recovery() {
     );
 }
 
+
+#[test]
+fn recovery_initialization_arms_and_disarms_the_shared_watchdog() {
+    let source = production_source();
+    let recovery = source
+        .split("fn try_recover_gpu(")
+        .nth(1)
+        .unwrap()
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    let armed = recovery
+        .find("GpuInitWatchdog::arm()")
+        .expect("GPU recovery must arm a fresh initialization watchdog");
+    assert!(
+        armed
+            < recovery
+                .find("Renderer::new_with_escalation_and_display_handle(")
+                .unwrap()
+    );
+    fn failed_attempt(done: Arc<std::sync::atomic::AtomicBool>) -> Result<(), ()> {
+        let _guard = super::GpuInitWatchdog { done };
+        Err(())
+    }
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    assert!(failed_attempt(done.clone()).is_err());
+    assert!(
+        done.load(Ordering::Acquire),
+        "every returning error path must disarm the watchdog"
+    );
+}

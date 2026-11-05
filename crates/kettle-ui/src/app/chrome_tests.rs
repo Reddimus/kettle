@@ -625,3 +625,54 @@ fn finding_narrow_vertical_tabs_remain_selectable() {
     assert!(body.contains("tab_title_rect(rect, close, closable)"));
 }
 
+
+#[test]
+fn side_tabs_reserve_top_and_bottom_status_bands() {
+    use kettle_config::StatusBarMode;
+    let raw = (0.0, 0.0, 180.0, 574.0);
+    for (mode, expected) in [
+        (StatusBarMode::Top, (0.0, 22.0, 180.0, 552.0)),
+        (StatusBarMode::Bottom, (0.0, 0.0, 180.0, 552.0)),
+    ] {
+        let band = super::side_tab_band(raw, mode, 22.0);
+        assert_eq!(
+            band, expected,
+            "side-tab painting and pointer bands must exclude status text"
+        );
+        let status_y = if mode == StatusBarMode::Top {
+            10.0
+        } else {
+            563.0
+        };
+        assert!(!super::rect_contains(band, 90.0, status_y));
+        let rows = (band.3 / 24.0).floor() as usize;
+        let layout = super::side_tab_rows(40, 0, rows);
+        assert!(band.1 + (layout.plus + 1) as f32 * 24.0 <= band.1 + band.3);
+    }
+    assert_eq!(super::side_tab_band(raw, StatusBarMode::Off, 0.0), raw);
+}
+
+#[test]
+fn docking_append_marker_follows_the_last_visible_tab() {
+    let marker = kettle_render::tab_drag::INSERT_MARKER_PX;
+    let layout = super::tab_strip_layout(2, 0, 400.0, 48.0, 24.0, 120.0, true);
+    assert_eq!(
+        super::horizontal_tab_insert_x(&layout, 2, 400.0),
+        400.0 - marker,
+        "append marker must be at the last tab's right edge"
+    );
+    let layout = super::tab_strip_layout(20, 0, 400.0, 48.0, 24.0, 120.0, true);
+    let (last, x) = layout
+        .xs
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, x)| x.map(|x| (index, x)))
+        .unwrap();
+    assert!(last + 1 < layout.xs.len());
+    assert_eq!(
+        super::horizontal_tab_insert_x(&layout, last + 1, 400.0),
+        x + layout.width,
+        "an insertion before a hidden tab must follow the visible predecessor"
+    );
+}

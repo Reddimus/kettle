@@ -653,3 +653,83 @@ fn finding_watcher_refresh_keeps_working_registration() {
     );
 }
 
+
+#[cfg(unix)]
+#[test]
+fn config_watch_paths_keep_dangling_symlink_targets() {
+    use std::os::unix::fs::symlink;
+    let root = kettle_test_support::private_tempdir("kettle-dangling-config-");
+    let links = root.join("links");
+    let targets = root.join("targets");
+    std::fs::create_dir(&links).unwrap();
+    std::fs::create_dir(&targets).unwrap();
+    let link = links.join("config");
+    symlink("../targets/config", &link).unwrap();
+    let target = std::fs::canonicalize(&targets).unwrap().join("config");
+    for existed in [false, true] {
+        if existed {
+            std::fs::write(&target, "font-size = 12\n").unwrap();
+            assert!(super::config_watch_paths(&link).unwrap().contains(&target));
+            std::fs::remove_file(&target).unwrap();
+        }
+        let refreshed = super::config_watch_paths(&link).unwrap();
+        assert!(
+            refreshed.contains(&target),
+            "a refreshed watcher must retain the dangling config target"
+        );
+        std::fs::write(&target, "font-size = 14\n").unwrap();
+        let event = notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))
+            .add_path(target.clone());
+        assert!(
+            refreshed
+                .iter()
+                .any(|path| super::watcher_event_matches(&event, path))
+        );
+        std::fs::remove_file(&target).unwrap();
+    }
+}
+
+#[test]
+fn font_reload_between_recovery_attempts_survives_an_unchanged_reload() {
+    let runtime = 18.0;
+    let mut pending = super::recovery_font_size_after_reload(None, true, 14.0);
+    assert_eq!(
+        pending,
+        Some(14.0),
+        "font reloads while the renderer is absent must survive recovery"
+    );
+    pending = super::recovery_font_size_after_reload(pending, false, 14.0);
+    assert_eq!(
+        pending.unwrap_or(runtime),
+        14.0,
+        "a no-op reload must not resurrect the old snapshot's zoom"
+    );
+    pending = super::recovery_font_size_after_reload(pending, true, 12.0);
+    assert_eq!(pending, Some(12.0));
+    assert_eq!(
+        super::recovery_font_size_after_reload(None, false, 12.0).unwrap_or(runtime),
+        18.0
+    );
+    let source = production_source();
+    let restore = source
+        .split("fn restore_gpu_renderer_state(")
+        .nth(1)
+        .unwrap()
+        .split("\n}\n")
+        .next()
+        .unwrap();
+    assert!(restore.contains("set_font_family(cfg.font_family.clone())"));
+    assert!(restore.contains("set_cell_scale(cfg.cell_width, cfg.cell_height)"));
+    let recovery = source
+        .split("fn try_recover_gpu(")
+        .nth(1)
+        .unwrap()
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    assert_eq!(
+        recovery.matches("restore_gpu_renderer_state(").count(),
+        2,
+        "primary and secondary windows must reconcile recovery fonts"
+    );
+}

@@ -1912,6 +1912,10 @@ pub struct Tab {
     /// never saved, restored, duplicated or carried to another window, and
     /// leaves with its pane.
     pub(crate) lanes: HashMap<u64, LaneRequest>,
+    /// Kept on the tab so moving it cannot change its generated toggle name.
+    pub(crate) generated_group_name: Option<String>,
+    /// This tab owns the window's saved scaled-zoom font baseline.
+    pub(crate) scaled_zoom_owner: bool,
 }
 
 /// Activity state of an *inactive* tab, used by the renderer to pick
@@ -2690,6 +2694,8 @@ impl Mux {
                         last_output_at: None,
                         last_seen_at: None,
                         bell: false,
+                        scaled_zoom_owner: false,
+                        generated_group_name: None,
                         lanes: HashMap::new(),
                     });
                 }
@@ -2804,6 +2810,8 @@ impl Mux {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         // Terminator parity, terminatorlib/config.py:97
@@ -2917,6 +2925,8 @@ impl Mux {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         self.active = self.tabs.len() - 1;
@@ -4188,6 +4198,8 @@ impl Mux {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             },
         );
@@ -6960,6 +6972,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         m.active = m.tabs.len() - 1;
@@ -7946,6 +7960,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         mux.active = 0;
@@ -9228,6 +9244,8 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             });
         }
@@ -9282,6 +9300,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         assert!(!single.move_active_tab(1));
@@ -9304,6 +9324,8 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             });
         }
@@ -9346,6 +9368,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         assert!(!single.nudge_active_tab(1));
@@ -9365,6 +9389,8 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             });
         }
@@ -9400,6 +9426,8 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             });
         }
@@ -9454,6 +9482,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
 
@@ -9499,6 +9529,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         assert_eq!(m.tab_index_of_any_pane(&[10]), Some(0));
@@ -9539,6 +9571,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         m.active = 0;
@@ -9605,6 +9639,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         m.active = 0;
@@ -9704,6 +9740,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         }];
         let mut active = 0;
@@ -9741,6 +9779,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         }];
         let mut active = 0;
@@ -9776,6 +9816,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         }];
         let mut active = 0;
@@ -10085,6 +10127,8 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             }
         }
@@ -10157,6 +10201,8 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             });
         }
@@ -10184,6 +10230,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         for id in 2..=60 {
@@ -10233,6 +10281,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         super::insert_split(&mut tab, 2, Dir::Horizontal, false);
@@ -10252,6 +10302,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         super::insert_split(&mut tab, 2, Dir::Vertical, false);
@@ -10277,6 +10329,8 @@ mod node_tests {
                 last_seen_at: None,
                 bell: false,
                 title_override: None,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             };
             assert!(super::insert_split(&mut tab, 2, dir, new_first));
@@ -10305,6 +10359,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         assert!(
@@ -10350,6 +10406,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         m.active = 0;
@@ -10377,6 +10435,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         m.active = 0;
@@ -10431,6 +10491,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         m.tabs.push(mk(1));
@@ -10471,6 +10533,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         let mut src = Mux::new();

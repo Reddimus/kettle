@@ -1972,8 +1972,8 @@ fn a_lane_holding_the_keyboard_is_wired_as_a_modal() {
     assert_eq!(
         flat.matches("if self.preview_holds_keyboard(ws, pane) {")
             .count(),
-        2,
-        "send_keys and send_text"
+        3,
+        "send_keys, send_text and run_command"
     );
     assert_eq!(
         flat.matches("self.leave_preview_focus_for_press(ws);")
@@ -2381,4 +2381,48 @@ fn an_undrawable_file_goes_on_the_shelf_as_itself() {
     ] {
         assert!(publish.contains(needle), "publish_show: {needle}");
     }
+}
+
+#[test]
+fn run_command_respects_preview_keyboard_ownership_in_each_window() {
+    use super::preview::pane_preview_holds_keyboard;
+    use super::production_source;
+    use crate::window_state::WindowState;
+    let source = production_source();
+    let run = source
+        .split("fn ctl_run_command(")
+        .nth(1)
+        .unwrap()
+        .split("fn resolve_pending_run(")
+        .next()
+        .unwrap();
+    let guard = run
+        .find("self.preview_holds_keyboard(ws, pane)")
+        .expect("run_command must reject preview-owned keyboard input");
+    assert!(guard < run.find("expect_correlated_command(").unwrap());
+    assert!(guard < run.find("p.feed_input(&input)").unwrap());
+    assert!(
+        run[guard..]
+            .contains("reply.send(Response::err(req.id, ec::BUSY, PREVIEW_HOLDS_KEYBOARD))")
+    );
+    let (mux, panes) = super::tests::title_test_tab_mux(1);
+    let local = panes[0];
+    let mut ws = WindowState::new(1, mux);
+    let (mux, panes) = super::tests::title_test_tab_mux(1);
+    let foreign = panes[0];
+    let mut other = WindowState::new(2, mux);
+    other.preview_focus = Some(crate::media::PreviewFocus {
+        pane: foreign,
+        item: 1,
+    });
+    let mut windows = std::collections::BTreeMap::from([(2, other)]);
+    assert!(!pane_preview_holds_keyboard(&ws, &windows, local));
+    assert!(pane_preview_holds_keyboard(&ws, &windows, foreign));
+    ws.preview_focus = Some(crate::media::PreviewFocus {
+        pane: local,
+        item: 1,
+    });
+    assert!(pane_preview_holds_keyboard(&ws, &windows, local));
+    windows.get_mut(&2).unwrap().preview_focus = None;
+    assert!(!pane_preview_holds_keyboard(&ws, &windows, foreign));
 }

@@ -9,6 +9,24 @@ fn kettle_ui_group_all_name() -> &'static str {
     "All"
 }
 
+pub(super) fn generated_tab_group_name(
+    tab: &mut crate::mux::Tab,
+    populated: &HashSet<String>,
+) -> String {
+    tab.generated_group_name
+        .get_or_insert_with(|| {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            loop {
+                let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let name = format!("Tab {id}");
+                if !populated.contains(&name) {
+                    return name;
+                }
+            }
+        })
+        .clone()
+}
+
 pub(super) fn group_scope_is_globally_stale(
     autoclean: bool,
     scope: &BroadcastScope,
@@ -77,8 +95,19 @@ pub(crate) fn report_split_failure(
     );
 }
 
+pub(super) fn take_orphaned_scaled_zoom_font(ws: &mut WindowState) -> Option<f32> {
+    if ws.mux.tabs.iter().any(|tab| tab.scaled_zoom_owner) {
+        None
+    } else {
+        ws.scaled_zoom_prev_font_size.take()
+    }
+}
+
 impl App {
     fn restore_scaled_zoom_font(&mut self, ws: &mut WindowState) {
+        for tab in &mut ws.mux.tabs {
+            tab.scaled_zoom_owner = false;
+        }
         if let Some(prev) = ws.scaled_zoom_prev_font_size.take()
             && let Some(r) = ws.renderer.as_mut()
         {
@@ -115,11 +144,17 @@ impl App {
                     let cur = r.font_size();
                     if ws.scaled_zoom_prev_font_size.is_none() {
                         ws.scaled_zoom_prev_font_size = Some(cur);
+                        for (index, tab) in ws.mux.tabs.iter_mut().enumerate() {
+                            tab.scaled_zoom_owner = index == ws.mux.active;
+                        }
                     }
                     let new_size = (cur * factor).clamp(6.0, 96.0);
                     r.set_font_size(new_size);
                 }
             } else if let Some(prev) = ws.scaled_zoom_prev_font_size.take() {
+                for tab in &mut ws.mux.tabs {
+                    tab.scaled_zoom_owner = false;
+                }
                 r.set_font_size(prev);
             }
         }
@@ -1443,7 +1478,18 @@ impl App {
                 // `GroupWindow` open the name prompt.
                 let tab_scope = matches!(action, Action::ToggleGroupTab);
                 let name = if tab_scope {
-                    format!("Tab {}", ws.mux.active + 1)
+                    let populated = self
+                        .windows
+                        .values()
+                        .chain(std::iter::once(&*ws))
+                        .flat_map(|window| window.mux.panes.values())
+                        .filter_map(|pane| pane.group_name.clone())
+                        .collect();
+                    let index = ws.mux.active;
+                    let Some(tab) = ws.mux.tabs.get_mut(index) else {
+                        return;
+                    };
+                    generated_tab_group_name(tab, &populated)
                 } else {
                     format!("Window group {}", ws.seq)
                 };
