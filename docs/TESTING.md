@@ -658,7 +658,15 @@ The parser gate tests and lints `vte` with `ansi` and `alacritty_terminal`.
 The PTY gate uses `serde_support` for compatibility with serialized builders.
 The clipboard gate runs display-free Linux URI-list tests, then the X11 INCR
 paste test under `xvfb-run` when xvfb-run and xclip are installed. Other hosts
-check formatting for that patch.
+check formatting for that patch. `kettle-ui --test clipboard_transfer` also
+exercises the default image/file acquisition bounds with scripted correctly
+typed INCR chunks (byte ceiling and absolute deadline). Its
+`default_paste_x11_owner_cannot_renew_media_incr_forever` test drives the actual
+arboard image/file acquisitions against an unterminated, correctly typed X11
+owner; run it with `KETTLE_X11_CLIPBOARD_TEST=1` on a private X server. The
+clipboard gate runs it under `xvfb-run`; macOS and Windows cannot execute it.
+The trigger tests include DECSTBM rows 2-5, upward and downward retained-row
+movement, and eligibility after an old match scrolls out.
 
 CI runs parser patches on Linux and portable-pty on all three native hosts.
 Only Windows executes its ConPTY-specific code.

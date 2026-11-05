@@ -26,7 +26,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use crate::platform::x11_incr::IncrRead;
+use crate::platform::x11_incr::{read_paste, IncrRead, PasteFormat};
 
 use log::{error, trace, warn};
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
@@ -1082,7 +1082,10 @@ impl Clipboard {
 	#[cfg(feature = "image-data")]
 	pub(crate) fn get_image(&self, selection: LinuxClipboardKind) -> Result<ImageData<'static>> {
 		let formats = [self.inner.atoms.PNG_MIME];
-		let bytes = self.inner.read(&formats, selection)?.bytes;
+		let bytes = read_paste(PasteFormat::Image, |bounds| {
+			self.inner.read_inner(&formats, selection, bounds)
+		})?
+		.bytes;
 
 		let cursor = std::io::Cursor::new(&bytes);
 		let mut reader = image::ImageReader::new(cursor);
@@ -1116,7 +1119,9 @@ impl Clipboard {
 	}
 
 	pub(crate) fn get_file_list(&self, selection: LinuxClipboardKind) -> Result<Vec<PathBuf>> {
-		let result = self.inner.read(&[self.inner.atoms.URI_LIST], selection)?;
+		let result = read_paste(PasteFormat::Files, |bounds| {
+			self.inner.read_inner(&[self.inner.atoms.URI_LIST], selection, bounds)
+		})?;
 
 		Ok(paths_from_uri_list(result.bytes))
 	}

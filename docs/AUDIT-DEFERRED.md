@@ -166,6 +166,16 @@ campaign and startup outlier remain inconclusive. These entries stay open.
 
 ## Platform
 
+- **Native clipboard acquisition can exceed paste bounds.** Independent review
+  of the clipboard fixes found that macOS `stringForType` materializes the
+  pasteboard string before the size check (`vendor/arboard-3.6.1/src/platform/osx.rs`),
+  and a delayed-rendering Windows owner can block synchronous `GetClipboardData`
+  beyond the deadline (`vendor/arboard-3.6.1/src/platform/windows.rs`). Deferred
+  because both require acquisition in a bounded helper process or thread that
+  lets the UI stop waiting while preserving OSC 52 store/load ordering. Close
+  with native tests for an oversized macOS string and a stalled Windows owner,
+  proving bounded resource use and UI wait time without reordering OSC 52.
+
 - **Descriptor sweep on generic Unix.** On Unix systems other than Linux and
   macOS, the media worker's close-on-exec sweep stops at the current
   `RLIMIT_NOFILE`, so a descriptor opened above a later-lowered limit is

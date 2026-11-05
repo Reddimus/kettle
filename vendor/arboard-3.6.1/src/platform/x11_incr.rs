@@ -5,6 +5,28 @@ use crate::Error;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(4);
 const DRAIN_CHUNKS_MAX: usize = 4096;
 
+/// Raw formats read by the default file/image paste branches, before decoding.
+#[derive(Clone, Copy)]
+pub(super) enum PasteFormat {
+	Image,
+	Files,
+}
+
+pub(super) fn read_paste<T>(
+	format: PasteFormat,
+	read: impl FnOnce(Option<crate::common::ReadBounds>) -> Result<T, Error>,
+) -> Result<T, Error> {
+	let max_bytes = match format {
+		// Match Kettle's existing pasted-image source limit, plus one sentinel byte.
+		PasteFormat::Image => 256 * 1024 * 1024 + 1,
+		PasteFormat::Files => 1024 * 1024 + 1,
+	};
+	read(Some(crate::common::ReadBounds {
+		max_bytes,
+		deadline: Instant::now() + Duration::from_secs(2),
+	}))
+}
+
 #[derive(Default)]
 pub(super) struct IncrRead {
 	pub(super) data: Vec<u8>,
@@ -148,6 +170,51 @@ mod bounded_tests {
 					"correctly typed INCR exceeded its absolute deadline"
 				);
 			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod paste_tests {
+	use super::*;
+	// Drive the acquisition used by the default paste branches before PNG/URI decoding.
+	// The owner sends correctly typed INCR chunks forever, without an end marker.
+	fn unterminated_paste(format: PasteFormat, slow: bool) -> Error {
+		use std::time::{Duration, Instant};
+		let start = Instant::now();
+		read_paste(format, |bounds| -> Result<(), Error> {
+			let mut transfer = match bounds {
+				Some(bounds) => IncrRead::bounded(bounds.max_bytes, bounds.deadline),
+				None => IncrRead::default(),
+			};
+			if slow {
+				for tick in 0..=4 {
+					transfer.push(true, vec![1], start + Duration::from_secs(tick))?;
+				}
+			} else {
+				// Reach the exact ceiling, then refuse the next chunk before appending.
+				let limit = match format {
+					PasteFormat::Image => 256 * 1024 * 1024 + 1,
+					PasteFormat::Files => 1024 * 1024 + 1,
+				};
+				let mut sent = 0;
+				while sent < limit {
+					let count = (limit - sent).min(1024 * 1024);
+					transfer.push(true, vec![1; count], start)?;
+					sent += count;
+				}
+				transfer.push(true, vec![1], start)?;
+			}
+			panic!("default paste accepted an unterminated INCR transfer");
+		})
+		.unwrap_err()
+	}
+
+	#[test]
+	fn default_paste_refuses_unterminated_image_png_and_uri_list_incr() {
+		for format in [PasteFormat::Image, PasteFormat::Files] {
+			assert!(matches!(unterminated_paste(format, true), Error::Timeout));
+			assert!(matches!(unterminated_paste(format, false), Error::LimitExceeded));
 		}
 	}
 }

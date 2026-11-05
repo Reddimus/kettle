@@ -38,6 +38,12 @@ def main():
              "--lib", "platform::linux::x11::incr_tests", "--", "--nocapture"],
             cwd=ROOT, check=True, timeout=600,
         )
+        subprocess.run(
+            ["xvfb-run", "-a", "env", "KETTLE_X11_CLIPBOARD_TEST=1", "cargo", "test",
+             "--locked", "-p", "kettle-ui", "--test", "clipboard_transfer",
+             "default_paste_x11_owner_cannot_renew_media_incr_forever", "--", "--nocapture"],
+            cwd=ROOT, check=True, timeout=600,
+        )
     else:
         print("SKIP: the X11 INCR test needs xvfb-run and xclip")
     run("clippy", *common, "--all-targets", "--", "-D", "warnings")
