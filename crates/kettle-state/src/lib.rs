@@ -918,7 +918,14 @@ fn poll_with_timeout<T>(
 }
 
 fn open_lock_file(path: &Path) -> io::Result<File> {
-    open_private_file(path)
+    #[cfg(windows)]
+    {
+        private::open_lock_file(path)
+    }
+    #[cfg(not(windows))]
+    {
+        open_private_file(path)
+    }
 }
 
 fn acquire_file_lock(
@@ -984,29 +991,76 @@ mod tests {
 
     #[test]
     fn lock_retirement_keeps_waiters_out_until_the_file_is_retired() {
-        let root = test_tempdir();
-        let path = root.path().join("lock");
-        let lock = ExclusiveFileLock::acquire(&path).unwrap();
-        let waiter = open_lock_file(&path).unwrap();
-        lock.remove_with(&path, || {
-            assert!(
-                ExclusiveFileLock::try_acquire(&path).unwrap().is_none(),
-                "retirement released the exclusive lock before retiring the file"
-            );
-        })
-        .unwrap();
-        fs4::FileExt::lock(&waiter).unwrap();
-        let result = verify_locked_file(waiter, &path);
-        match result {
-            Ok(file) => {
-                fs4::FileExt::unlock(&file).unwrap();
+        for preexisting in [false, true] {
+            let root = test_tempdir();
+            let path = root.path().join("lock");
+            if preexisting {
+                drop(open_private_file(&path).unwrap());
             }
-            Err(error) => assert!(
-                is_retired_lock(&error),
-                "waiter saw a non-retryable error: {error}"
-            ),
+            let lock = ExclusiveFileLock::acquire(&path).unwrap();
+            #[cfg(windows)]
+            let retirement_supported = supports_posix_retirement(&lock.file);
+            #[cfg(not(windows))]
+            let retirement_supported = true;
+            let waiter = open_lock_file(&path).unwrap();
+            lock.remove_with(&path, || {
+                assert!(
+                    ExclusiveFileLock::try_acquire(&path).unwrap().is_none(),
+                    "retirement released the exclusive lock before retiring the file"
+                );
+            })
+            .unwrap();
+            if retirement_supported {
+                assert_eq!(
+                    fs::symlink_metadata(&path).unwrap_err().kind(),
+                    io::ErrorKind::NotFound,
+                    "remove must retire the name while a waiter still holds the file"
+                );
+            }
+            fs4::FileExt::lock(&waiter).unwrap();
+            let result = verify_locked_file(waiter, &path);
+            match result {
+                Ok(file) => {
+                    assert!(!retirement_supported, "waiter acquired a retired lock");
+                    fs4::FileExt::unlock(&file).unwrap();
+                }
+                Err(error) => assert!(
+                    is_retired_lock(&error),
+                    "waiter saw a non-retryable error: {error}"
+                ),
+            }
+            assert!(ExclusiveFileLock::try_acquire(&path).unwrap().is_some());
         }
-        assert!(ExclusiveFileLock::try_acquire(&path).unwrap().is_some());
+    }
+
+    #[cfg(windows)]
+    fn supports_posix_retirement(file: &File) -> bool {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
+        use windows_sys::Win32::System::SystemServices::FILE_SUPPORTS_POSIX_UNLINK_RENAME;
+
+        let mut flags = 0;
+        // SAFETY: the handle is live, flags is writable, and unused output
+        // buffers are null with zero lengths.
+        let result = unsafe {
+            GetVolumeInformationByHandleW(
+                file.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut flags,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        assert_ne!(
+            result,
+            0,
+            "query lock volume: {}",
+            io::Error::last_os_error()
+        );
+        flags & FILE_SUPPORTS_POSIX_UNLINK_RENAME != 0
     }
 
     #[cfg(unix)]

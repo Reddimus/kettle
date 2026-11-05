@@ -1003,6 +1003,11 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
     open_private_file_impl(path)
 }
 
+#[cfg(windows)]
+pub(super) fn open_lock_file(path: &Path) -> io::Result<File> {
+    windows::open_lock_file(path)
+}
+
 /// Open an existing private regular file for reading and writing.
 ///
 /// Unlike [`open_private_file`], this never creates a missing path.
@@ -4299,7 +4304,17 @@ mod windows {
     }
 
     pub(super) fn create_private_file_new(path: &Path) -> io::Result<File> {
-        create_private_file_new_with_access(path, GENERIC_READ | GENERIC_WRITE)
+        create_private_file_new_with_access(path, GENERIC_READ | GENERIC_WRITE, false)
+    }
+
+    pub(super) fn open_lock_file(path: &Path) -> io::Result<File> {
+        match create_private_file_new_with_access(path, GENERIC_READ | GENERIC_WRITE, true) {
+            Ok(file) => Ok(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                open_existing_private_file(path, false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) fn create_user_selected_file_new(
@@ -4560,10 +4575,14 @@ mod windows {
     }
 
     pub(super) fn create_private_file_new_append(path: &Path) -> io::Result<File> {
-        create_private_file_new_with_access(path, FILE_APPEND_DATA)
+        create_private_file_new_with_access(path, FILE_APPEND_DATA, false)
     }
 
-    fn create_private_file_new_with_access(path: &Path, desired_access: u32) -> io::Result<File> {
+    fn create_private_file_new_with_access(
+        path: &Path,
+        desired_access: u32,
+        share_delete: bool,
+    ) -> io::Result<File> {
         create_parent_dirs(path)?;
         let path = std::path::absolute(path)?;
         let parent = PrivateParentGuard::new(&path)?;
@@ -4578,17 +4597,18 @@ mod windows {
         };
         let mut path_wide = parent.stable_path(&path)?;
         path_wide.push(0);
+        // Lock handles must allow retirement to reopen this same object with
+        // DELETE access while its exclusive byte-range lock remains held.
+        // Other creation handles pin the new entry through validation.
+        let sharing =
+            FILE_SHARE_READ | FILE_SHARE_WRITE | if share_delete { FILE_SHARE_DELETE } else { 0 };
         // SAFETY: every pointer is valid for the call. The descriptor owns no
         // storage; its SID and ACL are anchored above until CreateFileW returns.
         let handle = unsafe {
             CreateFileW(
                 path_wide.as_ptr(),
                 desired_access | DELETE,
-                // Keep the new directory entry stable until every
-                // postcondition has been checked. In particular, this makes
-                // the failure cleanup below incapable of deleting a path an
-                // attacker swapped in after creation.
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                sharing,
                 &attributes,
                 CREATE_NEW,
                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
