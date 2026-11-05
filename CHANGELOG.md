@@ -30,6 +30,33 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The test-support source scanner no longer lets a test-only enum variant
   hide the production variant after it, and scratch directories are removed
   only when their lifetime lock is free.
+- Terminal images: encoded images are limited to PNG, JPEG and GIF before a
+  decoder is built, Extended XMP segments and WebP payloads are bounded,
+  replacing a PNG retires the old image state, and running out of graphics
+  memory no longer drops ordinary control strings or reports the image as
+  corrupt.
+- Terminal state: a clipped URL query no longer turns into a local file link,
+  widening keeps the right prompt row, clearing navigation marks keeps known
+  shell state, `VDISCARD` is ordinary input on Linux, output backpressure no
+  longer counts toward the end-of-file deadline, and recording retention
+  scans are serialized across processes.
+- Rendering: image culling uses the rendered extent, failed animation frames
+  and decodes retry, atlas failures are reported once per frame, buffer
+  growth checks the device limit, and titlebars, completion counts, compact
+  scrubbers and settings categories keep stable, correctly measured widths.
+- CLI and control: headless clipboard queries get their empty reply, a full
+  semantic queue fails the run instead of losing replies, slow readers are no
+  longer called stalled, stdin read failures exit non-zero, and the control
+  endpoint checks directory ancestors, process ownership and registry bounds.
+- Config, remote and update: `force-no-bell` no longer hides saved bell
+  changes, keybind edits are batched, SSH reconnect is suppressed when
+  `IdentitiesOnly` cannot be kept, and a macOS update verifies the bundle
+  through the held staging directory and refuses to delete an unexpected
+  displaced bundle.
+- Media: memory-probe failures survive cleanup, playback cannot starve
+  worker commands, delayed video tracks keep their start time, still-image
+  rotation comes from the right stream, and structural limits apply before
+  native measurement.
 
 ## [5.9.0] — 2026-11-03
 
