@@ -386,3 +386,36 @@ include!("startup_tests.rs");
 include!("title_tests.rs");
 include!("update_toast_tests.rs");
 include!("windowing_tests.rs");
+
+#[test]
+fn opening_settings_does_not_enumerate_gpus_on_event_loop() {
+    let source = include_str!("actions.rs");
+    let open_settings = source
+        .split("Action::OpenSettings => {")
+        .nth(1)
+        .unwrap()
+        .split("Action::OpenLayoutPicker")
+        .next()
+        .unwrap();
+    assert!(
+        !open_settings.contains("kettle_render::detect_gpus()"),
+        "opening Settings must not synchronously enumerate GPU drivers on the event loop"
+    );
+}
+
+#[test]
+fn settings_gpu_row_projects_translated_pending_value_and_disables_edits() {
+    let source = include_str!("modals.rs");
+    assert!(source.contains("f.key == \"gpu\" && self.gpu_discovery_pending"));
+    assert!(source.contains("Text::SettingsValueDetecting"));
+    assert!(source.contains("field.key == \"gpu\" && self.gpu_discovery_pending"));
+    assert_eq!(
+        EN_TEXT.text(kettle_i18n::Text::SettingsValueDetecting),
+        "Detecting..."
+    );
+    let spanish = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    assert_eq!(
+        spanish.text(kettle_i18n::Text::SettingsValueDetecting),
+        "Detectando..."
+    );
+}

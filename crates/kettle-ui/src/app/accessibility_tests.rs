@@ -1102,3 +1102,69 @@ fn review_terminal_row_allocator_allows_only_the_deprecated_atomic() {
         "the MSRV-compatible fetch_update call needs a statement-scoped allowance"
     );
 }
+
+#[test]
+fn accessible_editor_characters_follow_graphemes() {
+    let text = "a\u{301}\u{1f469}\u{200d}\u{1f4bb}b";
+    let mut editor = crate::text_editor::TextEditor::from_text(text.into(), 1024);
+    editor.set_character_selection(2, 1);
+    assert_eq!(
+        editor.directed_selection(),
+        Some((14, 3)),
+        "accessible selection indices must select whole editor graphemes"
+    );
+    let overlay = kettle_render::Overlay {
+        palette_query: Some(text.into()),
+        text_field: Some(kettle_render::TextFieldOverlay {
+            text: text.into(),
+            cursor_byte: 3,
+            selection: Some((3, 14)),
+            horizontal_scroll: 0,
+            rect: (0.0, 0.0, 400.0, 26.0),
+            prefix: String::new(),
+            hint: String::new(),
+            accent_palette: 0,
+        }),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    let input = projection
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == accesskit::Role::TextInput)
+        .unwrap();
+    let run = projection
+        .nodes
+        .iter()
+        .find(|(id, _)| Some(id) == input.1.children().first())
+        .unwrap();
+    assert_eq!(
+        run.1.character_lengths(),
+        &[3, 11, 1],
+        "AccessKit lengths are UTF-8 bytes per grapheme"
+    );
+    let selection = input.1.text_selection().unwrap();
+    assert_eq!(
+        (
+            selection.anchor.character_index,
+            selection.focus.character_index
+        ),
+        (2, 1)
+    );
+}
+
+#[test]
+fn accessibility_editor_runs_keep_oversized_graphemes_atomic() {
+    let text = format!("a{}b", "\u{301}".repeat(200));
+    let characters = crate::text_editor::EditorCharacters::new(&text);
+    let run = super::accessibility::editor_accessibility_run(&characters);
+    assert_eq!(run.value(), Some("\u{fffd}b"));
+    assert_eq!(run.character_lengths(), &[3, 1]);
+    let mut editor = crate::search_input::SearchEditor::from_text(text, 1024);
+    editor.set_character_selection(0, 1);
+    assert_eq!(editor.selection(), Some(0..401));
+    editor.move_right(false, false);
+    editor.move_right(false, false);
+    assert_eq!(editor.cursor(), 402);
+}
