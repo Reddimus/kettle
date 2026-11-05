@@ -148,7 +148,8 @@ class TitlebarGeometryTests(unittest.TestCase):
                         "segments": [{"rect": rect(240, 0, 320, 28),
                                       "title_rect": rect(300, 0, 200, 28),
                                       "close": rect(532, 0, 28, 28),
-                                      "fitted_title": "shell"}]},
+                                      "fitted_title": "",
+                                      "label": "Kettle caption fixture"}]},
         }
 
     def test_titlebar_geometry_uses_scaled_band(self):
@@ -164,7 +165,7 @@ class TitlebarGeometryTests(unittest.TestCase):
             lambda g: g["content"].update(y=0),
             lambda g: g["tab_bar"]["segments"][0]["rect"].update(x=0),
             lambda g: g["tab_bar"]["segments"][0]["title_rect"].update(x=0),
-            lambda g: g["tab_bar"]["segments"][0].update(fitted_title=""),
+            lambda g: g["tab_bar"]["segments"][0].update(label=" "),
             lambda g: g["tab_bar"]["new_tab"].update(width=16),
         ):
             geometry = self.fixture()

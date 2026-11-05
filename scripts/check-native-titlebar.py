@@ -72,7 +72,7 @@ def titlebar_geometry(geometry):
     if len(bar["segments"]) == 1:
         title = bar["segments"][0]["title_rect"]
         assert abs(title["x"] + title["width"] / 2 - geometry["surface"]["width"] / 2) <= 1
-        assert bar["segments"][0]["fitted_title"], "single-tab title is missing"
+        assert bar["segments"][0]["label"].strip(), "single-tab title is missing"
 
 
 def capture(live, out, label, hover_caption=False):

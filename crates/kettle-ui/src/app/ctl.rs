@@ -1004,11 +1004,21 @@ impl App {
                     seg.title_rect.2,
                     tab_cell_w,
                 );
+                // The text the strip paints: tab-format applied around the
+                // fitted title, plus the active tab's recording notice. A
+                // literal-only format has no fitted title but still a label.
+                let label = kettle_render::tab_segment_label(
+                    seg,
+                    &self.cfg.tab_format,
+                    tab_cell_w,
+                    &bar.recording_notice,
+                );
                 serde_json::json!({
                     "index": seg.idx,
                     "title": seg.title,
                     "path": seg.path.as_deref(),
                     "fitted_title": fitted_title,
+                    "label": label,
                     "active": seg.active,
                     "rect": rect_json(seg.rect),
                     "title_rect": rect_json(seg.title_rect),
