@@ -1244,6 +1244,77 @@ fn relative_depth_admission_preserves_new_and_replaced_placements() {
 }
 
 #[test]
+fn anonymous_relative_depth_admission_uses_its_own_parent() {
+    for synchronized in [false, true] {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b_Ga=T,i=1,p=1,q=2,f=24,s=1,v=1,C=1;AAAA\x1b\\");
+        for placement in 2..=9 {
+            harness.feed(
+                format!(
+                    "\x1b_Ga=p,i=1,p={placement},P=1,Q={},q=2\x1b\\",
+                    placement - 1
+                )
+                .as_bytes(),
+            );
+        }
+        for parent in [9, 8] {
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(format!("\x1b_Ga=p,i=1,p=0,P=1,Q={parent}\x1b\\").as_bytes());
+            if synchronized {
+                harness.feed(b"\x1b[?2026l");
+            }
+            let replies = ordinary_reply_bytes(&harness);
+            assert_eq!(replies.len(), 1);
+            if parent == 9 {
+                assert!(
+                    replies[0].contains(";EINVAL:"),
+                    "anonymous ninth link accepted: {replies:?}"
+                );
+                assert!(!harness.relatives.lock().unwrap().contains_key(&(1, 0)));
+            } else {
+                assert!(
+                    replies[0].contains(";OK"),
+                    "anonymous eighth link rejected: {replies:?}"
+                );
+                assert_eq!(
+                    harness.relatives.lock().unwrap()[&(1, 0)].parent_placement,
+                    8
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn relative_replacement_preserves_anonymous_descendant_depth() {
+    let mut harness = SyncGraphicsHarness::new();
+    harness.feed(b"\x1b_Ga=T,i=1,p=1,q=2,f=24,s=1,v=1,C=1;AAAA\x1b\\");
+    for placement in 2..=8 {
+        harness.feed(
+            format!(
+                "\x1b_Ga=p,i=1,p={placement},P=1,Q={},q=2\x1b\\",
+                placement - 1
+            )
+            .as_bytes(),
+        );
+    }
+    harness.feed(b"\x1b_Ga=p,i=1,p=0,P=1,Q=8,q=2\x1b\\");
+    assert!(harness.relatives.lock().unwrap().contains_key(&(1, 0)));
+    harness.feed(b"\x1b_Ga=p,i=1,p=20,P=1,Q=1,q=2\x1b\\");
+    harness.feed(b"\x1b_Ga=p,i=1,p=2,P=1,Q=20\x1b\\");
+    let replies = ordinary_reply_bytes(&harness);
+    assert!(
+        replies[0].contains(";EINVAL:"),
+        "replacement made an anonymous descendant too deep: {replies:?}"
+    );
+    let relatives = harness.relatives.lock().unwrap();
+    assert_eq!(relatives[&(1, 2)].parent_placement, 1);
+    assert_eq!(relatives[&(1, 0)].parent_placement, 8);
+}
+
+#[test]
 fn relative_depth_replacement_preserves_descendant_visibility() {
     let mut harness = SyncGraphicsHarness::new();
     harness.feed(b"\x1b_Ga=T,i=1,p=1,q=2,f=24,s=1,v=1,C=1;AAAA\x1b\\");

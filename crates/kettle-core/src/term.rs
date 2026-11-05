@@ -10251,13 +10251,13 @@ fn apply_graphics_chunk_at(
                         placement_id: placement,
                     }),
                 );
-                if proposed.keys().any(|&(image_id, placement_id)| {
+                if proposed.values().any(|entry| {
                     resolver.exceeds_depth(
                         PlacementKey {
-                            image_id,
-                            placement_id,
+                            image_id: entry.parent_img,
+                            placement_id: entry.parent_placement,
                         },
-                        crate::images::MAX_RELATIVE_DEPTH,
+                        crate::images::MAX_RELATIVE_DEPTH - 1,
                     )
                 }) {
                     return Err(GraphicsAdmissionError::InvalidGeometry);
