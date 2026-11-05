@@ -2423,3 +2423,32 @@ context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar next tab title or 
 
 [messages.macos_menu_previous_tab]
 context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar previous tab title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.confirm_paste_heading]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.confirm_paste_body]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+args = [{ name = "preview", type = "str" }]
+[messages.confirm_paste_one_line]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_select_all]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_split]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_pane]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_tab]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_window]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_title]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_group]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_appearance]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_commands]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+
+[messages.menu_category_close_confirmation]
+context = "Preferences submenu category for the close-confirmation policy choices."

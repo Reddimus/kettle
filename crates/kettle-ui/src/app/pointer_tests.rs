@@ -500,7 +500,7 @@ fn clicks_share_the_fully_visible_hover_row_contract() {
         .expect("end of context-menu click resolver");
     let resolver = &src[start..end];
     assert!(
-        resolver.contains("let idx = self.menu_row_at_cursor(ws)?;"),
+        resolver.contains("let Some(idx) = self.menu_row_at_cursor(ws)"),
         "clicks must use the clipped-row helper exercised above"
     );
     assert!(
@@ -777,8 +777,8 @@ fn native_and_control_selection_motion_share_the_drag_threshold() {
         normalized_src
             .matches("self.install_confirm_dialog(")
             .count(),
-        2,
-        "every confirmation path (closing and keybind conflicts) must use the shared transition"
+        3,
+        "every confirmation path (closing, keybind conflicts, and pasting) must use the shared transition"
     );
     assert_eq!(
         normalized_src.matches("ws.confirm_dialog = Some(").count(),

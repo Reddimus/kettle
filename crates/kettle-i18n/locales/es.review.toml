@@ -22,6 +22,19 @@
 # panel and observed accessibility tree, including an independent second pass.
 
 [status]
+menu_category_close_confirmation = "draft"
+confirm_paste_heading = "draft"
+confirm_paste_body = "draft"
+confirm_paste_one_line = "draft"
+menu_select_all = "draft"
+menu_category_split = "draft"
+menu_category_pane = "draft"
+menu_category_tab = "draft"
+menu_category_window = "draft"
+menu_category_title = "draft"
+menu_category_group = "draft"
+menu_category_appearance = "draft"
+menu_category_commands = "draft"
 macos_menu_app = "draft"
 macos_menu_shell = "draft"
 macos_menu_edit = "draft"
@@ -810,6 +823,9 @@ media_viewer_a11y = "accepted"
 
 [second-pass]
 keys = [
+    "confirm_paste_heading",
+    "confirm_paste_body",
+    "confirm_paste_one_line",
     "settings_a11y_search",
     "media_viewer_a11y",
     "media_viewer_a11y_pin",

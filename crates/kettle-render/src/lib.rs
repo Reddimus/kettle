@@ -2591,8 +2591,14 @@ impl Renderer {
 
         // Context-menu row labels (one buffer per row, separators skipped)
         // + right-aligned shortcut hints (dropdown-parity).
-        if let Some(menu) = &overlay.context_menu {
-            while self.context_menu_buffers.len() < menu.rows.len() {
+        {
+            let row_count: usize = overlay
+                .context_menu_parents
+                .iter()
+                .chain(overlay.context_menu.iter())
+                .map(|menu| menu.rows.len())
+                .sum();
+            while self.context_menu_buffers.len() < row_count {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.context_menu_buffers.push(b);
             }
@@ -2601,90 +2607,99 @@ impl Renderer {
             // buffer pool's. The font-family invalidation above clears only the
             // `_texts` caches, not the heavier buffer pools, so the two could
             // otherwise reach different lengths and panic on indexing below.
-            while self.context_menu_texts.len() < menu.rows.len() {
+            while self.context_menu_texts.len() < row_count {
                 // Empty sentinel — same trick `hint_buffers`/`hint_texts` use —
                 // so a fresh slot's first fill isn't skipped by the equality
                 // gate below (unless the row's own label is also empty).
                 self.context_menu_texts.push(String::new());
             }
-            while self.context_menu_hint_buffers.len() < menu.rows.len() {
+            while self.context_menu_hint_buffers.len() < row_count {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.context_menu_hint_buffers.push(b);
             }
-            while self.context_menu_hint_texts.len() < menu.rows.len() {
+            while self.context_menu_hint_texts.len() < row_count {
                 self.context_menu_hint_texts.push(String::new());
             }
             // Shrink to the current row count so a small menu after a large
             // one (common with dynamic Lua menus) doesn't keep the peak's worth
             // of shaped-glyph buffers.
-            self.context_menu_buffers.truncate(menu.rows.len());
-            self.context_menu_texts.truncate(menu.rows.len());
-            self.context_menu_hint_buffers.truncate(menu.rows.len());
-            self.context_menu_hint_texts.truncate(menu.rows.len());
-            // The App's clamped width is authoritative when present; all
-            // render passes share this helper so text, chrome, and hit testing
-            // cannot drift by a fractional cell after ellipsis.
-            let panel_w = context_menu_panel_width(menu, cw);
-            let accent = self.ui_accent(cfg, theme);
-            self.context_menu_match_keys.resize(menu.rows.len(), 0);
-            // Row height matches a comfortable click target (~28-32 px
-            // on default cell metrics).
-            let row_h = ch + 12.0;
-            for (i, row) in menu.rows.iter().enumerate() {
-                if row.separator {
-                    continue;
-                }
-                let buf = &mut self.context_menu_buffers[i];
-                buf.set_metrics(metrics);
-                buf.set_size(Some(panel_w), Some(row_h));
-                // Re-shape only when the row's label actually changed. An open
-                // menu's rows are byte-stable, so blink/hover-driven redraws
-                // need no reshape.
-                let match_key = overlays::menu_match_key(row, accent);
-                if self.context_menu_texts[i] != row.label
-                    || self.context_menu_match_keys[i] != match_key
-                {
-                    let base = Attrs::new().family(Family::Name(&family));
-                    if row.matched_chars.is_none() {
-                        buf.set_text(&row.label, &base, Shaping::Advanced, None);
-                    } else {
-                        let spans = overlays::menu_label_spans(row);
-                        buf.set_rich_text(
-                            spans.iter().map(|(text, matched)| {
-                                (
-                                    *text,
-                                    if *matched {
-                                        base.clone()
-                                            .color(GColor::rgb(accent.r, accent.g, accent.b))
-                                    } else {
-                                        base.clone()
-                                    },
-                                )
-                            }),
-                            &base,
-                            Shaping::Advanced,
-                            None,
-                        );
+            self.context_menu_buffers.truncate(row_count);
+            self.context_menu_texts.truncate(row_count);
+            self.context_menu_hint_buffers.truncate(row_count);
+            self.context_menu_hint_texts.truncate(row_count);
+            let mut row_base = 0;
+            for menu in overlay
+                .context_menu_parents
+                .iter()
+                .chain(overlay.context_menu.iter())
+            {
+                // The App's clamped width is authoritative when present; all
+                // render passes share this helper so text, chrome, and hit testing
+                // cannot drift by a fractional cell after ellipsis.
+                let panel_w = context_menu_panel_width(menu, cw);
+                let accent = self.ui_accent(cfg, theme);
+                self.context_menu_match_keys.resize(row_count, 0);
+                // Row height matches a comfortable click target (~28-32 px
+                // on default cell metrics).
+                let row_h = ch + 12.0;
+                for (index, row) in menu.rows.iter().enumerate() {
+                    let i = row_base + index;
+                    if row.separator {
+                        continue;
                     }
-                    self.context_menu_match_keys[i] = match_key;
-                    self.context_menu_texts[i].clone_from(&row.label);
-                }
-                buf.shape_until_scroll(&mut self.font_system, false);
-                if !row.hint.is_empty() {
-                    let hb = &mut self.context_menu_hint_buffers[i];
-                    hb.set_metrics(metrics);
-                    hb.set_size(Some(panel_w), Some(row_h));
-                    if self.context_menu_hint_texts[i] != row.hint {
-                        hb.set_text(
-                            &row.hint,
-                            &Attrs::new().family(Family::Name(&family)),
-                            Shaping::Advanced,
-                            None,
-                        );
-                        self.context_menu_hint_texts[i].clone_from(&row.hint);
+                    let buf = &mut self.context_menu_buffers[i];
+                    buf.set_metrics(metrics);
+                    buf.set_size(Some(panel_w), Some(row_h));
+                    // Re-shape only when the row's label actually changed. An open
+                    // menu's rows are byte-stable, so blink/hover-driven redraws
+                    // need no reshape.
+                    let match_key = overlays::menu_match_key(row, accent);
+                    if self.context_menu_texts[i] != row.label
+                        || self.context_menu_match_keys[i] != match_key
+                    {
+                        let base = Attrs::new().family(Family::Name(&family));
+                        if row.matched_chars.is_none() {
+                            buf.set_text(&row.label, &base, Shaping::Advanced, None);
+                        } else {
+                            let spans = overlays::menu_label_spans(row);
+                            buf.set_rich_text(
+                                spans.iter().map(|(text, matched)| {
+                                    (
+                                        *text,
+                                        if *matched {
+                                            base.clone()
+                                                .color(GColor::rgb(accent.r, accent.g, accent.b))
+                                        } else {
+                                            base.clone()
+                                        },
+                                    )
+                                }),
+                                &base,
+                                Shaping::Advanced,
+                                None,
+                            );
+                        }
+                        self.context_menu_match_keys[i] = match_key;
+                        self.context_menu_texts[i].clone_from(&row.label);
                     }
-                    hb.shape_until_scroll(&mut self.font_system, false);
+                    buf.shape_until_scroll(&mut self.font_system, false);
+                    if !row.hint.is_empty() {
+                        let hb = &mut self.context_menu_hint_buffers[i];
+                        hb.set_metrics(metrics);
+                        hb.set_size(Some(panel_w), Some(row_h));
+                        if self.context_menu_hint_texts[i] != row.hint {
+                            hb.set_text(
+                                &row.hint,
+                                &Attrs::new().family(Family::Name(&family)),
+                                Shaping::Advanced,
+                                None,
+                            );
+                            self.context_menu_hint_texts[i].clone_from(&row.hint);
+                        }
+                        hb.shape_until_scroll(&mut self.font_system, false);
+                    }
                 }
+                row_base += menu.rows.len();
             }
         }
 
@@ -4102,7 +4117,13 @@ impl Renderer {
         // labels go to `menu_areas` (drawn by a dedicated
         // `self.menu_text_renderer.render` call after the menu quads), so the
         // opaque panel bg stays under the menu text.
-        if let Some(menu) = &overlay.context_menu {
+        let mut menu_row_base = 0;
+        for menu in overlay
+            .context_menu_parents
+            .iter()
+            .chain(overlay.context_menu.iter())
+        {
+            overlays::exclude_menu_text(&mut menu_areas, menu.rows_rect());
             let accent = self.ui_accent(cfg, theme);
             let chrome = menu_chrome_quads(
                 menu,
@@ -4168,7 +4189,7 @@ impl Renderer {
                     bottom: (row_y + row_h) as i32,
                 };
                 menu_areas.push(TextArea {
-                    buffer: &self.context_menu_buffers[i],
+                    buffer: &self.context_menu_buffers[menu_row_base + i],
                     left: ax + 16.0,
                     top: row_y + 6.0,
                     scale: 1.0,
@@ -4182,7 +4203,7 @@ impl Renderer {
                     let hint_w =
                         unicode_width::UnicodeWidthStr::width(row.hint.as_str()) as f32 * cw;
                     menu_areas.push(TextArea {
-                        buffer: &self.context_menu_hint_buffers[i],
+                        buffer: &self.context_menu_hint_buffers[menu_row_base + i],
                         left: (ax + panel_w - 16.0 - hint_w).max(ax + 16.0),
                         top: row_y + 6.0,
                         scale: 1.0,
@@ -4193,6 +4214,7 @@ impl Renderer {
                 }
                 row_y += row_h;
             }
+            menu_row_base += menu.rows.len();
         }
 
         // Settings surfaces use the menu layer, before all modal text.
@@ -4656,6 +4678,10 @@ impl Renderer {
                 for row in &menu.rows {
                     overlays::menu_match_key(row, self.ui_accent(cfg, theme)).hash(&mut h);
                 }
+            }
+            for parent in &overlay.context_menu_parents {
+                context_menu_text_damage_key(Some(parent), theme.foreground, theme.background)
+                    .hash(&mut h);
             }
             context_menu_text_damage_key(
                 overlay.context_menu.as_ref(),

@@ -2823,3 +2823,23 @@ Existing keyboard tests exercise program-ownership yielding and terminal
 encoding. These checks do not establish physical keyboard delivery or live
 Quick Action invocation; an unlocked macOS session is needed for mouse,
 keyboard, System Settings Services shortcuts and window list acceptance.
+
+menu while retaining Services and Windows registration. Existing keyboard tests
+exercise program-ownership yielding and terminal encoding. These checks do not
+establish live AppKit menu interaction; native CI must compile the AppKit layer,
+and an unlocked macOS session is needed for mouse, keyboard, Services and window
+list acceptance.
+
+### Paste protection and compact context menus
+
+`cargo test -p kettle-config paste_protection` exercises every C0 byte and the
+three config policies; `cargo test -p kettle-ui paste` checks paste preview,
+flattening and ESC neutralization. `cargo test -p kettle-ui context_menu` and
+`cargo test -p kettle-render menu` cover menu grouping, nested accessibility,
+shared geometry, panel flipping and clipping ancestor text under submenus.
+Native acceptance still needs clipboard, PRIMARY and PuTTY-style text paste,
+mixed bracketed/raw broadcast recipients, each of the three dialog buttons,
+and hover/click/arrow-key menu navigation at 800x600 in English and Spanish.
+Check VoiceOver/AccessKit nesting, resize/DPI changes, and `kettle ctl
+ui_geometry` parent-panel bounds against the painted panels. No headless unit
+test substitutes for that rendering and assistive-technology pass.

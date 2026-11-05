@@ -636,6 +636,12 @@ impl App {
             self.send_key_releases(None, &key_releases);
             return;
         };
+        if ws.confirm_dialog.is_some() {
+            self.discard_queued_paste(content);
+            self.send_key_releases(Some(&ws), &key_releases);
+            self.finish_window_dispatch(el, window, ws);
+            return;
+        }
         // Broadcast goes where its scope reaches now. A different scope, or
         // the same scope over other panes (another tab, a group that changed),
         // could reach panes the paste was never meant for.
@@ -767,7 +773,55 @@ impl App {
             self.report_input_result(PaneInputResult::Oversize);
             return;
         }
+        if self.confirm_text_paste(ws, target, text) {
+            return;
+        }
         self.deliver_text_paste(ws, target, text);
+    }
+
+    fn confirm_text_paste(
+        &mut self,
+        ws: &mut WindowState,
+        target: Option<u64>,
+        text: &str,
+    ) -> bool {
+        let recipients = self.broadcast_recipients(ws);
+        let ids = if ws.mux.is_broadcast_on() {
+            recipients.clone()
+        } else {
+            target.into_iter().collect()
+        };
+        let needs_confirmation = ids.iter().any(|id| {
+            let pane = ws.mux.panes.get(id).or_else(|| {
+                self.windows
+                    .values()
+                    .find_map(|other| other.mux.panes.get(id))
+            });
+            pane.is_some_and(|pane| {
+                if pane.read_only {
+                    return false;
+                }
+                let bracketed = pane.term.term.lock().ok().is_some_and(|term| {
+                    term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE)
+                });
+                self.cfg.paste_protection.confirms(text, bracketed)
+            })
+        });
+        if !needs_confirmation {
+            return false;
+        }
+        let dialog = text_paste_confirmation(
+            target,
+            text,
+            ws.mux.broadcast.clone(),
+            recipients,
+            self.ui_text,
+        );
+        self.install_confirm_dialog(ws, dialog);
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        true
     }
 
     pub(super) fn deliver_text_paste(
@@ -1590,5 +1644,73 @@ pub(super) fn clipboard_paste_result(
         Err(arboard::Error::Timeout) => Err(Text::NotifyBodyClipboardTimeout),
         Ok(text) if !local_paste_within_limit(&text) => Err(Text::NotifyBodyClipboardLimitExceeded),
         other => Ok(other.unwrap_or_default()),
+    }
+}
+
+/// Keep preview work and dialog size independent of clipboard size.
+pub(super) fn paste_preview(text: &str) -> String {
+    let mut preview = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let escaped = if c.is_control() || super::title::is_bidi_format_char(c) {
+            c.escape_default().collect::<String>()
+        } else {
+            c.to_string()
+        };
+        let width = escaped.chars().count();
+        if used + width > 160 {
+            preview.push('…');
+            break;
+        }
+        preview.push_str(&escaped);
+        used += width;
+    }
+    preview
+}
+
+pub(super) fn paste_as_one_line(text: &str) -> String {
+    text.replace("\r\n", " ")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_control() && c != '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+pub(super) fn text_paste_confirmation(
+    target: Option<u64>,
+    text: &str,
+    broadcast: BroadcastScope,
+    recipients: Vec<u64>,
+    tr: kettle_i18n::Translator,
+) -> ConfirmDialogState {
+    use kettle_i18n::Text as T;
+    ConfirmDialogState {
+        heading: tr.text(T::ConfirmPasteHeading).to_string(),
+        body: tr.confirm_paste_body(&paste_preview(text)),
+        buttons: vec![
+            ConfirmButton::Cancel,
+            ConfirmButton::Confirm {
+                label: tr.text(T::MenuPaste).to_string(),
+                destructive: false,
+            },
+            ConfirmButton::PasteOneLine {
+                label: tr.text(T::ConfirmPasteOneLine).to_string(),
+            },
+        ],
+        focus_idx: 0,
+        on_confirm: ConfirmAction::Paste {
+            target,
+            text: text.to_string(),
+            broadcast,
+            recipients,
+        },
+        scroll: 0,
+        armed_press: None,
+        space_pressed: None,
     }
 }

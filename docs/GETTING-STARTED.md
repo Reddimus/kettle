@@ -89,6 +89,23 @@ macOS leaves `Option+Arrow` to the terminal, so split focus lives on
 the same thing and stays bound. `Ctrl+Shift+N` / `Ctrl+Shift+P` cycles panes on
 every platform.
 
+Right-click a terminal to reach Copy, Paste and Select All first. A link adds
+Open Link and Copy Link before those actions. Split, Pane, Tab, Window, Title,
+Group and Appearance commands live in submenus. Click a category or press Right
+to enter it; Left or Escape returns to its parent. Hovering a category also
+opens it. Menus and the command palette show native shortcut symbols on macOS
+(for example, ⌘V and ⇧⌘D); other platforms keep Ctrl+Shift+V notation.
+
+Pasting text that contains a newline or a control character other than tab
+asks for confirmation when the receiving program has not enabled bracketed
+paste. Cancel is selected initially. Choose Paste to send the original text,
+or Paste as one line to replace line breaks and other control characters with
+spaces (tabs stay tabs). A short preview escapes control characters so they
+are visible. Bracketed paste keeps multi-line text and strips embedded ESC
+bytes so pasted text cannot close the bracket early. Set `paste-protection =
+always` to confirm multi-line text even in editors, or `paste-protection = off`
+to disable confirmation. See [configuration](CONFIG.md).
+
 ## 5. Search screen and scrollback
 
 Press **`Ctrl+Shift+F`** to open the bottom search bar. Enter a Rust regular

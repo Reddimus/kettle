@@ -946,7 +946,7 @@ fn render_frame_truncates_overlay_buffer_pools_on_shrink() {
             "tab_buffers",
         ),
         (
-            "self.context_menu_buffers.truncate(menu.rows.len())",
+            "self.context_menu_buffers.truncate(row_count)",
             "context_menu_buffers",
         ),
         (

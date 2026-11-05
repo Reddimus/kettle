@@ -109,6 +109,31 @@ impl Trigger {
         });
         parts.join("+")
     }
+
+    /// Platform notation for GUI shortcuts. Configuration and CLI spelling stay stable.
+    pub fn ui_label(&self, macos: bool) -> String {
+        if !macos {
+            return self.label();
+        }
+        let mut label = String::new();
+        for (modifier, symbol) in [
+            (Mods::CTRL, "⌃"),
+            (Mods::ALT, "⌥"),
+            (Mods::SHIFT, "⇧"),
+            (Mods::SUPER, "⌘"),
+        ] {
+            if self.mods.contains(modifier) {
+                label.push_str(symbol);
+            }
+        }
+        let key = Trigger {
+            mods: Mods::empty(),
+            key: self.key,
+        }
+        .label();
+        label.push_str(&key);
+        label
+    }
 }
 
 /// Maximum decoded payload for a `text:` binding. Keystroke-sized on purpose:
@@ -221,17 +246,31 @@ pub fn action_label(a: &Action) -> String {
 /// its US-shifted twin `Ctrl+Shift+!`), then the shortest label, then
 /// lexicographic. `None` when the action is unbound.
 pub fn hint_label(bindings: &Bindings, action: &Action) -> Option<String> {
+    hint_label_for_platform(bindings, action, false)
+}
+
+/// Native modifier notation for context-menu and palette hints.
+pub fn ui_hint_label(bindings: &Bindings, action: &Action) -> Option<String> {
+    hint_label_for_platform(bindings, action, cfg!(target_os = "macos"))
+}
+
+pub fn hint_label_for_platform(
+    bindings: &Bindings,
+    action: &Action,
+    macos: bool,
+) -> Option<String> {
     bindings
         .iter()
         .filter(|(_, a)| *a == action)
-        .map(|(t, _)| t.label())
-        .min_by_key(|l| {
+        .map(|(t, _)| (t, t.label()))
+        .min_by_key(|(_, l)| {
             let alnum = l
                 .rsplit('+')
                 .next()
                 .is_some_and(|k| k.len() == 1 && k.chars().all(|c| c.is_ascii_alphanumeric()));
             (!alnum, l.len(), l.clone())
         })
+        .map(|(trigger, _)| trigger.ui_label(macos))
 }
 
 /// Human-readable lines for the default keymap, sorted by trigger label —
@@ -2487,6 +2526,28 @@ mod tests {
 
     /// Dropdown parity: `hint_label` reverse-lookup — prefers the
     /// alphanumeric spelling of a chord and follows user rebinds.
+    #[test]
+    fn gui_shortcuts_use_platform_notation_and_live_bindings() {
+        for (raw, expected) in [
+            ("cmd+v=paste", "⌘V"),
+            ("shift+cmd+d=split_down", "⇧⌘D"),
+            ("ctrl+shift+a=select_all", "⌃⇧A"),
+            ("ctrl+alt+shift+cmd+x=copy", "⌃⌥⇧⌘X"),
+        ] {
+            let mut bindings = Bindings::new();
+            apply_keybind(&mut bindings, raw);
+            let (trigger, action) = bindings.iter().next().unwrap();
+            assert_eq!(
+                hint_label_for_platform(&bindings, action, true).as_deref(),
+                Some(expected)
+            );
+            assert_eq!(
+                hint_label_for_platform(&bindings, action, false).as_deref(),
+                Some(trigger.label().as_str())
+            );
+        }
+    }
+
     #[test]
     fn hint_label_prefers_alphanumeric_trigger_and_follows_rebinds() {
         let d = defaults();

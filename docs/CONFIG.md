@@ -387,7 +387,8 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `search-case-sensitive` | enum | `smart` | `smart` ignores case until the query contains uppercase. `always` / `sensitive` forces matching case; `never` / `insensitive` always ignores it. `case-sensitive = true/false` remains accepted as an alias |
 | `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click) |
 | `disable-mouse-paste` | bool | `false` | Block middle-click paste |
-| `clipboard-paste-protection` | bool | — | Retired in 5.1: pastes no longer ask first. Still accepted, so an older config stays free of warnings |
+| `paste-protection` | enum | `auto` | `auto` confirms text containing newlines or C0 controls other than tab when any writable recipient has not enabled bracketed paste. `always` confirms every multi-line paste, including bracketed mode. `off` never confirms. The dialog offers Paste, Paste as one line, and Cancel (focused initially). All modes remove embedded ESC bytes in bracketed paste |
+| `clipboard-paste-protection` | bool | — | Retired legacy key; accepted and ignored. Use `paste-protection` for the current policy |
 | `putty-paste-style` | bool | `false` | Right-click pastes instead of opening the context menu. By default it uses the same PRIMARY-first source as middle-click paste on Linux and falls back to the regular clipboard on platforms without PRIMARY |
 | `putty-paste-style-source-clipboard` | bool | `false` | When `putty-paste-style = true`, source right-click paste from the regular system clipboard instead of X11 PRIMARY |
 | `close-button-on-tab` | bool | `true` | Show a close button on tabs (horizontal: active and hovered tabs only; vertical: every tab) |

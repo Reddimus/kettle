@@ -4658,3 +4658,20 @@ a complete focused field. Picker geometry similarly reduces outer spacing to
 retain its header and one result. The renderer uses `visible_resize_overlay`
 for both size-chip text preparation and drawing, suppressing it under Settings
 or a picker card.
+
+### Paste consent and context-menu nesting
+
+Text paste consent is a `kettle-ui` confirmation action carrying bounded text,
+the original pane, and the broadcast scope and recipient set. Consent fails
+closed if that scope changes. Queued input behind a paste cannot pass through
+an unanswered confirmation. `kettle-config` owns the `paste-protection` policy;
+`input::paste_payload` removes clipboard ESC bytes inside bracketed wrappers.
+Path pastes retain their stricter rejection of control characters in filenames.
+
+Context menus keep ancestor levels and their physical anchors while a submenu
+is open. The app supplies each panel to the renderer in stacking order and
+uses the same geometry for pointer input, AccessKit bounds and `ui_geometry`.
+Ancestor text is clipped under child panels. AccessKit nests the child Menu
+under the expanded parent MenuItem, with actions on visible ancestor rows.
+Menus have no editable text or IME caret; paste consent reuses the existing
+confirmation layout and IME ownership rules.

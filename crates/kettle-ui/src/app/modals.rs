@@ -535,8 +535,10 @@ impl App {
         };
         match button {
             ConfirmButton::Cancel => self.cancel_confirm_dialog(ws),
-            ConfirmButton::Confirm { .. } => {
-                let action = dialog.on_confirm.clone();
+            ConfirmButton::Confirm { .. } | ConfirmButton::PasteOneLine { .. } => {
+                let Some(action) = confirmation_button_action(dialog, index) else {
+                    return;
+                };
                 ws.confirm_dialog = None;
                 self.dispatch_confirm_action(ws, action);
             }
@@ -1006,7 +1008,7 @@ impl App {
             ConfirmAction::ClosePane(_) => {
                 (Text::ConfirmTitleClosePane, Text::ConfirmButtonClosePane)
             }
-            ConfirmAction::RebindKeybind { .. } => return false,
+            ConfirmAction::RebindKeybind { .. } | ConfirmAction::Paste { .. } => return false,
         };
         let consequence = self.ui_text.text(Text::ConfirmCloseConsequences);
         let body = if matches!(&on_confirm, ConfirmAction::ClosePane(_)) {
@@ -1144,6 +1146,16 @@ impl App {
                     w.request_redraw();
                 }
             }
+            ConfirmAction::Paste {
+                target,
+                text,
+                broadcast,
+                recipients,
+            } => {
+                if ws.mux.broadcast == broadcast && self.broadcast_recipients(ws) == recipients {
+                    self.deliver_text_paste(ws, target, &text);
+                }
+            }
             ConfirmAction::RebindKeybind {
                 trig,
                 act,
@@ -1231,6 +1243,7 @@ impl App {
                     }
                     self.confirm_scroll(ws, 0, true);
                 }
+                ConfirmKeyResult::Activate(index) => self.resolve_confirm_button(ws, index),
                 ConfirmKeyResult::Confirm => {
                     let index = state
                         .buttons
@@ -2532,6 +2545,8 @@ pub enum ConfirmKey {
 /// Outcome of a key press in the confirm dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKeyResult {
+    /// Activate exactly the focused button, including alternate paste actions.
+    Activate(usize),
     /// Update `focus_idx` to the new value + redraw.
     Move(usize),
     /// Dispatch `on_confirm` + close the modal.
@@ -2594,15 +2609,9 @@ pub(super) fn confirm_dialog_keypress(
     }
     match key {
         ConfirmKey::Escape => ConfirmKeyResult::Cancel,
-        // Enter activates the FOCUSED button, not always Confirm. The
-        // close-confirm dialogs open focused on `Cancel` (index 0, the safe
-        // default the renderer highlights), so firing the destructive action
-        // regardless of focus would contradict that highlight and risk data
-        // loss. Buttons are `[Cancel, Confirm]`, so only the last button
-        // confirms; any other focused button (Cancel) cancels.
         ConfirmKey::Enter => {
-            if current_focus + 1 == num_buttons {
-                ConfirmKeyResult::Confirm
+            if current_focus < num_buttons {
+                ConfirmKeyResult::Activate(current_focus)
             } else {
                 ConfirmKeyResult::Cancel
             }
@@ -2638,7 +2647,9 @@ pub(super) fn confirm_dialog_keypress(
 fn confirm_button_label<'a>(button: &'a ConfirmButton, tr: &kettle_i18n::Translator) -> &'a str {
     match button {
         ConfirmButton::Cancel => tr.text(kettle_i18n::Text::ConfirmButtonCancel),
-        ConfirmButton::Confirm { label, .. } => label.as_str(),
+        ConfirmButton::Confirm { label, .. } | ConfirmButton::PasteOneLine { label } => {
+            label.as_str()
+        }
     }
 }
 
@@ -2766,6 +2777,13 @@ pub enum DropPanes {
 #[allow(clippy::enum_variant_names)] // close-family prefix is intentional
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
+    /// Consent applies only to the original pane or unchanged broadcast scope.
+    Paste {
+        target: Option<u64>,
+        text: String,
+        broadcast: crate::mux::BroadcastScope,
+        recipients: Vec<u64>,
+    },
     /// Close the entire window (every tab + every pane).
     ///
     /// `drop_panes` carries the requester's intent through the prompt, so
@@ -2798,15 +2816,20 @@ pub enum ConfirmAction {
     },
 }
 
-/// Which buttons a confirm modal shows. v1 is just
-/// the two-button [Cancel] / [Confirm] shape; future additions can
-/// add a third "Apply to all" or similar without rippling.
+/// Buttons in a confirmation. Close and rebind questions use Cancel/Confirm;
+/// paste questions also offer a one-line alternative.
 #[derive(Debug, Clone)]
 pub enum ConfirmButton {
+    PasteOneLine {
+        label: String,
+    },
     /// Dismiss the modal without action. Always the safe default.
     Cancel,
     /// Dispatch the dialog's action using destructive or ordinary styling.
-    Confirm { label: String, destructive: bool },
+    Confirm {
+        label: String,
+        destructive: bool,
+    },
 }
 
 /// Live state for an open confirm dialog. `focus_idx`
@@ -3195,5 +3218,24 @@ impl App {
             // list. Without it, clicks fall through to the terminal behind a
             // "Quit?" / "Close pane?" prompt.
             || ws.confirm_dialog.is_some()
+    }
+}
+
+pub(super) fn confirmation_button_action(
+    dialog: &ConfirmDialogState,
+    index: usize,
+) -> Option<ConfirmAction> {
+    let button = dialog.buttons.get(index)?;
+    match button {
+        ConfirmButton::Cancel => None,
+        ConfirmButton::Confirm { .. } => Some(dialog.on_confirm.clone()),
+        ConfirmButton::PasteOneLine { .. } => {
+            let mut action = dialog.on_confirm.clone();
+            let ConfirmAction::Paste { text, .. } = &mut action else {
+                return None;
+            };
+            *text = paste_as_one_line(text);
+            Some(action)
+        }
     }
 }

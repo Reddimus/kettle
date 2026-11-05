@@ -131,7 +131,7 @@ pub(super) fn command_picker_list(
                 label: label.shown(tr).to_string(),
                 separator: false,
                 enabled: true,
-                hint: kettle_config::keybinds::hint_label(bindings, action).unwrap_or_default(),
+                hint: kettle_config::keybinds::ui_hint_label(bindings, action).unwrap_or_default(),
             }
         })
         .collect::<Vec<_>>();

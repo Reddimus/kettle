@@ -400,6 +400,26 @@ impl KeybindYield {
     }
 }
 
+/// Confirmation policy for terminal text pastes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PasteProtection {
+    #[default]
+    Auto,
+    Always,
+    Off,
+}
+
+impl PasteProtection {
+    /// Whether this payload needs consent for a receiving terminal mode.
+    pub fn confirms(self, text: &str, bracketed: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Always => text.contains(['\n', '\r']),
+            Self::Auto => !bracketed && text.bytes().any(|b| b < 0x20 && b != b'\t'),
+        }
+    }
+}
+
 /// Policy for pasting OS file references — a file copied in the file manager
 /// (`CF_HDROP` on Windows, `text/uri-list` elsewhere) — into the focused pane
 /// as a shell-quoted path. `On` (default) pastes the path(s); `Off` ignores a
@@ -1305,6 +1325,8 @@ pub struct Config {
     /// Paste a clipboard file list (e.g. a file copied in Explorer) as a
     /// shell-quoted path (default: on). See [`PasteFiles`].
     pub paste_files: PasteFiles,
+    /// Confirm unsafe or multi-line terminal pastes (default: auto).
+    pub paste_protection: PasteProtection,
     /// Paste a clipboard BITMAP (screenshot) as a temporary-PNG path.
     pub paste_images: PasteImages,
     /// Show a short-lived thumbnail receipt after the initiating pane queues a
@@ -2951,6 +2973,7 @@ impl Default for Config {
             modify_other_keys: ModifyOtherKeysMode::Auto,
             keybind_yield: KeybindYield::Auto,
             paste_files: PasteFiles::On,
+            paste_protection: PasteProtection::Auto,
             paste_images: PasteImages::On,
             paste_image_preview: true,
             paste_video_preview: true,
@@ -4097,6 +4120,7 @@ impl Config {
                 "keybind-yield" | "keybind_yield" => {
                     matches!(v.to_ascii_lowercase().as_str(), "auto" | "off")
                 }
+                "paste-protection" => matches!(v.to_ascii_lowercase().as_str(), "auto" | "always" | "off"),
                 "paste-files" | "paste-images" | "paste-image" => {
                     parse_paste_policy(v).is_some()
                 }
@@ -4686,6 +4710,13 @@ impl Config {
                         "off" => KeybindYield::Off,
                         _ => KeybindYield::Auto,
                     }
+                }
+                "paste-protection" => {
+                    cfg.paste_protection = match e.value.to_ascii_lowercase().as_str() {
+                        "always" => PasteProtection::Always,
+                        "off" => PasteProtection::Off,
+                        _ => PasteProtection::Auto,
+                    };
                 }
                 "paste-files" => {
                     cfg.paste_files = if parse_paste_policy(&e.value) == Some(false) {
@@ -7479,6 +7510,39 @@ cell-height = 1.2\n";
         );
         let (_, unknown) = Config::parse_collect("modify-other-keys = off\n");
         assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn paste_protection_policy_and_config() {
+        assert_eq!(Config::default().paste_protection, PasteProtection::Auto);
+        for (token, expected) in [
+            ("auto", PasteProtection::Auto),
+            ("always", PasteProtection::Always),
+            ("off", PasteProtection::Off),
+        ] {
+            let line = format!("paste-protection = {token}");
+            assert_eq!(Config::parse_text(&line).paste_protection, expected);
+            assert!(Config::detect_malformed_values(&line).is_empty());
+        }
+        assert!(!Config::detect_malformed_values("paste-protection = sometimes").is_empty());
+        assert_eq!(
+            Config::parse_text("paste-protection = sometimes").paste_protection,
+            PasteProtection::Auto
+        );
+        for byte in 0..32u8 {
+            let text = format!("a{}b", byte as char);
+            assert_eq!(PasteProtection::Auto.confirms(&text, false), byte != b'\t');
+            assert!(!PasteProtection::Auto.confirms(&text, true));
+            assert!(!PasteProtection::Off.confirms(&text, false));
+            assert_eq!(
+                PasteProtection::Always.confirms(&text, true),
+                matches!(byte, b'\n' | b'\r')
+            );
+        }
+        for text in ["", "hello", "ñ\t界", "a\u{7f}b"] {
+            assert!(!PasteProtection::Auto.confirms(text, false));
+        }
+        assert!(PasteProtection::Always.confirms("a\r\nb", true));
     }
 
     #[test]

@@ -988,14 +988,14 @@ fn item_to_click_maps_every_dispatchable_row_type() {
             &ContextMenuItem::UrlItem {
                 label: "Open Link",
                 url: "https://example.com".into(),
-                how: UrlHow::Open,
+                how: super::UrlHow::Open,
                 pane: Some(7),
             },
             0
         ),
         // The pane the link came from rides along to the click.
         Some(ContextMenuClick::Url {
-            how: UrlHow::Open,
+            how: super::UrlHow::Open,
             pane: Some(7),
             ..
         })
@@ -1052,7 +1052,9 @@ fn submenu_transitions_reclamp_the_new_panel() {
         .split("ContextMenuClick::Action(action) =>")
         .next()
         .unwrap();
-    assert!(drill.contains(call));
+    assert!(drill.contains("self.enter_context_submenu(ws, idx)"));
+    let enter = finding_body(include_str!("menus.rs"), "enter_context_submenu");
+    assert!(enter.contains("self.reclamp_context_menu(ws, (surface.0 as f32, surface.1 as f32))"));
     let back = src
         .split("fn context_menu_back(")
         .nth(1)
@@ -1236,7 +1238,7 @@ fn context_menu_label_ellipsis_is_bounded_and_utf8_safe() {
 
 #[test]
 fn finding_short_menu_keeps_one_complete_row() {
-    let body = finding_body(include_str!("menus.rs"), "context_menu_geometry");
+    let body = finding_body(include_str!("menus.rs"), "context_menu_level_geometry");
     assert!(
         body.contains(".max(row_h)"),
         "menu breathing room must yield to one complete row"
@@ -1325,4 +1327,103 @@ fn menu_copy_and_lua_dismissal_redraws_without_cursor_activity() {
         body[last_action..].contains("request_redraw()"),
         "menu dismissal must request a frame independently of action side effects or cursor blinking"
     );
+}
+
+#[test]
+fn terminal_menu_groups_commands_and_fits_800_by_600_in_both_languages() {
+    use kettle_i18n::{Language, Translator};
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let mut items: Vec<_> = [
+            Action::Copy,
+            Action::Paste,
+            Action::SelectAll,
+            Action::SplitAuto,
+            Action::SplitRight,
+            Action::SplitLeft,
+            Action::SplitDown,
+            Action::SplitUp,
+            Action::ClosePane,
+            Action::ToggleZoom,
+            Action::Reset,
+            Action::TogglePaneReadOnly,
+            Action::NewTab,
+            Action::CloseTab,
+            Action::NewWindow,
+            Action::CloseWindow,
+            Action::EditWindowTitle,
+            Action::EditTabTitle,
+            Action::EditPaneTitle,
+            Action::CreateGroup,
+            Action::GroupTab,
+            Action::UngroupTab,
+            Action::OpenSettings,
+            Action::OpenThemePicker,
+        ]
+        .into_iter()
+        .map(|action| ContextMenuItem::Item {
+            label: tr.text(kettle_i18n::Text::MenuPaste),
+            action,
+            enabled: true,
+        })
+        .collect();
+        items.insert(
+            0,
+            ContextMenuItem::UrlItem {
+                label: "Open Link",
+                url: "https://example.test".into(),
+                how: super::UrlHow::Open,
+                pane: None,
+            },
+        );
+        for i in 0..100 {
+            items.push(ContextMenuItem::ConfigItem {
+                label: format!("Custom {i}"),
+                command: "true".into(),
+            });
+        }
+        let grouped = super::grouped_terminal_menu(items, tr);
+        assert!(matches!(grouped[0], ContextMenuItem::UrlItem { .. }));
+        assert!(matches!(
+            grouped[1],
+            ContextMenuItem::Item {
+                action: Action::Copy,
+                ..
+            }
+        ));
+        assert!(matches!(
+            grouped[2],
+            ContextMenuItem::Item {
+                action: Action::Paste,
+                ..
+            }
+        ));
+        assert!(matches!(
+            grouped[3],
+            ContextMenuItem::Item {
+                action: Action::SelectAll,
+                ..
+            }
+        ));
+        assert_eq!(
+            count_rows_fitting(&grouped, 0, 592.0, 28.0, 8.0),
+            grouped.len()
+        );
+        for item in grouped.iter().skip(5) {
+            assert!(matches!(item, ContextMenuItem::Submenu { .. }));
+        }
+    }
+}
+
+#[test]
+fn disabled_submenu_leaves_are_removed_and_empty_categories_disappear() {
+    let items = vec![ContextMenuItem::Submenu {
+        label: "Split".into(),
+        items: vec![ContextMenuItem::Item {
+            label: "Split right",
+            action: Action::SplitRight,
+            enabled: false,
+        }],
+    }];
+    assert!(filter_disabled(items).is_empty());
 }

@@ -1,3 +1,16 @@
+menu_category_close_confirmation = "Confirmación de cierre"
+confirm_paste_heading = "Confirmar pegado"
+confirm_paste_body = "Este pegado puede enviar comandos a la terminal. Vista previa: {preview}"
+confirm_paste_one_line = "Pegar en una sola línea"
+menu_select_all = "Seleccionar todo"
+menu_category_split = "Dividir"
+menu_category_pane = "Panel"
+menu_category_tab = "Pestaña"
+menu_category_window = "Ventana"
+menu_category_title = "Título"
+menu_category_group = "Grupo"
+menu_category_appearance = "Apariencia"
+menu_category_commands = "Comandos"
 # Neutral Latin American Spanish. The owner designated an independent reviewer.
 # Rendered context and required second-pass acceptance remain pending for 5.0.
 

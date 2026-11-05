@@ -8,6 +8,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- `paste-protection` (`auto` by default) asks before a paste that contains
+  a newline or control characters when the program has not turned on
+  bracketed paste, with Paste, Paste as one line and Cancel; `always`
+  confirms every multi-line paste and `off` never asks. In bracketed mode,
+  escape bytes in pasted text are neutralized so the paste cannot end it
+  early.
 - SGR 53 overline (and SGR 55 to clear it) is drawn like underline at the
   top of the cell.
 - On macOS, a complete menu bar: Kettle (with Settings…), Shell, Edit, View
@@ -19,6 +25,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The context menu puts the actions for what you clicked first (Copy, Paste,
+  Select All, and Open or Copy Link on a link) and groups pane, tab, title
+  and appearance commands into submenus, so it no longer scrolls. On macOS,
+  menus and the command palette write shortcuts as ⌘V, ⇧⌘D and ⌃⇧A.
 - With grapheme clusters on (mode 2027), emoji ZWJ sequences and emoji with
   skin-tone modifiers draw as one glyph across the cluster's width, and emoji
   presentation fills the cell height like other emoji.

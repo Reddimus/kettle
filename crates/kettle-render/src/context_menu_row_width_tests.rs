@@ -325,3 +325,30 @@ fn picker_surface_encloses_header_and_selection_stays_inside_rounded_corners() {
         assert!(quad.pos[1] + quad.size[1] <= 127.0);
     }
 }
+
+#[test]
+fn submenu_surfaces_clip_ancestor_labels_into_disjoint_rectangles() {
+    let bounds = crate::TextBounds {
+        left: 0,
+        top: 0,
+        right: 100,
+        bottom: 100,
+    };
+    let parts = crate::overlays::menu_text_bounds_outside(bounds, (20.0, 30.0, 60.0, 40.0));
+    assert_eq!(parts.len(), 4);
+    assert_eq!(
+        parts
+            .iter()
+            .map(|r| (r.right - r.left) * (r.bottom - r.top))
+            .sum::<i32>(),
+        7600
+    );
+    for part in parts {
+        assert!(part.right <= 20 || part.left >= 80 || part.bottom <= 30 || part.top >= 70);
+    }
+    assert!(crate::overlays::menu_text_bounds_outside(bounds, (0.0, 0.0, 100.0, 100.0)).is_empty());
+    assert_eq!(
+        crate::overlays::menu_text_bounds_outside(bounds, (200.0, 200.0, 10.0, 10.0)),
+        vec![bounds]
+    );
+}

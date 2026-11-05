@@ -1167,17 +1167,33 @@ impl App {
                         "label": label,
                         "separator": separator,
                         "dispatchable": item_is_dispatchable(item),
+                        "submenu": matches!(item, ContextMenuItem::Submenu { .. }),
                         "rect": rect_json((ax, row_y, panel_w, h)),
                     });
                     row_y += h;
                     row
                 })
                 .collect();
+            let parents: Vec<_> = self.context_menu_parent_overlays(target).iter().enumerate().map(|(depth, panel)| {
+                let natural_h: f32 = panel.rows.iter().map(|row| if row.separator { sep_h } else { row_h }).sum();
+                let (inset, content_h) = kettle_render::menu::scroll_content(natural_h, panel.panel_h_clamped, row_h);
+                let mut y = panel.anchor.1 + inset;
+                let mut rows = Vec::new();
+                for (index, row) in panel.rows.iter().enumerate().skip(panel.scroll_offset) {
+                    let height = if row.separator { sep_h } else { row_h };
+                    if y + height > panel.anchor.1 + inset + content_h { break; }
+                    rows.push(serde_json::json!({"index": index, "label": row.label, "separator": row.separator, "rect": rect_json((panel.anchor.0, y, panel.panel_w_clamped, height))}));
+                    y += height;
+                }
+                serde_json::json!({"depth": depth, "rect": rect_json(panel.rows_rect()), "highlight": panel.highlight, "rows": rows})
+            }).collect();
             Some(serde_json::json!({
                 "anchor": {"x": ax, "y": ay},
                 "rect": rect_json((ax, ay, panel_w, panel_h)),
                 "highlight": menu.highlight,
                 "scroll_offset": menu.scroll_offset,
+                "depth": menu.drill_stack.len(),
+                "parents": parents,
                 "rows": rows,
             }))
         });

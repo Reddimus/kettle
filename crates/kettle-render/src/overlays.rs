@@ -321,6 +321,8 @@ pub struct Overlay {
     /// top of everything else so an overlapping pane border doesn't
     /// occlude the menu.
     pub context_menu: Option<ContextMenu>,
+    /// Visible ancestor panels of a cascading context menu, root first.
+    pub context_menu_parents: Vec<ContextMenu>,
     /// Renderer projection of the confirmation dialog's prompt, buttons and focused index.
     pub confirm_dialog: Option<ConfirmDialogOverlay>,
     /// `Some` while the in-app settings overlay is open. Painted
@@ -1613,4 +1615,55 @@ fn clip_picker_bottom_corners(quads: &mut Vec<QuadInstance>, (x, y, w, h): Rect4
             push(top, end, inset);
         }
     }
+}
+
+/// Earlier ancestor labels must not paint through a later submenu's surface.
+pub(crate) fn exclude_menu_text(areas: &mut Vec<super::TextArea<'_>>, hole: Rect4) {
+    let original = std::mem::take(areas);
+    for area in original {
+        for bounds in menu_text_bounds_outside(area.bounds, hole) {
+            areas.push(super::TextArea {
+                bounds,
+                ..area.clone()
+            });
+        }
+    }
+}
+
+pub(crate) fn menu_text_bounds_outside(
+    bounds: super::TextBounds,
+    (x, y, w, h): Rect4,
+) -> Vec<super::TextBounds> {
+    let left = bounds.left.max(x.floor() as i32);
+    let top = bounds.top.max(y.floor() as i32);
+    let right = bounds.right.min((x + w).ceil() as i32);
+    let bottom = bounds.bottom.min((y + h).ceil() as i32);
+    if left >= right || top >= bottom {
+        return vec![bounds];
+    }
+    [
+        super::TextBounds {
+            bottom: top,
+            ..bounds
+        },
+        super::TextBounds {
+            top: bottom,
+            ..bounds
+        },
+        super::TextBounds {
+            left: bounds.left,
+            top,
+            right: left,
+            bottom,
+        },
+        super::TextBounds {
+            left: right,
+            top,
+            right: bounds.right,
+            bottom,
+        },
+    ]
+    .into_iter()
+    .filter(|part| part.left < part.right && part.top < part.bottom)
+    .collect()
 }

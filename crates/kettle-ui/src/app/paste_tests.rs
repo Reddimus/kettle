@@ -1384,3 +1384,114 @@ fn bounded_clipboard_extra_byte_rejects_instead_of_truncating() {
         Err(kettle_i18n::Text::NotifyBodyClipboardLimitExceeded)
     );
 }
+
+#[test]
+fn paste_preview_is_short_and_cannot_interpret_controls() {
+    assert_eq!(
+        super::paste_preview("echo hola\n\x1b[201~"),
+        "echo hola\\n\\u{1b}[201~"
+    );
+    assert_eq!(super::paste_preview("español 界"), "español 界");
+    let preview = super::paste_preview(&"x".repeat(LOCAL_PREVIEW_TEST_LEN));
+    assert_eq!(preview.chars().count(), 161);
+    assert!(preview.ends_with('…'));
+    let controls = super::paste_preview(&"\x1b".repeat(1000));
+    assert!(controls.chars().count() <= 161);
+    assert!(!super::paste_preview("safe\u{202e}evil").contains('\u{202e}'));
+}
+const LOCAL_PREVIEW_TEST_LEN: usize = 1000;
+
+#[test]
+fn paste_as_one_line_removes_execution_controls_and_keeps_tabs() {
+    assert_eq!(
+        super::paste_as_one_line("a\r\nb\nc\rd\x03\x1b\0\te"),
+        "a b c d   \te"
+    );
+    assert_eq!(super::paste_as_one_line("café 界"), "café 界");
+    for byte in 0..32u8 {
+        let text = super::paste_as_one_line(&(byte as char).to_string());
+        assert_eq!(text.as_bytes(), if byte == b'\t' { b"\t" } else { b" " });
+    }
+}
+
+#[test]
+fn text_paste_confirmation_covers_all_entry_points_and_stays_targeted() {
+    let source = include_str!("paste.rs");
+    let submit = source
+        .split("fn paste_text_to(")
+        .nth(1)
+        .unwrap()
+        .split("fn confirm_text_paste(")
+        .next()
+        .unwrap();
+    assert!(
+        submit.find("local_paste_within_limit").unwrap()
+            < submit.find("confirm_text_paste").unwrap()
+    );
+    assert!(
+        submit.find("confirm_text_paste").unwrap() < submit.find("deliver_text_paste").unwrap()
+    );
+    let confirmation = source
+        .split("fn confirm_text_paste(")
+        .nth(1)
+        .unwrap()
+        .split("fn deliver_text_paste(")
+        .next()
+        .unwrap();
+    for expected in [
+        "broadcast_recipients(ws)",
+        "pane.read_only",
+        "BRACKETED_PASTE",
+        "paste_protection.confirms",
+    ] {
+        assert!(confirmation.contains(expected), "{expected}");
+    }
+    let dispatch = include_str!("modals.rs");
+    assert!(
+        dispatch.contains(
+            "ws.mux.broadcast == broadcast && self.broadcast_recipients(ws) == recipients"
+        )
+    );
+    assert!(dispatch.contains("self.deliver_text_paste(ws, target, &text)"));
+}
+
+#[test]
+fn paste_confirmation_buttons_keep_consent_targeted_in_each_language() {
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let dialog =
+            super::text_paste_confirmation(Some(7), "one\ntwo", BroadcastScope::Off, vec![], tr);
+        assert_eq!(dialog.focus_idx, 0);
+        assert_eq!(dialog.buttons.len(), 3);
+        assert!(super::confirmation_button_action(&dialog, 0).is_none());
+        assert!(super::confirmation_button_action(&dialog, 3).is_none());
+        for (index, expected) in [(1, "one\ntwo"), (2, "one two")] {
+            let super::ConfirmAction::Paste {
+                target,
+                text,
+                broadcast,
+                recipients,
+            } = super::confirmation_button_action(&dialog, index).unwrap()
+            else {
+                panic!("paste action");
+            };
+            assert_eq!(target, Some(7));
+            assert_eq!(text, expected);
+            assert_eq!(broadcast, BroadcastScope::Off);
+            assert!(recipients.is_empty());
+        }
+        let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+        for surface in [(800.0, 600.0), (240.0, 320.0)] {
+            let layout =
+                kettle_render::ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &overlay);
+            for (index, &(x, y, w, h)) in layout.buttons.iter().enumerate() {
+                if w > 0.0 && h > 0.0 {
+                    assert_eq!(
+                        super::confirm_dialog_button_hit(&layout, x + w / 2.0, y + h / 2.0),
+                        Some(index)
+                    );
+                }
+            }
+        }
+    }
+}

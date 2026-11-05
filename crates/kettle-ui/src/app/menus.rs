@@ -16,6 +16,8 @@ impl ContextMenuState {
             _ => return false,
         };
         self.drill_stack.push(ContextMenuLevel {
+            anchor: self.anchor,
+            anchor_scale: self.anchor_scale,
             items: std::mem::replace(&mut self.items, nested),
             highlight: index,
             scroll_offset: self.scroll_offset,
@@ -31,10 +33,12 @@ impl ContextMenuState {
         true
     }
 
-    fn leave_submenu(&mut self) -> bool {
+    pub(super) fn leave_submenu(&mut self) -> bool {
         let Some(parent) = self.drill_stack.pop() else {
             return false;
         };
+        self.anchor = parent.anchor;
+        self.anchor_scale = parent.anchor_scale;
         self.items = parent.items;
         self.highlight = parent.highlight;
         self.scroll_offset = parent.scroll_offset;
@@ -313,6 +317,11 @@ impl App {
             ContextMenuItem::Item {
                 label: tr.text(T::MenuPaste),
                 action: Action::Paste,
+                enabled: true,
+            },
+            ContextMenuItem::Item {
+                label: tr.text(T::MenuSelectAll),
+                action: Action::SelectAll,
                 enabled: true,
             },
             ContextMenuItem::Separator,
@@ -609,7 +618,7 @@ impl App {
         });
         items.push(ContextMenuItem::Submenu {
             label: tr.text(T::MenuPreferences).to_string(),
-            items: inner,
+            items: compact_preferences(inner, *tr),
         });
     }
 
@@ -791,6 +800,7 @@ impl App {
         // Preferences submenu: runtime-mutable settings + the Advanced…
         // escape hatch.
         self.append_preferences_submenu_items(&mut items);
+        let items = grouped_terminal_menu(items, tr);
         self.show_context_menu(ws, items, px, py);
     }
 
@@ -938,12 +948,12 @@ impl App {
             .map(|it| match it {
                 ContextMenuItem::Item { action, .. }
                 | ContextMenuItem::DynamicItem { action, .. } => {
-                    kettle_config::keybinds::hint_label(&self.cfg.keybinds, action)
+                    kettle_config::keybinds::ui_hint_label(&self.cfg.keybinds, action)
                         .unwrap_or_default()
                 }
                 ContextMenuItem::NewTabShell { .. } => {
                     let h = if shell_ordinal < 9 {
-                        kettle_config::keybinds::hint_label(
+                        kettle_config::keybinds::ui_hint_label(
                             &self.cfg.keybinds,
                             &Action::NewTabShell(shell_ordinal),
                         )
@@ -1196,16 +1206,34 @@ impl App {
             self.scroll_context_menu(ws, delta);
             return;
         }
-        let Some(idx) = self.menu_row_at_cursor(ws) else {
-            return;
+        let index = if let Some(index) = self.menu_row_at_cursor(ws) {
+            index
+        } else {
+            let Some((depth, index)) = self.parent_menu_row_at_cursor(ws) else {
+                return;
+            };
+            let Some(menu) = ws.context_menu.as_mut() else {
+                return;
+            };
+            if menu.drill_stack[depth].highlight == index {
+                return;
+            }
+            while menu.drill_stack.len() > depth {
+                menu.leave_submenu();
+            }
+            index
         };
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
-        if menu.highlight == idx {
+        let changed = menu.highlight != index;
+        menu.highlight = index;
+        let submenu = matches!(menu.items.get(index), Some(ContextMenuItem::Submenu { .. }));
+        if submenu {
+            self.enter_context_submenu(ws, index);
+        } else if !changed {
             return;
         }
-        menu.highlight = idx;
         ws.reuse_pane_snapshots_once = true;
         if let Some(w) = &ws.window {
             w.request_redraw();
@@ -1231,17 +1259,25 @@ impl App {
     ) {
         self.sync_pane_focus_reports(ws);
         match click {
+            ContextMenuClick::ParentRow { depth, index } => {
+                let chosen = ws.context_menu.as_mut().and_then(|menu| {
+                    if depth >= menu.drill_stack.len() {
+                        return None;
+                    }
+                    while menu.drill_stack.len() > depth {
+                        menu.leave_submenu();
+                    }
+                    menu.items
+                        .get(index)
+                        .and_then(|item| item_to_click(item, index))
+                });
+                if let Some(chosen) = chosen {
+                    self.dispatch_context_menu_click(ws, chosen, event_loop);
+                }
+            }
             // Keep the menu open: swap the visible level for the submenu.
             ContextMenuClick::DrillIntoSubmenu(idx) => {
-                if let Some(menu) = ws.context_menu.as_mut() {
-                    menu.enter_submenu(idx);
-                }
-                let (width, height) = ws
-                    .renderer
-                    .as_ref()
-                    .map(|renderer| renderer.surface_size())
-                    .unwrap_or((800, 600));
-                self.reclamp_context_menu(ws, (width as f32, height as f32));
+                self.enter_context_submenu(ws, idx);
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -1387,7 +1423,11 @@ impl App {
         // Hover and click must resolve through the same clipped-row geometry.
         // A second row walk here would let the blank partial strip below the
         // final fully drawn row dispatch an invisible item.
-        let idx = self.menu_row_at_cursor(ws)?;
+        let Some(idx) = self.menu_row_at_cursor(ws) else {
+            return self
+                .parent_menu_row_at_cursor(ws)
+                .map(|(depth, index)| ContextMenuClick::ParentRow { depth, index });
+        };
         let menu = ws.context_menu.as_ref()?;
         // Shared mapper — the same row-to-click table the keyboard Enter /
         // Space and mnemonic paths use, so mouse and keyboard dispatch cannot
@@ -1404,7 +1444,14 @@ impl App {
         &self,
         ws: &WindowState,
     ) -> Option<((f32, f32), (f32, f32))> {
-        let menu = ws.context_menu.as_ref()?;
+        self.context_menu_level_geometry(ws, ws.context_menu.as_ref()?)
+    }
+
+    fn context_menu_level_geometry(
+        &self,
+        ws: &WindowState,
+        menu: &ContextMenuState,
+    ) -> Option<((f32, f32), (f32, f32))> {
         let (cw, ch) = self.menu_cell(ws);
         let row_h = ch + kettle_render::menu::ROW_PAD;
         let sep_h = kettle_render::menu::SEP_H;
@@ -1463,6 +1510,31 @@ impl App {
             .as_ref()
             .map(|window| window.scale_factor())
             .unwrap_or(1.0);
+        let parents: Vec<_> = ws
+            .context_menu
+            .as_ref()
+            .map(|menu| {
+                menu.drill_stack
+                    .iter()
+                    .filter_map(|parent| {
+                        let (_, panel) =
+                            self.context_menu_level_geometry(ws, &parent.as_state())?;
+                        let anchor = scale_context_menu_anchor(
+                            parent.anchor,
+                            parent.anchor_scale,
+                            current_scale,
+                        );
+                        Some(clamp_context_menu_anchor(anchor, panel, surface))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(menu) = ws.context_menu.as_mut() {
+            for (parent, anchor) in menu.drill_stack.iter_mut().zip(parents) {
+                parent.anchor = anchor;
+                parent.anchor_scale = current_scale;
+            }
+        }
         let previous_scale = ws
             .context_menu
             .as_ref()
@@ -1496,7 +1568,14 @@ impl App {
     /// state. Splits the labels (owned `String`) from the dispatch
     /// actions so the renderer stays Action-agnostic.
     pub(super) fn context_menu_overlay(&self, ws: &WindowState) -> Option<ContextMenu> {
-        let menu = ws.context_menu.as_ref()?;
+        self.context_menu_level_overlay(ws, ws.context_menu.as_ref()?)
+    }
+
+    fn context_menu_level_overlay(
+        &self,
+        ws: &WindowState,
+        menu: &ContextMenuState,
+    ) -> Option<ContextMenu> {
         // Dropdown parity: per-row shortcut hints from the LIVE keybind
         // map (computed per frame; the map only changes on reload).
         let hints = self.menu_item_hints(&menu.items);
@@ -1600,7 +1679,7 @@ impl App {
         // Terminator menu UX: pass through the scroll state + clamped panel
         // geometry the renderer needs to draw only the visible slice.
         let (panel_w_clamped, panel_h_clamped) = self
-            .context_menu_geometry(ws)
+            .context_menu_level_geometry(ws, menu)
             .map(|(_, panel)| panel)
             .unwrap_or((0.0, 0.0));
         let (cell_w, _) = self.menu_cell(ws);
@@ -1618,6 +1697,91 @@ impl App {
             a11y_label: ws.context_menu_a11y_label.clone(),
             picker_header_height: 0.0,
         })
+    }
+
+    pub(super) fn context_menu_parent_overlays(&self, ws: &WindowState) -> Vec<ContextMenu> {
+        ws.context_menu
+            .as_ref()
+            .map(|menu| {
+                menu.drill_stack
+                    .iter()
+                    .filter_map(|parent| self.context_menu_level_overlay(ws, &parent.as_state()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn enter_context_submenu(&self, ws: &mut WindowState, index: usize) {
+        let Some((anchor, (width, _))) = self.context_menu_geometry(ws) else {
+            return;
+        };
+        let (_, ch) = self.menu_cell(ws);
+        let row_h = ch + kettle_render::menu::ROW_PAD;
+        let Some(menu) = ws.context_menu.as_mut() else {
+            return;
+        };
+        let row_y: f32 = menu
+            .items
+            .iter()
+            .skip(menu.scroll_offset)
+            .take(index.saturating_sub(menu.scroll_offset))
+            .map(|item| context_menu_item_height(item, row_h, kettle_render::menu::SEP_H))
+            .sum();
+        if !menu.enter_submenu(index) {
+            return;
+        }
+        let surface = ws
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size())
+            .unwrap_or((800, 600));
+        let Some((_, child_size)) = self.context_menu_geometry(ws) else {
+            return;
+        };
+        let x = submenu_anchor_x(anchor.0, width, child_size.0, surface.0 as f32);
+        if let Some(menu) = ws.context_menu.as_mut() {
+            menu.anchor = (x, anchor.1 + row_y);
+        }
+        self.reclamp_context_menu(ws, (surface.0 as f32, surface.1 as f32));
+        ws.accessibility_pending = true;
+    }
+
+    fn parent_menu_row_at_cursor(&self, ws: &WindowState) -> Option<(usize, usize)> {
+        let menu = ws.context_menu.as_ref()?;
+        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if let Some(((x, y), (w, h))) = self.context_menu_geometry(ws)
+            && px >= x
+            && px < x + w
+            && py >= y
+            && py < y + h
+        {
+            return None;
+        }
+        let (_, ch) = self.menu_cell(ws);
+        let row_h = ch + kettle_render::menu::ROW_PAD;
+        for (depth, parent) in menu.drill_stack.iter().enumerate().rev() {
+            let ((x, y), (w, h)) = self.context_menu_level_geometry(ws, &parent.as_state())?;
+            let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+            if px < x || px >= x + w || py < y || py >= y + h {
+                continue;
+            }
+            let (inset, content_h) =
+                context_menu_content_geometry(&parent.items, h, row_h, kettle_render::menu::SEP_H);
+            return find_menu_row_y(
+                py,
+                y + inset,
+                content_h,
+                row_h,
+                kettle_render::menu::SEP_H,
+                parent
+                    .items
+                    .iter()
+                    .skip(parent.scroll_offset)
+                    .map(|item| matches!(item, ContextMenuItem::Separator)),
+            )
+            .map(|index| (depth, index + parent.scroll_offset));
+        }
+        None
     }
 
     /// Esc / `h` semantics: pop a drilled-in submenu back to its parent, or
@@ -1770,7 +1934,7 @@ impl App {
             return;
         }
         match key {
-            Key::Named(NamedKey::Escape) => {
+            Key::Named(NamedKey::Escape) | Key::Named(NamedKey::ArrowLeft) => {
                 self.context_menu_back(ws);
             }
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
@@ -1778,6 +1942,14 @@ impl App {
             }
             Key::Named(NamedKey::ArrowUp) => {
                 self.step_context_menu_highlight(ws, -1);
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                if let Some(index) = ws.context_menu.as_ref().map(|menu| menu.highlight) {
+                    self.enter_context_submenu(ws, index);
+                }
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
             }
             Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
                 self.context_menu_activate(ws, event_loop);
@@ -2010,6 +2182,10 @@ pub(super) enum UrlHow {
 
 #[derive(Clone)]
 pub(super) enum ContextMenuClick {
+    ParentRow {
+        depth: usize,
+        index: usize,
+    },
     Action(Action),
     Preview {
         target: PreviewMenuTarget,
@@ -2244,9 +2420,11 @@ pub(crate) struct ContextMenuState {
 }
 
 pub(super) struct ContextMenuLevel {
-    items: Vec<ContextMenuItem>,
-    highlight: usize,
-    scroll_offset: usize,
+    pub(super) anchor: (f32, f32),
+    pub(super) anchor_scale: f64,
+    pub(super) items: Vec<ContextMenuItem>,
+    pub(super) highlight: usize,
+    pub(super) scroll_offset: usize,
 }
 
 /// Letters the menu's vim navigation layer (`vim-menu-nav`) consumes
@@ -2547,6 +2725,13 @@ pub(super) fn filter_disabled(items: Vec<ContextMenuItem>) -> Vec<ContextMenuIte
     // Step 1: drop disabled Items.
     let kept: Vec<ContextMenuItem> = items
         .into_iter()
+        .filter_map(|item| match item {
+            ContextMenuItem::Submenu { label, items } => {
+                let items = filter_disabled(items);
+                (!items.is_empty()).then_some(ContextMenuItem::Submenu { label, items })
+            }
+            item => Some(item),
+        })
         .filter(|it| {
             !matches!(
                 it,
@@ -2862,4 +3047,218 @@ impl PendingShellAction {
         let (window, index) = self.0.take()?;
         shells.get(index).map(|(_, argv)| (window, argv.clone()))
     }
+}
+
+/// Bound the terminal menu by categories, independently of optional commands.
+pub(super) fn grouped_terminal_menu(
+    items: Vec<ContextMenuItem>,
+    tr: kettle_i18n::Translator,
+) -> Vec<ContextMenuItem> {
+    use kettle_i18n::Text as T;
+    let mut primary = Vec::new();
+    let mut groups: [Vec<ContextMenuItem>; 8] = std::array::from_fn(|_| Vec::new());
+    for item in items {
+        let group = match &item {
+            ContextMenuItem::Separator => continue,
+            ContextMenuItem::UrlItem { .. }
+            | ContextMenuItem::Media { .. }
+            | ContextMenuItem::Preview { .. } => None,
+            ContextMenuItem::Item { action, .. } | ContextMenuItem::DynamicItem { action, .. } => {
+                match action {
+                    Action::Copy | Action::Paste | Action::SelectAll => None,
+                    Action::SplitAuto
+                    | Action::SplitRight
+                    | Action::SplitLeft
+                    | Action::SplitDown
+                    | Action::SplitUp => Some(0),
+                    Action::ToggleZoom
+                    | Action::ClosePane
+                    | Action::Reset
+                    | Action::TogglePaneReadOnly => Some(1),
+                    Action::NewTab | Action::CloseTab => Some(2),
+                    Action::NewWindow | Action::CloseWindow => Some(3),
+                    Action::EditWindowTitle | Action::EditTabTitle | Action::EditPaneTitle => {
+                        Some(4)
+                    }
+                    Action::CreateGroup | Action::GroupTab | Action::UngroupTab => Some(5),
+                    Action::OpenThemePicker | Action::OpenSettings => Some(6),
+                    _ => Some(7),
+                }
+            }
+            ContextMenuItem::Submenu { .. } => Some(6),
+            _ => Some(7),
+        };
+        if let Some(group) = group {
+            groups[group].push(item);
+        } else {
+            primary.push(item);
+        }
+    }
+    // Link actions stay first; terminal clipboard actions follow immediately.
+    primary.sort_by_key(|item| match item {
+        ContextMenuItem::UrlItem { .. } => 0,
+        ContextMenuItem::Item {
+            action: Action::Copy,
+            ..
+        } => 1,
+        ContextMenuItem::Item {
+            action: Action::Paste,
+            ..
+        } => 2,
+        ContextMenuItem::Item {
+            action: Action::SelectAll,
+            ..
+        } => 3,
+        _ => 4,
+    });
+    primary.push(ContextMenuItem::Separator);
+    for (label, items) in [
+        T::MenuCategorySplit,
+        T::MenuCategoryPane,
+        T::MenuCategoryTab,
+        T::MenuCategoryWindow,
+        T::MenuCategoryTitle,
+        T::MenuCategoryGroup,
+        T::MenuCategoryAppearance,
+        T::MenuCategoryCommands,
+    ]
+    .into_iter()
+    .zip(groups)
+    {
+        let items = filter_disabled(items);
+        if !items.is_empty() {
+            primary.push(ContextMenuItem::Submenu {
+                label: tr.text(label).to_string(),
+                items,
+            });
+        }
+    }
+    primary
+}
+
+impl ContextMenuLevel {
+    pub(super) fn as_state(&self) -> ContextMenuState {
+        ContextMenuState {
+            anchor: self.anchor,
+            anchor_scale: self.anchor_scale,
+            items: self.items.clone(),
+            highlight: self.highlight,
+            drill_stack: Vec::new(),
+            scroll_offset: self.scroll_offset,
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        }
+    }
+}
+
+pub(super) fn submenu_anchor_x(
+    parent_x: f32,
+    parent_width: f32,
+    child_width: f32,
+    surface_width: f32,
+) -> f32 {
+    if parent_x + parent_width + child_width <= surface_width - 4.0 {
+        parent_x + parent_width
+    } else {
+        (parent_x - child_width).max(4.0)
+    }
+}
+
+#[cfg(test)]
+mod cascading_tests {
+    use super::*;
+
+    #[test]
+    fn context_menu_submenus_restore_parent_anchor_and_selection() {
+        let parent = vec![ContextMenuItem::Submenu {
+            label: "Split".into(),
+            items: vec![ContextMenuItem::Item {
+                label: "Right",
+                action: Action::SplitRight,
+                enabled: true,
+            }],
+        }];
+        let mut state = ContextMenuState {
+            anchor: (40.0, 60.0),
+            anchor_scale: 2.0,
+            items: parent,
+            highlight: 0,
+            drill_stack: Vec::new(),
+            scroll_offset: 0,
+            typeahead_buf: "s".into(),
+            typeahead_until: Some(std::time::Instant::now()),
+        };
+        assert!(state.enter_submenu(0));
+        assert_eq!(state.drill_stack.len(), 1);
+        assert!(state.typeahead_buf.is_empty());
+        assert!(state.typeahead_until.is_none());
+        state.anchor = (300.0, 120.0);
+        state.anchor_scale = 1.0;
+        assert!(state.leave_submenu());
+        assert_eq!(state.anchor, (40.0, 60.0));
+        assert_eq!(state.anchor_scale, 2.0);
+        assert_eq!(state.highlight, 0);
+        assert!(!state.leave_submenu());
+    }
+
+    #[test]
+    fn context_menu_submenus_open_beside_parent_and_flip_at_surface_edge() {
+        assert_eq!(submenu_anchor_x(40.0, 200.0, 250.0, 800.0), 240.0);
+        assert_eq!(submenu_anchor_x(550.0, 200.0, 250.0, 800.0), 300.0);
+        assert_eq!(submenu_anchor_x(4.0, 400.0, 500.0, 800.0), 4.0);
+    }
+}
+
+fn compact_preferences(
+    items: Vec<ContextMenuItem>,
+    tr: kettle_i18n::Translator,
+) -> Vec<ContextMenuItem> {
+    use kettle_i18n::Text as T;
+    let mut rest = Vec::new();
+    let mut groups: [Vec<ContextMenuItem>; 3] = std::array::from_fn(|_| Vec::new());
+    for item in items {
+        let group = match &item {
+            ContextMenuItem::Separator => continue,
+            ContextMenuItem::Item { action, .. } | ContextMenuItem::DynamicItem { action, .. } => {
+                match action {
+                    Action::SetScrollbarAlways
+                    | Action::SetScrollbarAuto
+                    | Action::SetScrollbarNever => Some(0),
+                    Action::SetAskBeforeClosingAlways
+                    | Action::SetAskBeforeClosingMultiple
+                    | Action::SetAskBeforeClosingNever => Some(1),
+                    Action::SetBellOff
+                    | Action::SetBellVisual
+                    | Action::SetBellAttention
+                    | Action::SetBellBoth => Some(2),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(group) = group {
+            groups[group].push(item);
+        } else {
+            rest.push(item);
+        }
+    }
+    let mut result = Vec::new();
+    for (label, items) in [
+        T::SettingsFieldScrollbar,
+        T::MenuCategoryCloseConfirmation,
+        T::SettingsFieldBell,
+    ]
+    .into_iter()
+    .zip(groups)
+    {
+        if !items.is_empty() {
+            result.push(ContextMenuItem::Submenu {
+                label: tr.text(label).to_string(),
+                items,
+            });
+        }
+    }
+    result.push(ContextMenuItem::Separator);
+    result.extend(rest);
+    filter_disabled(result)
 }
