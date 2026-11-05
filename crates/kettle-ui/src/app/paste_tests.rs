@@ -1438,21 +1438,22 @@ fn text_paste_confirmation_covers_all_entry_points_and_stays_targeted() {
         .split("fn deliver_text_paste(")
         .next()
         .unwrap();
-    for expected in [
-        "broadcast_recipients(ws)",
-        "pane.read_only",
-        "BRACKETED_PASTE",
-        "paste_protection.confirms",
-    ] {
-        assert!(confirmation.contains(expected), "{expected}");
-    }
+    assert!(
+        confirmation
+            .contains("text_paste_needs_confirmation(self.cfg.paste_protection, text, modes)")
+    );
+    assert!(submit.contains("let modes = self.text_paste_modes(ws, target)"));
+    assert!(submit.contains("confirm_text_paste(ws, target, text, &modes)"));
+    assert!(submit.contains("deliver_text_paste(ws, target, text, &modes)"));
     let dispatch = include_str!("modals.rs");
     assert!(
         dispatch.contains(
             "ws.mux.broadcast == broadcast && self.broadcast_recipients(ws) == recipients"
         )
     );
-    assert!(dispatch.contains("self.deliver_text_paste(ws, target, &text)"));
+    assert!(dispatch.contains(
+        "self.deliver_text_paste(ws, target, &text, &self.text_paste_modes(ws, target))"
+    ));
 }
 
 #[test]
@@ -1493,5 +1494,67 @@ fn paste_confirmation_buttons_keep_consent_targeted_in_each_language() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn paste_mode_change_preserves_the_checked_payload() {
+    use super::paste::{paste_text_into_target, text_paste_modes, text_paste_needs_confirmation};
+    use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+
+    for scope in [
+        BroadcastScope::Off,
+        BroadcastScope::Tab,
+        BroadcastScope::Group("race".into()),
+    ] {
+        let (mut mux, ids) = title_test_tab_mux(1);
+        let target = ids[0];
+        mux.broadcast = scope.clone();
+        mux.panes.get_mut(&target).unwrap().group_name = Some("race".into());
+        let captured = mux.panes.get_mut(&target).unwrap().capture_input_for_test();
+        let mode = PrivateMode::Named(NamedPrivateMode::BracketedPaste);
+        mux.panes[&target]
+            .term
+            .term
+            .lock()
+            .unwrap()
+            .set_private_mode(mode);
+        let modes = text_paste_modes(mux.panes.iter().map(|(&id, pane)| (id, pane)));
+        let text = "echo first\necho second";
+        assert!(!text_paste_needs_confirmation(
+            kettle_config::PasteProtection::Auto,
+            text,
+            &modes
+        ));
+        // Deterministically schedule the PTY's disable after the decision and before encoding.
+        mux.panes[&target]
+            .term
+            .term
+            .lock()
+            .unwrap()
+            .unset_private_mode(mode);
+        if scope == BroadcastScope::Off {
+            assert_eq!(
+                paste_text_into_target(&mut mux, Some(target), text, &modes),
+                Some(PaneInputResult::Queued)
+            );
+        } else {
+            assert!(mux.broadcast_paste_delivery(text, None, &modes).accepted);
+        }
+        let local = captured();
+        if matches!(scope, BroadcastScope::Group(_)) {
+            // A named group uses the same snapshot in a foreign window.
+            assert!(
+                mux.broadcast_paste_foreign_delivery(&scope, text, None, &modes)
+                    .accepted
+            );
+            assert_eq!(captured(), local);
+        }
+        mux.kill_children();
+        assert_eq!(
+            local,
+            [b"\x1b[200~echo first\necho second\x1b[201~".to_vec()],
+            "{scope:?}"
+        );
     }
 }

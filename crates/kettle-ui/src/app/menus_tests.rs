@@ -1427,3 +1427,86 @@ fn disabled_submenu_leaves_are_removed_and_empty_categories_disappear() {
     }];
     assert!(filter_disabled(items).is_empty());
 }
+
+#[test]
+fn ancestor_menu_press_survives_dismissal_and_dispatches() {
+    use super::menus::{context_menu_click_at, context_menu_contains_cursor};
+    use super::modals::{ModalKind, dispatch_modal_press};
+    use super::{ContextMenu, ContextMenuClick, ContextMenuState};
+    let submenu = |label: &str, action| ContextMenuItem::Submenu {
+        label: label.into(),
+        items: vec![ContextMenuItem::Item {
+            label: "Leaf",
+            action,
+            enabled: true,
+        }],
+    };
+    let panel = |anchor, height| ContextMenu {
+        anchor,
+        rows: vec![],
+        highlight: 0,
+        scroll_offset: 0,
+        panel_w_clamped: 160.0,
+        panel_h_clamped: height,
+        a11y_label: None,
+        picker_header_height: 0.0,
+    };
+    for index in [0, 1] {
+        let mut ws = WindowState::new(1, Mux::new());
+        ws.context_menu = Some(ContextMenuState {
+            anchor: (10.0, 10.0),
+            anchor_scale: 1.0,
+            items: vec![
+                submenu("Split", Action::SplitRight),
+                submenu("Other", Action::Copy),
+            ],
+            highlight: 0,
+            drill_stack: vec![],
+            scroll_offset: 0,
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        });
+        // Hovering Split has already opened its child panel.
+        assert!(ws.context_menu.as_mut().unwrap().enter_submenu(0));
+        ws.context_menu.as_mut().unwrap().anchor = (174.0, 10.0);
+        let active = panel((174.0, 10.0), 24.0);
+        let parents = [panel((10.0, 10.0), 48.0)];
+        let cursor = (20.0, 22.0 + index as f32 * 24.0);
+        // Native and ctl presses dismiss outside modals before resolving menu rows.
+        let inside = context_menu_contains_cursor(&active, &parents, cursor);
+        let consumed = dispatch_modal_press(&mut ws, ModalKind::ContextMenu, inside, 0);
+        assert!(!consumed, "an ancestor press must reach row dispatch");
+        let menu = ws
+            .context_menu
+            .as_mut()
+            .expect("the visible menu survives the press");
+        let click = context_menu_click_at(menu, &active, &parents, cursor, 24.0, 0).unwrap();
+        let ContextMenuClick::ParentRow {
+            depth,
+            index: selected,
+        } = click
+        else {
+            panic!("ancestor click");
+        };
+        assert_eq!((depth, selected), (0, index));
+        let chosen = menu.select_parent_row(depth, selected).unwrap();
+        let ContextMenuClick::DrillIntoSubmenu(selected) = chosen else {
+            panic!("submenu selection");
+        };
+        assert!(menu.enter_submenu(selected));
+        assert_eq!(menu.drill_stack.len(), 1);
+        assert_eq!(menu.drill_stack[0].highlight, index);
+        assert!(
+            matches!(&menu.items[0], ContextMenuItem::Item { action, .. } if *action == if index == 0 { Action::SplitRight } else { Action::Copy })
+        );
+        // A genuinely outside press still dismisses and consumes the menu.
+        let inside = context_menu_contains_cursor(&active, &parents, (600.0, 400.0));
+        assert!(dispatch_modal_press(
+            &mut ws,
+            ModalKind::ContextMenu,
+            inside,
+            0
+        ));
+        assert!(ws.context_menu.is_none());
+    }
+}

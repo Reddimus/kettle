@@ -500,7 +500,20 @@ fn clicks_share_the_fully_visible_hover_row_contract() {
         .expect("end of context-menu click resolver");
     let resolver = &src[start..end];
     assert!(
-        resolver.contains("let Some(idx) = self.menu_row_at_cursor(ws)"),
+        resolver.contains("context_menu_click_at(")
+            && src
+                .split("fn context_menu_click_at(")
+                .nth(1)
+                .unwrap()
+                .contains("context_menu_row_at(")
+            && src
+                .split("fn menu_row_at_cursor(")
+                .nth(1)
+                .unwrap()
+                .split("\n    }")
+                .next()
+                .unwrap()
+                .contains("context_menu_row_at("),
         "clicks must use the clipped-row helper exercised above"
     );
     assert!(

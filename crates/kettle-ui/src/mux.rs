@@ -1088,6 +1088,13 @@ pub struct Pane {
 }
 
 impl Pane {
+    #[cfg(test)]
+    pub(crate) fn capture_input_for_test(&mut self) -> impl Fn() -> Vec<Vec<u8>> + use<> {
+        let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        self.pty_input.user_tx = user_tx;
+        move || user_rx.try_iter().map(|item| item.bytes.to_vec()).collect()
+    }
+
     #[cfg(any(target_os = "linux", test))]
     pub(crate) fn input_generation(&self) -> u64 {
         self.user_input_generation.load(Ordering::Relaxed)
@@ -4640,19 +4647,20 @@ impl Mux {
     /// Companion to `broadcast_write_delivery`. Paste is user input, so with
     /// broadcast on (group-input mode, Ctrl+Shift+G on Windows) it follows the
     /// same scoping as keystrokes. Each pane gets its own `BRACKETED_PASTE` wrap
-    /// decision read from its own `Term::mode()`. Panes can disagree on whether
+    /// decision from the snapshot used for confirmation. Panes can disagree on whether
     /// the running program enabled bracketed paste (e.g. one is in vim and one
     /// is at a shell prompt), and wrapping the wrong way would either inject
     /// literal `\e[200~`/`\e[201~` markers into the shell's command line or
     /// leave bytes vulnerable to the bracketed-paste auto-execute attack inside
-    /// vim. `paste_into` makes the per-pane wrap decision.
+    /// vim. `paste_into` retains that per-pane decision through encoding.
     pub(crate) fn broadcast_paste_delivery(
         &mut self,
         text: &str,
         receipt_pane: impl Into<PasteReceiptOwners> + Copy,
+        modes: &std::collections::HashMap<u64, bool>,
     ) -> PaneInputDelivery {
         let ids = self.broadcast_target_ids();
-        self.paste_into(ids, text, receipt_pane)
+        self.paste_into(ids, text, receipt_pane, modes)
     }
 
     /// Deliver a paste that ANOTHER window is originating, to the panes in this
@@ -4664,9 +4672,10 @@ impl Mux {
         scope: &BroadcastScope,
         text: &str,
         receipt_pane: impl Into<PasteReceiptOwners> + Copy,
+        modes: &std::collections::HashMap<u64, bool>,
     ) -> PaneInputDelivery {
         let ids = self.foreign_target_ids(scope);
-        self.paste_into(ids, text, receipt_pane)
+        self.paste_into(ids, text, receipt_pane, modes)
     }
 
     pub(crate) fn broadcast_paste_paths_delivery(
@@ -4741,6 +4750,7 @@ impl Mux {
         ids: Vec<u64>,
         text: &str,
         receipt_pane: impl Into<PasteReceiptOwners> + Copy,
+        modes: &std::collections::HashMap<u64, bool>,
     ) -> PaneInputDelivery {
         if ids.is_empty() {
             return PaneInputDelivery::new();
@@ -4763,13 +4773,9 @@ impl Mux {
                     delivery.record_for(id, receipt_pane, PaneInputResult::ReadOnly);
                     continue;
                 }
-                let bracketed = p
-                    .term
-                    .term
-                    .lock()
-                    .ok()
-                    .map(|t| t.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
-                    .unwrap_or(false);
+                let Some(&bracketed) = modes.get(&id) else {
+                    continue;
+                };
                 let bytes = if bracketed {
                     wrapped
                         .get_or_insert_with(|| Arc::from(crate::input::paste_payload(text, true)))

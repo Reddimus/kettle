@@ -97,15 +97,10 @@ impl App {
         }
         if ws.context_menu.is_some() {
             let inside = self.context_menu_overlay(ws).is_some_and(|menu| {
-                rect_contains(
-                    (
-                        menu.anchor.0,
-                        menu.anchor.1,
-                        menu.panel_w_clamped,
-                        menu.panel_h_clamped,
-                    ),
-                    x,
-                    y,
+                super::menus::context_menu_contains_cursor(
+                    &menu,
+                    &self.context_menu_parent_overlays(ws),
+                    (x, y),
                 )
             });
             return Some((ModalKind::ContextMenu, inside));
@@ -1153,7 +1148,7 @@ impl App {
                 recipients,
             } => {
                 if ws.mux.broadcast == broadcast && self.broadcast_recipients(ws) == recipients {
-                    self.deliver_text_paste(ws, target, &text);
+                    self.deliver_text_paste(ws, target, &text, &self.text_paste_modes(ws, target));
                 }
             }
             ConfirmAction::RebindKeybind {

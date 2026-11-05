@@ -783,10 +783,36 @@ impl App {
             self.report_input_result(PaneInputResult::Oversize);
             return;
         }
-        if self.confirm_text_paste(ws, target, text) {
+        // The PTY reader can change modes after this lock is released. Keep
+        // the safety decision and encoding on the same per-pane snapshot.
+        let modes = self.text_paste_modes(ws, target);
+        if self.confirm_text_paste(ws, target, text, &modes) {
             return;
         }
-        self.deliver_text_paste(ws, target, text);
+        self.deliver_text_paste(ws, target, text, &modes);
+    }
+
+    pub(super) fn text_paste_modes(
+        &self,
+        ws: &WindowState,
+        target: Option<u64>,
+    ) -> std::collections::HashMap<u64, bool> {
+        let ids = if ws.mux.is_broadcast_on() {
+            self.broadcast_recipients(ws)
+        } else {
+            target.into_iter().collect()
+        };
+        text_paste_modes(ids.into_iter().filter_map(|id| {
+            ws.mux
+                .panes
+                .get(&id)
+                .or_else(|| {
+                    self.windows
+                        .values()
+                        .find_map(|other| other.mux.panes.get(&id))
+                })
+                .map(|pane| (id, pane))
+        }))
     }
 
     fn confirm_text_paste(
@@ -794,29 +820,11 @@ impl App {
         ws: &mut WindowState,
         target: Option<u64>,
         text: &str,
+        modes: &std::collections::HashMap<u64, bool>,
     ) -> bool {
         let recipients = self.broadcast_recipients(ws);
-        let ids = if ws.mux.is_broadcast_on() {
-            recipients.clone()
-        } else {
-            target.into_iter().collect()
-        };
-        let needs_confirmation = ids.iter().any(|id| {
-            let pane = ws.mux.panes.get(id).or_else(|| {
-                self.windows
-                    .values()
-                    .find_map(|other| other.mux.panes.get(id))
-            });
-            pane.is_some_and(|pane| {
-                if pane.read_only {
-                    return false;
-                }
-                let bracketed = pane.term.term.lock().ok().is_some_and(|term| {
-                    term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE)
-                });
-                self.cfg.paste_protection.confirms(text, bracketed)
-            })
-        });
+        let needs_confirmation =
+            text_paste_needs_confirmation(self.cfg.paste_protection, text, modes);
         if !needs_confirmation {
             return false;
         }
@@ -839,6 +847,7 @@ impl App {
         ws: &mut WindowState,
         target: Option<u64>,
         text: &str,
+        modes: &std::collections::HashMap<u64, bool>,
     ) {
         self.sync_pane_focus_reports(ws);
         if text.is_empty() {
@@ -854,17 +863,19 @@ impl App {
                 rec.record_marker(&format!("kettle:paste len={}", text.chars().count()));
             }
             let receipt_pane = Self::media_paste_receipt_owners(ws);
-            let local = ws.mux.broadcast_paste_delivery(text, receipt_pane);
+            let local = ws.mux.broadcast_paste_delivery(text, receipt_pane, modes);
             Self::dismiss_media_paste_receipt_after_delivery(ws, local);
             let mut result = local.result;
             if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
                 let scope = ws.mux.broadcast.clone();
                 for other in self.windows.values_mut() {
                     let receipt_pane = Self::media_paste_receipt_owners(other);
-                    let delivery =
-                        other
-                            .mux
-                            .broadcast_paste_foreign_delivery(&scope, text, receipt_pane);
+                    let delivery = other.mux.broadcast_paste_foreign_delivery(
+                        &scope,
+                        text,
+                        receipt_pane,
+                        modes,
+                    );
                     Self::dismiss_media_paste_receipt_after_delivery(other, delivery);
                     result = result.merge(delivery.result);
                 }
@@ -883,7 +894,7 @@ impl App {
         if let Some(rec) = self.recorder.as_mut() {
             rec.record_marker(&format!("kettle:paste len={}", text.chars().count()));
         }
-        if let Some(result) = paste_text_into_target(&mut ws.mux, target, text) {
+        if let Some(result) = paste_text_into_target(&mut ws.mux, target, text, modes) {
             self.report_input_result(result);
             if let Some(pane_id) = target {
                 Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
@@ -1568,21 +1579,22 @@ pub(super) fn apply_terminal_control(mux: &Mux, targets: &[u64], bytes: &[u8]) {
     }
 }
 
-/// Deliver a confirmed non-broadcast text paste to the pane named when the
-/// prompt opened. Mode lookup and delivery use the same stable id.
-fn paste_text_into_target(
+/// Deliver to the stable target using the mode sampled for the safety decision.
+pub(super) fn paste_text_into_target(
     mux: &mut Mux,
     target: Option<u64>,
     text: &str,
+    modes: &std::collections::HashMap<u64, bool>,
 ) -> Option<PaneInputResult> {
-    let pane = mux.panes.get_mut(&target?)?;
-    let bracketed = pane
-        .term
-        .term
-        .lock()
-        .ok()
-        .map(|term| term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
-        .unwrap_or(false);
+    let id = target?;
+    let pane = mux.panes.get_mut(&id)?;
+    if pane.pty_input_failed() {
+        return Some(PaneInputResult::Failed);
+    }
+    if pane.read_only {
+        return Some(PaneInputResult::ReadOnly);
+    }
+    let bracketed = *modes.get(&id)?;
     let bytes = input::paste_payload(text, bracketed);
     Some(pane.feed_input(&bytes))
 }
@@ -1723,4 +1735,30 @@ pub(super) fn text_paste_confirmation(
         armed_press: None,
         space_pressed: None,
     }
+}
+
+pub(super) fn text_paste_modes<'a>(
+    panes: impl IntoIterator<Item = (u64, &'a Pane)>,
+) -> std::collections::HashMap<u64, bool> {
+    panes
+        .into_iter()
+        .filter(|(_, pane)| !pane.read_only)
+        .map(|(id, pane)| {
+            let bracketed =
+                pane.term.term.lock().ok().is_some_and(|term| {
+                    term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE)
+                });
+            (id, bracketed)
+        })
+        .collect()
+}
+
+pub(super) fn text_paste_needs_confirmation(
+    protection: kettle_config::PasteProtection,
+    text: &str,
+    modes: &std::collections::HashMap<u64, bool>,
+) -> bool {
+    modes
+        .values()
+        .any(|&bracketed| protection.confirms(text, bracketed))
 }

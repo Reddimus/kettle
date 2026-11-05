@@ -10,7 +10,7 @@ impl ContextMenuState {
         })
     }
 
-    fn enter_submenu(&mut self, index: usize) -> bool {
+    pub(super) fn enter_submenu(&mut self, index: usize) -> bool {
         let nested = match self.items.get(index) {
             Some(ContextMenuItem::Submenu { items, .. }) if !items.is_empty() => items.clone(),
             _ => return false,
@@ -31,6 +31,22 @@ impl ContextMenuState {
         self.typeahead_buf.clear();
         self.typeahead_until = None;
         true
+    }
+
+    pub(super) fn select_parent_row(
+        &mut self,
+        depth: usize,
+        index: usize,
+    ) -> Option<ContextMenuClick> {
+        if depth >= self.drill_stack.len() {
+            return None;
+        }
+        while self.drill_stack.len() > depth {
+            self.leave_submenu();
+        }
+        self.items
+            .get(index)
+            .and_then(|item| item_to_click(item, index))
     }
 
     pub(super) fn leave_submenu(&mut self) -> bool {
@@ -1177,23 +1193,15 @@ impl App {
     /// desktop menu does (GTK / macOS NSMenu / Windows).
     pub(super) fn menu_row_at_cursor(&self, ws: &WindowState) -> Option<usize> {
         let menu = ws.context_menu.as_ref()?;
-        let ((ax, ay), (panel_w, panel_h)) = self.context_menu_geometry(ws)?;
-        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        if px < ax || px >= ax + panel_w || py < ay || py >= ay + panel_h {
-            return None;
-        }
+        let geometry = self.context_menu_geometry(ws)?;
         let (_, ch) = self.menu_cell(ws);
-        let row_h = ch + kettle_render::menu::ROW_PAD;
-        let sep_h = kettle_render::menu::SEP_H;
-        // Row-walk starts at scroll_offset; only the
-        // visible slice is hit-tested. Off-by-one is handled by
-        // find_menu_row_y's half-open interval [y, y+h).
-        let start = menu.scroll_offset.min(menu.items.len());
-        let kinds = menu.items[start..]
-            .iter()
-            .map(|it| matches!(it, ContextMenuItem::Separator));
-        let (inset, content_h) = context_menu_content_geometry(&menu.items, panel_h, row_h, sep_h);
-        find_menu_row_y(py, ay + inset, content_h, row_h, sep_h, kinds).map(|i| i + start)
+        context_menu_row_at(
+            &menu.items,
+            menu.scroll_offset,
+            geometry,
+            (ws.cursor.x as f32, ws.cursor.y as f32),
+            ch + kettle_render::menu::ROW_PAD,
+        )
     }
 
     /// Set `menu.highlight` to whichever row the cursor is
@@ -1260,17 +1268,10 @@ impl App {
         self.sync_pane_focus_reports(ws);
         match click {
             ContextMenuClick::ParentRow { depth, index } => {
-                let chosen = ws.context_menu.as_mut().and_then(|menu| {
-                    if depth >= menu.drill_stack.len() {
-                        return None;
-                    }
-                    while menu.drill_stack.len() > depth {
-                        menu.leave_submenu();
-                    }
-                    menu.items
-                        .get(index)
-                        .and_then(|item| item_to_click(item, index))
-                });
+                let chosen = ws
+                    .context_menu
+                    .as_mut()
+                    .and_then(|menu| menu.select_parent_row(depth, index));
                 if let Some(chosen) = chosen {
                     self.dispatch_context_menu_click(ws, chosen, event_loop);
                 }
@@ -1417,24 +1418,18 @@ impl App {
         ws: &WindowState,
         bcode: u8,
     ) -> Option<ContextMenuClick> {
-        if bcode != 0 {
-            return None;
-        }
-        // Hover and click must resolve through the same clipped-row geometry.
-        // A second row walk here would let the blank partial strip below the
-        // final fully drawn row dispatch an invisible item.
-        let Some(idx) = self.menu_row_at_cursor(ws) else {
-            return self
-                .parent_menu_row_at_cursor(ws)
-                .map(|(depth, index)| ContextMenuClick::ParentRow { depth, index });
-        };
         let menu = ws.context_menu.as_ref()?;
-        // Shared mapper — the same row-to-click table the keyboard Enter /
-        // Space and mnemonic paths use, so mouse and keyboard dispatch cannot
-        // diverge.
-        menu.items
-            .get(idx)
-            .and_then(|item| item_to_click(item, idx))
+        let active = self.context_menu_overlay(ws)?;
+        let parents = self.context_menu_parent_overlays(ws);
+        let (_, ch) = self.menu_cell(ws);
+        context_menu_click_at(
+            menu,
+            &active,
+            &parents,
+            (ws.cursor.x as f32, ws.cursor.y as f32),
+            ch + kettle_render::menu::ROW_PAD,
+            bcode,
+        )
     }
 
     /// `(items, anchor, panel_w, panel_h)` snapshot for the click /
@@ -1761,25 +1756,17 @@ impl App {
         let row_h = ch + kettle_render::menu::ROW_PAD;
         for (depth, parent) in menu.drill_stack.iter().enumerate().rev() {
             let ((x, y), (w, h)) = self.context_menu_level_geometry(ws, &parent.as_state())?;
-            let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
             if px < x || px >= x + w || py < y || py >= y + h {
                 continue;
             }
-            let (inset, content_h) =
-                context_menu_content_geometry(&parent.items, h, row_h, kettle_render::menu::SEP_H);
-            return find_menu_row_y(
-                py,
-                y + inset,
-                content_h,
+            return context_menu_row_at(
+                &parent.items,
+                parent.scroll_offset,
+                ((x, y), (w, h)),
+                (px, py),
                 row_h,
-                kettle_render::menu::SEP_H,
-                parent
-                    .items
-                    .iter()
-                    .skip(parent.scroll_offset)
-                    .map(|item| matches!(item, ContextMenuItem::Separator)),
             )
-            .map(|index| (depth, index + parent.scroll_offset));
+            .map(|index| (depth, index));
         }
         None
     }
@@ -3261,4 +3248,101 @@ fn compact_preferences(
     result.push(ContextMenuItem::Separator);
     result.extend(rest);
     filter_disabled(result)
+}
+
+pub(super) fn context_menu_contains_cursor(
+    active: &ContextMenu,
+    parents: &[ContextMenu],
+    (x, y): (f32, f32),
+) -> bool {
+    std::iter::once(active).chain(parents).any(|panel| {
+        rect_contains(
+            (
+                panel.anchor.0,
+                panel.anchor.1,
+                panel.panel_w_clamped,
+                panel.panel_h_clamped,
+            ),
+            x,
+            y,
+        )
+    })
+}
+
+pub(super) fn context_menu_click_at(
+    menu: &ContextMenuState,
+    active: &ContextMenu,
+    parents: &[ContextMenu],
+    cursor: (f32, f32),
+    row_h: f32,
+    button: u8,
+) -> Option<ContextMenuClick> {
+    if button != 0 {
+        return None;
+    }
+    let row_at = |items: &[ContextMenuItem], panel: &ContextMenu| {
+        context_menu_row_at(
+            items,
+            panel.scroll_offset,
+            (panel.anchor, (panel.panel_w_clamped, panel.panel_h_clamped)),
+            cursor,
+            row_h,
+        )
+    };
+    // The active panel owns overlapping pixels, including separators and clipped rows.
+    if rect_contains(
+        (
+            active.anchor.0,
+            active.anchor.1,
+            active.panel_w_clamped,
+            active.panel_h_clamped,
+        ),
+        cursor.0,
+        cursor.1,
+    ) {
+        return row_at(&menu.items, active)
+            .and_then(|index| item_to_click(&menu.items[index], index));
+    }
+    for (depth, (parent, panel)) in menu.drill_stack.iter().zip(parents).enumerate().rev() {
+        if rect_contains(
+            (
+                panel.anchor.0,
+                panel.anchor.1,
+                panel.panel_w_clamped,
+                panel.panel_h_clamped,
+            ),
+            cursor.0,
+            cursor.1,
+        ) {
+            return row_at(&parent.items, panel)
+                .map(|index| ContextMenuClick::ParentRow { depth, index });
+        }
+    }
+    None
+}
+
+fn context_menu_row_at(
+    items: &[ContextMenuItem],
+    scroll_offset: usize,
+    ((ax, ay), (width, height)): ((f32, f32), (f32, f32)),
+    (x, y): (f32, f32),
+    row_h: f32,
+) -> Option<usize> {
+    if x < ax || x >= ax + width || y < ay || y >= ay + height {
+        return None;
+    }
+    let start = scroll_offset.min(items.len());
+    let (inset, content_h) =
+        context_menu_content_geometry(items, height, row_h, kettle_render::menu::SEP_H);
+    find_menu_row_y(
+        y,
+        ay + inset,
+        content_h,
+        row_h,
+        kettle_render::menu::SEP_H,
+        items[start..]
+            .iter()
+            .map(|item| matches!(item, ContextMenuItem::Separator)),
+    )
+    .map(|index| index + start)
 }
