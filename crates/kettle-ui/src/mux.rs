@@ -2464,6 +2464,7 @@ impl Mux {
             &shell_startup,
             TerminalCapabilities {
                 keyboard_input_modes: true,
+                grapheme_clustering: cfg.grapheme_clustering,
                 osc52_copy: self.osc52_copy_allowed,
                 osc52_read: true,
                 unnegotiated_modified_enter: unnegotiated_modified_enter(cfg.modify_other_keys),
@@ -11447,3 +11448,7 @@ mod node_tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "mux_grapheme_config_tests.rs"]
+mod grapheme_config_tests;

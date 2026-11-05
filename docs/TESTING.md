@@ -1598,13 +1598,17 @@ indicators, which `unicode-width` makes one column wide. Grapheme clusters
 score low, 0.7% for emoji ZWJ sequences, 50% for VS16, 0% for VS15, and 84%
 across 85 languages, chiefly Indic conjuncts. Kettle measures each codepoint
 separately in that release, so a cluster takes the sum of its codepoints'
-widths. This remains the default layout; applications can now opt into Unicode
-18 extended-grapheme cells with DECSET 2027.
+widths. New terminals now default to Unicode 18 extended-grapheme cells (mode 2027);
+`grapheme-clustering = false` restores scalar layout. These historical scores
+do not measure the new default.
 
 `just grapheme-tables-check` reproduces the generated tables from the pinned,
 licensed inputs without network access. Patched-engine tests run all 853
 Unicode 18 boundary vectors and a million-scalar stream with finite context.
-Core `grapheme_` tests cover mode/query/reset/save semantics, UTF-8 splits,
+UI `c08_` regressions cover default emoji clusters, the config opt-out,
+DECRST/DECSET/DECRQM, RIS/DECSTR for both defaults, Settings translations and
+reload isolation through real pane creation. Core `grapheme_` tests cover
+portable mode/query/reset/save semantics, UTF-8 splits,
 regional indicators, modifiers, Indic conjuncts, zero-width prefixes, storage
 limits, late VS16, VS15 width retention, margins, insertion, REP, overwrite,
 copying, search and reflow. Renderer tests exercise shaping metadata and row

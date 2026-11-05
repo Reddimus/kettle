@@ -50,6 +50,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   for control glyphs, shortcut hints and inactive titles. A single tab hides
   its shortcut hint and close button until hovered, including in the macOS
   titlebar; both controls return with multiple tabs.
+- Joined emoji, skin tones, flags and VS16 emoji now share grapheme cells by
+  default. Set `grapheme-clustering = false` in config or turn off Grapheme
+  clustering in Settings > Text / Rendering for the previous scalar layout
+  in new terminals. Applications can still toggle mode 2027; terminal resets
+  restore each terminal's configured startup default.
 - On macOS, top tabs share the titlebar by default, with a centred title for a
   single tab, native window dragging, and the system double-click action on
   empty strip space. `macos-titlebar-style = native` restores the separate

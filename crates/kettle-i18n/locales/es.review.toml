@@ -22,6 +22,9 @@
 # panel and observed accessibility tree, including an independent second pass.
 
 [status]
+settings_description_field_grapheme_clustering = "draft"
+settings_field_grapheme_clustering = "draft"
+settings_category_text_rendering = "draft"
 menu_category_close_confirmation = "draft"
 confirm_paste_heading = "draft"
 confirm_paste_body = "draft"

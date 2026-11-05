@@ -849,6 +849,13 @@ command_mark_a11y_success = "El comando se completó correctamente (código de s
 
 command_mark_a11y_failure = "El comando falló (código de salida {code})"
 
+settings_category_text_rendering = "Texto / Renderizado"
+
+settings_field_grapheme_clustering = "Agrupación de grafemas"
+
+settings_description_field_grapheme_clustering = "Unir emoji y grupos Unicode en las terminales nuevas."
+
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"

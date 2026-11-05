@@ -2480,9 +2480,10 @@ fn dec_column_change_homes_even_in_a_single_row_pane() {
 }
 
 #[test]
-fn grapheme_mode_2027_is_opt_in_and_keeps_emoji_in_its_leading_cell() {
+fn grapheme_mode_2027_scalar_opt_out_keeps_emoji_in_separate_cells() {
     let sequence = "\u{1f469}\u{200d}\u{1f4bb}";
     let (mut legacy, mut lp) = harness(12, 3);
+    feed(&mut legacy, &mut lp, b"\x1b[?2027l");
     feed(&mut legacy, &mut lp, sequence.as_bytes());
     assert_eq!(legacy.grid().cursor.point.column, Column(4));
     let (mut term, mut parser, rx) = harness_rx(12, 3);
@@ -3072,4 +3073,56 @@ fn withdrawing_keyboard_input_capability_clears_its_mutable_modes() {
     feed(&mut term, &mut parser, b"\x1b[2$p\x1b[12$p");
     assert_eq!(drain_pty(&rx), "\x1b[2;4$y\x1b[12;3$y");
     assert!(!term.keyboard_locked() && !term.local_echo());
+}
+
+/// The standalone engine retains scalar defaults; Kettle seeds its startup
+/// setting explicitly for every new terminal through TerminalCapabilities.
+#[test]
+fn c08_grapheme_startup_and_reset_defaults_are_per_terminal() {
+    assert!(TerminalCapabilities::default().grapheme_clustering);
+    for enabled in [true, false] {
+        for reset in [b"\x1bc".as_slice(), b"\x1b[!p"] {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let proxy = EventProxy::new(tx, std::sync::Arc::new(|| {}));
+            let config = TermConfig {
+                grapheme_clustering: enabled,
+                ..TermConfig::default()
+            };
+            let mut term = Term::new(config, &TermSize::new(20, 3), proxy);
+            let mut parser = Processor::new();
+            let expected = format!("\x1b[?2027;{}$y", if enabled { 1 } else { 2 });
+            feed(&mut term, &mut parser, b"\x1b[?2027$p");
+            assert_eq!(drain_pty(&rx), expected);
+            feed(
+                &mut term,
+                &mut parser,
+                "\u{1f469}\u{200d}\u{1f4bb}".as_bytes(),
+            );
+            assert_eq!(
+                term.grid().cursor.point.column,
+                Column(if enabled { 2 } else { 4 })
+            );
+            let toggle = if enabled {
+                b"\x1b[?2027l"
+            } else {
+                b"\x1b[?2027h"
+            };
+            feed(&mut term, &mut parser, toggle);
+            // Updating unrelated live options must preserve the original reset
+            // default even if the replacement options have a different one.
+            term.set_options(TermConfig {
+                grapheme_clustering: !enabled,
+                scrolling_history: 123,
+                ..TermConfig::default()
+            });
+            feed(&mut term, &mut parser, b"\x1b[?2027$p");
+            assert_eq!(
+                drain_pty(&rx),
+                format!("\x1b[?2027;{}$y", if enabled { 2 } else { 1 })
+            );
+            feed(&mut term, &mut parser, reset);
+            feed(&mut term, &mut parser, b"\x1b[?2027$p");
+            assert_eq!(drain_pty(&rx), expected);
+        }
+    }
 }

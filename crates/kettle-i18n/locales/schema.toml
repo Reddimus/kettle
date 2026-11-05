@@ -2558,3 +2558,12 @@ context = "crates/kettle-ui: Settings autohide description."
 
 [messages.quick_terminal_hotkey_failed]
 context = "crates/kettle-ui: Notice when Carbon or X11 rejects global hotkey registration."
+
+[messages.settings_category_text_rendering]
+context = "crates/kettle-ui/src/settings.rs: Settings category for text rendering options."
+
+[messages.settings_field_grapheme_clustering]
+context = "crates/kettle-ui/src/settings.rs: Settings toggle for Unicode grapheme cells (DEC mode 2027). Applies only to new terminals."
+
+[messages.settings_description_field_grapheme_clustering]
+context = "crates/kettle-ui/src/settings.rs: One-line Settings description. Joining includes families, skin tones and flags. Applies only to new terminals. English budget 70 characters."

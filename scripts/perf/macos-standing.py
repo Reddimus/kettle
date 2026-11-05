@@ -915,7 +915,7 @@ dark-theme delete-binding detachable-tabs disable-mouse-paste disable-mousewheel
 enabled-plugins env exit-action exit-behavior extra-styling focus focused-split-color font font-family
 font-family-bold font-family-bold-italic font-family-italic font-feature font-size force-no-bell
 foreground foreground-color full-screen geometry-hinting gpu-backend gpu-device-id
-gpu-force-software gpu-name gpu-power-preference gpu-vendor-id handle-size hide-from-taskbar
+gpu-force-software gpu-name gpu-power-preference gpu-vendor-id grapheme-clustering handle-size hide-from-taskbar
 hide-on-lose-focus http-proxy icon-bell inactive-bg-color-offset inactive-color-offset invert-search
 keybind keybind-yield language light-theme link-single-click log-strip-ansi login-shell lua-sandbox
 macos-cursor-blink-layer macos-option-as-alt macos-titlebar-style menu-item minimum-contrast modify-other-keys mouse-autohide mouse-hide

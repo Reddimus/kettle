@@ -848,6 +848,13 @@ command_mark_a11y_success = "Command succeeded (exit code {code})"
 
 command_mark_a11y_failure = "Command failed (exit code {code})"
 
+settings_category_text_rendering = "Text / Rendering"
+
+settings_field_grapheme_clustering = "Grapheme clustering"
+
+settings_description_field_grapheme_clustering = "Join emoji and Unicode clusters in new terminals."
+
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"

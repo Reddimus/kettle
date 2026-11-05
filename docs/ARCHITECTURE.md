@@ -2471,12 +2471,16 @@ continuation annotations. Cell flags use 32 bits with the legacy bit values
 unchanged; the cell still fits its existing 24-byte cap on 64-bit targets.
 Control snapshots retain their existing Boolean attribute fields.
 
-### Opt-in Unicode 18 grapheme cells
+### Unicode 18 grapheme cells
 
 DECSET/DECRST 2027 enables/disables extended-grapheme output; DECRQM reports
-its current state. It starts off, and RIS and DECSTR disable it. It is separate
-from saved cursor state. Changing the mode does not reinterpret existing cells.
-Legacy output keeps its per-codepoint layout.
+its current state. New terminals enable it by default. Set
+`grapheme-clustering = false` to start new terminals with scalar cells instead.
+RIS and DECSTR restore the configured default captured when the terminal was
+created. Config reloads affect only future terminals, preserving both the live
+mode and reset default of existing terminals. It is separate from saved cursor
+state. Changing the mode does not reinterpret existing cells. With the mode
+disabled, output keeps its per-codepoint layout.
 
 The engine uses generated Unicode 18 GCB, InCB and Extended_Pictographic tables,
 with all 853 official GraphemeBreakTest vectors. Its finite streaming boundary

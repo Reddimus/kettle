@@ -316,7 +316,7 @@ fn settings_descriptions_are_short_translated_and_marked_as_drafts() {
         }
     }
     assert_eq!(
-        descriptions, 56,
+        descriptions, 57,
         "every curated field and keybind has its own description"
     );
 }

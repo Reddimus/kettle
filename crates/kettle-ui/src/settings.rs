@@ -174,6 +174,7 @@ pub fn description(field: &Field) -> Text {
         Text::SettingsFieldCursorShape => Text::SettingsDescriptionFieldCursorShape,
         Text::SettingsFieldDetachableTabs => Text::SettingsDescriptionFieldDetachableTabs,
         Text::SettingsFieldFocus => Text::SettingsDescriptionFieldFocus,
+        Text::SettingsFieldGraphemeClustering => Text::SettingsDescriptionFieldGraphemeClustering,
         Text::SettingsFieldFontSize => Text::SettingsDescriptionFieldFontSize,
         Text::SettingsFieldGpuBackend => Text::SettingsDescriptionFieldGpuBackend,
         Text::SettingsFieldGpuDevice => Text::SettingsDescriptionFieldGpuDevice,
@@ -636,6 +637,13 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 ),
                 toggle(T::SettingsFieldShowTitlebar, "show-titlebar"),
             ],
+        },
+        Category {
+            name: T::SettingsCategoryTextRendering,
+            fields: vec![toggle(
+                T::SettingsFieldGraphemeClustering,
+                "grapheme-clustering",
+            )],
         },
         // The Background page. `starfield` is a zero-config animated
         // background; `image` takes a file path (edited inline here).
@@ -1256,6 +1264,7 @@ pub(crate) fn read_bool(cfg: &Config, key: &str) -> bool {
     match key {
         "quick-terminal-animation" => cfg.quick_terminal_animation,
         "quick-terminal-autohide" => cfg.quick_terminal_autohide,
+        "grapheme-clustering" => cfg.grapheme_clustering,
         "cursor-blink" => cfg.cursor_blink,
         "show-titlebar" => cfg.show_titlebar,
         "window-blur" => cfg.window_blur,
@@ -1472,6 +1481,29 @@ mod tests {
 
     const EN: Translator = Translator::new(Language::En);
     const ES: Translator = Translator::new(Language::Es);
+
+    #[test]
+    fn c08_grapheme_setting_round_trips_in_both_languages() {
+        let cats = categories(&[]);
+        let cat = cats
+            .iter()
+            .find(|cat| cat.fields.iter().any(|f| f.key == "grapheme-clustering"))
+            .expect("Text/Rendering group must expose grapheme clustering");
+        let field = cat
+            .fields
+            .iter()
+            .find(|f| f.key == "grapheme-clustering")
+            .unwrap();
+        assert_eq!(EN.text(cat.name), "Text / Rendering");
+        assert!(!ES.text(description(field)).is_empty());
+        assert_ne!(EN.text(description(field)), ES.text(description(field)));
+        let cfg = Config::default();
+        assert!(read_bool(&cfg, field.key));
+        assert_eq!(next_value(&cfg, field, 1), "false");
+        let off = Config::parse_text("grapheme-clustering = false");
+        assert!(!read_bool(&off, field.key));
+        assert_eq!(next_value(&off, field, 1), "true");
+    }
 
     #[test]
     fn default_scrollback_memory_is_64_mb() {
@@ -2523,11 +2555,15 @@ mod search_tests {
                 .any(|(_, key)| *key == "font-size")
         );
         assert_eq!(matches("idle seconds", &EN), [(0, "cursor-blink-timeout")]);
+        let graphics = categories(&[])
+            .iter()
+            .position(|cat| cat.name == Text::SettingsCategoryGraphics)
+            .unwrap();
         assert_eq!(
             matches("gpu-force-software", &EN),
-            [(5, "gpu-force-software")]
+            [(graphics, "gpu-force-software")]
         );
-        assert_eq!(matches("gpu-device-id", &EN), [(5, "gpu")]);
+        assert_eq!(matches("gpu-device-id", &EN), [(graphics, "gpu")]);
         assert_eq!(matches("OPACIDAD", &ES), [(0, "background-opacity")]);
         assert_eq!(matches("tamano de la fuente", &ES), [(0, "font-size")]);
         assert_eq!(
@@ -2703,10 +2739,19 @@ mod search_tests {
         assert_eq!(cats[target.0].fields[target.1].key, "gpu-backend");
         assert_eq!((nav.category, nav.field), target);
         assert!(!nav.search_focused);
-        nav.apply_hit(&cats, &cfg, &EN, kettle_render::SettingsHit::Category(1));
-        assert_eq!(nav.category, 1);
+        let background = cats
+            .iter()
+            .position(|cat| cat.name == Text::SettingsCategoryBackground)
+            .unwrap();
+        nav.apply_hit(
+            &cats,
+            &cfg,
+            &EN,
+            kettle_render::SettingsHit::Category(background),
+        );
+        assert_eq!(nav.category, background);
         assert!(nav.query.is_empty());
-        let image = cats[1]
+        let image = cats[background]
             .fields
             .iter()
             .position(|f| f.key == "background-image")

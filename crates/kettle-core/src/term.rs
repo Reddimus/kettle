@@ -1220,6 +1220,8 @@ pub struct TerminalCapabilities {
     /// Forward clipboard reads to an owner that enforces the live policy.
     pub osc52_read: bool,
     pub unnegotiated_modified_enter: bool,
+    /// Initial DEC mode 2027, also restored by RIS and DECSTR.
+    pub grapheme_clustering: bool,
     /// Spawn the command inside an OS-owned descendant containment boundary.
     /// Currently meaningful for headless automation on Windows.
     pub contain_process_tree: bool,
@@ -1240,6 +1242,7 @@ impl Default for TerminalCapabilities {
             osc52_copy: true,
             osc52_read: false,
             unnegotiated_modified_enter: true,
+            grapheme_clustering: true,
             contain_process_tree: false,
             observe_child_exit: false,
             color_scheme_dark: None,
@@ -5798,6 +5801,7 @@ impl Terminal {
         let history_limit = effective_scrollback_lines(scrollback, scrollback_bytes, cols, rows);
         let mut tconf = TermConfig {
             keyboard_input_modes: capabilities.keyboard_input_modes,
+            grapheme_clustering: capabilities.grapheme_clustering,
             // Live OSC 52 permissions are enforced by the UI at journal drain.
             osc52: if capabilities.osc52_read {
                 alacritty_terminal::term::Osc52::CopyPaste

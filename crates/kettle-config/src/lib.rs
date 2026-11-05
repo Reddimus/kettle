@@ -2055,6 +2055,9 @@ pub struct Config {
     /// `,│`|:\"' ()[]{}<>\t`). Set to e.g. ` "'` to make `/` part of a
     /// word so URLs/paths are picked up whole.
     pub word_delimiters: String,
+    /// Initial DEC mode 2027 for new terminals; resets restore this default.
+    /// Reloading does not change existing terminals.
+    pub grapheme_clustering: bool,
     pub font_ligatures: bool,
     /// Explicit OpenType feature overrides (`font-feature`, repeatable),
     /// applied on top of the ligature toggle. Later entries win.
@@ -3246,6 +3249,7 @@ impl Default for Config {
             scroll_on_output: false,
             mouse_hide_while_typing: true,
             word_delimiters: String::new(),
+            grapheme_clustering: true,
             font_ligatures: true,
             font_features: Vec::new(),
             search_foreground: None, // derive from theme.background
@@ -3723,6 +3727,8 @@ impl Config {
     /// it silently keep the default. Kept in lockstep with `parse_collect` by
     /// `bool_and_enum_typos_are_all_flagged`.
     const BOOL_KEYS: &'static [&'static str] = &[
+        "grapheme-clustering",
+        "grapheme_clustering",
         "allow-bold",
         "allow_bold",
         "always-on-top",
@@ -4976,6 +4982,11 @@ impl Config {
                     // Terminator parity.
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.always_on_top = b;
+                    }
+                }
+                "grapheme-clustering" | "grapheme_clustering" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.grapheme_clustering = b;
                     }
                 }
                 "allow-bold" | "allow_bold" => {
@@ -8095,6 +8106,22 @@ cell-height = 1.2\n";
         assert!(Config::parse_text("link_single_click = true").link_single_click);
         assert!(Config::parse_text("clear-select-on-copy = true").clear_select_on_copy);
         assert!(Config::parse_text("clear_select_on_copy = true").clear_select_on_copy);
+    }
+
+    #[test]
+    fn c08_grapheme_clustering_config_defaults_aliases_and_validation() {
+        assert!(Config::default().grapheme_clustering);
+        assert!(Config::parse_text("").grapheme_clustering);
+        for key in ["grapheme-clustering", "grapheme_clustering"] {
+            for value in [true, false] {
+                let (cfg, unknown) = Config::parse_collect(&format!("{key} = {value}"));
+                assert!(unknown.is_empty(), "{unknown:?}");
+                assert_eq!(cfg.grapheme_clustering, value);
+            }
+            let text = format!("{key} = treu");
+            assert!(Config::parse_text(&text).grapheme_clustering);
+            assert!(!Config::detect_malformed_values(&text).is_empty());
+        }
     }
 
     #[test]

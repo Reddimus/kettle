@@ -183,6 +183,10 @@ date. Recheck that before upgrading a crate or dropping a patch.
     above it and pushed that empty row, so a shell's startup `clear`
     followed by a taller window pulled a blank line back above the prompt.
     `grid/tests.rs` covers an empty screen, content, and existing history.
+  - `term::Config::grapheme_clustering` seeds DEC mode 2027 for a new
+    terminal and is the state RIS and DECSTR restore. Upstream has no such
+    option. A later `set_options` keeps each terminal's own seed, so a
+    host reload changes only terminals created afterwards.
 
   Upstream `master` still had all seven of these bugs on 2026-10-16.
   Three more from the 5.7.0 audit, not yet checked against upstream:
