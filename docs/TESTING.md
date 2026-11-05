@@ -150,6 +150,24 @@ write and stopped-writer tests remain in the MCP suite. Run offline with
 `cargo test -j 2 --locked --offline -p kettle regression_real_pipe_`, then run
 the full suites with `cargo test -j 2 --locked --offline -p kettle-core -p kettle`.
 
+`regression_one_byte_pipe_reads_keep_a_small_response_alive` fills a real Unix
+pipe, queues a 512-byte response, and drains one byte every 100 ms for twice
+the shortened stall limit before collecting the remaining response. Its unread
+control, `regression_unread_pipe_stalls_a_small_response`, must still time out.
+Run both on native Linux and macOS; macOS exercises the one-byte fallback when
+an atomic write cannot fit, while Linux retains queued-byte progress tracking.
+The media worker's `continuous_due_frames_` tests run in child processes with
+a real 200 ms watchdog. A presentation budget longer than that deadline requires
+renewal after successful writes; a shorter budget requires Close to be handled
+between batches. Run offline with:
+
+```sh
+export CARGO_INCREMENTAL=0 RUST_TEST_THREADS=2
+cargo test -j 2 --locked --offline -p kettle-media-worker continuous_due_frames_
+cargo test -j 2 --locked --offline -p kettle --bin kettle small_response
+cargo test -j 2 --locked --offline -p kettle-media-worker -p kettle
+```
+
 On Linux, `file_hook_card_reports_a_lost_pickup_after_metadata_wait` and
 `file_hook_card_reports_a_changed_root_after_metadata_wait` in `kettle-ui`
 admit a live native fixture, wait for file metadata, then clear or replace the

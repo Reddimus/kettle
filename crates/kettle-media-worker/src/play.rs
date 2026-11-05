@@ -632,7 +632,16 @@ fn audio_tail(video_end: Option<u64>, last: Option<u64>, frame_ms: u64, sound: b
 }
 
 impl<W: Write> Session<'_, W> {
-    fn run(mut self, events: &mpsc::Receiver<Event>, opened_by: Instant) -> i32 {
+    fn run(self, events: &mpsc::Receiver<Event>, opened_by: Instant) -> i32 {
+        self.run_with_hang_limit(events, opened_by, HANG)
+    }
+
+    fn run_with_hang_limit(
+        mut self,
+        events: &mpsc::Receiver<Event>,
+        opened_by: Instant,
+        hang: Duration,
+    ) -> i32 {
         let frame_ms = 1_000_000u64.div_ceil(u64::from(self.opened.fps_milli));
         // A frame written this far past its time sets the clock again.
         let mut pacer = Pacer::new(Duration::from_millis(frame_ms.max(20)));
@@ -701,13 +710,18 @@ impl<W: Write> Session<'_, W> {
             }
             let mut now = Instant::now();
             if shown_first {
-                self.watchdog.arm(HANG);
+                self.watchdog.arm(hang);
             }
             if !shown_first && now >= opened_by {
                 return self.fail(FailureCode::RenderTimeout);
             }
             let mut sound_due = None;
+            let presentation_deadline = now + frame_len;
             while !pending.is_empty() {
+                now = Instant::now();
+                if now >= presentation_deadline {
+                    break;
+                }
                 // Every write can block while replacements queue and sound
                 // advances. Refresh before deciding to keep a late frame.
                 if shown_first && playing && self.sound.is_some() && deferred.is_none() {
@@ -781,6 +795,11 @@ impl<W: Write> Session<'_, W> {
                 last_pts = Some(pts_ms);
                 now = Instant::now();
                 last_frame = now;
+                // Each successful write is progress, even when lookahead
+                // keeps this batch running longer than the hang limit.
+                if shown_first {
+                    self.watchdog.arm(hang);
+                }
                 if !playing {
                     if !shown_first {
                         first_paused = Some((pts_ms, now));
@@ -798,7 +817,7 @@ impl<W: Write> Session<'_, W> {
                     shown_first = true;
                     // Open: the opening's allowance ends with its first
                     // frame, before anything more is written.
-                    self.watchdog.arm(HANG);
+                    self.watchdog.arm(hang);
                     let state = if playing {
                         PlayState::Playing
                     } else {
@@ -836,6 +855,11 @@ impl<W: Write> Session<'_, W> {
                 && now.duration_since(last_frame) > stall
             {
                 return self.fail(FailureCode::RenderTimeout);
+            }
+            if playing && !pending.is_empty() && now >= presentation_deadline {
+                // Check commands before presenting another batch, without
+                // sleeping while frames are already due.
+                continue;
             }
             let mut wake = now + TICK;
             if !shown_first {
@@ -2071,6 +2095,146 @@ mod tests {
             said(&read).last(),
             Some(&&Frame::PlayState(PlayState::Ended))
         );
+    }
+
+    fn continuous_presentation(fps_milli: u32, write_time: Duration, close_after: usize) -> usize {
+        use crate::sound::testing::{Blocks, Told, stand};
+
+        struct Output<'a> {
+            bytes: Vec<u8>,
+            frames: usize,
+            write_time: Duration,
+            close_after: usize,
+            asked: &'a Asked,
+            events: mpsc::SyncSender<Event>,
+            opened: Opened,
+            clock: Arc<Mutex<Told>>,
+        }
+        impl Write for Output<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                let written = read_frame(&mut self.bytes.as_slice(), Direction::WorkerToParent)
+                    .unwrap()
+                    .unwrap();
+                self.bytes.clear();
+                if matches!(written, Frame::VideoFrame(_)) {
+                    std::thread::sleep(self.write_time);
+                    self.frames += 1;
+                    let pts_ms = self.frames as u64 * self.write_time.as_millis() as u64;
+                    self.clock.lock().unwrap().played =
+                        Some(kettle_media::audio::frame_of_ms(pts_ms) as f64);
+                    if self.frames == self.close_after {
+                        self.asked.hear(PlayCommand::Close);
+                    }
+                    // A fast decoder always has a replacement after a write.
+                    if self.frames < 32 {
+                        self.events.send(frame(&self.opened, pts_ms)).unwrap();
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        let (speaker, told) = stand(3);
+        told.lock().unwrap().played = Some(0.0);
+        let sound = Sound::start(
+            speaker,
+            Box::new(Blocks(VecDeque::from([(0.5, 96_000, 0)]))),
+            0,
+            SoundWish::new(false),
+        )
+        .unwrap();
+        sound.wish().hear(PlayCommand::Play);
+        let deadline = Instant::now() + SECOND;
+        while sound.heard().is_none() {
+            assert!(Instant::now() < deadline, "the sound never had a clock");
+            std::thread::yield_now();
+        }
+        let opened = opened(fps_milli, 4, 2);
+        let asked = Asked::new();
+        asked.hear(PlayCommand::Play);
+        let (events, received) = mpsc::sync_channel(EVENTS);
+        events.send(frame(&opened, 0)).unwrap();
+        events.send(frame(&opened, 0)).unwrap();
+        let mut output = Output {
+            bytes: Vec::new(),
+            frames: 0,
+            write_time,
+            close_after,
+            asked: &asked,
+            events,
+            opened,
+            clock: told,
+        };
+        let (free, _) = mpsc::sync_channel(BUFFERS);
+        let watchdog = Watchdog::start(2 * SECOND).unwrap();
+        let session = Session {
+            video_end_ms: None,
+            opened,
+            held: &Held::Bytes(&[]),
+            asked: &asked,
+            sound: Some(sound),
+            free,
+            output: &mut output,
+            watchdog: &watchdog,
+        };
+        assert_eq!(
+            session.run_with_hang_limit(
+                &received,
+                Instant::now() + OPEN_DEADLINE,
+                Duration::from_millis(200),
+            ),
+            0
+        );
+        output.frames
+    }
+
+    fn presentation_child(test: &str) -> bool {
+        if std::env::var("KETTLE_PRESENTATION_TEST").as_deref() == Ok(test) {
+            return true;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env("KETTLE_PRESENTATION_TEST", test)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + 10 * SECOND;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                panic!("presentation child timed out: {:?}", child.wait().unwrap());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(status.success(), "presentation child exited with {status}");
+        false
+    }
+
+    #[test]
+    fn continuous_due_frames_renew_the_watchdog() {
+        if presentation_child("play::tests::continuous_due_frames_renew_the_watchdog") {
+            // The frame budget exceeds the real watchdog's deadline, so
+            // bounding the batch alone cannot keep successful writes alive.
+            assert!(continuous_presentation(1_000, Duration::from_millis(30), 12) >= 12);
+        }
+    }
+
+    #[test]
+    fn continuous_due_frames_check_close_between_batches() {
+        if presentation_child("play::tests::continuous_due_frames_check_close_between_batches") {
+            let frames = continuous_presentation(10_000, Duration::from_millis(60), 2);
+            assert!(
+                frames <= 3,
+                "presentation ignored Close beyond its frame budget: {frames}"
+            );
+        }
     }
 
     fn replacement_queued_during_second_write(interleaved: Vec<Event>) -> Vec<Frame> {
