@@ -63,6 +63,8 @@ pub enum UpdateError {
     MissingArchiveFile(String),
     #[error("update transaction failed: {0}")]
     Transaction(String),
+    #[error("refusing to overwrite an unrecorded install path: {0}")]
+    OccupiedInstallPath(std::path::PathBuf),
     /// A committed update waits for a process of its version to start and
     /// confirm it. A restart finishes it; it is not a failure.
     #[error(
