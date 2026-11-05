@@ -100,6 +100,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   private, Windows control directories are checked and created with a
   private ACL, Windows lock files are retired while still locked, and the
   Linux media worker can change only its own scheduling priority.
+- Paste, PRIMARY paste and OSC 52 clipboard reads are bounded in size and
+  time before their contents are collected, so a misbehaving clipboard owner
+  can no longer block the UI or grow memory without limit.
+- Opening Settings no longer waits for GPU detection, media tips are claimed
+  off the UI thread, a trigger never reruns for a match it already handled,
+  sessions save at most the 16 windows restore accepts, and screen readers
+  get the same character boundaries as the caret.
 
 ## [5.9.0] — 2026-11-03
 
