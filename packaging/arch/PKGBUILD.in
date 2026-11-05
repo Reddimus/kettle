@@ -92,6 +92,7 @@ package() {
     install -d "${pkgdir}/usr/share/doc/kettle/docs/changelog"
     install -m644 docs/changelog/*.md \
         "${pkgdir}/usr/share/doc/kettle/docs/changelog/"
+    cp -R docs/licenses "${pkgdir}/usr/share/doc/kettle/docs/"
 
     # Man page so `man kettle` works after install.
     install -Dm644 packaging/linux/kettle.1 \
