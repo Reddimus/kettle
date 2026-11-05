@@ -388,11 +388,18 @@ fn mouse_and_focus_reports_use_chronological_user_input() {
     assert!(!focus_sender.contains("with_completion_input_admission"));
 
     let terminal_replies = source
-        .split("TermEvent::PtyWrite(s) => {")
+        .split("fn pane_event_reply(")
         .nth(1)
-        .and_then(|body| body.split("TermEvent::").next())
-        .expect("terminal reply arm");
-    assert!(terminal_replies.contains("pane.queue_protocol_reply"));
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("terminal reply formatter");
+    assert!(terminal_replies.contains("TermEvent::PtyWrite(s) => Some(s)"));
+    let drain = source
+        .split("fn drain_pane_events(")
+        .nth(1)
+        .and_then(|body| body.split("\n}\n").next())
+        .expect("pane event drain");
+    assert!(drain.contains("reply_for_event(pane, ev)"));
+    assert!(drain.contains("pane.queue_protocol_reply(reply.as_bytes())"));
 }
 
 /// A press a program got keeps its pane: that button's drag and its one

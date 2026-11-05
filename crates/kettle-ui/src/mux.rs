@@ -1352,6 +1352,11 @@ impl Pane {
     pub fn pty_input_failed(&self) -> bool {
         self.pty_input.failed()
     }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn disconnect_pty_input_for_test(&mut self) {
+        self.pty_input = PtyInputQueue::disconnected_for_test(Arc::new(|| {}));
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4291,6 +4296,7 @@ impl Mux {
         let launch = pane.reconnect_launch.clone();
         let group = pane.group_name.clone();
         let read_only = pane.read_only;
+        let completion_overlay = pane.completion_overlay;
         self.spawn_pane_replaying(
             cfg,
             geometry,
@@ -4303,6 +4309,8 @@ impl Mux {
         if let Some(pane) = self.panes.get_mut(&id) {
             pane.group_name = group;
             pane.read_only = read_only;
+            // Replayed startup handlers still own the original completion capability.
+            pane.completion_overlay = completion_overlay;
         }
         Ok(true)
     }

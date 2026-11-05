@@ -321,18 +321,26 @@ fn pane_reaping_cancels_divider_drags() {
 fn process_status_cannot_reap_a_pane_before_the_ordered_pty_exit() {
     let src = production_source();
     let drain = src
+        .split("fn drain_pane_events(")
+        .nth(1)
+        .and_then(|body| body.split("\n}\n").next())
+        .expect("pane event drain body");
+    let app_drain = src
         .split("fn drain_events(&mut self, ws: &mut WindowState) {")
         .nth(1)
-        .and_then(|body| body.split("\n    }\n").next())
-        .expect("drain_events body");
+        .unwrap()
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    let app_drain: String = app_drain.split_whitespace().collect();
+    assert!(app_drain.contains("drain_pane_events(ws,self.cfg.exit_action,"));
     let exit_latch = drain
         .split("if exited && !pane.closed {")
         .nth(1)
-        .and_then(|body| body.split("\n            }\n").next())
+        .and_then(|body| body.split("\n        }\n").next())
         .expect("ordered exit latch");
     assert!(
-        exit_latch.contains("apply_pane_exit_action(")
-            && exit_latch.contains("self.cfg.exit_action"),
+        exit_latch.contains("apply_pane_exit_action(") && exit_latch.contains("exit_action"),
         "the reader's ordered exit must latch reaping and apply exit-action policy"
     );
     // The exit latch is read before the pane's other latches and queue, and
@@ -351,10 +359,10 @@ fn process_status_cannot_reap_a_pane_before_the_ordered_pty_exit() {
         "exit read first, applied last: {read:?} {taken:?} {queue:?} {applied:?}"
     );
 
-    let status_arm = drain
-        .split("TermEvent::ChildExit(_) => {")
+    let status_arm = src
+        .split("TermEvent::ChildExit(_) => None,")
         .nth(1)
-        .and_then(|body| body.split("\n                    _ => {}").next())
+        .and_then(|body| body.split("\n            _ => None,").next())
         .expect("advisory ChildExit arm");
     for forbidden in [
         "exit_observed",
@@ -519,5 +527,14 @@ fn hidden_protocol_notifications_publish_a_semantic_wake() {
     assert!(
         semantic,
         "OSC 9 and OSC 777 must wake semantic dispatch while paint wakes are disabled"
+    );
+}
+
+#[test]
+fn unix_exit_behavior_test_module_is_absent_on_windows() {
+    let source = include_str!("output.rs");
+    assert!(
+        source.contains("#[cfg(all(test, unix))]\nmod exit_behavior_tests {"),
+        "Unix-only fixtures must not leave unused imports in Windows test builds"
     );
 }
