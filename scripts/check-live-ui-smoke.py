@@ -9457,7 +9457,12 @@ def live_helper_selftest() -> None:
 
                 def record_real_job_drain(timeout_s: float = 5.0) -> None:
                     real_wait_empty(timeout_s)
-                    native_job_process.poll()
+                    # Accounting drops to zero before the process object is
+                    # signalled; give that last step a bounded moment.
+                    try:
+                        native_job_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
                     assert native_job_process.returncode is not None, (
                         "Job accounting reached zero before its contained process exited"
                     )
