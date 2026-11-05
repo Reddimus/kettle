@@ -9315,10 +9315,12 @@ mod tests {
             apply_verified_linux_update(&mut transaction, &package, &install, &fake_update())
                 .unwrap_err();
 
+        // Preflight now refuses the linked component while checking ownership,
+        // before publication would try to open it; either refusal is safe.
+        let message = error.to_string();
         assert!(
-            error
-                .to_string()
-                .contains("install path component cannot be opened safely"),
+            message.contains("install path component cannot be opened safely")
+                || message.contains("install path component is not a directory"),
             "unexpected unsafe-destination error: {error}"
         );
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
