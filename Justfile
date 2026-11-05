@@ -532,6 +532,16 @@ screenshot OUT=(TMPDIR / "kettle.png"):
     cargo run --release -p kettle -- --screenshot {{if os_family() == "windows" { "'" + replace(OUT, "'", "''") + "'" } else { quote(OUT) }}}
     @echo {{if os_family() == "windows" { "'wrote " + replace(OUT, "'", "''") + "'" } else { quote("wrote " + OUT) }}}
 
+# Capture Kettle's UI states (default, palette, settings, search, tabs, splits,
+# theme picker) as PNGs through `kettle ctl`, each from a fresh isolated Kettle
+# (private HOME/XDG directories, `record = false`); never a desktop input path.
+# Pass `--languages en,es --themes dark,light --sizes default,narrow` for the
+# full matrix and `--compare DIR` to check against baselines. Needs a release
+# build and a desktop session. Output: target/ui-states.
+[unix]
+ui-states *ARGS: release
+    python3 scripts/capture-ui-states.py --kettle target/release/kettle {{ARGS}}
+
 # Render the synthetic right-click context menu — useful for visually
 # verifying menu rendering changes. Pixel-level CI smoke
 # (tests/menu_visual.rs) covers the regression class; this gives you

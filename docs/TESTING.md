@@ -770,6 +770,26 @@ When diagnosing a replay failure, compare the raw output with the projected
 grid first. Then check scroll offset, resize/reflow, and selection endpoints.
 Avoid replacing exact expected text with a loose substring merely to get green.
 
+## UI states
+
+`just ui-states` captures Kettle's own UI states as PNGs: the default window,
+the command palette (empty, with a query, with no match), Settings, Search
+(matches and no match), three tabs, splits and the theme picker. Each state
+starts a fresh Kettle with a private HOME and XDG directories and
+`record = false`, reaches the state through `kettle ctl` (actions and UI
+keys), and captures it with `kettle ctl screenshot`, which renders the
+window's own frame without the desktop or other windows. Add
+`--languages en,es`, `--themes dark,light` and `--sizes default,narrow` for
+the full matrix; files are named `state.language.theme.size.png` under
+`target/ui-states`.
+
+`--compare DIR` checks each capture against the PNG of the same name in
+`DIR`: a pixel differs when a channel moves by more than
+`--channel-tolerance` (24), and a state fails when more than `--max-changed`
+percent (0.5) of its pixels differ or its size changed. A missing baseline is
+reported, never created. A change to a baseline belongs in the pull request
+that changes the UI, with the before and after images in its description.
+
 ## Diagram gate
 
 `just mermaid-check` runs [scripts/check-mermaid.py](../scripts/check-mermaid.py)
