@@ -2452,3 +2452,25 @@ context = "Terminal paste confirmation or terminal context-menu category in kett
 
 [messages.menu_category_close_confirmation]
 context = "Preferences submenu category for the close-confirmation policy choices."
+
+[messages.search_a11y_regex]
+context = "Terminal search bar: regex toggle or placeholder while the exact match count is incomplete."
+
+[messages.search_regex_on]
+context = "Terminal search bar: regex toggle or placeholder while the exact match count is incomplete."
+
+[messages.search_regex_off]
+context = "Terminal search bar: regex toggle or placeholder while the exact match count is incomplete."
+
+[messages.search_counting]
+context = "Terminal search bar: regex toggle or placeholder while the exact match count is incomplete."
+
+[messages.scrollback_return]
+context = "Bottom-right pane button returning to live output. lines is a locale-grouped count of rows above the live bottom; count selects plural. Keep the downward arrow."
+args = [{ name = "lines", type = "str" }, { name = "count", type = "u64" }]
+plural = "count"
+
+[messages.scrollback_a11y]
+context = "Screen reader name of the pane's return-to-live button. lines is a grouped count of rows above the live bottom; count selects plural."
+args = [{ name = "lines", type = "str" }, { name = "count", type = "u64" }]
+plural = "count"

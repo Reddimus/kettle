@@ -1047,6 +1047,13 @@ impl App {
             .unwrap_or_default();
         // Each pane's preview lane, by pane: where it is and how it shows.
         // Geometry only; never a path, title or pixel.
+        let scrollback_pills: Vec<_> = pane_layout
+            .iter()
+            .filter_map(|(pane, partition)| {
+                let pill = self.scrollback_pill_for(target, *pane, partition.terminal)?;
+                Some(serde_json::json!({"pane": pane, "rect": rect_json(pill.rect)}))
+            })
+            .collect();
         let preview_lanes: Vec<serde_json::Value> = pane_layout
             .iter()
             .filter_map(|(id, partition)| {
@@ -1232,6 +1239,7 @@ impl App {
                         kettle_render::SearchControl::Next => "next",
                         kettle_render::SearchControl::Wrap => "wrap",
                         kettle_render::SearchControl::Case => "case",
+                        kettle_render::SearchControl::Regex => "regex",
                         kettle_render::SearchControl::Invert => "invert",
                         kettle_render::SearchControl::Close => "close",
                     },
@@ -1247,12 +1255,15 @@ impl App {
                 "rect": rect_json(geometry.rect),
                 "reserved_height": geometry.reserved_height,
                 "rows": geometry.rows,
+                "count_rect": rect_json(geometry.count),
+                "count": target.search.count_label(&english),
                 "status": effective_search_status(&target.search).label(&english),
                 "has_match": target.search.focused.is_some(),
                 "match_rects": active_search_match_rects,
                 "visible_truncated": target.search.visible_truncated,
                 "wrap": target.search.wrap,
                 "case": map_search_case_mode(target.search.case_mode).label(&english),
+                "regex": target.search.regex,
                 "invert": target.search.invert,
                 "status_rect": rect_json(geometry.status),
                 "controls": controls,
@@ -1609,6 +1620,10 @@ impl App {
             fields.insert(
                 "inline_cards".into(),
                 serde_json::Value::Array(inline_cards),
+            );
+            fields.insert(
+                "scrollback_pills".into(),
+                serde_json::Value::Array(scrollback_pills),
             );
             fields.insert(
                 "preview_lanes".into(),
@@ -2370,6 +2385,9 @@ impl App {
             return true;
         }
         if self.press_preview_lane(ws, px, py, bcode) {
+            return true;
+        }
+        if self.press_scrollback_pill(ws, px, py, bcode) {
             return true;
         }
         if self.press_card(ws, px, py, bcode) {

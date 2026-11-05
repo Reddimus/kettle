@@ -27,6 +27,8 @@ pub(crate) struct SearchState {
     pub(crate) dragging_editor: bool,
     pub(crate) wrap: bool,
     pub(crate) case_mode: kettle_config::SearchCaseSensitivity,
+    pub(crate) regex: bool,
+    pub(crate) count_scan: Option<kettle_core::search::SearchCountScan>,
     pub(crate) invert: bool,
     pub(crate) revision: u64,
     pub(crate) unlimited_retry_at: Option<std::time::Instant>,
@@ -76,6 +78,8 @@ impl Default for SearchState {
             dragging_editor: false,
             wrap: true,
             case_mode: kettle_config::SearchCaseSensitivity::Smart,
+            regex: true,
+            count_scan: None,
             invert: false,
             revision: 0,
             unlimited_retry_at: None,
@@ -91,9 +95,31 @@ impl Default for SearchState {
 }
 
 impl SearchState {
+    pub(crate) fn count_label(&self, tr: &kettle_i18n::Translator) -> String {
+        if self.query().is_empty()
+            || matches!(
+                self.status,
+                kettle_render::SearchStatus::Invalid
+                    | kettle_render::SearchStatus::TooComplex
+                    | kettle_render::SearchStatus::TooLong
+            )
+        {
+            return String::new();
+        }
+        let scan = self.count_scan.as_ref();
+        kettle_render::search_match_label(
+            tr,
+            scan.map_or(0, |scan| scan.position(self.focused)),
+            scan.filter(|scan| scan.complete && !scan.limited)
+                .map(|scan| scan.spans.len()),
+            scan.is_some_and(|scan| scan.limited),
+        )
+    }
+
     pub(crate) fn set_compiled(&mut self, compiled: Option<kettle_core::CompiledSearch>) {
         // Each job owns its resume offsets, even when its bounds coincide with the other's.
         self.highlight_compiled = compiled.clone();
+        self.count_scan = None;
         self.compiled = compiled;
     }
 

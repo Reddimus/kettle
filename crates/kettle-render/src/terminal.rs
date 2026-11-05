@@ -386,6 +386,9 @@ impl Renderer {
         let display_off = snap.display_offset as i32;
         let screen_rows = snap.screen_lines as i32;
         let default_bg = color::resolve_query(257, theme, term_colors).unwrap_or(theme.background);
+        let selection_bg =
+            self.minimum_contrast_cache
+                .resolve(theme.selection_background, default_bg, 3.0);
         let dim_bg = if term_colors.reverse_video() {
             default_bg
         } else {
@@ -518,6 +521,7 @@ impl Renderer {
         // so the prepare is skipped.
         let mut cursor_glyph_capture: Option<(char, Rgb, &[char], AttrsOwned)> = None;
         let mut fallback_run = None;
+        let mut search_quads = Vec::new();
 
         for (snapshot_index, sc) in snap.cells.iter().enumerate() {
             let row = sc.line;
@@ -639,7 +643,18 @@ impl Renderer {
                         cfg.search_background.unwrap_or(theme.palette[3])
                     }
                     CellHighlight::Search(false) | CellHighlight::Selection => {
-                        theme.selection_background
+                        super::theme::highlight_colors_cached(
+                            highlight,
+                            cfg,
+                            theme,
+                            if selected && search.is_none() {
+                                default_bg
+                            } else {
+                                bg
+                            },
+                            &mut self.minimum_contrast_cache,
+                        )
+                        .1
                     }
                     CellHighlight::None => theme.background,
                 };
@@ -657,7 +672,11 @@ impl Renderer {
             }
             fg = resolved_cell_foreground_cached(
                 fg,
-                bg,
+                if selected && search.is_none() {
+                    default_bg
+                } else {
+                    bg
+                },
                 highlight,
                 (flags.contains(Flags::DIM), bold),
                 cfg,
@@ -666,9 +685,11 @@ impl Renderer {
             );
             let cell_background = match highlight {
                 CellHighlight::Search(true) => cfg.search_background.unwrap_or(theme.palette[3]),
-                CellHighlight::Search(false) | CellHighlight::Selection => {
-                    theme.selection_background
+                CellHighlight::Search(false) => {
+                    self.minimum_contrast_cache
+                        .resolve(theme.selection_background, bg, 3.0)
                 }
+                CellHighlight::Selection => selection_bg,
                 CellHighlight::None => bg,
             };
             if inactive > 0.0 {
@@ -715,6 +736,24 @@ impl Renderer {
                     cw,
                     ch,
                     bg,
+                    1.0,
+                ));
+            }
+            if let Some(active) = search {
+                let fill = super::theme::highlight_colors_cached(
+                    CellHighlight::Search(active),
+                    cfg,
+                    theme,
+                    bg,
+                    &mut self.minimum_contrast_cache,
+                )
+                .1;
+                search_quads.push(rect(
+                    ox + col as f32 * cw,
+                    oy + vrow as f32 * ch,
+                    cw,
+                    ch,
+                    fill,
                     1.0,
                 ));
             }
@@ -819,11 +858,13 @@ impl Renderer {
                     oy + vrow as f32 * ch,
                     w as f32 * cw,
                     ch,
-                    theme.selection_background,
+                    selection_bg,
                     1.0,
                 ));
             }
         }
+
+        quads.extend(search_quads);
 
         // Cursor: hidden with the window unfocused, blink-aware otherwise.
         // Shape comes from the engine's live `RenderableContent.cursor.shape`

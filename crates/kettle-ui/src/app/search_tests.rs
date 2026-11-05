@@ -740,6 +740,7 @@ fn search_follows_focus_with_its_query_and_toggles() {
         query: "needle".into(),
         wrap: false,
         case_mode: kettle_config::SearchCaseSensitivity::Always,
+        regex: false,
         invert: true,
         focused_control: kettle_render::SearchControl::Next,
     };
@@ -753,6 +754,7 @@ fn search_follows_focus_with_its_query_and_toggles() {
         kettle_config::SearchCaseSensitivity::Always
     );
     assert!(moved.invert);
+    assert!(!moved.regex);
     assert_eq!(moved.focused_control, kettle_render::SearchControl::Next);
     assert_eq!(moved.pre_open_display_offset, Some(7));
     assert_eq!(
@@ -788,6 +790,7 @@ fn reopened_search_selects_the_remembered_query() {
         query: "line 5".into(),
         wrap: true,
         case_mode: kettle_config::SearchCaseSensitivity::Smart,
+        regex: true,
         invert: false,
         focused_control: kettle_render::SearchControl::Editor,
     };
@@ -1225,4 +1228,38 @@ fn review_regression_scrollback_search_advances_under_continuous_output() {
 #[test]
 fn review_regression_scrollback_search_wraps_under_continuous_output() {
     assert_scrollback_search_survives_continuous_output(true);
+}
+
+#[test]
+fn return_to_live_only_scrolls_the_clicked_pane() {
+    use alacritty_terminal::vte::ansi::Processor;
+    let (mux, panes) = title_test_tab_mux(2);
+    let mut ws = WindowState::new(1, mux);
+    for pane in &panes {
+        let mut term = ws.mux.panes[pane].term.term.lock().unwrap();
+        let mut parser: Processor = Default::default();
+        parser.advance(&mut *term, "history\r\n".repeat(200).as_bytes());
+        term.scroll_display(kettle_core::Scroll::Delta(30));
+        assert!(term.grid().display_offset() > 0);
+    }
+    App::return_pane_to_live(&mut ws, panes[0]);
+    assert_eq!(ws.mux.panes[&panes[0]].term.term.lock().unwrap().grid().display_offset(), 0);
+    assert!(ws.mux.panes[&panes[1]].term.term.lock().unwrap().grid().display_offset() > 0);
+    assert!(ws.accessibility_pending);
+}
+
+#[test]
+fn count_is_invalidated_by_edits_and_regex_control_is_a_shortcut() {
+    let mut search = crate::search_input::SearchState::default();
+    search.editor.insert("needle", 4096);
+    assert_eq!(search.count_label(&EN_TEXT), "Counting\u{2026}");
+    search.note_edit(std::time::Instant::now());
+    assert!(search.count_scan.is_none());
+    assert_eq!(super::search_bar_shortcut_kind(&kettle_config::Action::ToggleSearchRegex), super::SearchBarShortcut::Run);
+    assert!(!super::search_bar_claims(&winit::keyboard::Key::Character("R".into()),
+        winit::keyboard::ModifiersState::CONTROL | winit::keyboard::ModifiersState::SHIFT | winit::keyboard::ModifiersState::ALT,
+        cfg!(target_os="macos"), true, false));
+    let source = production_source();
+    assert!(source.contains("Self::return_pane_to_live(ws, pane)"));
+    assert!(source.contains("self.scrollback_pill_for(target, *pane, partition.terminal)"));
 }

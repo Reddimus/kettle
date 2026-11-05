@@ -25,6 +25,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Search shows the current match and total (3/122) next to the query, has a
+  Regex toggle beside Case (Case cycles on click), and draws other matches
+  with stronger contrast.
+- Selection and search highlights keep at least 3:1 contrast against the
+  background on every theme.
+- A pane scrolled into history shows a ↓ N lines button that returns to the
+  live bottom, and the scrollbar's hover target is wider.
+- `scrollback-bytes` defaults to 64 MB, so the default 10,000-line history
+  fits at common window widths.
 - The context menu puts the actions for what you clicked first (Copy, Paste,
   Select All, and Open or Copy Link on a link) and groups pane, tab, title
   and appearance commands into submenus, so it no longer scrolls. On macOS,

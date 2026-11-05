@@ -1412,6 +1412,20 @@ mod tests {
     const ES: Translator = Translator::new(Language::Es);
 
     #[test]
+    fn default_scrollback_memory_is_64_mb() {
+        let cfg = Config::default();
+        assert_eq!(cfg.scrollback, 10_000);
+        assert_eq!(cfg.scrollback_bytes, 64_000_000);
+        let cats = categories(&[]);
+        let field = cats
+            .iter()
+            .flat_map(|cat| &cat.fields)
+            .find(|field| field.key == "scrollback-bytes")
+            .unwrap();
+        assert_eq!(read(&cfg, field, &EN), "64 MB");
+    }
+
+    #[test]
     fn display_choices_use_sentence_case_without_changing_tokens() {
         let mut cfg = Config::default();
         cfg.window_blur = false;

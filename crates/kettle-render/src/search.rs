@@ -91,17 +91,19 @@ pub enum SearchControl {
     Next,
     Wrap,
     Case,
+    Regex,
     Invert,
     Close,
 }
 
 impl SearchControl {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Editor,
         Self::Previous,
         Self::Next,
         Self::Wrap,
         Self::Case,
+        Self::Regex,
         Self::Invert,
         Self::Close,
     ];
@@ -113,6 +115,7 @@ impl SearchControl {
             Self::Next => Text::SearchA11yNext,
             Self::Wrap => Text::SearchA11yWrap,
             Self::Case => Text::SearchA11yCase,
+            Self::Regex => Text::SearchA11yRegex,
             Self::Invert => Text::SearchA11yInvert,
             Self::Close => Text::SearchA11yClose,
         })
@@ -138,6 +141,10 @@ pub struct SearchOverlay {
     pub horizontal_scroll: usize,
     pub wrap: bool,
     pub case_mode: SearchCaseMode,
+    pub regex: bool,
+    pub match_position: usize,
+    pub match_total: Option<usize>,
+    pub match_limited: bool,
     pub invert: bool,
     pub status: SearchStatus,
     pub focused: SearchControl,
@@ -159,12 +166,33 @@ impl Default for SearchOverlay {
             horizontal_scroll: 0,
             wrap: true,
             case_mode: SearchCaseMode::Smart,
+            regex: true,
+            match_position: 0,
+            match_total: None,
+            match_limited: false,
             invert: false,
             status: SearchStatus::Typing,
             focused: SearchControl::Editor,
             hovered: None,
             pressed: None,
         }
+    }
+}
+
+/// Localized count feedback, without exposing query content.
+pub fn search_match_label(
+    tr: &Translator,
+    position: usize,
+    total: Option<usize>,
+    limited: bool,
+) -> String {
+    if limited {
+        return tr.text(Text::SearchStatusLimited).to_string();
+    }
+    match total {
+        Some(0) => tr.text(Text::SearchStatusNoMatch).to_string(),
+        Some(total) => format!("{position}/{total}"),
+        None => tr.text(Text::SearchCounting).to_string(),
     }
 }
 
@@ -176,6 +204,8 @@ pub struct SearchBarGeometry {
     pub reserved_height: f32,
     pub label: Rect4,
     pub editor: Rect4,
+    pub count: Rect4,
+    pub regex: Rect4,
     pub previous: Rect4,
     pub next: Rect4,
     pub wrap: Rect4,
@@ -193,6 +223,7 @@ impl SearchBarGeometry {
             SearchControl::Next => self.next,
             SearchControl::Wrap => self.wrap,
             SearchControl::Case => self.case_mode,
+            SearchControl::Regex => self.regex,
             SearchControl::Invert => self.invert,
             SearchControl::Close => self.close,
         }
@@ -252,6 +283,8 @@ pub(crate) struct SearchBarWidths {
     pub(crate) next: usize,
     pub(crate) wrap: usize,
     pub(crate) case: usize,
+    pub(crate) regex: usize,
+    pub(crate) count: usize,
     pub(crate) invert: usize,
     pub(crate) status: usize,
     pub(crate) close: usize,
@@ -265,6 +298,8 @@ impl SearchBarWidths {
         next: 8,
         wrap: 10,
         case: 15,
+        regex: 12,
+        count: 17,
         invert: 12,
         status: 19,
         close: 8,
@@ -284,6 +319,8 @@ impl SearchBarWidths {
             next: fit(w.next, english.next, here.next),
             wrap: fit(w.wrap, english.wrap, here.wrap),
             case: fit(w.case, english.case, here.case),
+            regex: fit(w.regex, english.regex, here.regex),
+            count: fit(w.count, english.count, here.count),
             invert: fit(w.invert, english.invert, here.invert),
             status: fit(w.status, english.status, here.status),
             close: fit(w.close, english.close, here.close),
@@ -298,6 +335,7 @@ struct SearchBarLabels {
     next: &'static str,
     wrap: [&'static str; 2],
     case: Vec<String>,
+    regex: [&'static str; 2],
     invert: [&'static str; 2],
     close: &'static str,
     tr: Translator,
@@ -314,6 +352,7 @@ impl SearchBarLabels {
                 .iter()
                 .map(|mode| search_case_text(tr, *mode))
                 .collect(),
+            regex: [tr.text(Text::SearchRegexOn), tr.text(Text::SearchRegexOff)],
             invert: [
                 tr.text(Text::SearchEnterNext),
                 tr.text(Text::SearchEnterPrev),
@@ -337,6 +376,17 @@ impl SearchBarLabels {
                 .map(|l| display_width(l))
                 .max()
                 .unwrap_or(0),
+            regex: widest(&self.regex),
+            count: [
+                Text::SearchStatusNoMatch,
+                Text::SearchStatusLimited,
+                Text::SearchCounting,
+            ]
+            .into_iter()
+            .map(|key| display_width(self.tr.text(key)))
+            .max()
+            .unwrap_or(12)
+            .max(12),
             invert: widest(&self.invert),
             status: SearchStatus::ALL
                 .iter()
@@ -388,6 +438,8 @@ pub fn search_bar_geometry(
             reserved_height: 0.0,
             label: zero,
             editor: zero,
+            count: zero,
+            regex: zero,
             previous: zero,
             next: zero,
             wrap: zero,
@@ -406,16 +458,29 @@ pub fn search_bar_geometry(
         next: NEXT,
         wrap: WRAP,
         case: CASE,
+        regex: REGEX,
+        count: COUNT,
         invert: INVERT,
         status: STATUS,
         close: CLOSE,
     } = SearchBarWidths::new(tr);
     const EDITOR_MIN: usize = 12;
-    // 8 single-column gaps between the nine controls, plus one extra column
-    // for each of the four gaps that separate groups rather than siblings
-    // (after the editor, after Next, after Invert, after Status).
-    let wide_min =
-        2 + LABEL + PREVIOUS + NEXT + WRAP + CASE + INVERT + STATUS + CLOSE + EDITOR_MIN + 8 + 4;
+    // Ten single-column gaps, plus four group gaps after the count,
+    // Next, Invert and status.
+    let wide_min = 2
+        + LABEL
+        + PREVIOUS
+        + NEXT
+        + WRAP
+        + CASE
+        + INVERT
+        + STATUS
+        + CLOSE
+        + REGEX
+        + COUNT
+        + EDITOR_MIN
+        + 10
+        + 4;
 
     let columns = (surface_width / cell_width).floor().max(1.0) as usize;
     let pad = usize::from(columns >= 4);
@@ -423,10 +488,12 @@ pub fn search_bar_geometry(
     let (
         label_pos,
         editor_pos,
+        count_pos,
         previous_pos,
         next_pos,
         wrap_pos,
         case_pos,
+        regex_pos,
         invert_pos,
         status_pos,
         close_pos,
@@ -450,21 +517,25 @@ pub fn search_bar_geometry(
         // All fixed controls plus their inter-control gaps have already been
         // budgeted by WIDE_MIN; the editor gets every surplus column.
         let editor_width = EDITOR_MIN + (columns - wide_min);
-        let editor_pos = place(editor_width, BETWEEN_GROUPS);
+        let editor_pos = place(editor_width, IN_GROUP);
+        let count_pos = place(COUNT, BETWEEN_GROUPS);
         let previous_pos = place(PREVIOUS, IN_GROUP);
         let next_pos = place(NEXT, BETWEEN_GROUPS);
         let wrap_pos = place(WRAP, IN_GROUP);
         let case_pos = place(CASE, IN_GROUP);
+        let regex_pos = place(REGEX, IN_GROUP);
         let invert_pos = place(INVERT, BETWEEN_GROUPS);
         let status_pos = place(STATUS, BETWEEN_GROUPS);
         let close_pos = (col, 0, CLOSE.min(right.saturating_sub(col)).max(1));
         (
             label_pos,
             editor_pos,
+            count_pos,
             previous_pos,
             next_pos,
             wrap_pos,
             case_pos,
+            regex_pos,
             invert_pos,
             status_pos,
             close_pos,
@@ -510,15 +581,17 @@ pub fn search_bar_geometry(
         // exactly and a single space does not read as a boundary between a
         // control and the outcome text.
         let desired = [
+            (COUNT, 2),
             (PREVIOUS, 1usize),
             (NEXT, 2),
             (WRAP, 1),
             (CASE, 1),
+            (REGEX, 1),
             (INVERT, 2),
             (STATUS, 1),
         ];
         let usable = inner.max(1);
-        let mut packed = [(0usize, 0usize, 1usize); 6];
+        let mut packed = [(0usize, 0usize, 1usize); 8];
         let mut row = if close_on_own_row { 2 } else { 1 };
         let mut col = pad;
         for (idx, (wanted, gap)) in desired.into_iter().enumerate() {
@@ -538,20 +611,24 @@ pub fn search_bar_geometry(
             col = col.saturating_add(width + gap);
         }
         let [
+            count_pos,
             previous_pos,
             next_pos,
             wrap_pos,
             case_pos,
+            regex_pos,
             invert_pos,
             status_pos,
         ] = packed;
         (
             label_pos,
             editor_pos,
+            count_pos,
             previous_pos,
             next_pos,
             wrap_pos,
             case_pos,
+            regex_pos,
             invert_pos,
             status_pos,
             close_pos,
@@ -580,6 +657,8 @@ pub fn search_bar_geometry(
         reserved_height,
         label: to_rect(label_pos),
         editor: to_rect(editor_pos),
+        count: to_rect(count_pos),
+        regex: to_rect(regex_pos),
         previous: to_rect(previous_pos),
         next: to_rect(next_pos),
         wrap: to_rect(wrap_pos),
@@ -611,8 +690,8 @@ pub fn search_bar_columns(rect_width: f32, cell_width: f32) -> usize {
 }
 
 /// Number of text segments in the search lane: label, editor, Previous, Next,
-/// Wrap, Case, Invert, status and Close.
-pub(crate) const SEARCH_SEGMENTS: usize = 9;
+/// count, Wrap, Case, Regex, Invert, status and Close.
+pub(crate) const SEARCH_SEGMENTS: usize = 11;
 
 /// One piece of search-lane text, placed in pixels and clipped to its slot.
 #[derive(Debug, Clone, PartialEq)]
@@ -944,6 +1023,26 @@ pub(crate) fn search_bar_segments(
         search_editor_body(search, editor_cols).0,
         geometry.editor.0 + cell_width,
     );
+    let count = if search.query.is_empty()
+        || matches!(
+            search.status,
+            SearchStatus::Invalid | SearchStatus::TooComplex | SearchStatus::TooLong
+        ) {
+        String::new()
+    } else {
+        search_match_label(
+            &search.tr,
+            search.match_position,
+            search.match_total,
+            search.match_limited,
+        )
+    };
+    push(
+        None,
+        geometry.count,
+        fit_single_line_label(&count, cols(geometry.count).max(1)),
+        geometry.count.0,
+    );
     let (text, left) = button(
         geometry.previous,
         labels.previous.to_string(),
@@ -971,6 +1070,12 @@ pub(crate) fn search_bar_segments(
         &case_variants,
     );
     push(Some(SearchControl::Case), geometry.case_mode, text, left);
+    let (text, left) = button(
+        geometry.regex,
+        labels.regex[usize::from(!search.regex)].to_string(),
+        &labels.regex,
+    );
+    push(Some(SearchControl::Regex), geometry.regex, text, left);
     // The invert toggle flips which direction Enter searches, so its label
     // names that direction. It also reminds users of the Enter keybinding.
     let (text, left) = button(
@@ -986,7 +1091,7 @@ pub(crate) fn search_bar_segments(
     // `Results limited` — look like just another word in the strip rather than
     // an answer. The slot keeps its width either way, so nothing shifts when
     // the status appears and disappears.
-    let status = if search.status == SearchStatus::Match {
+    let status = if matches!(search.status, SearchStatus::Match | SearchStatus::NoMatch) {
         String::new()
     } else {
         fit_single_line_label(

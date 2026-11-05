@@ -555,6 +555,7 @@ mod tests {
                 | DecreaseFontSize
                 | ResetFontSize
                 | StartSearch
+                | ToggleSearchRegex
                 | ToggleBroadcastAll
                 | ToggleBroadcastGroup
                 | ToggleBroadcastWindow

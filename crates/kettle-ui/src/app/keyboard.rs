@@ -773,6 +773,9 @@ pub(super) fn settings_capture_active(ws: &WindowState) -> bool {
 /// as long as it is held, and leave it wherever the last repeat fell. Such a
 /// repeat is still consumed, so it never reaches the program.
 pub(super) fn toggles_once_per_press(action: &Action) -> bool {
+    if matches!(action, Action::ToggleSearchRegex) {
+        return true;
+    }
     matches!(
         action,
         Action::ToggleViMode

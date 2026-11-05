@@ -145,8 +145,7 @@ impl App {
             .as_ref()
             .map(|window| window.scale_factor() as f32)
             .unwrap_or(1.0);
-        let painted = self.cfg.scrollbar_width.clamp(2.0, 40.0) * scale;
-        let zone = painted.max(12.0 * scale);
+        let zone = kettle_render::scrollbar_hit_width(self.cfg.scrollbar_width, scale);
         if require_zone && (px < rx + rw - zone || px > rx + rw || py < ry || py > ry + rh) {
             return None;
         }
@@ -183,30 +182,29 @@ impl App {
         Some(grab)
     }
 
-    /// Whether `(px, py)` is within the focused pane's scrollbar grab
-    /// zone (right edge, painted width floored at 12 logical px). Pure geometry
-    /// so it is cheap to call on every `CursorMoved` to drive the
-    /// overlay scrollbar's hover-brighten without affecting the scroll state.
-    pub(super) fn scrollbar_zone_contains(
+    /// The pane whose scaled scrollbar hit strip contains the pointer.
+    /// Hover feedback follows the pointer even before that pane takes focus.
+    pub(super) fn scrollbar_pane_at(
         &self,
         ws: &WindowState,
         area: Rect,
         px: f32,
         py: f32,
-    ) -> bool {
+    ) -> Option<u64> {
         if self.cfg.scrollbar == kettle_config::ScrollbarMode::Never {
-            return false;
+            return None;
         }
-        let Some((rx, ry, rw, rh)) = self.focused_terminal(ws, area) else {
-            return false;
-        };
         let scale = ws
             .window
             .as_ref()
-            .map(|window| window.scale_factor() as f32)
-            .unwrap_or(1.0);
-        let zone = (self.cfg.scrollbar_width.clamp(2.0, 40.0) * scale).max(12.0 * scale);
-        px >= rx + rw - zone && px <= rx + rw && py >= ry && py <= ry + rh
+            .map_or(1.0, |window| window.scale_factor() as f32);
+        let zone = kettle_render::scrollbar_hit_width(self.cfg.scrollbar_width, scale);
+        self.pane_layout(ws, area)
+            .into_iter()
+            .find_map(|(pane, partition)| {
+                let (rx, ry, rw, rh) = partition.terminal;
+                (px >= rx + rw - zone && px <= rx + rw && py >= ry && py <= ry + rh).then_some(pane)
+            })
     }
 
     pub(super) fn px_to_point(
@@ -1739,6 +1737,12 @@ impl App {
             .or(confirm_hover)
             .or(search_hover)
             .or(media_receipt_hover)
+            .or_else(|| {
+                (!self.pointer_modal_open(ws))
+                    .then(|| self.scrollback_pill_at(ws, ws.cursor.x as f32, ws.cursor.y as f32))
+                    .flatten()
+                    .map(|_| CursorIcon::Pointer)
+            })
             .or(chrome)
             // A card takes a press before a split seam does, so its hand
             // wins where the two overlap.
@@ -1836,5 +1840,86 @@ impl App {
             .panes
             .get(&pane_id)
             .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
+    }
+}
+
+impl App {
+    pub(super) fn scrollback_pill_for(
+        &self,
+        ws: &WindowState,
+        pane_id: u64,
+        terminal: Rect,
+    ) -> Option<kettle_render::ScrollbackPill> {
+        let pane = ws.mux.panes.get(&pane_id)?;
+        let offset = pane.term.term.lock().ok()?.grid().display_offset();
+        kettle_render::scrollback_pill(
+            terminal,
+            offset,
+            ws.window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor() as f32),
+            (
+                self.overlay_text_cell_width(ws),
+                self.overlay_text_line_height(ws),
+            ),
+            self.cfg.scrollbar_width,
+            &self.ui_text,
+        )
+    }
+
+    pub(super) fn return_pane_to_live(ws: &mut WindowState, pane_id: u64) {
+        if let Some(pane) = ws.mux.panes.get(&pane_id)
+            && let Ok(mut term) = pane.term.term.lock()
+        {
+            term.scroll_display(kettle_core::Scroll::Bottom);
+        }
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    fn scrollback_pill_at(&self, ws: &WindowState, px: f32, py: f32) -> Option<u64> {
+        self.pane_layout(ws, self.area(ws))
+            .into_iter()
+            .find_map(|(pane, partition)| {
+                let pill = self.scrollback_pill_for(ws, pane, partition.terminal)?;
+                rect_contains(pill.rect, px, py).then_some(pane)
+            })
+    }
+
+    pub(super) fn press_scrollback_pill(
+        &self,
+        ws: &mut WindowState,
+        px: f32,
+        py: f32,
+        button: u8,
+    ) -> bool {
+        let hit = self.scrollback_pill_at(ws, px, py);
+        if let Some(pane) = hit {
+            let completion = self.completion_overlay_projection(ws, terminal_surface_available(ws));
+            if completion_overlay_hit_test(completion.as_ref(), self.menu_cell(ws), (px, py)) {
+                return false;
+            }
+            if let Some((receipt, completion)) = self.media_paste_receipt_projection(ws)
+                && kettle_render::notification_geometry(
+                    self.update_toast_projection(ws).map(|toast| toast.geometry),
+                    Some(&receipt),
+                    completion.as_ref(),
+                    self.menu_cell(ws),
+                    self.overlay_text_cell_width(ws),
+                    self.overlay_text_line_height(ws),
+                )
+                .receipt
+                .is_some_and(|geometry| geometry.hit_test(px, py).is_some())
+            {
+                return false;
+            }
+            if button == 0 {
+                Self::return_pane_to_live(ws, pane);
+            }
+            return true;
+        }
+        false
     }
 }

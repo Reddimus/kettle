@@ -971,11 +971,11 @@ pub(crate) struct WindowState {
     /// Distance from the pointer to the dragged thumb's top edge. Keeping the
     /// grab offset prevents the thumb from jumping when a drag starts.
     pub(crate) scrollbar_drag_offset: Option<f32>,
-    /// The pointer is hovering the focused pane's scrollbar gutter.
+    /// The pane whose scrollbar gutter is under the pointer.
     /// Drives the overlay scrollbar's bright (vs dim-at-rest) opacity with no
     /// fade timer, so it costs zero idle wakeups — just a single repaint on the
     /// hover-enter / hover-leave transition.
-    pub(crate) scrollbar_hover: bool,
+    pub(crate) scrollbar_hover: Option<u64>,
     /// In-progress mouse drag of a split divider. `Some`
     /// while the left button is held after a press landed on a divider seam;
     /// each CursorMoved recomputes the addressed split's ratio from the cursor.
@@ -1542,7 +1542,7 @@ impl WindowState {
             selection_drag_origin: None,
             selection_button: None,
             scrollbar_drag_offset: None,
-            scrollbar_hover: false,
+            scrollbar_hover: None,
             dragging_split: None,
             links_scan_key: None,
             held_buttons: crate::held_buttons::HeldButtons::default(),

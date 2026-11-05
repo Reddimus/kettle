@@ -62,7 +62,7 @@ fn highlight_lookup_streams_across_visible_cells() {
 #[test]
 fn wide_geometry_is_one_row_and_hit_testing_reuses_paint_rects() {
     let bar = search_bar_geometry(
-        1200.0,
+        2000.0,
         800.0,
         10.0,
         20.0,
@@ -76,7 +76,7 @@ fn wide_geometry_is_one_row_and_hit_testing_reuses_paint_rects() {
         let (x, y) = center(rect);
         assert_eq!(bar.hit_test(x, y), Some(control));
     }
-    assert_eq!(bar.content_rect(1200.0, 800.0), (0.0, 0.0, 1200.0, 770.0));
+    assert_eq!(bar.content_rect(2000.0, 800.0), (0.0, 0.0, 2000.0, 770.0));
 }
 
 #[test]
@@ -133,6 +133,7 @@ fn only_the_status_that_tells_you_something_is_printed() {
     ] {
         let overlay = SearchOverlay {
             status,
+            match_total: (status == SearchStatus::NoMatch).then_some(0),
             ..base.clone()
         };
         let text = search_bar_text(&overlay, bar, 10.0);
@@ -253,7 +254,10 @@ fn no_search_control_label_is_ellipsized_at_any_cell_width() {
             };
             let text = search_bar_text(&overlay, bar, cell_width);
             assert!(
-                !text.contains(ELLIPSIS),
+                !search_bar_segments(&overlay, bar, cell_width)
+                    .iter()
+                    .filter(|segment| segment.control.is_some())
+                    .any(|segment| segment.text.contains(ELLIPSIS)),
                 "a control was truncated at cell_width={cell_width}: {text}"
             );
             checked += 1;
@@ -263,9 +267,11 @@ fn no_search_control_label_is_ellipsized_at_any_cell_width() {
 }
 
 #[test]
-fn rich_bar_is_status_only_and_never_emits_a_global_counter() {
+fn rich_bar_shows_counts_alongside_status() {
     let search = SearchOverlay {
         query: "needle".into(),
+        match_position: 3,
+        match_total: Some(122),
         cursor_byte: 6,
         wrap: true,
         case_mode: SearchCaseMode::Ignore,
@@ -305,10 +311,7 @@ fn rich_bar_is_status_only_and_never_emits_a_global_counter() {
     );
     assert!(text.contains("Wrapped"));
     assert!(text.contains("× Close"));
-    assert!(
-        !text.contains("/"),
-        "global match totals must stay out of chrome"
-    );
+    assert!(text.contains("3/122"), "{text}");
 }
 
 #[test]
@@ -372,14 +375,14 @@ fn button_labels_are_centered_and_toggles_do_not_move() {
     let variants = |index: usize| -> Vec<SearchOverlay> {
         let base = SearchOverlay::default();
         match index {
-            4 => vec![
+            5 => vec![
                 base.clone(),
                 SearchOverlay {
                     wrap: false,
                     ..base
                 },
             ],
-            5 => [
+            6 => [
                 SearchCaseMode::Smart,
                 SearchCaseMode::Match,
                 SearchCaseMode::Ignore,
@@ -390,7 +393,7 @@ fn button_labels_are_centered_and_toggles_do_not_move() {
                 ..base.clone()
             })
             .collect(),
-            6 => vec![
+            8 => vec![
                 base.clone(),
                 SearchOverlay {
                     invert: true,
@@ -400,7 +403,7 @@ fn button_labels_are_centered_and_toggles_do_not_move() {
             _ => vec![base],
         }
     };
-    for index in [2, 3, 4, 5, 6, 8] {
+    for index in [3, 4, 5, 6, 7, 8, 10] {
         let segments: Vec<_> = variants(index)
             .iter()
             .map(|search| search_bar_segments(search, bar, cell)[index].clone())
@@ -416,7 +419,7 @@ fn button_labels_are_centered_and_toggles_do_not_move() {
             assert!((before - after).abs() <= cell, "not centered: {segment:?}");
             assert_eq!(segment.left, segments[0].left, "label moved: {segment:?}");
         }
-        if index == 5 {
+        if index == 6 {
             let chevron = |segment: &super::SearchBarSegment| {
                 let (at, _) = segment
                     .text
@@ -775,7 +778,7 @@ fn status_vocabulary_is_bounded_and_semantic() {
     );
     assert_eq!(
         SearchStatus::NoMatch.label(&kettle_i18n::Translator::default()),
-        "No match"
+        "No matches"
     );
     assert_eq!(
         SearchStatus::Limited.label(&kettle_i18n::Translator::default()),
@@ -1010,4 +1013,45 @@ fn search_controls_use_natural_chrome_advance() {
         "Wrap state was clipped: {}",
         wrap.text
     );
+}
+
+#[test]
+fn match_count_is_exact_or_explicitly_incomplete_in_both_languages() {
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let bar = search_bar_geometry(2400.0, 800.0, 8.0, 18.0, &tr);
+        let mut overlay = SearchOverlay {
+            tr,
+            query: "needle".into(),
+            match_position: 3,
+            match_total: Some(122),
+            ..SearchOverlay::default()
+        };
+        assert!(search_bar_text(&overlay, bar, 8.0).contains("3/122"));
+        overlay.match_total = None;
+        assert!(
+            search_bar_text(&overlay, bar, 8.0)
+                .contains(tr.text(kettle_i18n::Text::SearchCounting))
+        );
+        overlay.match_total = Some(0);
+        assert!(
+            search_bar_text(&overlay, bar, 8.0)
+                .contains(tr.text(kettle_i18n::Text::SearchStatusNoMatch))
+        );
+        overlay.match_limited = true;
+        assert!(
+            search_bar_text(&overlay, bar, 8.0)
+                .contains(tr.text(kettle_i18n::Text::SearchStatusLimited))
+        );
+        overlay.regex = false;
+        let segment = search_bar_segments(&overlay, bar, 8.0)
+            .into_iter()
+            .find(|segment| segment.control == Some(SearchControl::Regex))
+            .unwrap();
+        assert_eq!(segment.text, tr.text(kettle_i18n::Text::SearchRegexOff));
+        assert_eq!(
+            bar.hit_test(center(bar.regex).0, center(bar.regex).1),
+            Some(SearchControl::Regex)
+        );
+    }
 }

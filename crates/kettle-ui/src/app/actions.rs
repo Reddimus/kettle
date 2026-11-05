@@ -649,6 +649,11 @@ impl App {
                 // reverting to the old one.
                 ws.scaled_zoom_prev_font_size = None;
             }
+            Action::ToggleSearchRegex => {
+                if ws.search.open {
+                    self.activate_search_control(ws, kettle_render::SearchControl::Regex);
+                }
+            }
             Action::StartSearch => {
                 self.open_search(ws);
             }

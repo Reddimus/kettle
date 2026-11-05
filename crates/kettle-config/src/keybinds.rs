@@ -485,6 +485,7 @@ pub enum Action {
     DecreaseFontSize,
     ResetFontSize,
     StartSearch,
+    ToggleSearchRegex,
     ToggleBroadcastAll,
     ToggleBroadcastOff,
     /// Toggle broadcast to the focused pane's named group. When the focused
@@ -864,6 +865,7 @@ pub fn action_names() -> Vec<&'static str> {
         "zoom_out",
         "reset_font_size",
         "zoom_normal",
+        "toggle_search_regex",
         "start_search",
         "search",
         "broadcast_all",
@@ -1202,6 +1204,7 @@ impl Action {
             "decrease_font_size" | "zoom_out" => DecreaseFontSize,
             "reset_font_size" | "zoom_normal" => ResetFontSize,
             "start_search" | "search" => StartSearch,
+            "toggle_search_regex" => ToggleSearchRegex,
             // Terminator's `broadcast_all` is `set_groupsend('all')`
             // (terminal.py:2193-2195), which reaches EVERY terminal, not just
             // the current tab's. `ToggleBroadcastAll` turns on the
@@ -1640,6 +1643,7 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(cs, Char('c'), Copy);
     bind(cs, Char('v'), Paste);
     bind(cs, Char('f'), StartSearch);
+    bind(cs | Mods::ALT, Char('r'), ToggleSearchRegex);
     // Font-size zoom: every variant of "Ctrl + the plus/minus area" maps
     // to the same action. The `+` glyph on a US layout *is* `Shift+=` —
     // winit reports the chord as `mods = Ctrl+Shift, key = '+'`, which
@@ -1889,6 +1893,22 @@ mod tests {
 
     /// The copied and selected diagram previews parse by either spelling
     /// and claim no default shortcut.
+    #[test]
+    fn search_regex_has_a_distinct_default_chord_and_action() {
+        assert_eq!(
+            Action::from_name("toggle_search_regex"),
+            Some(Action::ToggleSearchRegex)
+        );
+        let bindings = defaults();
+        assert_eq!(
+            bindings.get(&Trigger {
+                mods: Mods::CTRL | Mods::SHIFT | Mods::ALT,
+                key: Key::Char('r')
+            }),
+            Some(&Action::ToggleSearchRegex)
+        );
+    }
+
     #[test]
     fn diagram_previews_and_agent_setup_parse_without_a_default_shortcut() {
         for (names, action) in [

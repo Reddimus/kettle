@@ -216,6 +216,21 @@ impl App {
             );
             let mut pane_children: Vec<_> = text_nodes.iter().map(|(id, _)| *id).collect();
             nodes.extend(text_nodes);
+            if let Some(pill) = self.scrollback_pill_for(ws, pane_id, (x, y, width, height)) {
+                let id = accessibility_scrollback_id(pane_id);
+                let mut button = Node::new(Role::Button);
+                button.set_label(pill.accessible_label);
+                let (x, y, w, h) = pill.rect;
+                button.set_bounds(accesskit::Rect::new(
+                    x as f64,
+                    y as f64,
+                    (x + w) as f64,
+                    (y + h) as f64,
+                ));
+                button.add_action(AccessibilityAction::Click);
+                pane_children.push(id);
+                nodes.push((id, button));
+            }
             for (instance, card, item) in cards.iter().filter(|(_, card, _)| card.pane == pane_id) {
                 let id = accessibility_card_id(*instance);
                 pane_children.push(id);
@@ -460,9 +475,9 @@ impl App {
                 search_children.push(id);
                 let mut node = Node::new(match control {
                     kettle_render::SearchControl::Editor => Role::SearchInput,
-                    kettle_render::SearchControl::Wrap | kettle_render::SearchControl::Invert => {
-                        Role::CheckBox
-                    }
+                    kettle_render::SearchControl::Wrap
+                    | kettle_render::SearchControl::Regex
+                    | kettle_render::SearchControl::Invert => Role::CheckBox,
                     _ => Role::Button,
                 });
                 node.set_label(control.accessible_label(&self.ui_text));
@@ -503,6 +518,7 @@ impl App {
                         nodes.push((ACCESSIBILITY_SEARCH_TEXT_ID, text_node));
                     }
                     kettle_render::SearchControl::Wrap => node.set_toggled(ws.search.wrap.into()),
+                    kettle_render::SearchControl::Regex => node.set_toggled(ws.search.regex.into()),
                     kettle_render::SearchControl::Case => {
                         node.set_value(
                             map_search_case_mode(ws.search.case_mode).label(&self.ui_text),
@@ -515,9 +531,25 @@ impl App {
                 }
                 nodes.push((id, node));
             }
+            search_children.push(ACCESSIBILITY_SEARCH_COUNT_ID);
+            let mut count = Node::new(Role::Status);
+            count.set_label(ws.search.count_label(&self.ui_text));
+            count.set_live(accesskit::Live::Polite);
+            count.set_bounds(bounds(geometry.count));
+            nodes.push((ACCESSIBILITY_SEARCH_COUNT_ID, count));
             search_children.push(ACCESSIBILITY_SEARCH_STATUS_ID);
             let mut status = Node::new(Role::Status);
-            status.set_label(effective_search_status(&ws.search).label(&self.ui_text));
+            let state = effective_search_status(&ws.search);
+            status.set_label(
+                if matches!(
+                    state,
+                    kettle_render::SearchStatus::Match | kettle_render::SearchStatus::NoMatch
+                ) {
+                    ""
+                } else {
+                    state.label(&self.ui_text)
+                },
+            );
             status.set_live(accesskit::Live::Polite);
             status.set_bounds(bounds(geometry.status));
             nodes.push((ACCESSIBILITY_SEARCH_STATUS_ID, status));
@@ -722,12 +754,28 @@ impl App {
             size.height.hash(&mut hasher);
             window.scale_factor().to_bits().hash(&mut hasher);
         }
+        for (pane, partition) in self.pane_layout(ws, self.area(ws)) {
+            if let Some(pill) = self.scrollback_pill_for(ws, pane, partition.terminal) {
+                pane.hash(&mut hasher);
+                pill.label.hash(&mut hasher);
+                [pill.rect.0, pill.rect.1, pill.rect.2, pill.rect.3]
+                    .map(f32::to_bits)
+                    .hash(&mut hasher);
+            }
+        }
         ws.search.open.hash(&mut hasher);
         if ws.search.open {
             ws.search.query().hash(&mut hasher);
             ws.search.editor.cursor().hash(&mut hasher);
             ws.search.editor.selection().hash(&mut hasher);
             ws.search.wrap.hash(&mut hasher);
+            ws.search.regex.hash(&mut hasher);
+            ws.search.focused.hash(&mut hasher);
+            if let Some(scan) = &ws.search.count_scan {
+                scan.spans.len().hash(&mut hasher);
+                scan.complete.hash(&mut hasher);
+                scan.limited.hash(&mut hasher);
+            }
             map_search_case_mode(ws.search.case_mode)
                 .label(&self.ui_text)
                 .hash(&mut hasher);
@@ -1166,6 +1214,21 @@ impl App {
             return;
         }
         self.update_toast_focus = None;
+        if let Some((pane, _)) =
+            self.pane_layout(ws, self.area(ws))
+                .into_iter()
+                .find(|(pane, partition)| {
+                    accessibility_scrollback_id(*pane) == request.target_node
+                        && self
+                            .scrollback_pill_for(ws, *pane, partition.terminal)
+                            .is_some()
+                })
+        {
+            if request.action == AccessibilityAction::Click {
+                Self::return_pane_to_live(ws, pane);
+            }
+            return;
+        }
         if request.target_node == ACCESSIBILITY_MEDIA_RECEIPT_ID {
             if request.action == AccessibilityAction::Click {
                 let openable = self
@@ -1383,6 +1446,7 @@ const ACCESSIBILITY_SEARCH_ID_MASK: u64 = 1 << 61;
 pub(super) const ACCESSIBILITY_SEARCH_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK);
 const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 16);
 const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 17);
+const ACCESSIBILITY_SEARCH_COUNT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 18);
 const ACCESSIBILITY_COMPLETION_ID_MASK: u64 = 1 << 60;
 pub(super) const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId =
     NodeId(ACCESSIBILITY_COMPLETION_ID_MASK);
@@ -1524,44 +1588,15 @@ fn accessibility_search_control_id(control: kettle_render::SearchControl) -> Nod
         kettle_render::SearchControl::Case => 5,
         kettle_render::SearchControl::Invert => 6,
         kettle_render::SearchControl::Close => 7,
+        kettle_render::SearchControl::Regex => 8,
     };
     NodeId(ACCESSIBILITY_SEARCH_ID_MASK | offset)
 }
 
 fn accessibility_search_control_from_id(id: NodeId) -> Option<kettle_render::SearchControl> {
-    match id.0 {
-        value
-            if value == accessibility_search_control_id(kettle_render::SearchControl::Editor).0 =>
-        {
-            Some(kettle_render::SearchControl::Editor)
-        }
-        value
-            if value
-                == accessibility_search_control_id(kettle_render::SearchControl::Previous).0 =>
-        {
-            Some(kettle_render::SearchControl::Previous)
-        }
-        value if value == accessibility_search_control_id(kettle_render::SearchControl::Next).0 => {
-            Some(kettle_render::SearchControl::Next)
-        }
-        value if value == accessibility_search_control_id(kettle_render::SearchControl::Wrap).0 => {
-            Some(kettle_render::SearchControl::Wrap)
-        }
-        value if value == accessibility_search_control_id(kettle_render::SearchControl::Case).0 => {
-            Some(kettle_render::SearchControl::Case)
-        }
-        value
-            if value == accessibility_search_control_id(kettle_render::SearchControl::Invert).0 =>
-        {
-            Some(kettle_render::SearchControl::Invert)
-        }
-        value
-            if value == accessibility_search_control_id(kettle_render::SearchControl::Close).0 =>
-        {
-            Some(kettle_render::SearchControl::Close)
-        }
-        _ => None,
-    }
+    kettle_render::SearchControl::ALL
+        .into_iter()
+        .find(|control| accessibility_search_control_id(*control) == id)
 }
 
 /// What a screen reader hears for a preview lane: its name, with the item's
@@ -2606,4 +2641,7 @@ mod context_menu_nesting_tests {
         );
         assert_eq!(projection.focus, Some(accessibility_modal_id(2, 1)));
     }
+
+fn accessibility_scrollback_id(pane: u64) -> NodeId {
+    NodeId((1 << 54) | pane)
 }

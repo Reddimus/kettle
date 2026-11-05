@@ -35,6 +35,13 @@ menu_category_title = "draft"
 menu_category_group = "draft"
 menu_category_appearance = "draft"
 menu_category_commands = "draft"
+scrollback_a11y = "draft"
+search_a11y_regex = "draft"
+search_regex_on = "draft"
+search_regex_off = "draft"
+search_counting = "draft"
+scrollback_return = "draft"
+
 macos_menu_app = "draft"
 macos_menu_shell = "draft"
 macos_menu_edit = "draft"
@@ -637,7 +644,7 @@ search_status_end = "accepted"
 search_status_invalid = "accepted"
 search_status_limited = "accepted"
 search_status_match = "accepted"
-search_status_no_match = "accepted"
+search_status_no_match = "draft"
 search_status_searching = "accepted"
 search_status_start = "accepted"
 search_status_too_complex = "accepted"
@@ -826,6 +833,8 @@ keys = [
     "confirm_paste_heading",
     "confirm_paste_body",
     "confirm_paste_one_line",
+    "search_a11y_regex",
+    "scrollback_a11y",
     "settings_a11y_search",
     "media_viewer_a11y",
     "media_viewer_a11y_pin",

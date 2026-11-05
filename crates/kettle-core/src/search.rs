@@ -146,6 +146,80 @@ pub struct SearchBatch {
     pub continuation: Option<SearchPoint>,
 }
 
+/// Bounded enumeration for an exact count and ordinal, independent of navigation.
+/// The owner must discard the scan whenever its token changes.
+#[derive(Debug)]
+pub struct SearchCountScan {
+    pub token: SearchScanToken,
+    compiled: CompiledSearch,
+    cursor: SearchPoint,
+    pub spans: Vec<SearchSpan>,
+    pub complete: bool,
+    pub limited: bool,
+}
+
+impl SearchCountScan {
+    pub fn new(mut compiled: CompiledSearch, token: SearchScanToken, cursor: SearchPoint) -> Self {
+        compiled.clear_progress();
+        compiled.set_scan_token(token);
+        Self {
+            token,
+            compiled,
+            cursor,
+            spans: Vec::new(),
+            complete: false,
+            limited: false,
+        }
+    }
+
+    /// At most one engine work budget and 512 matches per event-loop turn.
+    pub fn advance(&mut self, term: &Term<EventProxy>) {
+        if self.complete {
+            return;
+        }
+        let edge = SearchPoint::new(term.bottommost_line().0, term.last_column().0);
+        let remaining = MAX_SEARCH_MATCHES.saturating_sub(self.spans.len());
+        let batch = self.compiled.find_in_range(
+            term,
+            SearchBounds::new(self.cursor, edge),
+            SearchDirection::Forward,
+            remaining.min(512),
+        );
+        self.spans.extend(batch.matches);
+        self.limited |= batch.accuracy_limited;
+        if batch.exhausted || batch.accuracy_limited {
+            self.complete = true;
+        } else if let Some(next) = batch.continuation {
+            self.cursor = next;
+        } else if let Some(last) = self.spans.last() {
+            if last.end.column < edge.column {
+                self.cursor = SearchPoint::new(last.end.line, last.end.column + 1);
+            } else if last.end.line < edge.line {
+                self.cursor = SearchPoint::new(last.end.line + 1, 0);
+            } else {
+                self.complete = true;
+            }
+        } else {
+            self.complete = true;
+            self.limited = true;
+        }
+        if self.spans.len() == MAX_SEARCH_MATCHES && !self.complete {
+            self.complete = true;
+            self.limited = true;
+        }
+    }
+
+    pub fn position(&self, focused: Option<SearchSpan>) -> usize {
+        focused
+            .and_then(|span| {
+                self.spans
+                    .binary_search_by_key(&span.start, |found| found.start)
+                    .ok()
+            })
+            .map_or(0, |index| index + 1)
+    }
+}
+
 /// Result of navigating to one match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchOutcome {
@@ -354,6 +428,15 @@ impl CompiledSearch {
         pattern: &str,
         mode: CaseSensitivity,
     ) -> Result<Option<Self>, SearchCompileError> {
+        Self::compile_mode(pattern, mode, true)
+    }
+
+    /// Compile regex or literal input with the same input and engine bounds.
+    pub fn compile_mode(
+        pattern: &str,
+        mode: CaseSensitivity,
+        regex: bool,
+    ) -> Result<Option<Self>, SearchCompileError> {
         if pattern.is_empty() {
             return Ok(None);
         }
@@ -389,20 +472,15 @@ impl CompiledSearch {
                     }
                 })
         };
-        let regex = match build(pattern) {
+        let source = if regex {
+            std::borrow::Cow::Borrowed(pattern)
+        } else {
+            std::borrow::Cow::Owned(regex::escape(pattern))
+        };
+        let regex = match build(&source) {
             Ok(regex) => regex,
-            // An unparseable query is usually text the user can see on
-            // screen, like `call(x`, `arr[0`, `a{`, or a bare `(`. The user
-            // cannot know the field takes a regex and has no toggle to turn
-            // that off, so retry it escaped as a literal search.
-            //
-            // A valid pattern keeps its regex meaning, so `a|b` and `^row`
-            // work, but `call(x)` and `arr[0]` still match as a group and a
-            // character class, not literal text. Fixing that needs a
-            // literal/regex toggle, not a wider fallback.
-            //
-            // Size limits are not retried: escaping cannot make a pattern
-            // cheaper in any way that matters, and "too complex" stays honest.
+            // Invalid regex retains the documented literal fallback. Complexity
+            // failures stay explicit; changing syntax cannot bypass engine bounds.
             Err(SearchCompileError::InvalidRegex) => build(&regex::escape(pattern))?,
             Err(error) => return Err(error),
         };
@@ -1346,6 +1424,99 @@ mod tests {
         for (offset, c) in text.chars().enumerate() {
             term.grid_mut()[Line(line)][Column(start + offset)].c = c;
         }
+    }
+
+    #[test]
+    fn literal_mode_matches_valid_regex_punctuation_and_regex_keeps_fallback() {
+        let mut term = empty_term(40, 4);
+        write_ascii(&mut term, 0, 0, "call(x) callx call(x");
+        let bounds = SearchBounds::new(SearchPoint::new(0, 0), SearchPoint::new(3, 39));
+        let mut literal = CompiledSearch::compile_mode("call(x)", CaseSensitivity::Always, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            literal
+                .find_in_range(&term, bounds, SearchDirection::Forward, 10)
+                .matches,
+            [SearchSpan::new(
+                SearchPoint::new(0, 0),
+                SearchPoint::new(0, 6)
+            )]
+        );
+        let mut regex = CompiledSearch::compile_mode("call(x)", CaseSensitivity::Always, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            regex
+                .find_in_range(&term, bounds, SearchDirection::Forward, 10)
+                .matches,
+            [SearchSpan::new(
+                SearchPoint::new(0, 8),
+                SearchPoint::new(0, 12)
+            )]
+        );
+        let mut fallback = CompiledSearch::compile_mode("call(x", CaseSensitivity::Always, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fallback
+                .find_in_range(&term, bounds, SearchDirection::Forward, 10)
+                .matches
+                .len(),
+            2
+        );
+        assert!(matches!(
+            CompiledSearch::compile_mode(
+                &"(".repeat(MAX_SEARCH_QUERY_BYTES + 1),
+                CaseSensitivity::Always,
+                false
+            ),
+            Err(SearchCompileError::QueryTooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn exact_count_resumes_after_match_and_work_budgets_and_reports_ordinals() {
+        let mut term = empty_term(160, 40);
+        for row in 0..40 {
+            write_ascii(&mut term, row, 0, &"a ".repeat(80));
+        }
+        let compiled = CompiledSearch::compile("a", CaseSensitivity::Always)
+            .unwrap()
+            .unwrap();
+        let token = SearchScanToken::capture(&term, 0, 0);
+        let mut scan = SearchCountScan::new(compiled, token, SearchPoint::new(0, 0));
+        scan.advance(&term);
+        assert!(!scan.complete);
+        assert!(scan.spans.len() <= 512);
+        for _ in 0..200 {
+            scan.advance(&term);
+            if scan.complete {
+                break;
+            }
+        }
+        assert!(scan.complete && !scan.limited);
+        assert_eq!(scan.spans.len(), 3200);
+        assert_eq!(
+            scan.position(Some(SearchSpan::new(
+                SearchPoint::new(1, 4),
+                SearchPoint::new(1, 4)
+            ))),
+            83
+        );
+        assert_eq!(scan.position(None), 0);
+        let empty = CompiledSearch::compile("zzz", CaseSensitivity::Always)
+            .unwrap()
+            .unwrap();
+        let mut scan = SearchCountScan::new(empty, token, SearchPoint::new(0, 0));
+        for _ in 0..200 {
+            scan.advance(&term);
+            if scan.complete {
+                break;
+            }
+        }
+        assert!(scan.complete && !scan.limited);
+        assert!(scan.spans.is_empty());
     }
 
     fn card_cell(term: &mut Term<EventProxy>, line: i32, col: usize, count: usize) {

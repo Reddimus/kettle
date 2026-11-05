@@ -526,7 +526,7 @@ search_status_end = "End reached"
 search_status_invalid = "Invalid pattern"
 search_status_limited = "Results limited"
 search_status_match = "Match"
-search_status_no_match = "No match"
+search_status_no_match = "No matches"
 search_status_searching = "Searching…"
 search_status_start = "Start reached"
 search_status_too_complex = "Pattern too complex"
@@ -814,6 +814,11 @@ macos_menu_next_tab = "Next Tab"
 macos_menu_previous_tab = "Previous Tab"
 
 
+search_a11y_regex = "Use regular expressions"
+search_regex_on = "Regex: On"
+search_regex_off = "Regex: Off"
+search_counting = "Counting…"
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"
@@ -833,3 +838,11 @@ other = "{count} `{event}` callbacks ran too long and will not be called again. 
 [confirm_close_scope]
 one = "The pane will close."
 other = "All {count} panes will close."
+
+[scrollback_return]
+one = "↓ {lines} line"
+other = "↓ {lines} lines"
+
+[scrollback_a11y]
+one = "Return to live output ({lines} line above bottom)"
+other = "Return to live output ({lines} lines above bottom)"

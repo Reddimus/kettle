@@ -19,9 +19,11 @@ mod gpu;
 mod labels;
 mod overlays;
 mod screenshot;
+mod scrollback;
 mod search;
 #[cfg(test)]
 use labels::overlay_label_cols;
+pub use scrollback::{ScrollbackPill, scrollback_pill, scrollbar_draw_width, scrollbar_hit_width};
 mod text_field;
 pub use text_field::{TextFieldLayout, TextFieldOverlay, text_field_labels, text_field_rects};
 mod settings;
@@ -132,7 +134,7 @@ use search::{
 };
 pub use search::{
     SearchBarGeometry, SearchCaseMode, SearchControl, SearchEditorCluster, SearchOverlay,
-    SearchStatus, search_bar_columns, search_bar_geometry,
+    SearchStatus, search_bar_columns, search_bar_geometry, search_match_label,
 };
 #[cfg(test)]
 use search::{
@@ -472,6 +474,7 @@ pub struct Renderer {
     status_bar_text: String,
     /// Ghostty parity: the transient resize chip's text buffer and its
     /// equality gate (re-shaped only when the grid size changes).
+    scrollback_buffers: Vec<TextBuffer>,
     resize_overlay_buffer: TextBuffer,
     resize_overlay_text: String,
     update_toast_buffers: [TextBuffer; 3],
@@ -1851,21 +1854,19 @@ impl Renderer {
             // Search coordinates belong to the pane captured when the lane
             // opened, even if focus changes through automation or pane reap.
             if pane_has_search {
-                for hl in &overlay.highlights {
+                // Match fills are resolved against each cell in the terminal walk.
+                // Underline the current match as well, so even identical theme fills
+                // leave the current result distinct from the other matches.
+                for hl in overlay.highlights.iter().filter(|hl| hl.active) {
+                    let fill = cfg.search_background.unwrap_or(theme.palette[3]);
+                    let ink = color::with_min_contrast(theme.foreground, fill, 3.0);
+                    let height = (2.0 * self.scale).min(ch);
                     quads.push(rect(
                         grid_origin.0 + hl.col as f32 * cw,
-                        grid_origin.1 + hl.row as f32 * ch,
+                        grid_origin.1 + (hl.row + 1) as f32 * ch - height,
                         hl.width as f32 * cw,
-                        ch,
-                        if hl.active {
-                            // The active match uses the theme's yellow
-                            // (Mocha #f9e2af) unless `search-background`
-                            // overrides it, so it follows the theme like the
-                            // inactive highlight's theme.selection_bg.
-                            cfg.search_background.unwrap_or(theme.palette[3])
-                        } else {
-                            theme.selection_background
-                        },
+                        height,
+                        ink,
                         1.0,
                     ));
                 }
@@ -1921,10 +1922,12 @@ impl Renderer {
                 // reliable contrast across light and dark themes. The two-state
                 // opacity still needs no fade timer or idle redraws.
                 if has_scroll || cfg.scrollbar == ScrollbarMode::Always {
-                    let bar_w = cfg.scrollbar_width.clamp(2.0, 40.0) * self.scale;
+                    let interacting = overlay.scrollbar_hovered_pane == Some(pv.id)
+                        || (pv.focused && overlay.scrollbar_active);
+                    let bar_w = scrollbar_draw_width(cfg.scrollbar_width, self.scale, interacting);
                     let edge = 2.0 * self.scale;
                     let bx = rx + rw - bar_w - edge;
-                    let active = off > 0 || (pv.focused && overlay.scrollbar_active);
+                    let active = off > 0 || interacting;
                     let (track_a, thumb_a) = if active { (0.14, 0.82) } else { (0.07, 0.42) };
                     let track_w = (1.5 * self.scale).clamp(1.0, bar_w);
                     if active || cfg.scrollbar == ScrollbarMode::Always {
@@ -2216,6 +2219,11 @@ impl Renderer {
                         && search.focused != SearchControl::Editor
                     {
                         theme.cursor_text
+                    } else if (segment.rect == geometry.count && search.match_total == Some(0))
+                        || (segment.rect == geometry.status
+                            && search.status == SearchStatus::NoMatch)
+                    {
+                        theme.palette[1]
                     } else {
                         theme.foreground
                     },
@@ -2534,6 +2542,39 @@ impl Renderer {
             }
             self.status_bar_buffer
                 .shape_until_scroll(&mut self.font_system, false);
+        }
+
+        let scrollback_pills: Vec<_> = panes
+            .iter()
+            .filter_map(|pane| {
+                scrollback_pill(
+                    pane.terminal,
+                    pane.snap.display_offset,
+                    self.scale,
+                    (
+                        self.overlay_text_cell_width(),
+                        self.overlay_text_line_height(),
+                    ),
+                    cfg.scrollbar_width,
+                    &pane.tr,
+                )
+            })
+            .collect();
+        while self.scrollback_buffers.len() < scrollback_pills.len() {
+            self.scrollback_buffers
+                .push(TextBuffer::new(&mut self.font_system, metrics));
+        }
+        self.scrollback_buffers.truncate(scrollback_pills.len());
+        for (buffer, pill) in self.scrollback_buffers.iter_mut().zip(&scrollback_pills) {
+            buffer.set_metrics(metrics);
+            buffer.set_size(None, Some(pill.rect.3));
+            buffer.set_text(
+                &pill.label,
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(&mut self.font_system, false);
         }
 
         // Ghostty `resize-overlay` parity: shape the transient size chip's
@@ -3143,6 +3184,26 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
+        }
+        for (pill, buffer) in scrollback_pills.iter().zip(&self.scrollback_buffers) {
+            let (x, y, w, h) = pill.rect;
+            let fill = color::with_min_contrast(theme.palette[0], theme.background, 3.0);
+            let ink = color::with_min_contrast(theme.foreground, fill, 4.5);
+            tab_strip::rounded_fill(&mut menu_q, (x, y, w, h), h / 2.0, (true, true), fill, None);
+            menu_areas.push(TextArea {
+                buffer,
+                left: pill.text_origin.0,
+                top: pill.text_origin.1,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: x as i32,
+                    top: y as i32,
+                    right: (x + w) as i32,
+                    bottom: (y + h) as i32,
+                },
+                default_color: GColor::rgb(ink.r, ink.g, ink.b),
+                custom_glyphs: &[],
+            });
         }
         // Ghostty parity: the transient resize chip, centered and drawn in the
         // menu pass (last) so it reads over any pane content.
@@ -4637,6 +4698,9 @@ impl Renderer {
             self.scroll_left_text.hash(&mut h);
             self.scroll_right_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
+            for pill in &scrollback_pills {
+                pill.label.hash(&mut h);
+            }
             self.update_toast_text.hash(&mut h);
             self.ime_text.hash(&mut h);
             prepared_text_areas_damage_key(&areas).hash(&mut h);

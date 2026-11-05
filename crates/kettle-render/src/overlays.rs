@@ -315,6 +315,8 @@ pub struct Overlay {
     /// scrolled-back pane (`display_offset > 0`) itself from the snapshot, so
     /// this carries only the hover/drag signal.
     pub scrollbar_active: bool,
+    /// Pane whose scrollbar is under the native pointer, including unfocused panes.
+    pub scrollbar_hovered_pane: Option<u64>,
     /// Cursor is in its "on" blink phase.
     pub cursor_visible: bool,
     /// `Some` while the right-click context menu is open. Rendered on

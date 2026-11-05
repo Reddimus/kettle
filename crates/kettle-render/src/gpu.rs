@@ -810,6 +810,7 @@ impl Renderer {
             scroll_left_text: String::new(),
             scroll_right_text: String::new(),
             status_bar_text: String::new(),
+            scrollback_buffers: Vec::new(),
             resize_overlay_buffer,
             resize_overlay_text: String::new(),
             update_toast_buffers,

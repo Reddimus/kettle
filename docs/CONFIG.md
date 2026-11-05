@@ -85,7 +85,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
 | `search-foreground` / `search-background` | color | from theme | Search-match + quick-select highlight. Default derives from the active theme (`search-background` → the theme's yellow `palette[3]`, `search-foreground` → the theme background), so it matches whatever theme is set; override with an explicit color |
 | `scrollback` | int / `infinite` | `10000` | Line-count history cap; `0`, `infinite` or `unlimited` = effectively unbounded before the byte cap is applied |
-| `scrollback-bytes` (`scrollback-byte-limit`, `scrollback-memory`) | bytes with optional `K`/`M`/`G`, `KiB`/`MiB`/`GiB`, or `0` | `10000000` | Per-pane scrollback memory budget. Includes the active screen, protects visible rows, and trims oldest history by reducing the effective line cap. `0` disables the byte cap and uses `scrollback` only. The budget is an **estimate over the inline grid**: it does not walk each cell's optional heap storage (combining marks, underline color, hyperlink), because that would mean touching every cell on the PTY reader's path. Those are separately bounded — combining marks are capped per cell, and hyperlink text is shared across the cells of one link — so actual usage exceeds the configured value by a bounded factor rather than an unbounded one |
+| `scrollback-bytes` (`scrollback-byte-limit`, `scrollback-memory`) | bytes with optional `K`/`M`/`G`, `KiB`/`MiB`/`GiB`, or `0` | `64000000` | Per-pane scrollback memory budget (64 MB by default; the 10,000-line cap still applies). Includes the active screen, protects visible rows, and trims oldest history by reducing the effective line cap. `0` disables the byte cap and uses `scrollback` only. The budget is an **estimate over the inline grid**: it does not walk each cell's optional heap storage (combining marks, underline color, hyperlink), because that would mean touching every cell on the PTY reader's path. Those are separately bounded — combining marks are capped per cell, and hyperlink text is shared across the cells of one link — so actual usage exceeds the configured value by a bounded factor rather than an unbounded one |
 | `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px), `0` or more |
 | `window-width` / `window-height` | int cells | unset | Initial fresh-window terminal grid size. Width is clamped `[20, 400]`, height `[8, 200]`. Unset, a fresh window opens at a `160x45` baseline (about 150 columns at the default font) fitted to 90 % × 85 % of the monitor, which is about 144 columns on a 1366 px wide laptop: the width Claude Code's fullscreen diff panel needs to auto-open (see [TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md#claude-code-diff-panel)). If only one dimension is set, the other comes from that same `160x45` baseline, and an explicit value is honoured as typed rather than fitted. The font is measured before the window opens, so a set dimension opens at exactly that many cells. An unset dimension keeps the `160x45` baseline's pixel size, converted with an 8×16 px cell in logical pixels, so a HiDPI display gets the same grid and the default window holds about 152x41 cells at the default font. Applied only as the startup seed; restored session geometry and explicit new-window geometry take precedence. For an ~800×600 px window, set `window-width = 98` / `window-height = 35` |
 | `window-position-x` / `window-position-y` | int px | unset | Initial fresh-window position in physical pixels. Negative coordinates are valid for monitors left/above the primary display. Applied only as the startup seed; restored sessions and explicit new-window placement take precedence |
@@ -187,19 +187,19 @@ SSH pane titles show the destination after skipping option operands, including
 ### Scrollback search
 
 `Ctrl+Shift+F` opens a responsive search bar at the bottom of the
-window. Its controls are Editor, Previous, Next, Wrap, Case, Invert, and Close;
+window. It shows the current match position and exact total beside the query (for example, `3/122`), **No matches** when empty, and **Counting…** while its bounded count scan is incomplete. Its controls are Editor, Previous, Next, Wrap, Case, Regex, Invert, and Close;
 `search-wrap`, `search-case-sensitive`, and `invert-search` are also available
 in **Settings → Search**. Changes made from either surface persist to the config.
 
 Patterns use Rust regex syntax through `regex-automata`'s meta engine and are
 limited to **4096 UTF-8 bytes**. A pattern that **fails to parse** is retried as
 a literal, so searching for `call(x` or a bare `(` finds that text on screen
-instead of reporting an error — most people typing into a search box are copying
-something they can see, not writing a regex, and the bar offers no way to turn
-regex off. A pattern that **does** parse keeps regex meaning, so `a|b` and `^row`
-work as expected. The consequence is worth knowing: `call(x)` and `arr[0]` are
-valid regex (a group and a character class), so they are matched as regex and
-still will not find that literal text. Engine construction is bounded to a
+instead of reporting an error. Regex is on by default; click **Regex** or press
+`Ctrl+Shift+Alt+R` (`toggle_search_regex`, rebindable) to switch to literal text.
+This toggle is local to the open window's search and does not change a config key.
+In regex mode a pattern that **does** parse keeps regex meaning, so `a|b` and
+`^row` work as expected. Literal mode finds punctuation such as `call(x)` and
+`arr[0]` exactly. Clicking **Case** cycles Smart, Match and Ignore. Engine construction is bounded to a
 **512 KiB NFA**, **256 KiB one-pass state**, **256 KiB hybrid cache**, and
 **40 KiB DFA**. A syntactically valid expression that exceeds an applicable
 ceiling shows **Pattern too complex**. Kettle asks the engine for its implicit
@@ -244,9 +244,11 @@ ends inside the logical line, it is an immediate accuracy barrier: Kettle does
 not skip the uninspected cells, returns no continuation beyond them, and reports
 **Results limited** instead of claiming a definitive first, last, wrap, or
 no-match state. One nearby projection retains at most **65,536 match spans**.
-Signed grid coordinates keep negative scrollback rows valid. Only the active
-and nearby matches are retained; the bar deliberately reports status rather
-than an eager global match count. Search state belongs to the OS window, while
+Signed grid coordinates keep negative scrollback rows valid. A separate bounded scan retains at most 65,536 spans for the exact total and
+current ordinal. It advances one engine call and at most 512 matches per turn,
+after the typing pause, and restarts on output, query changes or reflow. It shows
+**Results limited** when a capacity barrier prevents an exact count. Navigation
+and visible highlights have independent scanner progress. Search state belongs to the OS window, while
 the last query is remembered per pane within that window.
 
 `Enter` follows the configured default direction and `Shift+Enter` reverses it;
@@ -463,6 +465,21 @@ moves a key into the main table without changing its parser arm.
 | `enabled-plugins` | Terminator plugin-enable list | Kettle loads `<config-dir>/init.lua` instead; use `lua-sandbox` to set its trust level |
 | `hide-from-taskbar` | Suppress from OS taskbar | winit Windows-only natively; cross-platform requires per-platform extensions |
 | `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides | Multi-cycle per-pane font system |
+
+### Selection and history controls
+
+Faint selection fills are strengthened to at least 3:1 against the terminal
+background; selected text is adjusted to 4.5:1. Theme colours that already meet
+these ratios remain unchanged. Non-current search fills meet 3:1 against each
+cell background; the current result also has an underline.
+
+A pane scrolled into history shows a bottom-right **↓ 1,234 lines** pill. Click it
+to return that pane to live output. It disappears at the bottom and when a pane
+is too small to fit its label. It remains available with `scrollbar = never`.
+The scrollbar retains its configured resting width, grows to at least 10 logical
+pixels on hover or drag, and has a hit strip at least 12 logical pixels wide.
+All sizes scale with display DPI.
+
 
 ## Editing the config from inside kettle (Preferences submenu)
 

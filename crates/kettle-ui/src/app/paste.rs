@@ -1270,7 +1270,7 @@ impl App {
                 .as_ref()
                 .map(|window| window.scale_factor() as f32)
                 .unwrap_or(1.0);
-            (self.cfg.scrollbar_width.clamp(2.0, 40.0) * scale).max(12.0 * scale)
+            kettle_render::scrollbar_hit_width(self.cfg.scrollbar_width, scale)
         } else {
             0.0
         };

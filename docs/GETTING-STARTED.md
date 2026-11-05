@@ -117,10 +117,17 @@ budget shows **Pattern too complex**.
 - `F3` / `Shift+F3` always finds next / previous, and so do `Cmd+G` /
   `Shift+Cmd+G` (`Ctrl+G` / `Ctrl+Shift+G` on Linux).
 - **Wrap** controls whether stepping crosses the history boundary.
-- **Smart** ignores case until the pattern contains an uppercase character;
+- **Regex** switches between regular expressions and literal text. Click it or
+  press `Ctrl+Shift+Alt+R`; regex starts on, including the literal fallback for
+  invalid patterns.
+- Click **Case** to cycle modes. **Smart** ignores case until the pattern contains an uppercase character;
   **Match** always matches case; **Ignore** never matches case.
 - **Invert** flips the default direction. `Escape` closes the bar while keeping
   the selected result anchored on screen.
+
+The query shows its current match and total, such as **3/122**, **No matches**,
+or **Counting…** until the count finishes. Capacity-limited searches show
+**Results limited**.
 
 The bar is a lane below the grid, not a dialog over it: while it is open you
 can still drag-select text, double-click words, open links, scroll, and
@@ -137,12 +144,19 @@ without it.
 The query editor follows Unicode grapheme boundaries for caret movement and
 deletion, so combining marks and emoji sequences are not split. Kettle
 remembers the last query for each pane within its current window. The status
-shows searching, match/boundary, invalid, too-complex, no-match, or **Results
-limited** rather than a global count. Results limited means a pathological
+shows boundary, invalid, too-complex, or **Results limited** feedback alongside
+the count. Results limited means a pathological
 soft-wrapped line, an output-interrupted navigation, or the nearby-highlight
-cap made ordering uncertain; Kettle will not claim a possibly wrong first,
+cap prevented an exact count or made ordering uncertain; Kettle will not claim a possibly wrong first,
 last, or miss. Ordinary work-budget pauses resume automatically. This keeps
 large or infinite scrollback responsive.
+
+When you scroll into history, click the **↓ 1,234 lines** pill at the pane's
+bottom-right to return to live output. The default history budget is 64 MB per
+pane with a 10,000-line cap. Settings shows **64 MB** under **Scrollback memory**;
+`scrollback-bytes` and `scrollback` let you change the two limits independently.
+Selection and non-current search highlights are strengthened for visibility in
+faint themes, and the current search result has a distinct underline.
 
 ## 6. If something looks wrong
 

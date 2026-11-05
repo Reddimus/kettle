@@ -171,23 +171,13 @@ fn search_and_selection_foregrounds_ignore_underlying_dim_and_bold_attributes() 
     let base_fg = Rgb::new(200, 210, 220);
     let base_bg = Rgb::new(1, 2, 3);
 
-    for (name, highlight, expected) in [
-        (
-            "active search",
-            CellHighlight::Search(true),
-            cfg.search_foreground.expect("search foreground"),
-        ),
-        (
-            "inactive search",
-            CellHighlight::Search(false),
-            theme.selection_foreground,
-        ),
-        (
-            "selection",
-            CellHighlight::Selection,
-            theme.selection_foreground,
-        ),
+    for (name, highlight) in [
+        ("active search", CellHighlight::Search(true)),
+        ("inactive search", CellHighlight::Search(false)),
+        ("selection", CellHighlight::Selection),
     ] {
+        let expected =
+            resolved_cell_foreground(base_fg, base_bg, highlight, false, false, &cfg, &theme);
         for (dim, bold) in [(false, false), (true, false), (false, true), (true, true)] {
             assert_eq!(
                 resolved_cell_foreground(base_fg, base_bg, highlight, dim, bold, &cfg, &theme,),

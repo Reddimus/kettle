@@ -815,6 +815,11 @@ macos_menu_next_tab = "Pestaña siguiente"
 macos_menu_previous_tab = "Pestaña anterior"
 
 
+search_a11y_regex = "Usar expresiones regulares"
+search_regex_on = "Regex: Sí"
+search_regex_off = "Regex: No"
+search_counting = "Contando…"
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"
@@ -834,3 +839,11 @@ other = "{count} callbacks `{event}` tardaron demasiado y no se volverán a llam
 [confirm_close_scope]
 one = "Se cerrará el panel."
 other = "Se cerrarán los {count} paneles."
+
+[scrollback_return]
+one = "↓ {lines} línea"
+other = "↓ {lines} líneas"
+
+[scrollback_a11y]
+one = "Volver a la salida en vivo ({lines} línea sobre el final)"
+other = "Volver a la salida en vivo ({lines} líneas sobre el final)"

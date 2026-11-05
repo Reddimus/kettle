@@ -240,7 +240,7 @@ impl App {
                 }
                 // Pointer left the window → drop the scrollbar hover so
                 // the overlay bar relaxes to its dim state.
-                ws.scrollbar_hover = false;
+                ws.scrollbar_hover = None;
                 ws.hovered_close_idx = None;
                 ws.hovered_tab_idx = None;
                 ws.hovered_new_tab = false;
@@ -464,13 +464,13 @@ impl App {
                     }
                     return;
                 }
-                // Overlay-scrollbar hover-brighten. Update the focused
-                // pane's hover flag and repaint only on the enter/leave edge so it
+                // Overlay-scrollbar hover-brighten. Update the hovered
+                // pane's identity and repaint only on the enter/leave edge so it
                 // costs nothing while the pointer is elsewhere.
                 {
                     let area = self.area(ws);
                     let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                    let hover = self.scrollbar_zone_contains(ws, area, px, py);
+                    let hover = self.scrollbar_pane_at(ws, area, px, py);
                     if hover != ws.scrollbar_hover {
                         ws.scrollbar_hover = hover;
                         if let Some(w) = &ws.window {
@@ -688,6 +688,9 @@ impl App {
                 }
                 // An inline card takes a primary press before anything else
                 // in the window does; its release opens the card's item.
+                if self.press_scrollback_pill(ws, px, py, bcode) {
+                    return;
+                }
                 if self.press_card(ws, px, py, bcode) {
                     return;
                 }
@@ -1361,7 +1364,7 @@ impl App {
                     ws.search.pressed_control = None;
                     self.finish_selection_gesture(ws);
                     ws.scrollbar_drag_offset = None;
-                    ws.scrollbar_hover = false;
+                    ws.scrollbar_hover = None;
                     ws.tab_drag_active = false;
                     ws.tab_drag_press = None;
                     ws.tab_pressed_idx = None;

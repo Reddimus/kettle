@@ -221,3 +221,8 @@ and returns to it when it closes.
 While Settings or a picker is open, the transient window-size chip is hidden.
 Picker cards reduce their outer spacing on short windows so the query header
 and at least one result remain visible down to a 120-pixel window height.
+
+The default **Scrollback memory** is **64 MB** per pane. The separate default
+**Scrollback lines** cap remains 10,000; either cap can trim the oldest history.
+The search bar's **Regex** button (also `Ctrl+Shift+Alt+R`) changes the current
+search between regex and literal text without changing a saved preference.

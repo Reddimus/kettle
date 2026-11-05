@@ -45,7 +45,7 @@ pub const INFINITE_SCROLLBACK: usize = 10_000_000;
 
 /// Per-pane scrollback byte budget. `0` disables the byte cap and leaves the
 /// line-count `scrollback` key as the only history limit.
-pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
+pub const DEFAULT_SCROLLBACK_BYTES: usize = 64_000_000;
 /// Mirrors `kettle_core::record::MIN_RECORD_BYTES`. kettle-config and
 /// kettle-core are siblings, so the value is duplicated; kettle-core floors the
 /// live policy regardless, and its
