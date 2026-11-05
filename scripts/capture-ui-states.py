@@ -79,7 +79,7 @@ STATES: Dict[str, Callable] = {
 SIZES: Dict[str, Tuple[int, int]] = {"default": (1280, 820), "narrow": (640, 820)}
 
 
-def write_config(path: Path, language: str, theme: str) -> None:
+def write_config(path: Path, language: str, theme: str, shell: Path) -> None:
     lines = [
         "record = false",
         "restore-session = false",
@@ -89,7 +89,7 @@ def write_config(path: Path, language: str, theme: str) -> None:
         "cursor-blink = false",
         "window-title-format = {title}",
         # Every tab and split runs the same plain shell (see capture_state).
-        "command = bash --noprofile --norc",
+        f"command = {shell}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -114,8 +114,12 @@ def capture_state(smoke, kettle: str, out: Path, name: str, language: str, theme
         os.chmod(scratch, 0o700)
         home = scratch / "home"
         home.mkdir(mode=0o700)
+        # `command` names a program, so the shell's flags live in a wrapper.
+        shell = scratch / "shell.sh"
+        shell.write_text("#!/bin/sh\nexec bash --noprofile --norc\n", encoding="utf-8")
+        os.chmod(shell, 0o700)
         cfg = scratch / "kettle.cfg"
-        write_config(cfg, language, theme)
+        write_config(cfg, language, theme, shell)
         env = private_env(home)
         # The config's plain shell gets a fixed prompt, so images do not
         # depend on the account's shell, its startup files or the host name.
