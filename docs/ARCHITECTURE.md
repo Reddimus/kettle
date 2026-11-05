@@ -2500,6 +2500,14 @@ Overflow or a journal/marker mismatch is sticky for that update and fails
 closed by clearing both buffer-local graphics stores and resynchronizing the
 extractor to the engine's active screen.
 
+Output-trigger snapshots drain a separate bounded copy of the terminal's row
+mutation journal under the grid lock. Consumed matches move with retained rows
+inside scroll regions; rows lost from a region lose their consumed spans.
+Full-screen scrolling into history retains the absolute document identities.
+If this journal overflows, previously consumed text stays suppressed regardless
+of its position until a later screen reset or cache eviction, since lost
+movements cannot prove a new occurrence.
+
 DEC mode 69 enables left/right scrolling margins. The engine clips cursor
 movement and edits to the applicable margins and applies vertical scrolls
 inside their rectangle without rotating whole rows into history. A wide glyph
