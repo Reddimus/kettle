@@ -119,6 +119,8 @@ pub fn atomic_replace(
         )
     })?;
 
+    #[cfg(unix)]
+    let mut existing_group = None;
     let (destination_exists, mut existing_permissions) = match fs::symlink_metadata(destination) {
         Ok(metadata) => {
             if options.reject_symlink && metadata_is_link_like(&metadata) {
@@ -138,6 +140,11 @@ pub fn atomic_replace(
                         destination.display()
                     ),
                 ));
+            }
+            #[cfg(unix)]
+            if options.preserve_permissions {
+                use std::os::unix::fs::MetadataExt as _;
+                existing_group = Some(metadata.gid());
             }
             (
                 true,
@@ -201,6 +208,14 @@ pub fn atomic_replace(
             && let Some(snapshot) = destination_snapshot.as_ref()
         {
             private::apply_preserved_dacl(snapshot, &staged)?;
+        }
+        #[cfg(unix)]
+        if let Some(group) = existing_group {
+            use std::os::fd::AsRawFd as _;
+            // SAFETY: staged owns a live descriptor; -1 leaves its owner unchanged.
+            if unsafe { libc::fchown(staged.as_raw_fd(), !0, group) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
         if let Some(permissions) = existing_permissions.as_ref() {
             staged.set_permissions(permissions.clone())?;
@@ -1531,6 +1546,40 @@ mod tests {
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o640
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_existing_group() {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("config");
+        let file = File::create(&path).unwrap();
+        let staging_group = file.metadata().unwrap().gid();
+        let mut groups = vec![0; 128];
+        // SAFETY: groups has capacity for the requested number of group IDs.
+        let count = unsafe { libc::getgroups(groups.len() as _, groups.as_mut_ptr()) };
+        assert!(count >= 0);
+        groups.truncate(count as usize);
+        let Some(group) = groups.into_iter().find(|group| *group != staging_group) else {
+            eprintln!("skipping: no supplementary group differs from the staging group");
+            return;
+        };
+        // SAFETY: file owns a live descriptor; -1 leaves its owner unchanged.
+        assert_eq!(unsafe { libc::fchown(file.as_raw_fd(), !0, group) }, 0);
+        file.set_permissions(fs::Permissions::from_mode(0o640))
+            .unwrap();
+
+        atomic_replace(&path, b"new", AtomicWriteOptions::PRESERVE_PERMISSIONS).unwrap();
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().gid(),
+            group,
+            "destination group changed"
+        );
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o640);
     }
 
     #[cfg(windows)]

@@ -511,6 +511,8 @@ pub fn create_private_dirs(directory: &Path) -> io::Result<()> {
 fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
 
+    unix::reject_parent_components(directory)?;
+
     let private = |path: &Path| {
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -716,7 +718,12 @@ fn repair_private_dir_mode(path: &Path) -> io::Result<()> {
     // Both checks now read the object we hold open, not the name.
     let metadata = directory.metadata()?;
     // SAFETY: geteuid has no preconditions.
-    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 == 0 {
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    unix::macos_acl::clear_extended_acl(&directory)?;
+    if metadata.mode() & 0o077 == 0 {
         return Ok(());
     }
     // SAFETY: `directory` owns a live descriptor for the duration of the call.
@@ -1594,7 +1601,7 @@ pub(crate) mod unix {
         Ok(normalized)
     }
 
-    fn reject_parent_components(path: &Path) -> io::Result<()> {
+    pub(super) fn reject_parent_components(path: &Path) -> io::Result<()> {
         if path
             .components()
             .any(|component| matches!(component, Component::ParentDir))
@@ -3112,6 +3119,15 @@ pub(crate) mod unix {
         leaf: &OsStr,
         path: &Path,
     ) -> io::Result<File> {
+        create_user_selected_file_new_at_with(parent, leaf, path, || {})
+    }
+
+    pub(super) fn create_user_selected_file_new_at_with(
+        parent: &File,
+        leaf: &OsStr,
+        path: &Path,
+        after_create: impl FnOnce(),
+    ) -> io::Result<File> {
         let leaf_c = c_name(leaf, "user-selected output file name")?;
         #[cfg(target_os = "macos")]
         let file =
@@ -3138,30 +3154,17 @@ pub(crate) mod unix {
             // SAFETY: openat returned a new owned descriptor.
             unsafe { File::from_raw_fd(fd) }
         };
-        let result = (|| {
-            require_user_owned_regular(&file, path)?;
-            restrict_private_object(&file)?;
-            let identity = FileIdentity::from_metadata(&file.metadata()?);
-            let linked = entry_stat(parent, leaf)?
-                .is_some_and(|stat| FileIdentity::from_stat(&stat) == identity);
-            if !linked {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "user-selected output path no longer refers to the created file",
-                ));
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
-            if file.metadata().ok().is_some_and(|metadata| {
-                entry_stat(parent, leaf).ok().flatten().is_some_and(|stat| {
-                    FileIdentity::from_stat(&stat) == FileIdentity::from_metadata(&metadata)
-                })
-            }) {
-                // SAFETY: this held directory and leaf still identify our file.
-                let _ = unsafe { libc::unlinkat(parent.as_raw_fd(), leaf_c.as_ptr(), 0) };
-            }
-            return Err(error);
+        after_create();
+        require_user_owned_regular(&file, path)?;
+        restrict_private_object(&file)?;
+        let identity = FileIdentity::from_metadata(&file.metadata()?);
+        let linked = entry_stat(parent, leaf)?
+            .is_some_and(|stat| FileIdentity::from_stat(&stat) == identity);
+        if !linked {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "user-selected output path no longer refers to the created file",
+            ));
         }
         Ok(file)
     }
@@ -3367,7 +3370,8 @@ pub(crate) mod unix {
         } else {
             guard.path.join(target)
         };
-        let resolved = std::fs::canonicalize(target)?;
+        let target_guard = PrivateParentGuard::new(&target)?;
+        let resolved = target_guard.path.join(&target_guard.leaf);
         let file = open_trusted_file_read(&resolved)?;
         Ok((file, resolved))
     }
@@ -6565,6 +6569,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn direct_export_validation_failure_retains_the_visible_entry() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_tempdir();
+        let exports = root.path().join("exports");
+        std::fs::create_dir(&exports).unwrap();
+        std::fs::set_permissions(&exports, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let parent = File::open(&exports).unwrap();
+        let path = exports.join("partial.png");
+        let alias = exports.join("alias.png");
+
+        let error = unix::create_user_selected_file_new_at_with(
+            &parent,
+            std::ffi::OsStr::new("partial.png"),
+            &path,
+            || std::fs::hard_link(&path, &alias).unwrap(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("hard-link count"), "{error}");
+        assert!(path.exists(), "failed validation unlinked a visible export");
+        assert!(alias.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn direct_export_discard_retains_the_visible_entry() {
         let root = crate::test_tempdir();
         let path = root.path().join("partial.png");
@@ -7133,6 +7164,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn trusted_leaf_follow_rejects_links_through_a_writable_directory() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let root = crate::test_tempdir();
+        let target = root.path().join("trusted.lua");
+        std::fs::write(&target, b"return 'trusted'\n").unwrap();
+        let writable = root.path().join("writable");
+        std::fs::create_dir(&writable).unwrap();
+        std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o777)).unwrap();
+        symlink(&target, writable.join("selected.lua")).unwrap();
+        symlink(root.path(), writable.join("selected-directory")).unwrap();
+
+        for selected in [
+            writable.join("selected.lua"),
+            writable.join("selected-directory/trusted.lua"),
+        ] {
+            let link = root.path().join("init.lua");
+            symlink(&selected, &link).unwrap();
+            assert!(
+                open_trusted_file_read_following_leaf(&link).is_err(),
+                "trusted leaf accepted an attacker-controlled intermediate link"
+            );
+            std::fs::remove_file(&link).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_preexisting_link_requires_trusted_ownership_and_one_name() {
         // SAFETY: geteuid has no preconditions.
         let current = unsafe { libc::geteuid() };
@@ -7173,6 +7232,59 @@ mod tests {
         let error = open_trusted_file_read(&alias).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(std::fs::read(&target).unwrap(), b"font-size = 98\n");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn private_directory_repair_clears_mutation_acls() {
+        const CHILD: &str = "KETTLE_DIRECTORY_ACL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "private::tests::private_directory_repair_clears_mutation_acls",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "directory ACL child failed: {status}");
+            return;
+        }
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        for mode in [0o700, 0o775] {
+            let root = crate::test_tempdir();
+            // SAFETY: only this re-executed child changes its environment.
+            unsafe { std::env::set_var("XDG_RUNTIME_DIR", root.path()) };
+            let directory = root.path().join("kettle");
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(mode)).unwrap();
+            let status = std::process::Command::new("/bin/chmod")
+                .args([
+                    "+a",
+                    "everyone allow search,add_file,delete_child,directory_inherit",
+                ])
+                .arg(&directory)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let child = directory.join("ctl");
+
+            create_private_dirs(&child).unwrap();
+
+            for path in [&directory, &child] {
+                let file = File::open(path).unwrap();
+                assert!(
+                    !unix::macos_acl::has_any_extended_acl(&file).unwrap(),
+                    "private control directory retained an extended ACL: {}",
+                    path.display()
+                );
+                assert_eq!(file.metadata().unwrap().mode() & 0o077, 0);
+                validate_trusted_directory(path).unwrap();
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -7533,6 +7645,59 @@ mod tests {
             dir.path().metadata().unwrap().permissions().mode() & 0o777,
             before
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_directory_creation_rejects_traversal_before_mutating() {
+        const CHILD: &str = "KETTLE_DIRECTORY_TRAVERSAL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "private::tests::private_directory_creation_rejects_traversal_before_mutating",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "directory traversal child failed: {status}"
+            );
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_tempdir();
+        let home = root.path().join("home");
+        let config = home.join(".config");
+        let namespace = config.join("kettle");
+        std::fs::create_dir_all(&namespace).unwrap();
+        for path in [&home, &config] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // SAFETY: only this re-executed child changes its environment.
+        unsafe { std::env::set_var("HOME", &home) };
+
+        let result = create_private_dirs(&namespace.join("../.."));
+
+        for path in [&home, &config] {
+            assert_eq!(
+                path.metadata().unwrap().permissions().mode() & 0o777,
+                0o755,
+                "traversal changed an ancestor mode: {}",
+                path.display()
+            );
+        }
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        let missing = namespace.join("../../unexpected/child");
+        assert_eq!(
+            create_private_dirs(&missing).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(!home.join("unexpected").exists());
     }
 
     #[cfg(unix)]
