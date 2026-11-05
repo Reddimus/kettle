@@ -17,7 +17,7 @@ pub fn tab_shortcut_hint(index: usize, macos: bool) -> Option<String> {
     (macos && index < 9).then(|| format!("Cmd+{}", index + 1))
 }
 
-/// Hint space is optional; close and activity space take priority over it.
+/// Hidden controls reserve no hint or close space; title and activity take priority.
 pub fn horizontal_tab_content_layout(
     segment: Rect4,
     show_controls: bool,
@@ -47,7 +47,7 @@ pub fn horizontal_tab_content_layout(
     .max(x);
     let left = (x + 8.0 + if activity { 12.0 } else { 0.0 }).min(right);
     let cw = cell_width.max(1.0);
-    let hint = hint.and_then(|hint| {
+    let hint = hint.filter(|_| show_controls).and_then(|hint| {
         let width = display_width(hint) as f32 * cw;
         let title_width = display_width(label) as f32 * cw;
         if title_width + cw + width <= right - left {
@@ -216,6 +216,71 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_single_tab_controls_render_from_shared_geometry() {
+        let source = crate::production_source();
+        let close = source
+            .split_once("if s.close.2 <= 0.0")
+            .unwrap()
+            .1
+            .split_once("let (cx, cy, ccw, cch) = s.close;")
+            .unwrap()
+            .0;
+        assert!(!close.contains("s.active"));
+        assert!(!close.contains("hovered_tab_idx"));
+    }
+
+    #[test]
+    fn horizontal_controls_keep_strip_text_metrics_and_contrast() {
+        let source = crate::production_source();
+        for buffer in ["tabbar_buffer", "new_tab_arrow_buffer", "tab_close_buffer"] {
+            assert!(source.contains(&format!("self.{buffer}.set_metrics(tab_metrics);")));
+            assert!(source.contains(&format!("buffer: &self.{buffer},")));
+        }
+        for statement in [
+            "let plus_fg = self.chrome_colors.text(plus_fg, background);",
+            "let arrow_fg = self.chrome_colors.text(arrow_fg, background);",
+            "let close_fg = self.chrome_colors.text(close_fg, close_background);",
+            "let hint_fg = self.chrome_colors.muted(fg, tab_background);",
+        ] {
+            assert!(
+                source.contains(statement),
+                "missing contrast resolution: {statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn horizontal_single_tab_controls_follow_hover_and_tab_count() {
+        for count in [1, 2] {
+            for hovered in [false, true] {
+                let visible = count > 1 || hovered;
+                let content = horizontal_tab_content_layout(
+                    (0.0, 0.0, 320.0, 28.0),
+                    visible,
+                    true,
+                    false,
+                    "shell",
+                    Some("Cmd+1"),
+                    8.0,
+                );
+                assert_eq!(
+                    content.hint.is_some(),
+                    visible,
+                    "count={count}, hover={hovered}"
+                );
+                assert_eq!(content.close.2 > 0.0, visible);
+                if !visible {
+                    assert_eq!(content.title, (8.0, 0.0, 304.0, 28.0));
+                    assert_eq!(
+                        tab_label_origin(content.title, "shell", (8.0, 16.0)),
+                        (140.0, 6.0)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn horizontal_content_places_controls_only_when_visible() {
         for width in [24.0, 40.0, 80.0, 160.0, 320.0] {
             for active in [false, true] {
@@ -237,7 +302,7 @@ mod tests {
                             assert!(c.title.0 + c.title.2 <= c.close.0);
                         }
                         let available = width - 8.0 - if close { 28.0 } else { 8.0 };
-                        assert_eq!(c.hint.is_some(), available >= 88.0);
+                        assert_eq!(c.hint.is_some(), (active || hovered) && available >= 88.0);
                         if let Some(hint) = c.hint {
                             assert!(c.title.0 + c.title.2 + 8.0 <= hint.0);
                             assert_eq!(

@@ -325,13 +325,15 @@ mod tests {
                                 "{name}: tab control"
                             );
                         }
-                        assert!(
-                            color::contrast_ratio(
-                                colors.muted(theme.foreground, background),
-                                background
-                            ) >= 3.0,
-                            "{name}: Cmd+N hint"
-                        );
+                        for role in ["Cmd+N hint", "inactive tab title"] {
+                            assert!(
+                                color::contrast_ratio(
+                                    colors.muted(theme.foreground, background),
+                                    background
+                                ) >= TEXT_CONTRAST,
+                                "{name}: {role}"
+                            );
+                        }
                     }
                 }
             }

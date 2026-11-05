@@ -3986,11 +3986,7 @@ impl Renderer {
                 if !cfg.close_button_on_tab {
                     continue;
                 }
-                if s.close.2 <= 0.0
-                    || (!cfg.tab_bar_pos.is_vertical()
-                        && !s.active
-                        && tabbar.hovered_tab_idx != Some(s.idx))
-                {
+                if s.close.2 <= 0.0 {
                     continue;
                 }
                 let (cx, cy, ccw, cch) = s.close;

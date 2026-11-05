@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn titlebar_single_tab_stays_visible_and_centres_title_with_controls() {
+    fn titlebar_single_tab_stays_visible_and_centres_title_with_hover_controls() {
         assert!(tab_strip_visible(TabBarMode::Auto, 1, false, false, true));
         assert!(!tab_strip_visible(TabBarMode::Auto, 1, false, false, false));
         assert!(!tab_strip_visible(TabBarMode::Off, 1, false, false, false));
@@ -308,20 +308,28 @@ mod tests {
                 let strip = width - left - 2.0 * h;
                 let layout = titlebar_tab_layout(1, 0, (strip, 2.0 * h, left), h, 80.0, true);
                 let rect = (left + layout.xs[0].unwrap(), 0.0, layout.width, h);
-                let content = kettle_render::horizontal_tab_content_layout(
-                    rect,
-                    true,
-                    true,
-                    false,
-                    "shell",
-                    Some("Cmd+1"),
-                    8.0 * scale,
-                );
-                let title = centered_title_lane(content.title, width * 0.5);
-                assert!((title.0 + title.2 * 0.5 - width * 0.5).abs() < 0.01);
-                assert!(title.0 >= left);
-                assert!(title.0 + title.2 <= content.hint.unwrap().0);
-                assert!(content.close.2 >= 20.0 * scale && content.close.3 >= 20.0 * scale);
+                for hovered in [false, true] {
+                    let content = kettle_render::horizontal_tab_content_layout(
+                        rect,
+                        hovered,
+                        true,
+                        false,
+                        "shell",
+                        Some("Cmd+1"),
+                        8.0 * scale,
+                    );
+                    let title = centered_title_lane(content.title, width * 0.5);
+                    assert!((title.0 + title.2 * 0.5 - width * 0.5).abs() < 0.01);
+                    assert!(title.0 >= left);
+                    assert_eq!(content.hint.is_some(), hovered);
+                    if let Some(hint) = content.hint {
+                        assert!(title.0 + title.2 <= hint.0);
+                        assert!(content.close.2 >= 20.0 * scale && content.close.3 >= 20.0 * scale);
+                    } else {
+                        assert_eq!(content.close.2, 0.0);
+                        assert_eq!(content.close.3, 0.0);
+                    }
+                }
                 assert!(
                     rect.0 + rect.2 < left + strip,
                     "room remains for native window drag"

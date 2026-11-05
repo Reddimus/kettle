@@ -281,9 +281,10 @@ impl App {
                 } else {
                     cell_w
                 };
+                let show_controls = n > 1 || hovered;
                 let mut content = kettle_render::horizontal_tab_content_layout(
                     rect,
-                    i == active || hovered,
+                    show_controls,
                     self.cfg.close_button_on_tab,
                     activity != RenderTabActivity::Normal,
                     &full_label,

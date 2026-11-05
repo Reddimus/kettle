@@ -46,6 +46,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Automatic selection and search text colours meet 4.5:1 contrast against
   their highlight, including dim text and underlined links, while preserving
   readable cell colours and explicit highlight foregrounds.
+- Horizontal tab strips use full-size controls and at least 4.5:1 contrast
+  for control glyphs, shortcut hints and inactive titles. A single tab hides
+  its shortcut hint and close button until hovered, including in the macOS
+  titlebar; both controls return with multiple tabs.
 - On macOS, top tabs share the titlebar by default, with a centred title for a
   single tab, native window dragging, and the system double-click action on
   empty strip space. `macos-titlebar-style = native` restores the separate

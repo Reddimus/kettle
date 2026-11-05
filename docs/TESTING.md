@@ -83,6 +83,17 @@ adapter. Run
 `cargo test -j 2 --locked --offline -p kettle-render horizontal_translucent_active_surface -- --nocapture`,
 then the full `kettle-render` and `kettle-ui` suites.
 
+The horizontal tab regressions cover a single tab at rest and on hover,
+multiple tabs, optional hints when space is tight, and the shared close geometry
+used by painting, hit tests and AccessKit. Run
+`cargo test -j 2 --locked --offline -p kettle-render -p kettle-ui horizontal_single_tab_controls`
+and `cargo test -j 2 --locked --offline -p kettle-render tab_controls_and_shortcut_hints`
+for the visibility and bundled-theme contrast checks. The native titlebar
+checker consumes `ui_geometry`'s per-tab `hovered`, `hint` and `close` fields;
+`python3 scripts/test-native-titlebar.py` checks its scaled fixtures without a
+live window. Full-size control metrics and contrast wiring have portable source
+guards; these do not replace native titlebar screenshots.
+
 The renderer recovery tests include successful device creation on a backend
 that failed while drawing, checking that another backend is tried first.
 `python3 scripts/test-install-media.py` interrupts uninstall after each recovery

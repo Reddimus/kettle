@@ -1,4 +1,97 @@
 #[test]
+fn horizontal_single_tab_controls_use_count_and_physical_hover() {
+    let source = include_str!("chrome.rs");
+    let horizontal = source
+        .split_once("fn tab_bar_at_height(")
+        .unwrap()
+        .1
+        .split_once("pub(super) fn title_edit_rect(")
+        .unwrap()
+        .0;
+    assert!(horizontal.contains("let show_controls = n > 1 || hovered;"));
+    assert!(horizontal.contains("rect,\n                    show_controls,"));
+    assert!(horizontal.contains("rect_contains(rect, p.x as f32, p.y as f32)"));
+}
+
+#[test]
+fn horizontal_single_tab_controls_match_hit_tests_and_accesskit() {
+    for in_titlebar in [false, true] {
+        for bottom in [false, true] {
+            for count in [1, 2] {
+                for hovered in [false, true] {
+                    for close_enabled in [false, true] {
+                        let mut bar = kettle_render::TabBar::hidden();
+                        bar.height = 28.0;
+                        bar.in_titlebar = in_titlebar;
+                        for idx in 0..count {
+                            let rect = (
+                                78.0 + idx as f32 * 320.0,
+                                if bottom { 572.0 } else { 0.0 },
+                                320.0,
+                                28.0,
+                            );
+                            let hint = kettle_render::tab_shortcut_hint(idx, true).unwrap();
+                            let content = kettle_render::horizontal_tab_content_layout(
+                                rect,
+                                count > 1 || hovered,
+                                close_enabled,
+                                false,
+                                "shell",
+                                Some(&hint),
+                                8.0,
+                            );
+                            bar.segments.push(kettle_render::TabSeg {
+                                idx,
+                                rect,
+                                title_rect: content.title,
+                                hint: content.hint.map(|r| (r, hint)),
+                                close: content.close,
+                                title: "shell".into(),
+                                path: None,
+                                active: idx == 0,
+                                activity: kettle_render::TabActivity::Normal,
+                            });
+                        }
+                        let nodes = super::tab_accessibility_projection(
+                            &bar,
+                            &[10, 20],
+                            false,
+                            &kettle_i18n::Translator::default(),
+                        );
+                        for seg in &bar.segments {
+                            let visible = count > 1 || hovered;
+                            assert_eq!(seg.hint.is_some(), visible);
+                            let closes = visible && close_enabled;
+                            assert_eq!(
+                                super::hovered_close_button(
+                                    &bar.segments,
+                                    seg.rect.0 + 306.0,
+                                    seg.rect.1 + 14.0,
+                                ),
+                                closes.then_some(seg.idx)
+                            );
+                            let close_id = super::accessibility_tab_id([10, 20][seg.idx], true);
+                            assert_eq!(nodes.iter().any(|(id, _)| *id == close_id), closes);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let ctl = include_str!("ctl.rs");
+    for field in [
+        "\"close\": rect_json(seg.close)",
+        "\"hint\": seg.hint.as_ref()",
+        "\"hovered\": bar.hovered_tab_idx == Some(seg.idx)",
+    ] {
+        assert!(
+            ctl.contains(field),
+            "ui_geometry must report the shared tab state"
+        );
+    }
+}
+
+#[test]
 fn shortcut_hint_layout_uses_natural_chrome_text_advance() {
     let src = include_str!("chrome.rs");
     let horizontal = src

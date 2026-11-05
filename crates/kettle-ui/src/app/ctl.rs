@@ -1020,6 +1020,7 @@ impl App {
                     "fitted_title": fitted_title,
                     "label": label,
                     "active": seg.active,
+                    "hovered": bar.hovered_tab_idx == Some(seg.idx),
                     "rect": rect_json(seg.rect),
                     "title_rect": rect_json(seg.title_rect),
                     "hint": seg.hint.as_ref().map(|(rect, text)| serde_json::json!({"rect": rect_json(*rect), "text": text})),

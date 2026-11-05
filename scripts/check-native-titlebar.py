@@ -70,7 +70,13 @@ def titlebar_geometry(geometry):
         if close["width"]:
             assert close["width"] >= 20 * scale and close["height"] >= 20 * scale
     if len(bar["segments"]) == 1:
-        title = bar["segments"][0]["title_rect"]
+        tab = bar["segments"][0]
+        if not tab["hovered"]:
+            assert tab["hint"] is None, "idle single tab must hide its shortcut hint"
+            assert tab["close"]["width"] == tab["close"]["height"] == 0, (
+                "idle single tab must hide its close button"
+            )
+        title = tab["title_rect"]
         assert abs(title["x"] + title["width"] / 2 - geometry["surface"]["width"] / 2) <= 1
         assert bar["segments"][0]["label"].strip(), "single-tab title is missing"
 
