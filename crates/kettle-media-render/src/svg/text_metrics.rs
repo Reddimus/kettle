@@ -213,6 +213,7 @@ pub(crate) fn measure_shape_with_whitespace(
     if document.len() > 5 * 1024 * 1024 {
         return Err(FailureCode::RenderResource);
     }
+    super::structure::admit(&super::sanitize::parse(&document)?)?;
     let tree = crate::guarded(FailureCode::RenderParse, || {
         usvg::Tree::from_str(&document, &super::options(fonts))
             .map_err(|_| FailureCode::RenderParse)

@@ -355,6 +355,30 @@ mod tests {
     }
 
     #[test]
+    fn formatted_multiword_probes_observe_structural_work_limits() {
+        let cache = fixture();
+        let text = "x ".repeat(400);
+        assert_eq!(
+            cache
+                .measure_shape(&text, &style(&cache), TextShape::Formatted, || Ok(()))
+                .map(|_| ()),
+            Err(FailureCode::RenderResource)
+        );
+        assert!(cache.state.lock().unwrap().families.is_empty());
+        assert!(cache.measure(&text, &style(&cache), || Ok(())).is_ok());
+        assert!(
+            cache
+                .measure_shape(
+                    &"x ".repeat(100),
+                    &style(&cache),
+                    TextShape::Formatted,
+                    || Ok(()),
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn a_deadline_after_shaping_prevents_cache_publication() {
         let cache = fixture();
         let calls = std::cell::Cell::new(0);

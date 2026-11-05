@@ -137,6 +137,7 @@ fn css_only_value(name: &str, value: &str) -> bool {
                 | "saturation"
                 | "color"
                 | "luminosity"
+                | "plus-lighter"
         ),
         "isolation" => matches!(value, "auto" | "isolate"),
         "font-kerning" => matches!(value, "auto" | "normal" | "none"),
