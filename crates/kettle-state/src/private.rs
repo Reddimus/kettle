@@ -854,9 +854,21 @@ fn repair_private_dir_mode(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
+    windows::create_parent_dirs(&directory.join(".kettle-directory-create"))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
     std::fs::create_dir_all(directory)
+}
+
+/// Validate a current-user-owned Windows directory without allowing mutation
+/// grants to principals other than that user, SYSTEM and Administrators.
+#[cfg(windows)]
+pub fn validate_private_directory(directory: &Path) -> io::Result<()> {
+    windows::validate_private_directory(directory)
 }
 
 /// Create a new private regular file without an inherited-permission window.
@@ -1373,6 +1385,11 @@ fn discard_created_private_file_checked_impl(file: File, path: &Path) -> io::Res
 #[cfg(windows)]
 fn restrict_private_object(file: &File) -> io::Result<()> {
     windows::restrict_private_object(file)
+}
+
+#[cfg(windows)]
+pub(super) fn retire_locked_file(file: &File) {
+    windows::retire_locked_file(file);
 }
 
 #[cfg(windows)]
@@ -4735,9 +4752,7 @@ mod windows {
         require_trusted_object_security(
             &file,
             &path,
-            current_user.sid,
-            administrators.sid,
-            system.sid,
+            |sid| trusted_windows_sid(sid, current_user.sid, administrators.sid, system.sid),
             DANGEROUS_FILE_RIGHTS,
             "trusted file",
         )?;
@@ -4773,9 +4788,7 @@ mod windows {
             require_trusted_object_security(
                 &link,
                 requested,
-                current_user.sid,
-                administrators.sid,
-                system.sid,
+                |sid| trusted_windows_sid(sid, current_user.sid, administrators.sid, system.sid),
                 DANGEROUS_FILE_RIGHTS,
                 "trusted file link",
             )?;
@@ -4812,6 +4825,42 @@ mod windows {
         // SAFETY: ReOpenFile transferred ownership of this valid handle.
         let writable = File::from(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) });
         writable.set_len(len)
+    }
+
+    pub(super) fn retire_locked_file(file: &File) {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+            FILE_DISPOSITION_INFO_EX, FileDispositionInfoEx,
+        };
+        // SAFETY: ReOpenFile targets the held kernel file, with cooperative
+        // sharing; the exclusive byte-range lock remains on the original handle.
+        let handle = unsafe {
+            ReOpenFile(
+                file.as_raw_handle() as HANDLE,
+                DELETE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return;
+        }
+        // SAFETY: ReOpenFile transferred ownership of this valid handle.
+        let deletion = unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) };
+        let disposition = FILE_DISPOSITION_INFO_EX {
+            Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        };
+        // SAFETY: the handle has DELETE access and the disposition has the
+        // requested layout. Failure leaves the reusable lock file untouched;
+        // legacy delete-pending semantics would deny access to waiting openers.
+        unsafe {
+            SetFileInformationByHandle(
+                deletion.as_raw_handle() as HANDLE,
+                FileDispositionInfoEx,
+                std::ptr::addr_of!(disposition).cast(),
+                std::mem::size_of_val(&disposition) as u32,
+            );
+        }
     }
 
     pub(super) fn remove_open_private_file(file: File, path: &Path) -> io::Result<()> {
@@ -5164,9 +5213,7 @@ mod windows {
     fn require_trusted_object_security(
         object: &File,
         path: &Path,
-        current_user: PSID,
-        administrators: PSID,
-        system: PSID,
+        trusted_sid: impl Fn(PSID) -> bool,
         dangerous_rights: u32,
         description: &str,
     ) -> io::Result<()> {
@@ -5191,7 +5238,7 @@ mod windows {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
         let _descriptor = SecurityDescriptor(descriptor);
-        if !trusted_windows_sid(owner, current_user, administrators, system) {
+        if !trusted_sid(owner) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!("{description} has an untrusted owner: {}", path.display()),
@@ -5282,7 +5329,7 @@ mod windows {
                     ),
                 ));
             }
-            if !trusted_windows_sid(sid, current_user, administrators, system) {
+            if !trusted_sid(sid) {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     format!(
@@ -5293,6 +5340,41 @@ mod windows {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn validate_private_directory(directory: &Path) -> io::Result<()> {
+        let guard = PrivateParentGuard::new(&directory.join(".kettle-directory-trust-check"))?;
+        let target = guard
+            ._handles
+            .last()
+            .expect("a directory guard has a target");
+        let token = effective_token()?;
+        let user = token_user_sid(&token)?;
+        let owner = token_owner_sid(&token)?;
+        let administrators = builtin_administrators_sid()?;
+        let system = well_known_sid(WinLocalSystemSid)?;
+        if !owned_by_any_handle_direct(target, &[user.sid, owner.sid])? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private directory has another owner",
+            ));
+        }
+        require_trusted_object_security(
+            target,
+            directory,
+            |sid| {
+                // SAFETY: the validator supplies a SID in its retained security
+                // descriptor; the trusted SID buffers outlive this call.
+                unsafe {
+                    EqualSid(sid, user.sid) != 0
+                        || EqualSid(sid, administrators.sid) != 0
+                        || EqualSid(sid, system.sid) != 0
+                }
+            },
+            DANGEROUS_PATH_RIGHTS | DANGEROUS_CONTENT_RIGHTS,
+            "private directory",
+        )?;
+        guard.verify_directory()
     }
 
     fn require_trusted_directory_security(
@@ -5311,9 +5393,7 @@ mod windows {
         require_trusted_object_security(
             directory,
             path,
-            current_user,
-            administrators,
-            system,
+            |sid| trusted_windows_sid(sid, current_user, administrators, system),
             dangerous_rights,
             "private parent",
         )
@@ -6491,6 +6571,22 @@ mod tests {
                 .unwrap(),
             CreatedFilePublication::Linked
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_directory_creation_uses_a_protected_current_user_dacl() {
+        let root = crate::test_tempdir();
+        let directory = root.path().join("new").join("control");
+        create_private_dirs(&directory).unwrap();
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL};
+        let handle = std::fs::OpenOptions::new()
+            .access_mode(READ_CONTROL)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&directory)
+            .unwrap();
+        assert!(has_current_user_only_dacl(&handle).unwrap());
     }
 
     #[cfg(windows)]
