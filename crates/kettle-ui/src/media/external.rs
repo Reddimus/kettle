@@ -441,12 +441,31 @@ pub(crate) fn open(
     viewer: Viewer,
     failed: impl FnOnce(OpenFailure) + Send + 'static,
 ) {
+    open_with_handoff(copies, image, viewer, failed, hand_over);
+}
+
+fn open_with_handoff(
+    copies: Arc<Mutex<PastedImages>>,
+    image: ImageData,
+    viewer: Viewer,
+    failed: impl FnOnce(OpenFailure) + Send + 'static,
+    handoff: impl FnOnce(
+        &Mutex<PastedImages>,
+        &ImageData,
+        Viewer,
+    ) -> Result<Option<std::process::Child>, OpenFailure>
+    + Send
+    + 'static,
+) {
     let Some(slot) = Slot::take() else {
         failed(OpenFailure::Busy);
         return;
     };
     start_open("kettle-ui-open", failed, move |failed| {
-        match hand_over(&copies, &image, viewer) {
+        let opened = handoff(&copies, &image, viewer);
+        drop(image);
+        drop(copies);
+        match opened {
             Ok(child) => {
                 // The slot bounds the work of opening, not how long the
                 // viewer stays up: Eye of GNOME runs until the user closes
@@ -526,6 +545,54 @@ fn save_and_open(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_pixels_are_released_while_viewer_is_running() {
+        use std::time::Duration;
+        let dir = kettle_test_support::private_tempdir("kettle-image-lifetime-");
+        let copies = Arc::new(Mutex::new(PastedImages::of_kind_in(
+            crate::paste_image::OPENED,
+            dir.path().join("copies"),
+        )));
+        let image = ImageData::new(1, 1, vec![0, 0, 0, 255]).unwrap();
+        let pixels = Arc::downgrade(&image.rgba);
+        let (ready, input) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        open_with_handoff(
+            copies,
+            image,
+            Viewer::Preview,
+            move |why| done.send(why).unwrap(),
+            move |_, _, _| {
+                let mut child = std::process::Command::new("/bin/cat")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+                ready.send(child.stdin.take().unwrap()).unwrap();
+                Ok(Some(child))
+            },
+        );
+        let input = input.recv_timeout(Duration::from_secs(2)).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while pixels.strong_count() != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let released = pixels.strong_count() == 0;
+        assert_eq!(
+            finished.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+        drop(input);
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(2)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        );
+        assert!(
+            released,
+            "image reservation retained while viewer is running"
+        );
+    }
 
     #[test]
     fn a_thread_start_failure_notifies_once_and_releases_its_work() {

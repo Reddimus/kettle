@@ -252,8 +252,10 @@ mod file_manager {
                 if uid != unsafe { libc::geteuid() } || !permitted(&executable) {
                     return Err(OpenFailure::Viewer);
                 }
-                // The connection named is still that process's.
-                if process::identity(pid).ok() != Some(identity) {
+                let held = kettle_ctl::agent_launch::HeldExecutable::open(&executable)
+                    .map_err(|_| OpenFailure::Viewer)?;
+                // The connection named is still running the permitted file.
+                if process::identity(pid).ok() != Some(identity) || !held.matches(identity) {
                     return Err(OpenFailure::Viewer);
                 }
                 target.path_for_handoff()?;
@@ -421,6 +423,23 @@ mod tests {
                 "{manager}"
             );
         }
+    }
+
+    #[test]
+    fn file_manager_delivery_checks_the_running_executable_file() {
+        let source = kettle_test_support::production_source(include_str!("reveal.rs"));
+        let held = source
+            .find("HeldExecutable::open(&executable)")
+            .expect("file manager must hold the permitted executable file");
+        let checked = source[held..]
+            .find("!held.matches(identity)")
+            .expect("file manager must match the running executable file")
+            + held;
+        let delivery = source[checked..]
+            .find("\"ShowItems\"")
+            .expect("file identity must be checked before ShowItems")
+            + checked;
+        assert!(held < checked && checked < delivery);
     }
 
     /// Live, by hand on a Mac with a desktop session: Finder opens the

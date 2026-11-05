@@ -639,6 +639,7 @@ fn display_lines<'a>(
             let line = line.strip_suffix('\r').unwrap_or(line);
             let mut row = String::new();
             let (mut column, mut shown) = (0usize, 0usize);
+            let mut kept_base = first_column == 0;
             let max_bytes = columns
                 .saturating_add(1)
                 .saturating_mul(MAX_ROW_BYTES_PER_COLUMN);
@@ -661,6 +662,11 @@ fn display_lines<'a>(
                     (glyph, 1, width)
                 };
                 for _ in 0..repeat {
+                    if each > 0 {
+                        kept_base = column >= first_column && shown < columns;
+                    } else if !kept_base {
+                        continue;
+                    }
                     if column >= first_column && shown < columns {
                         row.push(glyph);
                         shown += each;
@@ -968,6 +974,19 @@ mod tests {
             "{} bytes",
             row.len()
         );
+    }
+
+    #[test]
+    fn scrolling_past_a_base_discards_its_combining_marks() {
+        let text = "a\u{0301}b\u{0308}c";
+        assert_eq!(
+            display_rows(text, 0, 1, 1, 80),
+            ["b\u{0308}c"],
+            "a clipped base must not leave an orphaned accent"
+        );
+        assert_eq!(display_rows(text, 0, 1, 0, 80), [text]);
+        assert_eq!(display_rows("\u{0301}b", 0, 1, 0, 80), ["\u{0301}b"]);
+        assert_eq!(display_rows("\u{65e5}\u{0301}b", 0, 1, 1, 80), [" b"]);
     }
 
     #[test]

@@ -849,7 +849,7 @@ impl App {
     ) {
         let argv = target
             .and_then(|pane| ws.mux.panes.get(&pane))
-            .map_or_else(|| ws.mux.focused_argv(), |pane| pane.argv.clone());
+            .map_or_else(|| ws.mux.focused_argv(), |pane| pane.path_argv().to_vec());
         if !self.paths_type_exactly(ws, &argv, &paths) {
             self.pasted_images.discard_previews_for_paths(&paths);
             log::warn!(
@@ -862,7 +862,11 @@ impl App {
             );
             return;
         }
-        let mut preview = match crate::mux::format_paths_for_paste(&argv, &paths) {
+        let mut preview = match crate::mux::format_paths_for_paste_bounded(
+            &argv,
+            &paths,
+            LOCAL_PASTE_MAX.saturating_sub(usize::from(trailing_space)),
+        ) {
             Ok(preview) => preview,
             Err(error) => {
                 self.pasted_images.discard_previews_for_paths(&paths);
@@ -929,7 +933,8 @@ impl App {
         if !ws.mux.is_broadcast_on() {
             return fits(argv);
         }
-        let pane_fits = |mux: &Mux, id: u64| mux.panes.get(&id).is_none_or(|pane| fits(&pane.argv));
+        let pane_fits =
+            |mux: &Mux, id: u64| mux.panes.get(&id).is_none_or(|pane| fits(pane.path_argv()));
         ws.mux
             .broadcast_target_ids()
             .into_iter()
@@ -1512,7 +1517,11 @@ pub(super) fn paste_paths_into_target(
     trailing_space: bool,
 ) -> Option<PaneInputDelivery> {
     let pane = mux.panes.get_mut(&target?)?;
-    let mut text = match crate::mux::format_paths_for_paste(&pane.argv, paths) {
+    let mut text = match crate::mux::format_paths_for_paste_bounded(
+        pane.path_argv(),
+        paths,
+        LOCAL_PASTE_MAX.saturating_sub(usize::from(trailing_space)),
+    ) {
         Ok(text) => text,
         Err(error) => return Some(PaneInputDelivery::rejected(error)),
     };

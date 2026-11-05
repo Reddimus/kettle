@@ -755,7 +755,23 @@ pub fn key_press_uses_kitty_sequence(key: &Key, mods: ModifiersState, mode: Term
 /// legacy xterm encoder. Pure enhancement flags and legacy-compatible keys can
 /// keep downstream compatibility behavior such as Backspace/Delete remaps.
 pub fn uses_kitty_sequence(event: &KeyEvent, mods: ModifiersState, mode: TermMode) -> bool {
-    kitty_event_uses_sequence(&KittyKeyEvent::from(event), mods, mode)
+    let event = KittyKeyEvent::from(event);
+    let mods = kitty_event_modifiers(&event, mods, cfg!(target_os = "windows"));
+    kitty_event_uses_sequence(&event, mods, mode)
+}
+
+fn kitty_event_modifiers(
+    event: &KittyKeyEvent,
+    mods: ModifiersState,
+    windows: bool,
+) -> ModifiersState {
+    legacy_event_modifiers(
+        &event.logical_key,
+        &event.key_without_modifiers,
+        event.text.as_deref(),
+        mods,
+        windows && event.has_layout_identity,
+    )
 }
 
 fn kitty_event_uses_sequence(event: &KittyKeyEvent, mods: ModifiersState, mode: TermMode) -> bool {
@@ -775,17 +791,20 @@ fn encode_kitty_key_event(
     mods: ModifiersState,
     mode: TermMode,
 ) -> Option<Vec<u8>> {
+    encode_kitty_key_event_for_platform(event, mods, mode, cfg!(target_os = "windows"))
+}
+
+fn encode_kitty_key_event_for_platform(
+    event: &KittyKeyEvent,
+    mods: ModifiersState,
+    mode: TermMode,
+    windows: bool,
+) -> Option<Vec<u8>> {
+    let mods = kitty_event_modifiers(event, mods, windows);
     if !kitty_event_uses_sequence(event, mods, mode) {
         if event.state == ElementState::Released {
             return None;
         }
-        let mods = legacy_event_modifiers(
-            &event.logical_key,
-            &event.key_without_modifiers,
-            event.text.as_deref(),
-            mods,
-            cfg!(target_os = "windows"),
-        );
         return encode_app_keypad(&event.logical_key, event.location, mods, mode)
             .or_else(|| encode(&event.logical_key, event.text.as_deref(), mods, mode));
     }
@@ -995,6 +1014,7 @@ fn kitty_numpad_base(event: &KittyKeyEvent) -> Option<(String, char)> {
         Key::Named(NamedKey::End) => 57424,
         Key::Named(NamedKey::Insert) => 57425,
         Key::Named(NamedKey::Delete) => 57426,
+        Key::Named(NamedKey::Clear) => 57427,
         _ => return None,
     };
     Some((code.to_string(), 'u'))
@@ -1498,7 +1518,11 @@ mod tests {
         // Super-bearing legacy sequence from real GUI input while every guard
         // and the modifier sweep — which drives `encode_key_press` — stayed
         // green.
-        for signature in ["pub fn encode_key_event(", "fn encode_kitty_key_event("] {
+        for signature in [
+            "pub fn encode_key_event(",
+            "fn encode_kitty_key_event(",
+            "fn encode_kitty_key_event_for_platform(",
+        ] {
             let body = src
                 .split(signature)
                 .nth(1)
@@ -1511,7 +1535,10 @@ mod tests {
                  building a legacy sequence itself"
             );
             assert!(
-                body.contains("encode_app_keypad(") || body.contains("encode("),
+                body.contains("encode_app_keypad(")
+                    || body.contains("encode(")
+                    || (signature == "fn encode_kitty_key_event("
+                        && body.contains("encode_kitty_key_event_for_platform(")),
                 "{signature} must reach a guarded encoder"
             );
         }
@@ -1905,6 +1932,30 @@ mod tests {
         assert_eq!(
             encode_kitty_key_event(&left_shift_release, ModifiersState::empty(), all_events),
             Some(b"\x1b[57441;1:3u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_numpad_clear_press_and_release() {
+        let mut event = protocol_event(
+            Key::Named(NamedKey::Clear),
+            Key::Named(NamedKey::Clear),
+            None,
+            "",
+            KeyLocation::Numpad,
+            ElementState::Pressed,
+            false,
+        );
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_EVENT_TYPES;
+        assert_eq!(
+            encode_kitty_key_event(&event, ModifiersState::empty(), mode),
+            Some(b"\x1b[57427u".to_vec()),
+            "keypad begin must not disappear"
+        );
+        event.state = ElementState::Released;
+        assert_eq!(
+            encode_kitty_key_event(&event, ModifiersState::empty(), mode),
+            Some(b"\x1b[57427;1:3u".to_vec())
         );
     }
 
@@ -2559,6 +2610,31 @@ mod tests {
             encode(&sp(), None, ModifiersState::ALT, mode),
             Some(vec![0x1b, b' '])
         );
+    }
+
+    #[test]
+    fn windows_altgr_kitty_modes() {
+        let event = character_event("@", "q", "@", ElementState::Pressed, false);
+        let mods = ModifiersState::CONTROL | ModifiersState::ALT;
+        for (mode, expected) in [
+            (TermMode::DISAMBIGUATE_ESC_CODES, b"@".as_slice()),
+            (TermMode::REPORT_ALL_KEYS_AS_ESC, b"\x1b[64u".as_slice()),
+        ] {
+            assert_eq!(
+                encode_kitty_key_event_for_platform(&event, mods, mode, true),
+                Some(expected.to_vec()),
+                "AltGr must retain its composed text without Ctrl+Alt"
+            );
+            assert_eq!(
+                encode_kitty_key_event_for_platform(
+                    &synthetic_key_event(&Key::Character("@".into()), mods),
+                    mods,
+                    mode,
+                    true
+                ),
+                Some(b"\x1b[64;7u".to_vec())
+            );
+        }
     }
 
     #[test]

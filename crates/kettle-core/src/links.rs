@@ -9,7 +9,8 @@ use std::sync::OnceLock;
 
 use crate::event::EventProxy;
 
-const MAX_URL_BYTES: usize = 4096;
+/// Maximum byte length accepted for an opened URL.
+pub const MAX_URL_BYTES: usize = 4096;
 
 /// A clickable link in viewport (visible-row) coordinates.
 #[derive(Debug, Clone)]
