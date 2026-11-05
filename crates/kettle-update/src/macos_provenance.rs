@@ -15,6 +15,8 @@ const MAX_RECORD_BYTES: u64 = 1024;
 struct Record {
     name: String,
     identity: Option<Identity>,
+    #[serde(default)]
+    bundle_identities: Option<[Identity; 2]>,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Eq)]
@@ -50,6 +52,7 @@ impl Transaction {
         let record = Record {
             name,
             identity: None,
+            bundle_identities: None,
         };
         let bytes = serde_json::to_vec(&record)?;
         for slot in 0..MAX_TRANSACTIONS {
@@ -111,6 +114,24 @@ impl Transaction {
 
     pub(crate) fn record_identity(&mut self, metadata: &Metadata) -> io::Result<()> {
         self.record.identity = Some(Identity::of(metadata));
+        self.persist()
+    }
+
+    pub(crate) fn record_exchange(&mut self, staged: &Metadata, live: &Metadata) -> io::Result<()> {
+        self.record.bundle_identities = Some([Identity::of(staged), Identity::of(live)]);
+        self.persist()
+    }
+
+    pub(crate) fn bundle_matches(&self, metadata: Option<&Metadata>) -> bool {
+        self.record
+            .bundle_identities
+            .as_ref()
+            .is_none_or(|identities| {
+                metadata.is_some_and(|metadata| identities.contains(&Identity::of(metadata)))
+            })
+    }
+
+    fn persist(&mut self) -> io::Result<()> {
         kettle_state::atomic_replace(
             &self.path,
             &serde_json::to_vec(&self.record)?,
@@ -163,6 +184,27 @@ fn valid_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exchange_records_bind_cleanup_to_either_expected_bundle() {
+        let temp = kettle_test_support::private_tempdir("kettle-exchange-record-");
+        let records = temp.path().join("records");
+        let mut transaction = Transaction::create(&records, format!("{STAGED_PREFIX}one")).unwrap();
+        let metadata = ["staged", "live", "unexpected"].map(|name| {
+            let path = temp.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::metadata(path).unwrap()
+        });
+        transaction
+            .record_exchange(&metadata[0], &metadata[1])
+            .unwrap();
+        drop(transaction);
+        let transaction = Transaction::load_all(&records).pop().unwrap();
+        assert!(transaction.bundle_matches(Some(&metadata[0])));
+        assert!(transaction.bundle_matches(Some(&metadata[1])));
+        assert!(!transaction.bundle_matches(Some(&metadata[2])));
+        assert!(!transaction.bundle_matches(None));
+    }
 
     #[test]
     fn records_are_private_bounded_and_track_directory_identity() {
