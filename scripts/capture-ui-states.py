@@ -26,6 +26,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -113,13 +114,19 @@ def capture_state(smoke, kettle: str, out: Path, name: str, language: str, theme
         home.mkdir(mode=0o700)
         cfg = scratch / "kettle.cfg"
         write_config(cfg, language, theme)
+        env = private_env(home)
+        # A plain shell with a fixed prompt, so images do not depend on the
+        # account's shell, its startup files or the host name.
+        env["PS1"] = "$ "
+        shell = ["-e", "bash", "--noprofile", "--norc"]
         with smoke.LiveKettle(kettle, cfg, scratch / "kettle.log",
-                              extra_env=private_env(home)) as live:
+                              extra_args=shell, extra_env=env) as live:
             width, height = SIZES[size]
             live.json_ctl("resize_window", {"width": width, "height": height})
             smoke.live_shell_command(live, FIXTURE_TEXT, READY, timeout_ms=15000)
             STATES[name](live)
-            live.wait_for_text(READY, timeout_ms=3000, quiet_ms=400)
+            # Let the state's own frame settle before capturing it.
+            time.sleep(0.6)
             target = out / f"{label}.png"
             live.screenshot(target)
     return target
