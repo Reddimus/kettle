@@ -389,7 +389,7 @@ def blink_evidence(path, setup, disabled=False):
                     'before_sha256': capture.get('before_sha256') if digest(capture.get('before_sha256')) else None,
                     'setup': setup}
         return ('unproven' if reason else 'verified'), evidence
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
         return 'unproven', {'reason': 'blink validation unreadable'}
 
 

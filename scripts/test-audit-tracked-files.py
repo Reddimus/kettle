@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("audit-tracked-files.py")
@@ -30,6 +32,7 @@ def initialize_repository(root: Path) -> None:
             "-c",
             "user.email=kettle-fixture@example.invalid",
             "commit",
+            "--no-gpg-sign",
             "--quiet",
             "-m",
             "fixture",
@@ -45,6 +48,19 @@ def write_lf(path: Path, text: str) -> None:
 
 
 class TrackedFileAuditTests(unittest.TestCase):
+    def test_fixture_commits_ignore_inherited_signing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_lf(root / 'fixture.txt', 'fixture\n')
+            with mock.patch.dict(os.environ, {
+                'GIT_CONFIG_COUNT': '2', 'GIT_CONFIG_KEY_0': 'commit.gpgSign', 'GIT_CONFIG_VALUE_0': 'true',
+                'GIT_CONFIG_KEY_1': 'gpg.program', 'GIT_CONFIG_VALUE_1': str(root / 'missing-signer'),
+            }):
+                try:
+                    initialize_repository(root)
+                except subprocess.CalledProcessError:
+                    self.fail('fixture commit attempted inherited signing')
+
     def test_regular_file_replaced_by_external_symlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "repo"

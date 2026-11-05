@@ -622,7 +622,12 @@ let gate = NSLock()
 /// the process is gone, so results never overwrite each other.
 func finish(_ object: [String: Any], to path: String, code: Int32) -> Never {
     gate.lock()
-    write(object, to: path)
+    do {
+        try write(object, to: path)
+    } catch {
+        FileHandle.standardError.write("latency-probe: could not write result: \(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
     exit(code)
 }
 
@@ -1023,9 +1028,9 @@ func parse(_ args: [String]) -> Options? {
 }
 
 /// Written atomically: the harness reads the file as soon as it appears.
-func write(_ object: [String: Any], to path: String) {
-    let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-    try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+func write(_ object: [String: Any], to path: String) throws {
+    let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    try data.write(to: URL(fileURLWithPath: path), options: .atomic)
 }
 
 // GUI-free decisions also used by the native capture and entry dispatch.
@@ -1112,8 +1117,9 @@ func blinkCheck(_ options: Options) async throws -> [String: Any] {
             let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if deadline > now { try await Task.sleep(nanoseconds: deadline - now) }
             guard invocationAlive(options.leaseFile) else { throw Failure(reason: "invocation cancelled") }
+            let snapshot = capture.snapshot()
             let t = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            guard let (arrival, hash, status) = capture.snapshot(), t >= arrival, t - arrival <= 250_000_000 else {
+            guard let (arrival, hash, status) = snapshot, t >= arrival, t - arrival <= 250_000_000 else {
                 throw Failure(reason: "cursor frame missing or stale")
             }
             let visible = mayPost(frontmost: frontmostPid(), topWindow: topWindow(), target: options.pid, window: window.windowID)

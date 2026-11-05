@@ -446,7 +446,9 @@ def process_ids(name: str) -> Set[int]:
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return set()
+        raise RuntimeError(f"{name} PID query timed out") from None
+    if cp.returncode not in (0, 1):
+        raise RuntimeError(f"{name} PID query failed: {cp.returncode}")
     result: Set[int] = set()
     for value in cp.stdout.split():
         if value.isdigit():

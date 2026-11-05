@@ -59,7 +59,7 @@ def parse_exits(text, launch_id, window_id, probe, payload, warmup, measured, pe
             raise ValueError('malformed or legacy cursor exit record')
         try:
             obj = json.loads(line[len(CONTRACT)+1:], object_pairs_hook=object_pairs)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             raise ValueError('malformed cursor exit JSON') from None
         if not isinstance(obj, dict):
             raise ValueError('cursor exit record is not an object')

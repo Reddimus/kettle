@@ -125,6 +125,35 @@ def run_score(terminals: list[str]) -> ScoreResult:
 
 
 class ApplePayloadTests(unittest.TestCase):
+    def test_failed_pid_baseline_aborts_before_launch(self):
+        source = SCRIPT.read_text()
+        marker = 'cat > "$apple_run" <<\'PY\'\n'
+        start = source.index(marker) + len(marker)
+        namespace = {"__name__": "apple_run_test"}
+        exec(compile(source[start:source.index("\nPY\n", start)], str(SCRIPT), "exec"), namespace)
+        launch = mock.Mock(return_value=subprocess.CompletedProcess([], 1, '', 'fixture'))
+        namespace["osascript"] = launch
+        namespace["append_pids"] = mock.Mock()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            argv = ['apple-run', '--app', 'terminal', '--timeout', '1', '--launch-timeout', '1',
+                    '--pid-log', str(root / 'pids'), '--marker-dir', raw, '--window-log', str(root / 'windows'),
+                    '--', '/bin/true']
+            for failure in (subprocess.TimeoutExpired('pgrep', 2),
+                            subprocess.CompletedProcess([], 2, '', 'failed')):
+                launch.reset_mock()
+                with self.subTest(failure=failure), \
+                        mock.patch.dict(os.environ, {'APPLE_WINDOW_LOG': str(root / 'windows')}), \
+                        mock.patch.object(sys, 'argv', argv), \
+                        mock.patch.object(subprocess, 'run', side_effect=[failure,
+                                          subprocess.CompletedProcess([], 0, '123\n', '')]):
+                    try:
+                        namespace['main']()
+                    except (RuntimeError, OSError):
+                        pass
+                    self.assertFalse(launch.called, 'an unknown PID baseline must prevent launch')
+                    self.assertFalse((root / 'pids').exists())
+
     def test_empty_completion_marker_is_polled_until_written(self):
         source = SCRIPT.read_text()
         start = source.index('cat > "$apple_run" <<\'PY\'\n') + len('cat > "$apple_run" <<\'PY\'\n')
