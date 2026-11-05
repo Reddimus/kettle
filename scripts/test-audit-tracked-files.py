@@ -102,6 +102,16 @@ class TrackedFileAuditTests(unittest.TestCase):
                 errors = AUDIT.audit(root)["errors"]
                 self.assertTrue(any("structured-data parse failed" in e for e in errors), errors)
 
+    def test_nul_in_source_and_documentation_is_rejected(self) -> None:
+        for name in ("broken.rs", "broken.py", "broken.sh", "broken.md",
+                     "broken.bash", "broken.zsh", "broken.fish", "broken.mmd"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / name).write_bytes(b"content\x00\n")
+                initialize_repository(root)
+                errors = AUDIT.audit(root)["errors"]
+                self.assertIn(f"{name}: NUL byte in text", errors)
+
     def test_text_unset_files_keep_their_bytes(self) -> None:
         """A file `.gitattributes` marks `-text` keeps its CRLF, its last
         line without a newline and its trailing white space; any other text

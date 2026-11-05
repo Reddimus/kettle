@@ -1416,27 +1416,21 @@ public static class KettleSmokeNativeJob {
             raise self._ctypes.WinError(self._ctypes.get_last_error())
 
     def wait_empty(self, timeout_s: float = 5.0) -> None:
-        """Wait for the Job's kernel object to signal that every process exited."""
+        """Wait until job accounting reports that every process exited."""
         if self._job is None:
             raise RuntimeError("Windows Job Object is already closed")
-        timeout_ms = max(0, min(round(timeout_s * 1000), 0xFFFFFFFE))
-        result = self._kernel32.WaitForSingleObject(self._job, timeout_ms)
-        if result == 0:  # WAIT_OBJECT_0
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
             active = self.active_processes()
-            if active != 0:
+            if active == 0:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise RuntimeError(
-                    "Windows Job was signaled while it still contained "
-                    f"{active} process(es)"
+                    "Windows Job still contains "
+                    f"{active} process(es) after {timeout_s:g}s"
                 )
-            return
-        if result == 0x00000102:  # WAIT_TIMEOUT
-            raise RuntimeError(
-                "Windows Job still contains "
-                f"{self.active_processes()} process(es) after {timeout_s:g}s"
-            )
-        if result == 0xFFFFFFFF:  # WAIT_FAILED
-            raise self._ctypes.WinError(self._ctypes.get_last_error())
-        raise RuntimeError(f"unexpected Windows Job wait result: 0x{result:08x}")
+            time.sleep(min(0.01, remaining))
 
     def close(self) -> None:
         if self._job is None:
@@ -2007,6 +2001,7 @@ def repository_file_digest(
     parent = relative.parent
     name = relative.name
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
     digest = hashlib.sha256()
     read_bytes = 0
     with held_repository_directory(repository, parent) as (parent_fd, _parent_path):
@@ -2448,22 +2443,29 @@ def _run_repository_worker(argv: List[str], timeout_s: float) -> Tuple[int, str,
         name="kettle-provenance-launcher",
         daemon=True,
     ).start()
+    worker = None
+    job = None
     try:
         worker, job, launch_error = launched.get(
             timeout=max(0.0, deadline - time.monotonic())
         )
+        if launch_error is not None:
+            raise RuntimeError(
+                f"repository provenance worker could not start: {launch_error}"
+            ) from launch_error
+        assert worker is not None
+        accepted.set()
+        remaining = deadline - time.monotonic()
     except queue.Empty as error:
         abandoned.set()
         raise RuntimeError(
             "repository provenance exceeded its hard time limit during launch"
         ) from error
-    accepted.set()
-    if launch_error is not None:
-        raise RuntimeError(
-            f"repository provenance worker could not start: {launch_error}"
-        ) from launch_error
-    assert worker is not None
-    remaining = deadline - time.monotonic()
+    except BaseException:
+        abandoned.set()
+        if accepted.is_set() and worker is not None:
+            _stop_repository_worker(worker, job)
+        raise
     if remaining <= 0:
         abandoned.set()
         cleanup_errors, reaped = _stop_repository_worker(worker, job)
@@ -2970,33 +2972,54 @@ def missing_commands(*commands: str) -> List[str]:
 
 
 def read_rgba_png(path: Path) -> Tuple[int, int, List[bytes]]:
-    data = path.read_bytes()
+    max_encoded_bytes = 64 * 1024 * 1024
+    with path.open("rb") as source:
+        data = source.read(max_encoded_bytes + 1)
+    if len(data) > max_encoded_bytes:
+        raise SystemExit(f"{path}: PNG exceeds encoded byte limit")
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         raise SystemExit(f"{path}: not a PNG")
     pos = 8
     width = height = None
-    raw = b""
+    raw = bytearray()
     while pos < len(data):
+        if len(data) - pos < 12:
+            raise SystemExit(f"{path}: truncated PNG chunk")
         n = struct.unpack(">I", data[pos : pos + 4])[0]
         pos += 4
         typ = data[pos : pos + 4]
         pos += 4
+        if n > len(data) - pos - 4:
+            raise SystemExit(f"{path}: truncated PNG chunk")
         chunk = data[pos : pos + n]
         pos += n + 4
         if typ == b"IHDR":
+            if len(chunk) != 13:
+                raise SystemExit(f"{path}: invalid IHDR")
             width, height, bit_depth, color_type, _, _, interlace = struct.unpack(
                 ">IIBBBBB", chunk
             )
             if (bit_depth, color_type, interlace) != (8, 6, 0):
                 raise SystemExit(f"{path}: expected non-interlaced 8-bit RGBA PNG")
         elif typ == b"IDAT":
-            raw += chunk
+            raw.extend(chunk)
         elif typ == b"IEND":
             break
     if width is None or height is None:
         raise SystemExit(f"{path}: missing IHDR")
 
-    decoded = zlib.decompress(raw)
+    if not (0 < width <= 16384 and 0 < height <= 16384
+            and width * height <= 16 * 1024 * 1024):
+        raise SystemExit(f"{path}: PNG dimensions exceed limits")
+    expected_bytes = height * (1 + width * 4)
+    decoder = zlib.decompressobj()
+    try:
+        decoded = decoder.decompress(raw, expected_bytes + 1)
+    except zlib.error as error:
+        raise SystemExit(f"{path}: invalid decoded PNG data: {error}") from error
+    if (len(decoded) != expected_bytes or not decoder.eof
+            or decoder.unconsumed_tail or decoder.unused_data):
+        raise SystemExit(f"{path}: invalid decoded PNG size")
     bpp = 4
     stride = width * bpp
     rows: List[bytes] = []
@@ -3518,6 +3541,18 @@ def bright_pixels_in_rect(rgba_rows: List[bytes], x0: float, y0: float, x1: floa
     return total
 
 
+def clear_git_overrides_command(*, windows: bool) -> str:
+    if windows:
+        return (
+            "Get-ChildItem Env:GIT_* | ForEach-Object { "
+            "Remove-Item -LiteralPath ('Env:' + $_.Name) }; "
+        )
+    return (
+        'for KETTLE_GIT_VAR in ${!GIT_@}; do unset "$KETTLE_GIT_VAR"; done; '
+        "unset KETTLE_GIT_VAR; "
+    )
+
+
 def shell_quote(text: str, *, windows: Optional[bool] = None) -> str:
     use_windows = platform.system() == "Windows" if windows is None else windows
     if use_windows:
@@ -3769,7 +3804,7 @@ class AgentShellTarget:
         source = self.nvim_config_source()
         if self.mode == "wsl":
             source_expr = (
-                self.posix_path_expression(source) if self.astro_config else source
+                self.posix_path_expression(source) if self.astro_config else f'"{source}"'
             )
             cp = run(
                 self.posix_script_argv(f"test -d {source_expr}"),
@@ -4505,7 +4540,7 @@ print(json.dumps(result,sort_keys=True))
         if self.powershell:
             root = self.validate_native_sandbox_path(sandbox_path)
             marker_left, marker_right = split_marker(marker)
-            return (
+            return clear_git_overrides_command(windows=True) + (
                 "$KettleSmokeRoot="
                 f"{shell_quote(str(root), windows=True)}; "
                 "if (-not (Test-Path -LiteralPath $KettleSmokeRoot "
@@ -4572,7 +4607,7 @@ print(json.dumps(result,sort_keys=True))
             '"$KETTLE_SMOKE_ROOT/run" || return 1; '
         )
         marker_left, marker_right = split_marker(marker)
-        activation = (
+        activation = clear_git_overrides_command(windows=False) + (
             'export HOME="$KETTLE_SMOKE_ROOT/home" '
             'XDG_CONFIG_HOME="$KETTLE_SMOKE_ROOT/config" '
             'XDG_DATA_HOME="$KETTLE_SMOKE_ROOT/data" '
@@ -5173,64 +5208,63 @@ finally:
             os.fsencode(f"KETTLE_SMOKE_ROOT={root}"),
             os.fsencode(f"XDG_CONFIG_HOME={root / 'config'}"),
         }
-        for pid in cls.native_nvim_sandbox_processes(
-            root,
-            owned=owned,
-            deadline=deadline,
-            retained_by_pid=retained_by_pid,
-        ):
-            if deadline is not None:
-                remaining_before(deadline, "retaining sandbox processes", cap=5)
-            try:
-                handle = StableProcessHandle.open(pid)
-            except (OSError, RuntimeError) as error:
-                # A disappearing candidate is benign. A still-matching process
-                # for which no identity-stable handle could be acquired is not:
-                # treating it as absent would allow the quiet scan to remove a
-                # sandbox that process is still using.
-                environment = cls._native_process_environment(pid)
-                if environment is not None and needles.issubset(environment):
-                    close_errors = _close_stable_process_handles(handles)
-                    detail = (
-                        "; retained-handle close failures: "
-                        + "; ".join(str(item) for item in close_errors)
-                        if close_errors
-                        else ""
+        try:
+            for pid in cls.native_nvim_sandbox_processes(
+                root,
+                owned=owned,
+                deadline=deadline,
+                retained_by_pid=retained_by_pid,
+            ):
+                if deadline is not None:
+                    remaining_before(deadline, "retaining sandbox processes", cap=5)
+                try:
+                    handle = StableProcessHandle.open(pid)
+                except (OSError, RuntimeError) as error:
+                    # A disappearing candidate is benign. A still-matching process
+                    # for which no identity-stable handle could be acquired is not:
+                    # treating it as absent would allow the quiet scan to remove a
+                    # sandbox that process is still using.
+                    environment = cls._native_process_environment(pid)
+                    if environment is not None and needles.issubset(environment):
+                        raise RuntimeError(
+                            f"could not retain matching sandbox process {pid}: {error}"
+                        ) from error
+                    continue
+                # Re-read the environment after acquiring the handle, then prove
+                # the PID still denotes that handle. This binds the match to the
+                # process instance signalled below, even across immediate PID reuse.
+                try:
+                    environment = cls._native_process_environment(pid)
+                    current_match = (
+                        environment is not None
+                        and needles.issubset(environment)
+                        and handle.matches_current()
                     )
-                    raise RuntimeError(
-                        f"could not retain matching sandbox process {pid}: {error}"
-                        + detail
-                    ) from error
-                continue
-            # Re-read the environment after acquiring the handle, then prove
-            # the PID still denotes that handle. This binds the match to the
-            # process instance signalled below, even across immediate PID reuse.
-            try:
-                environment = cls._native_process_environment(pid)
-                current_match = (
-                    environment is not None
-                    and needles.issubset(environment)
-                    and handle.matches_current()
-                )
-            except BaseException as error:
-                close_errors = _close_stable_process_handles(
-                    [handle, *handles.values()]
-                )
-                if close_errors:
-                    raise RuntimeError(
-                        f"{error}; stable-handle close failures: "
-                        + "; ".join(str(item) for item in close_errors)
-                    ) from error
-                raise
-            if not current_match:
-                close_errors = _close_stable_process_handles([handle])
-                if close_errors:
-                    raise RuntimeError(
-                        "could not close a stale sandbox process handle: "
-                        + "; ".join(str(item) for item in close_errors)
-                    )
-                continue
-            handles[handle.identity] = handle
+                except BaseException as error:
+                    close_errors = _close_stable_process_handles([handle])
+                    if close_errors:
+                        raise RuntimeError(
+                            f"{error}; stable-handle close failures: "
+                            + "; ".join(str(item) for item in close_errors)
+                        ) from error
+                    raise
+                if not current_match:
+                    close_errors = _close_stable_process_handles([handle])
+                    if close_errors:
+                        raise RuntimeError(
+                            "could not close a stale sandbox process handle: "
+                            + "; ".join(str(item) for item in close_errors)
+                        )
+                    continue
+                handles[handle.identity] = handle
+        except BaseException as error:
+            close_errors = _close_stable_process_handles(handles)
+            if close_errors:
+                raise RuntimeError(
+                    f"{error}; stable-handle close failures: "
+                    + "; ".join(str(item) for item in close_errors)
+                ) from error
+            raise
         return handles
 
     @classmethod
@@ -5273,19 +5307,21 @@ finally:
                         },
                     )
                     owned_handles.extend(scanned.values())
-                    batches = [scanned]
-                    if linux_subreaper is not None:
-                        adopted = linux_subreaper.adopted_roots(
-                            parents, owned, deadline=deadline
-                        )
-                        owned_handles.extend(adopted.values())
-                        batches.append(adopted)
+
+                    def batches():
+                        yield scanned
+                        if linux_subreaper is not None:
+                            adopted = linux_subreaper.adopted_roots(
+                                parents, owned, deadline=deadline
+                            )
+                            owned_handles.extend(adopted.values())
+                            yield adopted
 
                     added = 0
                     new_handles: List[
                         Tuple[Tuple[int, ...], StableProcessHandle]
                     ] = []
-                    for batch in batches:
+                    for batch in batches():
                         for identity, handle in batch.items():
                             if identity in retained:
                                 continue
@@ -5321,7 +5357,16 @@ finally:
                             continue
                         if platform.system() == "Linux":
                             current_parent = _linux_process_parent(pid)
-                            if current_parent not in anchor_pids | descendants:
+                            parent_handle = next(
+                                (ancestor for ancestor in retained.values()
+                                 if ancestor.pid == current_parent),
+                                None,
+                            )
+                            if (
+                                parent_handle is None
+                                or not parent_handle.matches_current()
+                                or not handle.matches_current()
+                            ):
                                 continue
                         if platform.system() == "Darwin":
                             current_parents, _owned = cls._native_process_snapshot(
@@ -7431,9 +7476,7 @@ def run_underline(kettle: str, root: Path) -> Path:
         )
         + "\n"
     )
-    extra_args = ["-d", str(repo)]
-    if platform.system() == "Windows":
-        extra_args.extend(["-e", "powershell.exe", "-NoLogo", "-NoProfile"])
+    extra_args = ["-d", str(repo), *AgentShellTarget().launch_args()]
     with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
         live.ctl("send_text", params={"text": underline_command(repo, svn_fixture)})
         live.ctl("send_keys", params={"keys": ["enter"]})
@@ -7451,6 +7494,24 @@ def run_underline(kettle: str, root: Path) -> Path:
                 keys = ["j"] * 6 if i < 5 else ["k"] * 6
                 live.ctl("send_keys", params={"keys": keys}, timeout=6)
             time.sleep(0.08)
+
+        delta_fixtures = {"git": False, "svn": False}
+        for name, needle in (
+            ("git", "changed underlined token_003"),
+            ("svn", "svn changed underlined token_004"),
+        ):
+            if name == "svn" and not svn_enabled:
+                continue
+            live.ctl("send_keys", params={"keys": ["g"]})
+            live.ctl("send_text", params={"text": "/" + needle})
+            live.ctl("send_keys", params={"keys": ["enter"]})
+            live.wait_for_text(needle, timeout_ms=8000, quiet_ms=250)
+            cells = live.read_cells()
+            if needle not in cell_grid_text(cells):
+                raise SystemExit(f"underline smoke: {name} delta output not visible")
+            (out / f"delta-{name}.cells.json").write_text(json.dumps(cells))
+            live.screenshot(out / f"delta-{name}.png")
+            delta_fixtures[name] = True
 
     top_sentinels: List[int] = []
     underline_frames = 0
@@ -7608,7 +7669,7 @@ def run_underline(kettle: str, root: Path) -> Path:
         raise SystemExit("underline smoke: no autodetected path underlines observed")
     if not (top_sentinels[0] < top_sentinels[4] and top_sentinels[-1] < top_sentinels[4]):
         raise SystemExit(f"underline smoke: down/up scroll sequence failed: {top_sentinels}")
-    (out / "analysis.json").write_text(json.dumps({"frames": 8, "underline_frames": underline_frames, "path_overlay_frames": path_overlay_frames, "top_sentinels": top_sentinels, "delta_fixtures": {"git": True, "svn": svn_enabled}, "frames_detail": analysis}, indent=2) + "\n")
+    (out / "analysis.json").write_text(json.dumps({"frames": 8, "underline_frames": underline_frames, "path_overlay_frames": path_overlay_frames, "top_sentinels": top_sentinels, "delta_fixtures": delta_fixtures, "frames_detail": analysis}, indent=2) + "\n")
     return out
 
 
@@ -11247,7 +11308,9 @@ def live_helper_selftest() -> None:
             anchored_exit: Optional[subprocess.Popen] = None
             anchored_descendant: Optional[int] = None
             anchored_descendant_handle: Optional[StableProcessHandle] = None
+            session_anchors: Dict[int, StableProcessHandle] = {}
             try:
+                session_anchors[tracked.pid] = StableProcessHandle.open(tracked.pid)
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline:
                     tracker._remember_tracker_sessions()
@@ -11361,6 +11424,7 @@ def live_helper_selftest() -> None:
                     env=tracked_env,
                     start_new_session=True,
                 )
+                session_anchors[tracked_late.pid] = StableProcessHandle.open(tracked_late.pid)
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline:
                     tracker._remember_tracker_sessions()
@@ -11393,6 +11457,7 @@ def live_helper_selftest() -> None:
                     env=tracked_env,
                     start_new_session=True,
                 )
+                session_anchors[anchored_exit.pid] = StableProcessHandle.open(anchored_exit.pid)
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline and not descendant_record.exists():
                     time.sleep(0.01)
@@ -11432,12 +11497,26 @@ def live_helper_selftest() -> None:
                 tracker._remember_pty_sessions(json.dumps({"panes": []}))
                 assert not tracker._pty_sessions, "a closed pane retained a stale pid"
             finally:
-                if tracked.returncode is None:
-                    terminate_owned_process_group(tracked, grace_s=0.1)
-                if tracked_late is not None and tracked_late.returncode is None:
-                    terminate_owned_process_group(tracked_late, grace_s=0.1)
-                if anchored_exit is not None and anchored_exit.returncode is None:
-                    terminate_owned_process_group(anchored_exit, grace_s=0.1)
+                session_errors: List[BaseException] = []
+                for process in (tracked, tracked_late, anchored_exit):
+                    if process is None:
+                        continue
+                    anchor = session_anchors.get(process.pid)
+                    try:
+                        if process.returncode is None:
+                            if anchor is None:
+                                terminate_owned_process_group(process, grace_s=0.1)
+                            else:
+                                terminate_owned_pty_session(anchor, grace_s=0.1)
+                            process.wait(timeout=3)
+                    except BaseException as error:
+                        session_errors.append(error)
+                    finally:
+                        if anchor is not None:
+                            try:
+                                anchor.close()
+                            except BaseException as error:
+                                session_errors.append(error)
                 if anchored_descendant_handle is not None:
                     try:
                         anchored_descendant_handle.signal(signal.SIGKILL)
@@ -11445,6 +11524,11 @@ def live_helper_selftest() -> None:
                         pass
                     anchored_descendant_handle.close()
                 tracker._run_post_exit_cleanups()
+                if session_errors:
+                    raise RuntimeError(
+                        "self-test PTY cleanup failed: "
+                        + "; ".join(str(error) for error in session_errors)
+                    )
 
             failed_enumeration = subprocess.Popen(
                 [sys.executable, "-c", "import time; time.sleep(60)"],
@@ -13460,7 +13544,7 @@ def lazyvcs_repo_setup_command(
         # otherwise a failed `git init` still reaches `Pop-Location` and the
         # harness cannot tell a partial repository from a complete one. The
         # `finally` guarantees the location is restored either way.
-        return (
+        return clear_git_overrides_command(windows=True) + (
             "$ErrorActionPreference='Stop'; "
             "function Invoke-Git { git @args; "
             "if ($LASTEXITCODE -ne 0) { throw \"git $args failed: $LASTEXITCODE\" } }; "
@@ -13475,7 +13559,7 @@ def lazyvcs_repo_setup_command(
             f"Set-Content -Path tracked.txt -Value '{first}','{changed}','{third}' "
             "} finally { Pop-Location }"
         )
-    return (
+    return clear_git_overrides_command(windows=False) + (
         f"mkdir -p {quoted} && cd {quoted} && "
         "git init -q . && "
         "git config user.name KTLBL && "
@@ -15110,7 +15194,7 @@ def run_search_history(kettle: str, root: Path) -> Path:
             "*) printf 'KETTLE_SEARCH_FILL_%04d\\n' \"$i\" ;; esac; done; "
             "printf '%s%s\\n' KETTLE_SEARCH_HISTORY_FIXTURE_ DONE"
         )
-        extra_args = []
+        extra_args = AgentShellTarget().launch_args()
 
     states: List[Dict[str, object]] = []
     with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
@@ -15356,6 +15440,7 @@ def run_search_selection(kettle: str, root: Path, *, isolated_clipboard: bool = 
         "\n".join(
             [
                 "agent-server = full",
+                "language = en",
                 "text-renderer = grid",
                 "tab-bar = always",
                 "status-bar = off",
@@ -16523,7 +16608,10 @@ def run_video_paste_receipt(kettle: str, root: Path, *, isolated_clipboard: bool
             screen = live.json_ctl("read_screen")
             if (
                 geometry.get("media_paste_receipt") is None
-                and not any(path.name in json.dumps(screen) for path in fixtures)
+                and not any(
+                    path.name in "".join(screen_text(screen).splitlines())
+                    for path in fixtures
+                )
             ):
                 break
             time.sleep(0.05)
@@ -16721,6 +16809,7 @@ def run_interaction(kettle: str, root: Path, *, isolated_clipboard: bool = False
         "\n".join(
             [
                 "agent-server = full",
+                "shell = powershell.exe" if platform.system() == "Windows" else "shell = bash",
                 "language = en",
                 "text-renderer = grid",
                 "tab-bar = always",

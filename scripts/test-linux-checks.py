@@ -16,6 +16,30 @@ SPEC.loader.exec_module(AUDIO)
 
 
 class LinuxCheckTests(unittest.TestCase):
+    def test_installer_checker_never_opens_source_binary_for_writing(self):
+        source = (ROOT / 'check-linux-installers.sh').read_text()
+        setup = source[source.index('normal_binary='):source.index('# Keep the alias')]
+        start = source.index('echo "linux-installer check: spaced recording prefix/install/uninstall OK"')
+        restore = source[start:source.index('# Exercise the release-tarball layout', start)]
+        with tempfile.TemporaryDirectory() as raw:
+            command = r'''set -eu
+mkdir -p target/release
+printf original > target/release/kettle
+cp() {
+  if [ "$2" = target/release/kettle ]; then
+    echo 'Text file busy' >&2
+    echo write-attempt >> attempts
+    return 1
+  fi
+  command cp "$@"
+}
+tmp_root="$PWD/scratch"
+mkdir "$tmp_root"
+''' + setup + restore + '\ncleanup\ntrap - EXIT INT TERM\n'
+            result = subprocess.run(['bash', '-c', command], cwd=raw, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((Path(raw) / 'attempts').exists(), 'source executable opened for writing')
+
     def test_audio_timeout_keeps_log_and_stage(self):
         with tempfile.TemporaryDirectory() as raw:
             out = Path(raw) / 'out'

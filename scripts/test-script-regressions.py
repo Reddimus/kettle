@@ -28,6 +28,55 @@ def load(name):
 
 
 class ScriptRegressionTests(unittest.TestCase):
+    def test_windows_job_wait_uses_active_process_accounting(self):
+        live = load('check-live-ui-smoke')
+        job = object.__new__(live.WindowsKillJob)
+        job._job = 1
+        job._kernel32 = Mock()
+        job._kernel32.WaitForSingleObject.return_value = 0x102
+        job.active_processes = Mock(side_effect=[1, 0])
+        with patch.object(live.time, 'sleep'):
+            job.wait_empty(1)
+        self.assertEqual(job.active_processes.call_count, 2)
+        job.active_processes = Mock(return_value=1)
+        with self.assertRaisesRegex(RuntimeError, 'still contains 1'):
+            job.wait_empty(0)
+
+    def test_image_paste_relative_output_passes_absolute_fixture_paths(self):
+        check = load('check-image-paste-parity')
+        class StopFixture(Exception):
+            pass
+        helpers = Mock()
+        helpers.LiveKettle.side_effect = StopFixture
+        with tempfile.TemporaryDirectory(dir=SCRIPTS.parent) as raw:
+            relative = Path(raw).relative_to(Path.cwd()) / 'output'
+            with patch.object(sys, 'argv', ['check', '--kettle', 'kettle', '--out-dir', str(relative)]), \
+                 patch.object(check.platform, 'system', return_value='Darwin'), \
+                 patch.object(check.importlib.util, 'spec_from_file_location', return_value=Mock()), \
+                 patch.object(check.importlib.util, 'module_from_spec', return_value=helpers):
+                with self.assertRaises(StopFixture):
+                    check.main()
+            args = helpers.LiveKettle.call_args
+            self.assertTrue(Path(args.args[1]).is_absolute(), 'relative config path')
+            for value in args.kwargs['extra_args'][2:]:
+                self.assertTrue(Path(value).is_absolute(), 'relative pane fixture path')
+
+    def test_cli_uses_cargo_reported_executable(self):
+        cli = load('check-cli-smoke')
+        executable = SCRIPTS / 'configured-target' / 'host-triple' / 'debug' / 'kettle'
+        message = json.dumps({'reason': 'compiler-artifact',
+                              'target': {'name': 'kettle', 'kind': ['bin']},
+                              'executable': str(executable)})
+        class StopFixture(Exception):
+            pass
+        with patch.object(cli, 'expected_git_identity', return_value='identity'), \
+             patch.object(cli.subprocess, 'run', return_value=Mock(stdout=message)) as build, \
+             patch.object(cli, 'private_scratch', side_effect=StopFixture):
+            with self.assertRaises(StopFixture):
+                cli.main()
+        self.assertEqual(cli.EXE, executable)
+        self.assertIn('--message-format=json-render-diagnostics', build.call_args.args[0])
+
     def test_search_result_waits_for_highlight_geometry_after_navigation(self):
         live = load('check-live-ui-smoke')
         pending = {'has_match': True, 'status': 'Match', 'match_rects': []}

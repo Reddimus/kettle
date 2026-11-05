@@ -316,7 +316,7 @@ def main():
         parser.error("this native smoke supports Linux and macOS")
     if platform.system() == "Linux" and os.environ.get("WAYLAND_DISPLAY"):
         parser.error("run in an isolated Xvfb display with WAYLAND_DISPLAY unset")
-    out = args.out_dir or Path(tempfile.mkdtemp(prefix="kettle-image-paste-"))
+    out = (args.out_dir or Path(tempfile.mkdtemp(prefix="kettle-image-paste-"))).resolve()
     out.mkdir(parents=True, exist_ok=True, mode=0o700)
     spec = importlib.util.spec_from_file_location(
         "kettle_live", Path(__file__).with_name("check-live-ui-smoke.py")

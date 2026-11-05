@@ -36,6 +36,12 @@ BINARY_EXTENSIONS = {
     ".woff2",
     ".zip",
 }
+TEXT_EXTENSIONS = {
+    ".rs", ".py", ".sh", ".ps1", ".md", ".txt", ".cfg", ".config",
+    ".html", ".css", ".js", ".ts", ".svg", ".xml", ".lua", ".nix",
+    ".swift", ".c", ".h", ".m", ".desktop", ".in", ".cjs",
+    ".bash", ".zsh", ".fish", ".mmd", ".1", ".plist", ".entitlements",
+}
 MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]+\]\((<[^>]+>|[^)\s]+)")
 MARKDOWN_FENCE = re.compile(r"(?ms)^\s*(```|~~~).*?^\s*\1\s*$")
 MARKDOWN_CODE_SPAN = re.compile(r"`+[^`\n]*`+")
@@ -291,7 +297,10 @@ def audit(root: Path) -> dict[str, Any]:
 
         suffix = pure.suffix.lower()
         structured = suffix in {".json", ".toml", ".yaml", ".yml"} or relative == "Cargo.lock"
-        is_binary = not structured and (suffix in BINARY_EXTENSIONS or b"\0" in data)
+        is_binary = not structured and (
+            suffix in BINARY_EXTENSIONS
+            or (suffix not in TEXT_EXTENSIONS and b"\0" in data)
+        )
         text: str | None = None
         if is_symlink:
             pass

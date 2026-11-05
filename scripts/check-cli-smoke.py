@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 from pathlib import Path
 import re
@@ -15,8 +16,7 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parent.parent
-TARGET = ROOT / Path(os.environ.get("CARGO_TARGET_DIR", "target"))
-EXE = TARGET / "debug" / ("kettle.exe" if os.name == "nt" else "kettle")
+EXE: Path
 
 
 def run(*arguments: str, environment: dict[str, str], expect: int = 0) -> str:
@@ -128,11 +128,27 @@ def main() -> int:
     # A previous checkout's binary is worse than no binary: every assertion can
     # pass while measuring code other than the tree named in `--version`.
     identity = expected_git_identity()
-    subprocess.run(
-        ["cargo", "build", "--locked", "-q", "-p", "kettle"],
+    build = subprocess.run(
+        ["cargo", "build", "--locked", "-p", "kettle",
+         "--message-format=json-render-diagnostics"],
         cwd=ROOT,
         check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
     )
+    executables = set()
+    for line in build.stdout.splitlines():
+        message = json.loads(line)
+        target = message.get("target", {})
+        if (message.get("reason") == "compiler-artifact"
+                and target.get("name") == "kettle"
+                and "bin" in target.get("kind", [])
+                and message.get("executable")):
+            executables.add(Path(message["executable"]).resolve())
+    require(len(executables) == 1, "Cargo did not report exactly one kettle executable")
+    global EXE
+    EXE = executables.pop()
 
     # Python's Windows `mkdir(0o700)` emits an OWNER RIGHTS ACE that Kettle
     # deliberately does not treat as an explicit user identity. The helper uses
