@@ -1148,7 +1148,8 @@ impl Extractor {
                                     self.esc_pending = true
                                 }
                                 1 if b == 0x1b => self.st_pending = true,
-                                1 => self.pass.push(b),
+                                1 if self.mode == Mode::Pass => self.pass.push(b),
+                                1 => i -= 1,
                                 _ => {}
                             }
                             self.handle_pending_chunks(&mut out, &mut handle);
@@ -1641,7 +1642,7 @@ impl Extractor {
     fn dispatch_seq<F>(
         &mut self,
         mut seq: Vec<u8>,
-        _seq_reservation: Option<GraphicsReservation>,
+        mut seq_reservation: Option<GraphicsReservation>,
         mut context: SequenceContext,
         out: &mut Vec<Chunk>,
         handle: &mut F,
@@ -1766,7 +1767,7 @@ impl Extractor {
             else {
                 return;
             };
-            let mut reservation = match _seq_reservation {
+            let mut reservation = match seq_reservation {
                 Some(reservation) => reservation,
                 None => {
                     let Some(reservation) = self.budget.reserve_transient_cpu(raw_len) else {
@@ -2136,27 +2137,32 @@ impl Extractor {
                 let Some(pass_len) = seq.len().checked_add(4) else {
                     return;
                 };
-                let Some(_pass_reservation) = self.budget.reserve_transient_cpu(pass_len) else {
-                    return;
-                };
-                let mut v = Vec::new();
-                if v.try_reserve_exact(pass_len).is_err() {
+                if let Some(reservation) = seq_reservation.as_mut()
+                    && !reservation.try_grow_to(pass_len)
+                {
                     return;
                 }
-                v.push(0x1b);
-                v.push(match mode {
+                if seq.try_reserve_exact(4).is_err() {
+                    return;
+                }
+                let body_len = seq.len();
+                seq.resize(pass_len, 0);
+                seq.copy_within(..body_len, 2);
+                seq[0] = 0x1b;
+                seq[1] = match mode {
                     Mode::Dcs => b'P',
                     Mode::Apc => b'_',
                     Mode::Osc => b']',
                     Mode::Pass => b' ',
-                });
-                v.extend_from_slice(&seq);
+                };
                 if terminator == SeqTerminator::Bel && mode == Mode::Osc {
-                    v.push(0x07);
+                    seq[body_len + 2] = 0x07;
+                    seq.truncate(body_len + 3);
                 } else {
-                    v.push(0x1b);
-                    v.push(b'\\');
+                    seq[body_len + 2] = 0x1b;
+                    seq[body_len + 3] = b'\\';
                 }
+                let v = seq;
                 out.push(if terminal_only {
                     Chunk::Terminal(v)
                 } else {
@@ -3172,6 +3178,35 @@ mod tests {
     }
 
     #[test]
+    fn nested_private_escape_follower_stays_private_at_recovery_boundary() {
+        let mut start = b"\x1b]777;kettle-completion;".to_vec();
+        start.extend(std::iter::repeat_n(
+            b'x',
+            crate::completion::MAX_MESSAGE_BYTES + 1,
+        ));
+        let mut recovery = b"\x1b]777;kettle-completion;".to_vec();
+        recovery.resize(MAX_SEQ_RESYNC_BYTES - 1, b'x');
+        recovery.extend_from_slice(b"\x1bXsecret\x07visible");
+        for size in [1, 7, recovery.len()] {
+            let mut ex = Extractor::isolated();
+            let mut filter = PrivateOutputFilter::default();
+            assert!(passed(&ex.feed(&start)).is_empty());
+            assert!(filter.feed(&start, true).is_empty());
+            let mut screen = Vec::new();
+            let mut recorded = Vec::new();
+            for part in recovery.chunks(size) {
+                screen.extend(passed(&ex.feed(part)));
+                recorded.extend(filter.feed(part, true));
+            }
+            assert_eq!(recorded, b"visible");
+            assert_eq!(
+                screen, recorded,
+                "escape follower leaked with reads of {size} bytes"
+            );
+        }
+    }
+
+    #[test]
     fn a_nested_private_terminator_ends_recovery_immediately() {
         let mut start = b"\x1b]777;kettle-completion;1;show;1;completion;;fish;".to_vec();
         start.extend(std::iter::repeat_n(
@@ -4153,6 +4188,12 @@ mod tests {
             "OSC 133 must parse with the graphics account full, got {out:?}"
         );
         assert_eq!(passed(&out), b"ok");
+        let ordinary = b"\x1b]2;title\x07\x1b]8;;https://example.test\x07link\x1b]8;;\x07plain";
+        assert_eq!(
+            passed(&ex.feed(ordinary)),
+            ordinary,
+            "titles and hyperlink boundaries must survive graphics exhaustion"
+        );
     }
 
     /// A string refused for lack of shared memory is dropped through its real

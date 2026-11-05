@@ -15,6 +15,12 @@ pub const MAX_IMAGE_DIM: u32 = 8192;
 /// pathological shapes; the byte cap limits any one retained image to 64 MiB.
 pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum DecodeError {
+    InvalidImage,
+    NoSpace,
+}
+
 /// A decoded image plus placement metadata (kitty image/placement ids +
 /// z-index; Sixel/iTerm2 use `id = None`, `placement_id = 0`, `z = 0`).
 #[derive(Clone, Debug)]
@@ -293,38 +299,62 @@ impl ImageData {
         bytes: &[u8],
         budget: &GraphicsBudget,
     ) -> Option<ImageData> {
+        Self::decode_encoded_with_budget(bytes, budget).ok()
+    }
+
+    pub(crate) fn decode_encoded_with_budget(
+        bytes: &[u8],
+        budget: &GraphicsBudget,
+    ) -> Result<ImageData, DecodeError> {
         use image::ImageDecoder;
 
         let decode_cap = budget.limits().image_bytes.min(MAX_IMAGE_BYTES as usize);
         let scratch = if bytes.starts_with(&[0xff, 0xd8]) {
             if bytes.len() > budget.limits().transmission_bytes {
-                return None;
+                return Err(DecodeError::InvalidImage);
             }
-            jpeg::scratch_bytes(bytes, decode_cap)?
+            jpeg::scratch_bytes(bytes, decode_cap).ok_or(DecodeError::InvalidImage)?
         } else {
             decode_cap
         };
-        let _scratch = budget.reserve_transient_cpu(scratch)?;
+        let _scratch = budget
+            .reserve_transient_cpu(scratch)
+            .ok_or(DecodeError::NoSpace)?;
         let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
-            .ok()?;
+            .map_err(|_| DecodeError::InvalidImage)?;
+        if !matches!(
+            reader.format(),
+            Some(image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::Gif)
+        ) {
+            return Err(DecodeError::InvalidImage);
+        }
         reader.limits(decode_limits(decode_cap));
-        let mut decoder = reader.into_decoder().ok()?;
+        let mut decoder = reader
+            .into_decoder()
+            .map_err(|_| DecodeError::InvalidImage)?;
         // Match ImageReader::decode's working-buffer accounting while retaining
         // this decoder so headers are parsed only once.
         let mut limits = decode_limits(decode_cap);
-        limits.reserve(decoder.total_bytes()).ok()?;
-        decoder.set_limits(limits).ok()?;
+        limits
+            .reserve(decoder.total_bytes())
+            .map_err(|_| DecodeError::InvalidImage)?;
+        decoder
+            .set_limits(limits)
+            .map_err(|_| DecodeError::InvalidImage)?;
         let (width, height) = decoder.dimensions();
-        let expected = rgba_bytes(width, height)?;
+        let expected = rgba_bytes(width, height).ok_or(DecodeError::InvalidImage)?;
         if expected > decode_cap {
-            return None;
+            return Err(DecodeError::InvalidImage);
         }
-        let output = budget.reserve_image_cpu(expected)?;
+        let output = budget
+            .reserve_image_cpu(expected)
+            .ok_or(DecodeError::NoSpace)?;
         let img = image::DynamicImage::from_decoder(decoder)
-            .ok()?
+            .map_err(|_| DecodeError::InvalidImage)?
             .into_rgba8();
         ImageData::from_reserved(img.width(), img.height(), img.into_raw(), output)
+            .ok_or(DecodeError::InvalidImage)
     }
 
     /// A copied sub-rectangle. The rect is clamped to the image bounds; an
@@ -799,11 +829,11 @@ mod tests {
         assert_eq!(limits.max_alloc, Some(1234));
         let source = include_str!("image.rs");
         let from_encoded = source
-            .split_once("fn from_encoded_with_budget(")
-            .expect("from_encoded_with_budget")
+            .split_once("fn decode_encoded_with_budget(")
+            .expect("decode_encoded_with_budget")
             .1
             .split_once("\n    }\n")
-            .expect("end of from_encoded_with_budget")
+            .expect("end of decode_encoded_with_budget")
             .0;
         assert!(from_encoded.contains("reader.limits(decode_limits(decode_cap));"));
     }
@@ -835,6 +865,19 @@ mod tests {
             ImageData::from_encoded(&oversized).is_none(),
             "from_encoded must reject width {} (cap {MAX_IMAGE_DIM})",
             MAX_IMAGE_DIM + 1
+        );
+    }
+
+    #[test]
+    fn encoded_format_allowlist_rejects_webp() {
+        let webp = b"RIFF\x1c\0\0\0WEBPVP8L\x0f\0\0\0\x2f\x0f\xc0\x02\x00\x07\x10\xfd\x8f\xfe\x07\x22\xa2\xff\x01\0";
+        assert_eq!(image::guess_format(webp).unwrap(), image::ImageFormat::WebP);
+        if image::ImageFormat::WebP.reading_enabled() {
+            assert!(image::load_from_memory(webp).is_ok(), "valid WebP fixture");
+        }
+        assert!(
+            ImageData::from_encoded(webp).is_none(),
+            "terminal images must reject WebP even when its codec is enabled"
         );
     }
 
