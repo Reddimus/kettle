@@ -725,10 +725,13 @@ impl App {
                 ftc.0 + in_seg_x,
                 ftc.1 + f64::from(destination_band.1) + bar_h * 0.5,
             ),
-            TabBarPos::Left => (ftc.0 + strip_w * 0.5, ftc.1 + in_seg_y),
+            TabBarPos::Left => (
+                ftc.0 + strip_w * 0.5,
+                ftc.1 + tear_off_tab_anchor_y(self.cfg.tab_bar_pos, destination_band, in_seg_y),
+            ),
             TabBarPos::Right => (
                 ftc.0 + f64::from(size.width) - strip_w * 0.5,
-                ftc.1 + in_seg_y,
+                ftc.1 + tear_off_tab_anchor_y(self.cfg.tab_bar_pos, destination_band, in_seg_y),
             ),
         };
         let coordinate_scale = drag_coordinate_scale(&src);
@@ -1675,10 +1678,13 @@ impl App {
             match self.cfg.tab_bar_pos {
                 TabBarPos::Top => (along_x, along_y),
                 TabBarPos::Bottom => (along_x, f64::from(destination_band.1) + along_y),
-                TabBarPos::Left => (along_x, along_y),
+                TabBarPos::Left => (
+                    along_x,
+                    tear_off_tab_anchor_y(self.cfg.tab_bar_pos, destination_band, along_y),
+                ),
                 TabBarPos::Right => (
                     f64::from(window.inner_size().width) - f64::from(width) + along_x,
-                    along_y,
+                    tear_off_tab_anchor_y(self.cfg.tab_bar_pos, destination_band, along_y),
                 ),
             }
         };
@@ -2167,6 +2173,14 @@ pub(super) fn accent_seed_from_cwd(cwd: Option<&std::path::Path>) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     dir.hash(&mut h);
     h.finish()
+}
+
+/// Translate a tab-local vertical grip into the destination client coordinates.
+pub(super) fn tear_off_tab_anchor_y(pos: TabBarPos, band: Rect, offset: f64) -> f64 {
+    match pos {
+        TabBarPos::Bottom | TabBarPos::Left | TabBarPos::Right => f64::from(band.1) + offset,
+        TabBarPos::Top => offset,
+    }
 }
 
 /// Pure: which segment index the tab-bar cursor falls in,
