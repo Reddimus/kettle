@@ -168,7 +168,15 @@ fn inbox_channel() -> (InboxSender, InboxReceiver) {
 }
 
 impl InboxSender {
+    fn send_until(&self, message: CtlServerMsg, deadline: Instant) -> Result<(), ()> {
+        self.send_inner(message, Some(deadline))
+    }
+
     fn send(&self, message: CtlServerMsg) -> Result<(), ()> {
+        self.send_inner(message, None)
+    }
+
+    fn send_inner(&self, message: CtlServerMsg, deadline: Option<Instant>) -> Result<(), ()> {
         if let Some(conn_id) = message.request_conn_id() {
             let quota = self
                 .quotas
@@ -179,13 +187,20 @@ impl InboxSender {
                 .ok_or(())?;
             // Timed-out probes may still be queued. Reserve this connection's
             // share until the UI consumes or discards each request.
-            quota.reserve.send(()).map_err(drop)?;
-            self.requests
-                .send(QueuedRequest {
-                    message,
-                    _permit: RequestPermit(quota.release),
-                })
-                .map_err(drop)
+            if let Some(deadline) = deadline {
+                quota.reserve.send_deadline((), deadline).map_err(drop)?;
+            } else {
+                quota.reserve.send(()).map_err(drop)?;
+            }
+            let queued = QueuedRequest {
+                message,
+                _permit: RequestPermit(quota.release),
+            };
+            if let Some(deadline) = deadline {
+                self.requests.send_deadline(queued, deadline).map_err(drop)
+            } else {
+                self.requests.send(queued).map_err(drop)
+            }
         } else {
             let registered = if let CtlServerMsg::NewConn { conn_id, .. } = &message {
                 self.quotas
@@ -1052,6 +1067,12 @@ impl CtlServer {
         !already
     }
 
+    pub fn detach_pane(&mut self, pane: u64) {
+        for conn in self.conns.values_mut() {
+            conn.attached_panes.remove(&pane);
+        }
+    }
+
     /// Whether ANY connection has `pane` attached.
     pub fn pane_is_attached(&self, pane: u64) -> bool {
         self.conns
@@ -1608,11 +1629,26 @@ fn wait_for_poll(
         }
         // Compose the internal probe (pinned pane addressing).
         let (rtx, rrx) = crossbeam_channel::bounded::<Response>(1);
-        let _ = tx.send(CtlServerMsg::Request {
-            conn_id,
-            request: Box::new(wait.read_screen_probe(pinned_pane.as_ref())),
-            reply: rtx,
-        });
+        if tx
+            .send_until(
+                CtlServerMsg::Request {
+                    conn_id,
+                    request: Box::new(wait.read_screen_probe(pinned_pane.as_ref())),
+                    reply: rtx,
+                },
+                deadline,
+            )
+            .is_err()
+        {
+            if Instant::now() >= deadline {
+                break;
+            }
+            return Response::err(
+                req.id,
+                ec::INTERNAL,
+                "wait_for: the UI inbox is unavailable",
+            );
+        }
         wake();
         polls += 1;
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1759,6 +1795,87 @@ mod tests {
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
         std::thread::spawn(move || accept_loop(listener, tx, wake, access, policy));
         (endpoint, rx)
+    }
+
+    #[test]
+    fn abandoned_wait_probes_do_not_block_another_deadline() {
+        let (tx, rx) = inbox_channel();
+        tx.send(CtlServerMsg::NewConn {
+            conn_id: 1,
+            event_tx: dummy_event_tx(),
+        })
+        .unwrap();
+        rx.try_recv().unwrap();
+        let request = || {
+            let request =
+                serde_json::from_str(r#"{"v":1,"id":1,"method":"get_state","params":{}}"#).unwrap();
+            let (reply, _) = crossbeam_channel::bounded(1);
+            CtlServerMsg::Request {
+                conn_id: 1,
+                request: Box::new(admit(full_access().current(), request).unwrap()),
+                reply,
+            }
+        };
+        for _ in 0..REQUESTS_PER_CONNECTION {
+            tx.send(request()).unwrap();
+        }
+        let (done, received) = std::sync::mpsc::channel();
+        let next = request();
+        let worker = std::thread::spawn(move || {
+            done.send(tx.send_until(next, Instant::now() + Duration::from_millis(1)))
+                .unwrap();
+        });
+        let timed = received.recv_timeout(Duration::from_millis(100));
+        let respected_deadline = matches!(timed, Ok(Err(())));
+        // Release the blocked baseline before asserting, so the regression cannot hang the suite.
+        rx.try_recv().unwrap();
+        worker.join().unwrap();
+        assert!(
+            respected_deadline,
+            "a fifth abandoned probe must time out while the UI is stalled"
+        );
+    }
+
+    #[test]
+    fn wait_for_returns_timeout_after_four_abandoned_probes() {
+        let (endpoint, rx) = start_test_accept_loop("abandoned-probes", quick_policy());
+        let mut client = kettle_ctl::transport::connect(&endpoint).unwrap();
+        let _ = recv_new_conn(&rx, Duration::from_secs(2));
+        for id in 1..=5 {
+            let request = serde_json::json!({
+                "v": 1, "id": id, "method": "wait_for",
+                "params": {"text": "never printed", "timeout_ms": 1}
+            });
+            client
+                .write_all_until(
+                    format!("{request}\n").as_bytes(),
+                    Instant::now() + Duration::from_secs(1),
+                    None,
+                )
+                .unwrap();
+            let response = read_response(&mut client, Duration::from_secs(1));
+            assert!(response.ok, "{:?}", response.error);
+            assert_eq!(response.result["timed_out"], true);
+        }
+    }
+
+    #[test]
+    fn closed_pane_attachment_churn_retains_only_live_panes() {
+        let (mut server, _) = test_server();
+        for conn in [1, 2] {
+            server.add_conn(conn, dummy_event_tx());
+        }
+        server.attach_pane(1, 99);
+        for pane in 100..356 {
+            server.attach_pane(1, pane);
+            server.attach_pane(2, pane);
+            server.detach_pane(pane);
+            assert!(!server.pane_is_attached(pane));
+            assert_eq!(server.conns[&1].attached_panes.len(), 1);
+            assert!(server.conns[&2].attached_panes.is_empty());
+        }
+        assert_eq!(server.remove_conn(1), HashSet::from([99]));
+        assert!(server.remove_conn(2).is_empty());
     }
 
     #[test]

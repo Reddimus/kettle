@@ -947,3 +947,56 @@ fn unix_first_shell_title_can_equal_argv0() {
     ));
 }
 
+
+#[test]
+fn fitted_title_diagnostics_include_the_live_bell() {
+    for (enabled, ringing, expected) in [
+        (false, false, None),
+        (false, true, None),
+        (true, false, None),
+        (true, true, Some("\u{1f514}")),
+    ] {
+        let bell = super::diagnostic_titlebar_bell(enabled, ringing);
+        assert_eq!(
+            bell, expected,
+            "diagnostics must use the same live bell as painting"
+        );
+        for budget in [8, 18, 80] {
+            let actual = kettle_render::fit_pane_titlebar_title(
+                None,
+                "",
+                "terminal title",
+                None,
+                Some("80x24"),
+                bell,
+                budget,
+            );
+            let painted = kettle_render::fit_pane_titlebar_title(
+                None,
+                "",
+                "terminal title",
+                None,
+                Some("80x24"),
+                expected,
+                budget,
+            );
+            assert_eq!(actual, painted);
+        }
+    }
+}
+
+#[test]
+fn composed_window_title_sanitizes_osc_reported_cwd() {
+    let cwd = "/tmp/safe\u{202e}evil";
+    for (template, title) in [
+        (kettle_config::DEFAULT_WINDOW_TITLE_FORMAT, "kettle"),
+        ("{title}: {cwd}", "shell"),
+    ] {
+        let title = super::window_title(template, title, cwd, 1);
+        assert!(
+            !title.contains('\u{202e}'),
+            "composed window title must neutralize bidi characters from reported cwd"
+        );
+        assert!(title.contains("safe evil"));
+    }
+}

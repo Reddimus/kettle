@@ -318,7 +318,7 @@ pub(crate) struct Reservation {
     size: u64,
     /// The free space a byte copy must leave.
     keep_free: u64,
-    /// The store's count of bytes its byte copies have yet to write.
+    /// The volume's count of bytes its byte copies have yet to write.
     pending: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -603,7 +603,7 @@ pub(crate) struct PastedImages {
     stuck: Vec<StuckImage>,
     /// Copies being made: each one's name and the bytes set aside for it.
     reserved: Vec<(OsString, u64)>,
-    /// The bytes this store's byte copies have yet to write, together, so
+    /// The bytes this volume's byte copies have yet to write, together, so
     /// copies made at once keep the free-space reserve between them.
     pending: std::sync::Arc<std::sync::atomic::AtomicU64>,
     bytes: u64,
@@ -956,7 +956,12 @@ impl PastedImages {
             ));
         }
         if self.directory.is_none() {
-            self.directory = Some(establish_session_directory(&self.dir, self.kind)?);
+            let directory = establish_session_directory(&self.dir, self.kind)?;
+            #[cfg(unix)]
+            {
+                self.pending = pending_on_device(directory.device);
+            }
+            self.directory = Some(directory);
         }
         let directory = self
             .directory
@@ -1976,7 +1981,7 @@ fn copy_into_session(
             return Err(error);
         }
     }
-    // What every byte copy of the store has left to write must fit before
+    // What every byte copy of the volume has left to write must fit before
     // each chunk, keeping the reserve: two copies never count it twice.
     let share = Pending::new(pending, size);
     let room = |left: u64| {
@@ -2081,7 +2086,22 @@ fn clone_unsupported(error: &io::Error) -> bool {
     })
 }
 
-/// One byte copy's share of its store's pending bytes: what it has left to
+#[cfg(unix)]
+fn pending_on_device(device: u64) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+    use std::sync::{Arc, Mutex, OnceLock, Weak, atomic::AtomicU64};
+    static VOLUMES: OnceLock<Mutex<std::collections::HashMap<u64, Weak<AtomicU64>>>> =
+        OnceLock::new();
+    let mut volumes = VOLUMES.get_or_init(Default::default).lock().unwrap();
+    volumes.retain(|_, pending| pending.strong_count() != 0);
+    if let Some(pending) = volumes.get(&device).and_then(Weak::upgrade) {
+        return pending;
+    }
+    let pending = Arc::default();
+    volumes.insert(device, Arc::downgrade(&pending));
+    pending
+}
+
+/// One byte copy's share of its volume's pending bytes: what it has left to
 /// write, updated as it writes and given back when it ends.
 #[cfg(unix)]
 struct Pending<'a> {
@@ -3690,6 +3710,9 @@ mod tests {
         let (_source_dir, source) = video_source(64, 0o600);
         let dir = scratch("video-pending");
         let mut copies = PastedImages::of_kind_in(VIDEOS_ANY_DISK, dir.clone());
+        let reservation = copies.reserve_copy(64, "mp4").unwrap();
+        copies.release(reservation);
+        copies.pending = Default::default();
         let counter = std::sync::Arc::clone(&copies.pending);
         let other = Pending::new(&counter, u64::MAX / 4);
         let error = copies
@@ -3716,6 +3739,33 @@ mod tests {
         assert_eq!(copies.pending.load(std::sync::atomic::Ordering::Acquire), 0);
         copies.cleanup();
         assert!(!dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn video_and_document_final_chunks_share_the_reserve() {
+        let mut videos = PastedImages::of_kind_in(VIDEOS, scratch("shared-video"));
+        let mut documents = PastedImages::of_kind_in(DOCUMENTS, scratch("shared-document"));
+        let video = videos.reserve_copy(COPY_CHUNK as u64, "mp4").unwrap();
+        let document = documents.reserve_copy(COPY_CHUNK as u64, "pdf").unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _chunk = Pending::new(&video.pending, video.size);
+                barrier.wait();
+                barrier.wait();
+            });
+            let _chunk = Pending::new(&document.pending, document.size);
+            barrier.wait();
+            let pending = document.pending.load(Ordering::Acquire);
+            barrier.wait();
+            assert!(
+                pending >= 2 * COPY_CHUNK as u64,
+                "concurrent final chunks must count both stores, got {pending} bytes"
+            );
+        });
+        videos.release(video);
+        documents.release(document);
     }
 
     /// A reserved copy holds its name, its place and its bytes until it is

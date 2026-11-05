@@ -653,3 +653,129 @@ fn finding_watcher_refresh_keeps_working_registration() {
     );
 }
 
+
+#[cfg(unix)]
+#[test]
+fn config_watch_paths_keep_dangling_symlink_targets() {
+    use std::os::unix::fs::symlink;
+    let root = kettle_test_support::private_tempdir("kettle-dangling-config-");
+    let links = root.join("links");
+    let targets = root.join("targets");
+    std::fs::create_dir(&links).unwrap();
+    std::fs::create_dir(&targets).unwrap();
+    let link = links.join("config");
+    symlink("../targets/config", &link).unwrap();
+    let target = std::fs::canonicalize(&targets).unwrap().join("config");
+    for existed in [false, true] {
+        if existed {
+            std::fs::write(&target, "font-size = 12\n").unwrap();
+            assert!(super::config_watch_paths(&link).unwrap().contains(&target));
+            std::fs::remove_file(&target).unwrap();
+        }
+        let refreshed = super::config_watch_paths(&link).unwrap();
+        assert!(
+            refreshed.contains(&target),
+            "a refreshed watcher must retain the dangling config target"
+        );
+        std::fs::write(&target, "font-size = 14\n").unwrap();
+        let event = notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))
+            .add_path(target.clone());
+        assert!(
+            refreshed
+                .iter()
+                .any(|path| super::watcher_event_matches(&event, path))
+        );
+        std::fs::remove_file(&target).unwrap();
+    }
+}
+
+#[test]
+fn font_reload_between_recovery_attempts_survives_an_unchanged_reload() {
+    let runtime = 18.0;
+    let mut pending = super::recovery_font_size_after_reload(None, true, 14.0);
+    assert_eq!(
+        pending,
+        Some(14.0),
+        "font reloads while the renderer is absent must survive recovery"
+    );
+    pending = super::recovery_font_size_after_reload(pending, false, 14.0);
+    assert_eq!(
+        pending.unwrap_or(runtime),
+        14.0,
+        "a no-op reload must not resurrect the old snapshot's zoom"
+    );
+    pending = super::recovery_font_size_after_reload(pending, true, 12.0);
+    assert_eq!(pending, Some(12.0));
+    assert_eq!(
+        super::recovery_font_size_after_reload(None, false, 12.0).unwrap_or(runtime),
+        18.0
+    );
+    let source = production_source();
+    let restore = source
+        .split("fn restore_gpu_renderer_state(")
+        .nth(1)
+        .unwrap()
+        .split("\n}\n")
+        .next()
+        .unwrap();
+    assert!(restore.contains("set_font_family(cfg.font_family.clone())"));
+    assert!(restore.contains("set_cell_scale(cfg.cell_width, cfg.cell_height)"));
+    let recovery = source
+        .split("fn try_recover_gpu(")
+        .nth(1)
+        .unwrap()
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    assert_eq!(
+        recovery.matches("restore_gpu_renderer_state(").count(),
+        2,
+        "primary and secondary windows must reconcile recovery fonts"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn review_config_watcher_survives_a_missing_target_parent() {
+    use std::os::unix::fs::symlink;
+    #[cfg(target_os = "linux")]
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+    #[cfg(target_os = "linux")]
+    use std::time::Duration;
+
+    let root = kettle_test_support::private_tempdir("kettle-missing-target-parent-");
+    let links = root.join("links");
+    std::fs::create_dir(&links).unwrap();
+    let link = links.join("config");
+    symlink("../missing/config", &link).unwrap();
+    let watched = super::config_watch_paths(&link)
+        .expect("the original symlink's directory must remain watchable");
+    assert!(watched.contains(&std::path::absolute(&link).unwrap()));
+    assert!(watched.iter().all(|path| path.parent().unwrap().is_dir()));
+    #[cfg(target_os = "linux")]
+    let (tx, rx) = mpsc::channel();
+    #[cfg(target_os = "linux")]
+    let _watcher = super::config_watcher(
+        &link,
+        kettle_config::ConfigTrust::ExplicitPath,
+        Arc::new(AtomicBool::new(false)),
+        move || tx.send(()).is_ok(),
+    )
+    .expect("the original symlink's directory must remain watchable");
+    let valid = root.join("valid");
+    std::fs::write(&valid, "font-size = 14\n").unwrap();
+    std::fs::remove_file(&link).unwrap();
+    symlink("../valid", &link).unwrap();
+    let event = notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))
+        .add_path(std::path::absolute(&link).unwrap());
+    assert!(
+        watched
+            .iter()
+            .any(|path| super::watcher_event_matches(&event, path))
+    );
+    #[cfg(target_os = "linux")]
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("retargeting must wake configuration reload");
+    let refreshed = super::config_watch_paths(&link).unwrap();
+    assert!(refreshed.contains(&std::fs::canonicalize(valid).unwrap()));
+}

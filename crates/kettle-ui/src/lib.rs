@@ -33,7 +33,7 @@ pub mod agy_plugin;
 mod app;
 pub mod codex_shell;
 mod held_buttons;
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 mod test_bus;
 #[cfg(any(target_os = "linux", test))]
 mod wayland;
@@ -305,7 +305,7 @@ fn expand_user_path_with(path: &std::path::Path, home: Option<String>) -> std::p
     {
         let mut expanded = std::path::PathBuf::from(home);
         if let Some(rest) = s.strip_prefix("~/") {
-            expanded.push(rest);
+            expanded.push(rest.trim_start_matches(std::path::is_separator));
         }
         return expanded;
     }
@@ -314,6 +314,17 @@ fn expand_user_path_with(path: &std::path::Path, home: Option<String>) -> std::p
 
 #[cfg(test)]
 mod recording_policy_tests {
+    #[test]
+    fn record_dir_repeated_separators_stay_under_home() {
+        assert_eq!(
+            super::expand_user_path_with(
+                std::path::Path::new("~//tmp/records"),
+                Some("/home/k".into())
+            ),
+            std::path::PathBuf::from("/home/k/tmp/records")
+        );
+    }
+
     #[test]
     fn record_dir_tilde_is_expanded_to_home() {
         use super::expand_user_path_with;

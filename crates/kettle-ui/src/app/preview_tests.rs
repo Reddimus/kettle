@@ -1034,10 +1034,71 @@ fn get_state_reports_media_availability_without_waiting() {
 
 #[test]
 fn finding_enlarged_viewer_covers_sibling_lanes() {
-    let body = finding_body(include_str!("preview.rs"), "preview_lane_projections");
+    let body = finding_body(include_str!("preview_model.rs"), "lane_is_uncovered");
     assert!(
         body.contains("open.theater || open.fullscreen"),
         "fullscreen and theater projections must exclude sibling lanes"
     );
 }
 
+#[test]
+fn sibling_playback_visibility_uses_the_paint_exclusion() {
+    let source = include_str!("preview.rs");
+    let geometry = finding_body(source, "preview_lane_geometry_of");
+    assert!(
+        geometry.contains("lane_is_uncovered(ws.preview_overlay, pane)"),
+        "playback geometry must exclude siblings covered by theater or fullscreen"
+    );
+    let painting = finding_body(source, "preview_lane_projections");
+    assert!(painting.contains("lane_is_uncovered(ws.preview_overlay, *pane)"));
+    for tick in ["tick_lane_playbacks", "tick_lane_previews"] {
+        assert!(finding_body(source, tick).contains("self.preview_lane_geometry_of(ws, pane)"));
+    }
+}
+
+#[test]
+fn sibling_playback_visibility_hides_pinned_lanes_behind_an_enlarged_viewer() {
+    assert!(super::lane_is_uncovered(None, 1));
+    for (theater, fullscreen) in [(false, false), (true, false), (false, true), (true, true)] {
+        let open = Some(crate::media::Overlay {
+            pane: 2,
+            origin: Some(1),
+            control: None,
+            theater,
+            fullscreen,
+        });
+        assert!(super::lane_is_uncovered(open, 2));
+        assert_eq!(super::lane_is_uncovered(open, 1), !(theater || fullscreen));
+    }
+}
+
+#[test]
+fn clipboard_feedback_is_applied_after_steady_playback_status() {
+    let body = finding_body(include_str!("preview.rs"), "preview_lane_panel");
+    assert!(
+        body.rfind("lane_notice_with_action(")
+            .is_some_and(|action| action > body.find("match playback.notice()").unwrap()),
+        "clipboard action feedback must retain precedence over muted or silent playback"
+    );
+}
+
+#[test]
+fn clipboard_feedback_survives_muted_and_silent_status() {
+    use crate::window_state::LaneNotice as N;
+    let tr = kettle_i18n::Translator::default();
+    for steady in [
+        tr.text(kettle_i18n::Text::MediaLaneNoticeVideoMuted),
+        tr.text(super::silence_text(kettle_media::AudioStatus::NoTrack)),
+    ] {
+        for notice in [N::CopyFailed, N::CopyBusy, N::ImageCopied, N::SourceCopied] {
+            assert_eq!(
+                super::lane_notice_with_action(Some(notice), Some(steady.into()), &tr),
+                Some(super::lane_notice_text(notice, &tr).into())
+            );
+        }
+        assert_eq!(
+            super::lane_notice_with_action(None, Some(steady.into()), &tr),
+            Some(steady.into())
+        );
+    }
+}

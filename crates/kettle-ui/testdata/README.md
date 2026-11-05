@@ -1,7 +1,10 @@
 # Video preview fixture
 
 `video-preview.mp4` is a one-second, 160 by 90 H.264 test pattern with no audio.
-It exercises the native macOS and Windows poster workers in CI.
+The [shipped-worker tests](../../kettle/tests/video_preview_native.rs) cover
+Unix identity/content checks and Windows native poster extraction in CI.
+Separate [macOS rendering tests](../../kettle-media-native/tests/avfoundation.rs)
+exercise AVFoundation with the `avfoundation` feature.
 
 Regenerate it with:
 

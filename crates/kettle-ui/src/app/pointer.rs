@@ -810,7 +810,7 @@ impl App {
             }
             return true;
         }
-        if self.picker_pointer(ws, PickerPointer::Wheel(-(steps.notches as isize))) {
+        if self.picker_pointer(ws, PickerPointer::Wheel(-(steps.notches as isize)), None) {
             return true;
         }
         // A wheel over a lane is the lane's: it pans a rendered item or
@@ -864,11 +864,13 @@ impl App {
                 steps.cols
             };
             if step != 0 {
+                let pre = self.focus_key(ws);
                 if step > 0 {
                     ws.mux.prev_tab();
                 } else {
                     ws.mux.next_tab();
                 }
+                self.note_focus_change(ws, pre);
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -896,6 +898,7 @@ impl App {
                 r.font_size() - 1.0
             };
             r.set_font_size(new);
+            ws.scaled_zoom_prev_font_size = None;
             self.resize_all(ws);
             if let Some(w) = &ws.window {
                 w.request_redraw();
@@ -1818,9 +1821,7 @@ impl App {
             return None;
         }
         let (row, col) = self.cursor_cell_in_rect(ws, rect);
-        ws.links
-            .iter()
-            .find(|l| l.row == row && col >= l.start_col && col <= l.end_col)
+        cached_link_at_cell(ws, row, col)
     }
 
     pub(super) fn pane_mode(

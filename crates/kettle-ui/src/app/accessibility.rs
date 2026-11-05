@@ -132,6 +132,9 @@ impl App {
         let cards = self.accessible_cards(ws);
         let mut children = Vec::with_capacity(layout.len());
         let mut nodes = Vec::with_capacity(layout.len() * 2 + cards.len() + 1);
+        ws.accessibility_text_rows
+            .borrow_mut()
+            .retain(|pane, _| ws.mux.panes.contains_key(pane));
         // A pane's terminal node covers its terminal, clear of its titlebar
         // and lane.
         for (pane_id, partition) in layout {
@@ -143,7 +146,6 @@ impl App {
                 continue;
             };
             let node_id = accessibility_pane_id(pane_id);
-            let text_id = accessibility_text_id(pane_id);
             children.push(node_id);
             let mut node = Node::new(Role::Terminal);
             let label = if pane.title.trim().is_empty() {
@@ -152,7 +154,32 @@ impl App {
                 pane.title.clone()
             };
             node.set_label(label);
-            let mut pane_children = vec![text_id];
+            let text = pane
+                .term
+                .screen_text(0)
+                .map(|screen| screen.text.trim_end().to_string())
+                .unwrap_or_default();
+            let mut text_rows = ws.accessibility_text_rows.borrow_mut();
+            let ids = text_rows
+                .entry(pane_id)
+                .or_insert_with(|| vec![accessibility_text_id(pane_id)]);
+            let rows = text.split_inclusive('\n').count().max(1);
+            ids.resize_with(rows, next_terminal_accessibility_row_id);
+            ids.truncate(rows);
+            let text_rect = (
+                x + self.cfg.padding_x,
+                y + self.cfg.padding_y,
+                (width - 2.0 * self.cfg.padding_x).max(0.0),
+                (height - 2.0 * self.cfg.padding_y).max(0.0),
+            );
+            let text_nodes = terminal_accessibility_runs(
+                &text,
+                text_rect,
+                Self::cell_size(ws).unwrap_or((8.0, 16.0)).1,
+                ids,
+            );
+            let mut pane_children: Vec<_> = text_nodes.iter().map(|(id, _)| *id).collect();
+            nodes.extend(text_nodes);
             for (instance, card, item) in cards.iter().filter(|(_, card, _)| card.pane == pane_id) {
                 let id = accessibility_card_id(*instance);
                 pane_children.push(id);
@@ -167,25 +194,6 @@ impl App {
                 ));
             }
             node.set_children(pane_children);
-            let text = pane
-                .term
-                .screen_text(0)
-                .map(|screen| screen.text.trim_end().to_string())
-                .unwrap_or_default();
-            let mut text_node = Node::new(Role::TextRun);
-            text_node.set_character_lengths(
-                text.chars()
-                    .map(|character| character.len_utf8() as u8)
-                    .collect::<Vec<_>>(),
-            );
-            text_node.set_value(text);
-            text_node.set_bounds(accesskit::Rect::new(
-                f64::from(x),
-                f64::from(y),
-                f64::from(x + width),
-                f64::from(y + height),
-            ));
-            nodes.push((text_id, text_node));
             if pane.read_only {
                 node.set_read_only();
             }
@@ -504,22 +512,11 @@ impl App {
                 };
                 let id = accessibility_completion_row_id(candidate.position);
                 row_ids.push(id);
-                let mut row = Node::new(Role::ListBoxOption);
-                row.set_label(if candidate.description.is_empty() {
-                    candidate.label.clone()
-                } else {
-                    format!("{}, {}", candidate.label, candidate.description)
-                });
-                row.set_position_in_set(candidate.position + 1);
-                if completion.selected == Some(index) {
-                    row.set_selected(true);
-                }
-                row.set_bounds(accesskit::Rect::new(
-                    f64::from(x),
-                    f64::from(y),
-                    f64::from(x + width),
-                    f64::from(y + height),
-                ));
+                let row = completion_accessibility_row(
+                    candidate,
+                    completion.selected == Some(index),
+                    (x, y, width, height),
+                );
                 nodes.push((id, row));
             }
             let mut list = Node::new(Role::ListBox);
@@ -1270,6 +1267,7 @@ pub(super) fn update_toast_nodes(
 pub(super) const ACCESSIBILITY_ROOT_ID: NodeId = NodeId(0);
 const ACCESSIBILITY_PANE_ID_MASK: u64 = 1 << 63;
 const ACCESSIBILITY_TEXT_ID_MASK: u64 = (1 << 63) | (1 << 62);
+const ACCESSIBILITY_TERMINAL_ROW_ID_MASK: u64 = 1 << 55;
 const ACCESSIBILITY_SEARCH_ID_MASK: u64 = 1 << 61;
 pub(super) const ACCESSIBILITY_SEARCH_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK);
 const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 16);
@@ -1320,8 +1318,86 @@ pub(super) fn accessibility_pane_id(pane_id: u64) -> NodeId {
     NodeId::from(ACCESSIBILITY_PANE_ID_MASK | pane_id)
 }
 
+pub(super) fn next_terminal_accessibility_row_id() -> NodeId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    // Rust 1.99 renames fetch_update; try_update is unavailable at the MSRV.
+    #[allow(deprecated)]
+    let id = NEXT
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |next| {
+                next.checked_add(1)
+                    .filter(|next| *next < ACCESSIBILITY_TERMINAL_ROW_ID_MASK)
+            },
+        )
+        .expect("terminal accessibility node IDs exhausted");
+    NodeId(ACCESSIBILITY_TERMINAL_ROW_ID_MASK | id)
+}
+
 pub(super) fn accessibility_text_id(pane_id: u64) -> NodeId {
     NodeId::from(ACCESSIBILITY_TEXT_ID_MASK | pane_id)
+}
+
+pub(super) fn terminal_accessibility_runs(
+    text: &str,
+    rect: Rect,
+    cell_height: f32,
+    ids: &[NodeId],
+) -> Vec<(NodeId, Node)> {
+    let (x, y, width, height) = rect;
+    let mut lines: Vec<_> = text.split_inclusive('\n').collect();
+    if lines.is_empty() {
+        lines.push("");
+    }
+    lines
+        .into_iter()
+        .zip(ids.iter().copied())
+        .enumerate()
+        .map(|(row, (line, id))| {
+            let mut node = Node::new(Role::TextRun);
+            node.set_value(line);
+            node.set_character_lengths(
+                line.chars()
+                    .map(|character| character.len_utf8() as u8)
+                    .collect::<Vec<_>>(),
+            );
+            let top = (y + row as f32 * cell_height).min(y + height);
+            let bottom = (top + cell_height).min(y + height);
+            node.set_bounds(accesskit::Rect::new(
+                x as f64,
+                top as f64,
+                (x + width) as f64,
+                bottom as f64,
+            ));
+            (id, node)
+        })
+        .collect()
+}
+
+pub(super) fn completion_accessibility_row(
+    candidate: &kettle_render::CompletionOverlayRow,
+    selected: bool,
+    rect: Rect,
+) -> Node {
+    let (x, y, width, height) = rect;
+    let mut row = Node::new(Role::ListBoxOption);
+    row.set_label(if candidate.description.is_empty() {
+        candidate.label.clone()
+    } else {
+        format!("{}, {}", candidate.label, candidate.description)
+    });
+    row.set_position_in_set(candidate.position);
+    if selected {
+        row.set_selected(true);
+    }
+    row.set_bounds(accesskit::Rect::new(
+        f64::from(x),
+        f64::from(y),
+        f64::from(x + width),
+        f64::from(y + height),
+    ));
+    row
 }
 
 pub(super) fn accessibility_completion_row_id(position: usize) -> NodeId {
@@ -1560,6 +1636,7 @@ pub(super) const MODAL_KIND_LAYOUTS: u64 = 6;
 pub(super) const MODAL_KIND_SSH: u64 = 7;
 pub(super) const MODAL_KIND_TITLE: u64 = 8;
 pub(super) const MODAL_KIND_THEMES: u64 = 10;
+pub(super) const MODAL_KIND_SETTINGS: u64 = 11;
 /// Text runs take kinds of their own, above every modal kind, so no row index
 /// can reach them.
 const MODAL_KIND_TEXT_RUN: u64 = 1 << 8;
@@ -1569,8 +1646,8 @@ pub(super) fn accessibility_modal_text_run_id(kind: u64) -> NodeId {
 }
 
 /// The kind of the modal text input that has the keyboard, in
-/// `modal_editor`'s precedence; Settings edits paths in its own dialog.
-fn accessibility_modal_input_kind(ws: &WindowState) -> Option<u64> {
+/// `modal_editor`'s precedence.
+pub(super) fn accessibility_modal_input_kind(ws: &WindowState) -> Option<u64> {
     if ws.confirm_dialog.is_some() || ws.context_menu.is_some() {
         None
     } else if ws.palette_input.is_some() {
@@ -1578,7 +1655,7 @@ fn accessibility_modal_input_kind(ws: &WindowState) -> Option<u64> {
     } else if ws.theme_picker_input.is_some() {
         Some(MODAL_KIND_THEMES)
     } else if ws.settings_text_edit.is_some() {
-        None
+        Some(MODAL_KIND_SETTINGS)
     } else if ws.layout_picker_input.is_some() {
         Some(MODAL_KIND_LAYOUTS)
     } else if ws.ssh_input.is_some() {
@@ -1854,6 +1931,33 @@ pub(super) fn modal_accessibility_projection(
         let list_id = accessibility_modal_id(5, 1);
         let mut children = Vec::with_capacity(settings.rows.len());
         for (index, row) in settings.rows.iter().enumerate() {
+            if index == settings.focused_row
+                && !picker_open
+                && overlay.edit_title.is_none()
+                && let Some(field) = overlay.text_field.as_ref()
+            {
+                let id = accessibility_modal_id(MODAL_KIND_SETTINGS, 1);
+                let mut input = Node::new(Role::TextInput);
+                input.set_label(row.label.clone());
+                input.set_value(field.text.clone());
+                let (x, y, width, height) = field.rect;
+                input.set_bounds(accesskit::Rect::new(
+                    x as f64,
+                    y as f64,
+                    (x + width) as f64,
+                    (y + height) as f64,
+                ));
+                push_text_input_run(
+                    &mut projection.nodes,
+                    &mut input,
+                    accessibility_modal_text_run_id(MODAL_KIND_SETTINGS),
+                    &field.text,
+                    Some(field),
+                );
+                children.push(id);
+                projection.nodes.push((id, input));
+                continue;
+            }
             let id = accessibility_modal_id(5, index + 2);
             let mut node = Node::new(Role::ListBoxOption);
             // macOS maps list options to static text and uses the label as

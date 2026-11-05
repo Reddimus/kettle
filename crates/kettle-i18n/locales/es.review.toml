@@ -22,6 +22,7 @@
 # panel and observed accessibility tree, including an independent second pass.
 
 [status]
+notify_body_reconnect_environment_unavailable = "draft"
 menu_detecting_shells = "draft"
 theme_builtin_dark = "draft"
 theme_builtin_light = "draft"
@@ -324,8 +325,9 @@ notify_body_path_not_typed = "draft"
 notify_body_keybind_modifier = "accepted"
 notify_body_lua_callback_stopped = "accepted"
 notify_body_lua_not_delivered = "accepted"
+notify_body_setting_not_applied = "draft"
 notify_body_not_saved = "accepted"
-notify_body_padding_partial = "accepted"
+notify_body_padding_partial = "draft"
 notify_body_program_not_opened = "accepted"
 notify_body_recording_flush_failed = "accepted"
 notify_body_recording_overloaded = "accepted"

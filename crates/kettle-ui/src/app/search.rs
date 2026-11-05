@@ -28,11 +28,6 @@ impl App {
         if !ws.search.open {
             return;
         }
-        const TYPING_SEARCH_LINES: usize = 1_000;
-        const BACKGROUND_CHUNK_LINES: usize = 1_000;
-        const VISIBLE_CONTEXT_LINES: i32 = 100;
-        const MAX_LOGICAL_LINE_EXPANSION: usize = kettle_core::MAX_SEARCH_LOGICAL_LINE_CONTEXT;
-
         let Some(pane_id) = ws.search.target_pane else {
             self.close_search(ws);
             return;
@@ -41,6 +36,22 @@ impl App {
             self.close_search(ws);
             return;
         };
+
+        let output_generation = pane.term.output_generation();
+        Self::update_search_for_pane(ws, pane_id, output_generation);
+    }
+
+    pub(super) fn update_search_for_pane(
+        ws: &mut WindowState,
+        pane_id: u64,
+        output_generation: u64,
+    ) {
+        const TYPING_SEARCH_LINES: usize = 1_000;
+        const BACKGROUND_CHUNK_LINES: usize = 1_000;
+        const VISIBLE_CONTEXT_LINES: i32 = 100;
+        const MAX_LOGICAL_LINE_EXPANSION: usize = kettle_core::MAX_SEARCH_LOGICAL_LINE_CONTEXT;
+
+        let pane = ws.mux.panes.get(&pane_id).expect("search target checked");
 
         // Compile untrusted input before taking the terminal-grid lock. Compilation has explicit
         // engine limits, but it still does allocation and Unicode automata construction that must
@@ -79,7 +90,6 @@ impl App {
             return;
         }
 
-        let output_generation = pane.term.output_generation();
         let Ok(mut term) = pane.term.term.lock() else {
             ws.search.set_status_at(
                 kettle_render::SearchStatus::Searching,
@@ -283,6 +293,15 @@ impl App {
                 };
                 if at_edge {
                     if ws.search.wrap {
+                        ws.search.background = wrapped_background_search(
+                            current_token,
+                            default_direction,
+                            anchor,
+                            (top_line, bottom_line, last_column),
+                            false,
+                            false,
+                            false,
+                        );
                         ws.search.set_status_at(
                             kettle_render::SearchStatus::Searching,
                             std::time::Instant::now(),
@@ -292,6 +311,34 @@ impl App {
                         ws.search.unlimited_retry_at = None;
                     }
                 } else {
+                    let cursor = search_point_after(
+                        edge,
+                        default_direction,
+                        top_line,
+                        bottom_line,
+                        last_column,
+                    )
+                    .expect("nearby edge is inside the grid");
+                    let terminal_edge = match default_direction {
+                        kettle_core::SearchDirection::Forward => {
+                            kettle_core::SearchPoint::new(bottom_line, last_column)
+                        }
+                        kettle_core::SearchDirection::Reverse => {
+                            kettle_core::SearchPoint::new(top_line, 0)
+                        }
+                    };
+                    ws.search.background = Some(crate::search_input::BackgroundSearch {
+                        token: current_token,
+                        direction: default_direction,
+                        cursor,
+                        edge: terminal_edge,
+                        wrap_anchor: anchor,
+                        wrapped: false,
+                        nearby: false,
+                        navigation: false,
+                        had_focus: false,
+                        output_drifted: false,
+                    });
                     ws.search.set_status_at(
                         kettle_render::SearchStatus::Searching,
                         std::time::Instant::now(),
@@ -306,7 +353,7 @@ impl App {
         let background_due = !prioritize_visible
             && !foreground_scan_ran
             && !nearby_yielded_this_turn
-            && (ws.search.background.is_some()
+            && (search_background_ready(&ws.search, now)
                 || ws
                     .search
                     .unlimited_retry_at
@@ -407,6 +454,9 @@ impl App {
             if let Some(mut job) = ws.search.background.take()
                 && job.token == current_token
             {
+                if !job.nearby {
+                    ws.search.unlimited_retry_at = None;
+                }
                 let chunk_edge = bounded_search_edge(
                     job.cursor,
                     job.direction,
@@ -2167,6 +2217,7 @@ pub(super) fn activate_quiet_search_retry(search: &mut crate::search_input::Sear
 }
 
 pub(super) fn cancel_deferred_search_retry(search: &mut crate::search_input::SearchState) {
+    search.background = None;
     search.quiet_retry_pending = false;
     search.unlimited_retry_at = None;
 }
@@ -2424,4 +2475,13 @@ pub(super) fn search_pointer_route(
         None if dragging_editor => SearchPointerRoute::Bar,
         None => SearchPointerRoute::Grid,
     }
+}
+
+pub(super) fn search_background_ready(
+    search: &crate::search_input::SearchState,
+    now: std::time::Instant,
+) -> bool {
+    search.background.as_ref().is_some_and(|job| {
+        job.nearby || job.navigation || search.unlimited_retry_at.is_none_or(|at| now >= at)
+    })
 }

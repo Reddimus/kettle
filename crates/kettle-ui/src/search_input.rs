@@ -164,6 +164,12 @@ impl SearchState {
                     | kettle_render::SearchStatus::TooComplex
                     | kettle_render::SearchStatus::TooLong
             );
+        for compiled in [&mut self.compiled, &mut self.highlight_compiled]
+            .into_iter()
+            .flatten()
+        {
+            compiled.clear_progress();
+        }
         self.focused = None;
         self.revealed_focus = None;
         self.visible.clear();
@@ -490,6 +496,49 @@ mod tests {
         }
         assert!(navigation_done, "navigation never exhausted the range");
         assert!(visible_done, "highlights never exhausted the range");
+    }
+
+    #[test]
+    fn preference_reload_restarts_discarded_highlights() {
+        use kettle_core::{
+            CaseSensitivity, CompiledSearch, SearchBounds, SearchDirection, SearchPoint,
+        };
+        let term = wrapped_search_term(&"a".repeat(12_000));
+        let bounds = SearchBounds::new(SearchPoint::new(0, 0), SearchPoint::new(149, 79));
+        let mut state = super::SearchState::default();
+        state.set_compiled(CompiledSearch::compile("a", CaseSensitivity::Always).unwrap());
+        let first = state.compiled_for_highlights().find_in_range(
+            &term,
+            bounds,
+            SearchDirection::Forward,
+            12_000,
+        );
+        assert!(!first.matches.is_empty());
+        assert!(first.continuation.is_some());
+        state.visible = first.matches;
+        state.wrap = !state.wrap;
+        state.restart_navigation(std::time::Instant::now());
+        let mut remaining = bounds;
+        for _ in 0..128 {
+            let limit = 12_000 - state.visible.len();
+            let batch = state.compiled_for_highlights().find_in_range(
+                &term,
+                remaining,
+                SearchDirection::Forward,
+                limit,
+            );
+            state.visible.extend(batch.matches);
+            match batch.continuation {
+                Some(cursor) => remaining.start = cursor,
+                None => break,
+            }
+        }
+        assert_eq!(
+            state.visible.len(),
+            12_000,
+            "discarded highlights must be rescanned"
+        );
+        assert_eq!(state.visible[0].start, bounds.start);
     }
 
     #[test]

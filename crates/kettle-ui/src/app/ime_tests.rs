@@ -210,3 +210,59 @@ fn empty_pane_preedit_still_rejects_late_commit_after_focus_moves() {
     assert!(super::take_ime_commit(&mut ws));
 }
 
+#[test]
+fn cancelled_modal_composition_rejects_continuation() {
+    for search in [false, true] {
+        let mut ws = WindowState::new(1, Mux::new());
+        ws.search.open = search;
+        ws.palette_input = (!search).then(|| (Default::default(), 0));
+        super::update_ime_preedit(&mut ws, "old".into(), None);
+        if search {
+            super::end_modal_composition(&mut ws);
+            ws.search.open = false;
+        } else {
+            assert!(super::dispatch_modal_press(
+                &mut ws,
+                super::ModalKind::Palette,
+                false,
+                0
+            ));
+        }
+        super::update_ime_preedit(&mut ws, "continued".into(), None);
+        assert!(
+            ws.ime_preedit.is_none(),
+            "cancelled modal phrase must stay hidden"
+        );
+        assert!(
+            !super::take_ime_commit(&mut ws),
+            "cancelled modal phrase must not commit"
+        );
+    }
+}
+
+#[test]
+fn cancelled_modal_composition_allows_fresh_commit_only_input() {
+    for search in [false, true] {
+        let mut ws = WindowState::new(1, Mux::new());
+        ws.search.open = search;
+        ws.palette_input = (!search).then(|| (Default::default(), 0));
+        super::update_ime_preedit(&mut ws, "old".into(), None);
+        if search {
+            super::end_modal_composition(&mut ws);
+            ws.search.open = false;
+        } else {
+            assert!(super::dispatch_modal_press(
+                &mut ws,
+                super::ModalKind::Palette,
+                false,
+                0
+            ));
+        }
+        super::update_ime_preedit(&mut ws, String::new(), None);
+        super::update_ime_preedit(&mut ws, String::new(), None);
+        assert!(
+            super::take_ime_commit(&mut ws),
+            "fresh commit-only input after modal cancellation must be accepted"
+        );
+    }
+}

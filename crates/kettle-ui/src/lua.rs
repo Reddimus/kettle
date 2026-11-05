@@ -370,9 +370,9 @@ impl LuaEngine {
     /// `Safe` and `Restricted` both nil the Lua stdlib functions that execute
     /// external processes or open arbitrary files: `os.execute`, `os.exit`,
     /// `os.remove`, `os.rename`, `io.open`, `io.popen`, `io.lines`,
-    /// `io.input`, `io.output`, `package.loadlib`, `loadfile`, `dofile`. The
+    /// `io.read`, `io.input`, `io.output`, `package.loadlib`, `loadfile`, `dofile`. The
     /// rest of the stdlib (string, table, math, `os.date`/`os.time`/
-    /// `os.getenv`/`os.difftime`, `io.read`, ...) stays usable.
+    /// `os.getenv`/`os.difftime`, ...) stays usable.
     ///
     /// **Nil'ing those is not what stops a plugin running commands.**
     /// `kettle.send_text` types into the focused shell, and a newline in that
@@ -425,6 +425,26 @@ impl LuaEngine {
             // Block dangerous APIs. Setting to nil is the canonical
             // sandbox pattern in mlua / WezTerm / Neovim plugins.
             let globals = lua.globals();
+            // Lua disables instruction hooks while running finalizers.
+            let setmetatable: mlua::Function = globals.get("setmetatable")?;
+            globals.set(
+                "setmetatable",
+                lua.create_function(
+                    move |_, (table, metatable): (mlua::Table, Option<mlua::Table>)| {
+                        if let Some(metatable) = &metatable
+                            && !matches!(
+                                metatable.raw_get::<mlua::Value>("__gc")?,
+                                mlua::Value::Nil
+                            )
+                        {
+                            return Err(mlua::Error::RuntimeError(
+                                "script finalizers are unavailable in sandboxed mode".into(),
+                            ));
+                        }
+                        setmetatable.call::<mlua::Table>((table, metatable))
+                    },
+                )?,
+            )?;
             if let Ok(os_tbl) = globals.get::<mlua::Table>("os") {
                 for k in [
                     "execute",
@@ -439,7 +459,8 @@ impl LuaEngine {
             }
             if let Ok(io_tbl) = globals.get::<mlua::Table>("io") {
                 for k in [
-                    "open", "popen", "lines", "input", "output", "stdin", "stdout", "stderr",
+                    "open", "popen", "lines", "read", "input", "output", "stdin", "stdout",
+                    "stderr",
                 ] {
                     io_tbl.set(k, mlua::Value::Nil)?;
                 }
@@ -1090,7 +1111,13 @@ impl LuaEngine {
                 }
                 match result {
                     Ok(mlua::Value::String(rewritten)) => {
+                        if rewritten.as_bytes().len() > kettle_core::links::MAX_URL_BYTES {
+                            continue;
+                        }
                         let text = rewritten.to_string_lossy();
+                        if text.len() > kettle_core::links::MAX_URL_BYTES {
+                            continue;
+                        }
                         let text = text.trim();
                         if !text.is_empty() {
                             return Ok(UrlHandlerOutcome::Open(text.to_string()));
@@ -1358,6 +1385,106 @@ impl LuaEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_refuses_finalizers_in_every_collection_phase() {
+        const CHILD: &str = "KETTLE_LUA_FINALIZER_CHILD";
+        if let Ok(case) = std::env::var(CHILD) {
+            let (mode, phase) = case.split_once(':').unwrap();
+            let sandbox = if mode == "safe" {
+                kettle_config::LuaSandbox::Safe
+            } else {
+                kettle_config::LuaSandbox::Restricted
+            };
+            let eng = LuaEngine::new_inner("Default", sandbox, 2).unwrap();
+            let finish = match phase {
+                "explicit" => "t = nil; collectgarbage('collect')",
+                "automatic" => "t = nil; for i = 1, 100000 do local a = {} end",
+                "teardown" => "kept = t",
+                _ => panic!("unknown phase"),
+            };
+            let error = eng.eval_str(&format!(
+                "local t = setmetatable({{}}, {{__gc = function() while true do end end}}); {finish}"
+            )).expect_err("sandbox must refuse script finalizers");
+            assert!(format!("{error:#}").contains("finalizers"), "{error:#}");
+            assert_eq!(
+                eng.eval_str(
+                    "local m = {}; local t = setmetatable({}, m); m.__gc = function() end; \
+                 return pcall(setmetatable, t, m)"
+                )
+                .unwrap(),
+                "false"
+            );
+            return;
+        }
+        for mode in ["safe", "restricted"] {
+            for phase in ["explicit", "automatic", "teardown"] {
+                let case = format!("{mode}:{phase}");
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "lua::tests::sandbox_refuses_finalizers_in_every_collection_phase",
+                    ])
+                    .env(CHILD, &case)
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .expect("isolated finalizer regression");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+                loop {
+                    if let Some(status) = child.try_wait().unwrap() {
+                        assert!(status.success(), "{case}: {status}");
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("{case}: finalizer bypassed the instruction watchdog");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_cannot_read_idle_stdin() {
+        const CHILD: &str = "KETTLE_LUA_STDIN_CHILD";
+        if let Ok(mode) = std::env::var(CHILD) {
+            let sandbox = if mode == "safe" {
+                kettle_config::LuaSandbox::Safe
+            } else {
+                kettle_config::LuaSandbox::Restricted
+            };
+            let eng = LuaEngine::new_with_sandbox("Default", sandbox).unwrap();
+            eng.eval_str("return io.read('*a')")
+                .expect_err("sandbox must refuse default-stream reads");
+            return;
+        }
+        for mode in ["safe", "restricted"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "lua::tests::sandbox_cannot_read_idle_stdin"])
+                .env(CHILD, mode)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("isolated stdin regression");
+            let input = child.stdin.take().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "{mode}: {status}");
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{mode}: io.read blocked on idle stdin");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            drop(input);
+        }
+    }
 
     #[test]
     fn sandbox_refuses_temporary_file_handles() {
@@ -2610,6 +2737,34 @@ mod tests {
             UrlHandlerOutcome::Fallthrough
         );
         assert_eq!(eng.eval_str("return github_hits").unwrap(), "1");
+    }
+
+    #[test]
+    fn rewritten_urls_obey_the_opening_size_limit() {
+        for value in [
+            "string.rep('x', 4097)",
+            "string.rep(string.char(255), 1366)",
+        ] {
+            let eng = LuaEngine::new("Default").unwrap();
+            eng.eval_str(&format!(
+                "kettle.add_url_handler('large', '.*', function() return {value} end)"
+            ))
+            .unwrap();
+            assert_eq!(
+                eng.try_url_handler("https://example.com"),
+                UrlHandlerOutcome::Fallthrough,
+                "oversized rewritten URL must be declined"
+            );
+        }
+        let eng = LuaEngine::new("Default").unwrap();
+        eng.eval_str(
+            "kettle.add_url_handler('limit', '.*', function() return string.rep('x', 4096) end)",
+        )
+        .unwrap();
+        assert_eq!(
+            eng.try_url_handler("https://example.com"),
+            UrlHandlerOutcome::Open("x".repeat(4096))
+        );
     }
 
     /// A handler must never be the reason a link stops opening.

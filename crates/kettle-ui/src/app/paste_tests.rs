@@ -869,6 +869,8 @@ fn docked_paste_owners_are_dismissed_independently_on_input() {
         last_output_at: None,
         last_seen_at: None,
         bell: false,
+        scaled_zoom_owner: false,
+        generated_group_name: None,
         lanes: Default::default(),
     };
     ws.adopt_moved_paste_state(donor.take_moved_paste_state(&tab, now));
@@ -953,12 +955,12 @@ fn a_pending_wayland_drop_does_not_cross_another_paste() {
     )
     .expect("PTY fixture");
     let ws = WindowState::new(1, mux);
-    let target = super::WaylandDropTarget::capture(&ws);
+    let target = super::WaylandDropTarget::capture(&ws, Vec::new());
     let pane = &ws.mux.panes[&ws.mux.active_focus().unwrap()];
     assert_eq!(pane.feed_focus_report(true), PaneInputResult::Queued);
-    assert!(target == super::WaylandDropTarget::capture(&ws));
+    assert!(target == super::WaylandDropTarget::capture(&ws, Vec::new()));
     assert_eq!(pane.feed_input(b"new paste "), PaneInputResult::Queued);
-    assert!(target != super::WaylandDropTarget::capture(&ws));
+    assert!(target != super::WaylandDropTarget::capture(&ws, Vec::new()));
     ws.mux.kill_children();
 }
 
@@ -1298,3 +1300,42 @@ fn deferred_key_releases_survive_coalesced_presses_and_pane_migration() {
     );
 }
 
+#[test]
+fn coalesced_input_never_exceeds_one_pty_message() {
+    use super::{QueuedPasteContent, defer_authored_input};
+    let queued = |content| key_release_test_paste(7, content);
+    let mut queue = std::collections::VecDeque::from([queued(QueuedPasteContent::Image {
+        id: 1,
+        fallback: String::new(),
+        path: None,
+    })]);
+    let limit = kettle_core::term::MAX_LOCAL_ECHO_BYTES;
+    let size = limit / 2 + 1;
+    for byte in *b"ab" {
+        assert_eq!(
+            defer_authored_input(
+                &mut queue,
+                queued(QueuedPasteContent::Input {
+                    targets: vec![(7, vec![byte; size])],
+                    prepare_input: true,
+                })
+            ),
+            Some(PaneInputResult::Queued)
+        );
+    }
+    let mut delivered = Vec::new();
+    for paste in &queue {
+        if let QueuedPasteContent::Input { targets, .. } = &paste.content {
+            for (_, bytes) in targets {
+                assert!(
+                    bytes.len() <= limit,
+                    "admitted input must remain within the PTY message limit when replayed"
+                );
+                delivered.extend_from_slice(bytes);
+            }
+        }
+    }
+    assert_eq!(delivered.len(), size * 2);
+    assert!(delivered[..size].iter().all(|byte| *byte == b'a'));
+    assert!(delivered[size..].iter().all(|byte| *byte == b'b'));
+}

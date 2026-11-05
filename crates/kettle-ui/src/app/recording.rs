@@ -103,6 +103,13 @@ pub(super) fn activation_recording_available(
     !required || status == Some(crate::dev_record::RecordStatus::Recording)
 }
 
+pub(super) fn output_chunks_ready(
+    rx: &crossbeam_channel::Receiver<Vec<u8>>,
+) -> impl Iterator<Item = Vec<u8>> + '_ {
+    let queued = rx.len();
+    rx.try_iter().take(queued)
+}
+
 impl Drop for App {
     fn drop(&mut self) {
         if let Some(recorder) = self.recorder.as_mut() {
@@ -185,7 +192,7 @@ impl App {
         let mut tail: Vec<(u64, Vec<u8>)> = Vec::new();
         for (&pane_id, pane) in &ws.mux.panes {
             if let Some(rx) = &pane.output_rx {
-                while let Ok(chunk) = rx.try_recv() {
+                for chunk in output_chunks_ready(rx) {
                     tail.push((pane_id, chunk));
                 }
             }

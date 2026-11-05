@@ -112,7 +112,7 @@ fn title_test_split_mux() -> (Mux, u64, u64) {
     (mux, target, sibling)
 }
 
-fn title_test_tab_mux(count: usize) -> (Mux, Vec<u64>) {
+pub(super) fn title_test_tab_mux(count: usize) -> (Mux, Vec<u64>) {
     let cfg = title_test_config();
     let argv = title_test_argv();
     let waker: kettle_core::Waker = Arc::new(|| {});

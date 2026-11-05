@@ -37,6 +37,7 @@ impl App {
 
     pub(super) fn finish_gpu_renderer_recovery(&mut self, ws: &mut WindowState) {
         ws.renderer_recovery = None;
+        ws.renderer_recovery_font_size = None;
         // The accent claim may have changed while the window had no renderer.
         crate::window_accent::apply_accent(ws);
         ws.frame_recovery.clear();
@@ -142,6 +143,7 @@ impl App {
         };
         let avoid = self.gpu.as_ref().map(|gpu| gpu.adapter_key());
         log::warn!("GPU recovery attempt {attempt} ({escalation:?})");
+        let _gpu_init_watchdog = GpuInitWatchdog::arm();
 
         Self::stash_renderer_for_gpu_recovery(ws);
         for other in self.windows.values_mut() {
@@ -168,9 +170,12 @@ impl App {
                 return Err(err.to_string());
             }
         };
-        if let Some(snapshot) = ws.renderer_recovery.as_ref() {
-            new_renderer.restore_recovery_state(snapshot);
-        }
+        restore_gpu_renderer_state(
+            &mut new_renderer,
+            ws.renderer_recovery.as_ref(),
+            &cfg,
+            ws.renderer_recovery_font_size,
+        );
         let new_gpu = new_renderer.gpu().clone();
         let targets = self.windows.values().filter_map(|other| {
             let window = other.window.clone()?;
@@ -178,41 +183,46 @@ impl App {
             let scale = window.scale_factor() as f32;
             Some((
                 other.seq,
-                (window, size, scale, other.renderer_recovery.clone()),
+                (
+                    window,
+                    size,
+                    scale,
+                    other.renderer_recovery.clone(),
+                    other.renderer_recovery_font_size,
+                ),
             ))
         });
-        let secondary_renderers = build_recovery_set(targets, |(window, size, scale, snapshot)| {
-            let mut renderer = kettle_render::Renderer::new_with_gpu(
-                &new_gpu,
-                window,
-                size.width.max(1),
-                size.height.max(1),
-                scale,
-                &cfg,
-                None,
-            )
-            .map_err(|error| error.to_string())?;
-            if let Some(snapshot) = snapshot.as_ref() {
-                renderer.restore_recovery_state(snapshot);
-            }
-            Ok::<_, String>(renderer)
-        })
-        .map_err(|errors| {
-            for (seq, error) in &errors {
-                log::error!(
-                    "GPU recovery: window {seq} could not rebind to the new device: {error}"
-                );
-            }
-            format!(
-                "{} secondary window renderer(s) could not rebind: {}",
-                errors.len(),
-                errors
-                    .into_iter()
-                    .map(|(seq, error)| format!("window {seq}: {error}"))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
-        })?;
+        let secondary_renderers =
+            build_recovery_set(targets, |(window, size, scale, snapshot, font_size)| {
+                let mut renderer = kettle_render::Renderer::new_with_gpu(
+                    &new_gpu,
+                    window,
+                    size.width.max(1),
+                    size.height.max(1),
+                    scale,
+                    &cfg,
+                    None,
+                )
+                .map_err(|error| error.to_string())?;
+                restore_gpu_renderer_state(&mut renderer, snapshot.as_ref(), &cfg, font_size);
+                Ok::<_, String>(renderer)
+            })
+            .map_err(|errors| {
+                for (seq, error) in &errors {
+                    log::error!(
+                        "GPU recovery: window {seq} could not rebind to the new device: {error}"
+                    );
+                }
+                format!(
+                    "{} secondary window renderer(s) could not rebind: {}",
+                    errors.len(),
+                    errors
+                        .into_iter()
+                        .map(|(seq, error)| format!("window {seq}: {error}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            })?;
 
         // Commit the replacement only after every live window can present on
         // the candidate adapter. A partial commit would leave some windows
@@ -264,6 +274,66 @@ impl App {
             adapter,
             secondary_window_failures: 0,
         })
+    }
+}
+
+fn restore_gpu_renderer_state(
+    renderer: &mut Renderer,
+    snapshot: Option<&kettle_render::RendererRecoveryState>,
+    cfg: &Config,
+    font_size: Option<f32>,
+) {
+    if let Some(snapshot) = snapshot {
+        renderer.restore_recovery_state(snapshot);
+    }
+    renderer.set_font_family(cfg.font_family.clone());
+    let size = font_size.unwrap_or_else(|| renderer.font_size());
+    renderer.set_font_size(size);
+    renderer.set_cell_scale(cfg.cell_width, cfg.cell_height);
+}
+
+pub(super) struct GpuInitWatchdog {
+    pub(super) done: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl GpuInitWatchdog {
+    pub(super) fn arm() -> Self {
+        let gpu_init_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let gpu_init_done = gpu_init_done.clone();
+            // If the watchdog thread can't be spawned, proceed without it
+            // rather than failing init.
+            let _ = std::thread::Builder::new()
+                .name("kettle-gpu-init-watchdog".into())
+                .spawn(move || {
+                    if gpu_init_timed_out(
+                        &gpu_init_done,
+                        std::time::Duration::from_secs(GPU_INIT_TIMEOUT_SECS),
+                        std::time::Duration::from_millis(100),
+                    ) {
+                        log::error!(
+                            "GPU initialization did not finish within {GPU_INIT_TIMEOUT_SECS}s — \
+                             your graphics driver may be hung or unresponsive. Try updating the \
+                             GPU driver; on Linux you can force software rendering with \
+                             `LIBGL_ALWAYS_SOFTWARE=1` or pick another backend via \
+                             `WGPU_BACKEND=gl`. Exiting so kettle doesn't hang invisibly."
+                        );
+                        // exit() skips destructors, so run_with's guard never
+                        // flushes this startup's trace.
+                        crate::startup_trace::flush();
+                        std::process::exit(1);
+                    }
+                });
+        }
+        Self {
+            done: gpu_init_done,
+        }
+    }
+}
+
+impl Drop for GpuInitWatchdog {
+    fn drop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 

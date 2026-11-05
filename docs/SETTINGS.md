@@ -30,7 +30,8 @@ layout picker) step with `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`) so plain
 letters keep typing. Turn it off with `vim-menu-nav = false`.
 
 Changes are written to your config file, shown by `kettle --config-path`. Most
-apply immediately. GPU changes apply after restarting Kettle. Completion changes
+apply immediately. A failed save reports that the setting was not applied; an inline
+text edit stays open so you can retry. GPU changes apply after restarting Kettle. Completion changes
 apply to new shells. Opacity, background type, and blur may need a new window.
 The footer shows dependencies for the focused row and pending changes. Notes
 keep reserved space below scrolling fields in short windows.

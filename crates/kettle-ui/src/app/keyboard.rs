@@ -332,13 +332,13 @@ pub(super) fn extend_ctl_send_key_bytes(
 /// caller can name the bad token instead of sending wrong bytes. Pure
 /// (unit-tested).
 pub(super) fn parse_send_key(token: &str) -> Option<(ModifiersState, Key)> {
-    parse_key_token(token)
+    parse_key_token(token, true)
 }
 
 /// Parse a Kettle-owned UI key. Application chrome can consume Super/Command
 /// character chords directly (for example Command+A on macOS).
 pub(super) fn parse_ui_key(token: &str) -> Option<(ModifiersState, Key)> {
-    let (mods, key) = parse_key_token(token)?;
+    let (mods, key) = parse_key_token(token, true)?;
     let key = if key == Key::Named(NamedKey::Space) {
         Key::Character(" ".into())
     } else if matches!(
@@ -365,7 +365,7 @@ pub(super) fn parse_ui_key(token: &str) -> Option<(ModifiersState, Key)> {
     Some((mods, key))
 }
 
-fn parse_key_token(token: &str) -> Option<(ModifiersState, Key)> {
+fn parse_key_token(token: &str, infer_shift: bool) -> Option<(ModifiersState, Key)> {
     let parts: Vec<&str> = token.split('+').collect();
     let last = parts.len().checked_sub(1)?;
     let mut mods = ModifiersState::empty();
@@ -453,7 +453,7 @@ fn parse_key_token(token: &str) -> Option<(ModifiersState, Key)> {
                         // report the unshifted primary key and shifted
                         // alternate key instead of misreporting a Caps-Lock
                         // style unmodified uppercase key.
-                        if c.is_ascii_uppercase() {
+                        if infer_shift && c.is_ascii_uppercase() {
                             mods |= ModifiersState::SHIFT;
                         }
                         // Keep SHIFT on alphabetic chords while normalizing
@@ -1191,7 +1191,7 @@ pub(super) fn parse_ctl_logical_key(
     ) {
         return Ok(None);
     }
-    let Some((mods, key)) = parse_send_key(token) else {
+    let Some((mods, key)) = parse_key_token(token, false) else {
         return Err(format!("unrecognized logical key token '{token}'"));
     };
     if !mods.is_empty() {

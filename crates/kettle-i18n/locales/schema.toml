@@ -541,6 +541,9 @@ plural = "count"
 context = "crates/kettle-ui/src/app.rs: desktop notification body. pane is a pane number. Keep send_text, an API name."
 args = [{ name = "pane", type = "u64" }]
 
+[messages.notify_body_setting_not_applied]
+context = "Settings save failure; the requested setting was not applied. The inline text editor remains open for retry."
+
 [messages.notify_body_not_saved]
 context = "crates/kettle-ui/src/app.rs: desktop notification body."
 
@@ -2179,3 +2182,6 @@ context = "Display name for the bundled Builtin Light theme; keep the configurat
 
 [messages.menu_detecting_shells]
 context = "crates/kettle-ui/src/app/menus.rs shell_menu_items: disabled loading row while shell detection runs."
+
+[messages.notify_body_reconnect_environment_unavailable]
+context = "crates/kettle-ui/src/app/remote.rs: notification body when reconnect refuses an unreadable client connection environment."

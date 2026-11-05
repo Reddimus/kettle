@@ -24,7 +24,11 @@ if [[ -o interactive ]]; then
         'builtin' 'export' KETTLE_OWN_CODEX=0:$$
       fi
     else
-      'builtin' 'export' KETTLE_OWN_CODEX=1:$$
+      if (( ${+aliases[codex]} )); then
+        'builtin' 'export' KETTLE_OWN_CODEX=
+      else
+        'builtin' 'export' KETTLE_OWN_CODEX=1:$$
+      fi
     fi
   }
   'builtin' 'typeset' -ga precmd_functions

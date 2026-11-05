@@ -3564,6 +3564,9 @@ pub struct Terminal {
     /// The argv this pane was launched with (empty = default shell);
     /// persisted so SSH/remote panes can be restored.
     pub argv: Vec<String>,
+    /// The program selected for an empty launch, after applying its environment.
+    /// Kept separately so quoting can follow the shell without changing session argv.
+    pub default_shell_program: Option<String>,
     /// Terminator parity (`plugins/logger.py`): optional per-pane session log.
     /// The reader admits raw PTY bytes to a bounded worker and never performs
     /// filesystem I/O. When `None`, the `log_active` flag skips the writer lock;
@@ -6872,12 +6875,19 @@ impl Terminal {
                                             }
                                         }
                                         Chunk::Notification { title, body } => {
-                                            if let Ok(mut q) = protocol_notifications.lock() {
+                                            let wake = if let Ok(mut q) = protocol_notifications.lock() {
+                                                let wake = q.is_empty();
                                                 if q.len() >= 32 {
                                                     let d = q.len() - 31;
                                                     q.drain(0..d);
                                                 }
                                                 q.push(ProtocolNotification { title, body });
+                                                wake
+                                            } else {
+                                                false
+                                            };
+                                            if wake {
+                                                proxy.wake_owner();
                                             }
                                         }
                                         Chunk::Completion(update) => {
@@ -6985,6 +6995,13 @@ impl Terminal {
             .recv()
             .context("PTY reader stopped before reporting readiness")?
             .map_err(anyhow::Error::msg)?;
+        let default_shell_program = argv.is_empty().then(|| {
+            if cmd.is_default_prog() {
+                cmd.get_shell()
+            } else {
+                cmd.get_argv()[0].to_string_lossy().into_owned()
+            }
+        });
         let child = pair.slave.spawn_command(cmd)?;
         // No fallible terminal setup remains after the child starts, but keep
         // the guard armed across the final value construction so an unwind
@@ -7062,6 +7079,7 @@ impl Terminal {
             osc_cwd_seen: osc_cwd_seen_for_struct,
             progress: progress_cell,
             argv: argv.to_vec(),
+            default_shell_program,
             session_log: session_log_for_struct,
             log_strip_ansi: log_strip_ansi_for_struct,
             log_active: log_active_for_struct,

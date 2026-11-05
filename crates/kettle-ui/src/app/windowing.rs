@@ -495,6 +495,7 @@ impl App {
                     log::error!("open_window: shell spawn failed: {e}");
                     return Err(Box::new(WindowOpen::Fresh { cwd }));
                 }
+                self.fire_tab_add_event(&mut ws);
             }
             WindowOpen::AdoptTab {
                 tab: dt,
@@ -502,6 +503,8 @@ impl App {
                 scaled_zoom_prev_font_size,
                 ..
             } => {
+                let scaled_zoom_prev_font_size =
+                    scaled_zoom_prev_font_size.filter(|_| dt.tab.scaled_zoom_owner);
                 ws.scaled_zoom_prev_font_size = scaled_zoom_prev_font_size;
                 ws.mux.attach_tab(dt, None);
                 ws.adopt_moved_paste_state(*paste);
@@ -722,10 +725,13 @@ impl App {
                 ftc.0 + in_seg_x,
                 ftc.1 + f64::from(destination_band.1) + bar_h * 0.5,
             ),
-            TabBarPos::Left => (ftc.0 + strip_w * 0.5, ftc.1 + in_seg_y),
+            TabBarPos::Left => (
+                ftc.0 + strip_w * 0.5,
+                ftc.1 + tear_off_tab_anchor_y(self.cfg.tab_bar_pos, destination_band, in_seg_y),
+            ),
             TabBarPos::Right => (
                 ftc.0 + f64::from(size.width) - strip_w * 0.5,
-                ftc.1 + in_seg_y,
+                ftc.1 + tear_off_tab_anchor_y(self.cfg.tab_bar_pos, destination_band, in_seg_y),
             ),
         };
         let coordinate_scale = drag_coordinate_scale(&src);
@@ -935,6 +941,11 @@ impl App {
             height,
             self.cfg.tab_bar_width,
             self.search_bar_h(ws),
+            if self.cfg.status_bar == kettle_config::StatusBarMode::Top {
+                self.status_bar_h(ws)
+            } else {
+                0.0
+            },
             bottom_status_height,
         )
     }
@@ -951,6 +962,11 @@ impl App {
             height,
             self.cfg.tab_bar_width,
             0.0,
+            if self.cfg.status_bar == kettle_config::StatusBarMode::Top {
+                self.status_bar_h(ws)
+            } else {
+                0.0
+            },
             bottom_status,
         )
     }
@@ -1541,8 +1557,8 @@ impl App {
                     && !self.any_modal_open(ws)
                     && ws.mux.active_focus().is_some()
                 {
-                    self.wayland_file_drops
-                        .insert(id, (window, WaylandDropTarget::capture(ws)));
+                    let target = WaylandDropTarget::capture(ws, self.broadcast_recipients(ws));
+                    self.wayland_file_drops.insert(id, (window, target));
                 }
                 log::debug!(
                     "Wayland file drop context captured: {}",
@@ -1555,7 +1571,9 @@ impl App {
                     !self.quit_requested
                         && !self.window_close_pending(*seq)
                         && self.windows.get(seq).is_some_and(|ws| {
-                            !self.any_modal_open(ws) && *target == WaylandDropTarget::capture(ws)
+                            !self.any_modal_open(ws)
+                                && *target
+                                    == WaylandDropTarget::capture(ws, self.broadcast_recipients(ws))
                         })
                 });
                 log::debug!(
@@ -1660,10 +1678,13 @@ impl App {
             match self.cfg.tab_bar_pos {
                 TabBarPos::Top => (along_x, along_y),
                 TabBarPos::Bottom => (along_x, f64::from(destination_band.1) + along_y),
-                TabBarPos::Left => (along_x, along_y),
+                TabBarPos::Left => (
+                    along_x,
+                    tear_off_tab_anchor_y(self.cfg.tab_bar_pos, destination_band, along_y),
+                ),
                 TabBarPos::Right => (
                     f64::from(window.inner_size().width) - f64::from(width) + along_x,
-                    along_y,
+                    tear_off_tab_anchor_y(self.cfg.tab_bar_pos, destination_band, along_y),
                 ),
             }
         };
@@ -1819,11 +1840,13 @@ impl App {
     pub(super) fn dock_tab_into(
         &mut self,
         target: &mut WindowState,
-        dt: crate::mux::DetachedTab,
+        mut dt: crate::mux::DetachedTab,
         paste: crate::window_state::MovedPasteState,
         idx: usize,
         from_seq: u64,
     ) {
+        // Docking keeps the destination font; the source owns its baseline.
+        dt.tab.scaled_zoom_owner = false;
         let pre_focus = self.focus_key(target);
         let landed = target.mux.attach_tab(dt, Some(idx));
         target.adopt_moved_paste_state(paste);
@@ -2152,6 +2175,14 @@ pub(super) fn accent_seed_from_cwd(cwd: Option<&std::path::Path>) -> u64 {
     h.finish()
 }
 
+/// Translate a tab-local vertical grip into the destination client coordinates.
+pub(super) fn tear_off_tab_anchor_y(pos: TabBarPos, band: Rect, offset: f64) -> f64 {
+    match pos {
+        TabBarPos::Bottom | TabBarPos::Left | TabBarPos::Right => f64::from(band.1) + offset,
+        TabBarPos::Top => offset,
+    }
+}
+
 /// Pure: which segment index the tab-bar cursor falls in,
 /// using the same rendered segment rects that hit-testing and painting use.
 /// Used by the drag-to-reorder handler — the user grabs a tab,
@@ -2319,12 +2350,14 @@ pub(super) struct WaylandDropTarget {
     input_generation: u64,
     preview: Option<crate::media::PreviewFocus>,
     pane_input: Option<u64>,
+    recipients: Vec<u64>,
 }
 
 #[cfg(any(target_os = "linux", test))]
 impl WaylandDropTarget {
-    pub(super) fn capture(ws: &WindowState) -> Self {
+    pub(super) fn capture(ws: &WindowState, recipients: Vec<u64>) -> Self {
         Self {
+            recipients,
             pane: ws.mux.active_focus(),
             broadcast: ws.mux.broadcast.clone(),
             input_generation: ws.ime_focus_generation,
@@ -2861,6 +2894,15 @@ impl App {
         seq: u64,
         mut ws: WindowState,
     ) {
+        let previous = if ws.renderer.is_some() {
+            take_orphaned_scaled_zoom_font(&mut ws)
+        } else {
+            None
+        };
+        if let (Some(renderer), Some(previous)) = (ws.renderer.as_mut(), previous) {
+            renderer.set_font_size(previous);
+            self.resize_all(&mut ws);
+        }
         if modal_editor(&ws).is_some() {
             self.sync_modal_editor_scroll(&mut ws);
             self.update_ime_cursor_area(&mut ws);
@@ -2887,6 +2929,9 @@ impl App {
                 .is_some_and(|t| t.seq == seq || t.carrier == seq)
             {
                 self.abandon_torn_drag(None);
+            }
+            if let Some((name, theme)) = cancel_theme_preview(&mut ws) {
+                self.set_runtime_theme_state(&ws, name, theme);
             }
             drop(ws);
             self.hoover_mapped_groups();

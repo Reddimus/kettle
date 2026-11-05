@@ -237,28 +237,20 @@ pub(crate) fn verify(directory: &Path, files: &OwnedFiles) -> Result<(), ()> {
         kettle_state::validate_trusted_directory(path).map_err(|_| ())
     };
     // No entry beyond the files' own.
-    let entries = |path: &Path| -> Result<Vec<String>, ()> {
-        let mut names = std::fs::read_dir(path)
-            .map_err(|_| ())?
-            .map(|entry| {
-                entry
-                    .map_err(|_| ())
-                    .and_then(|entry| entry.file_name().into_string().map_err(|_| ()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        names.sort();
-        Ok(names)
+    let entries = |path: &Path, expected: &[String]| -> Result<(), ()> {
+        verify_entries(
+            std::fs::read_dir(path)
+                .map_err(|_| ())?
+                .map(|entry| entry.map(|entry| entry.file_name())),
+            expected,
+        )
     };
     read_only_directory(directory)?;
-    if entries(directory)? != files.children("") {
-        return Err(());
-    }
+    entries(directory, &files.children(""))?;
     for subdirectory in files.directories() {
         let path = directory.join(&subdirectory);
         read_only_directory(&path)?;
-        if entries(&path)? != files.children(&subdirectory) {
-            return Err(());
-        }
+        entries(&path, &files.children(&subdirectory))?;
     }
     for (path, contents) in &files.files {
         let file = kettle_state::open_trusted_file_read(&directory.join(path)).map_err(|_| ())?;
@@ -275,6 +267,27 @@ pub(crate) fn verify(directory: &Path, files: &OwnedFiles) -> Result<(), ()> {
         }
     }
     Ok(())
+}
+
+#[cfg(any(unix, test))]
+fn verify_entries(
+    entries: impl Iterator<Item = std::io::Result<std::ffi::OsString>>,
+    expected: &[String],
+) -> Result<(), ()> {
+    let mut found = vec![false; expected.len()];
+    for entry in entries {
+        let name = entry.map_err(|_| ())?.into_string().map_err(|_| ())?;
+        let index = expected.binary_search(&name).map_err(|_| ())?;
+        if found[index] {
+            return Err(());
+        }
+        found[index] = true;
+    }
+    if found.iter().all(|found| *found) {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 #[cfg(not(unix))]
@@ -411,6 +424,19 @@ mod tests {
                 ("fish/fish/vendor_conf.d/kettle.fish", "fish\n".into()),
             ],
         )
+    }
+
+    #[test]
+    fn unexpected_directory_entries_stop_enumeration_immediately() {
+        let entries = std::iter::once(Ok(std::ffi::OsString::from("unexpected"))).chain(
+            std::iter::once_with(|| panic!("enumerated past an unexpected child")),
+        );
+        assert_eq!(verify_entries(entries, &["kept".into()]), Err(()));
+        let entries = ["b", "a"].into_iter().map(|name| Ok(name.into()));
+        assert_eq!(verify_entries(entries, &["a".into(), "b".into()]), Ok(()));
+        let entries = ["a", "a"].into_iter().map(|name| Ok(name.into()));
+        assert_eq!(verify_entries(entries, &["a".into(), "b".into()]), Err(()));
+        assert_eq!(verify_entries(std::iter::empty(), &["a".into()]), Err(()));
     }
 
     #[cfg(unix)]

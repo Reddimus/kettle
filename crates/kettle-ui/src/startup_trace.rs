@@ -703,10 +703,14 @@ mod tests {
                 ),
             "run_with holds the flush guard before anything can fail"
         );
-        let watchdog = resumed
-            .split_once("GPU initialization did not finish")
+        assert!(resumed.contains("let gpu_init_watchdog = GpuInitWatchdog::arm();"));
+        let watchdog = production
+            .split_once("impl GpuInitWatchdog {")
             .unwrap()
-            .1;
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
         assert!(
             at(watchdog, "startup_trace::flush();") < at(watchdog, "std::process::exit(1);"),
             "the GPU watchdog flushes before it exits"

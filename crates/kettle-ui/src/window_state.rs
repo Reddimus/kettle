@@ -854,6 +854,9 @@ pub(crate) struct WindowState {
     /// AT-SPI/UIA client cannot turn terminal repaint throughput into unbounded
     /// native accessibility traffic on the UI thread.
     pub(crate) accessibility_key: Option<u64>,
+    /// Row node IDs stay stable across text-only accessibility updates.
+    pub(crate) accessibility_text_rows:
+        std::cell::RefCell<std::collections::HashMap<u64, Vec<accesskit::NodeId>>>,
     pub(crate) accessibility_updated_at: Option<std::time::Instant>,
     pub(crate) accessibility_pending: bool,
     /// Short-lived thumbnail for a Kettle-created clipboard bitmap or an
@@ -1173,6 +1176,7 @@ pub(crate) struct WindowState {
     pub(crate) blink_on: bool,
     pub(crate) last_blink: std::time::Instant,
     pub(crate) term_animation_active: bool,
+    pub(crate) term_animation_tick_at: Option<std::time::Instant>,
     /// The last keystroke, paste, focus change, or settings change. The cursor
     /// stops blinking `cursor-blink-timeout` after it. Output does not count.
     pub(crate) last_blink_activity: std::time::Instant,
@@ -1270,6 +1274,8 @@ pub(crate) struct WindowState {
     /// so runtime font zoom, cell scaling, per-window accent, and a queued
     /// screenshot completion cannot be reset or lost between retries.
     pub(crate) renderer_recovery: Option<kettle_render::RendererRecoveryState>,
+    /// A configured size accepted while no renderer could receive the reload.
+    pub(crate) renderer_recovery_font_size: Option<f32>,
     pub(crate) screenshot_completion:
         Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     /// Coalesces a monitor scale transition with its corresponding physical
@@ -1492,6 +1498,7 @@ impl WindowState {
             native_material: None,
             accessibility: None,
             accessibility_key: None,
+            accessibility_text_rows: Default::default(),
             accessibility_updated_at: None,
             accessibility_pending: false,
             media_paste_receipt: None,
@@ -1590,6 +1597,7 @@ impl WindowState {
             blink_on: true,
             last_blink: std::time::Instant::now(),
             term_animation_active: false,
+            term_animation_tick_at: None,
             last_blink_activity: std::time::Instant::now(),
             blink_layer: crate::cursor_blink::BlinkLayer::default(),
             cursor_exit_log: crate::cursor_exit_log::CursorExitLog::default(),
@@ -1614,6 +1622,7 @@ impl WindowState {
             frame_recovery: FrameRecoveryState::default(),
             pty_resize_retry: PtyResizeRetryState::default(),
             renderer_recovery: None,
+            renderer_recovery_font_size: None,
             screenshot_completion: None,
             dpi_resize: DpiResizeCoalescer::default(),
             dpi_resize_surface_suspended: false,
@@ -1659,6 +1668,8 @@ mod tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: Default::default(),
         }
     }

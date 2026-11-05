@@ -163,9 +163,7 @@ pub(super) fn reconnect_remote_session(
     waker: kettle_core::Waker,
     command: Option<kettle_remote::SessionCommand>,
 ) -> Result<()> {
-    let command = command.ok_or_else(|| anyhow::anyhow!(
-        "Cannot reconnect: the original client's connection environment could not be read safely"
-    ))?;
+    let command = command.ok_or(ReconnectEnvironmentUnavailable)?;
     let argv = std::iter::once(command.program)
         .chain(command.args)
         .collect();
@@ -318,5 +316,28 @@ impl App {
             }
         }
         self.windows = stored_windows;
+    }
+}
+
+#[derive(Debug)]
+struct ReconnectEnvironmentUnavailable;
+
+impl std::fmt::Display for ReconnectEnvironmentUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Cannot reconnect: the original client's connection environment could not be read safely")
+    }
+}
+
+impl std::error::Error for ReconnectEnvironmentUnavailable {}
+
+pub(super) fn reconnect_failure_body(
+    error: &anyhow::Error,
+    tr: &kettle_i18n::Translator,
+) -> String {
+    if error.is::<ReconnectEnvironmentUnavailable>() {
+        tr.text(kettle_i18n::Text::NotifyBodyReconnectEnvironmentUnavailable)
+            .to_owned()
+    } else {
+        error.to_string()
     }
 }

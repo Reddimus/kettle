@@ -604,5 +604,24 @@ fn remote_reconnect_environment_session_restore_omits_private_values() {
     );
 }
 
-
-
+#[test]
+fn reconnect_refusal_notification_is_spanish() {
+    let error = super::reconnect_remote_session(
+        &mut Mux::new(),
+        &title_test_config(),
+        super::PtyGeometry::from_cell_size(80, 24, 8, 16),
+        Arc::new(|| {}),
+        None,
+    )
+    .unwrap_err();
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    assert!(
+        super::reconnect_failure_body(&error, &tr).starts_with("No se puede reconectar:"),
+        "reconnect refusal must use the notification language"
+    );
+    let other = anyhow::anyhow!("native spawn error");
+    assert_eq!(
+        super::reconnect_failure_body(&other, &tr),
+        "native spawn error"
+    );
+}

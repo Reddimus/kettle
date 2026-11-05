@@ -185,14 +185,27 @@ pub(crate) fn open(
     reader: Reader,
     failed: impl FnOnce(OpenFailure) + Send + 'static,
 ) {
+    open_with_handoff(copies, document, reader, failed, hand_over);
+}
+
+fn open_with_handoff(
+    copies: Arc<PrivateCopies>,
+    document: DocumentSource,
+    reader: Reader,
+    failed: impl FnOnce(OpenFailure) + Send + 'static,
+    handoff: impl FnOnce(&PrivateCopies, &DocumentSource, Reader) -> Result<Child, OpenFailure>
+    + Send
+    + 'static,
+) {
     let Some(slot) = Slot::take() else {
         failed(OpenFailure::Busy);
         return;
     };
-    super::start_open(
-        "kettle-ui-open-document",
-        failed,
-        move |failed| match hand_over(&copies, &document, reader) {
+    super::start_open("kettle-ui-open-document", failed, move |failed| {
+        let opened = handoff(&copies, &document, reader);
+        drop(document);
+        drop(copies);
+        match opened {
             Ok(child) => {
                 // The slot bounds the work of opening, not how long the
                 // viewer stays up: Papers runs until the user closes it.
@@ -203,8 +216,8 @@ pub(crate) fn open(
                 drop(slot);
                 failed(why);
             }
-        },
-    );
+        }
+    });
 }
 
 /// Check the viewer, copy the PDF, and hand the viewer the copy. A copy
@@ -410,6 +423,55 @@ mod tests {
 
     fn charged(bytes: &[u8]) -> Arc<ChargedBytes> {
         Arc::new(ChargedBytes::new(bytes.to_vec()).expect("room"))
+    }
+
+    #[test]
+    fn document_bytes_are_released_while_reader_is_running() {
+        let _opens = super::super::tests::lock_open_tests();
+        let dir = kettle_test_support::private_tempdir("kettle-document-lifetime-");
+        let copies = Arc::new(copies_in(&dir));
+        let bytes = charged(PDF);
+        let source = Arc::downgrade(&bytes);
+        let document = DocumentSource::Bytes {
+            bytes,
+            digest: content_digest(PDF, None).unwrap(),
+        };
+        let (ready, input) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        open_with_handoff(
+            copies,
+            document,
+            Reader::Preview,
+            move |why| done.send(why).unwrap(),
+            move |_, _, _| {
+                let mut child = std::process::Command::new("/bin/cat")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+                ready.send(child.stdin.take().unwrap()).unwrap();
+                Ok(child)
+            },
+        );
+        let input = input.recv_timeout(Duration::from_secs(2)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while source.strong_count() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let released = source.strong_count() == 0;
+        assert_eq!(
+            finished.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+        drop(input);
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(2)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        );
+        assert!(
+            released,
+            "document reservation retained while reader is running"
+        );
     }
 
     /// The copy is the shown file's bytes, owner-only, named `.pdf` whatever

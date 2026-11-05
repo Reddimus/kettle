@@ -10,7 +10,8 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use kettle_config::{Config, CursorStyle, ModifyOtherKeysMode};
 use kettle_core::{
-    CursorShape, PtyGeometry, PtyOutputSender, TermEvent, Terminal, TerminalCapabilities, Waker,
+    CursorShape, PtyGeometry, PtyOutputSender, TermEvent, TermMode, Terminal, TerminalCapabilities,
+    Waker,
 };
 
 /// Private, in-memory settings for replaying a detected client directly.
@@ -37,7 +38,7 @@ const PTY_INPUT_QUEUE_DEPTH: usize = 64;
 const PTY_INPUT_WRITE_CHUNK_BYTES: usize = 8 * 1024;
 // `LOCAL_PASTE_MAX` is 4 MiB; leave room for the bracketed-paste envelope and
 // a small amount of already-queued interactive input.
-const MAX_USER_INPUT_MESSAGE_BYTES: usize = kettle_core::term::MAX_LOCAL_ECHO_BYTES;
+pub(crate) const MAX_USER_INPUT_MESSAGE_BYTES: usize = kettle_core::term::MAX_LOCAL_ECHO_BYTES;
 const MAX_QUEUED_USER_INPUT_BYTES: usize = MAX_USER_INPUT_MESSAGE_BYTES + 64 * 1024;
 // A 1 MiB OSC 52 clipboard payload expands to roughly 1.34 MiB after base64.
 const MAX_PROTOCOL_REPLY_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -597,7 +598,7 @@ impl PtyInputQueue {
 
     fn enqueue_key_release(
         &self,
-        focus_reporting: bool,
+        reporting_mode: TermMode,
         key: winit::keyboard::PhysicalKey,
         bytes: Arc<[u8]>,
     ) -> PaneInputResult {
@@ -610,22 +611,25 @@ impl PtyInputQueue {
                 pending.push_back((key, bytes));
             }
         }
-        self.retry_pending_reports(focus_reporting)
+        self.retry_pending_reports(reporting_mode)
     }
 
-    fn retry_pending_reports(&self, focus_reporting: bool) -> PaneInputResult {
+    fn retry_pending_reports(&self, reporting_mode: TermMode) -> PaneInputResult {
         let mut pending = self.pending_focus.lock().unwrap_or_else(|e| e.into_inner());
-        if !focus_reporting {
+        if !reporting_mode.contains(TermMode::FOCUS_IN_OUT) {
             pending.desired = None;
-        }
-        let result = self.flush_focus_report(&mut pending);
-        if !result.is_queued() {
-            return result;
         }
         let mut releases = self
             .pending_key_releases
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if !reporting_mode.contains(TermMode::REPORT_EVENT_TYPES) {
+            releases.clear();
+        }
+        let result = self.flush_focus_report(&mut pending);
+        if !result.is_queued() {
+            return result;
+        }
         while let Some((_, bytes)) = releases.front() {
             let result = self.enqueue_user_raw(bytes.clone());
             if !result.is_queued() {
@@ -636,17 +640,17 @@ impl PtyInputQueue {
         PaneInputResult::Queued
     }
 
-    fn enqueue_user(&self, focus_reporting: bool, bytes: Arc<[u8]>) -> PaneInputResult {
-        self.enqueue_user_with_echo(focus_reporting, bytes, None)
+    fn enqueue_user(&self, reporting_mode: TermMode, bytes: Arc<[u8]>) -> PaneInputResult {
+        self.enqueue_user_with_echo(reporting_mode, bytes, None)
     }
 
     fn enqueue_user_with_echo(
         &self,
-        focus_reporting: bool,
+        reporting_mode: TermMode,
         bytes: Arc<[u8]>,
         echo: Option<kettle_core::term::LocalEcho>,
     ) -> PaneInputResult {
-        let result = self.retry_pending_reports(focus_reporting);
+        let result = self.retry_pending_reports(reporting_mode);
         if !result.is_queued() {
             return result;
         }
@@ -1155,6 +1159,10 @@ impl Pane {
         }
     }
 
+    pub(crate) fn path_argv(&self) -> &[String] {
+        path_argv_with_default(&self.argv, self.term.default_shell_program.as_ref())
+    }
+
     /// Terminator parity: write user-originated input (keystroke /
     /// paste / IME / drag-drop / send-text) to the PTY, honoring the read-only
     /// toggle. Returns the explicit enqueue outcome. VTE
@@ -1193,12 +1201,12 @@ impl Pane {
             return result;
         }
         let input = bytes.as_ref();
-        let focus_reporting = self.focus_reporting_enabled();
+        let reporting_mode = self.input_reporting_mode();
         self.term
             .with_keyboard_input_admission(&[input], bytes.clone(), |echo| {
                 let result =
                     self.pty_input
-                        .enqueue_user_with_echo(focus_reporting, bytes.clone(), echo);
+                        .enqueue_user_with_echo(reporting_mode, bytes.clone(), echo);
                 self.record_user_input(result, !bytes.is_empty());
                 (result, result.is_queued())
             })
@@ -1225,14 +1233,14 @@ impl Pane {
             joined.extend_from_slice(input);
         }
         let boundaries: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
-        let focus_reporting = self.focus_reporting_enabled();
+        let reporting_mode = self.input_reporting_mode();
         let nonempty = !joined.is_empty();
         let joined: Arc<[u8]> = Arc::from(joined);
         self.term
             .with_keyboard_input_admission(&boundaries, joined.clone(), |echo| {
                 let result = self
                     .pty_input
-                    .enqueue_user_with_echo(focus_reporting, joined, echo);
+                    .enqueue_user_with_echo(reporting_mode, joined, echo);
                 self.record_user_input(result, nonempty);
                 (result, result.is_queued())
             })
@@ -1247,11 +1255,11 @@ impl Pane {
         if bytes.len() > MAX_USER_INPUT_MESSAGE_BYTES {
             return PaneInputResult::Oversize;
         }
-        let focus_reporting = self.focus_reporting_enabled();
+        let reporting_mode = self.input_reporting_mode();
         self.term.with_completion_input_admission(&[bytes], || {
             let result = self
                 .pty_input
-                .enqueue_user(focus_reporting, Arc::from(bytes));
+                .enqueue_user(reporting_mode, Arc::from(bytes));
             self.record_user_input(result, !bytes.is_empty());
             (result, result.is_queued())
         })
@@ -1278,15 +1286,16 @@ impl Pane {
 
     pub(crate) fn retry_pending_reports(&self) -> PaneInputResult {
         self.pty_input
-            .retry_pending_reports(self.focus_reporting_enabled())
+            .retry_pending_reports(self.input_reporting_mode())
     }
 
-    fn focus_reporting_enabled(&self) -> bool {
+    fn input_reporting_mode(&self) -> TermMode {
         self.term
             .term
             .lock()
             .ok()
-            .is_some_and(|term| term.mode().contains(kettle_core::TermMode::FOCUS_IN_OUT))
+            .map(|term| *term.mode())
+            .unwrap_or_default()
     }
 
     pub(crate) fn feed_key_release(
@@ -1296,7 +1305,7 @@ impl Pane {
     ) -> PaneInputResult {
         let result = self
             .pty_input
-            .enqueue_key_release(self.focus_reporting_enabled(), key, bytes);
+            .enqueue_key_release(self.input_reporting_mode(), key, bytes);
         self.record_user_input(result, true);
         result
     }
@@ -1912,6 +1921,10 @@ pub struct Tab {
     /// never saved, restored, duplicated or carried to another window, and
     /// leaves with its pane.
     pub(crate) lanes: HashMap<u64, LaneRequest>,
+    /// Kept on the tab so moving it cannot change its generated toggle name.
+    pub(crate) generated_group_name: Option<String>,
+    /// This tab owns the window's saved scaled-zoom font baseline.
+    pub(crate) scaled_zoom_owner: bool,
 }
 
 /// Activity state of an *inactive* tab, used by the renderer to pick
@@ -2690,6 +2703,8 @@ impl Mux {
                         last_output_at: None,
                         last_seen_at: None,
                         bell: false,
+                        scaled_zoom_owner: false,
+                        generated_group_name: None,
                         lanes: HashMap::new(),
                     });
                 }
@@ -2746,8 +2761,11 @@ impl Mux {
         waker: Waker,
     ) -> Result<()> {
         let argv = shell_argv(cfg);
-        let cwd = self.focused_cwd();
-        self.new_tab_with_geometry(cfg, geometry, waker, &argv, cwd.as_deref())
+        let cwd = self
+            .active_focus()
+            .and_then(|id| self.panes.get(&id))
+            .and_then(|pane| pane.term.current_dir_or_native());
+        self.new_tab_with_launch_geometry(cfg, geometry, waker, argv, cwd)
     }
 
     /// Open a new tab running an explicit `argv` in `cwd` (CLI `-e`/`-d`);
@@ -2795,6 +2813,13 @@ impl Mux {
         cwd: Option<&str>,
         launch: Option<&ReconnectLaunch>,
     ) -> Result<()> {
+        let configured_argv;
+        let argv = if argv.is_empty() && launch.is_none() {
+            configured_argv = shell_argv(cfg);
+            configured_argv.as_slice()
+        } else {
+            argv
+        };
         let id = self.spawn_pane_with_launch(cfg, geometry, waker, cwd, argv, launch)?;
         let new_tab = Tab {
             root: Node::Leaf(id),
@@ -2804,6 +2829,8 @@ impl Mux {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         // Terminator parity, terminatorlib/config.py:97
@@ -2917,6 +2944,8 @@ impl Mux {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         self.active = self.tabs.len() - 1;
@@ -3405,18 +3434,6 @@ impl Mux {
         self.tabs.get(self.active).map(|t| t.focus)
     }
 
-    /// The focused pane's current directory, so a new tab opens where you are,
-    /// like Terminator's `get_cwd()`. [`usable_cwd`] sends a since-deleted
-    /// directory back to the default.
-    fn focused_cwd(&self) -> Option<String> {
-        let id = self.active_focus()?;
-        usable_cwd(
-            self.panes
-                .get(&id)
-                .and_then(|p| p.term.current_dir_or_native()),
-        )
-    }
-
     pub fn focused(&mut self) -> Option<&mut Pane> {
         let id = self.tabs.get(self.active)?.focus;
         self.panes.get_mut(&id)
@@ -3428,7 +3445,7 @@ impl Mux {
     pub(crate) fn focused_argv(&self) -> Vec<String> {
         self.active_focus()
             .and_then(|id| self.panes.get(&id))
-            .map(|p| p.argv.clone())
+            .map(|p| p.path_argv().to_vec())
             .unwrap_or_default()
     }
 
@@ -4188,6 +4205,8 @@ impl Mux {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             },
         );
@@ -4689,27 +4708,32 @@ impl Mux {
         max_text_bytes: usize,
         receipt_pane: impl Into<PasteReceiptOwners> + Copy,
     ) -> PaneInputDelivery {
-        let targets = ids
-            .iter()
-            .filter_map(|id| self.panes.get(id).map(|pane| (*id, pane.argv.as_slice())));
-        let formatted = match format_paths_for_targets(targets, paths, trailing_space) {
+        let targets = ids.iter().filter_map(|id| {
+            self.panes
+                .get(id)
+                .filter(|pane| !pane.read_only && !pane.pty_input_failed())
+                .map(|pane| (*id, pane.path_argv()))
+        });
+        let formatted = match format_paths_for_targets_bounded(
+            targets,
+            paths,
+            trailing_space,
+            max_text_bytes,
+        ) {
             Ok(formatted) => formatted,
             Err(error) => return PaneInputDelivery::rejected(error),
         };
-        if formatted.iter().any(|(id, text)| {
-            self.panes.get(id).is_some_and(|pane| {
-                !pane.read_only && !pane.pty_input_failed() && text.len() > max_text_bytes
-            })
-        }) {
-            return PaneInputDelivery {
-                result: PaneInputResult::Oversize,
-                accepted: false,
-                receipt_accepted: false,
-                pending_accepted: false,
-            };
-        }
-
         let mut delivery = PaneInputDelivery::new();
+        for id in ids {
+            if let Some(pane) = self.panes.get(&id) {
+                if pane.pty_input_failed() {
+                    delivery.record_for(id, receipt_pane, PaneInputResult::Failed);
+                } else if pane.read_only {
+                    delivery.record_for(id, receipt_pane, PaneInputResult::ReadOnly);
+                }
+            }
+        }
+        let mut payloads = HashMap::new();
         for (id, text) in formatted {
             let Some(pane) = self.panes.get_mut(&id) else {
                 continue;
@@ -4729,8 +4753,12 @@ impl Mux {
                 .ok()
                 .map(|term| term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
                 .unwrap_or(false);
-            let bytes = crate::input::paste_payload(&text, bracketed);
-            let result = pane.feed_input(&bytes);
+            let bytes = payloads
+                .entry((text.as_ptr(), bracketed))
+                .or_insert_with(|| {
+                    Arc::<[u8]>::from(crate::input::paste_payload(&text, bracketed))
+                });
+            let result = pane.feed_input_shared(bytes.clone());
             delivery.record_for(id, receipt_pane, result);
         }
         delivery
@@ -4743,16 +4771,28 @@ impl Mux {
         trailing_space: bool,
         max_text_bytes: usize,
     ) -> Result<bool, PaneInputResult> {
-        let targets = ids
-            .iter()
-            .filter_map(|id| self.panes.get(id).map(|pane| (*id, pane.argv.as_slice())));
-        Ok(format_paths_for_targets(targets, paths, trailing_space)?
-            .iter()
-            .all(|(id, text)| {
-                self.panes.get(id).is_none_or(|pane| {
-                    pane.read_only || pane.pty_input_failed() || text.len() <= max_text_bytes
-                })
-            }))
+        let mut validated = std::collections::HashSet::new();
+        for id in ids {
+            let Some(pane) = self
+                .panes
+                .get(&id)
+                .filter(|pane| !pane.read_only && !pane.pty_input_failed())
+            else {
+                continue;
+            };
+            if !validated.insert(path_format_key(pane.path_argv())) {
+                continue;
+            }
+            let Some(limit) = max_text_bytes.checked_sub(usize::from(trailing_space)) else {
+                return Ok(false);
+            };
+            match format_paths_for_paste_bounded(pane.path_argv(), paths, limit) {
+                Ok(_) => {}
+                Err(PaneInputResult::Oversize) => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
     }
 
     pub fn tab_titles(&self) -> Vec<String> {
@@ -5129,7 +5169,7 @@ fn launch_cwd(mut argv: Vec<String>, raw_cwd: Option<String>) -> (Vec<String>, O
 
 /// Which family of shell a pane's argv launches, for path quoting. WSL panes
 /// run a POSIX shell in-distro; native Windows panes run PowerShell or cmd.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum PaneShellKind {
     /// bash/zsh/fish/… (incl. anything launched through `wsl`).
     Posix,
@@ -5139,10 +5179,19 @@ pub(crate) enum PaneShellKind {
     Cmd,
 }
 
+fn path_argv_with_default<'a>(argv: &'a [String], default: Option<&'a String>) -> &'a [String] {
+    if argv.is_empty()
+        && let Some(program) = default
+    {
+        std::slice::from_ref(program)
+    } else {
+        argv
+    }
+}
+
 /// Classify a pane's launch argv into a [`PaneShellKind`]. A WSL launcher is
 /// POSIX (the in-distro shell); `pwsh`/`powershell` and `cmd` are matched by
-/// argv[0] basename. An empty argv means the configured default shell — POSIX
-/// everywhere except Windows, where the built-in default is a Windows shell.
+/// argv[0] basename. Default-shell panes supply the program selected at spawn.
 /// Unknown programs default to POSIX (the portable, most common case). Pure.
 pub(crate) fn shell_kind_for_argv(argv: &[String]) -> PaneShellKind {
     if argv_is_wsl(argv) {
@@ -5151,7 +5200,6 @@ pub(crate) fn shell_kind_for_argv(argv: &[String]) -> PaneShellKind {
     match argv0_base_lower(argv).as_str() {
         "pwsh" | "powershell" => PaneShellKind::PowerShell,
         "cmd" => PaneShellKind::Cmd,
-        "" if cfg!(windows) => PaneShellKind::PowerShell,
         _ => PaneShellKind::Posix,
     }
 }
@@ -5416,6 +5464,7 @@ fn path_for_wsl(argv: &[String], path: &std::path::Path) -> Option<String> {
 /// without hand-escaping. POSIX/PowerShell wrap in single quotes (POSIX escapes
 /// an embedded `'` as `'\''`; PowerShell doubles it to `''`); cmd wraps in
 /// double quotes (Windows filenames cannot contain `"`, so this is lossless).
+/// Backslashes are quoted outside single quotes so fish preserves them too.
 /// Always quotes, even plain paths, for predictable output. Pure.
 pub(crate) fn quote_path_for(kind: PaneShellKind, s: &str) -> String {
     match kind {
@@ -5425,6 +5474,8 @@ pub(crate) fn quote_path_for(kind: PaneShellKind, s: &str) -> String {
             for ch in s.chars() {
                 if ch == '\'' {
                     out.push_str("'\\''");
+                } else if ch == '\\' {
+                    out.push_str("'\\\\'");
                 } else {
                     out.push(ch);
                 }
@@ -5464,51 +5515,108 @@ pub(crate) fn path_types_exactly(argv: &[String], path: &std::path::Path) -> boo
         && !(shell_kind_for_argv(argv) == PaneShellKind::Cmd && text.contains(['%', '!']))
 }
 
-/// Format OS file paths (from a clipboard file-list or a drag-drop) into text
-/// to feed the focused pane: translate to the pane's WSL path when it runs
-/// WSL, quote each for the pane's shell family, and space-join multiple paths.
-/// Pure so the whole rule is unit-tested.
+#[cfg(test)]
 pub(crate) fn format_paths_for_paste(
     argv: &[String],
     paths: &[std::path::PathBuf],
 ) -> Result<String, PaneInputResult> {
-    let wsl = argv_is_wsl(argv);
-    let kind = shell_kind_for_argv(argv);
-    let translated: Option<Vec<_>> = paths
-        .iter()
-        .map(|path| {
-            let text = if wsl {
-                match path_for_wsl(argv, path) {
-                    Some(text) => text,
-                    None if wsl_unc_parts(path).is_some() => return None,
-                    None => path.to_string_lossy().into_owned(),
-                }
-            } else {
-                path.to_string_lossy().into_owned()
-            };
-            Some(quote_path_for(kind, &text))
-        })
-        .collect();
-    translated
-        .map(|paths| paths.join(" "))
-        .ok_or(PaneInputResult::PathNotTyped)
+    format_paths_for_paste_bounded(argv, paths, MAX_USER_INPUT_MESSAGE_BYTES)
 }
 
-pub(crate) fn format_paths_for_targets<'a>(
+/// Format OS file paths (from a clipboard file-list or a drag-drop) into text
+/// to feed the focused pane: translate to the pane's WSL path when it runs
+/// WSL, quote each for the pane's shell family, and space-join multiple paths.
+/// Pure so the whole rule is unit-tested.
+pub(crate) fn format_paths_for_paste_bounded(
+    argv: &[String],
+    paths: &[std::path::PathBuf],
+    max_text_bytes: usize,
+) -> Result<String, PaneInputResult> {
+    let wsl = argv_is_wsl(argv);
+    let kind = shell_kind_for_argv(argv);
+    let mut result = String::new();
+    for (index, path) in paths.iter().enumerate() {
+        if path.as_os_str().len() > max_text_bytes {
+            return Err(PaneInputResult::Oversize);
+        }
+        let text = if wsl {
+            match path_for_wsl(argv, path) {
+                Some(text) => std::borrow::Cow::Owned(text),
+                None if wsl_unc_parts(path).is_some() => return Err(PaneInputResult::PathNotTyped),
+                None => path.to_string_lossy(),
+            }
+        } else {
+            path.to_string_lossy()
+        };
+        let separator = usize::from(index != 0);
+        let remaining = max_text_bytes
+            .checked_sub(result.len())
+            .and_then(|left| left.checked_sub(separator))
+            .ok_or(PaneInputResult::Oversize)?;
+        // Every quoted byte is counted before the quoted string is allocated.
+        let quoted_len = text
+            .chars()
+            .try_fold(2usize, |len, ch| {
+                let extra = match kind {
+                    PaneShellKind::Posix if matches!(ch, '\'' | '\\') => 4,
+                    PaneShellKind::PowerShell
+                        if matches!(
+                            ch,
+                            '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}'
+                        ) =>
+                    {
+                        2 * ch.len_utf8()
+                    }
+                    _ => ch.len_utf8(),
+                };
+                len.checked_add(extra).filter(|len| *len <= remaining)
+            })
+            .filter(|len| *len <= remaining)
+            .ok_or(PaneInputResult::Oversize)?;
+        if separator != 0 {
+            result.push(' ');
+        }
+        let quoted = quote_path_for(kind, &text);
+        debug_assert_eq!(quoted.len(), quoted_len);
+        result.push_str(&quoted);
+    }
+    Ok(result)
+}
+
+fn path_format_key(argv: &[String]) -> (PaneShellKind, bool, Option<String>) {
+    (
+        shell_kind_for_argv(argv),
+        argv_is_wsl(argv),
+        wsl_distribution(argv).map(str::to_ascii_lowercase),
+    )
+}
+
+fn format_paths_for_targets_bounded<'a>(
     targets: impl IntoIterator<Item = (u64, &'a [String])>,
     paths: &[std::path::PathBuf],
     trailing_space: bool,
-) -> Result<Vec<(u64, String)>, PaneInputResult> {
-    targets
-        .into_iter()
-        .map(|(id, argv)| {
-            let mut text = format_paths_for_paste(argv, paths)?;
-            if trailing_space {
-                text.push(' ');
+    max_text_bytes: usize,
+) -> Result<Vec<(u64, Arc<str>)>, PaneInputResult> {
+    let mut cache = HashMap::new();
+    let mut result = Vec::new();
+    for (id, argv) in targets {
+        let key = path_format_key(argv);
+        let text = match cache.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let limit = max_text_bytes
+                    .checked_sub(usize::from(trailing_space))
+                    .ok_or(PaneInputResult::Oversize)?;
+                let mut text = format_paths_for_paste_bounded(argv, paths, limit)?;
+                if trailing_space {
+                    text.push(' ');
+                }
+                Arc::clone(entry.insert(Arc::<str>::from(text)))
             }
-            Ok((id, text))
-        })
-        .collect()
+        };
+        result.push((id, text));
+    }
+    Ok(result)
 }
 
 pub(crate) fn encode_target_modes(
@@ -5572,6 +5680,72 @@ mod node_tests {
     }
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_tab_argv_uses_the_configured_shell() {
+        let cfg = Config {
+            shell: Some("/bin/cat".into()),
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &[],
+            None,
+        )
+        .expect("PTY fixture");
+        let argv = mux.panes[&mux.active_focus().unwrap()].argv.clone();
+        mux.kill_children();
+        assert_eq!(
+            argv,
+            ["/bin/cat"],
+            "empty ordinary launch must use cfg.shell"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_new_tab_routes_raw_wsl_cwd_through_launcher() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let launcher = root.path().join("wsl.exe");
+        std::fs::write(&launcher, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launcher = launcher.to_string_lossy().into_owned();
+        let cfg = Config {
+            shell: Some(launcher.clone()),
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
+        mux.new_tab_with_geometry(
+            &cfg,
+            geometry,
+            Arc::new(|| {}),
+            std::slice::from_ref(&launcher),
+            None,
+        )
+        .unwrap();
+        let pane = &mux.panes[&mux.active_focus().unwrap()];
+        *pane.term.cwd.lock().unwrap() = Some("/linux-only/kettle-project".into());
+        pane.term.osc_cwd_seen.store(true, Ordering::Release);
+        mux.new_tab_geometry(&cfg, geometry, Arc::new(|| {}))
+            .unwrap();
+        let argv = mux.panes[&mux.active_focus().unwrap()].argv.clone();
+        mux.kill_children();
+        assert_eq!(
+            argv,
+            [launcher, "--cd".into(), "/linux-only/kettle-project".into()],
+            "ordinary new tabs must preserve a WSL-reported directory"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -6086,8 +6260,14 @@ mod node_tests {
         assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[I");
         // Focus-out occurred with reporting disabled, so the caller sent nothing.
         assert_eq!(queue.enqueue_focus_report(true), PaneInputResult::Queued);
-        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
-        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+        assert_eq!(
+            queue.retry_pending_reports(TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES),
+            PaneInputResult::Queued
+        );
+        assert_eq!(
+            queue.retry_pending_reports(TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES),
+            PaneInputResult::Queued
+        );
         let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
         assert_eq!(delivered, [b"\x1b[I".to_vec()]);
     }
@@ -6098,7 +6278,10 @@ mod node_tests {
             let (queue, rx) = input_queue_fixture();
             for _ in 0..PTY_INPUT_QUEUE_DEPTH {
                 assert_eq!(
-                    queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                    queue.enqueue_user(
+                        TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                        Arc::from(&b"old"[..])
+                    ),
                     PaneInputResult::Queued
                 );
             }
@@ -6106,15 +6289,30 @@ mod node_tests {
                 queue.enqueue_focus_report(focused),
                 PaneInputResult::Backpressured
             );
-            assert_eq!(queue.retry_pending_reports(false), PaneInputResult::Queued);
-            assert_eq!(queue.retry_pending_reports(false), PaneInputResult::Queued);
+            assert_eq!(
+                queue.retry_pending_reports(TermMode::empty()),
+                PaneInputResult::Queued
+            );
+            assert_eq!(
+                queue.retry_pending_reports(TermMode::empty()),
+                PaneInputResult::Queued
+            );
             let old: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
             assert_eq!(old, vec![b"old".to_vec(); PTY_INPUT_QUEUE_DEPTH]);
-            assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+            assert_eq!(
+                queue.retry_pending_reports(TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES),
+                PaneInputResult::Queued
+            );
             assert!(rx.is_empty(), "discarded reports must not return");
             assert_eq!(queue.enqueue_focus_report(focused), PaneInputResult::Queued);
-            assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
-            assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+            assert_eq!(
+                queue.retry_pending_reports(TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES),
+                PaneInputResult::Queued
+            );
+            assert_eq!(
+                queue.retry_pending_reports(TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES),
+                PaneInputResult::Queued
+            );
             assert_eq!(
                 rx.try_recv().unwrap().bytes.as_ref(),
                 if focused {
@@ -6130,7 +6328,9 @@ mod node_tests {
     #[cfg(unix)]
     #[test]
     fn disabled_focus_reporting_discards_backpressured_reports_on_every_retry_path() {
-        use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+        use alacritty_terminal::vte::ansi::{
+            Handler, KeyboardModes, NamedPrivateMode, PrivateMode,
+        };
 
         let cfg = Config {
             shell_integration: false,
@@ -6147,6 +6347,11 @@ mod node_tests {
         )
         .expect("PTY fixture");
         let pane = mux.panes.values_mut().next().unwrap();
+        pane.term
+            .term
+            .lock()
+            .unwrap()
+            .push_keyboard_mode(KeyboardModes::REPORT_EVENT_TYPES);
         let mode = PrivateMode::Named(NamedPrivateMode::ReportFocusInOut);
         let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
         for focused in [false, true] {
@@ -6200,24 +6405,75 @@ mod node_tests {
     }
 
     #[test]
+    fn backpressured_key_release_is_discarded_after_reporting_reset() {
+        for mode in [TermMode::empty(), TermMode::FOCUS_IN_OUT] {
+            for authored in [false, true] {
+                let (queue, rx) = input_queue_fixture();
+                for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+                    assert_eq!(
+                        queue.enqueue_user(TermMode::REPORT_EVENT_TYPES, Arc::from(&b"old"[..])),
+                        PaneInputResult::Queued
+                    );
+                }
+                let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
+                assert_eq!(
+                    queue.enqueue_key_release(
+                        TermMode::REPORT_EVENT_TYPES,
+                        key,
+                        Arc::from(&b"\x1b[97;1:3u"[..])
+                    ),
+                    PaneInputResult::Backpressured
+                );
+                while rx.try_recv().is_ok() {}
+                let result = if authored {
+                    queue.enqueue_user(mode, Arc::from(&b"typed"[..]))
+                } else {
+                    queue.retry_pending_reports(mode)
+                };
+                assert_eq!(result, PaneInputResult::Queued);
+                let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
+                let expected = if authored {
+                    vec![b"typed".to_vec()]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(
+                    delivered, expected,
+                    "a retained release must be discarded after reporting resets"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn backpressured_key_release_precedes_later_authored_input() {
         let (queue, rx) = input_queue_fixture();
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                queue.enqueue_user(
+                    TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                    Arc::from(&b"old"[..])
+                ),
                 PaneInputResult::Queued
             );
         }
         let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
         for _ in 0..2 {
             assert_eq!(
-                queue.enqueue_key_release(true, key, Arc::from(&b"\x1b[1;1:3A"[..])),
+                queue.enqueue_key_release(
+                    TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                    key,
+                    Arc::from(&b"\x1b[1;1:3A"[..])
+                ),
                 PaneInputResult::Backpressured
             );
         }
         while rx.try_recv().is_ok() {}
         assert_eq!(
-            queue.enqueue_user(true, Arc::from(&b"typed"[..])),
+            queue.enqueue_user(
+                TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                Arc::from(&b"typed"[..])
+            ),
             PaneInputResult::Queued
         );
         let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
@@ -6229,7 +6485,10 @@ mod node_tests {
         let (queue, rx) = input_queue_fixture();
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                queue.enqueue_user(
+                    TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                    Arc::from(&b"old"[..])
+                ),
                 PaneInputResult::Queued
             );
         }
@@ -6242,8 +6501,14 @@ mod node_tests {
             PaneInputResult::Backpressured
         );
         while rx.try_recv().is_ok() {}
-        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
-        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+        assert_eq!(
+            queue.retry_pending_reports(TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES),
+            PaneInputResult::Queued
+        );
+        assert_eq!(
+            queue.retry_pending_reports(TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES),
+            PaneInputResult::Queued
+        );
         assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[I");
         assert!(rx.is_empty());
     }
@@ -6259,7 +6524,10 @@ mod node_tests {
         queue.waker = waker.clone();
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                queue.enqueue_user(
+                    TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                    Arc::from(&b"old"[..])
+                ),
                 PaneInputResult::Queued
             );
         }
@@ -6290,7 +6558,10 @@ mod node_tests {
             1,
             "restored capacity must wake the event loop once"
         );
-        assert_eq!(queue.retry_pending_reports(true), PaneInputResult::Queued);
+        assert_eq!(
+            queue.retry_pending_reports(TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES),
+            PaneInputResult::Queued
+        );
         assert_eq!(rx.try_recv().unwrap().bytes.as_ref(), b"\x1b[O");
     }
 
@@ -6318,7 +6589,10 @@ mod node_tests {
         let (queue, rx) = input_queue_fixture();
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                queue.enqueue_user(
+                    TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                    Arc::from(&b"old"[..])
+                ),
                 PaneInputResult::Queued
             );
         }
@@ -6351,7 +6625,10 @@ mod node_tests {
         let (queue, rx) = input_queue_fixture();
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(true, Arc::from(&b"old"[..])),
+                queue.enqueue_user(
+                    TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                    Arc::from(&b"old"[..])
+                ),
                 PaneInputResult::Queued
             );
         }
@@ -6361,7 +6638,10 @@ mod node_tests {
         );
         while rx.try_recv().is_ok() {}
         assert_eq!(
-            queue.enqueue_user(true, Arc::from(&b"typed"[..])),
+            queue.enqueue_user(
+                TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                Arc::from(&b"typed"[..])
+            ),
             PaneInputResult::Queued
         );
         let delivered: Vec<_> = rx.try_iter().map(|item| item.bytes.to_vec()).collect();
@@ -6393,7 +6673,10 @@ mod node_tests {
 
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(true, Arc::from(&b"x"[..])),
+                queue.enqueue_user(
+                    TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                    Arc::from(&b"x"[..])
+                ),
                 PaneInputResult::Queued
             );
         }
@@ -6402,7 +6685,10 @@ mod node_tests {
             PTY_INPUT_QUEUE_DEPTH
         );
         assert_eq!(
-            queue.enqueue_user(true, Arc::from(&b"y"[..])),
+            queue.enqueue_user(
+                TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                Arc::from(&b"y"[..])
+            ),
             PaneInputResult::Backpressured
         );
         assert_eq!(
@@ -6449,12 +6735,18 @@ mod node_tests {
         let release = || Arc::<[u8]>::from(&b"\x1b[<0;1;1m"[..]);
         for _ in 0..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(
-                queue.enqueue_user(true, Arc::from(&b"a"[..])),
+                queue.enqueue_user(
+                    TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                    Arc::from(&b"a"[..])
+                ),
                 PaneInputResult::Queued
             );
         }
         assert_eq!(
-            queue.enqueue_user(true, Arc::from(&b"a"[..])),
+            queue.enqueue_user(
+                TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                Arc::from(&b"a"[..])
+            ),
             PaneInputResult::Backpressured,
             "ordinary input stops at the lane's depth"
         );
@@ -6488,16 +6780,25 @@ mod node_tests {
 
         // A lane full by bytes still takes a release.
         assert_eq!(
-            queue.enqueue_user(true, Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES])),
+            queue.enqueue_user(
+                TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES])
+            ),
             PaneInputResult::Queued
         );
         let rest = MAX_QUEUED_USER_INPUT_BYTES - queued_user_bytes.load(Ordering::Acquire);
         assert_eq!(
-            queue.enqueue_user(true, Arc::from(vec![b'y'; rest])),
+            queue.enqueue_user(
+                TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                Arc::from(vec![b'y'; rest])
+            ),
             PaneInputResult::Queued
         );
         assert_eq!(
-            queue.enqueue_user(true, Arc::from(&b"z"[..])),
+            queue.enqueue_user(
+                TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                Arc::from(&b"z"[..])
+            ),
             PaneInputResult::Backpressured
         );
         assert_eq!(
@@ -6538,7 +6839,10 @@ mod node_tests {
         };
 
         assert_eq!(
-            queue.enqueue_user(true, Arc::from(vec![b'x'; 4 * 1024 * 1024 + 12])),
+            queue.enqueue_user(
+                TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                Arc::from(vec![b'x'; 4 * 1024 * 1024 + 12])
+            ),
             PaneInputResult::Queued
         );
         assert_eq!(
@@ -6548,7 +6852,10 @@ mod node_tests {
         let aggregate_headroom =
             MAX_QUEUED_USER_INPUT_BYTES - queued_user_bytes.load(Ordering::Acquire);
         assert_eq!(
-            queue.enqueue_user(true, Arc::from(vec![b'b'; aggregate_headroom])),
+            queue.enqueue_user(
+                TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                Arc::from(vec![b'b'; aggregate_headroom])
+            ),
             PaneInputResult::Queued,
             "the exact aggregate byte budget must remain admissible"
         );
@@ -6557,14 +6864,17 @@ mod node_tests {
             MAX_QUEUED_USER_INPUT_BYTES
         );
         assert_eq!(
-            queue.enqueue_user(true, Arc::from(&b"b"[..])),
+            queue.enqueue_user(
+                TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                Arc::from(&b"b"[..])
+            ),
             PaneInputResult::Backpressured,
             "one byte over the bounded user-input budget is retryable, not read-only or failed"
         );
         assert!(!failed.load(Ordering::Acquire));
         assert_eq!(
             queue.enqueue_user(
-                true,
+                TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
                 Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES + 1])
             ),
             PaneInputResult::Oversize,
@@ -6738,7 +7048,10 @@ mod node_tests {
             PaneInputResult::Failed
         );
         assert_eq!(
-            queue.enqueue_user(true, Arc::from(&b"user"[..])),
+            queue.enqueue_user(
+                TermMode::FOCUS_IN_OUT | TermMode::REPORT_EVENT_TYPES,
+                Arc::from(&b"user"[..])
+            ),
             PaneInputResult::Failed,
             "a disconnected user-input worker is terminal rather than retryable"
         );
@@ -6960,6 +7273,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         m.active = m.tabs.len() - 1;
@@ -7946,6 +8261,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         mux.active = 0;
@@ -8776,6 +9093,103 @@ mod node_tests {
     }
 
     #[test]
+    fn posix_path_quoting_preserves_backslashes_for_fish() {
+        assert_eq!(
+            quote_path_for(PaneShellKind::Posix, r"/tmp/a\"),
+            r"'/tmp/a'\\''",
+            "backslashes must be escaped outside single quotes"
+        );
+        #[cfg(unix)]
+        for program in ["/bin/sh", "fish"] {
+            let dir = tempfile::tempdir().unwrap();
+            for path in [r"/tmp/a\", r"/tmp/a\'; touch PWNED; #.txt", r"/tmp/a\\b"] {
+                let script = format!("printf '%s' {}", quote_path_for(PaneShellKind::Posix, path));
+                let output = match std::process::Command::new(program)
+                    .args(["-c", &script])
+                    .current_dir(dir.path())
+                    .output()
+                {
+                    Ok(output) => output,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => panic!("{program}: {error}"),
+                };
+                assert!(output.status.success(), "{program}: {output:?}");
+                assert_eq!(output.stdout, path.as_bytes(), "{program}");
+                assert!(!dir.path().join("PWNED").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn default_shell_path_quoting_uses_the_selected_program() {
+        for (program, kind) in [
+            ("cmd.exe", PaneShellKind::Cmd),
+            ("pwsh", PaneShellKind::PowerShell),
+        ] {
+            let program = program.to_owned();
+            let argv = path_argv_with_default(&[], Some(&program));
+            assert_eq!(
+                shell_kind_for_argv(argv),
+                kind,
+                "default path quoting must use the actual selected shell"
+            );
+            if kind == PaneShellKind::Cmd {
+                assert!(!path_types_exactly(
+                    argv,
+                    std::path::Path::new(r"C:\tmp\a%PATH%.txt")
+                ));
+                assert_eq!(
+                    format_paths_for_paste(argv, &[r"C:\tmp\a&calc.exe&rem .txt".into()]).unwrap(),
+                    "\"C:\\tmp\\a&calc.exe&rem .txt\""
+                );
+            }
+        }
+        let explicit = vec!["bash".into()];
+        assert_eq!(
+            path_argv_with_default(&explicit, Some(&"cmd.exe".into())),
+            explicit
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_shell_path_quoting_retains_the_pty_selected_shell() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let shell = dir.path().join("pwsh");
+        std::fs::write(&shell, "#!/bin/sh\nexec /bin/cat\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cfg = Config {
+            shell: None,
+            shell_integration: false,
+            login_shell: false,
+            env: vec![("SHELL".into(), shell.to_string_lossy().into_owned())],
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &[],
+            None,
+        )
+        .unwrap();
+        let argv = mux.focused_argv();
+        let pane = &mux.panes[&mux.active_focus().unwrap()];
+        assert!(
+            pane.argv.is_empty(),
+            "session launch semantics must stay unchanged"
+        );
+        mux.kill_children();
+        assert_eq!(
+            shell_kind_for_argv(&argv),
+            PaneShellKind::PowerShell,
+            "default path quoting must retain the shell chosen by the PTY"
+        );
+    }
+
+    #[test]
     fn shell_kind_for_argv_classifies_families() {
         let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         assert_eq!(shell_kind_for_argv(&s(&["wsl.exe"])), PaneShellKind::Posix);
@@ -8983,19 +9397,60 @@ mod node_tests {
     }
 
     #[test]
+    fn path_fanout_stops_at_the_limit_and_shares_identical_text() {
+        let argv = vec!["bash".into()];
+        let paths = [std::path::PathBuf::from("123456789")];
+        let mut visited = 0;
+        let targets = (0..256).map(|id| {
+            visited += 1;
+            (id, argv.as_slice())
+        });
+        assert_eq!(
+            format_paths_for_targets_bounded(targets, &paths, false, 4),
+            Err(PaneInputResult::Oversize),
+            "oversized paths must stop before target fanout"
+        );
+        assert_eq!(
+            visited, 1,
+            "validation must stop at the first oversized target"
+        );
+        let shared = format_paths_for_targets_bounded(
+            [(1, argv.as_slice()), (2, argv.as_slice())],
+            &paths,
+            false,
+            11,
+        )
+        .unwrap();
+        assert_eq!(shared[0].1.as_ref(), "'123456789'");
+        assert!(
+            Arc::ptr_eq(&shared[0].1, &shared[1].1),
+            "identical targets must share formatted text"
+        );
+        assert_eq!(
+            format_paths_for_targets_bounded([(1, argv.as_slice())], &paths, true, 11),
+            Err(PaneInputResult::Oversize),
+            "the trailing space counts against the limit"
+        );
+    }
+
+    #[test]
     fn path_paste_fanout_formats_every_target_shell_independently() {
         use std::path::PathBuf;
 
         let powershell = vec!["pwsh.exe".to_string()];
         let wsl = vec!["wsl.exe".to_string()];
-        let formatted = format_paths_for_targets(
+        let formatted = format_paths_for_targets_bounded(
             [(10, powershell.as_slice()), (20, wsl.as_slice())],
             &[PathBuf::from(r"C:\Users\me\a b.txt")],
             true,
+            usize::MAX,
         )
         .unwrap();
         assert_eq!(
-            formatted,
+            formatted
+                .into_iter()
+                .map(|(id, text)| (id, text.to_string()))
+                .collect::<Vec<_>>(),
             [
                 (10, "'C:\\Users\\me\\a b.txt' ".to_string()),
                 (20, "'/mnt/c/Users/me/a b.txt' ".to_string()),
@@ -9228,6 +9683,8 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             });
         }
@@ -9282,6 +9739,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         assert!(!single.move_active_tab(1));
@@ -9304,6 +9763,8 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             });
         }
@@ -9346,6 +9807,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         assert!(!single.nudge_active_tab(1));
@@ -9365,6 +9828,8 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             });
         }
@@ -9400,6 +9865,8 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             });
         }
@@ -9454,6 +9921,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
 
@@ -9499,6 +9968,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         assert_eq!(m.tab_index_of_any_pane(&[10]), Some(0));
@@ -9539,6 +10010,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         m.active = 0;
@@ -9605,6 +10078,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         m.active = 0;
@@ -9704,6 +10179,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         }];
         let mut active = 0;
@@ -9741,6 +10218,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         }];
         let mut active = 0;
@@ -9776,6 +10255,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         }];
         let mut active = 0;
@@ -10037,37 +10518,44 @@ mod node_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn closed_tab_ring_bounded_and_lifo() {
-        // The snapshot ring is bounded at `CLOSED_TAB_RING_CAP`
-        // and pops LIFO (most-recent first). Builds a fake ring
-        // directly so we don't need to spawn real PTYs.
-        let mut m = Mux::new();
-        for i in 0..(super::CLOSED_TAB_RING_CAP + 3) {
-            if m.closed_tabs.len() >= super::CLOSED_TAB_RING_CAP {
-                m.closed_tabs.pop_front();
-            }
-            m.closed_tabs.push_back(super::ClosedTab {
-                original_index: i,
-                argv: vec![format!("argv-{i}")],
-                cwd: Some(format!("/tmp/{i}")),
-                reconnect_launch: None,
-            });
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
+        let mut mux = Mux::new();
+        for i in 0..(CLOSED_TAB_RING_CAP + 3) {
+            let argv = vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "exit 0".into(),
+                i.to_string(),
+            ];
+            mux.new_tab_with_geometry(&cfg, geometry, Arc::new(|| {}), &argv, None)
+                .unwrap();
+            assert!(mux.close_tab_at(0));
         }
-        // Cap honored: oldest 3 entries fell off the front.
-        assert_eq!(m.closed_tabs.len(), super::CLOSED_TAB_RING_CAP);
-        assert_eq!(m.closed_tabs.front().unwrap().original_index, 3);
-        assert_eq!(
-            m.closed_tabs.back().unwrap().original_index,
-            super::CLOSED_TAB_RING_CAP + 2
+        assert_eq!(mux.closed_tabs.len(), CLOSED_TAB_RING_CAP);
+        assert_eq!(mux.closed_tabs.front().unwrap().argv[3], "3");
+        for expected in (3..CLOSED_TAB_RING_CAP + 3).rev() {
+            assert!(
+                mux.undo_close_tab_geometry(&cfg, geometry, Arc::new(|| {}))
+                    .unwrap()
+            );
+            assert_eq!(
+                mux.panes[&mux.active_focus().unwrap()].argv[3],
+                expected.to_string()
+            );
+        }
+        assert!(
+            !mux.undo_close_tab_geometry(&cfg, geometry, Arc::new(|| {}))
+                .unwrap()
         );
-        // LIFO: pop_back gives the most-recently-closed snapshot.
-        let last = m.closed_tabs.pop_back().unwrap();
-        assert_eq!(last.original_index, super::CLOSED_TAB_RING_CAP + 2);
-        assert_eq!(
-            last.argv,
-            vec![format!("argv-{}", super::CLOSED_TAB_RING_CAP + 2)]
-        );
+        mux.kill_children();
     }
 
     #[test]
@@ -10085,6 +10573,8 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             }
         }
@@ -10157,6 +10647,8 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             });
         }
@@ -10184,6 +10676,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         for id in 2..=60 {
@@ -10233,6 +10727,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         super::insert_split(&mut tab, 2, Dir::Horizontal, false);
@@ -10252,6 +10748,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         super::insert_split(&mut tab, 2, Dir::Vertical, false);
@@ -10277,6 +10775,8 @@ mod node_tests {
                 last_seen_at: None,
                 bell: false,
                 title_override: None,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
                 lanes: HashMap::new(),
             };
             assert!(super::insert_split(&mut tab, 2, dir, new_first));
@@ -10305,6 +10805,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         assert!(
@@ -10350,6 +10852,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         m.active = 0;
@@ -10377,6 +10881,8 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         });
         m.active = 0;
@@ -10431,6 +10937,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         m.tabs.push(mk(1));
@@ -10471,6 +10979,8 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
             lanes: HashMap::new(),
         };
         let mut src = Mux::new();

@@ -15,6 +15,7 @@ use serde::Serialize;
 const SCHEMA_VERSION: u32 = 1;
 const MAX_INCIDENT_BYTES: u64 = 256 * 1024;
 const RETAINED_INCIDENTS: usize = 10;
+const MAX_INCIDENT_SCAN: usize = 4096;
 const MAX_MESSAGE_CHARS: usize = 2048;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,9 +152,18 @@ impl IncidentLog {
     ) -> io::Result<Self> {
         let dir = diagnostic_dir(cache_dir);
         let (path, file) = create_incident_file(&dir, unix_ms, pid)?;
-        if let Err(error) = prune_incidents(&dir, &path) {
-            kettle_state::discard_created_private_file(file, &path);
-            return Err(error);
+        match prune_incidents(&dir, &path) {
+            Ok(PruneOutcome::Complete) => {}
+            Ok(PruneOutcome::ScanLimited) => {
+                log::warn!(
+                    "GPU diagnostic cleanup incomplete: incident scan limit reached in {}",
+                    dir.display()
+                );
+            }
+            Err(error) => {
+                kettle_state::discard_created_private_file(file, &path);
+                return Err(error);
+            }
         }
 
         let mut log = Self {
@@ -327,7 +337,13 @@ fn create_incident_file(dir: &Path, unix_ms: u128, pid: u32) -> io::Result<(Path
     ))
 }
 
-fn prune_incidents(dir: &Path, preserve: &Path) -> io::Result<()> {
+#[derive(Debug, PartialEq, Eq)]
+enum PruneOutcome {
+    Complete,
+    ScanLimited,
+}
+
+fn prune_incidents(dir: &Path, preserve: &Path) -> io::Result<PruneOutcome> {
     prune_incidents_with(dir, preserve, |path| std::fs::remove_file(path))
 }
 
@@ -335,8 +351,11 @@ fn prune_incidents_with(
     dir: &Path,
     preserve: &Path,
     mut remove: impl FnMut(&Path) -> io::Result<()>,
-) -> io::Result<()> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
+) -> io::Result<PruneOutcome> {
+    let mut entries = std::fs::read_dir(dir)?;
+    let mut files: Vec<PathBuf> = entries
+        .by_ref()
+        .take(MAX_INCIDENT_SCAN)
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
@@ -345,6 +364,7 @@ fn prune_incidents_with(
                 .is_some_and(|name| name.starts_with("gpu-") && name.ends_with(".jsonl"))
         })
         .collect();
+    let scan_limited = entries.next().is_some();
     files.sort();
     let mut excess = files.len().saturating_sub(RETAINED_INCIDENTS);
     for stale in files.iter().filter(|path| *path != preserve) {
@@ -358,7 +378,11 @@ fn prune_incidents_with(
             Err(error) => return Err(error),
         }
     }
-    Ok(())
+    Ok(if scan_limited {
+        PruneOutcome::ScanLimited
+    } else {
+        PruneOutcome::Complete
+    })
 }
 
 fn incident_in_use(error: &io::Error) -> bool {
@@ -403,6 +427,77 @@ mod tests {
             kind: "Discrete",
             backend: "DX12",
         }
+    }
+
+    #[test]
+    fn gpu_retention_bounds_scans_and_cleanup_on_a_backlog() {
+        const SCAN_LIMIT: usize = 4096;
+        let root = kettle_test_support::private_tempdir("kettle-gpu-backlog-");
+        for index in 0..=SCAN_LIMIT {
+            std::fs::write(root.path().join(format!("gpu-{index:05}.jsonl")), b"{}\n").unwrap();
+        }
+        let preserve = root.path().join(format!("gpu-{SCAN_LIMIT:05}.jsonl"));
+        let result = prune_incidents(root.path(), &preserve);
+        assert_eq!(result.unwrap(), PruneOutcome::ScanLimited);
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            RETAINED_INCIDENTS + 1
+        );
+        prune_incidents(root.path(), &preserve).unwrap();
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            RETAINED_INCIDENTS
+        );
+        assert!(preserve.exists());
+    }
+
+    #[test]
+    fn gpu_retention_caps_nonmatching_directory_entries_too() {
+        let root = kettle_test_support::private_tempdir("kettle-gpu-unrelated-");
+        for index in 0..4097 {
+            std::fs::write(root.path().join(format!("other-{index:05}")), b"").unwrap();
+        }
+        let result = prune_incidents(root.path(), &root.path().join("preserve"));
+        assert_eq!(result.unwrap(), PruneOutcome::ScanLimited);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 4097);
+    }
+
+    #[test]
+    fn review_regression_incident_survives_an_incomplete_retention_scan() {
+        let root = TestDir::new("unrelated-start");
+        let diagnostics = diagnostic_dir(Some(root.0.path()));
+        kettle_state::create_private_dirs(&diagnostics).unwrap();
+        for index in 0..=MAX_INCIDENT_SCAN {
+            std::fs::write(diagnostics.join(format!("other-{index:05}")), b"").unwrap();
+        }
+        for timestamp in [1234, 1235] {
+            let mut log = IncidentLog::start_at(
+                Some(root.0.path()),
+                timestamp,
+                42,
+                "test",
+                adapter(),
+                Some(GpuFault {
+                    kind: "device_lost".into(),
+                    message: "driver reset".into(),
+                }),
+            )
+            .expect("incomplete retention must not discard the current fault");
+            log.record_attempt(0, "preferred").unwrap();
+            let contents = std::fs::read_to_string(log.path()).unwrap();
+            let events: Vec<serde_json::Value> = contents
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0]["phase"], "fault");
+            assert_eq!(events[0]["fault"]["message"], "driver reset");
+            assert_eq!(events[1]["phase"], "recovery_attempt");
+        }
+        assert_eq!(
+            std::fs::read_dir(diagnostics).unwrap().count(),
+            MAX_INCIDENT_SCAN + 3
+        );
     }
 
     #[test]

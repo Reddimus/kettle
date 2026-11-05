@@ -338,10 +338,15 @@ impl CompiledSearch {
     /// line is unchanged. Reusing the same token preserves exact work-budget continuations.
     pub fn set_scan_token(&mut self, token: SearchScanToken) {
         if self.scan_token != Some(token) {
-            self.forward_progress = None;
-            self.reverse_progress = None;
+            self.clear_progress();
             self.scan_token = Some(token);
         }
+    }
+
+    /// Discard resume offsets when the caller discards the accumulated results.
+    pub fn clear_progress(&mut self) {
+        self.forward_progress = None;
+        self.reverse_progress = None;
     }
 
     /// Compile an interactive regex. An empty query is valid but has no search program.

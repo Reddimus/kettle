@@ -1,5 +1,25 @@
 use super::*;
 
+pub(super) fn remote_watch_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let path = std::path::absolute(path)?;
+    let filename = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "remote spool needs a filename",
+        )
+    })?;
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "remote spool needs a parent",
+        )
+    })?;
+    // The spool may not exist yet. Resolve only its existing, private parent
+    // so native events through aliases such as /tmp use the same path.
+    kettle_state::create_private_dirs(parent)?;
+    Ok(std::fs::canonicalize(parent)?.join(filename))
+}
+
 /// Locate the XDG cache dir for the current user without
 /// pulling in the `dirs` crate. Probes `$XDG_CACHE_HOME` first
 /// (the spec-canonical var) then `$HOME/.cache` on Linux/macOS,
@@ -337,18 +357,17 @@ impl App {
         let mut remote_watcher = None;
         let mut remote_startup_retry = false;
         let remote_command_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        if let Some(path) = startup.remote_file.clone()
-            && let Some(dir) = path.parent().map(|p| p.to_path_buf())
+        if let Some(path) = startup.remote_file.clone().and_then(|path| {
+            remote_watch_path(&path)
+                .map_err(|error| {
+                    log::warn!("remote-command watcher path unavailable: {error}");
+                })
+                .ok()
+        }) && let Some(dir) = path.parent().map(|p| p.to_path_buf())
         {
             let p = proxy.clone();
             let watched = path.clone();
             let pending = remote_command_pending.clone();
-            // `remote.cmd` is a command channel into this terminal, so its
-            // parent must be private before the lock below touches anything.
-            // Repairing here rather than relying on some other subsystem
-            // having run first is the difference between the watcher working
-            // on this launch and on the next one.
-            let _ = kettle_state::create_private_dirs(&dir);
             use notify::Watcher;
             let built = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 if let Ok(ev) = res
@@ -715,6 +734,7 @@ impl App {
             window_icon_dark_synced: None,
             pending_window_closes: std::collections::BTreeSet::new(),
             quit_requested: false,
+            startup_error: None,
             recorder: None,
             recording_start_failed: false,
             recording_error_reported: false,
@@ -823,6 +843,7 @@ impl App {
                 Err(anyhow::anyhow!(error))
             }
         };
+        let result = result.and_then(|()| app.startup_error.take().map_or(Ok(()), Err));
         app.runtime_tracker.set_phase("exiting");
         // Pasted screenshots are captured screen content, so they do not outlive
         // the session that produced them. Runs on the error path too — an exit
@@ -1101,6 +1122,7 @@ impl App {
             && let Err(e) = self.spawn_first_tab(ws, has_launch_override)
         {
             log::error!("{e}");
+            self.startup_error = Some(anyhow::anyhow!(e));
             event_loop.exit();
             return;
         }
@@ -1137,6 +1159,7 @@ impl App {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 log::error!("failed to create window: {e}");
+                self.startup_error = Some(anyhow::anyhow!("failed to create window: {e}"));
                 ws.mux.kill_children();
                 event_loop.exit();
                 return;
@@ -1208,33 +1231,7 @@ impl App {
         // hazard with the GPU objects) turns that infinite hang into a clean,
         // actionable exit. `done` is set the instant init returns — success OR
         // a quick failure — so only a true never-returns hang trips it.
-        let gpu_init_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        {
-            let gpu_init_done = gpu_init_done.clone();
-            // If the watchdog thread can't be spawned, proceed without it
-            // rather than failing init.
-            let _ = std::thread::Builder::new()
-                .name("kettle-gpu-init-watchdog".into())
-                .spawn(move || {
-                    if gpu_init_timed_out(
-                        &gpu_init_done,
-                        std::time::Duration::from_secs(GPU_INIT_TIMEOUT_SECS),
-                        std::time::Duration::from_millis(100),
-                    ) {
-                        log::error!(
-                            "GPU initialization did not finish within {GPU_INIT_TIMEOUT_SECS}s — \
-                             your graphics driver may be hung or unresponsive. Try updating the \
-                             GPU driver; on Linux you can force software rendering with \
-                             `LIBGL_ALWAYS_SOFTWARE=1` or pick another backend via \
-                             `WGPU_BACKEND=gl`. Exiting so kettle doesn't hang invisibly."
-                        );
-                        // exit() skips destructors, so run_with's guard never
-                        // flushes this startup's trace.
-                        crate::startup_trace::flush();
-                        std::process::exit(1);
-                    }
-                });
-        }
+        let gpu_init_watchdog = GpuInitWatchdog::arm();
         let init_result = {
             let runtime_tracker = self.runtime_tracker.clone();
             let _phase = runtime_tracker.enter("gpu_init");
@@ -1251,11 +1248,12 @@ impl App {
         // Disarm the watchdog the moment init returns, on BOTH the success and
         // the quick-failure path, so a clean renderer-init error below never
         // gets a spurious "timed out" report behind it.
-        gpu_init_done.store(true, std::sync::atomic::Ordering::Release);
+        drop(gpu_init_watchdog);
         let renderer = match init_result {
             Ok(r) => r,
             Err(e) => {
                 log::error!("renderer init failed: {e}");
+                self.startup_error = Some(anyhow::anyhow!("renderer init failed: {e}"));
                 ws.mux.kill_children();
                 event_loop.exit();
                 return;
@@ -1326,6 +1324,7 @@ impl App {
                 cwd.as_deref(),
             ) {
                 log::error!("failed to spawn `-e` command: {e}");
+                self.startup_error = Some(anyhow::anyhow!("failed to spawn `-e` command: {e}"));
                 event_loop.exit();
                 return;
             }
@@ -1381,6 +1380,7 @@ impl App {
         };
         if !restored && let Err(e) = ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
             log::error!("failed to spawn shell: {e}");
+            self.startup_error = Some(anyhow::anyhow!("failed to spawn shell: {e}"));
             event_loop.exit();
             return;
         }

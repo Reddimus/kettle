@@ -448,3 +448,19 @@ fn a_single_line_correlated_command_keeps_the_normal_editor_input_path() {
         assert!(!enabled.windows(6).any(|part| part == b"\x1b[200~"));
     }
 }
+
+#[test]
+fn pane_close_lifecycle_removes_control_attachments() {
+    let source = production_source();
+    let close = source
+        .split("fn fire_pane_close_event(")
+        .nth(1)
+        .unwrap()
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    assert!(
+        close.contains("detach_pane(pane_id)"),
+        "pane teardown must remove historical control attachments"
+    );
+}

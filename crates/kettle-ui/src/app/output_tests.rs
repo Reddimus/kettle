@@ -493,3 +493,31 @@ fn restarts_use_launch_directory_routing() {
     assert!(body.contains("launch.as_ref()"));
 }
 
+#[cfg(unix)]
+#[test]
+fn hidden_protocol_notifications_publish_a_semantic_wake() {
+    let cfg = title_test_config();
+    let mut mux = Mux::new();
+    let argv = vec![
+        "/bin/sh".into(), "-c".into(),
+        r"stty -echo; printf READY; read line; printf '\033]9;first\007\033]777;notify;title;second\007DONE'; read line".into(),
+    ];
+    mux.new_tab_with(&cfg, 80, 24, 8, 16, Arc::new(|| {}), &argv, None)
+        .unwrap();
+    let pane = mux.active_focus().unwrap();
+    pane_screen_shows(&mux, pane, "READY", std::time::Duration::from_secs(5)).unwrap();
+    assert!(mux.panes[&pane].output_rx.is_none());
+    let term = &mux.panes[&pane].term;
+    term.take_lifecycle_wake();
+    term.set_output_wake_enabled(false);
+    term.write(b"go\n");
+    pane_screen_shows(&mux, pane, "DONE", std::time::Duration::from_secs(5)).unwrap();
+    let semantic = term.take_lifecycle_wake();
+    let notifications = term.drain_protocol_notifications();
+    mux.kill_children();
+    assert_eq!(notifications.len(), 2);
+    assert!(
+        semantic,
+        "OSC 9 and OSC 777 must wake semantic dispatch while paint wakes are disabled"
+    );
+}

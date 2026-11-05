@@ -725,3 +725,114 @@ fn cache_dir_from_env_probes_in_order() {
     assert!(cache_dir_from_env(|_| None).is_none());
 }
 
+#[test]
+fn relative_remote_spool_watch_is_normalized_before_parent_selection() {
+    let root = tempfile::Builder::new()
+        .prefix("kettle-remote-relative-")
+        .tempdir_in(".")
+        .unwrap();
+    let path = std::path::Path::new(".")
+        .join(root.path().file_name().unwrap())
+        .join("new-spool/remote.cmd");
+    assert!(path.is_relative());
+    let watched = super::remote_watch_path(&path).unwrap();
+    assert!(watched.is_absolute());
+    assert!(watched.parent().unwrap().is_dir());
+    assert!(!watched.exists(), "the spool need not exist yet");
+}
+
+#[cfg(unix)]
+#[test]
+fn review_regression_relative_remote_watch_resolves_parent_symlinks() {
+    let root = tempfile::Builder::new()
+        .prefix("kettle-remote-alias-")
+        .tempdir_in(".")
+        .unwrap();
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink("real", &alias).unwrap();
+    let relative = std::path::Path::new(".")
+        .join(root.path().file_name().unwrap())
+        .join("alias/spool/remote.cmd");
+    let watched = super::remote_watch_path(&relative).unwrap();
+    let event_path = std::fs::canonicalize(real.join("spool"))
+        .unwrap()
+        .join("remote.cmd");
+    assert!(!event_path.exists());
+    let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+        .add_path(event_path);
+    assert!(super::watcher_event_matches(&event, &watched));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn review_regression_remote_watch_matches_macos_tmp_alias() {
+    const CHILD: &str = "KETTLE_REMOTE_NATIVE_WATCH_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::tests::review_regression_remote_watch_matches_macos_tmp_alias",
+                "--nocapture",
+            ])
+            .current_dir("/")
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let root = tempfile::Builder::new()
+        .prefix("kettle-remote-native-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let relative = root
+        .path()
+        .strip_prefix("/")
+        .unwrap()
+        .join("spool/remote.cmd");
+    let watched = super::remote_watch_path(&relative).unwrap();
+    let spool = root.path().join("spool/remote.cmd");
+    std::fs::write(&spool, b"new-tab\n").unwrap();
+    let event_path = std::fs::canonicalize(spool).unwrap();
+    assert!(event_path.starts_with("/private/tmp"));
+    let event = notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))
+        .add_path(event_path);
+    assert!(super::watcher_event_matches(&event, &watched));
+}
+
+#[test]
+fn fatal_startup_failures_are_returned_after_event_loop_exit() {
+    let src = production_source();
+    let resumed = src.split("fn resumed_inner(").nth(1).unwrap();
+    for failure in [
+        "log::error!(\"{e}\");",
+        "log::error!(\"failed to create window: {e}\");",
+        "log::error!(\"renderer init failed: {e}\");",
+        "log::error!(\"failed to spawn `-e` command: {e}\");",
+        "log::error!(\"failed to spawn shell: {e}\");",
+    ] {
+        let branch = resumed
+            .split(failure)
+            .nth(1)
+            .unwrap()
+            .split("event_loop.exit();")
+            .next()
+            .unwrap();
+        assert!(
+            branch.contains("self.startup_error = Some("),
+            "fatal startup failure must survive event-loop exit: {failure}"
+        );
+    }
+    let run = src
+        .split("let result: Result<()> = match app.start_first_pane_before_launch()")
+        .nth(1)
+        .unwrap();
+    assert!(
+        run.split("app.runtime_tracker.set_phase(\"exiting\")")
+            .next()
+            .unwrap()
+            .contains("app.startup_error.take()")
+    );
+}

@@ -538,6 +538,7 @@ impl App {
         self.finish_selection_gesture(ws);
         ws.card_press = None;
         ws.dragging_split = None;
+        ws.pane_drag = None;
         // The press that opens a question also owns its later release.
         ws.confirm_pointer_release |= ws
             .held_buttons
@@ -1863,21 +1864,22 @@ impl App {
                 fire_notify(
                     self.ui_text
                         .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
-                    self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
+                    self.ui_text
+                        .text(kettle_i18n::Text::NotifyBodySettingNotApplied),
                 );
             }
             self.reload_config(ws);
             return;
         }
-        // Notify if the Settings change can't
-        // be written — it's live this session but lost on restart.
         let saved = self.persist_pref(key_str, &new_val);
         if !saved {
             fire_notify(
                 self.ui_text
                     .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
-                self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyBodySettingNotApplied),
             );
+            return;
         }
         // The single "Window padding" control sets *uniform* padding, so
         // mirror the value to the Y axis. Leaving `window-padding-y` at its
@@ -1962,15 +1964,18 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                if let Some(e) = ws.settings_text_edit.take() {
+                if let Some(e) = ws.settings_text_edit.as_ref() {
                     let val = e.buf.trim().to_string();
                     if !self.persist_pref(e.key, &val) {
                         fire_notify(
                             self.ui_text
                                 .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
-                            self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
+                            self.ui_text
+                                .text(kettle_i18n::Text::NotifyBodySettingNotApplied),
                         );
+                        return;
                     }
+                    ws.settings_text_edit = None;
                     self.reload_config(ws);
                 }
             }
@@ -2056,6 +2061,10 @@ impl App {
                 let ranked = rank_layouts(q, layouts);
                 let name = ranked.get(*sel).map(|&i| layouts[i].clone());
                 ws.layout_picker_input = None;
+                ws.accessibility_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
                 if let Some(name) = name {
                     let exe = std::env::current_exe()
                         .unwrap_or_else(|_| std::path::PathBuf::from("kettle"));
@@ -2271,11 +2280,12 @@ impl App {
                     let area = self.area(ws);
                     let (cols, rows) = self.grid_of(ws, area);
                     let geometry = self.pty_geometry_for_grid(ws, cols, rows);
-                    if let Err(e) =
-                        ws.mux
-                            .new_ssh_tab_geometry(&self.cfg, geometry, self.waker(), &target)
+                    match ws
+                        .mux
+                        .new_ssh_tab_geometry(&self.cfg, geometry, self.waker(), &target)
                     {
-                        log::error!("ssh launch failed: {e}");
+                        Ok(_) => self.fire_tab_add_event(ws),
+                        Err(e) => log::error!("ssh launch failed: {e}"),
                     }
                     self.resize_all(ws);
                     self.save_session(ws);
@@ -2696,6 +2706,14 @@ pub(super) fn dispatch_modal_press(
         ModalKind::Confirmation => return false,
     }
     ws.dragging_modal_editor = false;
+    if ws.ime_preedit.is_some()
+        && let Some(window) = &ws.window
+    {
+        window.set_ime_allowed(false);
+        #[cfg(target_os = "macos")]
+        discard_native_marked_text(window);
+        window.set_ime_allowed(true);
+    }
     end_modal_composition(ws);
     ws.accessibility_pending = true;
     if let Some(window) = &ws.window {
@@ -2917,6 +2935,7 @@ impl App {
         // modal is gone by the release.
         ws.card_press = None;
         ws.dragging_split = None;
+        ws.pane_drag = None;
         // The modal that opens takes the keyboard from a preview lane, even
         // if it closes again before the event loop looks.
         self.exit_preview_focus(ws);

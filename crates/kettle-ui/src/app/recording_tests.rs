@@ -422,3 +422,35 @@ fn review_recording_header_follows_restore_and_precedes_siblings() {
     );
 }
 
+#[test]
+fn recorder_drain_has_a_finite_batch_under_replenishment() {
+    let body = finding_body(include_str!("recording.rs"), "drain_recorder_output_once");
+    assert!(
+        !body.contains("while let Ok(chunk) = rx.try_recv()"),
+        "a replenished output channel must not extend one UI drain indefinitely"
+    );
+    assert!(body.contains("output_chunks_ready(rx)"));
+}
+
+#[test]
+fn recorder_drain_stops_at_the_sampled_queue_length() {
+    let (tx, rx) = crossbeam_channel::bounded(4);
+    for byte in 0..4 {
+        tx.send(vec![byte]).unwrap();
+    }
+    let mut batch = super::output_chunks_ready(&rx);
+    for byte in 0..4 {
+        assert_eq!(batch.next(), Some(vec![byte]));
+        tx.send(vec![9]).unwrap();
+    }
+    assert_eq!(
+        batch.next(),
+        None,
+        "new output must wait for the next drain"
+    );
+    assert_eq!(rx.len(), 4, "remaining output must stay queued");
+    assert_eq!(
+        super::output_chunks_ready(&rx).collect::<Vec<_>>(),
+        vec![vec![9]; 4]
+    );
+}

@@ -349,3 +349,43 @@ fn finding_captured_input_survives_broadcast_change() {
     );
 }
 
+
+#[test]
+fn generated_tab_groups_are_unique_and_follow_reordered_tabs() {
+    let tab = |pane| crate::mux::Tab {
+        root: crate::mux::Node::Leaf(pane),
+        focus: pane,
+        title_override: None,
+        zoomed: false,
+        last_output_at: None,
+        last_seen_at: None,
+        bell: false,
+        scaled_zoom_owner: false,
+        generated_group_name: None,
+        lanes: Default::default(),
+    };
+    let mut first = Mux::new();
+    first.tabs = vec![tab(1), tab(2)];
+    let mut second = Mux::new();
+    second.tabs.push(tab(3));
+    let mut populated = HashSet::from(["Tab 1".to_string()]);
+    let name = super::generated_tab_group_name(&mut first.tabs[0], &populated);
+    assert!(
+        !populated.contains(&name),
+        "generated names must avoid existing named groups"
+    );
+    populated.insert(name.clone());
+    let other = super::generated_tab_group_name(&mut second.tabs[0], &populated);
+    assert_ne!(
+        name, other,
+        "first tabs in different windows must not share a group"
+    );
+    assert!(first.move_active_tab(1));
+    assert_eq!(
+        super::generated_tab_group_name(&mut first.tabs[1], &populated),
+        name,
+        "toggling a reordered tab must use its original generated group"
+    );
+    let neighbor = super::generated_tab_group_name(&mut first.tabs[0], &populated);
+    assert_ne!(neighbor, name);
+}

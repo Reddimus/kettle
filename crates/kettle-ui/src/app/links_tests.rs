@@ -241,3 +241,64 @@ fn custom_url_launch_uses_the_bounded_opener_worker() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn custom_url_handler_waiters_remain_bounded_until_children_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("wait.sh");
+    std::fs::write(
+        &script,
+        "while [ ! -f \"$0.done\" ]; do sleep 0.01; done\nprintf x >> \"$0.finished\"\n",
+    )
+    .unwrap();
+    let results: Vec<_> = (0..5)
+        .map(|_| super::spawn_custom_url_handler("/bin/sh", script.to_str().unwrap()))
+        .collect();
+    std::fs::write(dir.path().join("wait.sh.done"), "").unwrap();
+    let expected = results.iter().filter(|result| result.is_ok()).count();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::fs::read(dir.path().join("wait.sh.finished")).map_or(0, |bytes| bytes.len())
+        < expected
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "handler fixtures must finish before cleanup"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        results[..4].iter().all(Result::is_ok),
+        "four handlers may start"
+    );
+    assert!(
+        results[4]
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock),
+        "a fifth running custom handler must be refused"
+    );
+}
+
+#[test]
+fn focus_change_before_redraw_rejects_previous_panes_links() {
+    let (mux, target, sibling) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    super::scan_links(&mut ws);
+    ws.links.push(kettle_core::Link {
+        row: 0,
+        start_col: 0,
+        end_col: 4,
+        group: 0,
+        uri: "https://pane-a.invalid/".into(),
+    });
+    assert!(super::cached_link_at_cell(&ws, 0, 2).is_some());
+    assert!(ws.mux.focus_pane(sibling));
+    let stale = super::cached_link_at_cell(&ws, 0, 2).is_some();
+    assert_eq!(super::links_pane(&ws), Some(target));
+    super::scan_links(&mut ws);
+    assert_eq!(super::links_pane(&ws), Some(sibling));
+    ws.mux.kill_children();
+    assert!(
+        !stale,
+        "link activation must reject another pane's cache before redraw"
+    );
+}

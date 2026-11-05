@@ -197,7 +197,7 @@ impl App {
     /// the window.
     pub(super) fn stash_unrestorable_session(&mut self, reason: &str) {
         recover_startup_snapshot(
-            self.restore_source.as_deref(),
+            &mut self.restore_source,
             self.restore_identity.as_ref(),
             &mut self.session_load_failed,
             reason,
@@ -269,21 +269,24 @@ impl App {
 }
 
 pub(super) fn recover_startup_snapshot(
-    path: Option<&std::path::Path>,
+    path: &mut Option<std::path::PathBuf>,
     identity: Option<&crate::session::SnapshotIdentity>,
     load_failed: &mut bool,
     reason: &str,
 ) {
-    let Some(path) = path else {
+    let Some(source) = path.as_deref() else {
         log::warn!("session could not be restored ({reason}); it had no file to keep");
         return;
     };
     // Preserve the exact snapshot read by this launch. If it changed, or the
     // backup failed, even a fresh/partial layout must never replace the file.
     let recovered = identity.is_some_and(|identity| {
-        crate::session::stash_unrestorable_snapshot(path, identity, reason).is_ok()
+        crate::session::stash_unrestorable_snapshot(source, identity, reason).is_ok()
     });
     *load_failed |= !recovered;
+    if recovered {
+        *path = None;
+    }
 }
 
 pub(super) fn loaded_startup_snapshot(

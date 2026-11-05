@@ -282,7 +282,7 @@ fn followup_replaced_restore_snapshot_disables_saving() {
     std::fs::rename(&newer, &path).unwrap();
     let mut failed = false;
     super::sessions::recover_startup_snapshot(
-        Some(&path),
+        &mut Some(path.clone()),
         Some(&identity),
         &mut failed,
         "restore rejected",
@@ -479,23 +479,22 @@ fn regression_waiting_file_facts_expire_while_another_check_is_stalled() {
         )
         .unwrap(),
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
-    query.control = kettle_media::client::RenderControl::with_deadline(deadline);
     let blocker = crate::media::FactsQuery {
         window: 1,
         pane,
         item: 99,
         generation: 0,
-        control: query.control.clone(),
+        control: Default::default(),
         source: kettle_media::Source::Bytes(Vec::new()),
         why: crate::media::FileWhy::Unsupported,
         reply: None,
     };
-    // Both running and queued jobs share the deadline; neither may publish late.
     assert!(media.request_facts(blocker, None, Arc::new(|| {})).is_ok());
     started
         .recv_timeout(std::time::Duration::from_secs(2))
         .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    query.control = kettle_media::client::RenderControl::with_deadline(deadline);
     let (reply, received) = crossbeam_channel::bounded(1);
     super::media::prepare_file_reply(
         &mut query,
@@ -736,5 +735,35 @@ fn check_file_hook_card_lost_pickup(clear_root: bool) {
     assert_eq!(
         result.card_reason.as_deref(),
         Some(kettle_ctl::show::card_reason::PANE_CANNOT)
+    );
+}
+
+#[test]
+fn obsolete_canvas_render_failures_are_discarded_before_notices() {
+    let body = finding_body(include_str!("media.rs"), "finish_lane_render");
+    let failure = body.find("let output = match result").unwrap();
+    assert!(
+        body[..failure].contains("item.generation == render.generation"),
+        "obsolete canvas render failures must be rejected before changing lane notices"
+    );
+}
+
+#[test]
+fn facts_expiry_fixture_starts_its_blocker_before_the_deadline() {
+    let source = kettle_test_support::code_only(include_str!("media_tests.rs"));
+    let fixture = source
+        .split("fn regression_waiting_file_facts_expire_while_another_check_is_stalled()")
+        .nth(1)
+        .unwrap()
+        .split("\nfn ")
+        .next()
+        .unwrap();
+    assert!(
+        fixture.find("let deadline =").unwrap() > fixture.find(".recv_timeout(").unwrap(),
+        "the blocker startup handshake must precede the queued query deadline"
+    );
+    assert!(
+        !fixture.contains("control: query.control.clone()"),
+        "the blocker must not expire before entering its source"
     );
 }

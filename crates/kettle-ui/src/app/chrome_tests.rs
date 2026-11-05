@@ -450,7 +450,7 @@ fn the_side_tab_bar_places_rows_through_side_tab_rows() {
     // A title editor takes the top row of the window, strip included, so the
     // rows start below it rather than under it.
     assert!(body.contains("let lead = self.vertical_title_edit_h(ws);"));
-    assert!(body.contains("let row_y = |row: usize| lead + row as f32 * height;"));
+    assert!(body.contains("let row_y = |row: usize| strip_y + lead + row as f32 * height;"));
     assert!(body.contains("let strip_rows = ((sh - lead) / height).floor()"));
     // A strip with no room keeps its plus button out of view.
     assert!(body.contains("let plus_y = if layout.plus < rows {"));
@@ -625,3 +625,45 @@ fn finding_narrow_vertical_tabs_remain_selectable() {
     assert!(body.contains("tab_title_rect(rect, close, closable)"));
 }
 
+#[test]
+fn docking_append_marker_follows_the_last_visible_tab() {
+    let marker = kettle_render::tab_drag::INSERT_MARKER_PX;
+    let layout = super::tab_strip_layout(2, 0, 400.0, 48.0, 24.0, 120.0, true);
+    assert_eq!(
+        super::horizontal_tab_insert_x(&layout, 2, 400.0),
+        400.0 - marker,
+        "append marker must be at the last tab's right edge"
+    );
+    let layout = super::tab_strip_layout(20, 0, 400.0, 48.0, 24.0, 120.0, true);
+    let (last, x) = layout
+        .xs
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, x)| x.map(|x| (index, x)))
+        .unwrap();
+    assert!(last + 1 < layout.xs.len());
+    assert_eq!(
+        super::horizontal_tab_insert_x(&layout, last + 1, 400.0),
+        x + layout.width,
+        "an insertion before a hidden tab must follow the visible predecessor"
+    );
+}
+
+#[test]
+fn vertical_tab_band_excludes_status_bands() {
+    use kettle_config::TabBarPos;
+    for pos in [TabBarPos::Left, TabBarPos::Right] {
+        let band = super::tab_band_rect((800, 600), pos, 24.0, 180.0, 78.0, 0.0, 22.0);
+        assert_eq!(
+            band.1 + band.3,
+            500.0,
+            "vertical tabs must stop above bottom status and search"
+        );
+        let top = super::tab_band_rect((800, 600), pos, 24.0, 180.0, 0.0, 22.0, 0.0);
+        assert_eq!(top.1, 22.0, "vertical tabs must start below top status");
+        assert_eq!(top.3, 578.0);
+        assert!(!super::rect_contains(top, top.0 + 10.0, 10.0));
+        assert!(super::rect_contains(top, top.0 + 10.0, 30.0));
+    }
+}
