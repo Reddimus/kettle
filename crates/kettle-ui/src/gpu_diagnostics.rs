@@ -152,9 +152,18 @@ impl IncidentLog {
     ) -> io::Result<Self> {
         let dir = diagnostic_dir(cache_dir);
         let (path, file) = create_incident_file(&dir, unix_ms, pid)?;
-        if let Err(error) = prune_incidents(&dir, &path) {
-            kettle_state::discard_created_private_file(file, &path);
-            return Err(error);
+        match prune_incidents(&dir, &path) {
+            Ok(PruneOutcome::Complete) => {}
+            Ok(PruneOutcome::ScanLimited) => {
+                log::warn!(
+                    "GPU diagnostic cleanup incomplete: incident scan limit reached in {}",
+                    dir.display()
+                );
+            }
+            Err(error) => {
+                kettle_state::discard_created_private_file(file, &path);
+                return Err(error);
+            }
         }
 
         let mut log = Self {
@@ -328,7 +337,13 @@ fn create_incident_file(dir: &Path, unix_ms: u128, pid: u32) -> io::Result<(Path
     ))
 }
 
-fn prune_incidents(dir: &Path, preserve: &Path) -> io::Result<()> {
+#[derive(Debug, PartialEq, Eq)]
+enum PruneOutcome {
+    Complete,
+    ScanLimited,
+}
+
+fn prune_incidents(dir: &Path, preserve: &Path) -> io::Result<PruneOutcome> {
     prune_incidents_with(dir, preserve, |path| std::fs::remove_file(path))
 }
 
@@ -336,7 +351,7 @@ fn prune_incidents_with(
     dir: &Path,
     preserve: &Path,
     mut remove: impl FnMut(&Path) -> io::Result<()>,
-) -> io::Result<()> {
+) -> io::Result<PruneOutcome> {
     let mut entries = std::fs::read_dir(dir)?;
     let mut files: Vec<PathBuf> = entries
         .by_ref()
@@ -363,13 +378,11 @@ fn prune_incidents_with(
             Err(error) => return Err(error),
         }
     }
-    if scan_limited {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "incident scan limit reached",
-        ));
-    }
-    Ok(())
+    Ok(if scan_limited {
+        PruneOutcome::ScanLimited
+    } else {
+        PruneOutcome::Complete
+    })
 }
 
 fn incident_in_use(error: &io::Error) -> bool {
@@ -425,11 +438,7 @@ mod tests {
         }
         let preserve = root.path().join(format!("gpu-{SCAN_LIMIT:05}.jsonl"));
         let result = prune_incidents(root.path(), &preserve);
-        assert!(
-            result.is_err(),
-            "an incomplete GPU directory scan must be reported"
-        );
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(result.unwrap(), PruneOutcome::ScanLimited);
         assert_eq!(
             std::fs::read_dir(root.path()).unwrap().count(),
             RETAINED_INCIDENTS + 1
@@ -449,11 +458,46 @@ mod tests {
             std::fs::write(root.path().join(format!("other-{index:05}")), b"").unwrap();
         }
         let result = prune_incidents(root.path(), &root.path().join("preserve"));
-        assert!(
-            result.is_err(),
-            "the GPU scan bound must precede filename filtering"
-        );
+        assert_eq!(result.unwrap(), PruneOutcome::ScanLimited);
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 4097);
+    }
+
+    #[test]
+    fn review_regression_incident_survives_an_incomplete_retention_scan() {
+        let root = TestDir::new("unrelated-start");
+        let diagnostics = diagnostic_dir(Some(root.0.path()));
+        kettle_state::create_private_dirs(&diagnostics).unwrap();
+        for index in 0..=MAX_INCIDENT_SCAN {
+            std::fs::write(diagnostics.join(format!("other-{index:05}")), b"").unwrap();
+        }
+        for timestamp in [1234, 1235] {
+            let mut log = IncidentLog::start_at(
+                Some(root.0.path()),
+                timestamp,
+                42,
+                "test",
+                adapter(),
+                Some(GpuFault {
+                    kind: "device_lost".into(),
+                    message: "driver reset".into(),
+                }),
+            )
+            .expect("incomplete retention must not discard the current fault");
+            log.record_attempt(0, "preferred").unwrap();
+            let contents = std::fs::read_to_string(log.path()).unwrap();
+            let events: Vec<serde_json::Value> = contents
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0]["phase"], "fault");
+            assert_eq!(events[0]["fault"]["message"], "driver reset");
+            assert_eq!(events[1]["phase"], "recovery_attempt");
+        }
+        assert_eq!(
+            std::fs::read_dir(diagnostics).unwrap().count(),
+            MAX_INCIDENT_SCAN + 3
+        );
     }
 
     #[test]
