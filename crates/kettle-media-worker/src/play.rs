@@ -236,7 +236,7 @@ pub(crate) fn serve(
     let player: Option<&dyn VideoPlayer> =
         (!decoders.is_empty()).then_some(&decoders as &dyn VideoPlayer);
     #[cfg(feature = "test-faults")]
-    let fake = faults::player(prefix);
+    let fake = faults::player(prefix, Arc::clone(&gate));
     #[cfg(feature = "test-faults")]
     let player = fake
         .as_ref()
@@ -645,6 +645,7 @@ impl<W: Write> Session<'_, W> {
         // its write ended.
         let mut first_paused: Option<(u64, Instant)> = None;
         let mut decoded_all = false;
+        let mut deferred = None;
         let mut seq = 0u64;
         let mut last_frame = Instant::now();
         let mut last_pts = None;
@@ -704,6 +705,23 @@ impl<W: Write> Session<'_, W> {
             }
             if !shown_first && now >= opened_by {
                 return self.fail(FailureCode::RenderTimeout);
+            }
+            if shown_first && playing && self.sound.is_some() && deferred.is_none() {
+                for _ in 0..EVENTS {
+                    if pending.len() >= BUFFERS {
+                        break;
+                    }
+                    match events.try_recv() {
+                        Ok(Event::Frame { pts_ms, rgba }) => pending.push_back((pts_ms, rgba)),
+                        Ok(Event::Asked) => {}
+                        Ok(event) => {
+                            // PCM and terminal events stay ahead of later frames.
+                            deferred = Some(event);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
             }
             let mut sound_due = None;
             while let Some(&(pts_ms, _)) = pending.front() {
@@ -826,7 +844,9 @@ impl<W: Write> Session<'_, W> {
             if playing && decoded_all && sounding {
                 wake = wake.min(now + SOUND_SOON);
             }
-            match events.recv_timeout(wake.saturating_duration_since(Instant::now())) {
+            match deferred.take().map(Ok).unwrap_or_else(|| {
+                events.recv_timeout(wake.saturating_duration_since(Instant::now()))
+            }) {
                 Ok(Event::Asked) | Err(RecvTimeoutError::Timeout) => {}
                 #[cfg(target_os = "linux")]
                 Ok(Event::Pcm(message)) => {
@@ -912,6 +932,110 @@ mod tests {
     use crate::worker::Watchdog;
 
     const SECOND: Duration = Duration::from_secs(1);
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn decoder_opening_waits_for_mutation() {
+        use std::io::BufRead as _;
+        use std::process::{Command, Stdio};
+        const CHILD_PATH: &str = "KETTLE_MEDIA_WORKER_OPENING_FILE";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let source = Source::user_pull(
+                NativePath::from_path(std::path::Path::new(&path)).unwrap(),
+                GuiActionWitness::from_explicit_gui_action(),
+            );
+            let held = source::hold(&source, MAX_VIDEO_PREFIX_BYTES).unwrap();
+            let Held::File {
+                file,
+                identity,
+                prefix,
+            } = &held
+            else {
+                panic!("held file")
+            };
+            let gate = Arc::new(PlayGate::default());
+            let release = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                std::io::stdin().read_exact(&mut [0]).unwrap();
+                release.play();
+            });
+            let fake = faults::player(prefix, gate).unwrap();
+            let opening = fake.play(
+                VideoInput {
+                    file,
+                    identity: *identity,
+                    container: kettle_media::video::VideoContainer::IsoBmff,
+                },
+                PlayRequest {
+                    max_width: 16,
+                    max_height: 16,
+                    start_ms: 0,
+                    max_fps_milli: 10_000,
+                    audio: AudioRequest::Off,
+                },
+                Instant::now() + OPEN_DEADLINE,
+            );
+            assert!(
+                held.unchanged().is_err(),
+                "opening returned before mutation"
+            );
+            assert_eq!(opening.is_err(), prefix.ends_with(b"refuse\n"));
+            return;
+        }
+        for suffix in ["", " refuse"] {
+            let dir = kettle_test_support::private_tempdir("kettle-worker-opening-");
+            let path = dir.path().join("video.mp4");
+            let mut bytes = vec![0; 24];
+            bytes.extend_from_slice(
+                format!("kettle-media-worker-test-video 10 10000 16 16 open wait{suffix}\n")
+                    .as_bytes(),
+            );
+            std::fs::write(&path, bytes).unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "play::tests::decoder_opening_waits_for_mutation",
+                    "--nocapture",
+                ])
+                .env(CHILD_PATH, &path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stderr = child.stderr.take().unwrap();
+            let (send, opening) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                std::io::BufReader::new(stderr)
+                    .read_line(&mut line)
+                    .unwrap();
+                let _ = send.send(line);
+            });
+            let opening = opening.recv_timeout(5 * SECOND);
+            if opening.as_deref() != Ok("kettle-media-worker-test-opening\n") {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            assert_eq!(
+                opening.as_deref(),
+                Ok("kettle-media-worker-test-opening\n"),
+                "the decoder must signal opening before the file changes"
+            );
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(b"more")
+                .unwrap();
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "opening must wait for release"
+            );
+            child.stdin.take().unwrap().write_all(b"x").unwrap();
+            assert!(child.wait().unwrap().success());
+        }
+    }
 
     fn opened(fps_milli: u32, width: u32, height: u32) -> Opened {
         Opened {
@@ -1883,6 +2007,62 @@ mod tests {
         assert_eq!(told.muted, [false, true]);
     }
 
+    #[test]
+    fn queued_late_frames_are_dropped_after_a_blocked_write() {
+        use crate::sound::testing::{Blocks, stand};
+        use std::sync::atomic::AtomicBool;
+        let (speaker, told) = stand(3);
+        told.lock().unwrap().played = Some(96_000.0);
+        let sound = Sound::start(
+            speaker,
+            Box::new(Blocks(VecDeque::from([(0.5, 96_000, 0)]))),
+            0,
+            SoundWish::new(false),
+        )
+        .unwrap();
+        let wish = sound.wish();
+        wish.hear(PlayCommand::Play);
+        let deadline = Instant::now() + SECOND;
+        while sound.heard().is_none() {
+            assert!(Instant::now() < deadline, "the sound never had a clock");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let opened = opened(10_000, 512, 512);
+        let queued = AtomicBool::new(false);
+        let read = run_with(
+            opened,
+            &Held::Bytes(&[]),
+            Some(sound),
+            None,
+            vec![Step::Ask(PlayCommand::Play), Step::Send(frame(&opened, 0))],
+            |read| {
+                if read == 0 {
+                    let deadline = Instant::now() + SECOND;
+                    while !queued.load(Ordering::Acquire) {
+                        assert!(Instant::now() < deadline, "replacement frames never queued");
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            },
+            |parent| {
+                parent.first_write();
+                parent.send(frame(&opened, 100));
+                parent.send(frame(&opened, 200));
+                parent.send(Event::End);
+                queued.store(true, Ordering::Release);
+            },
+        );
+        assert_eq!(
+            shown(&read).iter().map(|(_, pts)| *pts).collect::<Vec<_>>(),
+            [0, 200],
+            "a queued replacement must supersede the older late frame"
+        );
+        assert_eq!(
+            said(&read).last(),
+            Some(&&Frame::PlayState(PlayState::Ended))
+        );
+    }
+
     /// A frame the sound has passed is dropped only for a newer one waiting
     /// behind it: a late last frame, its End not yet taken, still goes out,
     /// so the lane holds the video's own last frame.
@@ -2101,9 +2281,12 @@ mod tests {
 /// HEIGHT` plays with a stand-in decoder, frame N filled with N's low byte
 /// and timed N frame lengths in; `stall N` makes it give no frame from the
 /// Nth on, and `fail N` fail there; `open MS` makes opening take that long,
-/// and `refuse` then fail.
+/// and `refuse` then fail. `open wait` signals opening on stderr and waits
+/// for Play before proceeding.
 #[cfg(feature = "test-faults")]
 mod faults {
+    use std::io::Write as _;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use kettle_media::video::{
@@ -2124,10 +2307,12 @@ mod faults {
         stall: Option<u64>,
         fail: Option<u64>,
         open_ms: Option<u64>,
+        open_wait: bool,
+        gate: Arc<PlayGate>,
         refuse: bool,
     }
 
-    pub(super) fn player(prefix: &[u8]) -> Option<Fake> {
+    pub(super) fn player(prefix: &[u8], gate: Arc<PlayGate>) -> Option<Fake> {
         let rest = prefix.get(AT..)?.strip_prefix(MARK)?;
         let line = rest.split(|byte| *byte == b'\n').next()?;
         let words: Vec<&str> = std::str::from_utf8(line).ok()?.split_whitespace().collect();
@@ -2144,6 +2329,8 @@ mod faults {
             stall: after("stall"),
             fail: after("fail"),
             open_ms: after("open"),
+            open_wait: words.windows(2).any(|pair| pair == ["open", "wait"]),
+            gate,
             refuse: words.contains(&"refuse"),
         })
     }
@@ -2153,10 +2340,18 @@ mod faults {
             &self,
             input: VideoInput<'_>,
             request: PlayRequest,
-            _deadline: Instant,
+            deadline: Instant,
         ) -> Result<Playback, FailureCode> {
             if let Some(open_ms) = self.open_ms {
                 std::thread::sleep(Duration::from_millis(open_ms));
+            }
+            if self.open_wait {
+                std::io::stderr()
+                    .write_all(b"kettle-media-worker-test-opening\n")
+                    .map_err(|_| FailureCode::RenderResource)?;
+                if self.gate.wait_to_play(Some(deadline)) != Some(true) {
+                    return Err(FailureCode::RenderTimeout);
+                }
             }
             if self.refuse {
                 return Err(FailureCode::RenderParse);

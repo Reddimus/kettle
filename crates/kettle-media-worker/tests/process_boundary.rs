@@ -2105,14 +2105,36 @@ fn a_session_whose_file_changes_fails() {
 #[cfg(feature = "test-faults")]
 #[test]
 fn a_file_changed_while_its_decoder_opens_is_changed() {
-    for spec in ["10 10000 16 16 open 800", "10 10000 16 16 open 800 refuse"] {
+    for spec in [
+        "10 10000 16 16 open wait",
+        "10 10000 16 16 open wait refuse",
+    ] {
         let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
         let video = fake_video(directory.path(), spec);
         let mut child = grouped_worker();
         handshake(&mut child);
         send(&mut child, &play_open(&video, (16, 16), 0));
         let frames = Frames::of(&mut child);
-        std::thread::sleep(Duration::from_millis(300));
+        let stderr = child.stderr.take().unwrap();
+        let (send, opening) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            let mut line = String::new();
+            std::io::BufReader::new(stderr)
+                .read_line(&mut line)
+                .unwrap();
+            let _ = send.send(line);
+        });
+        let opening = opening.recv_timeout(5 * SECOND);
+        if opening.as_deref() != Ok("kettle-media-worker-test-opening\n") {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert_eq!(
+            opening.as_deref(),
+            Ok("kettle-media-worker-test-opening\n"),
+            "the decoder must signal opening before the file changes"
+        );
         {
             use std::io::Write as _;
             let mut file = std::fs::OpenOptions::new()
@@ -2121,6 +2143,7 @@ fn a_file_changed_while_its_decoder_opens_is_changed() {
                 .unwrap();
             file.write_all(b"more").unwrap();
         }
+        command(&mut child, PlayCommand::Play);
         assert_eq!(
             frames.next(5 * SECOND),
             failure(FailureCode::Changed),
