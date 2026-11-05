@@ -232,6 +232,14 @@ impl Write for PipeOutput {
         loop {
             match self.file.write(bytes) {
                 Err(error) if self.is_pipe && error.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Writes up to PIPE_BUF are atomic: a small read may
+                    // leave room for one byte but not the pending chunk.
+                    if bytes.len() > 1 {
+                        match self.file.write(&bytes[..1]) {
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                            result => return result,
+                        }
+                    }
                     std::thread::sleep(Duration::from_millis(10));
                     let now = self.pending_bytes()?;
                     if let (Some(before), Some(after)) = (pending, now)
@@ -1585,6 +1593,74 @@ mod tests {
         // SAFETY: restore blocking writes to reproduce the original OS behavior.
         assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, 0) }, 0);
         (reader, output, filled)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn regression_one_byte_pipe_reads_keep_a_small_response_alive() {
+        small_pipe_response(true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn regression_unread_pipe_stalls_a_small_response() {
+        small_pipe_response(false);
+    }
+
+    #[cfg(unix)]
+    fn small_pipe_response(read_slowly: bool) {
+        use std::io::Read as _;
+
+        let (mut reader, output, filled) = saturated_mcp_pipe();
+        let mode = PipeMode::nonblocking(&output).unwrap().unwrap();
+        let progress = Arc::new(WriterProgress::default());
+        let mut message = json!({"result":""});
+        let padding = 512 - serde_json::to_vec(&message).unwrap().len() - 1;
+        message["result"] = json!("x".repeat(padding));
+        let mut expected = serde_json::to_vec(&message).unwrap();
+        expected.push(b'\n');
+        assert_eq!(expected.len(), 512);
+        progress.in_write.store(true, Ordering::Release);
+        let writing = progress.clone();
+        let writer = std::thread::spawn(move || {
+            crate::exec::block_sigpipe_for_current_thread().unwrap();
+            let mut output = PipeOutput {
+                file: output,
+                is_pipe: true,
+                progress: writing.clone(),
+            };
+            write_message_progress(&mut output, &message, |bytes| {
+                writing.completed.fetch_add(bytes as u64, Ordering::Release);
+            })
+            .unwrap();
+            writing.in_write.store(false, Ordering::Release);
+        });
+        let reading = std::thread::spawn(move || {
+            let mut received = Vec::new();
+            for _ in 0..8 {
+                std::thread::sleep(Duration::from_millis(100));
+                if read_slowly {
+                    let mut byte = [0];
+                    reader.read_exact(&mut byte).unwrap();
+                    received.extend_from_slice(&byte);
+                }
+            }
+            // Release the writer even when the detector reports a stall.
+            reader.read_to_end(&mut received).unwrap();
+            received
+        });
+        let started = Instant::now();
+        let alive = wait_unless_stdout_stalled(&progress, STDOUT_STALL_LIMIT, || {
+            started.elapsed() >= STDOUT_STALL_LIMIT * 2
+        });
+        writer.join().unwrap();
+        drop(mode);
+        let received = reading.join().unwrap();
+        assert_eq!(&received[filled..], expected);
+        assert_eq!(
+            alive, read_slowly,
+            "only a pipe whose reader stopped should stall a 512-byte response"
+        );
     }
 
     #[test]
