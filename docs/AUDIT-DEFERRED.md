@@ -152,13 +152,12 @@ campaign and startup outlier remain inconclusive. These entries stay open.
   still needs an identified assistive-technology observation. Keep appearance
   skips in `docs/APPEARANCE-GATE.md` with their own artifact scope.
 
-- **Two Windows state-file races.** `ExclusiveFileLock::remove` releases the
-  lock before deleting its file on Windows, so another process can open the
-  file in between (`crates/kettle-state`, used by kettle-ctl activation
-  cleanup), and `open_existing_private_file` requests `WRITE_OWNER` before
-  hardening the DACL, which an account with only Modify permission is refused.
-  Deferred because both need a native Windows reproduction to prove the fix
-  and its regression. Close with handle-based retirement (delete-on-close
-  while held) and a conditional `WRITE_OWNER` request limited to the
-  ownership-migration branch, each with a Windows test.
+- **Windows `WRITE_OWNER` request before DACL hardening.**
+  `open_existing_private_file` requests `WRITE_OWNER` before hardening the
+  DACL, which an account with only Modify permission is refused
+  (`crates/kettle-state`). Deferred because it needs a native Windows
+  reproduction to prove the fix and its regression. Close with a conditional
+  `WRITE_OWNER` request limited to the ownership-migration branch, with a
+  Windows test. (The companion lock-retirement race is fixed: a lock file is
+  now retired through its held handle.)
 
