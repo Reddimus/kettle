@@ -68,6 +68,11 @@ pub fn text_field_rects(field: &TextFieldOverlay, cw: f32) -> [Rect4; 3] {
     ]
 }
 
+/// Match fixed-height fields to their band for painting and pointer geometry.
+pub fn text_field_cell_width(field: &TextFieldOverlay, cw: f32, line_height: f32) -> f32 {
+    cw * crate::tab_text_scale(field.rect.3, line_height)
+}
+
 pub(crate) fn prepare_text_field(
     fonts: &mut FontSystem,
     buffer: &mut TextBuffer,
@@ -76,6 +81,9 @@ pub(crate) fn prepare_text_field(
     metrics: Metrics,
     family: &str,
 ) -> TextFieldLayout {
+    let cw = text_field_cell_width(field, cw, metrics.line_height);
+    let scale = crate::tab_text_scale(field.rect.3, metrics.line_height);
+    let metrics = Metrics::new(metrics.font_size * scale, metrics.line_height * scale);
     let editor = text_field_rects(field, cw)[1];
     let segment = SearchBarSegment {
         control: Some(SearchControl::Editor),
@@ -177,10 +185,9 @@ pub(crate) fn shape_field_label(
     metrics: Metrics,
     family: &str,
 ) {
-    buffer.set_metrics(Metrics::new(
-        metrics.font_size,
-        height.max(metrics.font_size),
-    ));
+    let scale = crate::tab_text_scale(height, metrics.line_height);
+    let font_size = metrics.font_size * scale;
+    buffer.set_metrics(Metrics::new(font_size, height.max(font_size)));
     buffer.set_size(None, Some(height));
     buffer.set_text(
         text,
@@ -448,6 +455,64 @@ mod picker_header_tests {
             field.rect.2 = 720.0;
             field.text = "query".repeat(30);
             assert!(text_field_labels(&field, 8.0).1.is_empty());
+        }
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    #[test]
+    fn review_large_title_editor_scales_input_and_hint_shaping() {
+        let mut fonts = FontSystem::new();
+        for face in kettle_config::font::all() {
+            crate::load_bundled_font(&mut fonts, face);
+        }
+        for scale in [1.0, 2.0] {
+            let metrics = Metrics::new(72.0 * scale, 90.0 * scale);
+            let mut buffer = TextBuffer::new(&mut fonts, metrics);
+            buffer.set_wrap(glyphon::cosmic_text::Wrap::None);
+            let field = TextFieldOverlay {
+                picker_header: false,
+                text: "Rename".into(),
+                cursor_byte: 3,
+                selection: Some((0, 3)),
+                horizontal_scroll: 0,
+                rect: (78.0 * scale, 0.0, 640.0 * scale, 28.0 * scale),
+                prefix: "Title: ".into(),
+                hint: "(Enter apply Esc cancel)".into(),
+                accent_palette: 3,
+            };
+            let layout = prepare_text_field(
+                &mut fonts,
+                &mut buffer,
+                &field,
+                43.2 * scale,
+                metrics,
+                "JetBrains Mono",
+            );
+            let cw = text_field_cell_width(&field, 43.2 * scale, metrics.line_height);
+            assert!((cw - 13.44 * scale).abs() < 0.001);
+            let slots = text_field_rects(&field, cw);
+            assert_eq!(layout.editor, slots[1]);
+            assert!((slots[0].2 - 7.0 * cw).abs() < 0.001);
+            assert!(buffer.metrics().font_size <= field.rect.3);
+            assert_eq!(buffer.metrics().line_height, field.rect.3);
+            assert!(!buffer.layout_runs().next().unwrap().glyphs.is_empty());
+            let cursor_x = layout.stops.iter().find(|(b, _)| *b == 3).unwrap().1;
+            assert_eq!(cursor_x, layout.caret.0);
+            let mut hint = TextBuffer::new(&mut fonts, metrics);
+            shape_field_label(
+                &mut fonts,
+                &mut hint,
+                "Esc cancel",
+                field.rect.3,
+                metrics,
+                "JetBrains Mono",
+            );
+            assert!(hint.metrics().font_size <= field.rect.3);
+            assert_eq!(hint.metrics().line_height, field.rect.3);
+            assert_eq!(hint.layout_runs().count(), 1);
         }
     }
 }

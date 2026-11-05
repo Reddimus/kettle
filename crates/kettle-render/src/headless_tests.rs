@@ -4900,3 +4900,61 @@ fn toast_redesign_text_focus_fade_and_dismissal_preserve_retained_layers() {
     overlay.update_toast = None;
     assert_eq!(baseline, capture(&mut renderer, &cfg, &panes, &overlay));
 }
+
+#[test]
+fn review_titlebar_editor_paint_and_measurement_share_fitted_metrics() {
+    let _serialized = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.font_size = 72.0;
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 800, 240, 1.0, false).unwrap()
+    else {
+        eprintln!("titlebar editor paint/measurement check skipped: no GPU adapter");
+        return;
+    };
+    let field = TextFieldOverlay {
+        picker_header: false,
+        text: "Rename".into(),
+        cursor_byte: 3,
+        selection: Some((0, 3)),
+        horizontal_scroll: 0,
+        rect: (78.0, 0.0, 722.0, 28.0),
+        prefix: "Title: ".into(),
+        hint: "(Enter apply Esc cancel)".into(),
+        accent_palette: 3,
+    };
+    let overlay = Overlay {
+        text_field: Some(field.clone()),
+        ..focused(true)
+    };
+    let snap = snapshot_of(20, 2, b"");
+    capture(&mut renderer, &cfg, &[pane(&snap, 800, 240)], &overlay);
+    // The segment pool keeps unused buffers at default metrics; only the
+    // prefix, input and hint segments this field painted are fitted.
+    let painted: Vec<_> = renderer
+        .search_segment_buffers
+        .iter()
+        .filter(|buffer| buffer.lines.iter().any(|line| !line.text().is_empty()))
+        .collect();
+    assert_eq!(painted.len(), 3, "prefix, input and hint segments");
+    for buffer in painted {
+        assert!(buffer.metrics().font_size <= 28.0);
+        assert_eq!(buffer.metrics().line_height, 28.0);
+        assert_eq!(buffer.layout_runs().count(), 1);
+    }
+    let measured = renderer.measure_text_field(&field);
+    let cw = text_field_cell_width(
+        &field,
+        renderer.overlay_text_cell_width(),
+        renderer.overlay_text_line_height(),
+    );
+    assert_eq!(measured.editor, text_field_rects(&field, cw)[1]);
+    let painted = text_field::prepare_text_field(
+        &mut renderer.font_system,
+        &mut renderer.search_segment_buffers[1],
+        &field,
+        cw / tab_text_scale(28.0, renderer.metrics.line_height),
+        renderer.metrics,
+        &renderer.font_family,
+    );
+    assert_eq!(measured, painted);
+}

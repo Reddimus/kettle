@@ -834,6 +834,7 @@ pub(crate) struct WindowState {
     /// renderer exists, so the first pane can start while the GPU
     /// initializes. The renderer's own metrics win once it exists.
     pub(crate) startup_cell: Option<(f32, f32)>,
+    pub(crate) startup_scale: f32,
     pub(crate) startup_surface: Option<(u32, u32)>,
     /// The fonts `startup_cell` was measured with, until the renderer takes
     /// them over.
@@ -1493,6 +1494,7 @@ impl WindowState {
             seq,
             renderer: None,
             startup_cell: None,
+            startup_scale: 1.0,
             startup_surface: None,
             startup_fonts: None,
             pre_launch: None,

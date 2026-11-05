@@ -711,6 +711,12 @@ impl App {
         };
         let mut windows = std::collections::BTreeMap::new();
         let mut initial_window = WindowState::new(1, mux);
+        #[cfg(target_os = "macos")]
+        {
+            // The quick terminal is borderless; it never hosts titlebar tabs.
+            initial_window.macos_titlebar_tabs = !startup.quick_terminal
+                && macos_titlebar_policy(&initial_cfg) == MacosTitlebarPolicy::Tabs;
+        }
         initial_window.cursor_exit_log = crate::cursor_exit_log::CursorExitLog::from_env(1);
         windows.insert(1, initial_window);
         let remote_proxy = proxy.clone();
@@ -928,48 +934,16 @@ impl App {
         monitor: Option<StartupMonitor>,
     ) -> Option<(u32, u32)> {
         let cell = Self::cell_size(ws)?;
-        let scale = monitor.map_or(1.0, |m| m.scale);
-        let (default_w, default_h) = startup_inner_size(&self.cfg, monitor);
-        let physical = |logical: f64| (logical * scale).round().max(1.0) as u32;
-        let cols = self.cfg.window_width.map(|cols| {
-            cols.clamp(
-                kettle_config::WINDOW_WIDTH_MIN,
-                kettle_config::WINDOW_WIDTH_MAX,
-            )
-        });
-        let rows = self.cfg.window_height.map(|rows| {
-            rows.clamp(
-                kettle_config::WINDOW_HEIGHT_MIN,
-                kettle_config::WINDOW_HEIGHT_MAX,
-            )
-        });
-        let (exact_w, exact_h) = surface_for_grid(
-            (
-                cols.unwrap_or(STARTUP_DEFAULT_COLS) as usize,
-                rows.unwrap_or(STARTUP_DEFAULT_ROWS) as usize,
-            ),
+        Some(startup_surface_for(
+            &self.cfg,
             cell,
-            (self.cfg.padding_x, self.cfg.padding_y),
             self.content_bands(ws),
-            self.cfg.tab_bar_pos,
-            self.cfg.status_bar,
-            self.cfg.tab_bar_width,
-        );
-        Some((
-            if cols.is_some() {
-                exact_w
-            } else {
-                physical(default_w)
-            },
-            if rows.is_some() {
-                exact_h
-            } else {
-                physical(default_h)
-            },
+            monitor,
         ))
     }
 
     fn prepare_startup_fonts(&mut self, ws: &mut WindowState, startup_scale: f32) {
+        ws.startup_scale = startup_scale;
         let fonts = match ws.startup_fonts.take() {
             Some(fonts) if fonts.matches(&self.cfg, startup_scale) => fonts,
             Some(fonts) => fonts.remeasure(&self.cfg, startup_scale),
@@ -1217,12 +1191,6 @@ impl App {
             }
         };
         self.apply_post_create(&window);
-        #[cfg(target_os = "macos")]
-        {
-            // The quick terminal is borderless; it never hosts titlebar tabs.
-            ws.macos_titlebar_tabs = !self.startup.quick_terminal
-                && macos_titlebar_policy(&self.cfg) == MacosTitlebarPolicy::Tabs;
-        }
         if self.startup.quick_terminal {
             crate::quick_terminal::native::configure(&window);
         }
@@ -1578,4 +1546,51 @@ impl App {
             let _ = proxy.send_event(UserEvent::ShellsDetected);
         }));
     }
+}
+
+pub(super) fn startup_surface_for(
+    cfg: &Config,
+    cell: (f32, f32),
+    bands: ContentBands,
+    monitor: Option<StartupMonitor>,
+) -> (u32, u32) {
+    let scale = monitor.map_or(1.0, |m| m.scale);
+    let (default_w, default_h) = startup_inner_size(cfg, monitor);
+    let physical = |logical: f64| (logical * scale).round().max(1.0) as u32;
+    let cols = cfg.window_width.map(|cols| {
+        cols.clamp(
+            kettle_config::WINDOW_WIDTH_MIN,
+            kettle_config::WINDOW_WIDTH_MAX,
+        )
+    });
+    let rows = cfg.window_height.map(|rows| {
+        rows.clamp(
+            kettle_config::WINDOW_HEIGHT_MIN,
+            kettle_config::WINDOW_HEIGHT_MAX,
+        )
+    });
+    let (exact_w, exact_h) = surface_for_grid(
+        (
+            cols.unwrap_or(STARTUP_DEFAULT_COLS) as usize,
+            rows.unwrap_or(STARTUP_DEFAULT_ROWS) as usize,
+        ),
+        cell,
+        (cfg.padding_x, cfg.padding_y),
+        bands,
+        cfg.tab_bar_pos,
+        cfg.status_bar,
+        cfg.tab_bar_width,
+    );
+    (
+        if cols.is_some() {
+            exact_w
+        } else {
+            physical(default_w)
+        },
+        if rows.is_some() {
+            exact_h
+        } else {
+            physical(default_h)
+        },
+    )
 }

@@ -1798,8 +1798,12 @@ The shared tab band supplies painting, pointer hit tests, accessibility, ctl
 geometry, IME placement, docking and tear-off placement. Content and status
 bands reserve its height once; the traffic-light inset restricts tab and dock
 geometry without shifting terminal columns. Tab text fits within the fixed
-band even at large terminal font zoom. The native style retains its previous
-content origin below AppKit's caption.
+band even at large terminal font zoom. Title-editor shaping, measurement,
+scrolling and pointer slots use the same band scale. Startup initializes this
+policy before exact-grid sizing or spawning a pane, using the display scale
+until native measurements exist. Recording notices travel separately from
+configurable title substitutions and take priority when fitting a label.
+The native style retains its previous content origin below AppKit's caption.
 
 The generated application icon uses the historical, font-independent `>_`
 mark on every platform. Dark appearance uses a TokyoNight blue system-masked

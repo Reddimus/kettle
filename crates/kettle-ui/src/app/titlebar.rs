@@ -67,11 +67,14 @@ impl App {
         let _ = ws;
     }
 
-    pub(super) fn macos_titlebar_band(&self, ws: &WindowState) -> Option<TitlebarBand> {
+    pub(super) fn macos_titlebar_band(ws: &WindowState) -> Option<TitlebarBand> {
         if !ws.macos_titlebar_tabs {
             return None;
         }
-        let scale = ws.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
+        let scale = ws
+            .window
+            .as_ref()
+            .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
         #[cfg(target_os = "macos")]
         if let Some(window) = &ws.window {
             return Some(native::measure(window));
@@ -80,7 +83,7 @@ impl App {
     }
 
     pub(super) fn tab_strip_height(&self, ws: &WindowState) -> f32 {
-        self.macos_titlebar_band(ws).map_or_else(
+        Self::macos_titlebar_band(ws).map_or_else(
             || {
                 let scale = ws.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
                 tab_bar_height(

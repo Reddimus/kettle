@@ -708,3 +708,26 @@ fn horizontal_tab_height_is_shared_with_restore_content_and_status_bands() {
         }
     }
 }
+
+#[test]
+fn review_narrow_titlebar_strips_park_tabs_without_panicking() {
+    for strip in [0.0, 0.5, 1.0, 1.5] {
+        for scroll in [true, false] {
+            let layout = super::titlebar_tab_layout(2, 1, (strip, 56.0, 78.0), 28.0, 80.0, scroll);
+            assert!(layout.xs.iter().all(Option::is_none));
+            assert!(layout.arrow_left.is_none() && layout.arrow_right.is_none());
+            assert_eq!(layout.width, 0.0);
+        }
+    }
+}
+
+#[test]
+fn review_titlebar_preferred_width_preserves_configured_minimum() {
+    let layout = super::titlebar_tab_layout(2, 1, (666.0, 56.0, 78.0), 28.0, 600.0, true);
+    assert_eq!(layout.width, 600.0);
+    assert!(layout.arrow_left.is_some() && layout.arrow_right.is_some());
+    assert!(layout.xs[0].is_none());
+    assert!(layout.xs[1].is_some());
+    let fits = super::titlebar_tab_layout(2, 0, (1400.0, 56.0, 78.0), 28.0, 600.0, true);
+    assert!(fits.width >= 600.0 && fits.last_width >= 600.0);
+}

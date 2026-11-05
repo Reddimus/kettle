@@ -309,22 +309,35 @@ impl App {
                 5
             },
         };
-        let width = kettle_render::text_field_rects(&field, self.overlay_text_cell_width(ws))[1].2;
+        let cw = self.modal_field_cell_width(ws, &field);
+        let width = kettle_render::text_field_rects(&field, cw)[1].2;
         field.horizontal_scroll = crate::text_editor::TextEditor::visible_scroll_for(
             &field.text,
             field.cursor_byte,
             editor.horizontal_scroll(),
-            (width / self.overlay_text_cell_width(ws)).floor().max(1.0) as usize,
+            (width / cw).floor().max(1.0) as usize,
         );
         Some(field)
+    }
+
+    fn modal_field_cell_width(
+        &self,
+        ws: &WindowState,
+        field: &kettle_render::TextFieldOverlay,
+    ) -> f32 {
+        kettle_render::text_field_cell_width(
+            field,
+            self.overlay_text_cell_width(ws),
+            self.overlay_text_line_height(ws),
+        )
     }
 
     pub(super) fn sync_modal_editor_scroll(&self, ws: &mut WindowState) {
         let Some(field) = self.modal_text_projection(ws) else {
             return;
         };
-        let cw = self.overlay_text_cell_width(ws);
-        let width = kettle_render::text_field_rects(&field, self.overlay_text_cell_width(ws))[1].2;
+        let cw = self.modal_field_cell_width(ws, &field);
+        let width = kettle_render::text_field_rects(&field, cw)[1].2;
         if let Some(editor) = modal_editor_mut(ws) {
             editor.ensure_cursor_visible((width / cw).floor().max(1.0) as usize);
         }
@@ -339,7 +352,8 @@ impl App {
             return false;
         };
         let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        let slot = kettle_render::text_field_rects(&field, self.overlay_text_cell_width(ws))[1];
+        let slot =
+            kettle_render::text_field_rects(&field, self.modal_field_cell_width(ws, &field))[1];
         if press
             && !rect_contains(
                 if field.picker_header {

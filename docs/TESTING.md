@@ -2903,3 +2903,14 @@ five geometries work across mixed-DPI displays, and Reduce Motion disables the
 slide. Also check a taken hotkey, rebind/clear on reload, CapsLock/NumLock on X11,
 window-list/cycling exclusion, English/Spanish Settings, and Wayland/Windows
 desktop shortcuts. A GUI-free test run does not establish these native behaviors.
+
+### Titlebar regression coverage
+
+The `review_` tests in `kettle-ui` and `kettle-render` cover strips below two
+pixels, configured tab minimum widths, startup policy ordering, and the exact
+40-row startup surface at 1x and 2x scale. Recording-label tests use numeric,
+literal-only, repeated-title and path formats, including raw-input and failure
+notices. Bundled-font tests check 72-point title-editor input, hints, caret and
+pointer slots; the offscreen renderer also compares painting with measurement.
+Run them offline with `cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render -p kettle-config --no-fail-fast review_`.
+These checks do not replace native window sizing or live title-editor checks.

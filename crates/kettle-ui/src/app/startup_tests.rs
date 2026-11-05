@@ -872,3 +872,88 @@ fn fatal_startup_failures_are_returned_after_event_loop_exit() {
             .contains("app.startup_error.take()")
     );
 }
+
+#[test]
+fn review_startup_titlebar_policy_precedes_exact_grid_and_spawn() {
+    let startup = include_str!("startup.rs");
+    let initial = startup
+        .find("let mut initial_window = WindowState::new(1, mux);")
+        .unwrap();
+    let inserted = startup[initial..]
+        .find("windows.insert(1, initial_window);")
+        .unwrap();
+    assert!(
+        startup[initial..initial + inserted].contains("macos_titlebar_tabs"),
+        "initialize the first window's policy before pre-launch sizing and spawning"
+    );
+    let windowing = include_str!("windowing.rs");
+    let probe = windowing
+        .find("let mut probe = WindowState::new(0, Mux::new());")
+        .unwrap();
+    let measured = windowing[probe..]
+        .find("self.startup_surface(&probe, monitor)")
+        .unwrap();
+    assert!(
+        windowing[probe..probe + measured].contains("macos_titlebar_tabs"),
+        "initialize the additional window probe before exact-grid sizing"
+    );
+}
+
+#[test]
+fn review_exact_startup_surface_retains_forty_rows_with_titlebar_tabs() {
+    use super::{
+        ContentBands, StartupMonitor, content_rect_for_with_strip, grid_dims_px,
+        startup_surface_for,
+    };
+    let cfg = kettle_config::Config {
+        window_width: Some(100),
+        window_height: Some(40),
+        ..Default::default()
+    };
+    for scale in [1.0, 2.0] {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.macos_titlebar_tabs = true;
+        ws.startup_scale = scale;
+        let band = App::macos_titlebar_band(&ws).unwrap();
+        assert_eq!(band.height, 28.0 * scale);
+        let bands = ContentBands {
+            tab_bar_h: band.height,
+            ..Default::default()
+        };
+        // Deliberately use measured-cell-like fractional sizes, not the 8x16 baseline.
+        let cell = (9.25 * scale, 18.5 * scale);
+        let monitor = Some(StartupMonitor::from_physical(
+            (1920.0 * scale) as u32,
+            (1080.0 * scale) as u32,
+            scale as f64,
+        ));
+        let surface = startup_surface_for(&cfg, cell, bands, monitor);
+        let area = content_rect_for_with_strip(
+            surface,
+            bands,
+            cfg.tab_bar_pos,
+            cfg.status_bar,
+            cfg.tab_bar_width,
+        );
+        assert_eq!(
+            grid_dims_px((area.2, area.3), cell, (cfg.padding_x, cfg.padding_y)),
+            (100, 40)
+        );
+        let old_surface = startup_surface_for(&cfg, cell, ContentBands::default(), monitor);
+        let old_area = content_rect_for_with_strip(
+            old_surface,
+            bands,
+            cfg.tab_bar_pos,
+            cfg.status_bar,
+            cfg.tab_bar_width,
+        );
+        assert!(
+            grid_dims_px(
+                (old_area.2, old_area.3),
+                cell,
+                (cfg.padding_x, cfg.padding_y)
+            )
+            .1 < 40
+        );
+    }
+}

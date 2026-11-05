@@ -1106,6 +1106,8 @@ impl StatusBar {
 pub struct TabBar {
     /// The strip replaces the macOS caption and has a fixed native height.
     pub in_titlebar: bool,
+    /// Recording warning, independent of the configurable tab format.
+    pub recording_notice: String,
     /// Bar height in px (0 = hidden).
     pub height: f32,
     /// Top-left Y of the bar. 0 at the top; at the bottom the App places it
@@ -1189,6 +1191,7 @@ impl TabBar {
     pub fn hidden() -> Self {
         TabBar {
             in_titlebar: false,
+            recording_notice: String::new(),
             height: 0.0,
             y: 0.0,
             segments: Vec::new(),

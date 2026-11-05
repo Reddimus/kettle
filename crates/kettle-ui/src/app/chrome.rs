@@ -127,6 +127,7 @@ impl App {
             };
             return TabBar {
                 in_titlebar: ws.macos_titlebar_tabs,
+                recording_notice: String::new(),
                 height,
                 y,
                 segments: Vec::new(),
@@ -147,18 +148,15 @@ impl App {
                 scroll_right: (0.0, 0.0, 0.0, 0.0),
             };
         }
-        let mut labels = ws.mux.tab_labels(&self.ui_text);
-        if ws.macos_titlebar_tabs
-            && let Some(label) = labels.get_mut(ws.mux.active)
-        {
-            // The native caption is hidden, so keep its recording notice visible in the tab.
+        let labels = ws.mux.tab_labels(&self.ui_text);
+        let recording_notice = if ws.macos_titlebar_tabs {
             let raw = self.recorder.as_ref().is_some_and(|rec| rec.raw_input());
-            label.text = recording_window_title(label.text.clone(), self.recording_status(), raw);
-            label.path = label
-                .path
-                .take()
-                .map(|path| recording_window_title(path, self.recording_status(), raw));
-        }
+            recording_window_title(String::new(), self.recording_status(), raw)
+                .trim()
+                .to_owned()
+        } else {
+            String::new()
+        };
         let n = labels.len().max(1);
         // Trailing "▾ +" button: a `▾` dropdown arrow (left) + the `+` (right),
         // each `height` wide. The strip must reserve the WHOLE
@@ -195,25 +193,26 @@ impl App {
         // — scrolls with `‹ ›` arrows, showing only whole tabs (active kept in
         // view). See `tab_strip_layout`. Scroll arrows are `height`-wide squares.
         let active = ws.mux.active;
-        let mut layout = tab_strip_layout(
-            n,
-            active,
-            strip,
-            button_w,
-            height,
-            self.cfg.tab_min_width,
-            self.cfg.scroll_tabbar,
-        );
-        if ws.macos_titlebar_tabs {
-            layout = titlebar_tab_layout(
+        let layout = if ws.macos_titlebar_tabs {
+            titlebar_tab_layout(
                 n,
                 active,
                 (strip, button_w, x0),
                 height,
                 self.cfg.tab_min_width,
                 self.cfg.scroll_tabbar,
-            );
-        }
+            )
+        } else {
+            tab_strip_layout(
+                n,
+                active,
+                strip,
+                button_w,
+                height,
+                self.cfg.tab_min_width,
+                self.cfg.scroll_tabbar,
+            )
+        };
         // Tabs scrolled out of view are parked off-screen (kept in the segment
         // list, idx-indexed, so reorder / dock / ghost logic is undisturbed).
         let now = std::time::Instant::now();
@@ -264,13 +263,16 @@ impl App {
                 let hovered = ws
                     .native_pointer
                     .is_some_and(|p| rect_contains(rect, p.x as f32, p.y as f32));
-                let full_label = kettle_config::template::fill(
+                let mut full_label = kettle_config::template::fill(
                     &self.cfg.tab_format,
                     &[
                         ("n", &(i + 1).to_string()),
                         ("title", label.path.as_deref().unwrap_or(&label.text)),
                     ],
                 );
+                if i == active && !recording_notice.is_empty() {
+                    full_label = format!("{recording_notice} {full_label}");
+                }
                 let hint = kettle_render::tab_shortcut_hint(i, cfg!(target_os = "macos"));
                 let cell_w = self.overlay_text_cell_width(ws);
                 let cell_w = if ws.macos_titlebar_tabs {
@@ -318,6 +320,7 @@ impl App {
             |ox: Option<f32>| ox.map_or((0.0, 0.0, 0.0, 0.0), |x| (x0 + x, y, height, height));
         TabBar {
             in_titlebar: ws.macos_titlebar_tabs,
+            recording_notice,
             height,
             y,
             segments,
@@ -373,7 +376,7 @@ impl App {
             sh,
             row_h,
         );
-        if let Some(band) = self.macos_titlebar_band(ws) {
+        if let Some(band) = Self::macos_titlebar_band(ws) {
             (
                 rect.0 + band.left,
                 rect.1,
@@ -470,6 +473,7 @@ impl App {
         );
         TabBar {
             in_titlebar: false,
+            recording_notice: String::new(),
             height,
             y: strip_y,
             segments,
@@ -721,6 +725,18 @@ pub(super) struct TabStripLayout {
     pub(super) arrow_right: Option<f32>,
 }
 
+impl TabStripLayout {
+    fn empty(n: usize) -> Self {
+        Self {
+            width: 0.0,
+            last_width: 0.0,
+            xs: vec![None; n.max(1)],
+            arrow_left: None,
+            arrow_right: None,
+        }
+    }
+}
+
 pub(super) fn tab_strip_layout(
     n: usize,
     active: usize,
@@ -731,6 +747,9 @@ pub(super) fn tab_strip_layout(
     scroll: bool,
 ) -> TabStripLayout {
     let n = n.max(1);
+    if strip < 2.0 {
+        return TabStripLayout::empty(n);
+    }
     let strip = strip.max(1.0);
     let min_w = min_w.max(1.0);
     let reserve = trailing_reserve.max(0.0);
@@ -1101,9 +1120,12 @@ pub(super) fn titlebar_tab_layout(
     scroll: bool,
 ) -> TabStripLayout {
     let (strip, reserve, left) = space;
+    if strip < 2.0 {
+        return TabStripLayout::empty(n);
+    }
     let mut layout = tab_strip_layout(n, active, strip, reserve, height, min, scroll);
     let scale = height / 28.0;
-    let preferred = if n == 1 { 320.0 } else { 240.0 } * scale;
+    let preferred = (if n == 1 { 320.0 } else { 240.0 } * scale).max(min.max(1.0));
     if strip / n.max(1) as f32 >= preferred {
         layout.width = preferred;
         layout.last_width = preferred;

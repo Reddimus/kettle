@@ -377,6 +377,12 @@ impl App {
             && size.is_none()
         {
             let mut probe = WindowState::new(0, Mux::new());
+            #[cfg(target_os = "macos")]
+            {
+                probe.macos_titlebar_tabs =
+                    macos_titlebar_policy(&self.cfg) == MacosTitlebarPolicy::Tabs;
+            }
+            probe.startup_scale = monitor.map_or(1.0, |m| m.scale) as f32;
             probe.startup_cell = Some(fonts.cell);
             if let Some((width, height)) = self.startup_surface(&probe, monitor) {
                 attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
@@ -975,7 +981,7 @@ impl App {
             },
             bottom_status_height,
         );
-        inset_titlebar_band(band, self.macos_titlebar_band(ws))
+        inset_titlebar_band(band, Self::macos_titlebar_band(ws))
     }
 
     fn tear_off_tab_band(&self, ws: &WindowState, surface: (u32, u32), height: f32) -> Rect {
@@ -997,7 +1003,7 @@ impl App {
             },
             bottom_status,
         );
-        inset_titlebar_band(band, self.macos_titlebar_band(ws))
+        inset_titlebar_band(band, Self::macos_titlebar_band(ws))
     }
 
     /// Insertion slot if the (approximated) screen

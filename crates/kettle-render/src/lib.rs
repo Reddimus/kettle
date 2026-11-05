@@ -25,7 +25,9 @@ mod search;
 use labels::overlay_label_cols;
 pub use scrollback::{ScrollbackPill, scrollback_pill, scrollbar_draw_width, scrollbar_hit_width};
 mod text_field;
-pub use text_field::{TextFieldLayout, TextFieldOverlay, text_field_labels, text_field_rects};
+pub use text_field::{
+    TextFieldLayout, TextFieldOverlay, text_field_cell_width, text_field_labels, text_field_rects,
+};
 mod settings;
 mod tab_strip;
 mod terminal;
@@ -95,7 +97,7 @@ use gpu::{latch_gpu_fault, live_device_limits, resolve_headless_adapter};
 use labels::{
     display_width, fit_key_hint, fit_single_line_label, middle_ellipsis, take_cols_front,
 };
-pub use labels::{fit_pane_titlebar_title, fit_tab_segment_title};
+pub use labels::{fit_pane_titlebar_title, fit_tab_segment_title, tab_segment_label};
 #[cfg(test)]
 use labels::{fit_tab_path, fit_tab_title};
 #[cfg(test)]
@@ -2352,6 +2354,7 @@ impl Renderer {
                     metrics,
                     &family,
                 );
+                let cw = text_field_cell_width(field, cw, metrics.line_height);
                 let (prefix, hint) = text_field::text_field_labels(field, cw);
                 for (index, text) in [(0, prefix.as_str()), (2, hint.as_str())] {
                     text_field::shape_field_label(
@@ -2429,21 +2432,7 @@ impl Renderer {
                 // `fixed_w` reserves room for the non-title part of the format
                 // (e.g. "{n}: "), so the title ellipsizes to keep the WHOLE
                 // label inside the segment.
-                let title = fit_tab_segment_title(
-                    &s.title,
-                    s.path.as_deref(),
-                    s.idx,
-                    &cfg.tab_format,
-                    title_w,
-                    tab_cw,
-                );
-                let n = (s.idx + 1).to_string();
-                let body =
-                    kettle_config::template::fill(&cfg.tab_format, &[("n", &n), ("title", &title)]);
-                // Title only — the ✕ is rendered separately below so we
-                // can color it independently from the title text and
-                // give it a real button chip background.
-                let label = body;
+                let label = tab_segment_label(s, &cfg.tab_format, tab_cw, &tabbar.recording_notice);
                 let buf = &mut self.tab_buffers[bi];
                 buf.set_metrics(tab_metrics);
                 buf.set_size(Some(title_w), Some(title_h));
@@ -4505,7 +4494,9 @@ impl Renderer {
             }
             let (x, y, w, h) = layout.caret;
             menu_q.push(rect(x, y, w, h, theme.foreground, 1.0));
-            let slots = text_field_rects(field, self.overlay_text_cell_width());
+            let cw =
+                text_field_cell_width(field, self.overlay_text_cell_width(), metrics.line_height);
+            let slots = text_field_rects(field, cw);
             for (index, slot) in slots.into_iter().enumerate() {
                 menu_areas.push(TextArea {
                     buffer: &self.search_segment_buffers[index],
