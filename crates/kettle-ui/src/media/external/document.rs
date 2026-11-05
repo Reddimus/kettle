@@ -427,6 +427,7 @@ mod tests {
 
     #[test]
     fn document_bytes_are_released_while_reader_is_running() {
+        let _opens = super::super::tests::lock_open_tests();
         let dir = kettle_test_support::private_tempdir("kettle-document-lifetime-");
         let copies = Arc::new(copies_in(&dir));
         let bytes = charged(PDF);

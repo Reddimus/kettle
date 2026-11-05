@@ -546,8 +546,40 @@ fn save_and_open(
 mod tests {
     use super::*;
 
+    pub(super) fn lock_open_tests() -> std::sync::MutexGuard<'static, ()> {
+        static TEST_OPENS: Mutex<()> = Mutex::new(());
+        TEST_OPENS.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[test]
+    fn review_opener_admission_tests_share_a_guard() {
+        for (source, name) in [
+            (
+                include_str!("external.rs"),
+                "image_pixels_are_released_while_viewer_is_running",
+            ),
+            (
+                include_str!("external.rs"),
+                "the_viewer_gets_a_marked_private_png",
+            ),
+            (
+                include_str!("external/document.rs"),
+                "document_bytes_are_released_while_reader_is_running",
+            ),
+        ] {
+            let code = kettle_test_support::code_only(source);
+            let body = code.split(&format!("fn {name}() {{")).nth(1).unwrap();
+            let first_statement = body.trim_start().split(';').next().unwrap();
+            assert!(
+                first_statement.contains("lock_open_tests()"),
+                "{name} must hold the shared guard before acquiring global opener slots"
+            );
+        }
+    }
+
     #[test]
     fn image_pixels_are_released_while_viewer_is_running() {
+        let _opens = lock_open_tests();
         use std::time::Duration;
         let dir = kettle_test_support::private_tempdir("kettle-image-lifetime-");
         let copies = Arc::new(Mutex::new(PastedImages::of_kind_in(
@@ -669,6 +701,7 @@ mod tests {
     /// once.
     #[test]
     fn the_viewer_gets_a_marked_private_png() {
+        let _opens = lock_open_tests();
         use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!(
             "kettle-open-test-{}-{:?}",
