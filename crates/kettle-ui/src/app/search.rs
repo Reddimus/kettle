@@ -28,11 +28,6 @@ impl App {
         if !ws.search.open {
             return;
         }
-        const TYPING_SEARCH_LINES: usize = 1_000;
-        const BACKGROUND_CHUNK_LINES: usize = 1_000;
-        const VISIBLE_CONTEXT_LINES: i32 = 100;
-        const MAX_LOGICAL_LINE_EXPANSION: usize = kettle_core::MAX_SEARCH_LOGICAL_LINE_CONTEXT;
-
         let Some(pane_id) = ws.search.target_pane else {
             self.close_search(ws);
             return;
@@ -41,6 +36,22 @@ impl App {
             self.close_search(ws);
             return;
         };
+
+        let output_generation = pane.term.output_generation();
+        Self::update_search_for_pane(ws, pane_id, output_generation);
+    }
+
+    pub(super) fn update_search_for_pane(
+        ws: &mut WindowState,
+        pane_id: u64,
+        output_generation: u64,
+    ) {
+        const TYPING_SEARCH_LINES: usize = 1_000;
+        const BACKGROUND_CHUNK_LINES: usize = 1_000;
+        const VISIBLE_CONTEXT_LINES: i32 = 100;
+        const MAX_LOGICAL_LINE_EXPANSION: usize = kettle_core::MAX_SEARCH_LOGICAL_LINE_CONTEXT;
+
+        let pane = ws.mux.panes.get(&pane_id).expect("search target checked");
 
         // Compile untrusted input before taking the terminal-grid lock. Compilation has explicit
         // engine limits, but it still does allocation and Unicode automata construction that must
@@ -79,7 +90,6 @@ impl App {
             return;
         }
 
-        let output_generation = pane.term.output_generation();
         let Ok(mut term) = pane.term.term.lock() else {
             ws.search.set_status_at(
                 kettle_render::SearchStatus::Searching,
@@ -301,6 +311,34 @@ impl App {
                         ws.search.unlimited_retry_at = None;
                     }
                 } else {
+                    let cursor = search_point_after(
+                        edge,
+                        default_direction,
+                        top_line,
+                        bottom_line,
+                        last_column,
+                    )
+                    .expect("nearby edge is inside the grid");
+                    let terminal_edge = match default_direction {
+                        kettle_core::SearchDirection::Forward => {
+                            kettle_core::SearchPoint::new(bottom_line, last_column)
+                        }
+                        kettle_core::SearchDirection::Reverse => {
+                            kettle_core::SearchPoint::new(top_line, 0)
+                        }
+                    };
+                    ws.search.background = Some(crate::search_input::BackgroundSearch {
+                        token: current_token,
+                        direction: default_direction,
+                        cursor,
+                        edge: terminal_edge,
+                        wrap_anchor: anchor,
+                        wrapped: false,
+                        nearby: false,
+                        navigation: false,
+                        had_focus: false,
+                        output_drifted: false,
+                    });
                     ws.search.set_status_at(
                         kettle_render::SearchStatus::Searching,
                         std::time::Instant::now(),

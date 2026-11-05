@@ -1130,3 +1130,73 @@ fn retained_wrapped_history_job_obeys_typing_deadline_under_output() {
         kettle_render::SearchStatus::Searching
     );
 }
+
+fn assert_scrollback_search_survives_continuous_output(wrapped: bool) {
+    use alacritty_terminal::{
+        index::{Column, Line},
+        vte::ansi::Processor,
+    };
+    use kettle_core::Dimensions as _;
+
+    let (mux, panes) = title_test_tab_mux(1);
+    let pane = panes[0];
+    let mut ws = WindowState::new(1, mux);
+    let mut parser: Processor = Default::default();
+    {
+        let mut term = ws.mux.panes[&pane].term.term.lock().unwrap();
+        term.resize(kettle_core::term::TermSize::new(20, 24));
+        term.grid_mut().update_history(10_000);
+        parser.advance(&mut *term, "plain\r\n".repeat(6_000).as_bytes());
+        assert!(term.topmost_line().0 < -5_500);
+        // Short soft-wrapped groups let the nearby range finish in one work slice.
+        for line in term.topmost_line().0..term.bottommost_line().0 {
+            if line % 5 != 0 {
+                term.grid_mut()[Line(line)][Column(19)]
+                    .flags
+                    .insert(kettle_core::Flags::WRAPLINE);
+            }
+        }
+        let target = if wrapped { -5_500 } else { -500 };
+        for (column, ch) in "needle".chars().enumerate() {
+            term.grid_mut()[Line(target)][Column(column)].c = ch;
+        }
+        term.scroll_display(kettle_core::Scroll::Delta(4_000));
+    }
+    ws.search.open = true;
+    ws.search.target_pane = Some(pane);
+    ws.search.wrap = wrapped;
+    ws.search.anchor = Some(kettle_core::SearchPoint::new(-4_000, 0));
+    ws.search.editor.insert("needle", 1024);
+    ws.search.unlimited_retry_at = Some(std::time::Instant::now());
+
+    for generation in 1..=40 {
+        {
+            let mut term = ws.mux.panes[&pane].term.term.lock().unwrap();
+            parser.advance(&mut *term, b"more output\r\n");
+        }
+        App::update_search_for_pane(&mut ws, pane, generation);
+        if generation == 1 {
+            assert_eq!(
+                ws.search.typing_scanned_revision,
+                Some(ws.search.revision),
+                "the nearby range must finish without a work-budget yield"
+            );
+        }
+        if let Some(found) = ws.search.focused {
+            assert!(found.start.line < if wrapped { -5_400 } else { 0 });
+            assert_eq!(ws.search.status, kettle_render::SearchStatus::Limited);
+            return;
+        }
+    }
+    panic!("continuous output starved the scrollback search (wrapped={wrapped})");
+}
+
+#[test]
+fn review_regression_scrollback_search_advances_under_continuous_output() {
+    assert_scrollback_search_survives_continuous_output(false);
+}
+
+#[test]
+fn review_regression_scrollback_search_wraps_under_continuous_output() {
+    assert_scrollback_search_survives_continuous_output(true);
+}
