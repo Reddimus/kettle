@@ -509,7 +509,7 @@ and confinement, described below.
   it, a read outside the caller's own permissions, or the command writing
   anywhere but where it was told, is in scope.
 - **Diagram rendering** — Mermaid source is parsed and laid out by merman
-  0.9.2, pinned exactly, with its resource-constrained policy, a deadline,
+  0.9.3, pinned exactly, with its resource-constrained policy, a deadline,
   no network or file access, and Kettle's own text measurement from the job's
   fonts. Its SVG then passes the same sanitizer and admission as an outside
   SVG, in a generated mode that leaves out what it cannot check instead of

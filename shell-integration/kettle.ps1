@@ -89,19 +89,6 @@ if (-not $global:__kettle_prompt_installed) {
             1
         }
 
-        # `$?` is read-only. Ignore restores failure without polluting `$Error`.
-        if (-not $__kettle_ok) {
-            Write-Error 'kettle: propagating command failure' -ErrorAction Ignore
-        }
-        try {
-            $rendered = & $global:__kettle_original_prompt
-        } catch {
-            $rendered = $null
-        }
-        if ($null -eq $rendered) {
-            $rendered = "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
-        }
-
         $esc = [char]27
         $bel = [char]7
         __kettle_completion_clear
@@ -116,6 +103,19 @@ if (-not $global:__kettle_prompt_installed) {
         }
         $capability = if ($global:__kettle_correlation_enabled) { ';kettle=1;shell=powershell' } else { ';kettle=0' }
         [Console]::Write("$esc]133;A$capability$bel")
+        $global:LASTEXITCODE = $__kettle_state[1]
+        # `$?` is read-only. Ignore restores failure without polluting `$Error`.
+        if (-not $__kettle_ok) {
+            Write-Error 'kettle: propagating command failure' -ErrorAction Ignore
+        }
+        try {
+            $rendered = & $global:__kettle_original_prompt
+        } catch {
+            $rendered = $null
+        }
+        if ($null -eq $rendered) {
+            $rendered = "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
+        }
         if ($global:__kettle_completion_enabled -and
             $global:__kettle_completion_session -lt $global:__kettle_completion_counter_max) {
             $global:__kettle_completion_session =
@@ -132,12 +132,15 @@ if (-not $global:__kettle_prompt_installed) {
         # Report only filesystem locations for new-tab/split cwd inheritance.
         # Windows paths use file://HOST/C:/... with encoded segments.
         $loc = $ExecutionContext.SessionState.Path.CurrentLocation
-        if ($loc.Provider.Name -eq 'FileSystem') {
+        $hostname = try { [Environment]::MachineName } catch { '' }
+        if ($loc.Provider.Name -eq 'FileSystem' -and
+            $hostname.Length -le 255 -and
+            $hostname -cmatch '\A[A-Za-z0-9][A-Za-z0-9._-]*\z') {
             $segs = $loc.ProviderPath -replace '\\', '/' -split '/'
             $enc = ($segs | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
             # Drive paths need a leading slash; UNC paths already have one.
             if (-not $enc.StartsWith('/')) { $enc = "/$enc" }
-            [Console]::Write("$esc]7;file://$env:COMPUTERNAME$enc$bel")
+            [Console]::Write("$esc]7;file://$hostname$enc$bel")
         }
         # Do not let the prompt renderer replace the user's native exit code.
         $global:LASTEXITCODE = $__kettle_state[1]

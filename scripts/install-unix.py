@@ -361,6 +361,8 @@ def _publish_pending(
     created: Dict[str, int],
 ) -> None:
     records = [record for path in sorted(pending) for record in pending[path]]
+    if not 1 <= len(records) <= 2 * MAX_ENTRIES:
+        _fail("install receipt exceeds its bounded entry count")
     encoded = (
         json.dumps(
             {
@@ -453,12 +455,16 @@ def _verify_file(root_fd: int, record: Dict[str, Any]) -> None:
         ):
             _fail(f"recorded install file changed identity: {record['path']}")
         digest = hashlib.sha256()
+        total = 0
         while True:
-            chunk = os.read(handle, 1024 * 1024)
+            chunk = os.read(handle, min(1024 * 1024, record["size"] - total + 1))
             if not chunk:
                 break
+            total += len(chunk)
+            if total > record["size"]:
+                _fail(f"recorded install file grew while hashing: {record['path']}")
             digest.update(chunk)
-        if digest.hexdigest() != record["sha256"]:
+        if total != record["size"] or digest.hexdigest() != record["sha256"]:
             _fail(f"recorded install file changed content: {record['path']}")
     finally:
         os.close(handle)
@@ -818,7 +824,12 @@ def _install(arguments: argparse.Namespace) -> None:
             if _read_manifest(root_fd, prefix, uninstall=True) is not None:
                 _fail("an interrupted uninstall must be completed before installing")
             existing = _read_manifest(root_fd, prefix)
-            pending = _read_pending(root_fd, prefix)
+            pending = {}
+            for path, candidates in _read_pending(root_fd, prefix).items():
+                for record in candidates:
+                    if _file_matches(root_fd, record):
+                        pending[path] = [record]
+                        break
             planned = {spec["path"]: _planned_record(spec) for spec in specs}
 
             def written_by_interrupted_install(path: str) -> bool:

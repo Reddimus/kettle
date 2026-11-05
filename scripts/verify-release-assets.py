@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a GitHub draft release against an exact local asset set."""
+"""Verify a GitHub release against an exact local asset set and expected state."""
 
 from __future__ import annotations
 
@@ -88,13 +88,16 @@ def verify(
     *,
     tag: str,
     paths: list[Path],
+    expected_state: str = "draft",
 ) -> None:
     if not isinstance(payload, dict):
         raise ValueError("GitHub release response is not an object")
     if payload.get("tag_name") != tag:
         raise ValueError("GitHub release tag does not match the requested tag")
-    if payload.get("draft") is not True:
-        raise ValueError("GitHub release must still be a draft during verification")
+    if expected_state not in ("draft", "published"):
+        raise ValueError("expected release state must be draft or published")
+    if payload.get("draft") is not (expected_state == "draft"):
+        raise ValueError(f"GitHub release must be {expected_state} during verification")
     if payload.get("prerelease") is not False:
         raise ValueError("GitHub release unexpectedly has prerelease state")
 
@@ -138,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api-json", required=True, type=Path)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--asset", action="append", required=True, type=Path)
+    parser.add_argument("--expected-state", choices=("draft", "published"), default="draft")
     args = parser.parse_args(argv)
     try:
         metadata = args.api_json.lstat()
@@ -150,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("GitHub release response is unsafe or unbounded")
         with args.api_json.open("r", encoding="utf-8") as stream:
             payload = json.load(stream)
-        verify(payload, tag=args.tag, paths=args.asset)
+        verify(payload, tag=args.tag, paths=args.asset, expected_state=args.expected_state)
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         parser.error(str(error))
     return 0

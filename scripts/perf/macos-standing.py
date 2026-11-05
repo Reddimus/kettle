@@ -140,6 +140,8 @@ GRID_KEYS = ("cols", "rows")
 # the probe's calibration posts before the measured ones (the payload's
 # sequence numbers count them too); the payload's 32-byte log record.
 LATENCY_PROBE_ID = "org.kettle.terminal.latency-probe"
+PROBE_BUNDLE_FILE_LIMIT = 64 * 1024 * 1024
+PROBE_BUNDLE_TOTAL_LIMIT = 128 * 1024 * 1024
 LATENCY_FLOORS = ("ca", "metal-sync", "metal-nosync", "metal-sync-2")
 LATENCY_CALIBRATION_KEYS = 6
 KEYBLOCK_RECORD = struct.Struct("<4Q")
@@ -282,11 +284,17 @@ def probe_bundle_snapshot(app: Path) -> dict:
     Recheck the complete tree and every inode after hashing."""
     def inventory() -> dict:
         entries = {}
+        total = 0
         def visit(path: Path):
+            nonlocal total
             info = path.lstat()
             if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                 raise probe_refusal("bundle contains a link or special file")
             entries[path.relative_to(app).as_posix()] = probe_file_identity(info)
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+                if info.st_size > PROBE_BUNDLE_FILE_LIMIT or total > PROBE_BUNDLE_TOTAL_LIMIT:
+                    raise probe_refusal("bundle size limit exceeded")
             if stat.S_ISDIR(info.st_mode):
                 for child in sorted(path.iterdir()):
                     visit(child)
@@ -305,11 +313,20 @@ def probe_bundle_snapshot(app: Path) -> dict:
                 with os.fdopen(fd, "rb") as stream:
                     if probe_file_identity(os.fstat(stream.fileno())) != info:
                         raise probe_refusal("bundle changed while hashing")
-                    data = stream.read()
+                    file_digest = hashlib.sha256()
+                    digest.update(info[3].to_bytes(8, "big"))
+                    size = 0
+                    while data := stream.read(min(65536, info[3] - size + 1)):
+                        size += len(data)
+                        if size > info[3]:
+                            raise probe_refusal("bundle changed while hashing")
+                        file_digest.update(data)
+                        digest.update(data)
+                    if size != info[3]:
+                        raise probe_refusal("bundle changed while hashing")
                     if probe_file_identity(os.fstat(stream.fileno())) != info:
                         raise probe_refusal("bundle changed while hashing")
-                files[relative] = hashlib.sha256(data).hexdigest()
-                digest.update(len(data).to_bytes(8, "big") + data)
+                files[relative] = file_digest.hexdigest()
         if inventory() != before:
             raise probe_refusal("bundle changed while hashing")
         return {"bundle_sha256": digest.hexdigest(), "files": files,
@@ -1792,7 +1809,8 @@ class Runner:
         stderr_path.unlink(missing_ok=True)
         stamped = phases and name in self.phases
         env = {key: value for key, value in os.environ.items()
-               if key not in ("RUST_LOG", "KETTLE_HC_OBSERVER_SELF_COST")}
+               if key not in ("RUST_LOG", "KETTLE_HC_OBSERVER_SELF_COST", "KETTLE_RECORD",
+                              "KETTLE_RECORD_DIR", "KETTLE_RECORD_RAW_INPUT")}
         if getattr(self, "observer_pilot", False):
             env["KETTLE_HC_OBSERVER_SELF_COST"] = "1"
         if self.config_closure is not None:
@@ -2065,12 +2083,13 @@ class Runner:
             time.sleep(0.02)
         return False
 
-    def sample(self) -> Optional[dict]:
+    def sample(self, timed: bool = False) -> Optional[dict]:
         pid_file = Path(str(self.work / "stamp") + ".pid")
         if not pid_file.exists():
             return None
         pid = pid_file.read_text().strip()
-        out = subprocess.run([str(self.probes["memsample"]), pid], capture_output=True, text=True)
+        out = subprocess.run([str(self.probes["memsample"]), pid] + (["100", "1"] if timed else []),
+                             capture_output=True, text=True)
         return json.loads(out.stdout) if out.returncode == 0 else None
 
     def stop(self, process: subprocess.Popen, timeout: float) -> bool:
@@ -2156,17 +2175,20 @@ class Runner:
         activated = self.activate() if activate else None
         checks = [self.frontmost()]
         time.sleep(settle)
-        first = self.sample()
+        first = self.sample(timed=True)
         time.sleep(window / 2)
         checks.append(self.frontmost())
         time.sleep(window / 2)
-        second = self.sample()
+        second = self.sample(timed=True)
         checks.append(self.frontmost())
         if not self.stop(process, 30):
             return {"error": "the terminal did not stop"}
         if not first or not second:
             return {"error": "terminal exited before sampling"}
-        return {**idle_row(first, second, window, checks), "activated": activated}
+        elapsed = (second["t_ns"] - first["t_ns"]) / 1e9
+        if elapsed <= 0:
+            return {"error": "invalid idle sampling interval"}
+        return {**idle_row(first, second, elapsed, checks), "activated": activated}
 
     def flood_memory(self, name: str, flood: Path, offsets: Sequence[float], activate: bool,
                      footprint_detail: bool) -> dict:
@@ -3208,8 +3230,9 @@ def median_interval(values: Sequence[float], level: float = LEVEL) -> Tuple[floa
     # r is the largest rank with P(Binomial(n, 1/2) <= r - 1) <= (1 - level) / 2;
     # the interval is [x_(r), x_(n+1-r)] in 1-based order statistics.
     within, cumulative = 0, 0.0
+    outcomes = 2 ** n
     for j in range(n):
-        cumulative += math.comb(n, j) / 2.0 ** n
+        cumulative += math.comb(n, j) / outcomes
         if cumulative > (1.0 - level) / 2.0:
             break
         within += 1
@@ -4472,17 +4495,15 @@ def bundle_kettle(binary: Path, dest: Path, template: Optional[Path]) -> Path:
             # The parent inode serializes swaps without a disposable lock file.
             fcntl.flock(lock, fcntl.LOCK_EX)
             previous = scratch / "previous"
-            if dest.exists():
-                dest.rename(previous)
             try:
+                if dest.exists():
+                    dest.rename(previous)
                 partial.rename(dest)
             except BaseException:
+                preserve_previous = True
                 if previous.exists():
-                    try:
-                        previous.rename(dest)
-                    except BaseException:
-                        preserve_previous = True
-                        raise
+                    previous.rename(dest)
+                preserve_previous = False
                 raise
         finally:
             os.close(lock)
@@ -5209,6 +5230,10 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     parser.add_argument("--trace-input", nargs="+", metavar="FILE",
                         help="report retained private echo trace capability; launch no app")
     args = parser.parse_args()
+    if not math.isfinite(args.idle_window) or args.idle_window <= 0:
+        parser.error("--idle-window must be finite and strictly positive")
+    if not math.isfinite(args.idle_settle) or args.idle_settle < 0:
+        parser.error("--idle-settle must be finite and nonnegative")
     configure_observer_pilot(parser, args, sys.argv[1:])
     if args.observer_control:
         if args.combine or args.aa or args.make_bundle or args.latency_check or args.preflight_only or args.rebuild_latency_probe or any((args.startup_input, args.startup_phase_input, args.native_layer_input, args.trace_input)):
@@ -5568,10 +5593,10 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                     entries = workload_entries(workload, names, latency_names, cursor_names)
                     rows: Dict[str, List[dict]] = {name: [] for name in entries}
                     results["workloads"][workload] = rows
-                    # A whole rotation of failed latency rounds in a row points at the
+                    # Every latency entry failing since the last success points at the
                     # machine (an alert over the windows, lost grants), not at a
                     # terminal: the rest of the workload is recorded as not run.
-                    failures_in_a_row = 0
+                    failed_entries = set()
                     # Warm-up launches run first for every terminal, are flagged, and
                     # never enter a statistic; they absorb first-launch costs such as
                     # the payload script's one-time assessment.
@@ -5583,7 +5608,6 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                             for stale in (work / "stamp", work / "grid"):
                                 stale.unlink(missing_ok=True)
                             def collect_row():
-                                nonlocal failures_in_a_row
                                 if workload == "startup":
                                     row = runner.startup(name)
                                 elif workload == "idle":
@@ -5601,14 +5625,17 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                                         {**optional_options, "disabled": name in args.blink_disabled_default.split(",")},
                                         out_dir / f"{workload}-{name}-r{round_index}", setup)
                                 elif workload in ("latency", "latency-cursor"):
-                                    if failures_in_a_row >= len(entries):
-                                        row = {"error": f"not run: {len(entries)} latency rounds in a row failed"}
+                                    if len(failed_entries) >= len(entries):
+                                        row = {"error": f"not run: all {len(entries)} latency entries failed since the last success"}
                                     else:
                                         # A new gap sequence every round, the same for
                                         # every entry in it.
                                         row = runner.latency(name, cursor_options if workload == "latency-cursor" else latency_options, SEED * 1000 + round_index,
                                                              out_dir / f"{workload}-{name}-r{round_index}.json")
-                                        failures_in_a_row = failures_in_a_row + 1 if "error" in row else 0
+                                        if "error" in row:
+                                            failed_entries.add(name)
+                                        else:
+                                            failed_entries.clear()
                                 else:
                                     row = runner.vtebench(name, vtebench, benchmarks,
                                                           out_dir / f"{name}-r{round_index}.dat", args.vtebench_seconds)

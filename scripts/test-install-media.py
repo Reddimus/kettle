@@ -1,12 +1,15 @@
 """Hermetic paired-binary installation and removal tests."""
 
 import json
+import hashlib
+import importlib.util
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +52,35 @@ class MediaInstallTests(unittest.TestCase):
             text=True,
             timeout=30,
         )
+
+    def test_managed_hash_stops_at_recorded_size_when_file_grows(self):
+        spec = importlib.util.spec_from_file_location('installer', ROOT / 'scripts/install-unix.py')
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        path = self.root / 'managed'
+        path.write_bytes(b'old')
+        path.chmod(0o600)
+        record = {'path': 'managed', 'mode': 0o600, 'size': 3,
+                  'sha256': hashlib.sha256(b'old').hexdigest()}
+        root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        original_read = os.read
+        requests, received = [], []
+        def growing_read(handle, size):
+            if not requests:
+                with path.open('ab') as output:
+                    output.write(b'x' * 65536)
+            requests.append(size)
+            data = original_read(handle, size)
+            received.append(len(data))
+            return data
+        try:
+            with patch.object(installer.os, 'read', side_effect=growing_read):
+                with self.assertRaises(installer.InstallerError):
+                    installer._verify_file(root_fd, record)
+            self.assertLessEqual(sum(received), 4, 'hashing read past recorded size plus one byte')
+            self.assertLessEqual(max(requests), 4)
+        finally:
+            os.close(root_fd)
 
     def test_source_build_uses_the_artifacts_it_installs(self):
         source = self.root / "source"
@@ -251,8 +283,8 @@ class MediaInstallTests(unittest.TestCase):
     )
     def test_local_install_recipes_build_both_binaries(self):
         expected = [
-            "cargo build --locked --release -p kettle",
-            "cargo build --locked --profile media-worker -p kettle-media-worker",
+            "cargo build --locked --release -p kettle --target-dir target",
+            "cargo build --locked --profile media-worker -p kettle-media-worker --target-dir target",
         ]
         for recipe in ("install-local", "install-recording"):
             with self.subTest(recipe=recipe):
@@ -274,6 +306,49 @@ class MediaInstallTests(unittest.TestCase):
                     sum(command.startswith("cargo build ") for command in commands),
                     2,
                 )
+
+    @unittest.skipUnless(shutil.which("just"), "requires just")
+    def test_local_install_ignores_external_target_directory(self):
+        source = self.root / "recipes"
+        scripts = source / "scripts"
+        scripts.mkdir(parents=True)
+        justfile = (ROOT / "Justfile").read_text()
+        # Exercise the Linux recipes on either supported Unix development host.
+        (source / "Justfile").write_text(justfile.replace("[linux]\ninstall-", "[unix]\ninstall-"))
+        cargo = source / "cargo"
+        cargo.write_text(
+            "#!/bin/sh\nset -eu\n"
+            'target_dir=$CARGO_TARGET_DIR\nprofile=release\nbinary=kettle\n'
+            'while [ "$#" -gt 0 ]; do\n'
+            'case "$1" in\n'
+            '  --target-dir) target_dir=$2; shift ;;\n'
+            '  --profile) profile=$2; binary=kettle-media-worker; shift ;;\n'
+            'esac\nshift\ndone\n'
+            'mkdir -p "$target_dir/$profile"\n'
+            'printf fresh > "$target_dir/$profile/$binary"\n'
+        )
+        cargo.chmod(0o755)
+        installer = scripts / "install.sh"
+        installer.write_text(
+            '#!/bin/sh\nset -eu\n'
+            'for binary in target/release/kettle target/media-worker/kettle-media-worker; do\n'
+            '  test "$(cat "$binary")" = fresh || { echo "stale artifact: $binary" >&2; exit 1; }\n'
+            'done\n'
+        )
+        installer.chmod(0o755)
+        for recipe in ("install-local", "install-recording"):
+            with self.subTest(recipe=recipe):
+                for relative in ("release/kettle", "media-worker/kettle-media-worker"):
+                    stale = source / "target" / relative
+                    stale.parent.mkdir(parents=True, exist_ok=True)
+                    stale.write_text("stale")
+                result = subprocess.run(
+                    ["just", recipe], cwd=source,
+                    env={**os.environ, "PATH": f"{source}:{os.environ['PATH']}",
+                         "CARGO_TARGET_DIR": str(self.root / "external target")},
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_source_growth_is_rejected_before_writing_past_the_plan(self):
         source = self.root / "growing-source"
@@ -630,6 +705,19 @@ module._uninstall(arguments)
                 removed = self.uninstall()
                 self.assertEqual(removed.returncode, 0, removed.stderr)
                 self.assertFalse((self.prefix / "share/kettle").exists())
+
+    def test_repeated_interrupted_plans_keep_receipt_readable(self):
+        for attempt in range(3):
+            files = [(f'share/kettle/file-{index}', f'plan-{attempt}'.encode()) for index in range(100)]
+            killed = self.helper(*files, kill_at=1)
+            self.assertEqual(killed.returncode, 9, killed.stderr)
+            receipt = json.loads((self.prefix / 'share/kettle/install-pending.json').read_text())
+            self.assertLessEqual(len(receipt['files']), 256,
+                                 'installer published a receipt its reader rejects')
+        retried = self.helper(*files)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        removed = self.uninstall()
+        self.assertEqual(removed.returncode, 0, removed.stderr)
 
     def test_retry_preserves_pending_files_omitted_from_new_plan(self):
         self.assertEqual(self.helper().returncode, 0)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import hashlib
+import gzip
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -33,6 +34,36 @@ def deterministic_filler(size: int = 4096) -> bytes:
         output.extend(hashlib.sha256(f"kettle-fixture-{counter}".encode()).digest())
         counter += 1
     return bytes(output[:size])
+
+
+class RawArchiveTests(unittest.TestCase):
+    def preflight(self, archive, maximum=4096):
+        source = INSTALLER.read_text()
+        block = source.split('# --- Bounded archive preflight + extraction', 1)[1]
+        block = block.split('\n', 1)[1].split('if ! ARCHIVE_PREFLIGHT=', 1)[0]
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / 'package.tar.gz'
+            path.write_bytes(archive)
+            return subprocess.run(['sh', '-c', block], capture_output=True, text=True,
+                                  env={**os.environ, 'TAR': str(path),
+                                       'MAX_UNPACKED_BYTES': str(maximum), 'MAX_ARCHIVE_ENTRIES': '128'})
+
+    def test_extension_metadata_is_bounded_before_tar_listing(self):
+        output = BytesIO()
+        with tarfile.open(fileobj=output, mode='w:gz', format=tarfile.PAX_FORMAT) as archive:
+            member = tarfile.TarInfo('kettle/file')
+            member.pax_headers = {'comment': 'x' * (2 * 1024 * 1024)}
+            archive.addfile(member)
+        result = self.preflight(output.getvalue())
+        self.assertNotEqual(result.returncode, 0, 'oversized extension metadata reached GNU tar')
+
+    def test_decompressed_trailer_is_bounded_and_small_archive_passes(self):
+        output = BytesIO()
+        with tarfile.open(fileobj=output, mode='w:gz') as archive:
+            archive.addfile(tarfile.TarInfo('kettle/file'))
+        self.assertEqual(self.preflight(output.getvalue()).returncode, 0)
+        result = self.preflight(gzip.compress(gzip.decompress(output.getvalue()) + b'\0' * (2 * 1024 * 1024)))
+        self.assertNotEqual(result.returncode, 0, 'unbounded decompressed trailer was accepted')
 
 
 class OnlineInstallerTests(unittest.TestCase):

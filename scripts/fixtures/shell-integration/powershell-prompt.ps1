@@ -141,4 +141,20 @@ if ($rendered -notmatch 'USER-PROMPT' -or
     throw 'session rollover did not fail the completion side channel closed'
 }
 
+function global:prompt {
+    $global:__fixture_prompt_status = $?
+    Write-Host -NoNewline 'USER-HEADER'
+    [Console]::Write('USER-CONSOLE')
+    return 'USER-PROMPT'
+}
+Remove-Variable __kettle_prompt_installed -Scope Global -ErrorAction SilentlyContinue
+. $IntegrationPath
+[Console]::Write('KETTLE_PROMPT_ORDER_BEGIN')
+Get-Item -LiteralPath '__kettle_missing_header__' -ErrorAction SilentlyContinue
+prompt
+if ($global:__fixture_prompt_status -ne $false) {
+    throw 'direct-output prompt did not observe the failed command'
+}
+[Console]::Write('KETTLE_PROMPT_ORDER_END')
+
 Write-Output 'KETTLE_POWERSHELL_PROMPT_OK'

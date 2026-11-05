@@ -21,6 +21,26 @@ SPEC.loader.exec_module(PROBES)
 
 
 class StartupTests(unittest.TestCase):
+    def test_probe_uses_posix_shell_and_echo_cannot_complete_scrollback(self):
+        with tempfile.TemporaryDirectory() as raw:
+            live = PROBES.LiveKettle(Path('kettle'), Path('config'), Path(raw) / 'log')
+            process = Mock(pid=123)
+            process.poll.return_value = None
+            with patch.object(PROBES.subprocess, 'Popen', return_value=process) as launch,                  patch.object(live, 'ctl', return_value=subprocess.CompletedProcess([], 0)):
+                live.__enter__()
+            self.assertEqual(launch.call_args.args[0][-2:], ['-e', '/bin/sh'])
+        fixture = Mock()
+        def echoed(method, params, timeout):
+            sent = fixture.ctl.call_args_list[0].kwargs['params']['text']
+            return {'matched': params['text'] in sent}
+        fixture.json_ctl.side_effect = echoed
+        with self.assertRaisesRegex(SystemExit, 'generator timed out'):
+            PROBES.make_scrollback(fixture)
+        command = fixture.ctl.call_args_list[0].kwargs['params']['text']
+        output = subprocess.run(['/bin/sh', '-c', command], check=True, capture_output=True, text=True).stdout
+        self.assertIn('KETTLE_PERF_SCROLL_1600', output)
+        self.assertEqual(output.splitlines()[-1], 'KETTLE_PERF_SCROLL_DONE')
+
     def test_readiness_failure_reaps_kettle(self):
         with tempfile.TemporaryDirectory() as raw:
             live = PROBES.LiveKettle(Path('kettle'), Path('config'), Path(raw) / 'log')

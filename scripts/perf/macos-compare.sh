@@ -328,6 +328,20 @@ registration_failed() {
 }
 trap 'registration_failed "$1"' HUP INT TERM
 if ! child_start="$(python3 "$PROCESS_REGISTRY" register "$pid_log" "$child_pid")" || [ -z "$child_start" ]; then
+  if ! kill -0 "$child_pid" 2>/dev/null; then
+    wait "$child_pid" 2>/dev/null || true
+    if [ -s "$completion_marker" ]; then
+      payload_status="$(cat "$completion_marker")"
+      case "$payload_status" in
+        ''|*[!0-9]*) payload_status=invalid ;;
+      esac
+      if [ "${#payload_status}" -le 3 ] && [ "$payload_status" -le 255 ]; then
+        rm -f "$completion_marker"
+        trap - HUP INT TERM
+        exit "$payload_status"
+      fi
+    fi
+  fi
   registration_failed "$1"
 fi
 
@@ -432,7 +446,9 @@ def process_ids(name: str) -> Set[int]:
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return set()
+        raise RuntimeError(f"{name} PID query timed out") from None
+    if cp.returncode not in (0, 1):
+        raise RuntimeError(f"{name} PID query failed: {cp.returncode}")
     result: Set[int] = set()
     for value in cp.stdout.split():
         if value.isdigit():

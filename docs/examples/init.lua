@@ -139,8 +139,7 @@ kettle.on("output", function(pane_id, bytes)
         local last = text:find("[\r\n]", first)
         if not last then break end
         local line = text:sub(first, last - 1)
-        if not announced[pane_id] and
-            (line:find("BUILD SUCCESSFUL") or line:find("Compiling%s*$")) then
+        if not announced[pane_id] and line:find("BUILD SUCCESSFUL") then
             notify_build(pane_id, now)
         end
         announced[pane_id] = nil

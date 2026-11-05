@@ -35,7 +35,7 @@ answers these:
 | XTVERSION (`CSI > q`) | `DCS > \| kettle(<version>) ST` | Claude Code, tmux |
 | DSR (`CSI 5 n`, `CSI 6 n`) and DECXCPR (`CSI ? 6 n`) | status, and the cursor position with or without DEC's `?`, counted from the top margin under origin mode | shells, Claude Code |
 | DECRQM (`CSI ? Ps $ p`) | each mode's state, including 47, 1047, 1049 and 2026 | Claude Code |
-| DECRQSS (`DCS $ q Pt ST`) | the current SGR (`m`), scroll region (`r`) or cursor shape (` q`); anything else is answered as invalid | Neovim's truecolor and undercurl probes |
+| DECRQSS (`DCS $ q Pt ST`) | settings such as the current SGR (`m`), scroll region (`r`), horizontal margins (`s`) or cursor shape (` q`); unsupported settings are answered as invalid | Neovim's truecolor and undercurl probes |
 | XTGETTCAP (`DCS + q Pt ST`) | `Tc`, `RGB`, `setrgbf`, `setrgbb`, `Smulx`, `Setulc`, `Ss`, `Se`, `Co` and `colors`; one reply per name, in one write, and any other name answered as unknown (kitty's and Ghostty's form; xterm joins the names and stops at the first unknown one) | Neovim, tmux |
 | Kitty graphics (`APC G a=q,i=...`) | `APC G i=<same id>;OK ST` after decoding direct RGB/RGBA or supported encoded data; fixed errors for invalid data or unsupported media | Kitty graphics capability probes |
 | Kitty keyboard flags (`CSI ? u`) | the active flags | Codex, Claude Code, Neovim |
@@ -405,8 +405,11 @@ the [xterm modified-key matrix](https://invisible-island.net/xterm/modified-keys
   Ctrl+Backspace alias remains `BS`, and Shift+Tab remains the separate edit-key
   sequence `CSI Z`.
 
-Plain keys are unchanged at every level. In particular, plain Enter is always
-`CR`:
+Plain keys keep their legacy encoding at every level. The table below assumes
+ANSI newline mode is reset (`CSI 20 l`), so plain Enter sends `CR`. Enabling
+newline mode (`CSI 20 h`) changes legacy Return bytes to `CR LF`, including
+plain Enter under Kitty disambiguation; negotiated modified-key sequences
+and the Alt+Enter `ESC CR` chord keep their encodings.
 
 | Keyboard mode | Enter | Shift+Enter | Ctrl+Enter | Alt+Enter |
 |---|---|---|---|---|

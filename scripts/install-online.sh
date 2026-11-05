@@ -164,7 +164,7 @@ case "$(uname -m)" in
 esac
 
 # --- Required tools ------------------------------------------------
-for cmd in awk cat chmod cp curl dirname find grep mkdir mktemp od rm sed tail tar tr uname wc; do
+for cmd in awk cat chmod cp curl dirname find grep mkdir mktemp od python3 rm sed tail tar tr uname wc; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "kettle install-online.sh: missing required tool '$cmd'." >&2
     echo "Install it via your distro's package manager and re-run." >&2
@@ -673,6 +673,62 @@ fi
 # tar to materialize links, devices, path aliases, or writable special modes.
 # GNU tar's fixed listing has six fields for Kettle's ASCII-only paths;
 # rejecting any other shape also rejects whitespace and control characters.
+# Python is also required by the descriptor-relative installation helper.
+# Inspect raw headers before tar can allocate PAX or GNU extension payloads.
+if ! python3 - "$TAR" "$MAX_UNPACKED_BYTES" "$MAX_ARCHIVE_ENTRIES" <<'PY'
+import gzip
+import sys
+import tarfile
+
+path, maximum, entries = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+metadata_limit = 1024 * 1024
+stream_limit = maximum + (entries + 1) * 1024 + metadata_limit
+consumed = 0
+
+try:
+    with gzip.open(path, "rb") as stream:
+        def read(size):
+            global consumed
+            data = stream.read(min(size, stream_limit - consumed + 1))
+            consumed += len(data)
+            if consumed > stream_limit:
+                raise ValueError("decompressed tar stream exceeds its safety limit")
+            return data
+
+        count = 0
+        while True:
+            header = read(512)
+            if not header or header == bytes(512):
+                while True:
+                    trailer = read(65536)
+                    if not trailer:
+                        break
+                    if any(trailer):
+                        raise ValueError("nonzero data after tar end marker")
+                break
+            if len(header) != 512:
+                raise ValueError("truncated tar header")
+            member = tarfile.TarInfo.frombuf(header, "utf-8", "surrogateescape")
+            count += 1
+            if count > 2 * entries or member.size < 0:
+                raise ValueError("too many raw tar headers or invalid size")
+            if member.type in (b"x", b"g", b"X", b"L", b"K") and member.size > metadata_limit:
+                raise ValueError("tar extension metadata exceeds its safety limit")
+            remaining = ((member.size + 511) // 512) * 512
+            if remaining > stream_limit - consumed:
+                raise ValueError("decompressed tar stream exceeds its safety limit")
+            while remaining:
+                chunk = read(min(remaining, 65536))
+                if not chunk:
+                    raise ValueError("truncated tar member")
+                remaining -= len(chunk)
+except (OSError, EOFError, ValueError, tarfile.HeaderError) as error:
+    sys.exit(f"kettle install-online.sh: raw archive preflight failed: {error}")
+PY
+then
+  exit 1
+fi
+
 if ! ARCHIVE_PREFLIGHT=$(
   tar --numeric-owner --full-time --quoting-style=escape -tvzf "$TAR" |
     awk \

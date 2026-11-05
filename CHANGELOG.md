@@ -79,6 +79,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Settings: failed edits are no longer reported as applied, and closing a
   window restores an uncommitted theme preview. The reconnect refusal notice
   is translated.
+- Terminal grid: widening keeps the history origin, height resizes no
+  longer scan all scrollback, VS16 widening is limited to emoji-capable
+  sequences, and erasing one half of a wide glyph marks its counterpart drawn.
+- Shell integration: command-end and prompt-start markers are emitted before
+  the prompt renders, PowerShell on Unix reports a hostname with its working
+  directory, and the symbolic Shift-Tab binding needs Fish 4 or newer.
+- Build and tooling: `just install` no longer installs stale binaries,
+  `just screenshot` keeps output paths with spaces intact, the pre-commit
+  doc exemption no longer skips files that builds or tests embed, and
+  release verification accepts reruns of an already-public release.
+- Docs: corrected drift in the supported DECRQSS list, the newline-mode
+  Enter table, OSC 52 ordering, the GPU diagnostics cache override, and
+  parser versions.
 
 ## [5.9.0] — 2026-11-03
 

@@ -36,6 +36,12 @@ BINARY_EXTENSIONS = {
     ".woff2",
     ".zip",
 }
+TEXT_EXTENSIONS = {
+    ".rs", ".py", ".sh", ".ps1", ".md", ".txt", ".cfg", ".config",
+    ".html", ".css", ".js", ".ts", ".svg", ".xml", ".lua", ".nix",
+    ".swift", ".c", ".h", ".m", ".desktop", ".in", ".cjs",
+    ".bash", ".zsh", ".fish", ".mmd", ".1", ".plist", ".entitlements",
+}
 MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]+\]\((<[^>]+>|[^)\s]+)")
 MARKDOWN_FENCE = re.compile(r"(?ms)^\s*(```|~~~).*?^\s*\1\s*$")
 MARKDOWN_CODE_SPAN = re.compile(r"`+[^`\n]*`+")
@@ -164,6 +170,11 @@ def audit_png(path: str, data: bytes) -> list[str]:
 
 def audit_binary(path: str, data: bytes) -> list[str]:
     suffix = PurePosixPath(path).suffix.lower()
+    if suffix == ".plist":
+        # bplist00: an 8-byte header and a 32-byte trailer at minimum.
+        if not data.startswith(b"bplist00") or len(data) < 40:
+            return [f"{path}: invalid binary property list"]
+        return []
     if suffix in {".ttf", ".otf"}:
         return audit_sfnt(path, data)
     if suffix == ".png":
@@ -291,7 +302,13 @@ def audit(root: Path) -> dict[str, Any]:
 
         suffix = pure.suffix.lower()
         structured = suffix in {".json", ".toml", ".yaml", ".yml"} or relative == "Cargo.lock"
-        is_binary = not structured and (suffix in BINARY_EXTENSIONS or b"\0" in data)
+        is_binary = not structured and (
+            suffix in BINARY_EXTENSIONS
+            or (suffix not in TEXT_EXTENSIONS and b"\0" in data)
+            # Property lists are XML or Apple's binary format; only the
+            # binary form, which declares itself, is audited as binary.
+            or (suffix == ".plist" and data.startswith(b"bplist"))
+        )
         text: str | None = None
         if is_symlink:
             pass

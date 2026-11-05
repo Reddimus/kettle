@@ -82,6 +82,48 @@ class QualificationReceipts(unittest.TestCase):
 
 
 class CaseSupervision(unittest.TestCase):
+    def test_fallback_cleanup_keeps_original_fixture_handles(self):
+        reused = False
+        replacements = []
+        owned = {}
+        def retain(pid, label):
+            handle = Mock(pid=pid)
+            if reused:
+                replacements.append(handle)
+            else:
+                owned[pid] = handle
+            return handle
+        live = SimpleNamespace(
+            _open_stable_process_if_present=retain,
+            _process_state=lambda handle: 'Z',
+            run=Mock(return_value=subprocess.CompletedProcess([], 0, '', '')),
+        )
+        def spawn(argv, **kwargs):
+            process = Mock(pid=123)
+            process.poll.return_value = None
+            if len(argv) > 2 and argv[1].endswith('fixture.py'):
+                out = Path(argv[2])
+                for index, role in enumerate(('supervisor', 'child', 'grandchild')):
+                    (out / (role + '.pid')).write_text(str(123 + index))
+            return process
+        def invoke(case, binary, out, timeout):
+            nonlocal reused
+            out.mkdir()
+            qualification.subprocess.Popen(['python', 'helper', 'case'])
+            reused = True
+            return dict(passed=False, timed_out=True, forced_cleanup=dict(
+                closed=True, processes=[dict(pid=pid) for pid in (123, 124, 125)]))
+        with patch.object(qualification, 'load_live', return_value=live), \
+                patch.object(qualification, 'invoke_case', side_effect=invoke), \
+                patch.object(subprocess, 'Popen', side_effect=spawn):
+            self.exercise_forced_timeout()
+        for replacement in replacements:
+            replacement.signal.assert_not_called()
+        self.assertEqual(set(owned), {123, 124, 125})
+        for handle in owned.values():
+            handle.signal.assert_called_once_with(signal.SIGKILL)
+            handle.close.assert_called_once()
+
     @unittest.skipUnless(os.name == "posix", "Unix wait events")
     def test_only_terminal_wait_events_are_exits(self):
         live = qualification.load_live()
@@ -272,6 +314,7 @@ class CaseSupervision(unittest.TestCase):
                 "signal.signal(signal.SIGINT,signal.SIG_IGN)\n"
                 "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
                 "(root/(role+'.pid')).write_text(str(os.getpid()))\n"
+                "while not (root/(role+'.release')).exists(): time.sleep(.01)\n"
                 "if role!='grandchild':\n"
                 " child='child' if role=='supervisor' else 'grandchild'\n"
                 " subprocess.Popen([sys.executable,__file__,str(root),child],start_new_session=True)\n"
@@ -280,6 +323,7 @@ class CaseSupervision(unittest.TestCase):
             )
             decoy = real_popen([sys.executable, "-c", "import time;time.sleep(60)"])
             recorded = []
+            fixture_handles = {}
 
             def start(*args, **kwargs):
                 proc = real_popen(
@@ -287,10 +331,17 @@ class CaseSupervision(unittest.TestCase):
                 )
                 recorded.append(proc)
                 deadline = time.monotonic() + 5
-                while not (out / "grandchild.pid").exists():
-                    if time.monotonic() >= deadline:
-                        raise AssertionError("owned descendant did not start")
-                    time.sleep(0.01)
+                for role in ('supervisor', 'child', 'grandchild'):
+                    path = out / (role + '.pid')
+                    while not path.exists() or not path.read_text().strip():
+                        if time.monotonic() >= deadline:
+                            raise AssertionError("owned descendant did not start")
+                        time.sleep(0.01)
+                    pid = int(path.read_text())
+                    handle = live._open_stable_process_if_present(pid, "owned test fixture")
+                    self.assertIsNotNone(handle)
+                    fixture_handles[pid] = handle
+                    (out / (role + '.release')).touch()
                 return proc
 
             try:
@@ -328,15 +379,8 @@ class CaseSupervision(unittest.TestCase):
                 self.assertTrue(result["timed_out"])
                 expected = {int(p.read_text()) for p in out.glob("*.pid")}
                 self.assertEqual(len(expected), 3)
-                for pid in expected:
-                    handle = live._open_stable_process_if_present(pid, "test fixture")
-                    if handle is not None:
-                        try:
-                            self.assertTrue(
-                                (live._process_state(handle) or "Z").startswith("Z")
-                            )
-                        finally:
-                            handle.close()
+                for handle in fixture_handles.values():
+                    self.assertTrue((live._process_state(handle) or "Z").startswith("Z"))
                 self.assertTrue(result["forced_cleanup"]["closed"])
                 self.assertNotIn("error", result["forced_cleanup"])
                 self.assertEqual(
@@ -351,17 +395,14 @@ class CaseSupervision(unittest.TestCase):
                     )
                 self.assertIsNone(decoy.poll())
             finally:
-                # Also close recorded fixtures if the regression fails against old code.
-                for path in out.glob("*.pid"):
-                    handle = live._open_stable_process_if_present(
-                        int(path.read_text()), "recorded test fixture"
-                    )
-                    if handle is not None:
-                        try:
-                            handle.signal(signal.SIGKILL)
-                        finally:
-                            handle.close()
+                for handle in fixture_handles.values():
+                    try:
+                        handle.signal(signal.SIGKILL)
+                    finally:
+                        handle.close()
                 for proc in recorded:
+                    if proc.poll() is None:
+                        proc.kill()
                     proc.wait(timeout=5)
                 decoy.kill()
                 decoy.wait(timeout=5)
@@ -375,20 +416,34 @@ class CaseSupervision(unittest.TestCase):
             out = root / "case"
             fixture = root / "fixture.py"
             fixture.write_text(
-                "import json,subprocess,sys\nfrom pathlib import Path\n"
+                "import json,subprocess,sys,time\nfrom pathlib import Path\n"
                 "root=Path(sys.argv[1])\n"
                 "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],start_new_session=True)\n"
                 "(root/'child.pid').write_text(str(child.pid))\n"
+                "while not (root/'release').exists(): time.sleep(.01)\n"
                 "(root/'case.json').write_text(json.dumps({'case':'search-history','status':'PASS','cleanup':True}))\n",
                 encoding="utf-8",
             )
             decoy = real_popen([sys.executable, "-c", "import time;time.sleep(60)"])
 
+            fixture_handles = []
+            recorded = []
+
             def dispatch(command, *args, **kwargs):
                 if len(command) > 2 and command[2] == "case":
-                    return real_popen(
-                        [sys.executable, str(fixture), str(out)], **kwargs
-                    )
+                    proc = real_popen([sys.executable, str(fixture), str(out)], **kwargs)
+                    recorded.append(proc)
+                    deadline = time.monotonic() + 5
+                    pid_file = out / 'child.pid'
+                    while not pid_file.exists() or not pid_file.read_text().strip():
+                        if time.monotonic() >= deadline:
+                            raise AssertionError('owned orphan did not start')
+                        time.sleep(.01)
+                    handle = live._open_stable_process_if_present(int(pid_file.read_text()), "owned test orphan")
+                    self.assertIsNotNone(handle)
+                    fixture_handles.append(handle)
+                    (out / 'release').touch()
+                    return proc
                 return real_popen(command, *args, **kwargs)
 
             try:
@@ -409,15 +464,15 @@ class CaseSupervision(unittest.TestCase):
                 )
                 self.assertIsNone(decoy.poll())
             finally:
-                if (out / "child.pid").exists():
-                    handle = live._open_stable_process_if_present(
-                        int((out / "child.pid").read_text()), "recorded test orphan"
-                    )
-                    if handle is not None:
-                        try:
-                            handle.signal(signal.SIGKILL)
-                        finally:
-                            handle.close()
+                for handle in fixture_handles:
+                    try:
+                        handle.signal(signal.SIGKILL)
+                    finally:
+                        handle.close()
+                for proc in recorded:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait(timeout=5)
                 decoy.kill()
                 decoy.wait(timeout=5)
 

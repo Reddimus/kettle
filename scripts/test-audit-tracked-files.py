@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("audit-tracked-files.py")
@@ -30,6 +32,7 @@ def initialize_repository(root: Path) -> None:
             "-c",
             "user.email=kettle-fixture@example.invalid",
             "commit",
+            "--no-gpg-sign",
             "--quiet",
             "-m",
             "fixture",
@@ -45,6 +48,19 @@ def write_lf(path: Path, text: str) -> None:
 
 
 class TrackedFileAuditTests(unittest.TestCase):
+    def test_fixture_commits_ignore_inherited_signing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_lf(root / 'fixture.txt', 'fixture\n')
+            with mock.patch.dict(os.environ, {
+                'GIT_CONFIG_COUNT': '2', 'GIT_CONFIG_KEY_0': 'commit.gpgSign', 'GIT_CONFIG_VALUE_0': 'true',
+                'GIT_CONFIG_KEY_1': 'gpg.program', 'GIT_CONFIG_VALUE_1': str(root / 'missing-signer'),
+            }):
+                try:
+                    initialize_repository(root)
+                except subprocess.CalledProcessError:
+                    self.fail('fixture commit attempted inherited signing')
+
     def test_regular_file_replaced_by_external_symlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "repo"
@@ -101,6 +117,31 @@ class TrackedFileAuditTests(unittest.TestCase):
                 initialize_repository(root)
                 errors = AUDIT.audit(root)["errors"]
                 self.assertTrue(any("structured-data parse failed" in e for e in errors), errors)
+
+    def test_nul_in_source_and_documentation_is_rejected(self) -> None:
+        for name in ("broken.rs", "broken.py", "broken.sh", "broken.md",
+                     "broken.bash", "broken.zsh", "broken.fish", "broken.mmd"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / name).write_bytes(b"content\x00\n")
+                initialize_repository(root)
+                errors = AUDIT.audit(root)["errors"]
+                self.assertIn(f"{name}: NUL byte in text", errors)
+
+    def test_binary_property_lists_are_binary_and_xml_ones_text(self) -> None:
+        fixture = SCRIPT.parent.parent / "crates/kettle-ui/tests/fixtures/reopen-version.plist"
+        for name, data, accepted in (
+            ("binary.plist", fixture.read_bytes(), True),
+            ("truncated.plist", b"bplist00\x00", False),
+            ("xml.plist", b'<?xml version="1.0"?>\n<plist version="1.0"><dict/></plist>\n', True),
+            ("nul.plist", b"<plist>\x00</plist>\n", False),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / name).write_bytes(data)
+                initialize_repository(root)
+                errors = [e for e in AUDIT.audit(root)["errors"] if e.startswith(name)]
+                self.assertEqual(not errors, accepted, errors)
 
     def test_text_unset_files_keep_their_bytes(self) -> None:
         """A file `.gitattributes` marks `-text` keeps its CRLF, its last

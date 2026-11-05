@@ -53,6 +53,20 @@ platform refuses the other encoding.
 | 12 PlayState | Worker to parent | One state byte: 0 playing, 1 paused, 2 ended |
 | 13 AudioState | Worker to parent | One sound status byte: the session's sound changed from what Opened said |
 | 14 PCM | Parent/worker only | Subtype, generation and the fixed fields below |
+| 15 FileFactsRequest | Parent to worker | Generation u64, worker path source (inline bytes refused) |
+| 16 FileFactsReply | Worker to parent | Generation u64, optional path identity: presence byte, then dev u64, ino u64, size u64, modification seconds i64 and nanoseconds u32 |
+
+The metadata-only exchange is Hello, Ready, one FileFactsRequest and one
+FileFactsReply, then worker exit. `MediaService::request_facts` uses
+`WorkerClient::file_facts` to obtain file-card metadata without rendering.
+The request uses the worker source's normal path authorization and must name
+a regular file; the reply echoes the shelf generation. An absent identity
+means metadata could not be obtained or the source failed its checks, rather
+than an empty file. Both frames are private to the parent/worker channel and
+are refused in the external direction. Startup, cancellation, resource and
+cleanup limits are shared with rendering; the parent's 500 ms metadata
+deadline starts before writing the request after Ready, bounded further by
+the caller's deadline. The worker also arms a 500 ms watchdog on receipt.
 
 PCM subtypes are Open (0: generation/start/end frames u64, muted boolean),
 Block (1: generation/sequence/start frame u64, 7680-byte stereo f32le/48 kHz
@@ -207,10 +221,12 @@ No version negotiates, so a peer with a different version is `RestartRequired` e
 ## Build identity and worker availability
 
 Every Kettle binary takes its identity from one build helper,
-`crates/kettle/build_support/source_id.rs`: a hash of every file under `crates/`
-(through links) and the workspace `Cargo.toml` and `Cargo.lock`, by relative
-path and contents, read without git. A checkout and an exported source tree of
-the same files agree; any source edit changes it; a rebuild, or the same source
+`crates/kettle/build_support/source_id.rs`: a hash of files under `crates/`
+and `vendor/` (through links) and the workspace `Cargo.toml` and `Cargo.lock`,
+by relative path and contents, read without git. Generated `vendor/target/`,
+`vendor/*/target/` and `vendor/*/Cargo.lock` are excluded; the vendor
+workspace's `vendor/Cargo.lock` is included. A checkout and an exported source
+tree of the same files agree; any source edit changes it; a rebuild, or the same source
 built elsewhere, keeps it. The helper is under `crates/`, so it hashes itself.
 `kettle`'s build script emits it as `KETTLE_SOURCE_HASH` (16 hex digits) and,
 unchanged for the video-preview worker, as `KETTLE_SOURCE_ID`
@@ -484,7 +500,9 @@ both binaries of one source answer with one `BuildId`. On Linux and macOS:
 5. **One job, or one session.** Hello must carry this build's identity. A
    different build, or a frame header of another protocol version, is answered
    `RestartRequired` and exits 9. Ready follows, then one Job and one reply,
-   then exit 0; or one PlayOpen and the playback session below. The reply to an Auto job is DetectedRendered; to any other,
+   then exit 0; or one FileFactsRequest and one FileFactsReply under the
+   500 ms metadata deadline, then exit 0; or one PlayOpen and the playback
+   session below. The reply to an Auto job is DetectedRendered; to any other,
    Rendered. A frame out of order, cut short or that does not decode is
    answered `BadParams` (or `TooLarge`) and exits 2; a parent that closes stdin
    between frames ends the worker quietly with 0. stdout carries frames only, through one writer.

@@ -63,6 +63,17 @@ pub(super) fn emoji_presentation(c: char) -> bool {
         .is_some_and(|range| range.0 <= cp)
 }
 
+pub(super) fn emoji_variation(c: char) -> bool {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if c.width() != Some(1) {
+        return false;
+    }
+    let mut bytes = [0; 7];
+    let len = c.encode_utf8(&mut bytes).len();
+    bytes[len..len + 3].copy_from_slice("\u{fe0f}".as_bytes());
+    std::str::from_utf8(&bytes[..len + 3]).is_ok_and(|text| text.width() == 2)
+}
+
 pub(super) fn base_offset(text: &str) -> usize {
     text.char_indices()
         .find(|(_, c)| is_base(*c))

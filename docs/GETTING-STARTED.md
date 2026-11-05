@@ -136,6 +136,7 @@ large or infinite scrollback responsive.
 - **Found a bug?** On Linux and macOS, crash logs are written to
   `$XDG_STATE_HOME/kettle/crash/` when set and otherwise
   `~/.local/state/kettle/crash/`. GPU device-loss records are written to
+  `$XDG_CACHE_HOME/kettle/diagnostics/` when set and otherwise
   `~/.cache/kettle/diagnostics/`; they contain adapter/recovery metadata and no
   terminal contents. Attach the relevant file to an issue.
 

@@ -4,14 +4,18 @@
 import ast
 import importlib.util
 import io
+import inspect
 import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import struct
 import sys
 import tempfile
+import threading
+import textwrap
 import unittest
 import zlib
 from unittest.mock import MagicMock, Mock, PropertyMock, patch
@@ -25,6 +29,284 @@ spec.loader.exec_module(checker)
 
 
 class LiveUiTests(unittest.TestCase):
+    def test_sandbox_activation_clears_git_overrides_before_editor_startup(self):
+        for windows in (False, True):
+            if windows and not (shutil.which('pwsh') or shutil.which('powershell.exe')):
+                continue
+            # The POSIX variant needs a POSIX bash; Git Bash on a Windows host
+            # cannot take the host's drive paths.
+            if not windows and os.name == 'nt':
+                continue
+            with self.subTest(windows=windows), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / 'sandbox'
+                root.mkdir()
+                target = checker.AgentShellTarget()
+                with (
+                    patch.object(checker.AgentShellTarget, 'powershell', new_callable=PropertyMock,
+                                 return_value=windows),
+                    patch.object(checker.AgentShellTarget, 'validate_native_sandbox_path', return_value=root),
+                ):
+                    command = target.nvim_sandbox_setup_command('READY_MARKER', sandbox_path=str(root))
+                if windows:
+                    shell = [shutil.which('pwsh') or shutil.which('powershell.exe'), '-NoProfile', '-Command']
+                    command += '; if (Test-Path Env:GIT_DIR) { exit 23 }'
+                else:
+                    shell = ['bash', '--noprofile', '--norc', '-c']
+                    command += '; test -z "${GIT_DIR+x}"'
+                result = subprocess.run([*shell, command], capture_output=True, text=True,
+                                        env={**os.environ, 'GIT_DIR': str(Path(directory) / 'outside.git')})
+                self.assertEqual(result.returncode, 0, 'editor inherited Git overrides: ' + result.stderr)
+
+    def test_video_receipt_clear_rejects_wrapped_stale_filename(self):
+        source = inspect.getsource(checker.run_video_paste_receipt)
+        start = source.index('        clear_deadline =')
+        end = source.index('    finally:', start)
+        block = textwrap.dedent(source[start:end])
+        for text, stale in [('second-vi\ndeo.webm', True), ('prompt', False)]:
+            with self.subTest(text=text):
+                live = Mock()
+                live.json_ctl.side_effect = [{'media_paste_receipt': None}, {'text': text}]
+                clock = Mock(monotonic=Mock(side_effect=[0, 0, 4]))
+                namespace = dict(checker.__dict__, live=live, time=clock,
+                                 fixtures=[Path('second-video.webm')])
+                if stale:
+                    with self.assertRaisesRegex(SystemExit, 'stale receipt or path text'):
+                        exec(compile(block, '<clear-receipt>', 'exec'), namespace)
+                else:
+                    exec(compile(block, '<clear-receipt>', 'exec'), namespace)
+
+    def test_interaction_config_pins_shell_for_new_tabs_and_splits(self):
+        class StopFixture(Exception):
+            pass
+        for system, shell in [('Linux', 'bash'), ('Windows', 'powershell.exe')]:
+            with (
+                self.subTest(system=system),
+                tempfile.TemporaryDirectory() as directory,
+                patch.dict(os.environ, {'SHELL': '/usr/bin/fish'}),
+                patch.object(checker.platform, 'system', return_value=system),
+                patch.object(checker, 'LiveKettle', side_effect=StopFixture) as launch,
+            ):
+                with self.assertRaises(StopFixture):
+                    checker.run_interaction('fixture', Path(directory), isolated_clipboard=True)
+                config = launch.call_args.args[1].read_text()
+                self.assertIn(f'shell = {shell}', config.splitlines())
+
+    def test_search_selection_pins_english_menu_labels(self):
+        class StopFixture(Exception):
+            pass
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {'LANG': 'es_ES.UTF-8'}),
+            patch.object(checker, 'LiveKettle', side_effect=StopFixture) as launch,
+        ):
+            with self.assertRaises(StopFixture):
+                checker.run_search_selection('fixture', Path(directory), isolated_clipboard=True)
+            config = launch.call_args.args[1].read_text()
+        self.assertIn('language = en', config.splitlines())
+
+    def test_search_history_launches_posix_shell_even_when_shell_is_fish(self):
+        class StopFixture(Exception):
+            pass
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {'SHELL': '/usr/bin/fish'}),
+            patch.object(checker.platform, 'system', return_value='Linux'),
+            patch.object(checker, 'LiveKettle', side_effect=StopFixture) as launch,
+        ):
+            with self.assertRaises(StopFixture):
+                checker.run_search_history('fixture', Path(directory))
+        self.assertEqual(launch.call_args.kwargs['extra_args'],
+                         ['-e', 'bash', '--noprofile', '--norc'])
+
+    @unittest.skipUnless(shutil.which('bash') and os.name != 'nt', 'requires a POSIX Bash')
+    def test_lazyvcs_git_overrides_cannot_modify_external_repository(self):
+        self.check_lazyvcs_git_overrides(windows=False)
+
+    @unittest.skipUnless(shutil.which('pwsh') or shutil.which('powershell.exe'), 'requires PowerShell')
+    def test_powershell_lazyvcs_git_overrides_cannot_modify_external_repository(self):
+        self.check_lazyvcs_git_overrides(windows=True)
+
+    def check_lazyvcs_git_overrides(self, *, windows):
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory) / 'outside'
+            outside.mkdir()
+            # The setup must not inherit Git overrides either, or it would write
+            # to whatever repository they name before the check under test runs.
+            clean = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+            subprocess.run(['git', 'init', '-q', str(outside)], check=True, env=clean)
+            subprocess.run(['git', '-C', str(outside), 'config', 'user.name', 'Original'],
+                           check=True, env=clean)
+            (outside / 'sentinel').write_bytes(b'private content')
+            subprocess.run(['git', '-C', str(outside), 'add', 'sentinel'], check=True, env=clean)
+            before = {path: path.read_bytes() for path in [outside / '.git' / 'config', outside / '.git' / 'index']}
+            fixture = Path(directory) / 'sandbox'
+            command = checker.lazyvcs_repo_setup_command(str(fixture), 'FIXTURE123', windows=windows)
+            env = {**os.environ, 'GIT_DIR': str(outside / '.git'), 'GIT_WORK_TREE': str(outside),
+                   'GIT_INDEX_FILE': str(outside / '.git' / 'index'), 'GIT_CONFIG_COUNT': '1',
+                   'GIT_CONFIG_KEY_0': 'user.name', 'GIT_CONFIG_VALUE_0': 'Override'}
+            shell = ([shutil.which('pwsh') or shutil.which('powershell.exe'), '-NoProfile', '-Command']
+                     if windows else ['bash', '--noprofile', '--norc', '-c'])
+            result = subprocess.run([*shell, command], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for path, content in before.items():
+                self.assertEqual(path.read_bytes(), content, 'external repository was modified')
+            self.assertTrue((fixture / '.git').is_dir(), 'fixture used inherited repository')
+
+    def test_failed_tracker_selftest_terminates_payload_in_another_group(self):
+        source = inspect.getsource(checker.live_helper_selftest)
+        start = source.index('            tracked = subprocess.Popen(')
+        end = source.index('            failed_enumeration = subprocess.Popen(', start)
+        block = textwrap.dedent(source[start:end])
+        class TrackerFailure(Exception):
+            pass
+        tracker = Mock()
+        tracker._remember_tracker_sessions.side_effect = TrackerFailure
+        process = Mock(pid=100, returncode=None)
+        anchor = Mock(pid=100)
+        payload_running = [True]
+        def terminate_session(handle, **kwargs):
+            self.assertIs(handle, anchor)
+            payload_running[0] = False
+        namespace = dict(checker.__dict__, tracker=tracker, tracked_argv=['-e', 'fixture'],
+                         tracked_env={}, execute_at=0, fixture='unused')
+        with (
+            patch.object(checker.subprocess, 'Popen', return_value=process),
+            patch.object(checker.StableProcessHandle, 'open', return_value=anchor),
+        ):
+            namespace.update(terminate_owned_pty_session=terminate_session,
+                             terminate_owned_process_group=Mock())
+            with self.assertRaises(TrackerFailure):
+                exec(compile(block, '<tracked-selftest>', 'exec'), namespace)
+        self.assertFalse(payload_running[0], 'payload survived failed tracker self-test cleanup')
+        anchor.close.assert_called_once()
+
+    def test_underline_launches_posix_shell_even_when_shell_is_fish(self):
+        class StopFixture(Exception):
+            pass
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {'SHELL': '/usr/bin/fish'}),
+            patch.object(checker.platform, 'system', return_value='Linux'),
+            patch.object(checker, 'make_git_fixture', side_effect=lambda path: path.mkdir(parents=True)),
+            patch.object(checker, 'make_svn_fixture', return_value=False),
+            patch.object(checker, 'LiveKettle', side_effect=StopFixture) as launch,
+        ):
+            with self.assertRaises(StopFixture):
+                checker.run_underline('fixture', Path(directory))
+        self.assertEqual(launch.call_args.kwargs['extra_args'][2:],
+                         ['-e', 'bash', '--noprofile', '--norc'])
+
+    def test_underline_requires_visible_delta_output_before_claiming_coverage(self):
+        function = ast.parse(inspect.getsource(checker.run_underline)).body[0]
+        capture = next(node for node in function.body if isinstance(node, ast.With))
+        for available in (False, True):
+            with self.subTest(available=available), tempfile.TemporaryDirectory() as directory:
+                fixture = MagicMock()
+                fixture.__enter__.return_value = fixture
+                text = ['UNDERLINE_SENTINEL_001']
+                def control(action, params=None, **kwargs):
+                    if action == 'send_text' and params['text'].startswith('/') and available:
+                        text[0] = params['text'][1:]
+                fixture.ctl.side_effect = control
+                fixture.json_ctl.return_value = {}
+                fixture.read_cells.side_effect = lambda: {'rows': 1, 'cols': len(text[0]), 'cells': [
+                    {'row': 0, 'col': i, 'ch': char} for i, char in enumerate(text[0])]}
+                namespace = dict(checker.__dict__, out=Path(directory), repo=Path(directory),
+                                 cfg=Path(directory) / 'config', kettle='fixture', extra_args=[],
+                                 svn_fixture=Path(directory), svn_enabled=True,
+                                 LiveKettle=Mock(return_value=fixture))
+                with patch.object(checker.time, 'sleep'):
+                    if available:
+                        exec(compile(ast.Module(body=[capture], type_ignores=[]), '<capture>', 'exec'), namespace)
+                        self.assertEqual(namespace['delta_fixtures'], {'git': True, 'svn': True})
+                        self.assertTrue((Path(directory) / 'delta-git.cells.json').is_file())
+                        self.assertTrue((Path(directory) / 'delta-svn.cells.json').is_file())
+                    else:
+                        with self.assertRaisesRegex(SystemExit, 'delta.*not visible'):
+                            exec(compile(ast.Module(body=[capture], type_ignores=[]), '<capture>', 'exec'), namespace)
+
+    def test_retention_deadline_closes_accumulated_handles(self):
+        root = Path('sandbox')
+        handle = Mock(identity=(100, 1))
+        environment = {os.fsencode(f'KETTLE_SMOKE_ROOT={root}'),
+                       os.fsencode(f'XDG_CONFIG_HOME={root / "config"}')}
+        with (
+            patch.object(checker.AgentShellTarget, 'native_nvim_sandbox_processes', return_value=[100, 200]),
+            patch.object(checker.StableProcessHandle, 'open', return_value=handle),
+            patch.object(checker.AgentShellTarget, '_native_process_environment', return_value=environment),
+            patch.object(checker, 'remaining_before', side_effect=[1, TimeoutError('deadline expired')]),
+        ):
+            with self.assertRaisesRegex(TimeoutError, 'deadline expired'):
+                checker.AgentShellTarget.native_nvim_sandbox_handles(root, deadline=1)
+        handle.close.assert_called_once()
+
+    @unittest.skipIf(sys.platform == "win32", "no SIGKILL on Windows")
+    def test_adoption_failure_kills_and_closes_exact_match_batch(self):
+        handle = Mock(pid=100, identity=(100, 1))
+        subreaper = Mock()
+        subreaper.adopted_roots.side_effect = RuntimeError('adoption failed')
+        with (
+            patch.object(checker.platform, 'system', return_value='Linux'),
+            patch.object(checker.AgentShellTarget, '_native_process_snapshot', return_value=({}, {100})),
+            patch.object(checker.AgentShellTarget, 'native_nvim_sandbox_handles', return_value={handle.identity: handle}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, 'adoption failed'):
+                checker.AgentShellTarget.terminate_native_nvim_sandbox_processes(
+                    Path('sandbox'), linux_subreaper=subreaper)
+        handle.signal.assert_called_once_with(signal.SIGKILL)
+        handle.close.assert_called_once()
+
+    @unittest.skipUnless(shutil.which("bash") and os.name != "nt", "requires a POSIX Bash")
+    def test_wsl_config_probe_accepts_spaces_in_xdg_config_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'editor config'
+            (config / 'nvim').mkdir(parents=True)
+            target = checker.AgentShellTarget(mode='wsl')
+            with (
+                patch.dict(os.environ, {'XDG_CONFIG_HOME': str(config)}),
+                patch.object(checker.AgentShellTarget, 'posix_script_argv', side_effect=lambda script: ['bash', '-c', script]),
+            ):
+                self.assertTrue(target.configured_nvim_available(), 'existing config with spaces was skipped')
+
+    def test_png_rejects_unbounded_dimensions_and_decoded_data(self):
+        def chunk(kind, payload):
+            return struct.pack('>I', len(payload)) + kind + payload + struct.pack('>I', zlib.crc32(kind + payload))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'frame.png'
+            for width, height, decoded in [(16385, 1, b'\0' * 65541), (0, 1, b''),
+                                           (1, 1, b'\0' * 6), (1, 1, b'\0' * 1048576),
+                                           (1, 1, b'\0' * 4)]:
+                with self.subTest(width=width, height=height):
+                    path.write_bytes(b'\x89PNG\r\n\x1a\n'
+                        + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0))
+                        + chunk(b'IDAT', zlib.compress(decoded)) + chunk(b'IEND', b''))
+                    with self.assertRaisesRegex(SystemExit, 'dimensions|decoded'):
+                        checker.read_rgba_png(path)
+
+    def test_interrupted_parent_abandons_delayed_worker_launch(self):
+        started = threading.Event()
+        release = threading.Event()
+        stopped = threading.Event()
+        worker = Mock()
+        def delayed_launch(*args, **kwargs):
+            started.set()
+            release.wait(2)
+            return worker
+        def interrupt_wait(*args, **kwargs):
+            self.assertTrue(started.wait(1))
+            raise KeyboardInterrupt
+        with (
+            patch.object(checker.subprocess, 'Popen', side_effect=delayed_launch),
+            patch.object(checker.queue.Queue, 'get', side_effect=interrupt_wait),
+            patch.object(checker, '_stop_repository_worker', side_effect=lambda *args: stopped.set()),
+        ):
+            try:
+                with self.assertRaises(KeyboardInterrupt):
+                    checker._run_repository_worker(['fixture'], 2)
+            finally:
+                release.set()
+            self.assertTrue(stopped.wait(1), 'abandoned launcher did not stop its worker')
+
     def test_steady_printing_warms_the_measured_text_and_rejects_queue_writes(self):
         # A renderer may legitimately rasterize new shaped text. Replaying the
         # warmed text must still reject queue uploads and missing mapped work.
@@ -67,7 +349,7 @@ class LiveUiTests(unittest.TestCase):
 
             def ctl(self, action, params):
                 command = params["text"]
-                if command.startswith("head -c"):
+                if command.startswith("awk "):
                     self.text = "KETTLE_STEADY_DONE"
                     return
                 suffix = command.rsplit(" ", 1)[1].strip()
@@ -205,12 +487,16 @@ class LiveUiTests(unittest.TestCase):
                 lambda: checker._regular_file_digest_at(parent_fd, path.name, path,
                                                        path.stat(), checker.SnapshotCopyBudget()),
                 lambda: checker.read_bounded_regular_text(path),
+                lambda: checker.repository_file_digest(root, Path(path.name),
+                                                        checker.RepositoryProvenanceBudget()),
             ):
                 with self.subTest(reader=reader):
                     if path.exists():
                         path.unlink()
                     path.write_bytes(b"READY\n")
                     def replace_before_open(name, flags, **kwargs):
+                        if name not in (path, path.name):
+                            return real_open(name, flags, **kwargs)
                         path.unlink()
                         os.mkfifo(path)
                         self.assertTrue(flags & os.O_NONBLOCK,
@@ -250,6 +536,13 @@ class LiveUiTests(unittest.TestCase):
     # The cleanup sends SIGSTOP and SIGKILL, which Windows does not define.
     @unittest.skipIf(sys.platform == "win32", "no SIGSTOP or SIGKILL on Windows")
     def test_darwin_descendant_pid_reuse_is_not_signalled(self):
+        self.check_descendant_pid_reuse("Darwin")
+
+    @unittest.skipIf(sys.platform == "win32", "no SIGSTOP or SIGKILL on Windows")
+    def test_linux_descendant_pid_reuse_is_not_signalled(self):
+        self.check_descendant_pid_reuse("Linux")
+
+    def check_descendant_pid_reuse(self, system):
         for relationship in ("reparented", "ancestor_reused", "candidate_reused", "owned_chain"):
             with self.subTest(relationship=relationship):
                 anchor = Mock(pid=100, identity=(100, 1))
@@ -274,17 +567,22 @@ class LiveUiTests(unittest.TestCase):
                     return {}, set()
                 ticks = iter(index * 0.01 for index in range(2000))
                 with (
-                    patch.object(checker.platform, "system", return_value="Darwin"),
+                    patch.object(checker.platform, "system", return_value=system),
                     patch.object(checker.AgentShellTarget, "_native_process_snapshot", side_effect=snapshot),
                     patch.object(checker.AgentShellTarget, "native_nvim_sandbox_handles",
                                  side_effect=[{anchor.identity: anchor}] + [{}] * 100),
                     patch.object(checker, "_open_stable_process_if_present",
                                  side_effect=lambda pid, _description: descendants[pid]),
+                    patch.object(checker, "_linux_process_parent",
+                                 side_effect=lambda pid: snapshot()[0].get(pid)),
                     patch.object(checker, "_process_state", return_value="Z"),
                     patch.object(checker.time, "monotonic", side_effect=lambda: next(ticks)),
                     patch.object(checker.time, "sleep"),
                 ):
-                    checker.AgentShellTarget.terminate_native_nvim_sandbox_processes(Path("sandbox"))
+                    subreaper = Mock()
+                    subreaper.adopted_roots.return_value = {}
+                    checker.AgentShellTarget.terminate_native_nvim_sandbox_processes(
+                        Path("sandbox"), linux_subreaper=subreaper if system == "Linux" else None)
                 for handle in descendants.values():
                     if relationship == "owned_chain":
                         self.assertEqual(handle.signal.call_args_list,

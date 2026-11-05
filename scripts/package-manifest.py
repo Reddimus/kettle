@@ -182,7 +182,7 @@ def validate_manifest_document(
 
     records: dict[str, dict[str, object]] = {}
     paths = ArchivePaths()
-    total = 0
+    total = len(data)
     ordered_paths: list[str] = []
     for value in manifest["files"]:
         if not isinstance(value, dict) or set(value) != {
@@ -308,13 +308,16 @@ def build_manifest(root: Path, target: str, version: str) -> dict[str, object]:
             }
         )
 
-    return {
+    manifest = {
         "schema": SCHEMA,
         "product": "kettle",
         "target": target,
         "version": version,
         "files": records,
     }
+    if total + len(encode(manifest)) > MAX_TOTAL_BYTES:
+        raise ValueError("package contents exceed the 512 MiB safety limit")
+    return manifest
 
 
 def encode(manifest: dict[str, object]) -> bytes:
@@ -385,7 +388,7 @@ def pack_archive(archive_path: Path, root: Path, target: str, version: str) -> N
     descriptor, temporary = tempfile.mkstemp(prefix=f".{archive_path.name}.", dir=archive_path.parent)
     try:
         with os.fdopen(descriptor, "wb") as output:
-            with tarfile.open(fileobj=output, mode="w:gz", format=tarfile.GNU_FORMAT) as archive:
+            with tarfile.open(fileobj=output, mode="w:gz", format=tarfile.GNU_FORMAT, dereference=True) as archive:
                 archive.add(root, arcname="kettle", recursive=False)
                 for path in files:
                     relative = path.relative_to(root).as_posix()

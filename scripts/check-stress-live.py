@@ -242,21 +242,33 @@ def s5_sighup_ignorer(live):
 
 
 def s7_titles(live):
+    def completed(marker):
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if marker in live.json_ctl("read_screen").get("text", "").splitlines():
+                return
+            time.sleep(0.1)
+        raise RuntimeError(f"S7 command did not complete: {marker}")
+
     live.ctl(
         "send_text",
         params={
-            "text": "printf '\\033]0;%s\\007' \"$(head -c 16777216 /dev/zero | tr '\\0' T)\"\r"
+            "text": "printf '\\033]0;%s\\007' \"$(head -c 16777216 /dev/zero | tr '\\0' T)\"; "
+                    "printf '\\nKETTLE_S7_LARGE_%s\\n' DONE\r"
         },
     )
-    time.sleep(3)
+    completed("KETTLE_S7_LARGE_DONE")
+    titles = [t.get("title", "") for t in live.json_ctl("list_tabs").get("tabs", [])]
     live.ctl(
         "send_text",
         params={
-            "text": "i=0; while [ $i -lt 10000 ]; do printf '\\033]2;title %d\\007' $i; i=$((i+1)); done; echo DONE-S7\r"
+            "text": "i=0; while [ $i -lt 10000 ]; do printf '\\033]2;title %d\\007' $i; i=$((i+1)); done; "
+                    "printf '\\nKETTLE_S7_FLOOD_%s\\n' DONE\r"
         },
     )
     worst = probe_during(live, 15)
-    titles = [t.get("title", "") for t in live.json_ctl("list_tabs").get("tabs", [])]
+    completed("KETTLE_S7_FLOOD_DONE")
+    titles += [t.get("title", "") for t in live.json_ctl("list_tabs").get("tabs", [])]
     return {
         "worst_get_state_during_s": worst,
         "title_lengths": [len(t) for t in titles],

@@ -84,8 +84,8 @@ kettle_completion_show() {
   emulate -L zsh
   local LC_ALL=C kind="${1:-completion}" source="${2:-zsh}" selected="$3"
   shift 3 || return
-  local payload body='' label description addition
-  integer count=0
+  local payload body='' label description addition emitted_selected=''
+  integer count=0 input_index=0
   case "$kind" in
     (completion|prediction) ;;
     (*) kind=completion ;;
@@ -100,19 +100,20 @@ kettle_completion_show() {
     __kettle_completion_encode "$1" 64 label
     __kettle_completion_encode "$2" 256 description
     shift 2
+    (( input_index++ ))
     [[ -n "$label" ]] || continue
     addition=";$label;$description"
     (( 128 + ${#source} + ${#body} + ${#addition} <= 30000 )) || break
     body+="$addition"
+    if [[ -n "$selected" ]] && (( selected == input_index - 1 )); then
+      emitted_selected=$count
+    fi
     (( count++ ))
   done
   if (( count == 0 )); then
     kettle_completion_clear
   else
-    if [[ -n "$selected" ]] && (( selected >= count )); then
-      selected=''
-    fi
-    payload="777;kettle-completion;1;show;$__kettle_completion_generation;$kind;$selected;$source$body"
+    payload="777;kettle-completion;1;show;$__kettle_completion_generation;$kind;$emitted_selected;$source$body"
     print -rn -- $'\e]'"$payload"$'\a'
   fi
 }

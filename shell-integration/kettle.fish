@@ -669,15 +669,17 @@ if status is-interactive; and test "$TERM_PROGRAM" = kettle; and test "$KETTLE_C
         if test $__kettle_owns_tab = 1
 
             # Fish 4 resolves CSI Z to the symbolic `shift-tab` binding. Fish
-            # 3.7 needs the raw sequence. Install both spellings, but only at a
-            # spelling the user has not claimed.
+            # 3.7 needs the raw sequence and treats `shift-tab` as literal text.
+            # Install only supported spellings the user has not claimed.
             set -l __kettle_user_backtab (bind --user -M $__kettle_mode "$__kettle_backtab" 2>/dev/null | string collect)
             if test -z "$__kettle_user_backtab"; or string match --quiet '* __kettle_complete_previous' "$__kettle_user_backtab"
                 bind -M $__kettle_mode "$__kettle_backtab" __kettle_complete_previous
             end
-            set -l __kettle_user_shift_tab (bind --user -M $__kettle_mode shift-tab 2>/dev/null | string collect)
-            if test -z "$__kettle_user_shift_tab"; or string match --quiet '* __kettle_complete_previous' "$__kettle_user_shift_tab"
-                bind -M $__kettle_mode shift-tab __kettle_complete_previous
+            if test "$__kettle_fish_major" -ge 4
+                set -l __kettle_user_shift_tab (bind --user -M $__kettle_mode shift-tab 2>/dev/null | string collect)
+                if test -z "$__kettle_user_shift_tab"; or string match --quiet '* __kettle_complete_previous' "$__kettle_user_shift_tab"
+                    bind -M $__kettle_mode shift-tab __kettle_complete_previous
+                end
             end
         end
     end

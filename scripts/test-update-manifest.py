@@ -89,6 +89,27 @@ class ManifestTests(unittest.TestCase):
             result.append((target, path))
         return result
 
+    def test_timestamp_matches_client_rfc3339_boundary(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            assets = self.assets(root)
+            valid = MODULE.build_manifest('v4.1.0', '2026-07-11T00:00:00Z', assets)
+            for timestamp in ('now', '', '2026-02-29T00:00:00Z', '2026-07-11 00:00:00Z',
+                              '2026-07-11T24:00:00Z', '2026-07-11T00:00:00',
+                              '2026-07-11T00:00:00.0000000000Z', '1969-12-31T23:59:59Z',
+                              '2026-07-11T00:00:00+24:00', '2026-07-11T00:00:60Z'):
+                with self.subTest(timestamp=timestamp):
+                    with self.assertRaisesRegex(ValueError, 'RFC 3339'):
+                        MODULE.build_manifest('v4.1.0', timestamp, assets)
+                    document = {**valid, 'published_at': timestamp}
+                    path = root / 'manifest.json'
+                    path.write_bytes(MODULE.encode_manifest(document))
+                    with self.assertRaisesRegex(ValueError, 'RFC 3339'):
+                        MODULE.verify_manifest(path, 'v4.1.0', assets)
+            for timestamp in ('1970-01-01T00:00:00Z', '2000-02-29T12:34:56.123456789+02:30',
+                              '2026-07-11T00:00:00-07:00', '9999-12-31T23:59:59+23:59'):
+                self.assertEqual(MODULE.build_manifest('v4.1.0', timestamp, assets)['published_at'], timestamp)
+
     def test_documented_verification_binds_archives_and_stops_on_failure(self):
         for command in ("bash", "openssl", "shasum", "python3"):
             if shutil.which(command) is None:
@@ -212,20 +233,20 @@ class ManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             assets = self.assets(Path(raw))
             with self.assertRaises(ValueError):
-                MODULE.build_manifest("v4.0.0-rc.1", "now", assets)
+                MODULE.build_manifest("v4.0.0-rc.1", "2026-07-11T00:00:00Z", assets)
             with self.assertRaises(ValueError):
-                MODULE.build_manifest("v4.0.0", "now", assets[:-1])
+                MODULE.build_manifest("v4.0.0", "2026-07-11T00:00:00Z", assets[:-1])
             wrong = list(assets)
             wrong[0] = (wrong[0][0], Path(raw) / "wrong.zip")
             wrong[0][1].write_bytes(b"wrong")
             with self.assertRaises(ValueError):
-                MODULE.build_manifest("v4.0.0", "now", wrong)
+                MODULE.build_manifest("v4.0.0", "2026-07-11T00:00:00Z", wrong)
 
     def test_three_target_manifest_rejects_pre_retirement_releases(self):
         with tempfile.TemporaryDirectory() as raw:
             assets = self.assets(Path(raw))
             with self.assertRaisesRegex(ValueError, "v4.0.0 and later"):
-                MODULE.build_manifest("v3.3.0", "now", assets)
+                MODULE.build_manifest("v3.3.0", "2026-07-11T00:00:00Z", assets)
 
     def test_release_generator_matches_shipped_client_artifact_limit(self):
         feed_source = (
@@ -246,7 +267,7 @@ class ManifestTests(unittest.TestCase):
             with oversized.open("wb") as stream:
                 stream.truncate(MODULE.MAX_ARTIFACT_BYTES + 1)
             with self.assertRaisesRegex(ValueError, "outside the accepted range"):
-                MODULE.build_manifest("v4.0.0", "now", assets)
+                MODULE.build_manifest("v4.0.0", "2026-07-11T00:00:00Z", assets)
 
     def test_production_trust_root_is_locked_across_release_consumers(self):
         trusted_pem = (ROOT / "packaging" / "update-public.pem").read_text(

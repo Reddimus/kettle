@@ -868,11 +868,16 @@ refuses as one Kettle does not draw (`media::FileWhy::of_job`:
 `BackendUnavailable`, no decoder here, though never `SandboxUnavailable`;
 `FileTooLarge`) becomes an item for the file itself rather than a failure. A
 job that asked for a kind (a PDF's page, a Markdown gallery's, Mermaid) and
-failed keeps its failure: the file is not that kind. `media::file_facts` opens the path as
-the worker opens a source (read-only, non-blocking, no controlling
-terminal), requires a regular file, and for an `ExternalAttested` request
-the device and inode the caller attested; anything else leaves the failure
-as it was. The item's `ItemKind::File` carries its `FileFacts` (length,
+failed keeps its failure: the file is not that kind. Kettle publishes an
+`ItemKind::CheckingFile` placeholder and asks `MediaService::request_facts`
+for metadata through `WorkerClient::file_facts`. The worker opens the path as
+it opens a source (read-only, non-blocking, no controlling terminal), requires
+a regular file, and for an `ExternalAttested` request the device and inode
+the caller attested. Successful metadata changes the placeholder to
+`ItemKind::File`; missing metadata changes it to `ItemKind::FailedFile` and
+refuses the pending show reply with `WorkerUnavailable`, unless cancellation
+or timeout supplies the error. The item's `ItemKind::File` carries its
+`FileFacts` (length,
 `PathIdentity`, why), its pixels are `ItemPixels::Undrawn`, which nothing
 charges and eviction never picks, and its source is
 `ItemSource::undrawn`, which holds the job for a reload and a digest of the
@@ -908,14 +913,19 @@ managers at its system path, which only root may change
 (`file_manager::permitted`). The bus helpers and their bounds are Loupe's
 (`loupe::owner`, `bus_query`, `bounded`; a second per call, five overall).
 
-A push that asks for an inline card (`ShowRequest::inline`, sent only by
-`kettle mcp --display` with `--claude-card-hook` or `--codex-card-hook`)
-gets one only when its connection thread (`card_harness`) found the program
-that asked to be the harness it asked as, under its maker's signature
-(`Requirement::CLAUDE_CODE` or `Requirement::CODEX`, macOS only), and the
-route is verified. After the item is published, `register_card` admits the
-harness against the `media::CardLedger` (32 live cards per harness, four a
-second), mints a nonce from the OS random source with unbiased digits and no
+A push that asks for an inline card (`ShowRequest::inline`) needs a verified
+pane route. Harness cards from `kettle mcp --display` with
+`--claude-card-hook` or `--codex-card-hook` have platform-specific admission:
+on macOS the connection thread (`card_harness`) checks the requested harness
+under its maker's signature (`Requirement::CLAUDE_CODE` or
+`Requirement::CODEX`); on Linux a checked launch scope supplies a live grant
+from `agent_launches`. CLI cards from `kettle show --inline` instead require
+stdout to name the pane's terminal device, the sender's process group to be
+the terminal's foreground group, and the alternate screen to be inactive.
+These CLI checks run again when rendering completes. After the item is
+published, `register_card` admits the owner against the `media::CardLedger`
+(32 live cards per owner, four a second), mints a nonce from the OS random
+source with unbiased digits and no
 live collision, sizes the card for its harness's column and label
 (`card_size`), builds its rows and caption (`card_message`, `card_caption`,
 whose file name drops control,
@@ -1722,10 +1732,16 @@ silently shortened.
 
 Terminal events reach the App through one bounded queue per pane, 1,024 deep,
 which holds only replies to the program's queries. State events (bell, title,
-cursor blinking, OSC 52 writes, exit) are latched in `LatchedEvents`, the
-newest kept, and taken when the App drains the pane; a reply that finds the
-queue full is dropped until it drains. Nothing a program prints can close its
-pane.
+cursor blinking, exit) are latched in `LatchedEvents`, the newest kept, and
+taken when the App drains the pane; a reply that finds the queue full is
+dropped until it drains. OSC 52 clipboard stores and loads instead use a
+bounded ordered journal, drained by `take_clipboard_events`. Stores for the
+same target coalesce only after the last load: every load is a read barrier,
+even across clipboard targets that may alias. The journal allows 1,024 loads,
+2,050 entries and 2 MiB of store text, with each store capped at 1 MiB.
+Excess loads are refused; evicting an old store also drops reads that depend
+on it, through the next store to that target, so they cannot observe unrelated
+clipboard contents. Nothing a program prints can close its pane.
 
 Reply loss is sticky, including OSC 52 loads refused by the clipboard journal
 or removed with an evicted store. Headless exec checks this state so it cannot
@@ -2114,8 +2130,11 @@ launch coalesces repeated Dock events. Old windows and PTYs remain alive.
 Search crosses core, UI, and renderer boundaries without materializing the
 whole scrollback buffer:
 
-- **`kettle-core` owns matching.** `CompiledSearch` validates strict Rust
-  regex syntax and the 4096-byte UTF-8 input cap, then runs
+- **`kettle-core` owns matching.** `CompiledSearch` enforces the 4096-byte
+  UTF-8 input cap and compiles Rust regex syntax, retrying syntactically
+  invalid expressions as escaped literal text. Valid expressions retain
+  regex semantics; complexity-limit failures remain errors and do not fall
+  back to literals. It then runs
   `regex-automata`'s meta engine over a bounded terminal-grid adapter. The meta
   engine retains Rust leftmost-first behavior and Unicode assertions such as
   word boundaries. Compilation admits at most 512 KiB of Thompson NFA, 256 KiB
@@ -4550,8 +4569,10 @@ map to black; undefined nonzero-luminance chromaticity is rejected.
 
 Each floating component is at most 48 ASCII bytes with absolute value at most
 one million; only finite decimal/exponent values are accepted. RGB intensities
-and luminance are bounded to 0..1, lightness to 0..100, and xy chromaticity to the
-physical triangle. Invalid specifications leave the previous colour unchanged.
+and CIExyY/CIEuvY luminance are bounded to 0..1, lightness to 0..100, and xy
+chromaticity to the physical triangle. CIEXYZ accepts nonnegative components
+up to one million before conversion and channel clipping. Invalid
+specifications leave the previous colour unchanged.
 The no-std parser retains its existing integer RGB syntax.
 
 

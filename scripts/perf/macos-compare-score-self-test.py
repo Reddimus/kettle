@@ -125,6 +125,35 @@ def run_score(terminals: list[str]) -> ScoreResult:
 
 
 class ApplePayloadTests(unittest.TestCase):
+    def test_failed_pid_baseline_aborts_before_launch(self):
+        source = SCRIPT.read_text()
+        marker = 'cat > "$apple_run" <<\'PY\'\n'
+        start = source.index(marker) + len(marker)
+        namespace = {"__name__": "apple_run_test"}
+        exec(compile(source[start:source.index("\nPY\n", start)], str(SCRIPT), "exec"), namespace)
+        launch = mock.Mock(return_value=subprocess.CompletedProcess([], 1, '', 'fixture'))
+        namespace["osascript"] = launch
+        namespace["append_pids"] = mock.Mock()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            argv = ['apple-run', '--app', 'terminal', '--timeout', '1', '--launch-timeout', '1',
+                    '--pid-log', str(root / 'pids'), '--marker-dir', raw, '--window-log', str(root / 'windows'),
+                    '--', '/bin/true']
+            for failure in (subprocess.TimeoutExpired('pgrep', 2),
+                            subprocess.CompletedProcess([], 2, '', 'failed')):
+                launch.reset_mock()
+                with self.subTest(failure=failure), \
+                        mock.patch.dict(os.environ, {'APPLE_WINDOW_LOG': str(root / 'windows')}), \
+                        mock.patch.object(sys, 'argv', argv), \
+                        mock.patch.object(subprocess, 'run', side_effect=[failure,
+                                          subprocess.CompletedProcess([], 0, '123\n', '')]):
+                    try:
+                        namespace['main']()
+                    except (RuntimeError, OSError):
+                        pass
+                    self.assertFalse(launch.called, 'an unknown PID baseline must prevent launch')
+                    self.assertFalse((root / 'pids').exists())
+
     def test_empty_completion_marker_is_polled_until_written(self):
         source = SCRIPT.read_text()
         start = source.index('cat > "$apple_run" <<\'PY\'\n') + len('cat > "$apple_run" <<\'PY\'\n')
@@ -190,6 +219,25 @@ class ProcessCleanupTests(unittest.TestCase):
         marker = f'cat > "${variable}" <<\'{delimiter}\'\n'
         start = source.index(marker) + len(marker)
         return source[start:source.index('\n' + delimiter + '\n', start)]
+
+    def test_fast_exit_before_registration_uses_valid_completion_marker(self):
+        for marker, expected in [('0\n', 0), ('7\n', 7), ('oops7\n', 1), ('', 1)]:
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                wrapper = root / 'bounded-run'
+                wrapper.write_text(self.embedded('bounded_run', 'EOF'))
+                registry = root / 'registry.py'
+                registry.write_text('import time\ntime.sleep(0.3)\n')
+                child = root / 'child.py'
+                child.write_text('import os, sys\nfrom pathlib import Path\n'
+                                 'Path(os.environ["COMPLETION_MARKER"]).write_text(sys.argv[1])\n')
+                result = subprocess.run(
+                    ['bash', str(wrapper), '2', str(root / 'pids'), sys.executable, str(child), marker],
+                    env=dict(os.environ, PROCESS_REGISTRY=str(registry), MARKER_DIR=raw),
+                    capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, expected,
+                                 'completed child was rejected before identity registration: ' + result.stderr)
+                self.assertFalse(list(root.glob('direct-result-*')))
 
     def test_registration_timeout_reaps_unregistered_child(self):
         for behavior in ('timeout', 'empty'):

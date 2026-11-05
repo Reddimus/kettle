@@ -115,6 +115,13 @@ def check_no_inline_completion_fallbacks() -> None:
 
 def check_zsh(executable: str) -> None:
     check_correlation_binding_ownership(executable, "zsh")
+    selection = run(
+        [executable, "-f", str(FIXTURES / "zsh-completion-selection.zsh"),
+         str(INTEGRATION / "kettle.zsh")],
+        "zsh skipped completion selection fixture",
+    )
+    if b"KETTLE_ZSH_SELECTION_OK" not in selection:
+        raise RuntimeError("zsh selection fixture omitted its success sentinel")
     prompt_output = run(
         [
             executable,
@@ -1010,6 +1017,8 @@ def check_fish(executable: str) -> None:
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
 
     env = os.environ.copy()
+    env.pop("TMUX", None)
+    env.pop("STY", None)
     env.update(
         TERM="xterm-256color",
         TERM_PROGRAM="kettle",
@@ -1386,6 +1395,17 @@ def check_fish(executable: str) -> None:
     )
 
 
+def assert_powershell_prompt_order(output: bytes) -> None:
+    rendered = output.split(b"KETTLE_PROMPT_ORDER_BEGIN", 1)[1].split(
+        b"KETTLE_PROMPT_ORDER_END", 1
+    )[0]
+    markers = (b"\x1b]133;D;", b"\x1b]133;A;", b"USER-HEADER",
+               b"USER-CONSOLE", b"USER-PROMPT", OSC_B)
+    positions = [rendered.find(marker) for marker in markers]
+    if any(position < 0 for position in positions) or positions != sorted(positions):
+        raise RuntimeError("PowerShell must emit D and A before direct prompt output")
+
+
 def check_powershell(executable: str) -> None:
     check_correlation_binding_ownership(executable, "ps1")
     common = [
@@ -1397,6 +1417,13 @@ def check_powershell(executable: str) -> None:
         "Bypass",
         "-File",
     ]
+    cwd_output = run(
+        [*common, str(FIXTURES / "powershell-cwd.ps1"),
+         "-IntegrationPath", str(INTEGRATION / "kettle.ps1")],
+        f"{Path(executable).name} cwd-hostname fixture",
+    )
+    if b"KETTLE_POWERSHELL_CWD_OK" not in cwd_output:
+        raise RuntimeError("PowerShell cwd fixture omitted its success sentinel")
     token = b"0123456789abcdef0123456789abcdef"
     for replacement in ["Arm", "Enter", "Vi"]:
         correlation = run(
@@ -1427,6 +1454,7 @@ def check_powershell(executable: str) -> None:
         )
     if b"KETTLE_POWERSHELL_PROMPT_OK" not in prompt_output:
         raise RuntimeError("PowerShell prompt fixture omitted its success sentinel")
+    assert_powershell_prompt_order(prompt_output)
     syncs = re.findall(
         rb"\x1b\]777;kettle-completion;4;sync;([0-9]+);([0-3])\x07",
         prompt_output,

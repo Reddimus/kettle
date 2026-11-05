@@ -861,6 +861,10 @@ class GhosttyFrame(unittest.TestCase):
 
 
 class RoundStatistics(unittest.TestCase):
+    def test_median_interval_supports_large_sessions(self):
+        self.assertEqual(standing.median_interval(list(range(1024))), (511.5, 480, 543))
+        self.assertEqual(standing.median_interval(list(range(2048))), (1023.5, 979, 1068))
+
     def test_paired_is_the_geometric_mean_ratio_of_paired_rounds(self) -> None:
         base = [10.0, 10.0, 10.0, 10.0]
         test = [9.0, 9.0, 11.0, 9.0]
@@ -1168,6 +1172,28 @@ class Safety(unittest.TestCase):
             self.assertEqual(len(backups), 1, 'failed rollback deleted the only original bundle')
             self.assertEqual(backups[0].read_bytes(), b'old')
 
+    def test_cancellation_after_first_bundle_rename_restores_original(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            binary = root / 'kettle'
+            binary.write_bytes(b'new')
+            dest = root / 'Local.app'
+            dest.mkdir()
+            (dest / 'original').write_bytes(b'old')
+            rename = Path.rename
+            def interrupted(path, target):
+                result = rename(path, target)
+                if path == dest:
+                    raise KeyboardInterrupt('after first rename')
+                return result
+            with mock.patch.object(subprocess, 'run'), mock.patch.object(Path, 'rename', interrupted):
+                with self.assertRaises(KeyboardInterrupt):
+                    standing.bundle_kettle(binary, dest, None)
+            self.assertTrue((dest / 'original').exists(), 'cancellation lost the original bundle')
+            self.assertEqual((dest / 'original').read_bytes(), b'old')
+
     @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('swiftc'), 'needs macOS and swiftc')
     def test_launch_rejects_invalid_timeout_before_spawning(self):
         import tempfile
@@ -1415,14 +1441,17 @@ class Safety(unittest.TestCase):
             probe.chmod(0o755)
             runner = standing.Runner({"launch": probe, "stamp": probe}, work, {"kettle": "/bin/true"})
             process = runner.launch("kettle", "true", 1)
-            # Signal only once the trap is set: a loaded machine can take
-            # longer than any fixed sleep to start the shell.
-            ready = work / "launch.json.ready"
-            deadline = time.monotonic() + 10
-            while not ready.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            self.assertTrue(ready.exists(), "the probe never set its trap")
-            self.assertFalse(runner.stop(process, 5))
+            try:
+                # Signal only once the trap is set: a loaded machine can take
+                # longer than any fixed sleep to start the shell.
+                ready = work / "launch.json.ready"
+                deadline = time.monotonic() + 10
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists(), "the probe never set its trap")
+                self.assertFalse(runner.stop(process, 5))
+            finally:
+                runner.stop_current()
 
     def test_a_probe_that_never_finishes_is_cleaned_up_and_reported(self) -> None:
         import tempfile
@@ -2350,6 +2379,37 @@ class FloodTimeline(unittest.TestCase):
 
 
 class IdleFocus(unittest.TestCase):
+    def test_invalid_idle_timing_refuses_before_preparation(self):
+        import contextlib, io
+        from unittest import mock
+        for flag, values in (('--idle-window', ('0', '-1', 'nan', 'inf')),
+                             ('--idle-settle', ('-1', 'nan', 'inf'))):
+            for value in values:
+                with self.subTest(flag=flag, value=value), \
+                        mock.patch.object(sys, 'argv', ['standing', flag + '=' + value]), \
+                        mock.patch.object(standing, 'configure_observer_pilot', side_effect=SystemExit(99)) as prepare, \
+                        contextlib.redirect_stderr(io.StringIO()) as error:
+                    with self.assertRaises(SystemExit) as raised:
+                        standing.main()
+                    self.assertEqual(raised.exception.code, 2, 'invalid idle timing reached preparation')
+                    self.assertIn(flag, error.getvalue())
+                    prepare.assert_not_called()
+
+    def test_idle_rates_use_observation_timestamps(self):
+        import tempfile
+        from unittest import mock
+        first = dict(t_ns=1_000_000_000, cpu_ns=0, wakeups=0, footprint=MIB, rss=MIB)
+        second = dict(first, t_ns=1_500_000_000, cpu_ns=50_000_000, wakeups=5)
+        with tempfile.TemporaryDirectory() as raw:
+            runner = standing.Runner({}, Path(raw), {'kettle': 'fixture'})
+            with mock.patch.object(runner, 'launch'), mock.patch.object(runner, 'wait_for', return_value=True), \
+                    mock.patch.object(runner, 'frontmost', return_value=True), \
+                    mock.patch.object(runner, 'sample', side_effect=[first, second]), \
+                    mock.patch.object(runner, 'stop', return_value=True), mock.patch.object(time, 'sleep'):
+                row = runner.idle('kettle', 0, .1, False)
+        self.assertAlmostEqual(row['cpu_percent'], 10.)
+        self.assertAlmostEqual(row['wakeups_per_second'], 10.)
+
     def test_idle_round_needs_frontmost_at_every_check(self) -> None:
         first = {"cpu_ns": 0, "wakeups": 0, "footprint": 30 * MIB, "rss": 90 * MIB}
         second = {"cpu_ns": 30_000_000, "wakeups": 15, "footprint": 31 * MIB, "rss": 91 * MIB}
@@ -2578,6 +2638,86 @@ def latency_meta(day, rounds=2, **extra):
 
 
 class NativeSynchronization(unittest.TestCase):
+    def test_exit_classification_fixture_survives_delayed_parent(self):
+        from unittest import mock
+        tick = 0
+        def clock():
+            nonlocal tick
+            tick += .01
+            return tick
+        def spawn(argv, **kwargs):
+            out, stamp = Path(argv[1]), Path(argv[2])
+            early = argv[5:] != ['/bin/sleep', '30']
+            if argv[5:] != ['/bin/sleep', '0.3']:
+                Path(str(stamp) + '.pid').touch()
+            helper = mock.Mock(pid=123)
+            helper.poll.return_value = 0
+            def wait(**kwargs):
+                out.write_text(json_dumps(dict(stopped=not early, killed=False, exit_ms=1.)))
+                Path(str(stamp) + '.pid').unlink(missing_ok=True)
+                return 0
+            helper.wait.side_effect = wait
+            return helper
+        read_text = Path.read_text
+        def read(path, *args, **kwargs):
+            text = read_text(path, *args, **kwargs)
+            if path.name == 'stamp.pid' and not text:
+                path.write_text('456')
+            return text
+        with mock.patch.object(shutil, 'which', return_value='/fixture/swiftc'), \
+                mock.patch.object(sys, 'platform', 'darwin'), \
+                mock.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'Z\n', '')), \
+                mock.patch.object(subprocess, 'Popen', side_effect=spawn), \
+                mock.patch.object(time, 'monotonic', side_effect=clock), mock.patch.object(time, 'sleep'), \
+                mock.patch.object(Path, 'read_text', read), \
+                mock.patch.object(os, 'kill'), \
+                mock.patch.object(os, 'waitpid', return_value=(123, (signal.SIGSTOP << 8) | 0x7f)):
+            ObserverPilot().test_launch_helper_records_an_exit_apart_from_a_stop()
+
+    def test_s3_smoke_without_macos_clock_constant(self):
+        from unittest import mock
+        with mock.patch.dict(time.__dict__):
+            time.__dict__.pop('CLOCK_UPTIME_RAW', None)
+            S3Evidence().test_s3_smoke_uses_tracker_payload_and_ci_checks_every_success()
+
+    def test_keyblock_tests_read_fragmented_initialization(self):
+        import pty, select, tempfile
+        from unittest import mock
+        prefix = b'\x1b[?25l\x1b[2 q\x1b[0m\x1b[2J\x1b[H'
+        def block(on):
+            return b''.join(f'\x1b[{r};53H\x1b[{7 if on else 27}m'.encode() + b' ' * 16
+                            for r in range(17, 21)) + b'\x1b[0m'
+        for method, count in ((Latency.test_keyblock_toggles_on_each_byte_and_logs_in_order, 3),
+                              (Latency.test_keyblock_cursor_mode_waits_on_a_real_terminal, 7)):
+            with self.subTest(method=method.__name__), tempfile.TemporaryDirectory() as raw:
+                case = Latency()
+                case.root = Path(raw)
+                (case.root / 'ack').write_text('ENABLED 1\n')
+                chunks = [prefix, block(False) + block(True)]
+                chunks += [block(i % 2 == 0) for i in range(1, 3 if count == 3 else 6)]
+                if count == 7:
+                    chunks += [b'\x1b[?25h\x1b[1 q\x1b[2;3H', b'\x1b[2;3H']
+                records = {i: (1, i * 10, i * 10 + 1) for i in range(1, count + 1)}
+                with mock.patch.object(pty, 'fork', return_value=(123, 42)), \
+                        mock.patch.object(select, 'select', return_value=([42], [], [])), \
+                        mock.patch.object(os, 'read', side_effect=chunks), mock.patch.object(os, 'write'), \
+                        mock.patch.object(os, 'close'), mock.patch.object(os, 'open', return_value=43), \
+                        mock.patch.object(os, 'mkfifo'), mock.patch.object(os, 'waitpid', return_value=(0, 0)), \
+                        mock.patch.object(subprocess, 'run'), mock.patch.object(time, 'sleep'), \
+                        mock.patch.object(standing, 'read_keyblock_log', return_value=records):
+                    getattr(method, '__wrapped__', method)(case)
+
+    def test_fake_probe_is_stopped_when_readiness_assertion_fails(self):
+        from unittest import mock
+        case = Safety()
+        with mock.patch.object(standing.Runner, 'launch'), \
+                mock.patch.object(standing.Runner, 'stop_current') as stop, \
+                mock.patch.object(Path, 'exists', return_value=True), \
+                mock.patch.object(case, 'assertTrue', side_effect=AssertionError('delayed readiness')):
+            with self.assertRaisesRegex(AssertionError, 'delayed readiness'):
+                case.test_a_terminal_the_probe_had_to_kill_is_not_a_clean_stop()
+            stop.assert_called_once()
+
     def test_fake_probe_tests_always_clean_up_after_pid_read_failure(self):
         from unittest import mock
         for method in (Safety.test_a_probe_that_ignores_stop_is_killed_with_its_group_and_reported,
@@ -2634,12 +2774,13 @@ class NativeSynchronization(unittest.TestCase):
                 def closed(fd):
                     if fd == 42:
                         self.assertTrue(ready, 'PTY closed before final log record')
+                init = b'\x1b[?25l\x1b[2 q\x1b[20;53H\x1b[27m' + b' ' * 16 + b'\x1b[0m'
                 frame = b'\x1b[?25l\x1b[2 q\x1b[27m\x1b[7m\x1b[2;3H' + b'\x1b[' * 3 + b'\x1b[0m'
                 if count == 7:
                     frame += b'\x1b[?25h\x1b[1 q\x1b[2;3H'
                 with mock.patch.object(pty, 'fork', return_value=(123, 42)), \
                         mock.patch.object(select, 'select', return_value=([42], [], [])), \
-                        mock.patch.object(os, 'read', return_value=frame), mock.patch.object(os, 'write'), \
+                        mock.patch.object(os, 'read', side_effect=[init] + [frame] * 10), mock.patch.object(os, 'write'), \
                         mock.patch.object(os, 'close', side_effect=closed), mock.patch.object(os, 'open', return_value=43), \
                         mock.patch.object(os, 'mkfifo'), mock.patch.object(os, 'waitpid', return_value=(0, 0)), \
                         mock.patch.object(subprocess, 'run'), mock.patch.object(time, 'sleep'), \
@@ -2648,6 +2789,40 @@ class NativeSynchronization(unittest.TestCase):
 
 
 class Latency(unittest.TestCase):
+    def test_broken_entry_does_not_stop_healthy_rotated_entry(self):
+        import contextlib, io
+        from unittest.mock import patch
+        out = self.root / 'campaign'
+        calls = []
+        def latency(runner, name, options, seed, keep):
+            calls.append(name)
+            (out / 'private-config/grid').write_text('120 36\n')
+            return {'error': 'fixture failure'} if name == 'kettle-b' else latency_run([10.] * 2)
+        state = dict(display={'fixture': 1}, power={}, low_power=False, load=[0., 0.], procs=[])
+        argv = ['standing', '--workloads', 'latency', '--rounds', '4', '--peers', '', '--no-build',
+                '--kettle', '/fixture/A.app/Contents/MacOS/kettle', '--kettle-b', '/fixture/B.app/Contents/MacOS/kettle',
+                '--fd-limit', '0', '--latency-keys', '2', '--out-dir', str(out)]
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(sys, 'argv', argv))
+            stack.enter_context(patch.object(sys, 'platform', 'darwin'))
+            stack.enter_context(patch.dict(os.environ, {'HOME': str(self.root)}))
+            for name, value in [('require_bundles', None), ('build_probes', {}), ('probe_tool_identity', ({}, {})),
+                                ('collect_preflight', state), ('preflight_refusals', []), ('command', 'fixture'),
+                                ('harness_revision', {}), ('terminal_identity', ({'sha256': 'same'}, {})),
+                                ('file_sha256', 'a' * 64), ('latency_grants', {'screen_recording': True, 'accessibility': True}),
+                                ('validate_latency_probe', {}), ('start_caffeinate', None)]:
+                stack.enter_context(patch.object(standing, name, return_value=value))
+            stack.enter_context(patch.object(standing, 'probe_lock', return_value=contextlib.nullcontext()))
+            stack.enter_context(patch.object(standing.hc, 'build_helpers', return_value={'latency-probe': Path('/fixture-probe')}))
+            stack.enter_context(patch.object(standing.Runner, 'latency', latency))
+            stack.enter_context(patch.object(standing.Runner, 'stop_current'))
+            stack.enter_context(patch.object(subprocess, 'Popen', side_effect=AssertionError('no launches')))
+            stack.enter_context(patch.object(time, 'sleep'))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            self.assertEqual(standing.main(), 0)
+        self.assertEqual(calls.count('kettle-a'), 4, 'a broken peer stopped the healthy entry')
+        self.assertEqual(calls.count('kettle-b'), 4)
+
     def setUp(self) -> None:
         import tempfile
 
@@ -2688,16 +2863,21 @@ class Latency(unittest.TestCase):
         if pid == 0:
             os.execv(str(binary), [str(binary), str(log)])
 
+        pending = b""
         def read_until(marker: bytes, timeout: float = 5.0) -> bytes:
-            data = b""
+            nonlocal pending
+            data, pending = pending, b""
             deadline = clock.monotonic() + timeout
             while marker not in data and clock.monotonic() < deadline:
                 if select.select([fd], [], [], 0.1)[0]:
                     data += os.read(fd, 4096)
+            if marker in data:
+                end = data.index(marker) + len(marker)
+                data, pending = data[:end], data[end:]
             return data
 
         try:
-            init = read_until(b"\x1b[0m", 5)
+            init = read_until(b"\x1b[20;53H\x1b[27m" + b" " * 16 + b"\x1b[0m", 5)
             self.assertIn(b"\x1b[?25l\x1b[2 q", init, "hides the cursor and makes it a steady block")
             self.assertIn(b"\x1b[27m", init, "starts with the block off")
             for expected in (b"\x1b[7m", b"\x1b[27m", b"\x1b[7m"):
@@ -2741,8 +2921,10 @@ class Latency(unittest.TestCase):
         if pid == 0:
             os.execv(str(binary), [str(binary), str(log), "cursor", str(control), str(ack), "20000"])
 
+        pending = b""
         def read_until(marker: bytes, timeout: float = 5.0) -> bytes:
-            data = b""
+            nonlocal pending
+            data, pending = pending, b""
             deadline = clock.monotonic() + timeout
             while marker not in data and clock.monotonic() < deadline:
                 if select.select([fd], [], [], 0.1)[0]:
@@ -2750,10 +2932,13 @@ class Latency(unittest.TestCase):
                         data += os.read(fd, 4096)
                     except OSError:
                         break
+            if marker in data:
+                end = data.index(marker) + len(marker)
+                data, pending = data[:end], data[end:]
             return data
 
         try:
-            self.assertIn(b"\x1b[?25l\x1b[2 q", read_until(b"\x1b[0m"))
+            self.assertIn(b"\x1b[?25l\x1b[2 q", read_until(b"\x1b[20;53H\x1b[27m" + b" " * 16 + b"\x1b[0m"))
             clock.sleep(1.0)
             self.assertEqual(os.waitpid(pid, os.WNOHANG), (0, 0), "cursor mode must keep waiting")
             for _ in range(6):
@@ -3191,6 +3376,20 @@ class Latency(unittest.TestCase):
 
 
 class ProbeIntegrity(unittest.TestCase):
+    def test_bundle_snapshot_refuses_oversized_files_and_total(self):
+        from unittest import mock
+        for sizes in ((65,), (48, 48, 48)):
+            with self.subTest(sizes=sizes):
+                app = self.root / ('large-' + str(len(sizes)) + '.app')
+                app.mkdir()
+                for index, size in enumerate(sizes):
+                    with (app / str(index)).open('wb') as stream:
+                        stream.truncate(size)
+                with mock.patch.object(standing, 'PROBE_BUNDLE_FILE_LIMIT', 64, create=True), \
+                        mock.patch.object(standing, 'PROBE_BUNDLE_TOTAL_LIMIT', 128, create=True):
+                    with self.assertRaisesRegex(RuntimeError, 'bundle size limit'):
+                        standing.probe_bundle_snapshot(app)
+
     """Portable filesystem/subprocess decisions. No invocation reaches macOS."""
 
     def setUp(self):
@@ -4189,6 +4388,19 @@ class MetricContracts(unittest.TestCase):
 
 
 class ConfigClosureTests(unittest.TestCase):
+    def test_recording_overrides_do_not_reach_benchmark_launches(self):
+        from unittest.mock import Mock, patch
+        closure = self.capture()
+        runner = standing.Runner({'launch': self.root / 'launch', 'stamp': self.root / 'stamp'},
+                                 self.root, {'kettle': 'fixture'})
+        runner.config_closure = closure
+        overrides = {'KETTLE_RECORD': 'capture.cast', 'KETTLE_RECORD_DIR': str(self.root),
+                     'KETTLE_RECORD_RAW_INPUT': '1'}
+        with patch.dict(os.environ, overrides), patch.object(subprocess, 'Popen', return_value=Mock()) as spawn:
+            runner.launch('kettle', 'true', 1)
+        self.assertFalse(set(overrides) & spawn.call_args.kwargs['env'].keys(),
+                         'ambient recording must not change measured work')
+
     """PR 3 regression cases use frozen files, never a terminal or user config."""
     def setUp(self):
         import tempfile
@@ -5036,7 +5248,7 @@ class S3Evidence(unittest.TestCase):
                 return {"surface": {"width": 1296}, "cell": {"width": 8.4}, "padding": {},
                         "scale_factor": 1., "monitor": {"width": 1920, "height": 1080}}
             def screenshot(self, path): pass
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(module, "LiveKettle", Live), mock.patch.object(module.platform, "system", return_value="Darwin"), mock.patch.object(module.subprocess, "run", side_effect=lambda args, **kw: Path(args[args.index("-o") + 1]).touch()), mock.patch.object(module.time, "clock_gettime_ns", return_value=10):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(module, "LiveKettle", Live), mock.patch.object(module.platform, "system", return_value="Darwin"), mock.patch.object(module.subprocess, "run", side_effect=lambda args, **kw: Path(args[args.index("-o") + 1]).touch()), mock.patch.object(module.time, "clock_gettime_ns", return_value=10), mock.patch.object(module.time, "CLOCK_UPTIME_RAW", 1, create=True):
             out = module.run_default_window_size("kettle", Path(tmp))
             result = _json.loads((out / "analysis.json").read_text())
             self.assertEqual(result["explicit"]["startup"]["native"]["state"], "supported")
@@ -5543,6 +5755,76 @@ class CursorLayerEvidence(unittest.TestCase):
 
 class OutputBlink(unittest.TestCase):
     """Portable PR 4 contracts; native fixture tests never launch a GUI."""
+    def test_nested_validation_is_unproven_and_does_not_hide_valid_file(self):
+        import tempfile
+        from unittest import mock
+        decoder = _json.JSONDecoder()
+        decoder.scan_once = _json.scanner.py_make_scanner(decoder)
+        with tempfile.TemporaryDirectory() as raw:
+            bad, good = Path(raw) / 'bad.json', Path(raw) / 'good.json'
+            bad.write_text('[' * 1500 + '0' + ']' * 1500)
+            good.write_text(_json.dumps(self.capture()))
+            with mock.patch.object(standing.hc.json, 'loads', side_effect=lambda data: decoder.decode(data.decode())):
+                activity, evidence = standing.hc.blink_evidence(bad, self.setup())
+                self.assertEqual(activity, 'unproven')
+                self.assertEqual(evidence['reason'], 'blink validation unreadable')
+                chosen, activity, _ = standing.hc.select_validation([bad, good], self.setup())
+                self.assertEqual((chosen, activity), (good, 'verified'))
+
+    @unittest.skipUnless(shutil.which('swiftc'), 'needs swiftc')
+    def test_probe_result_write_failure_exits_nonzero_with_diagnostic(self):
+        import tempfile
+        source = (HERE / 'macos-standing/latency-probe.swift').read_text()
+        functions = []
+        for marker in ('func write(_ object:', 'func finish(_ object:'):
+            start = source.index(marker)
+            functions.append(source[start:source.index('\n}', start) + 2])
+        fixture = 'import Foundation\nlet gate = NSLock()\n' + '\n'.join(functions)
+        fixture += '\nfinish(["answer": 42], to: CommandLine.arguments[1], code: 0)\n'
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            path, binary = root / 'write.swift', root / 'write'
+            path.write_text(fixture)
+            subprocess.run(['swiftc', str(path), '-o', str(binary)], check=True, capture_output=True)
+            success = subprocess.run([str(binary), str(root / 'result.json')], capture_output=True, text=True)
+            self.assertEqual(success.returncode, 0, success.stderr)
+            self.assertEqual(_json.loads((root / 'result.json').read_text()), {'answer': 42})
+            failure = subprocess.run([str(binary), str(root / 'missing/result.json')], capture_output=True, text=True)
+        self.assertNotEqual(failure.returncode, 0, 'a lost result must not report success')
+        self.assertIn('could not write result', failure.stderr)
+
+    @unittest.skipUnless(shutil.which('swiftc'), 'needs swiftc')
+    def test_blink_accepts_frame_published_during_snapshot(self):
+        import tempfile
+        source = (HERE / 'macos-standing/latency-probe.swift').read_text()
+        start = source.index('            guard invocationAlive(options.leaseFile)', source.index('func blinkCheck'))
+        start = source.index('\n', start) + 1
+        decision = source[start:source.index('            let visible =', start)]
+        decision = decision.replace('clock_gettime_nsec_np(CLOCK_UPTIME_RAW)', 'now()')
+        fixture = '''import Foundation
+struct Failure: Error { let reason: String }
+var clock: UInt64 = 100
+func now() -> UInt64 { clock }
+class Capture {
+    func snapshot() -> (UInt64, String, String)? {
+        clock = 110
+        return (110, "hash", "complete")
+    }
+}
+let capture = Capture()
+func sample() throws {
+''' + decision + '''
+    precondition(arrival <= t && hash == "hash" && status == "complete")
+}
+do { try sample() } catch { print(error); exit(1) }
+'''
+        with tempfile.TemporaryDirectory() as raw:
+            path, binary = Path(raw) / 'sample.swift', Path(raw) / 'sample'
+            path.write_text(fixture)
+            subprocess.run(['swiftc', str(path), '-o', str(binary)], check=True, capture_output=True)
+            result = subprocess.run([str(binary)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, 'a concurrently arriving frame is fresh: ' + result.stdout)
+
     def native_fixture(self, name, data=None, offsets=False):
         """Compile the changed source and execute only its GUI-free entry."""
         import tempfile
@@ -6653,6 +6935,15 @@ int main(int argc, char **argv) { return payload_main(argc,argv); }
 
 
 class CursorLatency(unittest.TestCase):
+    def test_deeply_nested_exit_json_is_a_failed_record(self):
+        from unittest import mock
+        decoder = _json.JSONDecoder(object_pairs_hook=standing.cursor.object_pairs)
+        decoder.scan_once = _json.scanner.py_make_scanner(decoder)
+        text = 'cursor_exit_v1 ' + '[' * 1500 + '0' + ']' * 1500 + '\n'
+        with mock.patch.object(standing.cursor.json, 'loads', side_effect=lambda text, **kw: decoder.decode(text)), \
+                self.assertRaisesRegex(ValueError, 'malformed cursor exit JSON'):
+            standing.cursor.parse_exits(text, 'fixture', 9, {}, {}, 1, 3, standing.percentile)
+
     def fixture(self, warmup=1, measured=3, durations=None):
         durations = durations or [9000] * warmup + [1000, 2000, 3000][:measured]
         launch, window, pane = '0123456789abcdef0123456789abcdef', 9, 2
@@ -8365,18 +8656,41 @@ class ObserverPilot(unittest.TestCase):
             build = subprocess.run(['swiftc', '-O', str(HERE/'macos-standing'/'launch.swift'), '-o', str(binary)],
                                    capture_output=True, text=True, timeout=180)
             self.assertEqual(build.returncode, 0, build.stderr)
-            for child, early in ((['/bin/sleep', '0.3'], True), (['/bin/sleep', '30'], False)):
+            release = work / 'release'
+            child_wait = [sys.executable, '-c',
+                          'import sys, time; from pathlib import Path; '
+                          'p = Path(sys.argv[1]); '
+                          'exec("while not p.exists(): time.sleep(.01)")',
+                          str(release)]
+            for child, early in ((child_wait, True), (['/bin/sleep', '30'], False)):
                 out, stamp = work/'launch.json', work/'stamp'
                 out.unlink(missing_ok=True)
-                helper = subprocess.Popen([str(binary), str(out), str(stamp), '20', '--', *child])
+                helper = subprocess.Popen([str(binary), str(out), str(stamp), '20', '--', *child],
+                                          start_new_session=True)
                 try:
                     deadline = time.monotonic() + 10
-                    while not Path(str(stamp)+'.pid').exists() and time.monotonic() < deadline:
+                    pid_file = Path(str(stamp)+'.pid')
+                    child_pid = None
+                    while time.monotonic() < deadline:
+                        if pid_file.exists() and (value := pid_file.read_text().strip()):
+                            child_pid = int(value)
+                            break
                         time.sleep(.01)
-                    self.assertTrue(Path(str(stamp)+'.pid').exists())
+                    self.assertIsNotNone(child_pid, 'the helper never published its child PID')
                     if early:
                         os.kill(helper.pid, sig.SIGSTOP)
-                        time.sleep(1.)
+                        held, status = os.waitpid(helper.pid, os.WUNTRACED)
+                        self.assertEqual(held, helper.pid)
+                        self.assertTrue(os.WIFSTOPPED(status))
+                        release.touch()
+                        deadline = time.monotonic() + 10
+                        while True:
+                            state = subprocess.run(['ps', '-o', 'stat=', '-p', str(child_pid)],
+                                                   capture_output=True, text=True, check=True).stdout.strip()
+                            if state.startswith('Z') or time.monotonic() >= deadline:
+                                break
+                            time.sleep(.01)
+                        self.assertTrue(state.startswith('Z'), 'the child must exit while its helper is held')
                     os.kill(helper.pid, sig.SIGTERM)
                     if early:
                         os.kill(helper.pid, sig.SIGCONT)
@@ -8384,7 +8698,7 @@ class ObserverPilot(unittest.TestCase):
                 finally:
                     if helper.poll() is None:
                         os.kill(helper.pid, sig.SIGCONT)
-                        os.kill(helper.pid, sig.SIGKILL)
+                        os.killpg(helper.pid, sig.SIGKILL)
                         helper.wait()
                 record = _json.loads(out.read_text())
                 self.assertEqual(standing.shutdown_kind(record, True), 'exited' if early else 'stopped', record)

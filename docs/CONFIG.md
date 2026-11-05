@@ -478,7 +478,7 @@ for everything else:
 | Mouse-hide while typing (✓) | `mouse-hide-while-typing` |
 | Confirm close (radio: always/multiple terminals/never) | `ask-before-closing` |
 | Font size + / − | (live-only; `font-size` not auto-persisted yet) |
-| Advanced… | opens `~/.config/kettle/config` with the default app |
+| Advanced… | opens the active configuration file (`--config FILE` or `--profile NAME`), falling back to the platform default resolved by `kettle --config-path`, with the default app |
 
 Each click both mutates the running `Config` (the change takes effect
 immediately) and atomically rewrites the matching line in the config file via
@@ -764,8 +764,10 @@ lane the keyboard, and its footer says "Keyboard: preview": the arrows move
 the picture (or scroll a source), Page Up and Page Down show the previous
 and next page of a PDF or gallery, Home and End its first and last, `+` and
 `-` zoom, `0` fits it (or shows a source
-from its start), `c` copies, Space plays or pauses a video (or stops its
-silent preview), `m` mutes or unmutes its sound, Left and Right step a video five seconds while it shows
+from its start), `c` copies, Space or `k` plays or pauses a video (or stops its
+silent preview), `m` mutes or unmutes its sound, `t` toggles theater mode,
+`f` toggles fullscreen, and the Context Menu key or Shift+F10 opens the
+preview menu. Left and Right step a video five seconds while it shows
 in the lane, and every other key and chord, Enter,
 digits and Kettle's own shortcuts included, does nothing, so nothing typed
 reaches the program in the pane (Option chords count on macOS). Esc, a

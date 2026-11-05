@@ -182,6 +182,33 @@ fn history_origin_advances_when_reflow_discards_oldest_rows() {
 }
 
 #[test]
+fn widening_preserves_history_prefix_identifiers_when_bottom_row_is_removed() {
+    let mut grid = Grid::<Cell>::new(3, 2, 10);
+    grid[Line(0)][Column(0)] = cell('x');
+    grid[Line(1)][Column(0)] = cell('y');
+    grid.scroll_up(&(Line(0)..Line(3)), 2);
+    grid[Line(0)][Column(0)] = cell('a');
+    grid[Line(0)][Column(1)] = cell('b');
+    grid[Line(0)][Column(1)].flags.insert(Flags::WRAPLINE);
+    grid[Line(1)][Column(0)] = cell('c');
+    grid[Line(1)][Column(1)] = cell('d');
+    grid.cursor.point = Point::new(Line(1), Column(0));
+
+    grid.resize(true, 3, 3);
+
+    assert_eq!(grid.history_size(), 1);
+    assert_eq!(grid.history_origin(), 0, "retained history prefix moved");
+    for (content, id) in [('x', 0u64), ('y', 1u64)] {
+        let line = id as i32 - grid.history_origin() as i32 - grid.history_size() as i32;
+        assert_eq!(
+            grid[Line(line)][Column(0)].c,
+            content,
+            "retained row id {id}"
+        );
+    }
+}
+
+#[test]
 fn history_origin_tracks_limit_reduction_and_full_reset() {
     let mut grid = Grid::<usize>::new(3, 1, 4);
     let region = Line(0)..Line(3);

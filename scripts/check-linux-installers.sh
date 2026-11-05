@@ -39,7 +39,6 @@ cp target/release/kettle "${normal_binary}"
 cargo_hardlink_alias="target/release/.kettle-installer-hardlink-smoke.$$"
 cleanup() {
   rm -f -- "${cargo_hardlink_alias}"
-  cp "${normal_binary}" target/release/kettle 2>/dev/null || true
   rm -rf "${tmp_root}"
 }
 trap cleanup EXIT INT TERM
@@ -283,10 +282,6 @@ assert_desktop_launch_argv "$dev_prefix" "$record_dir"
 "${dev_prefix}/share/kettle/install.sh" --uninstall > "${tmp_root}/dev-uninstall.out"
 assert_uninstalled_prefix "$dev_prefix"
 echo "linux-installer check: spaced recording prefix/install/uninstall OK"
-
-# Restore the exact release binary for the simulated public bundle and for any
-# CI smoke that follows this script.
-cp "${normal_binary}" target/release/kettle
 
 # Exercise the release-tarball layout without requiring a published tag. Only
 # this layout (and install-online.sh) may emit a stable self-update marker.
