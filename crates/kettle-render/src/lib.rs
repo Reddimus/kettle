@@ -1638,7 +1638,11 @@ impl Renderer {
             };
             let corner_mask =
                 pane_bottom_window_corner_mask(pv.rect, (sw, sh), self.rounded_window_corners);
-            if bw <= 0.0 {
+            if !geometry::pane_border_visible(panes.len(), tabbar.broadcast) {
+                // A lone pane has nothing to be told apart from: no frame,
+                // as in other terminals. Its 1 px inset stays, so geometry
+                // and hit tests do not move when a split appears.
+            } else if bw <= 0.0 {
                 // A zero handle size means no pane border. Do not send a
                 // degenerate outline to the shader: derivative AA can otherwise
                 // give a mathematical zero-width centreline visible coverage.

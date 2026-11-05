@@ -300,6 +300,13 @@ pub(crate) const OUTLINE_BOTTOM_RIGHT: u32 = 1 << 2;
 
 pub(crate) const OUTLINE_BOTTOM_LEFT: u32 = 1 << 3;
 
+/// Whether a pane is outlined. With more than one pane the focused one carries
+/// the accent and the rest the divider colour; a lone pane is outlined only
+/// while broadcast input is on, where the yellow frame is the warning.
+pub(crate) fn pane_border_visible(pane_count: usize, broadcast: bool) -> bool {
+    pane_count > 1 || broadcast
+}
+
 pub(crate) fn pane_bottom_window_corner_mask(
     rect: (f32, f32, f32, f32),
     surface: (f32, f32),
@@ -432,6 +439,13 @@ pub(crate) fn cell_locked_pen_x(cell_left: f32, x_offset_px: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_split_or_broadcast_panes_are_outlined() {
+        assert!(!pane_border_visible(1, false), "a lone pane has no frame");
+        assert!(pane_border_visible(1, true), "broadcast keeps its warning frame");
+        assert!(pane_border_visible(2, false), "split panes keep their borders");
+    }
 
     #[test]
     fn overlap_requires_positive_intersection_on_both_axes() {
