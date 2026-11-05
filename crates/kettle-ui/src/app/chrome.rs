@@ -2,6 +2,15 @@
 
 use super::*;
 
+pub(super) fn tab_bar_height(cell_height: f32, pos: TabBarPos) -> f32 {
+    let current = cell_height + 8.0;
+    if pos.is_vertical() {
+        current
+    } else {
+        current.max(cell_height + 12.0)
+    }
+}
+
 impl App {
     /// True when the cursor is over the status bar. Used
     /// by `cursor_in_chrome_band` so the OS arrow icon overrides
@@ -68,7 +77,10 @@ impl App {
             TabBarMode::Always => true,
         };
         if show {
-            Self::cell_size(ws).map_or(24.0, |(_, ch)| ch + 8.0)
+            tab_bar_height(
+                Self::cell_size(ws).map_or(16.0, |(_, ch)| ch),
+                self.cfg.tab_bar_pos,
+            )
         } else {
             0.0
         }
@@ -131,6 +143,7 @@ impl App {
                 hovered_new_tab_menu: false,
                 broadcast: ws.mux.is_broadcast_on(),
                 hovered_close_idx: None,
+                hovered_tab_idx: None,
                 drag_cursor_x: None,
                 drag_cursor_y: None,
                 // The title-edit modal owns the bar — no drag can be live.
@@ -220,12 +233,33 @@ impl App {
                 let rect = (x, y, seg_w, height);
                 // A tab narrowed below its close button's width has no room
                 // for one: the button would reach past it onto the arrows.
-                let closable = self.cfg.close_button_on_tab && seg_w >= height;
-                let close = tab_close_rect(x + seg_w - height, y, height, closable);
+                let hovered = ws
+                    .native_pointer
+                    .is_some_and(|p| rect_contains(rect, p.x as f32, p.y as f32));
+                let full_label = kettle_config::template::fill(
+                    &self.cfg.tab_format,
+                    &[
+                        ("n", &(i + 1).to_string()),
+                        ("title", label.path.as_deref().unwrap_or(&label.text)),
+                    ],
+                );
+                let hint = kettle_render::tab_shortcut_hint(i, cfg!(target_os = "macos"));
+                let cell_w = Self::cell_size(ws).map_or(8.0, |(cw, _)| cw);
+                let content = kettle_render::horizontal_tab_content_layout(
+                    rect,
+                    i == active || hovered,
+                    self.cfg.close_button_on_tab,
+                    activity != RenderTabActivity::Normal,
+                    &full_label,
+                    hint.as_deref(),
+                    cell_w,
+                );
+                let close = content.close;
                 TabSeg {
                     idx: i,
                     rect,
-                    title_rect: tab_title_rect(rect, close, closable),
+                    title_rect: content.title,
+                    hint: content.hint.zip(hint),
                     // ✕ hit zone = the trailing `height`-wide square.
                     close,
                     title: label.text.clone(),
@@ -235,6 +269,13 @@ impl App {
                 }
             })
             .collect();
+        let segments_hovered = segments
+            .iter()
+            .find(|s| {
+                ws.native_pointer
+                    .is_some_and(|p| rect_contains(s.rect, p.x as f32, p.y as f32))
+            })
+            .map(|s| s.idx);
         let to_btn = |ox: Option<f32>| ox.map_or((0.0, 0.0, 0.0, 0.0), |x| (x, y, height, height));
         TabBar {
             height,
@@ -246,10 +287,9 @@ impl App {
             hovered_new_tab_menu: ws.hovered_new_tab_menu,
             // Broadcast indicator on the active tab.
             broadcast: ws.mux.is_broadcast_on(),
-            // Hover-on-✕ chip: renderer paints a red highlight behind
-            // the close glyph; UI's `sync_cursor_icon` flips the OS
-            // cursor to Pointer at the same time.
+            // Close hover and tab hover share the physical pointer geometry.
             hovered_close_idx: ws.hovered_close_idx,
+            hovered_tab_idx: segments_hovered,
             // While a tab-bar drag is in progress, hand
             // the renderer the cursor x so it paints a translucent
             // ghost of the dragged segment under the cursor.
@@ -350,6 +390,7 @@ impl App {
                     idx: i,
                     rect,
                     title_rect: tab_title_rect(rect, close, closable),
+                    hint: None,
                     // ✕ hit zone = the trailing-right square of the
                     // segment (same axis convention as horizontal).
                     close,
@@ -385,6 +426,7 @@ impl App {
             hovered_new_tab_menu: false,
             broadcast: ws.mux.is_broadcast_on(),
             hovered_close_idx: ws.hovered_close_idx,
+            hovered_tab_idx: None,
             // A vertical strip's ghost rides the cursor's y down a fixed
             // column, so the main-axis coordinate is `y` here and `x` on the
             // horizontal bar. Using `x` here would pin the ghost to the top of

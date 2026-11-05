@@ -242,6 +242,7 @@ impl App {
                 // the overlay bar relaxes to its dim state.
                 ws.scrollbar_hover = false;
                 ws.hovered_close_idx = None;
+                ws.hovered_tab_idx = None;
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
                 ws.search.hovered_control = None;

@@ -3521,7 +3521,7 @@ fn disabled_wallpaper_discards_late_worker_frames() {
 }
 
 #[test]
-fn regression_active_close_glyph_contrasts_with_its_painted_chip() {
+fn regression_active_close_glyph_contrasts_with_its_tab_surface() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 160) else {
         eprintln!("no GPU adapter on this host; skipped");
@@ -3536,6 +3536,7 @@ fn regression_active_close_glyph_contrasts_with_its_painted_chip() {
         idx: 0,
         rect: (0.0, 0.0, 200.0, 40.0),
         title_rect: (0.0, 0.0, 150.0, 40.0),
+        hint: None,
         close: (150.0, 0.0, 40.0, 40.0),
         title: "Tab".into(),
         path: None,

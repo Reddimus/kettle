@@ -377,7 +377,7 @@ fn startup_geometry_cells_convert_to_inner_size() {
     };
     assert_eq!(
         startup_inner_size_px(&cfg),
-        Some((976, 680)),
+        Some((976, 684)),
         "120x40 cells + default padding + default top tab bar"
     );
 
@@ -402,7 +402,7 @@ fn startup_geometry_cells_convert_to_inner_size() {
     cfg.tab_bar_pos = kettle_config::TabBarPos::Top;
     assert_eq!(
         startup_inner_size_px(&cfg),
-        Some((1296, 542)),
+        Some((1296, 546)),
         "missing width comes from the 160-column default grid"
     );
     cfg.window_height = None;
@@ -414,7 +414,7 @@ fn startup_geometry_cells_convert_to_inner_size() {
 }
 
 /// A fresh window with no configured size opens at the 160x45 default
-/// grid (1296x760 logical px with the default chrome), fitted to 90 % x
+/// grid (1296x764 logical px with the default chrome), fitted to 90 % x
 /// 85 % of the monitor. The numbers below are the ones the docs quote.
 #[test]
 fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
@@ -426,12 +426,12 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
     assert_eq!((STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS), (160, 45));
     assert_eq!(
         default_startup_inner_size(&cfg, None),
-        (1296.0, 760.0),
+        (1296.0, 764.0),
         "160x45 cells + 8 px padding + the default top tab bar, no monitor known"
     );
     assert_eq!(
         default_startup_inner_size(&cfg, Some((1920.0, 1080.0))),
-        (1296.0, 760.0),
+        (1296.0, 764.0),
         "a 1080p monitor fits the whole target (about 152x41 cells at the 14 px font)"
     );
     assert_eq!(
@@ -441,7 +441,7 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
     );
     assert_eq!(
         default_startup_inner_size(&cfg, Some((3440.0, 1440.0))),
-        (1296.0, 760.0),
+        (1296.0, 764.0),
         "an ultrawide gets the same terminal-sized window, not a monitor fraction"
     );
     assert_eq!(
@@ -457,7 +457,7 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
         ..Default::default()
     };
     let tiny = Some(StartupMonitor::from_physical(640, 480, 1.0));
-    assert_eq!(startup_inner_size(&explicit, tiny), (3216.0, 3240.0));
+    assert_eq!(startup_inner_size(&explicit, tiny), (3216.0, 3244.0));
     assert_eq!(
         startup_inner_size(&cfg, tiny),
         (576.0, 408.0),

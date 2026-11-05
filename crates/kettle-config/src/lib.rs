@@ -3074,7 +3074,7 @@ impl Default for Config {
             minimum_contrast: 0.0,
             window_title_format: DEFAULT_WINDOW_TITLE_FORMAT.to_string(),
             agent_badge: "[agent] ".to_string(),
-            tab_format: "{n}: {title}".to_string(),
+            tab_format: "{title}".to_string(),
             scrollbar: ScrollbarMode::Auto,
             scrollbar_width: 6.0,
             resize_overlay: ResizeOverlayMode::AfterFirst,
@@ -7264,7 +7264,7 @@ cell-height = 1.2\n";
     #[test]
     fn tab_format_default_and_parse() {
         let d = Config::default();
-        assert_eq!(d.tab_format, "{n}: {title}");
+        assert_eq!(d.tab_format, "{title}");
         let c = Config::parse_text("tab-format = [{n}] {title}");
         assert_eq!(c.tab_format, "[{n}] {title}");
         let c2 = Config::parse_text("tab-title-format = {title}");

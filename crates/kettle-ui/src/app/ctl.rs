@@ -1006,6 +1006,7 @@ impl App {
                     "active": seg.active,
                     "rect": rect_json(seg.rect),
                     "title_rect": rect_json(seg.title_rect),
+                    "hint": seg.hint.as_ref().map(|(rect, text)| serde_json::json!({"rect": rect_json(*rect), "text": text})),
                     "close": rect_json(seg.close),
                 })
             })

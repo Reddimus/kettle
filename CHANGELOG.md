@@ -8,6 +8,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The tab strip draws the active tab as a raised surface in the terminal's
+  background with an accent edge, inactive tabs as muted labels without a
+  fill, close buttons only on the active and hovered tabs, activity as a dot
+  before the title, and on macOS each tab's `Cmd+N` shortcut when it fits.
+  The default `tab-format` is now `{title}`; set `tab-format = {n}: {title}`
+  for the previous numbered labels.
 - Settings opens as a centred two-pane window: categories in a sidebar,
   a search field that finds settings by name, description or config key,
   a one-line description under every setting, and values drawn as controls

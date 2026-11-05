@@ -1666,9 +1666,11 @@ impl App {
         let bar = self.tab_bar(ws);
         let prior_hover = (
             ws.hovered_close_idx,
+            ws.hovered_tab_idx,
             ws.hovered_new_tab,
             ws.hovered_new_tab_menu,
         );
+        ws.hovered_tab_idx = bar.hovered_tab_idx;
         ws.hovered_close_idx =
             hovered_close_button(&bar.segments, ws.cursor.x as f32, ws.cursor.y as f32);
         let (cursor_x, cursor_y) = (ws.cursor.x as f32, ws.cursor.y as f32);
@@ -1678,6 +1680,7 @@ impl App {
         if prior_hover
             != (
                 ws.hovered_close_idx,
+                ws.hovered_tab_idx,
                 ws.hovered_new_tab,
                 ws.hovered_new_tab_menu,
             )

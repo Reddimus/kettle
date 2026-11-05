@@ -919,7 +919,10 @@ impl App {
         if matches!(self.cfg.tab_bar, TabBarMode::Off) {
             return None;
         }
-        let height = ws.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0);
+        let height = tab_bar_height(
+            Self::cell_size(ws).map_or(16.0, |(_, ch)| ch),
+            self.cfg.tab_bar_pos,
+        );
         Some(self.tab_band(ws, height))
     }
 
@@ -1002,7 +1005,10 @@ impl App {
         if dist_to_rect(cx, cy, band) > 0.0 {
             return None;
         }
-        let height = Self::cell_size(w).map_or(24.0, |(_, ch)| ch + 8.0);
+        let height = tab_bar_height(
+            Self::cell_size(w).map_or(16.0, |(_, ch)| ch),
+            self.cfg.tab_bar_pos,
+        );
         let bar = self.tab_bar_at_height(w, height);
         let vertical = self.cfg.tab_bar_pos.is_vertical();
         dock_insertion_tab(&bar.segments, vertical, if vertical { cy } else { cx })

@@ -1131,6 +1131,7 @@ fn accessible_editor_characters_follow_graphemes() {
     let overlay = kettle_render::Overlay {
         palette_query: Some(text.into()),
         text_field: Some(kettle_render::TextFieldOverlay {
+            picker_header: false,
             text: text.into(),
             cursor_byte: 3,
             selection: Some((3, 14)),
@@ -1270,7 +1271,8 @@ fn settings_search_and_row_descriptions_have_layout_bounds_and_text_actions() {
     let layout = kettle_render::settings_layout(&settings, (8.0, 16.0), (1280.0, 820.0), 8.0);
     let overlay = kettle_render::Overlay {
         settings: Some(settings),
-        text_field: Some(kettle_render::TextFieldOverlay { text: "font".into(), cursor_byte: 4,
+        text_field: Some(kettle_render::TextFieldOverlay {
+            picker_header: false, text: "font".into(), cursor_byte: 4,
             selection: Some((0, 4)), rect: layout.search_rect, prefix: String::new(), hint: String::new(),
             horizontal_scroll: 0, accent_palette: 0 }), ..Default::default()
     };

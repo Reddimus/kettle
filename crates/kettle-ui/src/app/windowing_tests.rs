@@ -423,6 +423,7 @@ fn tab_drag_target_index_uses_rendered_segment_rects() {
             idx,
             rect,
             title_rect: super::tab_title_rect(rect, close, true),
+            hint: None,
             close,
             title: format!("tab-{idx}"),
             path: None,

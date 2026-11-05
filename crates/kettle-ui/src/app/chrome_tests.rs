@@ -208,6 +208,7 @@ fn hovered_close_button_finds_only_the_close_rect_hits() {
             idx: 0,
             rect: (0.0, 0.0, 100.0, 24.0),
             title_rect: (8.0, 0.0, 68.0, 24.0),
+            hint: None,
             close: (76.0, 0.0, 24.0, 24.0),
             title: "one".into(),
             path: None,
@@ -218,6 +219,7 @@ fn hovered_close_button_finds_only_the_close_rect_hits() {
             idx: 1,
             rect: (100.0, 0.0, 100.0, 24.0),
             title_rect: (108.0, 0.0, 68.0, 24.0),
+            hint: None,
             close: (176.0, 0.0, 24.0, 24.0),
             title: "two".into(),
             path: None,
@@ -254,6 +256,7 @@ fn a_vertical_tab_strip_reorders_by_the_axis_it_is_actually_stacked_on() {
             idx,
             rect,
             title_rect: super::tab_title_rect(rect, close, true),
+            hint: None,
             close,
             title: format!("tab-{idx}"),
             path: None,
@@ -461,7 +464,7 @@ fn the_side_tab_bar_places_rows_through_side_tab_rows() {
         .nth(1)
         .and_then(|rest| rest.split("\n    }\n").next())
         .expect("tab_bar body");
-    assert!(horizontal.contains("let closable = self.cfg.close_button_on_tab && seg_w >= height;"));
+    assert!(horizontal.contains("kettle_render::horizontal_tab_content_layout("));
 }
 
 /// A strip with less than `tab-min-width` between its scroll arrows still
@@ -665,5 +668,28 @@ fn vertical_tab_band_excludes_status_bands() {
         assert_eq!(top.3, 578.0);
         assert!(!super::rect_contains(top, top.0 + 10.0, 10.0));
         assert!(super::rect_contains(top, top.0 + 10.0, 30.0));
+    }
+}
+
+#[test]
+fn horizontal_tab_height_is_shared_with_restore_content_and_status_bands() {
+    use super::*;
+    for cell_height in [12.0, 16.0, 32.0] {
+        for pos in [TabBarPos::Top, TabBarPos::Bottom, TabBarPos::Left, TabBarPos::Right] {
+            let expected = cell_height + if pos.is_vertical() { 8.0 } else { 12.0 };
+            let height = tab_bar_height(cell_height, pos);
+            assert_eq!(height, expected);
+            let bands = ContentBands::default().for_restore(TabBarMode::Auto, 2, cell_height, pos);
+            assert_eq!(bands.tab_bar_h, height);
+            if pos.is_vertical() { continue; }
+            let area = content_rect_for_with_strip((800, 600), bands, pos, StatusBarMode::Off, 180.0);
+            assert_eq!(area.3, 600.0 - height);
+            assert_eq!(area.1, if pos == TabBarPos::Top { height } else { 0.0 });
+            let band = tab_band_rect((800, 600), pos, height, 180.0, 0.0, 0.0, 22.0);
+            assert_eq!(band.3, height);
+            assert_eq!(band.1, if pos == TabBarPos::Top { 0.0 } else { 578.0 - height });
+            assert!(rect_contains(band, 20.0, band.1 + height - 0.5));
+            assert!(!rect_contains(band, 20.0, band.1 + height));
+        }
     }
 }

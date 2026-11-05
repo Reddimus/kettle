@@ -1033,6 +1033,8 @@ pub struct TabSeg {
     /// Text lane within the segment, excluding fixed controls such as the
     /// trailing close button.
     pub title_rect: Rect4,
+    /// Optional right-aligned platform shortcut and its text lane.
+    pub hint: Option<(Rect4, String)>,
     /// Close-button (✕) hit rect within the segment.
     pub close: Rect4,
     pub title: String,
@@ -1106,11 +1108,12 @@ pub struct TabBar {
     pub broadcast: bool,
     /// Index of the segment whose `✕` close button is currently
     /// hovered by the mouse — used to draw a hover background so the
-    /// user can tell the trailing glyph is a real button. Browser /
-    /// Chrome / Firefox convention: the ✕ shows on every tab but the
-    /// background only appears on hover. Computed in the UI's cursor-
-    /// sync path so the renderer has zero geometry knowledge.
+    /// user can tell the trailing glyph is a real button. Horizontal tabs
+    /// show it only on the active or hovered segment; side tabs always show
+    /// it. Computed in the UI's cursor-sync path.
     pub hovered_close_idx: Option<usize>,
+    /// Horizontal segment under the pointer.
+    pub hovered_tab_idx: Option<usize>,
     /// Ghost-drag indicator: `Some(cursor_x)` while a
     /// left-button drag is in progress in the tab bar. The renderer
     /// draws a translucent overlay copy of the dragged (active) tab
@@ -1167,6 +1170,7 @@ impl TabBar {
             hovered_new_tab_menu: false,
             broadcast: false,
             hovered_close_idx: None,
+            hovered_tab_idx: None,
             drag_cursor_x: None,
             drag_cursor_y: None,
             tear_lift: 0.0,

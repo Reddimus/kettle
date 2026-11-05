@@ -821,6 +821,7 @@ impl Renderer {
             ime_text: String::new(),
             pane_titlebar_buffers: Vec::new(),
             tab_buffers: Vec::new(),
+            tab_hint_buffers: Vec::new(),
             hint_buffers: Vec::new(),
             context_menu_buffers: Vec::new(),
             context_menu_texts: Vec::new(),

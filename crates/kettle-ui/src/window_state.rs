@@ -1153,6 +1153,7 @@ pub(crate) struct WindowState {
     /// Index of the tab whose close-button (`✕`) zone the mouse cursor
     /// is currently over (pointer-cursor swap + hover-background quad).
     pub(crate) hovered_close_idx: Option<usize>,
+    pub(crate) hovered_tab_idx: Option<usize>,
     /// Hovered half of the trailing horizontal new-tab control. Stored beside
     /// close hover so pointer motion repaints only when the visual state
     /// actually changes; `tab_bar()` forwards it to the renderer.
@@ -1587,6 +1588,7 @@ impl WindowState {
             pane_drag: None,
             dock_preview: None,
             hovered_close_idx: None,
+            hovered_tab_idx: None,
             hovered_new_tab: false,
             hovered_new_tab_menu: false,
             context_menu_a11y_label: None,

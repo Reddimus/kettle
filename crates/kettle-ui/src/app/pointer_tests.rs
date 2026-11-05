@@ -1071,6 +1071,7 @@ fn a_hidden_tab_close_button_is_not_clickable() {
         idx: 0,
         rect: (0.0, 0.0, 100.0, 24.0),
         title_rect: (8.0, 0.0, 68.0, 24.0),
+        hint: None,
         close,
         title: String::new(),
         path: None,

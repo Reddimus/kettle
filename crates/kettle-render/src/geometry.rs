@@ -443,8 +443,14 @@ mod tests {
     #[test]
     fn only_split_or_broadcast_panes_are_outlined() {
         assert!(!pane_border_visible(1, false), "a lone pane has no frame");
-        assert!(pane_border_visible(1, true), "broadcast keeps its warning frame");
-        assert!(pane_border_visible(2, false), "split panes keep their borders");
+        assert!(
+            pane_border_visible(1, true),
+            "broadcast keeps its warning frame"
+        );
+        assert!(
+            pane_border_visible(2, false),
+            "split panes keep their borders"
+        );
     }
 
     #[test]

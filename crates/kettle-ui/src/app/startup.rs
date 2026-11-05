@@ -59,7 +59,6 @@ pub(super) fn cache_dir_from_env<F: Fn(&str) -> Option<String>>(
 
 const STARTUP_GEOMETRY_CELL_W: f64 = 8.0;
 const STARTUP_GEOMETRY_CELL_H: f64 = 16.0;
-const STARTUP_GEOMETRY_TAB_BAR_H: f64 = 24.0;
 const STARTUP_GEOMETRY_STATUS_BAR_H: f64 = 22.0;
 /// The grid a fresh window aims for when the config sets no size, and the
 /// value a half-specified `window-width`/`window-height` fills its other axis
@@ -67,7 +66,7 @@ const STARTUP_GEOMETRY_STATUS_BAR_H: f64 = 22.0;
 /// 110 columns and auto-opens at 144, and Codex CLI lays out two columns
 /// above ~120, so the classic 80x24 (or winit's ~800x600, 93 columns at the
 /// default font) left every fresh window too narrow for the tools Kettle
-/// targets. 160x45 baseline cells are 1296x760 logical px with the default
+/// targets. 160x45 baseline cells are 1296x764 logical px with the default
 /// chrome: about 152x41 real cells at the 14 px font on a 1080p monitor.
 pub(crate) const STARTUP_DEFAULT_COLS: u32 = 160;
 pub(crate) const STARTUP_DEFAULT_ROWS: u32 = 45;
@@ -100,7 +99,12 @@ fn startup_cells_to_logical_px(cfg: &Config, cols: u32, rows: u32) -> (f64, f64)
 
     if matches!(cfg.tab_bar, TabBarMode::Always) {
         match cfg.tab_bar_pos {
-            TabBarPos::Top | TabBarPos::Bottom => height += STARTUP_GEOMETRY_TAB_BAR_H,
+            TabBarPos::Top | TabBarPos::Bottom => {
+                height += f64::from(tab_bar_height(
+                    STARTUP_GEOMETRY_CELL_H as f32,
+                    cfg.tab_bar_pos,
+                ))
+            }
             TabBarPos::Left | TabBarPos::Right => {
                 width += f64::from(cfg.tab_bar_width.clamp(40.0, 600.0));
             }

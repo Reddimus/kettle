@@ -25,7 +25,9 @@ use labels::overlay_label_cols;
 mod text_field;
 pub use text_field::{TextFieldLayout, TextFieldOverlay, text_field_labels, text_field_rects};
 mod settings;
+mod tab_strip;
 mod terminal;
+pub use tab_strip::{HorizontalTabContent, horizontal_tab_content_layout, tab_shortcut_hint};
 mod theme;
 
 use background::{BgImageAnim, BgImageWorker, starfield_time};
@@ -514,6 +516,7 @@ pub struct Renderer {
     /// allocation; trimmed/grown alongside pane_buffers.
     pane_titlebar_buffers: Vec<TextBuffer>,
     tab_buffers: Vec<TextBuffer>,
+    tab_hint_buffers: Vec<TextBuffer>,
     hint_buffers: Vec<TextBuffer>,
     /// One text buffer per row of the right-click context menu. Reused
     /// across openings to amortize allocation; trimmed when the row
@@ -1248,116 +1251,133 @@ impl Renderer {
             } else {
                 quads.push(rect(0.0, by, sw, tabbar.height, chrome_strip_bg, 1.0));
             }
-            for s in &tabbar.segments {
-                // Vertical tabs: use the
-                // segment's own y/h (from the UI's tab-bar layout) instead of
-                // the strip-wide `by`/`tabbar.height`. For
-                // horizontal layouts the values match; for
-                // vertical they're per-row.
-                let (x, seg_y, w, seg_h) = s.rect;
-                if s.active {
-                    quads.push(rect(x, seg_y, w, seg_h, default_bg, 1.0));
-                    // When broadcast / group-input mode is on,
-                    // use a warning-yellow accent (theme palette index 3,
-                    // the standard ANSI "yellow" slot) for the active tab
-                    // so the user can't forget broadcast is enabled and
-                    // type to one pane expecting it to stay local. Other
-                    // tabs are unaffected — broadcast is scoped to the
-                    // active tab, so only the
-                    // active segment's accent flips.
-                    let accent = if tabbar.broadcast {
-                        theme.palette[3]
+            let tab_accent = if tabbar.broadcast {
+                theme.palette[3]
+            } else {
+                self.ui_accent(cfg, theme)
+            };
+            if !cfg.tab_bar_pos.is_vertical() {
+                quads.extend(tab_strip::horizontal_tab_quads(
+                    tabbar,
+                    theme,
+                    default_bg,
+                    chrome_strip_bg,
+                    tab_accent,
+                    cfg.tab_bar_pos,
+                    self.scale,
+                ));
+            } else {
+                for s in &tabbar.segments {
+                    // Vertical tabs: use the
+                    // segment's own y/h (from the UI's tab-bar layout) instead of
+                    // the strip-wide `by`/`tabbar.height`. For
+                    // horizontal layouts the values match; for
+                    // vertical they're per-row.
+                    let (x, seg_y, w, seg_h) = s.rect;
+                    if s.active {
+                        quads.push(rect(x, seg_y, w, seg_h, default_bg, 1.0));
+                        // When broadcast / group-input mode is on,
+                        // use a warning-yellow accent (theme palette index 3,
+                        // the standard ANSI "yellow" slot) for the active tab
+                        // so the user can't forget broadcast is enabled and
+                        // type to one pane expecting it to stay local. Other
+                        // tabs are unaffected — broadcast is scoped to the
+                        // active tab, so only the
+                        // active segment's accent flips.
+                        let accent = if tabbar.broadcast {
+                            theme.palette[3]
+                        } else {
+                            // Multi-window: the per-WINDOW accent
+                            // (Peacock pool slot, live-deduped), falling back to
+                            // explicit `accent-color` → theme signature.
+                            self.ui_accent(cfg, theme)
+                        };
+                        quads.push(rect(x, seg_y, 2.0, seg_h, accent, 1.0));
+                    }
+                    // Thin separator on the right (horizontal) or
+                    // bottom (vertical) of each segment. For vertical,
+                    // the UI's tab-bar layout stacks rows top-to-bottom,
+                    // so the separator goes ALONG the bottom edge of
+                    // each row instead of the right edge.
+                    if cfg.tab_bar_pos.is_vertical() {
+                        quads.push(rect(x, seg_y + seg_h - 1.0, w, 1.0, theme.background, 0.5));
                     } else {
-                        // Multi-window: the per-WINDOW accent
-                        // (Peacock pool slot, live-deduped), falling back to
-                        // explicit `accent-color` → theme signature.
-                        self.ui_accent(cfg, theme)
+                        quads.push(rect(x + w - 1.0, seg_y, 1.0, seg_h, theme.background, 0.5));
+                    }
+                    // Activity indicator dot — a small disc-
+                    // approximation in the lower-left of any *inactive*
+                    // segment whose tab has produced output (cyan) or
+                    // rung the terminal bell (yellow) since the user last
+                    // looked at it. Terminator's Activity / Urgent
+                    // Watcher affordance, surfaced inline on the tab bar
+                    // so a user driving long-running jobs in background
+                    // tabs sees the cue without polling each tab.
+                    let dot_color = match s.activity {
+                        TabActivity::Bell => Some(theme.palette[3]),
+                        TabActivity::Output => Some(theme.palette[6]),
+                        // Silent is the "your watched output
+                        // stopped" state. Dim palette[8] — same color
+                        // the inactive-pane border + chrome surfaces use,
+                        // so it reads as "low-urgency, FYI" rather than
+                        // the Output-arrived nudge.
+                        TabActivity::Silent => Some(theme.palette[8]),
+                        TabActivity::Normal => None,
                     };
-                    quads.push(rect(x, seg_y, 2.0, seg_h, accent, 1.0));
-                }
-                // Thin separator on the right (horizontal) or
-                // bottom (vertical) of each segment. For vertical,
-                // the UI's tab-bar layout stacks rows top-to-bottom,
-                // so the separator goes ALONG the bottom edge of
-                // each row instead of the right edge.
-                if cfg.tab_bar_pos.is_vertical() {
-                    quads.push(rect(x, seg_y + seg_h - 1.0, w, 1.0, theme.background, 0.5));
-                } else {
-                    quads.push(rect(x + w - 1.0, seg_y, 1.0, seg_h, theme.background, 0.5));
-                }
-                // Activity indicator dot — a small disc-
-                // approximation in the lower-left of any *inactive*
-                // segment whose tab has produced output (cyan) or
-                // rung the terminal bell (yellow) since the user last
-                // looked at it. Terminator's Activity / Urgent
-                // Watcher affordance, surfaced inline on the tab bar
-                // so a user driving long-running jobs in background
-                // tabs sees the cue without polling each tab.
-                let dot_color = match s.activity {
-                    TabActivity::Bell => Some(theme.palette[3]),
-                    TabActivity::Output => Some(theme.palette[6]),
-                    // Silent is the "your watched output
-                    // stopped" state. Dim palette[8] — same color
-                    // the inactive-pane border + chrome surfaces use,
-                    // so it reads as "low-urgency, FYI" rather than
-                    // the Output-arrived nudge.
-                    TabActivity::Silent => Some(theme.palette[8]),
-                    TabActivity::Normal => None,
-                };
-                if let Some(c) = dot_color {
-                    let r = (seg_h * 0.18).clamp(3.0, 6.0);
-                    let dx = x + 6.0;
-                    let dy = seg_y + seg_h - r * 2.0 - 4.0;
-                    // Render the dot as a small square. wgpu has no circle
-                    // primitive here, and a 6x6 to 12x12 square at high
-                    // opacity reads as a "bullet" at typical tab-bar sizes
-                    // (kitty / iTerm2 do the same in their text-only
-                    // inactive-tab indicators).
-                    quads.push(rect(dx, dy, r * 2.0, r * 2.0, c, 1.0));
-                }
-                // Close-button chip — drawn at *all* times so the user
-                // can see the close zone is a button without having to
-                // hover-discover it. Chrome / Firefox / Safari tab
-                // convention: the `✕` always has a subtle background
-                // chip, and hover bumps it to the destructive-action
-                // color (red). The chip is a small rounded-feeling
-                // square (no shader for actual rounded corners; we get
-                // the chip feel from the pad + opacity choice).
-                //
-                // Terminator parity, terminatorlib/config.py:81
-                // `close_button_on_tab`: when false, skip the close
-                // chip + the ✕ glyph entirely. Tab is still closable
-                // via Ctrl+Shift+W; just the visual chrome is removed.
-                if !cfg.close_button_on_tab {
-                    continue;
-                }
-                let (cx, cy, ccw, cch) = s.close;
-                let pad = 5.0_f32;
-                let inner_w = (ccw - pad * 2.0).max(0.0);
-                let inner_h = (cch - pad * 2.0).max(0.0);
-                let hovered = tabbar.hovered_close_idx == Some(s.idx);
-                let (chip_color, chip_alpha) = if hovered {
-                    // Hover: bright destructive-action red.
-                    (theme.palette[1], 0.85)
-                } else if s.active {
-                    // Inactive close on the *active* tab — slightly
-                    // more visible since the active tab has a brighter
-                    // surface and the chip needs more contrast.
-                    (theme.palette[8], 0.55)
-                } else {
-                    // Inactive tab: very subtle chip, just enough to
-                    // distinguish the close button from the title text.
-                    (theme.foreground, 0.12)
-                };
-                if inner_w > 0.0 && inner_h > 0.0 {
-                    quads.push(rect(
-                        cx + pad,
-                        cy + pad,
-                        inner_w,
-                        inner_h,
-                        chip_color,
-                        chip_alpha,
-                    ));
+                    if let Some(c) = dot_color {
+                        let r = (seg_h * 0.18).clamp(3.0, 6.0);
+                        let dx = x + 6.0;
+                        let dy = seg_y + seg_h - r * 2.0 - 4.0;
+                        // Render the dot as a small square. wgpu has no circle
+                        // primitive here, and a 6x6 to 12x12 square at high
+                        // opacity reads as a "bullet" at typical tab-bar sizes
+                        // (kitty / iTerm2 do the same in their text-only
+                        // inactive-tab indicators).
+                        quads.push(rect(dx, dy, r * 2.0, r * 2.0, c, 1.0));
+                    }
+                    // Close-button chip — drawn at *all* times so the user
+                    // can see the close zone is a button without having to
+                    // hover-discover it. Chrome / Firefox / Safari tab
+                    // convention: the `✕` always has a subtle background
+                    // chip, and hover bumps it to the destructive-action
+                    // color (red). The chip is a small rounded-feeling
+                    // square (no shader for actual rounded corners; we get
+                    // the chip feel from the pad + opacity choice).
+                    //
+                    // Terminator parity, terminatorlib/config.py:81
+                    // `close_button_on_tab`: when false, skip the close
+                    // chip + the ✕ glyph entirely. Tab is still closable
+                    // via Ctrl+Shift+W; just the visual chrome is removed.
+                    if !cfg.close_button_on_tab {
+                        continue;
+                    }
+                    let (cx, cy, ccw, cch) = s.close;
+                    let pad = 5.0_f32;
+                    let inner_w = (ccw - pad * 2.0).max(0.0);
+                    let inner_h = (cch - pad * 2.0).max(0.0);
+                    let hovered = tabbar.hovered_close_idx == Some(s.idx);
+                    let (chip_color, chip_alpha) = if hovered {
+                        // Hover: bright destructive-action red.
+                        (theme.palette[1], 0.85)
+                    } else if s.active {
+                        // Inactive close on the *active* tab — slightly
+                        // more visible since the active tab has a brighter
+                        // surface and the chip needs more contrast.
+                        (theme.palette[8], 0.55)
+                    } else {
+                        // Inactive tab: very subtle chip, just enough to
+                        // distinguish the close button from the title text.
+                        (theme.foreground, 0.12)
+                    };
+                    if inner_w > 0.0 && inner_h > 0.0 {
+                        quads.push(rect(
+                            cx + pad,
+                            cy + pad,
+                            inner_w,
+                            inner_h,
+                            chip_color,
+                            chip_alpha,
+                        ));
+                    }
                 }
             }
             // New-tab control group. The dropdown and `+` keep independent
@@ -1383,21 +1403,40 @@ impl Renderer {
             } else {
                 self.ui_accent(cfg, theme)
             };
-            if tabbar.hovered_new_tab_menu && mw > 0.0 {
-                quads.push(rect(mx, ny, mw, nh, accent, 0.14));
-            }
-            if tabbar.hovered_new_tab {
-                quads.push(rect(nx, ny, nw, nh, accent, 0.14));
-            }
-            if mw > 0.0 {
-                quads.push(rect(nx, ny + 6.0, 1.0, (nh - 12.0).max(0.0), accent, 0.45));
-            }
-            let cap_x = if matches!(cfg.tab_bar_pos, kettle_config::TabBarPos::Left) {
-                nx
+            if cfg.tab_bar_pos.is_vertical() {
+                if tabbar.hovered_new_tab_menu && mw > 0.0 {
+                    quads.push(rect(mx, ny, mw, nh, accent, 0.14));
+                }
+                if tabbar.hovered_new_tab {
+                    quads.push(rect(nx, ny, nw, nh, accent, 0.14));
+                }
+                if mw > 0.0 {
+                    quads.push(rect(nx, ny + 6.0, 1.0, (nh - 12.0).max(0.0), accent, 0.45));
+                }
+                let cap_x = if matches!(cfg.tab_bar_pos, kettle_config::TabBarPos::Left) {
+                    nx
+                } else {
+                    nx + nw - 2.0
+                };
+                quads.push(rect(cap_x, ny, 2.0, nh, accent, 1.0));
             } else {
-                nx + nw - 2.0
-            };
-            quads.push(rect(cap_x, ny, 2.0, nh, accent, 1.0));
+                let hover = color::over(chrome_strip_bg, theme.foreground, 0.06, false);
+                for (bounds, hovered) in [
+                    (tabbar.new_tab_menu, tabbar.hovered_new_tab_menu),
+                    (tabbar.new_tab, tabbar.hovered_new_tab),
+                ] {
+                    if hovered {
+                        tab_strip::rounded_fill(
+                            &mut quads,
+                            bounds,
+                            6.0 * self.scale,
+                            (true, true),
+                            hover,
+                            None,
+                        );
+                    }
+                }
+            }
             // Drag-in-progress ghost. While the user holds a
             // left button down on the tab bar, paint a
             // translucent overlay copy of the active segment centered
@@ -2320,8 +2359,25 @@ impl Renderer {
             // session's peak tab count (open 50, close to 5 → 50 shaped-text
             // buffers retained).
             self.tab_buffers.truncate(tabbar.segments.len());
+            while self.tab_hint_buffers.len() < tabbar.segments.len() {
+                self.tab_hint_buffers
+                    .push(TextBuffer::new(&mut self.font_system, metrics));
+            }
+            self.tab_hint_buffers.truncate(tabbar.segments.len());
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (_, _, title_w, title_h) = s.title_rect;
+                if let Some((hint_rect, hint)) = &s.hint {
+                    let buf = &mut self.tab_hint_buffers[bi];
+                    buf.set_metrics(metrics);
+                    buf.set_size(Some(hint_rect.2), Some(hint_rect.3));
+                    buf.set_text(
+                        hint,
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    buf.shape_until_scroll(&mut self.font_system, false);
+                }
                 // chars that fit: explicit title lane, ~cell_w each. The lane
                 // excludes fixed tab chrome such as the close button, so
                 // fitting and visual centering share the same coordinate space.
@@ -2367,14 +2423,19 @@ impl Renderer {
             self.tab_close_buffer
                 .set_size(Some(tabbar.height), Some(tabbar.height));
             // Constant glyph, shaped once per font family.
-            if self.tab_close_text != "✕" {
+            let close_glyph = if cfg.tab_bar_pos.is_vertical() {
+                "✕"
+            } else {
+                "×"
+            };
+            if self.tab_close_text != close_glyph {
                 self.tab_close_buffer.set_text(
-                    "✕",
+                    close_glyph,
                     &Attrs::new().family(Family::Name(&family)),
                     Shaping::Advanced,
                     None,
                 );
-                self.tab_close_text = "✕".into();
+                self.tab_close_text = close_glyph.into();
             }
             self.tab_close_buffer
                 .shape_until_scroll(&mut self.font_system, false);
@@ -3718,17 +3779,22 @@ impl Renderer {
                 let (tx, ty_px, tw, th) = s.title_rect;
                 let tab_background = if s.active {
                     default_bg
+                } else if !cfg.tab_bar_pos.is_vertical() && tabbar.hovered_tab_idx == Some(s.idx) {
+                    color::over(chrome_strip_bg, theme.foreground, 0.06, false)
                 } else {
                     chrome_strip_bg
                 };
-                let title_fg = self.chrome_colors.text(fg, tab_background);
-                let label_cols = display_width(&self.tab_texts[bi]) as f32;
-                let label_w = label_cols * cw.max(1.0);
-                let centered_left = tx + ((tw - label_w) * 0.5).max(0.0);
+                let title_fg = if s.active || cfg.tab_bar_pos.is_vertical() {
+                    self.chrome_colors.text(fg, tab_background)
+                } else {
+                    self.chrome_colors.muted(fg, tab_background)
+                };
+                let (centered_left, label_top) =
+                    tab_strip::tab_label_origin(s.title_rect, &self.tab_texts[bi], (cw, ch));
                 areas.push(TextArea {
                     buffer: &self.tab_buffers[bi],
                     left: centered_left,
-                    top: ty_px + ((th - ch) * 0.5).max(0.0),
+                    top: label_top,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: tx as i32,
@@ -3739,6 +3805,36 @@ impl Renderer {
                     default_color: gc(title_fg),
                     custom_glyphs: &[],
                 });
+                if let Some((hint_rect, _)) = &s.hint {
+                    let hint_fg = self.chrome_colors.muted(fg, tab_background);
+                    areas.push(TextArea {
+                        buffer: &self.tab_hint_buffers[bi],
+                        left: hint_rect.0,
+                        top: hint_rect.1 + ((hint_rect.3 - ch) * 0.5).max(0.0),
+                        scale: 1.0,
+                        bounds: text_bounds_for_rect(*hint_rect),
+                        default_color: gc(hint_fg),
+                        custom_glyphs: &[],
+                    });
+                }
+                if !cfg.tab_bar_pos.is_vertical() && tx - s.rect.0 >= 20.0 {
+                    let dot = match s.activity {
+                        TabActivity::Bell => Some(theme.palette[3]),
+                        TabActivity::Output => Some(theme.palette[6]),
+                        TabActivity::Silent => Some(theme.palette[8]),
+                        TabActivity::Normal => None,
+                    };
+                    if let Some(color) = dot {
+                        tab_strip::rounded_fill(
+                            &mut quads,
+                            (centered_left - 10.0, ty_px + th * 0.5 - 3.0, 6.0, 6.0),
+                            3.0,
+                            (true, true),
+                            color,
+                            None,
+                        );
+                    }
+                }
                 // `✕` close glyph — separate text area so we can color
                 // it independently of the title. Bright on hover, dim
                 // at rest (still readable, but visually subordinate to
@@ -3749,8 +3845,30 @@ impl Renderer {
                 if !cfg.close_button_on_tab {
                     continue;
                 }
+                if s.close.2 <= 0.0
+                    || (!cfg.tab_bar_pos.is_vertical()
+                        && !s.active
+                        && tabbar.hovered_tab_idx != Some(s.idx))
+                {
+                    continue;
+                }
                 let (cx, cy, ccw, cch) = s.close;
                 let hovered = tabbar.hovered_close_idx == Some(s.idx);
+                if hovered && !cfg.tab_bar_pos.is_vertical() {
+                    tab_strip::rounded_fill(
+                        &mut quads,
+                        (
+                            cx + 5.0,
+                            cy + 5.0,
+                            (ccw - 10.0).max(0.0),
+                            (cch - 10.0).max(0.0),
+                        ),
+                        6.0 * self.scale,
+                        (true, true),
+                        color::over(tab_background, theme.foreground, 0.06, false),
+                        None,
+                    );
+                }
                 let close_fg = if hovered {
                     // Dark glyph (theme.cursor_text) on the theme-red
                     // close chip (palette[1]) — higher contrast than white on the
@@ -3767,6 +3885,16 @@ impl Renderer {
                     (s.active, hovered),
                     self.config.format.is_srgb(),
                 );
+                let (close_fg, close_background) = if cfg.tab_bar_pos.is_vertical() {
+                    (close_fg, close_background)
+                } else {
+                    let background = if hovered {
+                        color::over(tab_background, theme.foreground, 0.06, false)
+                    } else {
+                        tab_background
+                    };
+                    (self.chrome_colors.muted(fg, background), background)
+                };
                 let close_fg = self.chrome_colors.icon(close_fg, close_background);
                 let (close_left, close_top) = centered_text_origin((cx, cy, ccw, cch), (cw, ch));
                 areas.push(TextArea {
@@ -3791,7 +3919,9 @@ impl Renderer {
                 fg
             };
             let toolbar_background = |colors: &mut chrome::Colors, hovered| {
-                if hovered {
+                if hovered && !cfg.tab_bar_pos.is_vertical() {
+                    color::over(chrome_strip_bg, theme.foreground, 0.06, false)
+                } else if hovered {
                     colors.surface(
                         chrome_strip_bg,
                         toolbar_accent,
@@ -3814,7 +3944,16 @@ impl Renderer {
             let plus_content = if matches!(cfg.tab_bar_pos, kettle_config::TabBarPos::Left) {
                 (nx + 2.0, ny, (nw - 2.0).max(0.0), nh)
             } else {
-                (nx, ny, (nw - 2.0).max(0.0), nh)
+                (
+                    nx,
+                    ny,
+                    if cfg.tab_bar_pos.is_vertical() {
+                        (nw - 2.0).max(0.0)
+                    } else {
+                        nw
+                    },
+                    nh,
+                )
             };
             let (plus_left, plus_top) = centered_text_origin(plus_content, (plus_w, ch));
             areas.push(TextArea {
@@ -4457,6 +4596,9 @@ impl Renderer {
             prepared_text_areas_damage_key(&card_areas).hash(&mut h);
             self.pane_titlebar_texts.hash(&mut h);
             self.tab_texts.hash(&mut h);
+            for segment in &tabbar.segments {
+                segment.hint.as_ref().map(|(_, text)| text).hash(&mut h);
+            }
             self.tabbar_text.hash(&mut h);
             self.status_bar_text.hash(&mut h);
             self.tab_close_text.hash(&mut h);
