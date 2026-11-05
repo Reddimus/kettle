@@ -137,10 +137,7 @@ fn nss_sources_are_local(mut sources: &str) -> Option<bool> {
             if !nss_name(source) {
                 return None;
             }
-            all_local &= matches!(
-                source,
-                "files" | "compat" | "systemd" | "altfiles" | "extrausers"
-            );
+            all_local &= matches!(source, "files" | "systemd" | "altfiles" | "extrausers");
             source_seen = true;
             sources = &sources[end..];
         }
@@ -170,6 +167,9 @@ mod tests {
             ("passwd: files", true),
             ("passwd: files systemd", true),
             ("passwd: files sss", false),
+            ("passwd: compat", false),
+            ("passwd: compat\npasswd_compat: ldap", false),
+            ("passwd: files compat\npasswd_compat: files", false),
             ("passwd: files [NOTFOUND=return] ldap", false),
             ("passwd: files winbind", false),
             ("passwd: files nis", false),
@@ -212,7 +212,7 @@ mod tests {
         for config in [
             "passwd: files",
             "  passwd :\tfiles\t systemd  # local accounts\n",
-            "# comment\ngroup: files sss\npasswd: files compat systemd altfiles extrausers",
+            "# comment\ngroup: files sss\npasswd: files systemd altfiles extrausers",
             "passwd: files # non-ASCII comment: \u{00e9}",
             "passwd: files [NOTFOUND=return] systemd",
             "passwd: files[!UNAVAIL=return SUCCESS=continue] systemd",
@@ -226,6 +226,9 @@ mod tests {
             "group: files",
             "passwd: files\npasswd: systemd",
             "passwd: files ldap",
+            "passwd: compat",
+            "passwd: compat\npasswd_compat: ldap",
+            "passwd: files compat\npasswd_compat: files",
             "passwd: sss files",
             "passwd: files [NOTFOUND=return] unknown",
             "passwd: files [NOTFOUND=return] nis",
