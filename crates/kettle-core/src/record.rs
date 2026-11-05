@@ -625,13 +625,15 @@ impl ReplaySafeCastWriter {
         if self.pending.is_empty() {
             return Ok(());
         }
-        let result = (|| {
-            #[cfg(test)]
-            if std::mem::take(&mut self.fail_next_write) {
-                return Err(std::io::Error::other("injected recording write failure"));
-            }
+        #[cfg(test)]
+        let injected = std::mem::take(&mut self.fail_next_write);
+        #[cfg(not(test))]
+        let injected = false;
+        let result = if injected {
+            Err(std::io::Error::other("injected recording write failure"))
+        } else {
             self.file.write_all(&self.pending)
-        })();
+        };
         if let Err(write_error) = result {
             let repair = self
                 .file
