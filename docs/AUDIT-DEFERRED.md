@@ -5,6 +5,15 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
 
 ## Security and boundaries
 
+- **A video moved onto the output name during frame publication.**
+  `crates/kettle/src/video_frames.rs` checks the destination's identity before
+  writing and then renames unconditionally, so a process that moves the input
+  video onto the output name in that window loses the video to the JPEG.
+  Deferred because a no-clobber rename changes the documented overwrite
+  behavior; the complete fix publishes with an exchange (Linux `RENAME_EXCHANGE`,
+  macOS `RENAME_SWAP`, Windows `ReplaceFile`) and swaps back when the displaced
+  file is not the one checked, with a native test per platform.
+
 - **D-Bus maintenance notices.** The product graph accepts the informational
   unmaintained notices RUSTSEC-2026-0370/0371/0372 for `zvariant 5.15.1`,
   `zvariant_derive 5.15.1` and `zbus_names 4.3.5`. The all-target exact reverse
@@ -96,6 +105,17 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
 
 ## Performance
 
+- **Menu-hover redraws still read placement grids.** `crates/kettle-ui/src/app/redraw.rs`
+  collects Kitty placeholder and relative placements before deciding to reuse
+  pane snapshots, so a menu highlight with virtual placements visible takes the
+  terminal lock and scans the grid again. Deferred until a profile shows the cost:
+  the fix caches placement projections with the snapshot generation.
+- **Synchronous X11 pointer queries during tab drags.** `crates/kettle-ui/src/app/windowing.rs`
+  queries pointer position and buttons with blocking X11 round trips on the event
+  loop while a tab is dragged, which a high-latency forwarded X connection turns
+  into visible stalls. Deferred: the fix needs an asynchronous query on a
+  dedicated connection; local X servers answer within the 16 ms tick.
+
 The [2026-11-01 diagnostics](SCALING-2026-11-01.md) sampled PTY, window and
 history scaling. Calibration refused the busy host; the partial 64-PTY
 campaign and startup outlier remain inconclusive. These entries stay open.
@@ -119,6 +139,14 @@ campaign and startup outlier remain inconclusive. These entries stay open.
   core text/cell/haystack budgets and projection cap.
 
 ## Testing
+
+- **Two macOS benchmark harness gaps.** `scripts/perf/macos-compare.sh` loses
+  its cleanup path when AppleScript times out after creating a window for an
+  already-running app, and `scripts/perf/macos-standing/latency-probe.swift`
+  checks focus only before and after a sample, so a focus round trip in between
+  passes. Both affect only owner-run measurements on a quiet machine. Close
+  with a per-launch window identity recorded before the AppleScript reply, and
+  an activation observer around each sample.
 
 - **App testability.** `crates/kettle-ui/src/app.rs` is now split into
   subsystem modules under `app/`, but event handlers still act on `App` and
