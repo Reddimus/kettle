@@ -371,6 +371,7 @@ impl App {
         // renderer takes the fonts over.
         let fonts =
             kettle_render::StartupFonts::load(&self.cfg, monitor.map_or(1.0, |m| m.scale) as f32);
+        let mut startup_titlebar_band = None;
         if matches!(open, WindowOpen::Fresh { .. })
             && matches!(state, kettle_config::WindowState::Normal)
             && pos.is_none()
@@ -385,6 +386,7 @@ impl App {
             probe.startup_scale = monitor.map_or(1.0, |m| m.scale) as f32;
             probe.startup_cell = Some(fonts.cell);
             if let Some((width, height)) = self.startup_surface(&probe, monitor) {
+                startup_titlebar_band = Self::macos_titlebar_band(&probe);
                 attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
             }
         }
@@ -418,6 +420,7 @@ impl App {
         if is_quick {
             crate::quick_terminal::native::configure(&window);
         }
+        self.correct_startup_titlebar_size(&window, startup_titlebar_band, monitor);
         let native_material =
             crate::native_material::NativeMaterial::install(&window, &self.cfg, self.proxy.clone());
         let size = window.inner_size();

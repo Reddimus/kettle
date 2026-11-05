@@ -55,6 +55,35 @@ pub(super) fn empty_titlebar_space(bar: &TabBar, x: f32, y: f32) -> bool {
 }
 
 impl App {
+    /// Reconcile estimated startup chrome while the new window is still hidden.
+    pub(super) fn correct_startup_titlebar_size(
+        &self,
+        window: &Window,
+        estimated: Option<TitlebarBand>,
+        monitor: Option<StartupMonitor>,
+    ) {
+        #[cfg(target_os = "macos")]
+        if let Some(estimated) = estimated {
+            let measured = native::measure(window);
+            let size = window.inner_size();
+            let corrected = startup_surface_with_measured_titlebar(
+                &self.cfg,
+                (size.width, size.height),
+                estimated.height,
+                measured.height,
+                monitor,
+            );
+            if corrected != (size.width, size.height) {
+                // On macOS this applies synchronously, before renderer sizing
+                // or any reveal; the queued resize event must not reapply it.
+                let _ = window
+                    .request_inner_size(winit::dpi::PhysicalSize::new(corrected.0, corrected.1));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (window, estimated, monitor);
+    }
+
     pub(super) fn sync_macos_titlebar(&self, ws: &mut WindowState) {
         #[cfg(target_os = "macos")]
         if let Some(window) = &ws.window {

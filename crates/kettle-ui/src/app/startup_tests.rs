@@ -975,3 +975,160 @@ fn only_quick_terminal_launches_read_the_previous_app_at_startup() {
     );
 }
 
+#[test]
+fn measured_startup_titlebar_correction_precedes_size_read_and_reveal() {
+    for (source, name) in [
+        (include_str!("startup.rs"), "resumed_inner"),
+        (include_str!("windowing.rs"), "open_window"),
+    ] {
+        let body = finding_body(source, name);
+        let created = body.find("event_loop.create_window(attrs)").unwrap();
+        let correction = body
+            .find("self.correct_startup_titlebar_size(")
+            .expect("correct the measured titlebar while the new window is hidden");
+        let size = body.find("let size = window.inner_size();").unwrap();
+        let reveal = body.find("set_visible(true)").unwrap();
+        assert!(created < correction && correction < size && correction < reveal);
+        assert_eq!(
+            body.matches("self.correct_startup_titlebar_size(").count(),
+            1
+        );
+    }
+    let helper = finding_body(include_str!("titlebar.rs"), "correct_startup_titlebar_size");
+    let measured = helper.find("native::measure(window)").unwrap();
+    let corrected = helper
+        .find("startup_surface_with_measured_titlebar(")
+        .unwrap();
+    let requested = helper.find("request_inner_size(").unwrap();
+    assert!(measured < corrected && corrected < requested);
+    assert_eq!(helper.matches("request_inner_size(").count(), 1);
+}
+
+#[test]
+fn measured_startup_titlebar_explicit_grid_keeps_content_and_width() {
+    use super::{
+        ContentBands, StartupMonitor, content_rect_for_with_strip, grid_dims_px,
+        startup_surface_for, startup_surface_with_measured_titlebar,
+    };
+    use kettle_config::Config;
+    for scale in [1.0, 2.0] {
+        // A small monitor must not clamp an explicitly requested grid.
+        let monitor = Some(StartupMonitor::from_display_points(640, 480, scale));
+        let cell = (9.25 * scale as f32, 18.5 * scale as f32);
+        for (width, height) in [(Some(80), Some(25)), (Some(80), None), (None, Some(25))] {
+            let cfg = Config {
+                window_width: width,
+                window_height: height,
+                ..Default::default()
+            };
+            for (estimated, measured) in [(28.0, 32.0), (32.0, 28.0), (32.0, 32.0)] {
+                let estimated = estimated * scale as f32;
+                let measured = measured * scale as f32;
+                let bands = ContentBands {
+                    tab_bar_h: estimated,
+                    ..Default::default()
+                };
+                let before = startup_surface_for(&cfg, cell, bands, monitor);
+                let after = startup_surface_with_measured_titlebar(
+                    &cfg, before, estimated, measured, monitor,
+                );
+                assert_eq!(after.0, before.0);
+                assert_eq!(
+                    after.1 as i64 - before.1 as i64,
+                    (measured - estimated) as i64
+                );
+                let area = |surface, tab_bar_h| {
+                    content_rect_for_with_strip(
+                        surface,
+                        ContentBands { tab_bar_h, ..bands },
+                        cfg.tab_bar_pos,
+                        cfg.status_bar,
+                        cfg.tab_bar_width,
+                    )
+                };
+                let old_area = area(before, estimated);
+                let new_area = area(after, measured);
+                if width == Some(80) && height == Some(25) && measured > estimated {
+                    let short = area(before, measured);
+                    assert_eq!(
+                        grid_dims_px((short.2, short.3), cell, (cfg.padding_x, cfg.padding_y)),
+                        (80, 24),
+                        "the uncorrected AppKit band reproduces the reported lost row"
+                    );
+                }
+                assert_eq!((new_area.2, new_area.3), (old_area.2, old_area.3));
+                let grid = grid_dims_px(
+                    (new_area.2, new_area.3),
+                    cell,
+                    (cfg.padding_x, cfg.padding_y),
+                );
+                if let Some(width) = width {
+                    assert_eq!(grid.0, width as usize);
+                }
+                if let Some(height) = height {
+                    assert_eq!(grid.1, height as usize);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn measured_startup_titlebar_default_grid_corrects_band_before_monitor_fit() {
+    use super::{
+        ContentBands, StartupMonitor, content_rect_for_with_strip, startup_surface_for,
+        startup_surface_with_measured_titlebar,
+    };
+    use kettle_config::Config;
+    let cfg = Config::default();
+    for scale in [1.0, 2.0] {
+        let cell = (9.25 * scale as f32, 18.5 * scale as f32);
+        for monitor in [
+            None,
+            Some(StartupMonitor::from_display_points(1920, 1080, scale)),
+            Some(StartupMonitor::from_display_points(640, 480, scale)),
+        ] {
+            // Without a monitor, startup_surface_for uses scale 1.
+            let actual_scale = monitor.map_or(1.0, |m| m.scale) as f32;
+            let estimated = 28.0 * actual_scale;
+            for measured in [28.0, 32.0, 24.0] {
+                let measured = measured * actual_scale;
+                let bands = ContentBands {
+                    tab_bar_h: estimated,
+                    ..Default::default()
+                };
+                let before = startup_surface_for(&cfg, cell, bands, monitor);
+                let after = startup_surface_with_measured_titlebar(
+                    &cfg, before, estimated, measured, monitor,
+                );
+                assert_eq!(after.0, before.0);
+                if monitor.is_some_and(|m| m.logical.1 == 480.0) {
+                    assert_eq!(
+                        after, before,
+                        "the monitor cap still wins in both directions"
+                    );
+                    assert_eq!(after.1, (408.0 * actual_scale) as u32);
+                } else {
+                    assert_eq!(
+                        after.1 as i64 - before.1 as i64,
+                        (measured - estimated) as i64
+                    );
+                    let content_height = |surface, tab_bar_h| {
+                        content_rect_for_with_strip(
+                            surface,
+                            ContentBands { tab_bar_h, ..bands },
+                            cfg.tab_bar_pos,
+                            cfg.status_bar,
+                            cfg.tab_bar_width,
+                        )
+                        .3
+                    };
+                    assert_eq!(
+                        content_height(after, measured),
+                        content_height(before, estimated)
+                    );
+                }
+            }
+        }
+    }
+}

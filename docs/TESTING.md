@@ -2964,3 +2964,13 @@ notices. Bundled-font tests check 72-point title-editor input, hints, caret and
 pointer slots; the offscreen renderer also compares painting with measurement.
 Run them offline with `cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render -p kettle-config --no-fail-fast review_`.
 These checks do not replace native window sizing or live title-editor checks.
+
+The `measured_startup_titlebar_` tests cover the hidden-window correction from
+an estimated 28-point band to AppKit's measured 32-point band, unchanged and
+smaller bands, either explicit grid axis, and default monitor fitting at 1x and
+2x. A source guard requires both window constructors to correct once before
+renderer sizing and the first reveal. Run them offline with
+`cargo test -j 2 --locked --offline -p kettle-ui measured_startup_titlebar_`.
+The live macOS check is
+`launchctl asuser $(id -u) python3 scripts/check-conformance.py esctest`;
+it requires an unlocked desktop and cannot run in the sandbox.

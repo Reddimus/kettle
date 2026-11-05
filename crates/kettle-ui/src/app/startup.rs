@@ -1142,6 +1142,7 @@ impl App {
             None
         };
         ws.startup_surface = startup_surface;
+        let startup_titlebar_band = startup_surface.and_then(|_| Self::macos_titlebar_band(ws));
         // The pane starts before the window only when the window will open at
         // this scale and size: on the monitor the cell was measured for, which
         // a configured position could change, and within it, where the OS
@@ -1206,6 +1207,7 @@ impl App {
         if self.startup.quick_terminal {
             crate::quick_terminal::native::configure(&window);
         }
+        self.correct_startup_titlebar_size(&window, startup_titlebar_band, monitor);
 
         ws.native_fullscreen = Some(crate::native_fullscreen::NativeFullscreen::install(
             &window,
@@ -1605,4 +1607,36 @@ pub(super) fn startup_surface_for(
             physical(default_h)
         },
     )
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn startup_surface_with_measured_titlebar(
+    cfg: &Config,
+    surface: (u32, u32),
+    estimated: f32,
+    measured: f32,
+    monitor: Option<StartupMonitor>,
+) -> (u32, u32) {
+    let delta = f64::from(measured - estimated);
+    if delta == 0.0 {
+        return surface;
+    }
+    let height = if cfg.window_width.is_some() || cfg.window_height.is_some() {
+        f64::from(surface.1) + delta
+    } else {
+        // Correct the default target before fitting it, so a monitor-capped
+        // window neither grows beyond the cap nor shrinks for a smaller band.
+        let scale = monitor.map_or(1.0, |m| m.scale);
+        let (_, unfitted_height) = startup_inner_size(cfg, None);
+        let height = (unfitted_height * scale).round() + delta;
+        monitor.map_or(height, |m| {
+            height.min(
+                (m.logical.1 * STARTUP_MONITOR_HEIGHT_FRACTION)
+                    .floor()
+                    .max(1.0)
+                    * scale,
+            )
+        })
+    };
+    (surface.0, height.round().max(1.0) as u32)
 }
