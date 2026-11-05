@@ -1666,12 +1666,15 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
         bind(su, Char('v'), Paste);
         bind(su, Char('t'), NewTab);
         bind(su, Char('n'), NewWindow);
-        // Apple Terminal semantics, not kettle's portable ones: Cmd+W is Close
-        // Tab and Shift+Cmd+D is Close Split Pane. Binding Cmd+W to ClosePane
+        // Cmd+W is Close Tab, as in Apple Terminal. Binding it to ClosePane
         // would silently close only the focused split of a split tab, which is
-        // not what the standard close chord means on this platform.
+        // not what the standard close chord means on this platform; panes close
+        // with the portable Ctrl+Shift+W.
         bind(su, Char('w'), CloseTab);
-        bind(sus, Char('d'), ClosePane);
+        // Cmd+D splits beside and Shift+Cmd+D splits below: the chords iTerm2,
+        // Ghostty and Warp share, so a split is where macOS users reach first.
+        bind(su, Char('d'), SplitRight);
+        bind(sus, Char('d'), SplitDown);
         bind(su, Char('f'), StartSearch);
         // Cmd+K clears the scrollback in Apple Terminal and iTerm2; the command
         // palette keeps its portable Ctrl+Shift+K and gains Shift+Cmd+P, the
@@ -2101,7 +2104,8 @@ mod tests {
                 (su, Key::Char('t'), NewTab),
                 (su, Key::Char('n'), NewWindow),
                 (su, Key::Char('w'), CloseTab),
-                (sus, Key::Char('d'), ClosePane),
+                (su, Key::Char('d'), SplitRight),
+                (sus, Key::Char('d'), SplitDown),
                 (su, Key::Char('f'), StartSearch),
                 (su, Key::Char('k'), ClearHistory),
                 (sus, Key::Char('p'), CommandPalette),

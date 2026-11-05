@@ -66,7 +66,8 @@ lists every setting.
 | Copy or paste | `Ctrl+Shift+C` or `Ctrl+Shift+V` |
 | Settings | `Ctrl+,` |
 
-macOS also has `Cmd+T`, `Cmd+C/V`, `Cmd+F` and `Cmd+,`. Run
+macOS also has `Cmd+T`, `Cmd+D` and `Shift+Cmd+D` (split beside and
+below), `Cmd+C/V`, `Cmd+F` and `Cmd+,`. Run
 `kettle --list-keybinds` for the full map, and see
 [Getting started](docs/GETTING-STARTED.md) for more.
 

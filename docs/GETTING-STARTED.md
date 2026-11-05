@@ -51,8 +51,8 @@ Kettle starts with these pane and tab keys:
 
 | Do this | Press |
 |---|---|
-| Split left/right | `Ctrl+Shift+E` |
-| Split top/bottom | `Ctrl+Shift+O` |
+| Split left/right | `Ctrl+Shift+E`, or `Cmd+D` on macOS |
+| Split top/bottom | `Ctrl+Shift+O`, or `Shift+Cmd+D` on macOS |
 | New tab | `Ctrl+Shift+T` |
 | Close pane | `Ctrl+Shift+W` |
 | Move focus between panes, Linux | `Alt + Arrow` |
