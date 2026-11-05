@@ -4629,3 +4629,13 @@ footer rectangles. Rendering, mouse hit tests, inline editing/IME, AccessKit
 bounds and `ctl ui_geometry` consume that layout with chrome font metrics,
 independent of terminal cell scaling. Diagnostics expose category, row, chip,
 label, description and search rectangles without the search query or values.
+
+Narrow category strips reserve overflow-arrow rectangles with target category
+indices. Pointer clicks and wheel notches resolve through `SettingsLayout`,
+then apply the same category transition in `SettingsNav`. Short panels reduce
+padding and omit the repeated title; the shortest panels place Search and the
+category strip side by side. Group headings are omitted when needed to retain
+a complete focused field. Picker geometry similarly reduces outer spacing to
+retain its header and one result. The renderer uses `visible_resize_overlay`
+for both size-chip text preparation and drawing, suppressing it under Settings
+or a picker card.

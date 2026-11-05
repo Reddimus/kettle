@@ -2760,3 +2760,23 @@ AccessKit tests cover row descriptions and the search text input. Every field
 must have a short description in both catalogues, and `kettle-i18n` checks
 schema and Spanish draft status coverage. These pure tests do not establish
 live rendering or native screen-reader acceptance.
+
+Pointer regression tests walk reachable categories from the initial selection,
+and apply overflow-arrow clicks and wheel paging through `SettingsNav` in both
+directions. Short-window tests cover the focused Settings editor and a picker
+header plus its selected result at 120 pixels, including 24- and 46-pixel top
+chrome for pickers. Accessibility action tests focus Search during chord
+capture and then type into the query. Resize-chip tests cover Settings, all
+four pickers, and a picker card without a query projection. The translated
+layout test includes the pseudo-locale only with debug assertions, so its
+English and Spanish cases also compile and run in release mode.
+
+Run these checks offline with the local Cargo cache:
+
+```sh
+cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render --lib settings_
+cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render --lib short_
+cargo test -j 2 --locked --offline -p kettle-ui --lib accessibility_search_focus_cancels_capture
+cargo test -j 2 --locked --offline -p kettle-render --release settings_slots_fit_english_spanish_and_measured_pseudo_text
+cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render --no-fail-fast
+```

@@ -327,3 +327,35 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
     assert!(!empty.rows[0].enabled);
     assert!(empty.rows[0].matched_chars.is_none());
 }
+
+#[test]
+fn short_picker_windows_keep_header_and_selected_result_visible() {
+    for top in [0.0, 24.0, 46.0] {
+        for surface in [(360.0, 120.0), (800.0, 120.0), (800.0, 200.0)] {
+            let list =
+                command_picker_list("", 20, &kettle_config::keybinds::defaults(), &EN_TEXT, None);
+            let menu = picker_context_menu(list, surface, (8.0, 16.0), top)
+                .expect("a restored 120px window must retain its picker");
+            let card = menu.card_rect();
+            assert!(card.1 >= top);
+            assert!(card.1 + card.3 <= surface.1);
+            assert!(menu.picker_header_height >= 16.0);
+            let row = menu
+                .visible_row_rect(menu.highlight)
+                .expect("selected result is visible");
+            assert!(row.1 >= menu.anchor.1);
+            assert!(row.1 + row.3 <= menu.anchor.1 + menu.panel_h_clamped + 0.01);
+            let mut ws = WindowState::new(0, Mux::new());
+            ws.palette_input = Some((Default::default(), 20));
+            ws.cursor.x = (row.0 + 1.0) as f64;
+            ws.cursor.y = (row.1 + 1.0) as f64;
+            assert!(super::apply_picker_pointer(
+                &mut ws,
+                &menu,
+                16.0,
+                super::PickerPointer::Press
+            ));
+            assert_eq!(ws.palette_input.as_ref().unwrap().1, menu.highlight);
+        }
+    }
+}

@@ -2540,7 +2540,7 @@ impl Renderer {
         // text ("120×40"). Drawn later in the menu pass so it sits above pane
         // content; the equality gate means a live resize only re-shapes when
         // the GRID size actually changed.
-        if let Some((rcols, rrows)) = overlay.resize_overlay {
+        if let Some((rcols, rrows)) = overlay.visible_resize_overlay() {
             let label = format!("{rcols}×{rrows}");
             // Metrics/size stay OUTSIDE the text gate: a DPI change can re-show
             // the chip with an UNCHANGED label, and gating them would leave the
@@ -3131,7 +3131,7 @@ impl Renderer {
         }
         // Ghostty parity: the transient resize chip, centered and drawn in the
         // menu pass (last) so it reads over any pane content.
-        if let Some((rcols, rrows)) = overlay.resize_overlay {
+        if let Some((rcols, rrows)) = overlay.visible_resize_overlay() {
             let label_cells = format!("{rcols}×{rrows}").chars().count() as f32;
             let pad = 14.0_f32;
             let chip_w = label_cells * cw + pad * 2.0;
@@ -4261,6 +4261,12 @@ impl Renderer {
                     0.0,
                     0.0,
                 );
+            }
+            for (_, rect) in [layout.category_previous, layout.category_next]
+                .into_iter()
+                .flatten()
+            {
+                shape(rect, theme.background, 1.0, border, 1.0, 4.0);
             }
             shape(
                 layout.search_rect,

@@ -862,13 +862,13 @@ impl App {
             })
             .unwrap_or((800.0, 600.0));
         let (mx, my) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        let hit = kettle_render::settings_hit_test_with_text_width(
+        let layout = kettle_render::settings_layout(
             &set,
             (cw, self.overlay_text_line_height(ws)),
             (sw, sh),
-            (mx, my),
             self.overlay_text_cell_width(ws),
         );
+        let hit = layout.pointer_hit((mx, my), (!is_click).then_some(dir));
         if ws
             .settings_nav
             .as_ref()

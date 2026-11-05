@@ -340,6 +340,25 @@ pub struct Overlay {
     pub pane_drop_hint: Option<Rect4>,
 }
 
+impl Overlay {
+    pub(crate) fn visible_resize_overlay(&self) -> Option<(u16, u16)> {
+        if self.settings.is_some()
+            || self.palette_query.is_some()
+            || self.ssh_query.is_some()
+            || self.layout_picker_query.is_some()
+            || self.theme_picker_query.is_some()
+            || self
+                .context_menu
+                .as_ref()
+                .is_some_and(|menu| menu.picker_header_height > 0.0)
+        {
+            None
+        } else {
+            self.resize_overlay
+        }
+    }
+}
+
 /// Window-local update notification. Its geometry is shared with input and accessibility.
 #[derive(Clone, Debug)]
 pub struct UpdateToastOverlay {

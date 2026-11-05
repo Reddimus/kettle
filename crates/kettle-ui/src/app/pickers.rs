@@ -485,13 +485,16 @@ pub(super) fn picker_card_geometry(
     let width = (sw * 0.56).clamp(360.0_f32.min(max_width), 720.0_f32.min(max_width));
     let x = (sw - width) * 0.5;
     let remaining = (sh - top_chrome).max(0.0);
-    let y = top_chrome + 24.0_f32.max(remaining * 0.08);
     let header_h = ch + kettle_render::menu::PICKER_HEADER_PAD;
     let row_h = ch + kettle_render::menu::ROW_PAD;
-    let available = sh - 16.0 - y - header_h;
-    if available < row_h {
+    let spacing = remaining - header_h - row_h;
+    if spacing < 0.0 {
         return None;
     }
+    let bottom = 16.0_f32.min(spacing * 0.5);
+    let top = 24.0_f32.max(remaining * 0.08).min(spacing - bottom);
+    let y = top_chrome + top;
+    let available = sh - bottom - y - header_h;
     let rows_h = (row_count.min(PICKER_MAX_VISIBLE_ROWS) as f32 * row_h).min(available);
     Some(PickerGeometry {
         header: (x, y, width, header_h),
