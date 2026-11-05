@@ -992,6 +992,7 @@ fn run_exec_engine_with_recording_poll(
         // 52 when OSC 52 writes would be deliberately ignored.
         TerminalCapabilities {
             osc52_copy: false,
+            osc52_read: true,
             contain_process_tree: true,
             ..TerminalCapabilities::default()
         },
@@ -1270,9 +1271,11 @@ fn run_exec_engine_with_recording_poll(
                 false
             }
         };
-        // Headless exec has no clipboard sink and advertises no DA1 extension
-        // 52, so OSC 52 clipboard operations are discarded here.
-        drop(term.take_clipboard_events());
+        for event in term.take_clipboard_events() {
+            if let TermEvent::ClipboardLoad(_, fmt) = event {
+                queue_reply(fmt("").as_bytes());
+            }
+        }
         // Titles are latched, the newest kept, so a run of them is one title
         // event. Held until output is ready, and counted as backlog until
         // then so completion cannot drop it.
@@ -1340,7 +1343,10 @@ fn run_exec_engine_with_recording_poll(
         if trace_lifecycle {
             log::debug!("kettle exec lifecycle event slice returned: backlog={event_backlog}");
         }
-        let fatal_pty_error = pty_writer_error;
+        let fatal_pty_error = pty_writer_error.or_else(|| {
+            term.has_lost_replies()
+                .then(|| "PTY semantic event queue exceeded its 1024-message bound".into())
+        });
         let mut stdin_forwarding_error = None;
         while let Ok(result) = stdin_done_rx.try_recv() {
             match result {
@@ -4082,6 +4088,21 @@ fn windows_console_size() -> Option<(u16, u16)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn regression_semantic_reply_loss_survives_queue_recovery() {
+        use kettle_core::{EventProxy, TermEvent, event::EventListener as _};
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let proxy = EventProxy::new(tx, std::sync::Arc::new(|| {}));
+        proxy.send_event(TermEvent::PtyWrite("first".into()));
+        proxy.send_event(TermEvent::PtyWrite("lost".into()));
+        rx.recv().unwrap();
+        proxy.send_event(TermEvent::PtyWrite("recovered".into()));
+        assert!(
+            proxy.has_lost_replies(),
+            "semantic reply loss was forgotten after queue recovery"
+        );
+    }
+
     #[allow(dead_code)]
     mod differential {
         use kettle_vt::AnsiStripper as SharedStripper;

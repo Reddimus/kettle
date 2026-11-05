@@ -322,6 +322,15 @@ impl GraphicsBudget {
         self.reserve(Resource::Gpu, bytes, false)
     }
 
+    /// Reserve retained window resources with their own size bounds, charging
+    /// both window and process accounts without the terminal-image cap.
+    pub fn reserve_retained_gpu(&self, bytes: usize) -> Option<GraphicsReservation> {
+        if bytes == 0 {
+            return None;
+        }
+        self.reserve(Resource::Gpu, bytes, true)
+    }
+
     /// Reserve a retained GPU texture/buffer in this window and process.
     pub fn reserve_gpu(&self, bytes: usize) -> Option<GraphicsReservation> {
         if bytes == 0 || bytes > self.limits.image_bytes {

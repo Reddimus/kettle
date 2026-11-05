@@ -12,6 +12,43 @@ use super::{
 };
 
 #[test]
+fn widening_discards_a_prompt_partially_merged_into_the_preceding_row() {
+    let first = PtyGeometry::new(80, 24, 800, 240);
+    let desired = PtyGeometry::new(100, 24, 1000, 240);
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut terminal = Term::new(
+        TermConfig::default(),
+        &TermSize::new(80, 24),
+        EventProxy::new(tx, Arc::new(|| {})),
+    );
+    let mut processor: Processor = Processor::new();
+    processor.advance(&mut terminal, &[b'x'; 81]);
+    let prompt = stable_grid_line_id(
+        terminal.grid().history_origin(),
+        terminal.grid().history_size(),
+        terminal.grid().cursor.point.line.0,
+    );
+    processor.advance(&mut terminal, &[b'p'; 50]);
+    let term: SharedTerm = Arc::new(Mutex::new(terminal));
+    let geometry = Arc::new(Mutex::new(VersionedPtyGeometry {
+        geometry: first,
+        generation: 0,
+    }));
+    let prompts = Mutex::new(VecDeque::from([prompt]));
+    commit_local_geometry_inner(
+        &term,
+        &geometry,
+        Some(&prompts),
+        desired,
+        Some(TermConfig::default()),
+    );
+    assert!(
+        prompts.lock().unwrap().is_empty(),
+        "partial row merging must not replace the prompt start with the cursor row"
+    );
+}
+
+#[test]
 fn transient_resize_round_trip_keeps_the_current_single_row_prompt() {
     let first = PtyGeometry::new(128, 24, 1228, 384);
     let narrowed = PtyGeometry::new(98, 24, 940, 384);

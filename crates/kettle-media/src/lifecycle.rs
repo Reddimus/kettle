@@ -689,7 +689,10 @@ impl<'a> Running<'a> {
                         self.kill();
                         return Stopped::OverFootprint;
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        self.kill();
+                        return Stopped::Killed;
+                    }
                     Ok(()) => {}
                 }
                 self.next_sample = Instant::now() + TICK;
@@ -1904,6 +1907,51 @@ mod tests {
             worker.kill(),
             Stopped::Exited(WorkerExit::Code(0))
         ));
+    }
+
+    #[test]
+    fn a_probe_failure_survives_a_clean_exit_during_cleanup() {
+        struct ExitsAfterProbe {
+            waits: usize,
+            reaped: Arc<AtomicUsize>,
+        }
+
+        impl WorkerProcess for ExitsAfterProbe {
+            fn try_wait(&mut self) -> std::io::Result<Option<WorkerExit>> {
+                self.waits += 1;
+                if self.waits < 3 {
+                    Ok(None)
+                } else {
+                    self.reaped.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(WorkerExit::Code(0)))
+                }
+            }
+
+            fn footprint(&mut self) -> std::io::Result<u64> {
+                assert_eq!(self.waits, 1);
+                Err(std::io::Error::other("cannot measure"))
+            }
+
+            fn kill(&mut self) {
+                panic!("the worker already exited");
+            }
+        }
+
+        let fake = Fake::new(vec![]);
+        let client = client(&fake);
+        let reaped = Arc::new(AtomicUsize::new(0));
+        let process = Box::new(ExitsAfterProbe {
+            waits: 0,
+            reaped: Arc::clone(&reaped),
+        });
+        let mut worker = Running::new(process, &client.shared, FAST);
+        worker.next_sample = Instant::now();
+        assert_eq!(
+            stop_rendered(&mut worker, Some(MediaKind::Raster), rendered())
+                .map(|output| output.rendered),
+            Err(FailureCode::WorkerUnavailable)
+        );
+        assert_eq!(reaped.load(Ordering::SeqCst), 1);
     }
 
     #[test]

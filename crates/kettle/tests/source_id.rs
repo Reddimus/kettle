@@ -168,3 +168,48 @@ fn vendored_source_edit_changes_build_identity() {
         "vendored source must affect identity"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn directory_cycles_do_not_expand_the_source_tree() {
+    let root = tempfile::tempdir().unwrap();
+    workspace(root.path());
+    let before = source_hash(root.path());
+    std::os::unix::fs::symlink(".", root.path().join("crates/a/src/again")).unwrap();
+    assert_eq!(
+        source_hash(root.path()),
+        before,
+        "directory cycle expanded sources"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn noncyclic_directory_aliases_retain_their_logical_sources() {
+    let linked = tempfile::tempdir().unwrap();
+    let copied = tempfile::tempdir().unwrap();
+    workspace(linked.path());
+    workspace(copied.path());
+    std::os::unix::fs::symlink("../../b/src", linked.path().join("crates/a/src/alias")).unwrap();
+    fs::create_dir(copied.path().join("crates/a/src/alias")).unwrap();
+    fs::write(
+        copied.path().join("crates/a/src/alias/main.rs"),
+        "fn main() {}\n",
+    )
+    .unwrap();
+    assert_eq!(source_hash(linked.path()), source_hash(copied.path()));
+}
+
+#[test]
+fn compiled_asset_edits_change_build_identity() {
+    let root = tempfile::tempdir().unwrap();
+    workspace(root.path());
+    for asset in ["assets/themes/example", "assets/fonts/example.ttf"] {
+        let path = root.path().join(asset);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "original").unwrap();
+        let before = source_hash(root.path());
+        fs::write(&path, "changed").unwrap();
+        assert_ne!(source_hash(root.path()), before, "asset omitted: {asset}");
+    }
+}

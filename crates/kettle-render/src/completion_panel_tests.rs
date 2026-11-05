@@ -1239,3 +1239,61 @@ fn notification_geometry_preserves_unobstructed_placement_and_hides_when_full() 
         assert!(ui.contains("kettle_render::notification_geometry("));
     }
 }
+
+#[test]
+fn completion_card_stays_fixed_across_count_digit_boundaries() {
+    let mut completion = overlay(Some(8), 40);
+    completion.anchor_col = Some(100);
+    let before = completion_panel_geometry(&completion, CELL).unwrap();
+    completion.selected = Some(9);
+    let after = completion_panel_geometry(&completion, CELL).unwrap();
+    assert_eq!(
+        before.rect.2, after.rect.2,
+        "completion count resized the card"
+    );
+    assert_eq!(
+        before.rect.0, after.rect.0,
+        "completion count moved the card"
+    );
+}
+
+#[test]
+fn completion_text_budgets_use_the_unscaled_font_advance() {
+    let mut card = overlay(Some(0), 40);
+    card.anchor_col = Some(30);
+    card.candidates[0].label = "/a/very/long/path/whose/tail/is/suffix.rs".into();
+    card.candidates[0].description = "d".repeat(40);
+    let grid = completion_panel_geometry(&card, (4.0, 16.0)).unwrap();
+    let text = grid.with_text_cell_width(4.0, 8.0);
+    assert_eq!(
+        grid.rect, text.rect,
+        "text fitting must preserve grid anchoring"
+    );
+    assert!(
+        text.label_columns as f32 * 8.0 <= text.label_w,
+        "completion label budget exceeds its painted text lane"
+    );
+    assert!(text.description_columns as f32 * 8.0 <= text.description_w);
+    let (header, count) = completion_header_columns(&text, &completion_header_count(&card));
+    assert!((header + count + 1) as f32 * 8.0 <= text.rect.2 - 8.0);
+    let fitted = super::middle_ellipsis(&card.candidates[0].label, text.label_columns);
+    assert!(fitted.ends_with("suffix.rs"));
+}
+
+#[test]
+fn top_lane_small_font_receipt_details_clear_the_dismiss_button() {
+    let receipt = video_receipt(true, true, 3);
+    let geometry = media_paste_receipt_geometry(&receipt, None, (8.0, 3.75), 8.0, 7.5).unwrap();
+    assert!(!geometry.compact);
+    assert!((geometry.dismiss_rect.1 - geometry.rect.1 - 5.0).abs() < 0.01);
+    let detail = geometry.detail_rect.unwrap();
+    assert!(
+        !super::rects_overlap(detail, geometry.dismiss_rect),
+        "top-lane receipt details overlap the dismiss button"
+    );
+    let (_, text) = media_paste_receipt_text(&receipt, &geometry, 8.0);
+    assert!(
+        text.lines()
+            .all(|line| display_width(line) as f32 * 8.0 <= detail.2)
+    );
+}

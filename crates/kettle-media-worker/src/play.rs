@@ -82,7 +82,7 @@ const CLOSE_GRACE: Duration = Duration::from_millis(500);
 pub(crate) enum Event {
     /// The parent asked something: look at [`Asked`].
     Asked,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(test, target_os = "linux"))]
     Pcm(kettle_media::pcm::Message),
     Frame {
         pts_ms: u64,
@@ -236,7 +236,7 @@ pub(crate) fn serve(
     let player: Option<&dyn VideoPlayer> =
         (!decoders.is_empty()).then_some(&decoders as &dyn VideoPlayer);
     #[cfg(feature = "test-faults")]
-    let fake = faults::player(prefix);
+    let fake = faults::player(prefix, Arc::clone(&gate));
     #[cfg(feature = "test-faults")]
     let player = fake
         .as_ref()
@@ -632,7 +632,16 @@ fn audio_tail(video_end: Option<u64>, last: Option<u64>, frame_ms: u64, sound: b
 }
 
 impl<W: Write> Session<'_, W> {
-    fn run(mut self, events: &mpsc::Receiver<Event>, opened_by: Instant) -> i32 {
+    fn run(self, events: &mpsc::Receiver<Event>, opened_by: Instant) -> i32 {
+        self.run_with_hang_limit(events, opened_by, HANG)
+    }
+
+    fn run_with_hang_limit(
+        mut self,
+        events: &mpsc::Receiver<Event>,
+        opened_by: Instant,
+        hang: Duration,
+    ) -> i32 {
         let frame_ms = 1_000_000u64.div_ceil(u64::from(self.opened.fps_milli));
         // A frame written this far past its time sets the clock again.
         let mut pacer = Pacer::new(Duration::from_millis(frame_ms.max(20)));
@@ -645,6 +654,7 @@ impl<W: Write> Session<'_, W> {
         // its write ended.
         let mut first_paused: Option<(u64, Instant)> = None;
         let mut decoded_all = false;
+        let mut deferred = None;
         let mut seq = 0u64;
         let mut last_frame = Instant::now();
         let mut last_pts = None;
@@ -700,13 +710,44 @@ impl<W: Write> Session<'_, W> {
             }
             let mut now = Instant::now();
             if shown_first {
-                self.watchdog.arm(HANG);
+                self.watchdog.arm(hang);
             }
             if !shown_first && now >= opened_by {
                 return self.fail(FailureCode::RenderTimeout);
             }
             let mut sound_due = None;
-            while let Some(&(pts_ms, _)) = pending.front() {
+            let presentation_deadline = now + frame_len;
+            while !pending.is_empty() {
+                now = Instant::now();
+                if now >= presentation_deadline {
+                    break;
+                }
+                // Every write can block while replacements queue and sound
+                // advances. Refresh before deciding to keep a late frame.
+                if shown_first && playing && self.sound.is_some() && deferred.is_none() {
+                    for _ in 0..EVENTS {
+                        if pending.len() >= BUFFERS {
+                            break;
+                        }
+                        match events.try_recv() {
+                            Ok(Event::Frame { pts_ms, rgba }) => pending.push_back((pts_ms, rgba)),
+                            Ok(Event::Asked) => {}
+                            #[cfg(any(test, target_os = "linux"))]
+                            Ok(Event::Pcm(message)) => {
+                                if !self.pcm(message) {
+                                    return EXIT_PROTOCOL;
+                                }
+                            }
+                            Ok(event) => {
+                                deferred = Some(event);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    now = Instant::now();
+                }
+                let &(pts_ms, _) = pending.front().expect("a waiting frame");
                 if shown_first {
                     if !playing {
                         break;
@@ -754,6 +795,11 @@ impl<W: Write> Session<'_, W> {
                 last_pts = Some(pts_ms);
                 now = Instant::now();
                 last_frame = now;
+                // Each successful write is progress, even when lookahead
+                // keeps this batch running longer than the hang limit.
+                if shown_first {
+                    self.watchdog.arm(hang);
+                }
                 if !playing {
                     if !shown_first {
                         first_paused = Some((pts_ms, now));
@@ -771,7 +817,7 @@ impl<W: Write> Session<'_, W> {
                     shown_first = true;
                     // Open: the opening's allowance ends with its first
                     // frame, before anything more is written.
-                    self.watchdog.arm(HANG);
+                    self.watchdog.arm(hang);
                     let state = if playing {
                         PlayState::Playing
                     } else {
@@ -810,6 +856,11 @@ impl<W: Write> Session<'_, W> {
             {
                 return self.fail(FailureCode::RenderTimeout);
             }
+            if playing && !pending.is_empty() && now >= presentation_deadline {
+                // Check commands before presenting another batch, without
+                // sleeping while frames are already due.
+                continue;
+            }
             let mut wake = now + TICK;
             if !shown_first {
                 wake = wake.min(opened_by);
@@ -826,16 +877,13 @@ impl<W: Write> Session<'_, W> {
             if playing && decoded_all && sounding {
                 wake = wake.min(now + SOUND_SOON);
             }
-            match events.recv_timeout(wake.saturating_duration_since(Instant::now())) {
+            match deferred.take().map(Ok).unwrap_or_else(|| {
+                events.recv_timeout(wake.saturating_duration_since(Instant::now()))
+            }) {
                 Ok(Event::Asked) | Err(RecvTimeoutError::Timeout) => {}
-                #[cfg(target_os = "linux")]
+                #[cfg(any(test, target_os = "linux"))]
                 Ok(Event::Pcm(message)) => {
-                    if self.sound.is_none() {
-                        continue;
-                    }
-                    if write_frame(self.output, &Frame::Pcm(message), Direction::WorkerToParent)
-                        .is_err()
-                    {
+                    if !self.pcm(message) {
                         return EXIT_PROTOCOL;
                     }
                 }
@@ -854,6 +902,12 @@ impl<W: Write> Session<'_, W> {
                 }
             }
         }
+    }
+
+    #[cfg(any(test, target_os = "linux"))]
+    fn pcm(&mut self, message: kettle_media::pcm::Message) -> bool {
+        self.sound.is_none()
+            || write_frame(self.output, &Frame::Pcm(message), Direction::WorkerToParent).is_ok()
     }
 
     /// End the session with `code`, unless the file changed meanwhile: a
@@ -912,6 +966,110 @@ mod tests {
     use crate::worker::Watchdog;
 
     const SECOND: Duration = Duration::from_secs(1);
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn decoder_opening_waits_for_mutation() {
+        use std::io::BufRead as _;
+        use std::process::{Command, Stdio};
+        const CHILD_PATH: &str = "KETTLE_MEDIA_WORKER_OPENING_FILE";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let source = Source::user_pull(
+                NativePath::from_path(std::path::Path::new(&path)).unwrap(),
+                GuiActionWitness::from_explicit_gui_action(),
+            );
+            let held = source::hold(&source, MAX_VIDEO_PREFIX_BYTES).unwrap();
+            let Held::File {
+                file,
+                identity,
+                prefix,
+            } = &held
+            else {
+                panic!("held file")
+            };
+            let gate = Arc::new(PlayGate::default());
+            let release = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                std::io::stdin().read_exact(&mut [0]).unwrap();
+                release.play();
+            });
+            let fake = faults::player(prefix, gate).unwrap();
+            let opening = fake.play(
+                VideoInput {
+                    file,
+                    identity: *identity,
+                    container: kettle_media::video::VideoContainer::IsoBmff,
+                },
+                PlayRequest {
+                    max_width: 16,
+                    max_height: 16,
+                    start_ms: 0,
+                    max_fps_milli: 10_000,
+                    audio: AudioRequest::Off,
+                },
+                Instant::now() + OPEN_DEADLINE,
+            );
+            assert!(
+                held.unchanged().is_err(),
+                "opening returned before mutation"
+            );
+            assert_eq!(opening.is_err(), prefix.ends_with(b"refuse\n"));
+            return;
+        }
+        for suffix in ["", " refuse"] {
+            let dir = kettle_test_support::private_tempdir("kettle-worker-opening-");
+            let path = dir.path().join("video.mp4");
+            let mut bytes = vec![0; 24];
+            bytes.extend_from_slice(
+                format!("kettle-media-worker-test-video 10 10000 16 16 open wait{suffix}\n")
+                    .as_bytes(),
+            );
+            std::fs::write(&path, bytes).unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "play::tests::decoder_opening_waits_for_mutation",
+                    "--nocapture",
+                ])
+                .env(CHILD_PATH, &path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stderr = child.stderr.take().unwrap();
+            let (send, opening) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                std::io::BufReader::new(stderr)
+                    .read_line(&mut line)
+                    .unwrap();
+                let _ = send.send(line);
+            });
+            let opening = opening.recv_timeout(5 * SECOND);
+            if opening.as_deref() != Ok("kettle-media-worker-test-opening\n") {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            assert_eq!(
+                opening.as_deref(),
+                Ok("kettle-media-worker-test-opening\n"),
+                "the decoder must signal opening before the file changes"
+            );
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(b"more")
+                .unwrap();
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "opening must wait for release"
+            );
+            child.stdin.take().unwrap().write_all(b"x").unwrap();
+            assert!(child.wait().unwrap().success());
+        }
+    }
 
     fn opened(fps_milli: u32, width: u32, height: u32) -> Opened {
         Opened {
@@ -1883,6 +2041,381 @@ mod tests {
         assert_eq!(told.muted, [false, true]);
     }
 
+    #[test]
+    fn queued_late_frames_are_dropped_after_a_blocked_write() {
+        use crate::sound::testing::{Blocks, stand};
+        use std::sync::atomic::AtomicBool;
+        let (speaker, told) = stand(3);
+        told.lock().unwrap().played = Some(96_000.0);
+        let sound = Sound::start(
+            speaker,
+            Box::new(Blocks(VecDeque::from([(0.5, 96_000, 0)]))),
+            0,
+            SoundWish::new(false),
+        )
+        .unwrap();
+        let wish = sound.wish();
+        wish.hear(PlayCommand::Play);
+        let deadline = Instant::now() + SECOND;
+        while sound.heard().is_none() {
+            assert!(Instant::now() < deadline, "the sound never had a clock");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let opened = opened(10_000, 512, 512);
+        let queued = AtomicBool::new(false);
+        let read = run_with(
+            opened,
+            &Held::Bytes(&[]),
+            Some(sound),
+            None,
+            vec![Step::Ask(PlayCommand::Play), Step::Send(frame(&opened, 0))],
+            |read| {
+                if read == 0 {
+                    let deadline = Instant::now() + SECOND;
+                    while !queued.load(Ordering::Acquire) {
+                        assert!(Instant::now() < deadline, "replacement frames never queued");
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            },
+            |parent| {
+                parent.first_write();
+                parent.send(frame(&opened, 100));
+                parent.send(frame(&opened, 200));
+                parent.send(Event::End);
+                queued.store(true, Ordering::Release);
+            },
+        );
+        assert_eq!(
+            shown(&read).iter().map(|(_, pts)| *pts).collect::<Vec<_>>(),
+            [0, 200],
+            "a queued replacement must supersede the older late frame"
+        );
+        assert_eq!(
+            said(&read).last(),
+            Some(&&Frame::PlayState(PlayState::Ended))
+        );
+    }
+
+    fn continuous_presentation(fps_milli: u32, write_time: Duration, close_after: usize) -> usize {
+        use crate::sound::testing::{Blocks, Told, stand};
+
+        struct Output<'a> {
+            bytes: Vec<u8>,
+            frames: usize,
+            write_time: Duration,
+            close_after: usize,
+            asked: &'a Asked,
+            events: mpsc::SyncSender<Event>,
+            opened: Opened,
+            clock: Arc<Mutex<Told>>,
+        }
+        impl Write for Output<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                let written = read_frame(&mut self.bytes.as_slice(), Direction::WorkerToParent)
+                    .unwrap()
+                    .unwrap();
+                self.bytes.clear();
+                if matches!(written, Frame::VideoFrame(_)) {
+                    std::thread::sleep(self.write_time);
+                    self.frames += 1;
+                    let pts_ms = self.frames as u64 * self.write_time.as_millis() as u64;
+                    self.clock.lock().unwrap().played =
+                        Some(kettle_media::audio::frame_of_ms(pts_ms) as f64);
+                    if self.frames == self.close_after {
+                        self.asked.hear(PlayCommand::Close);
+                    }
+                    // A fast decoder always has a replacement after a write.
+                    if self.frames < 32 {
+                        self.events.send(frame(&self.opened, pts_ms)).unwrap();
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        let (speaker, told) = stand(3);
+        told.lock().unwrap().played = Some(0.0);
+        let sound = Sound::start(
+            speaker,
+            Box::new(Blocks(VecDeque::from([(0.5, 96_000, 0)]))),
+            0,
+            SoundWish::new(false),
+        )
+        .unwrap();
+        sound.wish().hear(PlayCommand::Play);
+        let deadline = Instant::now() + SECOND;
+        while sound.heard().is_none() {
+            assert!(Instant::now() < deadline, "the sound never had a clock");
+            std::thread::yield_now();
+        }
+        let opened = opened(fps_milli, 4, 2);
+        let asked = Asked::new();
+        asked.hear(PlayCommand::Play);
+        let (events, received) = mpsc::sync_channel(EVENTS);
+        events.send(frame(&opened, 0)).unwrap();
+        events.send(frame(&opened, 0)).unwrap();
+        let mut output = Output {
+            bytes: Vec::new(),
+            frames: 0,
+            write_time,
+            close_after,
+            asked: &asked,
+            events,
+            opened,
+            clock: told,
+        };
+        let (free, _) = mpsc::sync_channel(BUFFERS);
+        let watchdog = Watchdog::start(2 * SECOND).unwrap();
+        let session = Session {
+            video_end_ms: None,
+            opened,
+            held: &Held::Bytes(&[]),
+            asked: &asked,
+            sound: Some(sound),
+            free,
+            output: &mut output,
+            watchdog: &watchdog,
+        };
+        assert_eq!(
+            session.run_with_hang_limit(
+                &received,
+                Instant::now() + OPEN_DEADLINE,
+                Duration::from_millis(600),
+            ),
+            0
+        );
+        output.frames
+    }
+
+    fn presentation_child(test: &str) -> bool {
+        if std::env::var("KETTLE_PRESENTATION_TEST").as_deref() == Ok(test) {
+            return true;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env("KETTLE_PRESENTATION_TEST", test)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + 10 * SECOND;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                panic!("presentation child timed out: {:?}", child.wait().unwrap());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(status.success(), "presentation child exited with {status}");
+        false
+    }
+
+    #[test]
+    fn continuous_due_frames_renew_the_watchdog() {
+        if presentation_child("play::tests::continuous_due_frames_renew_the_watchdog") {
+            // The frame budget exceeds the real watchdog's deadline, so
+            // bounding the batch alone cannot keep successful writes alive.
+            // 12 writes of 60 ms outlast the 600 ms hang limit inside one
+            // 1 s batch, so only per-write renewal keeps the session alive,
+            // with 10x headroom per write for a loaded runner.
+            assert!(continuous_presentation(1_000, Duration::from_millis(60), 12) >= 12);
+        }
+    }
+
+    #[test]
+    fn continuous_due_frames_check_close_between_batches() {
+        if presentation_child("play::tests::continuous_due_frames_check_close_between_batches") {
+            let frames = continuous_presentation(10_000, Duration::from_millis(60), 2);
+            assert!(
+                frames <= 3,
+                "presentation ignored Close beyond its frame budget: {frames}"
+            );
+        }
+    }
+
+    fn replacement_queued_during_second_write(interleaved: Vec<Event>) -> Vec<Frame> {
+        use crate::sound::testing::Blocks;
+
+        struct Clock {
+            frame: f64,
+            reads: usize,
+        }
+        struct Speaker {
+            clock: Arc<Mutex<Clock>>,
+            free: usize,
+        }
+        impl crate::sound::Speaker for Speaker {
+            fn take_free(&mut self) -> Option<usize> {
+                self.free = self.free.checked_sub(1)?;
+                Some(self.free)
+            }
+            fn enqueue(&mut self, _: usize, _: &[f32]) -> Result<(), ()> {
+                Ok(())
+            }
+            fn start(&mut self) -> Result<(), ()> {
+                Ok(())
+            }
+            fn pause(&mut self) -> Result<(), ()> {
+                Ok(())
+            }
+            fn set_muted(&mut self, _: bool) {}
+            fn played(&self) -> Option<(f64, Instant)> {
+                let mut clock = self.clock.lock().unwrap();
+                clock.reads += 1;
+                Some((clock.frame, Instant::now()))
+            }
+        }
+        struct Output<F> {
+            bytes: Vec<u8>,
+            frames: Vec<Frame>,
+            before_flush: F,
+        }
+        impl<F: FnMut(&Frame)> Write for Output<F> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                let frame = read_frame(&mut self.bytes.as_slice(), Direction::WorkerToParent)
+                    .unwrap()
+                    .unwrap();
+                (self.before_flush)(&frame);
+                self.frames.push(frame);
+                self.bytes.clear();
+                Ok(())
+            }
+        }
+
+        let clock = Arc::new(Mutex::new(Clock {
+            frame: 4_800.0,
+            reads: 0,
+        }));
+        let sound = Sound::start(
+            Box::new(Speaker {
+                clock: Arc::clone(&clock),
+                free: 3,
+            }),
+            Box::new(Blocks(VecDeque::from([(0.5, 960, 0)]))),
+            0,
+            SoundWish::new(false),
+        )
+        .unwrap();
+        sound.wish().hear(PlayCommand::Play);
+        let deadline = Instant::now() + SECOND;
+        while sound.heard().is_none() {
+            assert!(Instant::now() < deadline, "the sound never had a clock");
+            std::thread::yield_now();
+        }
+        let opened = opened(10_000, 4, 2);
+        let asked = Asked::new();
+        asked.hear(PlayCommand::Play);
+        let (events, received) = mpsc::sync_channel(EVENTS);
+        events.send(frame(&opened, 0)).unwrap();
+        let (blocked, writing) = mpsc::channel();
+        let (resume, ready) = mpsc::channel();
+        let mut output = Output {
+            bytes: Vec::new(),
+            frames: Vec::new(),
+            before_flush: |written: &Frame| {
+                if let Frame::VideoFrame(video) = written {
+                    match video.pts_ms {
+                        0 => {
+                            events.send(frame(&opened, 100)).unwrap();
+                            events.send(frame(&opened, 200)).unwrap();
+                        }
+                        100 => {
+                            blocked.send(()).unwrap();
+                            ready.recv_timeout(2 * SECOND).unwrap();
+                        }
+                        300 => clock.lock().unwrap().frame = 96_000.0,
+                        _ => {}
+                    }
+                }
+            },
+        };
+        std::thread::scope(|scope| {
+            let events = &events;
+            let clock = &clock;
+            scope.spawn(move || {
+                writing.recv_timeout(2 * SECOND).unwrap();
+                for event in interleaved {
+                    events.send(event).unwrap();
+                }
+                events.send(frame(&opened, 300)).unwrap();
+                events.send(Event::End).unwrap();
+                let reads = {
+                    let mut clock = clock.lock().unwrap();
+                    clock.frame = 16_800.0;
+                    clock.reads
+                };
+                let deadline = Instant::now() + SECOND;
+                // A second clock read proves the feeder published the first.
+                while clock.lock().unwrap().reads < reads + 2 {
+                    assert!(Instant::now() < deadline, "the clock never advanced");
+                    std::thread::yield_now();
+                }
+                resume.send(()).unwrap();
+            });
+            let (free, _) = mpsc::sync_channel(BUFFERS);
+            let watchdog = Watchdog::unwatched();
+            let session = Session {
+                video_end_ms: None,
+                opened,
+                held: &Held::Bytes(&[]),
+                asked: &asked,
+                sound: Some(sound),
+                free,
+                output: &mut output,
+                watchdog: &watchdog,
+            };
+            assert_eq!(session.run(&received, Instant::now() + OPEN_DEADLINE), 0);
+        });
+        output.frames
+    }
+
+    #[test]
+    fn a_replacement_queued_during_a_later_write_supersedes_a_late_frame() {
+        let read = replacement_queued_during_second_write(Vec::new());
+        let pts: Vec<_> = read
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::VideoFrame(frame) => Some(frame.pts_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pts, [0, 100, 300]);
+        assert_eq!(read.last(), Some(&Frame::PlayState(PlayState::Ended)));
+    }
+
+    #[test]
+    fn pcm_does_not_hide_a_replacement_queued_during_a_later_write() {
+        use kettle_media::pcm::{Message, Open};
+        let pcm = Message::Open(Open {
+            generation: 1,
+            start_frame: 0,
+            end_frame: 96_000,
+            muted: false,
+        });
+        let read = replacement_queued_during_second_write(vec![Event::Pcm(pcm.clone())]);
+        let pts: Vec<_> = read
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::VideoFrame(frame) => Some(frame.pts_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pts, [0, 100, 300]);
+        assert!(read.contains(&Frame::Pcm(pcm)));
+        assert_eq!(read.last(), Some(&Frame::PlayState(PlayState::Ended)));
+    }
+
     /// A frame the sound has passed is dropped only for a newer one waiting
     /// behind it: a late last frame, its End not yet taken, still goes out,
     /// so the lane holds the video's own last frame.
@@ -2101,9 +2634,12 @@ mod tests {
 /// HEIGHT` plays with a stand-in decoder, frame N filled with N's low byte
 /// and timed N frame lengths in; `stall N` makes it give no frame from the
 /// Nth on, and `fail N` fail there; `open MS` makes opening take that long,
-/// and `refuse` then fail.
+/// and `refuse` then fail. `open wait` signals opening on stderr and waits
+/// for Play before proceeding.
 #[cfg(feature = "test-faults")]
 mod faults {
+    use std::io::Write as _;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use kettle_media::video::{
@@ -2124,10 +2660,12 @@ mod faults {
         stall: Option<u64>,
         fail: Option<u64>,
         open_ms: Option<u64>,
+        open_wait: bool,
+        gate: Arc<PlayGate>,
         refuse: bool,
     }
 
-    pub(super) fn player(prefix: &[u8]) -> Option<Fake> {
+    pub(super) fn player(prefix: &[u8], gate: Arc<PlayGate>) -> Option<Fake> {
         let rest = prefix.get(AT..)?.strip_prefix(MARK)?;
         let line = rest.split(|byte| *byte == b'\n').next()?;
         let words: Vec<&str> = std::str::from_utf8(line).ok()?.split_whitespace().collect();
@@ -2144,6 +2682,8 @@ mod faults {
             stall: after("stall"),
             fail: after("fail"),
             open_ms: after("open"),
+            open_wait: words.windows(2).any(|pair| pair == ["open", "wait"]),
+            gate,
             refuse: words.contains(&"refuse"),
         })
     }
@@ -2153,10 +2693,18 @@ mod faults {
             &self,
             input: VideoInput<'_>,
             request: PlayRequest,
-            _deadline: Instant,
+            deadline: Instant,
         ) -> Result<Playback, FailureCode> {
             if let Some(open_ms) = self.open_ms {
                 std::thread::sleep(Duration::from_millis(open_ms));
+            }
+            if self.open_wait {
+                std::io::stderr()
+                    .write_all(b"kettle-media-worker-test-opening\n")
+                    .map_err(|_| FailureCode::RenderResource)?;
+                if self.gate.wait_to_play(Some(deadline)) != Some(true) {
+                    return Err(FailureCode::RenderTimeout);
+                }
             }
             if self.refuse {
                 return Err(FailureCode::RenderParse);

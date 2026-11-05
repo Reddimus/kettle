@@ -331,6 +331,10 @@ fn supervise(
         }
     })();
     let code = match result {
+        Ok(code) if code == EXIT_INTERNAL => {
+            let _ = output.write_all(diagnostics.tail());
+            code
+        }
         Ok(code) => code,
         Err(error) => {
             let _ = output.write_all(diagnostics.tail());
@@ -434,6 +438,22 @@ mod tests {
             }
             std::thread::sleep(POLL_INTERVAL);
         }
+    }
+
+    #[test]
+    fn regression_internal_exit_preserves_stderr_diagnostics() {
+        let (code, output) = supervise(
+            &mut shell("printf command-output; printf containment-failed >&2; exit 125"),
+            None,
+            OUTER_GRACE,
+            CANCEL_GRACE,
+        );
+        assert_eq!(code, EXIT_INTERNAL);
+        assert!(output.contains("command-output"));
+        assert!(
+            output.contains("containment-failed"),
+            "internal stderr was discarded: {output:?}"
+        );
     }
 
     #[test]

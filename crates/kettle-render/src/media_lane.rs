@@ -758,12 +758,12 @@ pub fn media_lane_geometry_scaled(
     if transport {
         area_bottom -= transport_height + pad;
     }
-    if let Some(bar) = lane.scrubber.as_ref().filter(|bar| bar.seekable)
+    if lane.scrubber.as_ref().is_some_and(|bar| bar.seekable)
         && !transport
         && area_bottom - lh - pad >= area_top + lh
     {
         let row = hint.1 - pad - lh;
-        let label = (bar.label.chars().count() as f32 + 1.0) * tw;
+        let label = label_width / time_scale;
         let label_left = right - label;
         if label_left - pad - left >= MIN_SCRUBBER_COLUMNS * tw {
             scrub_label = Some((label_left, row, right - label_left, lh));
@@ -1526,6 +1526,38 @@ mod tests {
             geometry.hit_test(track.0 + track.2 / 2.0, track.1 + 1.0),
             Some(MediaLaneHit::Scrub)
         );
+    }
+
+    #[test]
+    fn compact_scrubber_stays_fixed_across_timestamp_digit_boundaries() {
+        let mut scrubbed = false;
+        for width in [160.0, 168.0, 176.0] {
+            let mut lane = viewer((1, 1), Some((160, 90)));
+            lane.rect = (0.0, 0.0, width, 400.0);
+            lane.play = Some(MediaLanePlay::Pause);
+            lane.scrubber = Some(MediaLaneScrubber {
+                seekable: true,
+                position_ms: 599_000,
+                duration_ms: 754_000,
+                label: "9:59 / 12:34".into(),
+            });
+            let before = media_lane_geometry(&lane, (8.0, 16.0), (8.0, 16.0)).unwrap();
+            let bar = lane.scrubber.as_mut().unwrap();
+            bar.position_ms = 600_000;
+            bar.label = "10:00 / 12:34".into();
+            let after = media_lane_geometry(&lane, (8.0, 16.0), (8.0, 16.0)).unwrap();
+            assert_eq!(
+                before.scrubber, after.scrubber,
+                "timestamp boundary removed the compact scrubber at width {width}"
+            );
+            assert_eq!(before.scrub_label, after.scrub_label);
+            assert_eq!(before.image, after.image);
+            if let Some(track) = before.scrubber {
+                assert_eq!(after.scrub_at(track.0 + track.2 * 0.5), Some(0.5));
+                scrubbed = true;
+            }
+        }
+        assert!(scrubbed, "the narrow lanes must include a usable scrubber");
     }
 
     #[test]

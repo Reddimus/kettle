@@ -446,7 +446,7 @@ pub fn call_tool(selection: ToolSelection, params: &Value) -> Value {
 pub fn call_tool_cancellable(
     selection: ToolSelection,
     params: &Value,
-    cancelled: &std::sync::atomic::AtomicBool,
+    cancelled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     fits: &dyn Fn(&Value) -> bool,
 ) -> Value {
     call_tool_inner(selection, params, Some(cancelled), fits)
@@ -504,9 +504,10 @@ fn is_known_tool(selection: ToolSelection, name: &str) -> bool {
 fn call_tool_inner(
     selection: ToolSelection,
     params: &Value,
-    cancelled: Option<&std::sync::atomic::AtomicBool>,
+    cancel_flag: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     fits: &dyn Fn(&Value) -> bool,
 ) -> Value {
+    let cancelled = cancel_flag.map(|flag| &**flag);
     let call = match parse_tool_call(selection, params) {
         Ok(call) => call,
         Err(error) => return error_result(&error),
@@ -529,7 +530,7 @@ fn call_tool_inner(
         "kettle_card" => tool_kettle_card(&args, params, crate::mcp_display::session()),
         "kettle_allow" => tool_kettle_allow(params),
         "kettle_agent_hook" => tool_kettle_agent_hook(&args, params, cancelled),
-        "kettle_video_frames" => tool_kettle_video_frames(&args, fits),
+        "kettle_video_frames" => tool_kettle_video_frames(&args, fits, cancel_flag),
         "kettle_run" => tool_kettle_run(&args, cancelled),
         "kettle_list_panes" => ctl_call(
             "list_panes",
@@ -682,6 +683,16 @@ fn tool_kettle_show(
     cancelled: Option<&std::sync::atomic::AtomicBool>,
     session: &crate::mcp_display::DisplaySession,
 ) -> Value {
+    tool_kettle_show_with_source(args, params, cancelled, session, None)
+}
+
+fn tool_kettle_show_with_source(
+    args: &Value,
+    params: &Value,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+    session: &crate::mcp_display::DisplaySession,
+    admitted: Option<kettle_ctl::show::ShowSource>,
+) -> Value {
     use kettle_media::FailureCode;
     let agent_client = if crate::mcp_display::is_agy() {
         match crate::agy::client(cancelled) {
@@ -716,15 +727,20 @@ fn tool_kettle_show(
             _ => return show_failed(FailureCode::BadParams.into()),
         },
     };
-    let source = match (args.get("mermaid"), args.get("path")) {
-        (Some(Value::String(text)), None) => kettle_ctl::show::ShowSource::Mermaid(text.clone()),
-        (None, Some(Value::String(path))) if std::path::Path::new(path).is_absolute() => {
-            match crate::show_cli::file_source(std::path::Path::new(path), false) {
-                Ok(source) => crate::show_cli::with_page(source, page),
-                Err(refusal) => return show_failed(refusal),
+    let source = match admitted {
+        Some(source) => source,
+        None => match (args.get("mermaid"), args.get("path")) {
+            (Some(Value::String(text)), None) => {
+                kettle_ctl::show::ShowSource::Mermaid(text.clone())
             }
-        }
-        _ => return show_failed(FailureCode::BadParams.into()),
+            (None, Some(Value::String(path))) if std::path::Path::new(path).is_absolute() => {
+                match crate::show_cli::file_source(std::path::Path::new(path), false) {
+                    Ok(source) => crate::show_cli::with_page(source, page),
+                    Err(refusal) => return show_failed(refusal),
+                }
+            }
+            _ => return show_failed(FailureCode::BadParams.into()),
+        },
     };
     let name = args
         .get("path")
@@ -1004,12 +1020,13 @@ fn tool_kettle_agent_hook_with(
     if event != "Stop" {
         return empty();
     }
-    let path = session
-        .inbox
-        .lock()
-        .ok()
-        .and_then(|mut inbox| inbox.as_mut().and_then(crate::agent_artifacts::Inbox::next));
-    let Some(path) = path else {
+    let artifact = session.inbox.lock().ok().and_then(|mut inbox| {
+        let inbox = inbox.as_mut()?;
+        let path = inbox.next()?;
+        let (source, file) = inbox.fallback_source(&path)?;
+        Some((path, source, file))
+    });
+    let Some((path, source, _file)) = artifact else {
         return empty();
     };
     // A private synthetic call id lets the normal one-time card path enforce
@@ -1019,7 +1036,7 @@ fn tool_kettle_agent_hook_with(
     let id = format!("fallback-{sequence}");
     let call = json!({"_meta": {"callId": id}});
     let show = json!({"path": path, "key": crate::agent_artifacts::key(&path)});
-    let result = tool_kettle_show(&show, &call, cancelled, session);
+    let result = tool_kettle_show_with_source(&show, &call, cancelled, session, Some(source));
     if result
         .pointer("/structuredContent/delivery")
         .and_then(Value::as_str)
@@ -1274,28 +1291,56 @@ fn video_frames_request(args: &Value) -> Result<crate::video_frames::FramesReque
     })
 }
 
+#[derive(Default)]
+struct McpMedia(std::sync::OnceLock<Option<std::sync::Arc<kettle_media::client::WorkerClient>>>);
+
+impl McpMedia {
+    fn client(
+        &self,
+        create: impl FnOnce() -> Option<kettle_media::client::WorkerClient>,
+    ) -> Option<std::sync::Arc<kettle_media::client::WorkerClient>> {
+        self.0
+            .get_or_init(|| create().map(std::sync::Arc::new))
+            .clone()
+    }
+}
+
 /// `kettle_video_frames`: take a video's stills in a worker this server
 /// starts, and return exactly one JPEG image and the text index, sized to
 /// fit the response they are sent in. There is no `structuredContent`:
 /// Codex hands the model an image only from a result without it.
-fn tool_kettle_video_frames(args: &Value, fits: &dyn Fn(&Value) -> bool) -> Value {
+fn tool_kettle_video_frames(
+    args: &Value,
+    fits: &dyn Fn(&Value) -> bool,
+    cancelled: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Value {
     let request = match video_frames_request(args) {
         Ok(request) => request,
         Err(failure) => return frames_failed(failure),
     };
-    let Some(client) = crate::media_client() else {
+    static MEDIA: McpMedia = McpMedia(std::sync::OnceLock::new());
+    let Some(client) = MEDIA.client(crate::media_client) else {
         return frames_failed(FailureCode::WorkerUnavailable);
     };
-    match crate::video_frames::render(&request, &client) {
-        Ok(sheet) => frames_fitting(&sheet, fits),
+    match crate::video_frames::render(&request, &client, cancelled) {
+        Ok(sheet) => frames_fitting_cancellable(&sheet, fits, cancelled.map(|flag| &**flag)),
         Err(failure) => frames_failed(failure),
     }
 }
 
 /// The result for `sheet`, its JPEG the largest whose whole result `fits`.
+#[cfg(test)]
 fn frames_fitting(sheet: &crate::video_frames::Sheet, fits: &dyn Fn(&Value) -> bool) -> Value {
+    frames_fitting_cancellable(sheet, fits, None)
+}
+
+fn frames_fitting_cancellable(
+    sheet: &crate::video_frames::Sheet,
+    fits: &dyn Fn(&Value) -> bool,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Value {
     let text = sheet.index();
-    match sheet.jpeg(&|jpeg| fits(&frames_result(jpeg, &text))) {
+    match sheet.jpeg_cancellable(&|jpeg| fits(&frames_result(jpeg, &text)), cancelled) {
         Ok(jpeg) => frames_result(&jpeg, &text),
         Err(failure) => frames_failed(failure),
     }
@@ -1549,6 +1594,153 @@ mod tests {
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_owned))
             .collect()
+    }
+
+    struct StalledWorker {
+        checks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        gate: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl kettle_media::client::WorkerPlatform for StalledWorker {
+        fn worker_path(&self) -> Result<&std::path::Path, kettle_media::client::UnavailableCause> {
+            Ok(std::path::Path::new("/worker"))
+        }
+        fn inspect(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<kettle_media::client::FileIdentity, kettle_media::client::UnavailableCause>
+        {
+            self.checks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (lock, changed) = &*self.gate;
+            let _open = changed
+                .wait_while(lock.lock().unwrap(), |open| !*open)
+                .unwrap();
+            Err(kettle_media::client::UnavailableCause::NoInstallLocation)
+        }
+        fn verify(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<(), kettle_media::client::UnavailableCause> {
+            Ok(())
+        }
+        fn spawn(
+            &self,
+            _: &std::path::Path,
+        ) -> std::io::Result<kettle_media::client::SpawnedWorker> {
+            Err(std::io::Error::other("fixture never starts a worker"))
+        }
+        fn guard_pipe_writes(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn stalled_client(
+        checks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        gate: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    ) -> kettle_media::client::WorkerClient {
+        kettle_media::client::WorkerClient::with_test_budgets(
+            crate::media_build_id().unwrap(),
+            Box::new(StalledWorker { checks, gate }),
+            std::time::Duration::from_millis(250),
+            std::time::Duration::from_millis(250),
+            64 << 20,
+        )
+    }
+
+    #[test]
+    fn regression_video_cancellation_interrupts_startup() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Condvar, Mutex};
+        use std::time::{Duration, Instant};
+        let checks = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let client = kettle_media::client::WorkerClient::with_test_budgets(
+            crate::media_build_id().unwrap(),
+            Box::new(StalledWorker {
+                checks: checks.clone(),
+                gate: gate.clone(),
+            }),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+            64 << 20,
+        );
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"video").unwrap();
+        let request = crate::video_frames::FramesRequest {
+            path: file.path().into(),
+            ..Default::default()
+        };
+        let flag = cancelled.clone();
+        let cancelling = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while checks.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            flag.store(true, Ordering::Release);
+        });
+        let started = Instant::now();
+        let result = crate::video_frames::render(&request, &client, Some(&cancelled));
+        let elapsed = started.elapsed();
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        cancelling.join().unwrap();
+        assert!(result.is_err());
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "cancelled startup retained the tool worker for {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn regression_video_cancellation_stops_jpeg_fitting() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cancelled = AtomicBool::new(false);
+        let attempts = std::cell::Cell::new(0);
+        let mut sheet = sheet();
+        sheet.image = image::RgbaImage::new(64, 64);
+        let result = frames_fitting_cancellable(
+            &sheet,
+            &|_| {
+                attempts.set(attempts.get() + 1);
+                cancelled.store(true, Ordering::Release);
+                false
+            },
+            Some(&cancelled),
+        );
+        assert_eq!(
+            attempts.get(),
+            1,
+            "JPEG fitting continued after cancellation"
+        );
+        assert_eq!(result["structuredContent"]["code"], json!("render_failed"));
+    }
+
+    #[test]
+    fn regression_mcp_media_retains_stalled_start_accounting() {
+        let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let media = McpMedia::default();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"video").unwrap();
+        let request = crate::video_frames::FramesRequest {
+            path: file.path().into(),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let client = media
+                .client(|| Some(stalled_client(checks.clone(), gate.clone())))
+                .unwrap();
+            assert!(crate::video_frames::render(&request, &client, None).is_err());
+        }
+        let observed = checks.load(std::sync::atomic::Ordering::SeqCst);
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        assert_eq!(
+            observed, 1,
+            "successive calls accumulated stalled startup helpers"
+        );
     }
 
     /// Claude Code drops a tool whose input schema has a top-level `oneOf`,

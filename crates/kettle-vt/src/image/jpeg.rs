@@ -87,6 +87,7 @@ fn headers(bytes: &[u8]) -> Option<(Frame, usize)> {
     let mut entropy = false;
     let mut frame = None;
     let mut first_scan_count = None;
+    let mut extended_xmp_segments = 0;
     while pos < bytes.len() {
         if entropy && bytes[pos] != 0xff {
             pos += 1;
@@ -177,6 +178,13 @@ fn headers(bytes: &[u8]) -> Option<(Frame, usize)> {
                 first_scan_count.get_or_insert(count);
                 entropy = true;
             }
+            0xe1 if data.starts_with(b"http://ns.adobe.com/xmp/extension/\0") => {
+                // zune-jpeg reassembles all incomplete segments after each marker.
+                extended_xmp_segments += 1;
+                if extended_xmp_segments > 64 {
+                    return None;
+                }
+            }
             // DNL changes geometry after the admission decision.
             0xdc => return None,
             _ => {}
@@ -233,6 +241,37 @@ mod tests {
         assert_eq!(
             scratch_bytes(&separate, 4096).unwrap() - separate.len() * 8,
             progressive - interleaved.len() * 8
+        );
+    }
+
+    #[test]
+    fn repeated_incomplete_extended_xmp_is_bounded_before_decode() {
+        let mut segment = b"http://ns.adobe.com/xmp/extension/\0".to_vec();
+        segment.extend_from_slice(&[b'0'; 32]);
+        segment.extend_from_slice(&1u32.to_be_bytes());
+        segment.extend_from_slice(&0u32.to_be_bytes());
+        let mut bytes = vec![0xff, 0xd8];
+        for _ in 0..64 {
+            bytes.extend_from_slice(&[0xff, 0xe1]);
+            bytes.extend_from_slice(&((segment.len() + 2) as u16).to_be_bytes());
+            bytes.extend_from_slice(&segment);
+        }
+        let image = headers(false, false);
+        let boundary = bytes.len();
+        bytes.extend_from_slice(&image[2..]);
+        assert!(
+            scratch_bytes(&bytes, 4096).is_some(),
+            "bounded XMP is admitted"
+        );
+        bytes.splice(
+            boundary..boundary,
+            [0xff, 0xe1, 0, (segment.len() + 2) as u8]
+                .into_iter()
+                .chain(segment),
+        );
+        assert!(
+            scratch_bytes(&bytes, 4096).is_none(),
+            "too many incomplete Extended XMP segments must be rejected before decoding"
         );
     }
 

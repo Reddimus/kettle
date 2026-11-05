@@ -109,7 +109,17 @@ impl RegistryEntry {
 
 #[cfg(unix)]
 fn private_temp_state_dir() -> PathBuf {
-    std::env::temp_dir()
+    private_temp_state_dir_from(&std::env::temp_dir())
+}
+
+#[cfg(unix)]
+fn private_temp_state_dir_from(temp: &std::path::Path) -> PathBuf {
+    let temp = if temp.is_absolute() {
+        temp
+    } else {
+        std::path::Path::new("/tmp")
+    };
+    temp
         // SAFETY: geteuid has no preconditions.
         .join(format!("kettle-{}", unsafe { libc::geteuid() }))
         .join("state")
@@ -1125,6 +1135,25 @@ mod tests {
             });
             assert!(d.is_absolute(), "relative XDG paths must be ignored");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_temporary_base_uses_an_absolute_state_fallback() {
+        use std::path::Path;
+
+        let relative = private_temp_state_dir_from(Path::new("relative/tmp"));
+        assert!(
+            relative.is_absolute(),
+            "temporary state fallback must be absolute"
+        );
+        // SAFETY: geteuid has no preconditions.
+        let namespace = format!("kettle-{}", unsafe { libc::geteuid() });
+        assert_eq!(relative, Path::new("/tmp").join(&namespace).join("state"));
+        assert_eq!(
+            private_temp_state_dir_from(Path::new("/custom/tmp")),
+            Path::new("/custom/tmp").join(namespace).join("state")
+        );
     }
 
     #[test]

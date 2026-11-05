@@ -678,6 +678,8 @@ fn media_paste_receipt_geometry_avoiding(
     let expanded_h = (ch * if receipt.remote { 8.0 } else { 7.0 }).max(text_height);
     let image_box_w = (expanded_w * 0.40).max(text_cell_width * 8.0);
     let detail_w = expanded_w - pad * 3.0 - image_box_w;
+    let dismiss_size = 24.0_f32.max(text_line_height * 1.5);
+    let top_details_clear_dismiss = pad + text_line_height * 1.8 >= 5.0 + dismiss_size;
     // The remote warning is safety information, not decorative copy. Admit
     // the full card only when its actual detail box can hold the longest line;
     // the six-pixel padding floor and terminal `cell-width` scaling mean a
@@ -702,10 +704,10 @@ fn media_paste_receipt_geometry_avoiding(
             [right_bottom, right_top, left_bottom, left_top]
         };
         candidates.into_iter().find(|(candidate, top_lane)| {
-            let final_detail_w = if *top_lane {
+            let final_detail_w = if *top_lane && top_details_clear_dismiss {
                 detail_w
             } else {
-                detail_w + pad - 5.0 - 24.0_f32.max(text_line_height * 1.5) - text_cell_width * 0.5
+                detail_w + pad - 5.0 - dismiss_size - text_cell_width * 0.5
             };
             (!expanded || !receipt.remote || final_detail_w >= text_cell_width * min_detail_columns)
                 && completion_rect.is_none_or(|other| !rects_overlap(*candidate, other))
@@ -741,7 +743,6 @@ fn media_paste_receipt_geometry_avoiding(
             preview_h,
         );
         let text_x = rect.0 + pad + image_box_w + pad;
-        let dismiss_size = 24.0_f32.max(text_line_height * 1.5);
         let dismiss_inset = 5.0;
         let dismiss_rect = (
             rect.0 + rect.2 - dismiss_inset - dismiss_size,
@@ -758,7 +759,7 @@ fn media_paste_receipt_geometry_avoiding(
         // minimum font and cell height can make those bands touch.
         let title_right = dismiss_rect.0 - text_cell_width * 0.5;
         let title_w = (title_right - text_x).max(0.0);
-        let detail_right = if top_lane {
+        let detail_right = if top_lane && top_details_clear_dismiss {
             rect.0 + rect.2 - pad
         } else {
             dismiss_rect.0 - text_cell_width * 0.5

@@ -692,9 +692,8 @@ fn start_writer(
                         (state.pcm.take(), state.broker.clone())
                     };
                     if let Some((feedback, received)) = feedback {
-                        let frame = Frame::Pcm(crate::pcm_client::aged_feedback(
-                            feedback,
-                            received.elapsed(),
+                        let frame = Frame::Pcm(crate::pcm::Message::Feedback(
+                            crate::pcm_client::aged_feedback(feedback, received.elapsed()),
                         ));
                         if !wire::encode(&frame, Direction::ParentToWorker)
                             .is_ok_and(|bytes| send(&bytes).is_ok())

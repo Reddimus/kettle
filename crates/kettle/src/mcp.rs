@@ -144,18 +144,123 @@ const CANCELLED_TOOL_TEARDOWN_LIMIT: Duration = Duration::from_secs(10);
 /// it, lose the agent's build output, and blame stdout while stdout is being
 /// read. That is worse than a hang.
 ///
-/// The only thing that means "the peer stopped reading" is the writer being
-/// parked inside a single `write` that has not returned. That is what this
-/// records, so a busy worker waits as long as it needs to and a jammed pipe is
-/// still caught.
+/// Track both accepted writes and, on Linux pipes, reads that free bytes before
+/// an entire pipe-buffer slot becomes writable. A busy worker waits as long as
+/// it needs to, while a pipe with no delivery progress is still caught.
 #[derive(Default)]
 struct WriterProgress {
     /// Set while `write_message` has been entered and has not returned.
     in_write: AtomicBool,
-    /// Incremented after each completed write, so "parked in ONE write" is
-    /// distinguishable from "writing steadily".
+    /// Incremented for accepted bytes, observed pipe reads, or message completion.
     completed: AtomicU64,
     failure: Mutex<Option<String>>,
+}
+
+#[cfg(unix)]
+struct PipeMode {
+    file: std::fs::File,
+    flags: libc::c_int,
+}
+
+#[cfg(unix)]
+impl PipeMode {
+    fn nonblocking(file: &std::fs::File) -> std::io::Result<Option<Self>> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::FileTypeExt as _;
+
+        if !file.metadata()?.file_type().is_fifo() {
+            return Ok(None);
+        }
+        let file = file.try_clone()?;
+        // SAFETY: file owns a live descriptor; F_GETFL takes no extra argument.
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        if flags == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: F_SETFL takes integer flags on this live descriptor.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Some(Self { file, flags }))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PipeMode {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd as _;
+        // Duplicates share status flags. Restore them on the lifecycle thread,
+        // even when shutdown abandons the protocol writer.
+        // SAFETY: this retained descriptor still owns the pipe description.
+        if unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_SETFL, self.flags) } == -1 {
+            log::warn!(
+                "MCP: could not restore stdout flags: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+struct PipeOutput {
+    file: std::fs::File,
+    is_pipe: bool,
+    progress: Arc<WriterProgress>,
+}
+
+#[cfg(unix)]
+impl PipeOutput {
+    fn pending_bytes(&self) -> std::io::Result<Option<usize>> {
+        #[cfg(target_os = "linux")]
+        if self.is_pipe {
+            use std::os::fd::AsRawFd as _;
+            let mut pending: libc::c_int = 0;
+            // SAFETY: FIONREAD writes one integer; file owns the live pipe fd.
+            if unsafe { libc::ioctl(self.file.as_raw_fd(), libc::FIONREAD, &mut pending) } == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            return Ok(Some(pending.max(0) as usize));
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(unix)]
+impl Write for PipeOutput {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut pending = self.pending_bytes()?;
+        loop {
+            match self.file.write(bytes) {
+                Err(error) if self.is_pipe && error.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Writes up to PIPE_BUF are atomic: a small read may
+                    // leave room for one byte but not the pending chunk.
+                    if bytes.len() > 1 {
+                        match self.file.write(&bytes[..1]) {
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                            result => return result,
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                    let now = self.pending_bytes()?;
+                    if let (Some(before), Some(after)) = (pending, now)
+                        && after < before
+                    {
+                        // Linux can withhold writable readiness until a whole
+                        // page drains, even while the peer keeps reading it.
+                        self.progress
+                            .completed
+                            .fetch_add((before - after) as u64, Ordering::Release);
+                    }
+                    pending = now;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
 }
 
 fn stdout_stall_detector(progress: &WriterProgress, limit: Duration) -> impl FnMut() -> bool + '_ {
@@ -182,8 +287,7 @@ fn stdout_stall_detector(progress: &WriterProgress, limit: Duration) -> impl FnM
     }
 }
 
-/// Wait until `done()`, giving up only if the writer is parked inside a single
-/// write for longer than `limit`.
+/// Wait until `done()`, giving up only if delivery makes no progress for `limit`.
 ///
 /// Returns `true` when `done()` became true, `false` when the writer stalled.
 /// An idle writer — no write in flight — never stalls this, however long the
@@ -224,8 +328,35 @@ pub fn run_mcp(selection: ToolSelection) -> i32 {
             return 1;
         }
     };
+    #[cfg(unix)]
+    let status = run_mcp_with_file(stdin, output, selection);
+    #[cfg(not(unix))]
     let status = run_mcp_with(stdin, output, selection);
     crate::mcp_display::close_session();
+    status
+}
+
+#[cfg(unix)]
+fn run_mcp_with_file(
+    input: impl BufRead + Send + 'static,
+    output: std::fs::File,
+    selection: ToolSelection,
+) -> i32 {
+    let mode = match PipeMode::nonblocking(&output) {
+        Ok(mode) => mode,
+        Err(error) => {
+            eprintln!("kettle mcp: cannot prepare stdout pipe: {error}");
+            return 1;
+        }
+    };
+    let progress = Arc::new(WriterProgress::default());
+    let output = PipeOutput {
+        file: output,
+        is_pipe: mode.is_some(),
+        progress: progress.clone(),
+    };
+    let status = run_mcp_with_progress(input, output, selection, progress);
+    drop(mode);
     status
 }
 
@@ -235,10 +366,20 @@ pub fn run_mcp(selection: ToolSelection) -> i32 {
 /// the stall behaviour above testable at all: the failure only appears when the
 /// peer stops reading, and the process's real stdout cannot be made to do that
 /// from inside a test.
+#[cfg(any(test, not(unix)))]
 pub fn run_mcp_with(
+    input: impl BufRead + Send + 'static,
+    output: impl Write + Send + 'static,
+    selection: ToolSelection,
+) -> i32 {
+    run_mcp_with_progress(input, output, selection, Arc::default())
+}
+
+fn run_mcp_with_progress(
     mut input: impl BufRead + Send + 'static,
     output: impl Write + Send + 'static,
     selection: ToolSelection,
+    progress: Arc<WriterProgress>,
 ) -> i32 {
     let (input_tx, input_rx) = crossbeam_channel::bounded(1);
     if let Err(error) = std::thread::Builder::new()
@@ -259,7 +400,6 @@ pub fn run_mcp_with(
 
     let (responses_tx, responses_rx) =
         crossbeam_channel::bounded::<Value>(TOOL_QUEUE_CAPACITY + TOOL_WORKERS + 8);
-    let progress = Arc::new(WriterProgress::default());
     let writer_progress = progress.clone();
     let writer = match std::thread::Builder::new()
         .name("kettle-mcp-writer".into())
@@ -274,7 +414,11 @@ pub fn run_mcp_with(
             let mut output = output;
             while let Ok(message) = responses_rx.recv() {
                 writer_progress.in_write.store(true, Ordering::Release);
-                let wrote = write_message(&mut output, &message);
+                let wrote = write_message_progress(&mut output, &message, |bytes| {
+                    writer_progress
+                        .completed
+                        .fetch_add(bytes as u64, Ordering::Release);
+                });
                 if let Err(error) = &wrote {
                     crate::exec::consume_pending_sigpipe(error);
                     *writer_progress
@@ -322,6 +466,7 @@ pub fn run_mcp_with(
     let mut lifecycle = Lifecycle::Uninitialized;
     let mut stdout_stalled = stdout_stall_detector(&progress, STDOUT_STALL_LIMIT);
     let mut stalled = false;
+    let mut input_failed = false;
     loop {
         if responses_tx.peer_gone() || stdout_stalled() {
             stalled = true;
@@ -344,6 +489,7 @@ pub fn run_mcp_with(
             }
             Err(ReadLineError::Io(error)) => {
                 eprintln!("kettle mcp: stdin read failed: {error}");
+                input_failed = true;
                 break;
             }
         };
@@ -461,7 +607,7 @@ pub fn run_mcp_with(
         return 1;
     }
     let _ = writer.join();
-    0
+    i32::from(input_failed)
 }
 
 /// Cancel every pending tool call and wait up to `limit` for `workers` to
@@ -1251,7 +1397,16 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
+#[cfg(test)]
 fn write_message(writer: &mut impl Write, message: &Value) -> std::io::Result<()> {
+    write_message_progress(writer, message, |_| {})
+}
+
+fn write_message_progress(
+    writer: &mut impl Write,
+    message: &Value,
+    mut progress: impl FnMut(usize),
+) -> std::io::Result<()> {
     let mut bytes = serde_json::to_vec(message).map_err(std::io::Error::other)?;
     if bytes.len() > MAX_MCP_RESPONSE_BYTES {
         let id = message.get("id").cloned().unwrap_or(Value::Null);
@@ -1277,8 +1432,19 @@ fn write_message(writer: &mut impl Write, message: &Value) -> std::io::Result<()
             .map_err(std::io::Error::other)?;
         }
     }
-    writer.write_all(&bytes)?;
-    writer.write_all(b"\n")?;
+    bytes.push(b'\n');
+    let mut remaining = bytes.as_slice();
+    while !remaining.is_empty() {
+        match writer.write(&remaining[..remaining.len().min(8192)]) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(written) => {
+                remaining = &remaining[written..];
+                progress(written);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
     writer.flush()
 }
 
@@ -1349,6 +1515,247 @@ fn read_capped_line(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, ReadLi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regression_mcp_input_io_errors_fail_after_draining_responses() {
+        struct FailsAfterInput(std::io::Cursor<Vec<u8>>);
+        impl std::io::Read for FailsAfterInput {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.position() as usize == self.0.get_ref().len() {
+                    Err(std::io::Error::other("fixture input failure"))
+                } else {
+                    self.0.read(bytes)
+                }
+            }
+        }
+        impl BufRead for FailsAfterInput {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                if self.0.position() as usize == self.0.get_ref().len() {
+                    Err(std::io::Error::other("fixture input failure"))
+                } else {
+                    self.0.fill_buf()
+                }
+            }
+            fn consume(&mut self, count: usize) {
+                self.0.consume(count);
+            }
+        }
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+        impl Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let input = format!(
+            "{}\n",
+            json!({"jsonrpc":"2.0", "id":0, "method":"initialize",
+            "params":init_params(MCP_PROTOCOL_VERSION)})
+        );
+        let captured = Captured::default();
+        let code = run_mcp_with(
+            FailsAfterInput(std::io::Cursor::new(input.into_bytes())),
+            captured.clone(),
+            ToolSelection::Full,
+        );
+        let bytes = captured.0.lock().unwrap();
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["id"], 0, "accepted response was lost");
+        assert_ne!(code, 0, "stdin I/O failure returned success");
+    }
+
+    #[cfg(unix)]
+    fn saturated_mcp_pipe() -> (std::io::PipeReader, std::fs::File, usize) {
+        use std::os::fd::{AsRawFd as _, OwnedFd};
+
+        let (reader, writer) = std::io::pipe().unwrap();
+        let mut output = std::fs::File::from(OwnedFd::from(writer));
+        let fd = output.as_raw_fd();
+        #[cfg(target_os = "macos")]
+        // SAFETY: suppress Darwin's process-wide SIGPIPE on this owned pipe.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETNOSIGPIPE, 1) }, 0);
+        // SAFETY: fd is live; these fcntl operations take integer arguments.
+        let nonblocking = unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) };
+        assert_eq!(nonblocking, 0);
+        let mut filled = 0;
+        loop {
+            match output.write(&[b' '; 8192]) {
+                Ok(n) => filled += n,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                other => panic!("could not saturate pipe: {other:?}"),
+            }
+        }
+        assert!(filled >= 4096);
+        // SAFETY: restore blocking writes to reproduce the original OS behavior.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, 0) }, 0);
+        (reader, output, filled)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn regression_one_byte_pipe_reads_keep_a_small_response_alive() {
+        small_pipe_response(true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn regression_unread_pipe_stalls_a_small_response() {
+        small_pipe_response(false);
+    }
+
+    #[cfg(unix)]
+    fn small_pipe_response(read_slowly: bool) {
+        use std::io::Read as _;
+
+        let (mut reader, output, filled) = saturated_mcp_pipe();
+        let mode = PipeMode::nonblocking(&output).unwrap().unwrap();
+        let progress = Arc::new(WriterProgress::default());
+        let mut message = json!({"result":""});
+        let padding = 512 - serde_json::to_vec(&message).unwrap().len() - 1;
+        message["result"] = json!("x".repeat(padding));
+        let mut expected = serde_json::to_vec(&message).unwrap();
+        expected.push(b'\n');
+        assert_eq!(expected.len(), 512);
+        progress.in_write.store(true, Ordering::Release);
+        let writing = progress.clone();
+        let writer = std::thread::spawn(move || {
+            crate::exec::block_sigpipe_for_current_thread().unwrap();
+            let mut output = PipeOutput {
+                file: output,
+                is_pipe: true,
+                progress: writing.clone(),
+            };
+            write_message_progress(&mut output, &message, |bytes| {
+                writing.completed.fetch_add(bytes as u64, Ordering::Release);
+            })
+            .unwrap();
+            writing.in_write.store(false, Ordering::Release);
+        });
+        let reading = std::thread::spawn(move || {
+            let mut received = Vec::new();
+            for _ in 0..8 {
+                std::thread::sleep(Duration::from_millis(100));
+                if read_slowly {
+                    let mut byte = [0];
+                    reader.read_exact(&mut byte).unwrap();
+                    received.extend_from_slice(&byte);
+                }
+            }
+            // Release the writer even when the detector reports a stall.
+            reader.read_to_end(&mut received).unwrap();
+            received
+        });
+        let started = Instant::now();
+        let alive = wait_unless_stdout_stalled(&progress, STDOUT_STALL_LIMIT, || {
+            started.elapsed() >= STDOUT_STALL_LIMIT * 2
+        });
+        writer.join().unwrap();
+        drop(mode);
+        let received = reading.join().unwrap();
+        assert_eq!(&received[filled..], expected);
+        assert_eq!(
+            alive, read_slowly,
+            "only a pipe whose reader stopped should stall a 512-byte response"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn regression_real_pipe_reads_keep_mcp_alive() {
+        use std::io::Read as _;
+
+        let (mut reader, output, filled) = saturated_mcp_pipe();
+        let input = format!(
+            "{}\n",
+            json!({"jsonrpc":"2.0", "id":"x".repeat(16 * 1024),
+                "method":"initialize", "params":init_params(MCP_PROTOCOL_VERSION)})
+        );
+        let server = std::thread::spawn(move || {
+            run_mcp_with_file(
+                std::io::Cursor::new(input.into_bytes()),
+                output,
+                ToolSelection::Full,
+            )
+        });
+        let started = Instant::now();
+        let mut received = Vec::new();
+        while started.elapsed() < STDOUT_STALL_LIMIT * 2 {
+            let mut chunk = [0; 128];
+            reader.read_exact(&mut chunk).unwrap();
+            received.extend_from_slice(&chunk);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        reader.read_to_end(&mut received).unwrap();
+        let code = server.join().unwrap();
+        let response: Value = serde_json::from_slice(&received[filled..]).unwrap();
+        assert_eq!(response["id"], "x".repeat(16 * 1024));
+        assert_eq!(code, 0, "a real pipe reader was misclassified as stalled");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn regression_real_pipe_stall_restores_stdout_flags() {
+        use std::os::fd::AsRawFd as _;
+
+        let (reader, output, _) = saturated_mcp_pipe();
+        let retained = output.try_clone().unwrap();
+        let input = format!(
+            "{}\n",
+            json!({"jsonrpc":"2.0", "id":0, "method":"initialize",
+                "params":init_params(MCP_PROTOCOL_VERSION)})
+        );
+        let started = Instant::now();
+        let code = run_mcp_with_file(
+            std::io::Cursor::new(input.into_bytes()),
+            output,
+            ToolSelection::Full,
+        );
+        assert_eq!(code, 1, "a full, unread pipe must still time out");
+        assert!(started.elapsed() >= STDOUT_STALL_LIMIT);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // SAFETY: retained owns the same pipe description as the writer.
+        let flags = unsafe { libc::fcntl(retained.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags, -1);
+        assert_eq!(
+            flags & libc::O_NONBLOCK,
+            0,
+            "shutdown leaked nonblocking mode"
+        );
+        drop(reader);
+    }
+
+    #[test]
+    fn regression_short_writes_keep_a_slow_mcp_reader_alive() {
+        struct SlowWriter;
+        impl Write for SlowWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(4));
+                Ok(bytes.len().min(64))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let input = format!(
+            "{}\n",
+            json!({
+                "jsonrpc": "2.0", "id": "x".repeat(16 * 1024), "method": "initialize",
+                "params": init_params(MCP_PROTOCOL_VERSION)
+            })
+        );
+        let started = Instant::now();
+        let code = run_mcp_with(
+            std::io::Cursor::new(input.into_bytes()),
+            SlowWriter,
+            ToolSelection::Full,
+        );
+        assert_eq!(code, 0, "steady short writes were misclassified as stalled");
+        assert!(started.elapsed() > STDOUT_STALL_LIMIT);
+    }
 
     /// Discovery is this session's alone, never reused, in both modes, as
     /// what it says depends on where the server runs; display mode speaks

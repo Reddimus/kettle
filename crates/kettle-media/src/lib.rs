@@ -918,13 +918,21 @@ pub fn still_label(ms: u64, duration_ms: u64) -> String {
 
 impl VideoStillsResult {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        self.info.validate()?;
-        cap(self.samples.len(), usize::from(MAX_VIDEO_STILLS))?;
-        let in_range = |ms: u64| ms <= self.info.duration_ms;
-        let tolerance = u64::from(self.tolerance_ms);
-        if self.samples.is_empty()
-            || tolerance > self.info.duration_ms
-            || self.samples.iter().any(|sample| {
+        Self::validate_fields(&self.info, &self.samples, self.tolerance_ms)
+    }
+
+    pub(crate) fn validate_fields(
+        info: &VideoInfo,
+        samples: &[StillSample],
+        tolerance_ms: u32,
+    ) -> Result<(), ValidationError> {
+        info.validate()?;
+        cap(samples.len(), usize::from(MAX_VIDEO_STILLS))?;
+        let in_range = |ms: u64| ms <= info.duration_ms;
+        let tolerance = u64::from(tolerance_ms);
+        if samples.is_empty()
+            || tolerance > info.duration_ms
+            || samples.iter().any(|sample| {
                 !in_range(sample.requested_ms)
                     || !in_range(sample.actual_ms)
                     || sample.requested_ms.abs_diff(sample.actual_ms) > tolerance

@@ -98,6 +98,7 @@ struct SixelCanvas {
     cap_h: usize,
     width: usize,
     height: usize,
+    raster_height: Option<usize>,
     budget: GraphicsBudget,
     reservation: Option<GraphicsReservation>,
     /// Columns painted so far, checked against
@@ -115,6 +116,7 @@ impl SixelCanvas {
             cap_h: 0,
             width: 0,
             height: 0,
+            raster_height: None,
             budget,
             reservation: None,
             writes: 0,
@@ -197,6 +199,17 @@ impl SixelCanvas {
     fn put(&mut self, x: usize, band_y: usize, bits: u8, c: Rgb) -> bool {
         self.writes += 1;
         if self.writes > self.budget.limits().sixel_column_writes {
+            return false;
+        }
+        let band_end = self
+            .raster_height
+            .map_or(band_y + 6, |height| height.min(band_y + 6));
+        let painted_end = if bits == 0 {
+            0
+        } else {
+            band_y + (u8::BITS - bits.leading_zeros()) as usize
+        };
+        if !self.ensure(x + 1, band_end.max(painted_end)) {
             return false;
         }
         for r in 0..6 {
@@ -316,9 +329,6 @@ pub(crate) fn decode_with_budget(data: &[u8], budget: &GraphicsBudget) -> Option
                     if (0x3f..=0x7e).contains(&s) {
                         let bits = s - 0x3f;
                         for _ in 0..cnt.max(1) {
-                            if !canvas.ensure(x + 1, band_y + 6) {
-                                return None;
-                            }
                             if !canvas.put(x, band_y, bits, palette[color]) {
                                 return None;
                             }
@@ -348,6 +358,7 @@ pub(crate) fn decode_with_budget(data: &[u8], budget: &GraphicsBudget) -> Option
                     if !canvas.ensure(vals[2] as usize, vals[3] as usize) {
                         return None;
                     }
+                    canvas.raster_height = Some(canvas.height);
                 }
             }
             b'$' => {
@@ -361,9 +372,6 @@ pub(crate) fn decode_with_budget(data: &[u8], budget: &GraphicsBudget) -> Option
             }
             0x3f..=0x7e => {
                 let bits = b - 0x3f;
-                if !canvas.ensure(x + 1, band_y + 6) {
-                    return None;
-                }
                 if !canvas.put(x, band_y, bits, palette[color]) {
                     return None;
                 }
@@ -574,6 +582,34 @@ mod tests {
         // catches accidental width/height reversal.
         let img = decode(b"\"1;1;13;7").expect("raster hint should size the canvas");
         assert_eq!((img.width, img.height), (13, 7));
+    }
+
+    #[test]
+    fn final_band_unused_rows_fit_raster_byte_and_dimension_limits() {
+        for (width, height, column, overflow) in [(4096, 4096, b'N', b'^'), (1, 8192, b'B', b'F')] {
+            for repeat in [false, true] {
+                let mut body = format!("\"1;1;{width};{height}").into_bytes();
+                body.extend(std::iter::repeat_n(b'-', height / 6));
+                if repeat {
+                    body.extend_from_slice(b"!1");
+                }
+                body.push(column);
+                let budget =
+                    crate::GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+                let img = super::decode_with_budget(&body, &budget)
+                    .expect("unused final-band rows must not exceed the raster limits");
+                assert_eq!((img.width, img.height), (width as u32, height as u32));
+                assert_eq!(img.rgba[(height - 1) * width * 4 + 3], 255);
+                drop(img);
+                *body.last_mut().unwrap() = overflow;
+                assert!(
+                    super::decode_with_budget(&body, &budget).is_none(),
+                    "painted pixels outside the limits must still be refused"
+                );
+            }
+        }
+        let img = decode(b"\"1;1;1;1B").expect("painted pixels grow beyond the hint");
+        assert_eq!((img.width, img.height), (1, 2));
     }
 
     #[test]

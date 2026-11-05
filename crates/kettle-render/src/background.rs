@@ -153,6 +153,47 @@ pub(crate) fn starfield_time(
     }
 }
 
+fn admit_bg_frames(
+    decoded: Vec<bg_image::BgFrame>,
+    budget: &kettle_core::GraphicsBudget,
+) -> (Vec<kettle_core::ImageData>, Vec<bool>, Vec<u32>) {
+    let mut frames = Vec::with_capacity(decoded.len());
+    let mut opaque_frames = Vec::with_capacity(decoded.len());
+    let mut gaps = Vec::with_capacity(decoded.len());
+    for frame in decoded {
+        let opaque = frame
+            .image
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[3] == 255);
+        if let Some(image) = kettle_core::ImageData::new_with_budget(
+            frame.image.width,
+            frame.image.height,
+            frame.image.rgba,
+            budget,
+        ) {
+            frames.push(image);
+            opaque_frames.push(opaque);
+            gaps.push(frame.gap_ms);
+        } else {
+            frames.clear();
+            opaque_frames.clear();
+            gaps.clear();
+            break;
+        }
+    }
+    (frames, opaque_frames, gaps)
+}
+
+fn bg_image_retry_deadline(
+    retry_at: Option<std::time::Instant>,
+    decode_pending: bool,
+) -> Option<std::time::Instant> {
+    if decode_pending { None } else { retry_at }
+}
+
 impl Renderer {
     /// Repaint cap for the procedural starfield (`background-type = starfield`).
     /// The drift is slow, so a low rate keeps idle CPU near today's level while
@@ -246,6 +287,11 @@ impl Renderer {
         ))
     }
 
+    /// Next failed-background retry wake, suppressed while a decode is in flight.
+    pub fn background_retry_deadline(&self) -> Option<std::time::Instant> {
+        bg_image_retry_deadline(self.bg_image_retry_at, self.bg_image_pending.is_some())
+    }
+
     /// Install the owning window's redraw callback before its first frame.
     pub fn ensure_background_redraw(&mut self, redraw: impl Fn() + Send + Sync + 'static) {
         if self.bg_image_redraw.is_none() {
@@ -271,6 +317,8 @@ impl Renderer {
             match BgImageWorker::start(self.bg_image_redraw.clone()) {
                 Ok(worker) => self.bg_image_worker = Some(worker),
                 Err(error) => {
+                    self.bg_image_retry_at =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
                     log::warn!("could not start background-image decode worker: {error}");
                     return;
                 }
@@ -295,6 +343,8 @@ impl Renderer {
                 // spawns a fresh one instead of submitting into a dead
                 // channel every frame.
                 self.bg_image_worker = None;
+                self.bg_image_retry_at =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
             }
         }
     }
@@ -318,28 +368,9 @@ impl Renderer {
             if result.path != path || result.blur_radius != blur_radius {
                 continue;
             }
-            let mut frames = Vec::with_capacity(result.frames.len());
-            let mut opaque_frames = Vec::with_capacity(result.frames.len());
-            let mut gaps = Vec::with_capacity(result.frames.len());
-            for frame in result.frames {
-                let opaque = frame
-                    .image
-                    .rgba
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .all(|pixel| pixel[3] == 255);
-                if let Some(image) = kettle_core::ImageData::new_with_budget(
-                    frame.image.width,
-                    frame.image.height,
-                    frame.image.rgba,
-                    &self.graphics_budget,
-                ) {
-                    frames.push(image);
-                    opaque_frames.push(opaque);
-                    gaps.push(frame.gap_ms);
-                }
-            }
+            self.bg_image_cache = None;
+            let (frames, opaque_frames, gaps) =
+                admit_bg_frames(result.frames, &self.graphics_budget);
             // On failure, throttle the next retry; on success, clear it so
             // the loaded wallpaper never re-decodes.
             self.bg_image_retry_at = if frames.is_empty() {
@@ -356,5 +387,78 @@ impl Renderer {
                 started: std::time::Instant::now(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result() -> BgImageResult {
+        BgImageResult {
+            path: "wallpaper".into(),
+            blur_radius: 0,
+            frames: [40, 80]
+                .into_iter()
+                .map(|gap_ms| bg_image::BgFrame {
+                    image: bg_image::BgImage {
+                        width: 1,
+                        height: 1,
+                        rgba: vec![255; 4],
+                    },
+                    gap_ms,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn failed_background_decode_schedules_recovery_without_animation() {
+        use std::time::{Duration, Instant};
+        let dir = kettle_test_support::private_tempdir("kettle-bg-retry-");
+        let path = dir.path().join("wallpaper.png");
+        let (redraw_tx, redraw_rx) = std::sync::mpsc::channel();
+        let worker = BgImageWorker::start(Some(Arc::new(move || {
+            let _ = redraw_tx.send(());
+        })))
+        .unwrap();
+        let job = || BgImageJob {
+            path: path.to_string_lossy().into_owned(),
+            blur_radius: 0,
+        };
+        assert!(worker.try_submit(job()).is_ok());
+        redraw_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(worker.try_recv().unwrap().frames.is_empty());
+        let now = Instant::now();
+        let retry_at = now + Duration::from_secs(3);
+        let wake = bg_image_retry_deadline(Some(retry_at), false)
+            .expect("failed background decode did not schedule a retry wake");
+        assert_eq!(wake.duration_since(now), Duration::from_secs(3));
+        assert!(bg_image_retry_deadline(Some(retry_at), true).is_none());
+        assert!(bg_image_retry_deadline(None, false).is_none());
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
+        assert!(worker.try_submit(job()).is_ok());
+        redraw_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(worker.try_recv().unwrap().frames.len(), 1);
+    }
+
+    #[test]
+    fn animation_admission_retries_all_frames_after_temporary_pressure() {
+        let budget = kettle_core::GraphicsBudget::default();
+        let pressure = budget
+            .reserve_retained_cpu(budget.limits().retained_bytes - 4)
+            .unwrap();
+        let refused = admit_bg_frames(result().frames, &budget);
+        assert!(
+            refused.0.is_empty(),
+            "partial animation must remain a failed cache entry"
+        );
+        drop(refused);
+        drop(pressure);
+        let admitted = admit_bg_frames(result().frames, &budget);
+        assert_eq!(admitted.0.len(), 2);
+        assert_eq!(admitted.2, [40, 80]);
     }
 }

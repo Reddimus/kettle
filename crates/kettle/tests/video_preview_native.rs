@@ -238,8 +238,7 @@ fn shipped_check_names_the_video_s_cached_thumbnails() {
     let dir = kettle_test_support::private_tempdir("kettle-video-check-");
     let path = dir.path().join("clip.mp4");
     write_private_fixture(&path, VIDEO_FIXTURE);
-    // The MD5 of the video's file URI, which has no characters to escape.
-    let uri = format!("file://{}", path.display());
+    let uri = fixture_uri(&path);
     let digest = md5_hex(uri.as_bytes());
     let cache = dir.path().join("cache");
     let directory = cache.join("thumbnails/large");
@@ -454,4 +453,45 @@ fn fingerprint_recheck_retries_a_deadline_exit() {
         "deadline exit must be retried before parsing a fingerprint reply"
     );
     assert_eq!(attempts, 2);
+}
+
+#[cfg(unix)]
+fn fixture_uri(path: &std::path::Path) -> String {
+    use std::fmt::Write as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    assert!(path.is_absolute());
+    let mut uri = String::from("file://");
+    for component in path.components().skip(1) {
+        uri.push('/');
+        for &byte in component.as_os_str().as_bytes() {
+            if !(0x21..0x7f).contains(&byte)
+                || matches!(
+                    byte,
+                    b'"' | b'#' | b'%' | b'<' | b'>' | b'?' | b'\\' | b'`' | b'{' | b'}'
+                )
+            {
+                write!(uri, "%{byte:02X}").unwrap();
+            } else {
+                uri.push(char::from(byte));
+            }
+        }
+    }
+    if uri == "file://" {
+        uri.push('/');
+    }
+    uri
+}
+
+#[cfg(unix)]
+#[test]
+fn regression_thumbnail_fixture_encodes_file_uri_bytes() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(
+        b"/tmp/a b% caf\xc3\xa9\xff.mp4",
+    ));
+    assert_eq!(
+        fixture_uri(path),
+        "file:///tmp/a%20b%25%20caf%C3%A9%FF.mp4",
+        "fixture URI differs from the thumbnail key"
+    );
 }

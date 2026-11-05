@@ -162,12 +162,67 @@ pub struct GlyphSlot {
 struct CachedSlot {
     slot: Option<GlyphSlot>,
     last_used: u64,
+    refused: bool,
+}
+
+impl CachedSlot {
+    fn for_epoch(&self, epoch: u64) -> Option<Option<GlyphSlot>> {
+        if self.refused && self.last_used != epoch {
+            return None;
+        }
+        Some(self.slot)
+    }
 }
 
 enum CacheOutcome {
     Slot(GlyphSlot),
     Empty,
     AtlasFull,
+}
+
+fn remember_glyph_outcome(
+    slots: &mut HashMap<CacheKey, CachedSlot>,
+    key: CacheKey,
+    epoch: u64,
+    outcome: CacheOutcome,
+    complete: &mut bool,
+) -> Option<GlyphSlot> {
+    match outcome {
+        CacheOutcome::Slot(slot) => {
+            slots.insert(
+                key,
+                CachedSlot {
+                    slot: Some(slot),
+                    last_used: epoch,
+                    refused: false,
+                },
+            );
+            Some(slot)
+        }
+        CacheOutcome::Empty => {
+            slots.insert(
+                key,
+                CachedSlot {
+                    slot: None,
+                    last_used: epoch,
+                    refused: false,
+                },
+            );
+            None
+        }
+        CacheOutcome::AtlasFull => {
+            *complete = false;
+            slots.insert(
+                key,
+                CachedSlot {
+                    slot: None,
+                    last_used: epoch,
+                    refused: true,
+                },
+            );
+            None
+        }
+    }
 }
 
 /// Pick the `n` keys with the smallest `last_used` value out of `ages` — the
@@ -739,6 +794,19 @@ mod target_color_tests {
     }
 }
 
+fn glyph_instance_capacity(required: usize, max_buffer_size: u64) -> Option<(usize, usize)> {
+    let size = std::mem::size_of::<GlyphInstance>();
+    let maximum = usize::try_from(max_buffer_size / size as u64).unwrap_or(usize::MAX);
+    if required == 0 || required > maximum {
+        return None;
+    }
+    let capacity = required
+        .checked_next_power_of_two()
+        .unwrap_or(maximum)
+        .min(maximum);
+    Some((capacity, capacity.checked_mul(size)?))
+}
+
 /// The instanced glyph renderer: two atlases (color + mask), one pipeline, a
 /// per-`CacheKey` slot cache, and a growable instance buffer.
 pub struct GlyphPipeline {
@@ -757,6 +825,7 @@ pub struct GlyphPipeline {
     /// are cold once the cache needs to make room.
     epoch: u64,
     slot_limit_epoch: Option<u64>,
+    exhausted_kinds: [bool; 2],
     max_dim: u32,
     instances: wgpu::Buffer,
     capacity: usize,
@@ -921,8 +990,13 @@ impl GlyphPipeline {
             )
         });
         // With a ring, the queue path's buffer is never drawn from.
-        let capacity: usize = if ring.is_some() { 1 } else { 8192 };
-        let instance_bytes = capacity.checked_mul(std::mem::size_of::<GlyphInstance>())?;
+        let maximum = usize::try_from(
+            device.limits().max_buffer_size / std::mem::size_of::<GlyphInstance>() as u64,
+        )
+        .unwrap_or(usize::MAX);
+        let capacity: usize = if ring.is_some() { 1 } else { 8192.min(maximum) };
+        let (capacity, instance_bytes) =
+            glyph_instance_capacity(capacity, device.limits().max_buffer_size)?;
         let instance_gpu = budget.reserve_gpu(instance_bytes)?;
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kettle-glyph-instances"),
@@ -944,6 +1018,7 @@ impl GlyphPipeline {
             epoch: 0,
             max_dim: device.limits().max_texture_dimension_2d,
             slot_limit_epoch: None,
+            exhausted_kinds: [false; 2],
             instances,
             capacity,
             instance_gpu,
@@ -1004,8 +1079,14 @@ impl GlyphPipeline {
         rasterize: impl FnOnce() -> Option<RasterGlyph<'r>>,
     ) -> Option<GlyphSlot> {
         if let Some(cached) = self.slots.get_mut(&key) {
-            cached.last_used = self.epoch;
-            return cached.slot;
+            if let Some(slot) = cached.for_epoch(self.epoch) {
+                cached.last_used = self.epoch;
+                if cached.refused {
+                    self.glyphs_complete = false;
+                }
+                return slot;
+            }
+            self.slots.remove(&key);
         }
         // An endless stream of glyph and whitespace misses would grow this map
         // forever, so cap it at a fixed ceiling. At the cap, evict the coldest
@@ -1031,32 +1112,14 @@ impl GlyphPipeline {
                 return None;
             }
         }
-        match self.rasterize_into_atlas(device, queue, rasterize) {
-            CacheOutcome::Slot(slot) => {
-                self.slots.insert(
-                    key,
-                    CachedSlot {
-                        slot: Some(slot),
-                        last_used: self.epoch,
-                    },
-                );
-                Some(slot)
-            }
-            CacheOutcome::Empty => {
-                self.slots.insert(
-                    key,
-                    CachedSlot {
-                        slot: None,
-                        last_used: self.epoch,
-                    },
-                );
-                None
-            }
-            CacheOutcome::AtlasFull => {
-                self.glyphs_complete = false;
-                None
-            }
-        }
+        let outcome = self.rasterize_into_atlas(device, queue, rasterize);
+        remember_glyph_outcome(
+            &mut self.slots,
+            key,
+            self.epoch,
+            outcome,
+            &mut self.glyphs_complete,
+        )
     }
 
     /// Evict the `n` coldest slots (smallest `last_used` epoch), returning
@@ -1166,6 +1229,9 @@ impl GlyphPipeline {
             if let Some(p) = allocation {
                 break p;
             }
+            if self.exhausted_kinds[kind as usize] {
+                return CacheOutcome::AtlasFull;
+            }
             let grew = if kind == 0 {
                 self.color.grow(device, queue, label, self.max_dim)
             } else {
@@ -1177,6 +1243,7 @@ impl GlyphPipeline {
             }
             let batch = (self.slots.len() / 8).max(1);
             if self.evict_cold_kind(kind, batch) == 0 {
+                self.exhausted_kinds[kind as usize] = true;
                 log::warn!(
                     "kettle glyph atlas full ({}px) — skipping a glyph",
                     if kind == 0 {
@@ -1221,6 +1288,7 @@ impl GlyphPipeline {
         // frame's evictions see any slot left untouched since as strictly older
         // than one touched this frame.
         self.epoch = self.epoch.saturating_add(1);
+        self.exhausted_kinds = [false; 2];
         let glyphs_complete = std::mem::replace(&mut self.glyphs_complete, true);
         if self.bg_dirty {
             self.bind_group = Self::make_bg(
@@ -1255,11 +1323,9 @@ impl GlyphPipeline {
             return written && glyphs_complete;
         }
         if data.len() > self.capacity {
-            let Some(capacity) = data.len().checked_next_power_of_two() else {
-                self.count = 0;
-                return false;
-            };
-            let Some(bytes) = capacity.checked_mul(std::mem::size_of::<GlyphInstance>()) else {
+            let Some((capacity, bytes)) =
+                glyph_instance_capacity(data.len(), device.limits().max_buffer_size)
+            else {
                 self.count = 0;
                 return false;
             };
@@ -1360,12 +1426,79 @@ impl GlyphPipeline {
         self.color.allocator = AtlasAllocator::new(self.color.width, self.color.height);
         self.mask.allocator = AtlasAllocator::new(self.mask.width, self.mask.height);
         self.slot_limit_epoch = None;
+        self.exhausted_kinds = [false; 2];
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atlas_refusals_are_cached_for_one_frame_and_retried_next_frame() {
+        let mut fonts = crate::FontSystem::new();
+        crate::load_bundled_font(&mut fonts, kettle_config::font::REGULAR);
+        let font_id = fonts.db().faces().next().unwrap().id;
+        let key = CacheKey::new(
+            font_id,
+            0,
+            12.0,
+            (0.0, 0.0),
+            Default::default(),
+            glyphon::cosmic_text::CacheKeyFlags::empty(),
+        )
+        .0;
+        let mut slots: HashMap<CacheKey, CachedSlot> = HashMap::new();
+        let mut rasterizations = 0;
+        for epoch in 0..2 {
+            let mut complete = true;
+            for _ in 0..100 {
+                if let Some(cached) = slots.get_mut(&key)
+                    && cached.for_epoch(epoch).is_some()
+                {
+                    complete &= !cached.refused;
+                    continue;
+                }
+                rasterizations += 1;
+                remember_glyph_outcome(
+                    &mut slots,
+                    key,
+                    epoch,
+                    CacheOutcome::AtlasFull,
+                    &mut complete,
+                );
+            }
+            assert_eq!(
+                rasterizations,
+                epoch + 1,
+                "same-frame atlas refusal repeated rasterization"
+            );
+            assert!(!complete, "a refused glyph must keep the upload incomplete");
+        }
+        let mut complete = true;
+        remember_glyph_outcome(&mut slots, key, 2, CacheOutcome::Empty, &mut complete);
+        assert!(complete);
+        assert!(
+            slots.get_mut(&key).unwrap().for_epoch(3).is_some(),
+            "whitespace misses remain cached across frames"
+        );
+    }
+
+    #[test]
+    fn glyph_instances_fit_the_device_buffer_limit() {
+        let limit = 1024 * 1024;
+        for required in [1, 8192, 16_385] {
+            let (capacity, bytes) = glyph_instance_capacity(required, limit).unwrap();
+            assert!(capacity >= required);
+            assert!(
+                bytes as u64 <= limit,
+                "glyph buffer exceeds the device limit: {bytes}"
+            );
+        }
+        let too_many = limit as usize / std::mem::size_of::<GlyphInstance>() + 1;
+        assert!(glyph_instance_capacity(too_many, limit).is_none());
+        assert!(glyph_instance_capacity(1, 1).is_none());
+    }
 
     #[test]
     fn slot_ceiling_protects_current_entries_and_recovers_next_epoch() {
@@ -1402,6 +1535,7 @@ mod tests {
                 CachedSlot {
                     slot: None,
                     last_used: pipeline.epoch,
+                    refused: false,
                 },
             );
         }

@@ -336,6 +336,86 @@ fn escaped_utf8_leads_do_not_emit_orphaned_continuations() {
 }
 
 #[test]
+#[cfg(unix)]
+fn enabling_stripped_logging_during_an_osc_preserves_control_state() {
+    use super::{CursorShape, PtyOutputSender, Terminal};
+    use std::sync::Arc;
+    for terminated in [false, true] {
+        let prefix = if terminated {
+            b"\x1b]0;prefix\x07".as_slice()
+        } else {
+            b"\x1b]0;prefix"
+        };
+        let suffix = if terminated {
+            b"VISIBLE".as_slice()
+        } else {
+            b"suffix\x07VISIBLE"
+        };
+        let script = if terminated {
+            r"stty -echo; printf '\033]0;prefix\007'; read ready; printf 'VISIBLE'; read done"
+        } else {
+            r"stty -echo; printf '\033]0;prefix'; read ready; printf 'suffix\007VISIBLE'; read done"
+        };
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let (output_tx, output_rx) = crossbeam_channel::unbounded();
+        let terminal = Terminal::new_with_env_and_output(
+            &["/bin/sh".into(), "-c".into(), script.into()],
+            None,
+            100,
+            0,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            "xterm-256color",
+            "truecolor",
+            &[],
+            false,
+            false,
+            tx,
+            Arc::new(|| {}),
+            Some(PtyOutputSender::lossless(output_tx)),
+        )
+        .unwrap();
+        let mut observed = Vec::new();
+        while observed.len() < prefix.len() {
+            observed.extend(output_rx.recv_timeout(Duration::from_secs(3)).unwrap());
+        }
+        assert_eq!(observed, prefix);
+        let temp = kettle_test_support::private_tempdir("kettle-log-mid-osc-");
+        let path = temp.path().join("session.log");
+        *terminal.log_strip_ansi.lock().unwrap() = true;
+        terminal
+            .set_log_file(Some(kettle_state::create_private_file_new(&path).unwrap()))
+            .unwrap();
+        terminal.write(b"go\n");
+        observed.clear();
+        while observed.len() < suffix.len() {
+            observed.extend(output_rx.recv_timeout(Duration::from_secs(3)).unwrap());
+        }
+        assert_eq!(observed, suffix);
+        terminal.set_log_file(None).unwrap();
+        assert!(
+            terminal
+                .session_log
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .finish_with_timeout(Duration::from_secs(3))
+        );
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            b"VISIBLE",
+            "a stripped log must suppress the payload of an already-open OSC"
+        );
+    }
+}
+
+#[test]
 fn session_log_filter_resets_between_sessions_and_strip_modes() {
     let mut filter = SessionLogFilter::default();
     assert_eq!(filter.filter(b"before\x1b]0;partial", 1, true), b"before");

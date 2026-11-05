@@ -252,7 +252,8 @@ impl CardScene {
                             });
                         self.poster_failures.push(failure);
                         if let Some(ms) = cards.duration(block.nonce) {
-                            self.append_video(target, ms, ch, cw, geometry, colors);
+                            let duration = (cards.tip() != Some(block.nonce)).then_some(ms);
+                            self.append_video(target, duration, ch, cw, geometry, colors);
                         }
                     }
                     CardBadgeState::Ready
@@ -376,7 +377,7 @@ impl CardScene {
     fn append_video(
         &mut self,
         target: [f32; 4],
-        ms: u64,
+        ms: Option<u64>,
         ch: f32,
         cw: f32,
         geometry: &CardGeometry,
@@ -393,6 +394,9 @@ impl CardScene {
             }
         }
         let scale = 0.8;
+        let Some(ms) = ms else {
+            return;
+        };
         let text = duration_label(ms);
         let width = (text.len() as f32 + 1.0) * cw * scale;
         let height = ch * scale;
@@ -749,6 +753,61 @@ mod tests {
                 scene.labels.capacity()
             )
         );
+    }
+
+    #[test]
+    fn opening_tip_and_video_duration_do_not_overlap() {
+        let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+        cards.remove(nonce);
+        let poster = kettle_core::ImageData::new(160, 90, vec![255; 160 * 90 * 4]).unwrap();
+        cards
+            .insert(
+                nonce,
+                crate::CardSpec {
+                    rows: 3,
+                    columns: 12,
+                    harness: crate::CardHarness::ClaudeHook,
+                    caption: "diagram.png - raster 640x480".into(),
+                    poster: Some(crate::CardPoster::new(&poster)),
+                    duration_ms: Some(12_400),
+                },
+            )
+            .unwrap();
+        cards.set_tip(Some(nonce));
+        let mut frame = CardFrame::default();
+        cards.recognize_into(&snap, &mut frame);
+        let mut scene = CardScene::default();
+        scene.append(
+            &cards,
+            &frame,
+            &snap,
+            &CardGeometry {
+                grid_origin: [0.0, 0.0],
+                cell: [8.0, 16.0],
+                clip: [0.0, 0.0, 2000.0, 2000.0],
+                tr: kettle_i18n::Translator::default(),
+            },
+            &CardColors {
+                background: Rgb::new(10, 10, 10),
+                frame: Rgb::new(255, 0, 0),
+                selection: Rgb::new(0, 0, 255),
+            },
+        );
+        let tip = scene
+            .labels
+            .iter()
+            .find(|label| matches!(label.kind, CardLabelKind::Tip))
+            .unwrap();
+        for duration in scene
+            .labels
+            .iter()
+            .filter(|label| matches!(label.kind, CardLabelKind::Duration(_)))
+        {
+            assert!(
+                intersect(tip.rect, duration.rect).is_none(),
+                "opening tip overlaps video duration"
+            );
+        }
     }
 
     /// A video card shows a play glyph inside its poster and its duration on

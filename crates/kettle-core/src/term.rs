@@ -283,7 +283,9 @@ impl PtyInputTail {
                 self.erase_word(rules);
                 continue;
             }
-            if rules.iexten && (rules.vreprint == Some(byte) || rules.vdiscard == Some(byte)) {
+            if rules.iexten
+                && (rules.vreprint == Some(byte) || rules.discard_character() == Some(byte))
+            {
                 continue;
             }
             if byte == b'\n'
@@ -353,6 +355,13 @@ struct CanonicalEofRules {
 
 impl CanonicalEofRules {
     #[cfg(any(unix, test))]
+    fn discard_character(self) -> Option<u8> {
+        // Linux N_TTY leaves VDISCARD unimplemented, even with IEXTEN.
+        self.vdiscard
+            .filter(|_| self.word_erase != WordEraseMode::Linux)
+    }
+
+    #[cfg(any(unix, test))]
     fn supports_eof(self) -> bool {
         if !self.canonical || self.extproc {
             return false;
@@ -372,7 +381,7 @@ impl CanonicalEofRules {
                     self.vlnext,
                     self.vwerase,
                     self.vreprint,
-                    self.vdiscard,
+                    self.discard_character(),
                     self.veol2,
                 ]
                 .contains(&Some(byte)))
@@ -2462,7 +2471,8 @@ fn arm_completion_refresh_slot_at(
         }
         slot.next_request += 1;
         slot.expected_request = Some(slot.next_request);
-    } else {
+    }
+    if !slot.sequenced || slot.sync_expected {
         let total = slot
             .provisional_tab_requests
             .saturating_add(slot.provisional_backtab_requests);
@@ -2659,6 +2669,8 @@ fn prepare_optional_completion_resync(cell: &Mutex<CompletionSlot>, read_generat
         dismiss_completion_slot(&mut current);
         current.legacy_quarantined = false;
         current.sync_expected = true;
+        current.provisional_tab_requests = 0;
+        current.provisional_backtab_requests = 0;
         current.prompt_boundary_pending = false;
     }
 }
@@ -2955,17 +2967,19 @@ fn forward_pty_buffer_or_drain(
     generation: u64,
     mut buffer: Vec<u8>,
     read_len: usize,
+    child_exit_deadline: &mut Option<std::time::Instant>,
 ) -> PtyPumpSend {
-    loop {
+    let delivery_started = std::time::Instant::now();
+    let result = loop {
         if drain_output.load(Ordering::Acquire) {
-            return PtyPumpSend::Drain(buffer);
+            break PtyPumpSend::Drain(buffer);
         }
 
         match raw_tx.send_timeout(
             Some((generation, buffer, read_len)),
             std::time::Duration::from_millis(10),
         ) {
-            Ok(()) => return PtyPumpSend::Forwarded,
+            Ok(()) => break PtyPumpSend::Forwarded,
             Err(crossbeam_channel::SendTimeoutError::Timeout(Some((_, returned, _)))) => {
                 buffer = returned;
             }
@@ -2973,10 +2987,14 @@ fn forward_pty_buffer_or_drain(
                 unreachable!("PTY pump only forwards populated chunks");
             }
             Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => {
-                return PtyPumpSend::Disconnected;
+                break PtyPumpSend::Disconnected;
             }
         }
+    };
+    if let Some(deadline) = child_exit_deadline {
+        *deadline += delivery_started.elapsed();
     }
+    result
 }
 
 /// One unit of parser work.
@@ -3216,6 +3234,14 @@ fn commit_local_geometry_inner(
     // snapshots: Term first, geometry second.
     let mut term = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let old_columns = term.columns();
+    let preceding_row_wrapped = {
+        let grid = term.grid();
+        let preceding = alacritty_terminal::index::Line(grid.cursor.point.line.0 - 1);
+        preceding >= grid.topmost_line()
+            && grid[preceding][alacritty_terminal::index::Column(old_columns - 1)]
+                .flags
+                .contains(alacritty_terminal::term::cell::Flags::WRAPLINE)
+    };
     let old_cursor = {
         let grid = term.grid();
         stable_grid_line_id(
@@ -3253,6 +3279,7 @@ fn commit_local_geometry_inner(
             desired.columns,
             old_cursor,
             new_cursor,
+            preceding_row_wrapped,
         );
     }
 }
@@ -3490,6 +3517,7 @@ pub struct Terminal {
     /// `pop_front`, not a `Vec::drain(0..1)` that shifts all ~2048 elements on
     /// every prompt once full — this is the hot reader-thread path.
     prompts: Arc<Mutex<std::collections::VecDeque<u64>>>,
+    prompt_seen: Arc<AtomicBool>,
     /// Terminator parity (`command_notify.py` plugin):
     /// OSC 133 OutputStart timestamp — set when `OutputStart` fires,
     /// cleared when the matching `CommandEnd` fires. The reader
@@ -3538,8 +3566,8 @@ pub struct Terminal {
     pub argv: Vec<String>,
     /// Terminator parity (`plugins/logger.py`): optional per-pane session log.
     /// The reader admits raw PTY bytes to a bounded worker and never performs
-    /// filesystem I/O. When `None`, zero cost on the hot path — the `log_active`
-    /// flag short-circuits before the lock.
+    /// filesystem I/O. When `None`, the `log_active` flag skips the writer lock;
+    /// ANSI control state is still tracked for later log activation.
     /// Private: flip it via [`Terminal::set_log_path`] or
     /// [`Terminal::set_log_file`]
     /// so `log_active` can never drift out of sync.
@@ -3561,8 +3589,7 @@ pub struct Terminal {
     /// common case. Toggled ONLY through [`Terminal::set_log_path`] or
     /// [`Terminal::set_log_file`], which keeps the pair in sync.
     log_active: Arc<std::sync::atomic::AtomicBool>,
-    /// Changes whenever the installed writer's logging session changes. The
-    /// reader uses it to keep parser state from crossing session boundaries.
+    /// Changes whenever the installed writer changes or reports a failure.
     log_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Keeps worker-side failure reporting edge-triggered while preserving the
     /// failed writer long enough for the UI to observe its exact reason.
@@ -5049,7 +5076,8 @@ fn push_prompt_mark(ring: &mut std::collections::VecDeque<u64>, row_id: u64) -> 
 }
 
 /// Re-anchor the active prompt after a column reflow when its start and cursor
-/// occupied the same physical row beforehand. Widening cannot split that row.
+/// occupied the same physical row beforehand, without a preceding wrapped row
+/// that widening could partially merge into it.
 /// Narrowing is safe only when the stable cursor row did not move, proving the
 /// prompt and everything before it gained no wrapped rows. Every ambiguous
 /// change clears the ring rather than guessing across wraps.
@@ -5059,9 +5087,11 @@ fn rebase_prompt_marks_after_column_reflow(
     new_columns: usize,
     old_cursor: u64,
     new_cursor: u64,
+    preceding_row_wrapped: bool,
 ) {
     let cursor_row_is_safe = new_columns > old_columns || new_cursor == old_cursor;
-    let preserve_active = cursor_row_is_safe && ring.back() == Some(&old_cursor);
+    let preserve_active =
+        !preceding_row_wrapped && cursor_row_is_safe && ring.back() == Some(&old_cursor);
     ring.clear();
     if preserve_active {
         push_prompt_mark(ring, new_cursor);
@@ -5768,6 +5798,7 @@ impl Terminal {
         let graphics_reflow_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let prompts: Arc<Mutex<std::collections::VecDeque<u64>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let prompt_seen = Arc::new(AtomicBool::new(false));
         // Terminator parity (`command_notify.py`):
         // per-pane OSC 133 OutputStart timestamp + completed-command
         // event queue. Reader thread writes; App polls each tick.
@@ -5866,6 +5897,7 @@ impl Terminal {
             let graphics_gate = graphics_gate.clone();
             let graphics_reflow_generation = graphics_reflow_generation.clone();
             let prompts = prompts.clone();
+            let prompt_seen = prompt_seen.clone();
             let output_started_at = output_started_at.clone();
             let command_generation = command_generation.clone();
             let output_start_seen = output_start_seen.clone();
@@ -5938,7 +5970,6 @@ impl Terminal {
                                         // descriptor to service.
                                         Err(_) => return,
                                     };
-                                #[cfg(unix)]
                                 let mut child_exit_deadline = None;
                                 let mut drain_buffer = None;
                                 loop {
@@ -6092,6 +6123,7 @@ impl Terminal {
                                                 read_generation,
                                                 buffer,
                                                 n,
+                                                &mut child_exit_deadline,
                                             ) {
                                                 PtyPumpSend::Forwarded => {}
                                                 PtyPumpSend::Drain(buffer) => {
@@ -6216,10 +6248,9 @@ impl Terminal {
                         };
                         match received {
                             None => {
-                                let tap_raw = log_active.load(Ordering::Relaxed)
-                                    || output_tx.is_some();
-                                let final_raw = private_output_filter.finish(tap_raw);
+                                let final_raw = private_output_filter.finish(true);
                                 if !final_raw.is_empty() {
+                                    let stripped = session_log_filter.filter(&final_raw, 0, true);
                                     if log_active.load(Ordering::Relaxed)
                                         && let Ok(mut guard) = session_log.lock()
                                         && let Some(writer) = guard.as_mut()
@@ -6228,12 +6259,7 @@ impl Terminal {
                                             .lock()
                                             .map(|value| *value)
                                             .unwrap_or(false);
-                                        let generation = log_generation.load(Ordering::Acquire);
-                                        let filtered = session_log_filter.filter(
-                                            &final_raw,
-                                            generation,
-                                            strip,
-                                        );
+                                        let filtered = if strip { stripped } else { final_raw.clone() };
                                         if writer.try_write(filtered).is_err() {
                                             log_generation.fetch_add(1, Ordering::AcqRel);
                                             log_active.store(false, Ordering::Release);
@@ -6266,22 +6292,17 @@ impl Terminal {
                                         (reader_progress.load().generation, bytes.to_vec(), n, false)
                                     }
                                 };
-                                // Evaluated once per PTY read. If logging starts
-                                // while a bounded control string is in flight,
-                                // the extractor publishes the complete sequence
-                                // when its terminator arrives instead of a
-                                // malformed suffix. Local output never reaches
-                                // the session log or the recorder, which hold
-                                // what the child wrote.
-                                let tap_raw = log_active
-                                    .load(std::sync::atomic::Ordering::Relaxed)
-                                    || output_tx.is_some();
+                                // Track control state even without a writer, so enabling
+                                // stripped logging mid-sequence cannot expose its payload.
+                                // Local output never reaches the log or recorder.
+                                let tap_raw = true;
                                 let raw_output = if from_child {
                                     private_output_filter.feed(&buffer[..n], tap_raw)
                                 } else {
                                     Vec::new()
                                 };
                                 if !raw_output.is_empty() {
+                                    let stripped = session_log_filter.filter(&raw_output, 0, true);
                                     // Publish at most once per PTY read. OSC-heavy output can
                                     // produce thousands of parser chunks, while the logger and
                                     // recorder queues are intentionally bounded in read-sized
@@ -6295,12 +6316,7 @@ impl Terminal {
                                             .lock()
                                             .map(|value| *value)
                                             .unwrap_or(false);
-                                        let generation = log_generation.load(Ordering::Acquire);
-                                        let filtered = session_log_filter.filter(
-                                            &raw_output,
-                                            generation,
-                                            strip,
-                                        );
+                                        let filtered = if strip { stripped } else { raw_output.clone() };
                                         if writer.try_write(filtered).is_err() {
                                             log_generation.fetch_add(1, Ordering::AcqRel);
                                             log_active.store(false, Ordering::Release);
@@ -6392,7 +6408,7 @@ impl Terminal {
                                         Chunk::Image(mut placed) => {
                                             let key = placed.id.map(|id| (id, placed.placement_id));
                                             let completion = placed.completion.take();
-                                            let result = place_image(&term, &images, &shared_geometry, &mut processor, placed);
+                                            let result = place_image(&term, &images, &relatives, &shared_geometry, &mut processor, placed, extractor);
                                             let admission = result.as_ref().map(|_| ()).map_err(|error| *error);
                                             if admission.is_ok() {
                                                 reconcile_named_placement(&images, &virtuals, &relatives, key, PlacementForm::Physical);
@@ -6727,6 +6743,9 @@ impl Terminal {
                                             } else {
                                                 None
                                             };
+                                            if prompt_row.is_some() {
+                                                prompt_seen.store(true, Ordering::Release);
+                                            }
                                             // Fish 4 can emit the same prompt-start mark twice:
                                             // once from the bundled event handler and once while
                                             // it renders the prompt. Resetting between the managed
@@ -7030,6 +7049,7 @@ impl Terminal {
             graphics_gate,
             graphics_reflow_generation,
             prompts,
+            prompt_seen,
             output_started_at,
             command_generation,
             command_finished,
@@ -7218,7 +7238,7 @@ impl Terminal {
 
     /// Current command state when OSC 133 supplies enough information to know.
     pub fn shell_activity(&self) -> ShellActivity {
-        let seen_prompts = self.prompts.lock().map(|p| !p.is_empty()).unwrap_or(false);
+        let seen_prompts = self.prompt_seen.load(Ordering::Acquire);
         let tracks_commands = self
             .output_start_seen
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -7249,7 +7269,7 @@ impl Terminal {
     /// OutputStart the way it does for `shell_idle`. Without integration it
     /// is always false.
     pub fn shell_at_prompt(&self) -> bool {
-        let seen_prompts = self.prompts.lock().map(|p| !p.is_empty()).unwrap_or(false);
+        let seen_prompts = self.prompt_seen.load(Ordering::Acquire);
         seen_prompts
             && self
                 .output_started_at
@@ -8494,6 +8514,11 @@ impl Terminal {
     /// OSC 52 stores and loads in arrival order since the last call.
     pub fn take_clipboard_events(&self) -> Vec<TermEvent> {
         self.latched.take_clipboard_events()
+    }
+
+    /// Whether the bounded semantic queue has lost a terminal reply request.
+    pub fn has_lost_replies(&self) -> bool {
+        self.latched.has_lost_replies()
     }
 
     /// Whether the reader finished: the PTY closed after the last of its
@@ -10122,7 +10147,14 @@ fn apply_graphics_chunk_at(
                 .lock()
                 .map(|geometry| geometry.geometry)
                 .unwrap_or_else(|_| PtyGeometry::new(1, 1, 1, 1));
-            let result = place_image_during_sync(term, context.images, geometry, placed);
+            let result = place_image_during_sync(
+                term,
+                context.images,
+                context.relatives,
+                geometry,
+                placed,
+                extractor,
+            );
             if result.is_ok() {
                 reconcile_named_placement(
                     context.images,
@@ -10280,8 +10312,10 @@ fn apply_graphics_chunk_at(
 fn insert_image_at_cursor(
     term: &mut Term<EventProxy>,
     images: &Images,
+    relatives: &Relatives,
     geometry: PtyGeometry,
     placed: kettle_vt::Placed,
+    extractor: &mut Extractor,
 ) -> Result<(Option<PlacementParams>, usize, usize), GraphicsAdmissionError> {
     let kettle_vt::Placed {
         img: data,
@@ -10315,6 +10349,7 @@ fn insert_image_at_cursor(
         term.grid().history_size(),
         cursor.line.0,
     );
+    let mut removed = std::collections::HashSet::new();
     {
         let mut placements = images
             .lock()
@@ -10346,8 +10381,23 @@ fn insert_image_at_cursor(
         let limit = kettle_vt::GraphicsLimits::default().placements;
         if placements.len() > limit {
             let drop = placements.len() - limit;
-            placements.drain(0..drop);
+            removed.extend(placements.drain(0..drop).filter_map(|placement| {
+                placement.id.map(|image_id| PlacementKey {
+                    image_id,
+                    placement_id: placement.placement_id,
+                })
+            }));
         }
+    }
+    if !removed.is_empty() {
+        cascade_removed_relatives(
+            &mut relatives
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            &mut removed,
+            &mut std::collections::HashSet::new(),
+        );
+        extractor.apply_kitty_delete_result(&removed.into_iter().collect::<Vec<_>>(), &[]);
     }
     Ok((params, cell_cols, cell_rows))
 }
@@ -10355,10 +10405,13 @@ fn insert_image_at_cursor(
 fn place_image_during_sync(
     term: &mut Term<EventProxy>,
     images: &Images,
+    relatives: &Relatives,
     geometry: PtyGeometry,
     placed: kettle_vt::Placed,
+    extractor: &mut Extractor,
 ) -> Result<(), GraphicsAdmissionError> {
-    let (params, cell_cols, cell_rows) = insert_image_at_cursor(term, images, geometry, placed)?;
+    let (params, cell_cols, cell_rows) =
+        insert_image_at_cursor(term, images, relatives, geometry, placed, extractor)?;
     if let Some(params) = params {
         if !params.suppress_cursor_movement {
             let (right, down) = kitty_cursor_counts(cell_cols, cell_rows);
@@ -10377,9 +10430,11 @@ fn place_image_during_sync(
 fn place_image(
     term: &SharedTerm,
     images: &Images,
+    relatives: &Relatives,
     geometry: &Arc<Mutex<VersionedPtyGeometry>>,
     processor: &mut Processor,
     placed: kettle_vt::Placed,
+    extractor: &mut Extractor,
 ) -> Result<Option<GraphicsEventBatch>, GraphicsAdmissionError> {
     // Match resize's Term -> geometry lock order. Holding both through the
     // cursor snapshot and row reservation makes the grid/pixel generation one
@@ -10389,7 +10444,8 @@ fn place_image(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let geometry = geometry.geometry;
-    let (params, cell_cols, cell_rows) = insert_image_at_cursor(&mut t, images, geometry, placed)?;
+    let (params, cell_cols, cell_rows) =
+        insert_image_at_cursor(&mut t, images, relatives, geometry, placed, extractor)?;
     let mut advanced = false;
     if let Some(params) = params {
         if let Some(movement) = kitty_cursor_movement(params, cell_cols, cell_rows) {

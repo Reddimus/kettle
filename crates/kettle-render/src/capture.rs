@@ -9,6 +9,21 @@ use super::{
     resolve_headless_adapter, surface_clear_color, unpremultiply_rgba8,
 };
 
+pub(crate) fn screenshot_body_clip(
+    x: f32,
+    width: f32,
+    top: f32,
+    bottom: f32,
+    caption_top: Option<f32>,
+) -> [f32; 4] {
+    [
+        x,
+        top,
+        width,
+        (caption_top.unwrap_or(bottom).min(bottom) - top).max(0.0),
+    ]
+}
+
 pub(crate) fn screenshot_text_buffer(
     fonts: &mut FontSystem,
     metrics: Metrics,
@@ -394,9 +409,10 @@ pub fn capture_png_with_annotation(
         let tab_origin = (8.0_f32, 6.0_f32);
         let tab_clip = [0.0, 0.0, wf, tab_h];
         let left_origin = (pad, ly + pad);
-        let left_clip = [0.0, ly, split_x, hf - ly];
+        let caption_top = annotation.map(|_| hf - annotate_h);
+        let left_clip = screenshot_body_clip(0.0, split_x, ly, hf, caption_top);
         let right_origin = (split_x + pad, ly + pad);
-        let right_clip = [split_x, ly, wf - split_x, hf - ly];
+        let right_clip = screenshot_body_clip(split_x, wf - split_x, ly, hf, caption_top);
 
         let mut areas: Vec<TextArea> = Vec::new();
         if !grid {
@@ -423,7 +439,7 @@ pub fn capture_png_with_annotation(
                     left: 0,
                     top: ly as i32,
                     right: split_x as i32,
-                    bottom: h as i32,
+                    bottom: (left_clip[1] + left_clip[3]) as i32,
                 },
                 default_color: gc(theme.foreground),
                 custom_glyphs: &[],
@@ -437,7 +453,7 @@ pub fn capture_png_with_annotation(
                     left: split_x as i32,
                     top: ly as i32,
                     right: w as i32,
-                    bottom: h as i32,
+                    bottom: (right_clip[1] + right_clip[3]) as i32,
                 },
                 default_color: gc(theme.foreground),
                 custom_glyphs: &[],

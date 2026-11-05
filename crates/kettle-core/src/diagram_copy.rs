@@ -551,7 +551,7 @@ impl Preludes {
 
 /// The row the diagram in a reply, whose header is `rows[header]`, ends
 /// before. It runs over blank rows, as a source may hold, while the row
-/// after them is indented as far as its body: prose comes back to the
+/// after them is indented past its header: prose comes back to the
 /// message's indentation. After an unindented body, text after a blank row
 /// could be either.
 fn diagram_end(rows: &[String], header: usize) -> Result<usize, DiagramCopyError> {
@@ -571,10 +571,7 @@ fn diagram_end(rows: &[String], header: usize) -> Result<usize, DiagramCopyError
             return Ok(at);
         };
         let indent = indent(&rows[at + next]);
-        let continues = match body {
-            Some(body) => indent >= body,
-            None => indent > base,
-        };
+        let continues = indent > base;
         if !continues {
             if body.is_none() {
                 return Err(DiagramCopyError::Unbounded);
@@ -1315,6 +1312,12 @@ mod tests {
     /// reply on screen puts one, is the source to its end, as from `/copy`;
     /// in a reply, what follows a blank row after an unindented body could
     /// be prose or more of it.
+    #[test]
+    fn reduced_indentation_after_blank_preserves_statement() {
+        let source = "graph LR\n    A --> B\n\n  B --> C";
+        assert_eq!(diagram_sources(source, None).unwrap(), [source]);
+    }
+
     #[test]
     fn a_diagram_ends_where_its_body_does() {
         let reply = "⏺ Steps:\n\n  mermaid\n  sequenceDiagram\n      A->>B: Hi\n\n      B->>A: Hello\n\n  That is all.";

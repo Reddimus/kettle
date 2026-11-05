@@ -167,6 +167,7 @@ struct ClipboardJournal {
     entries: Vec<TermEvent>,
     bytes: usize,
     loads: usize,
+    reply_loss: bool,
 }
 
 impl ClipboardJournal {
@@ -205,6 +206,7 @@ impl ClipboardJournal {
             }
             TermEvent::ClipboardLoad(..) => {
                 if self.loads == MAX_CLIPBOARD_LOADS {
+                    self.reply_loss = true;
                     return false;
                 }
                 self.loads += 1;
@@ -240,6 +242,7 @@ impl ClipboardJournal {
                 TermEvent::ClipboardLoad(..) => {
                     self.entries.remove(next);
                     self.loads -= 1;
+                    self.reply_loss = true;
                 }
                 _ => next += 1,
             }
@@ -259,6 +262,7 @@ impl ClipboardJournal {
 /// otherwise fill the bounded event queue faster than a slow frame drains it.
 #[derive(Default)]
 pub(crate) struct LatchedEvents {
+    reply_loss: AtomicBool,
     bell: AtomicBool,
     cursor_blinking_changed: AtomicBool,
     exited: AtomicBool,
@@ -267,6 +271,10 @@ pub(crate) struct LatchedEvents {
 }
 
 impl LatchedEvents {
+    pub(crate) fn has_lost_replies(&self) -> bool {
+        self.reply_loss.load(Ordering::Acquire)
+    }
+
     pub(crate) fn take_bell(&self) -> bool {
         self.bell.swap(false, Ordering::AcqRel)
     }
@@ -309,11 +317,14 @@ impl LatchedEvents {
                 .unwrap_or_else(|e| e.into_inner())
                 .replace(TitleChange::Reset)
                 .is_none(),
-            event @ (TermEvent::ClipboardStore(..) | TermEvent::ClipboardLoad(..)) => self
-                .clipboard
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(event),
+            event @ (TermEvent::ClipboardStore(..) | TermEvent::ClipboardLoad(..)) => {
+                let mut journal = self.clipboard.lock().unwrap_or_else(|e| e.into_inner());
+                let first = journal.push(event);
+                if journal.reply_loss {
+                    self.reply_loss.store(true, Ordering::Release);
+                }
+                first
+            }
             other => return Err(other),
         })
     }
@@ -339,6 +350,11 @@ pub struct EventProxy {
 }
 
 impl EventProxy {
+    /// Whether terminal reply admission has failed.
+    pub fn has_lost_replies(&self) -> bool {
+        self.latched.has_lost_replies()
+    }
+
     pub fn new(tx: Sender<TermEvent>, waker: Waker) -> Self {
         Self {
             tx,
@@ -445,6 +461,7 @@ impl EventListener for EventProxy {
                 self.wake_owner();
             }
             Err(crossbeam_channel::TrySendError::Full(_)) => {
+                self.latched.reply_loss.store(true, Ordering::Release);
                 // Only replies to the program's queries (and the advisory
                 // child-exit status) reach the queue. The parser calls this
                 // while holding the terminal mutex, so it must not block, and
@@ -637,6 +654,54 @@ mod tests {
         );
         assert_eq!(text.len(), super::MAX_CLIPBOARD_ENTRY_BYTES);
         assert!(text.starts_with(&prefix));
+    }
+
+    #[test]
+    fn regression_clipboard_load_overflow_latches_reply_loss() {
+        let (proxy, rx, _) = gated_proxy(1);
+        let clone = proxy.clone();
+        for _ in 0..super::MAX_CLIPBOARD_LOADS {
+            proxy.send_event(TermEvent::ClipboardLoad(
+                ClipboardType::Clipboard,
+                Arc::new(str::to_owned),
+            ));
+        }
+        assert!(!proxy.has_lost_replies(), "all loads were admitted");
+        clone.send_event(TermEvent::ClipboardLoad(
+            ClipboardType::Selection,
+            Arc::new(str::to_owned),
+        ));
+        assert!(proxy.has_lost_replies(), "the journal refused a reply");
+        assert_eq!(
+            proxy.take_clipboard_events().len(),
+            super::MAX_CLIPBOARD_LOADS
+        );
+        proxy.send_event(TermEvent::ClipboardLoad(
+            ClipboardType::Clipboard,
+            Arc::new(str::to_owned),
+        ));
+        assert_eq!(proxy.take_clipboard_events().len(), 1);
+        assert!(clone.has_lost_replies(), "draining must not clear failure");
+        assert!(rx.is_empty(), "clipboard loads bypass the channel");
+    }
+
+    #[test]
+    fn regression_clipboard_byte_eviction_latches_reply_loss() {
+        let (proxy, rx, _) = gated_proxy(1);
+        for index in 0..3 {
+            proxy.send_event(TermEvent::ClipboardStore(
+                ClipboardType::Clipboard,
+                "x".repeat(super::MAX_CLIPBOARD_ENTRY_BYTES),
+            ));
+            proxy.send_event(TermEvent::ClipboardLoad(
+                ClipboardType::Selection,
+                Arc::new(str::to_owned),
+            ));
+            assert_eq!(proxy.has_lost_replies(), index == 2);
+        }
+        assert_eq!(proxy.take_clipboard_events().len(), 4);
+        assert!(proxy.has_lost_replies());
+        assert!(rx.is_empty());
     }
 
     #[test]

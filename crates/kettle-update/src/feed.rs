@@ -590,9 +590,13 @@ pub(crate) fn validate_manifest_freshness(
 
 fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
     let (date, time_and_zone) = value.split_once('T')?;
+    let digits = |field: &str| field.bytes().all(|byte| byte.is_ascii_digit());
     if date.len() != 10
         || date.as_bytes().get(4) != Some(&b'-')
         || date.as_bytes().get(7) != Some(&b'-')
+        || !digits(date.get(0..4)?)
+        || !digits(date.get(5..7)?)
+        || !digits(date.get(8..10)?)
     {
         return None;
     }
@@ -629,9 +633,12 @@ fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
         if zone.len() != 6 || zone.as_bytes().get(3) != Some(&b':') {
             return None;
         }
+        if !digits(zone.get(1..3)?) || !digits(zone.get(4..6)?) {
+            return None;
+        }
         let hours = zone.get(1..3)?.parse::<i64>().ok()?;
         let minutes = zone.get(4..6)?.parse::<i64>().ok()?;
-        if hours > 23 || minutes > 59 {
+        if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
             return None;
         }
         let magnitude = hours
@@ -659,13 +666,16 @@ fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
     if clock.len() != 8
         || clock.as_bytes().get(2) != Some(&b':')
         || clock.as_bytes().get(5) != Some(&b':')
+        || !digits(clock.get(0..2)?)
+        || !digits(clock.get(3..5)?)
+        || !digits(clock.get(6..8)?)
     {
         return None;
     }
     let hour = clock.get(0..2)?.parse::<i64>().ok()?;
     let minute = clock.get(3..5)?.parse::<i64>().ok()?;
     let second = clock.get(6..8)?.parse::<i64>().ok()?;
-    if hour > 23 || minute > 59 || second > 59 {
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
         return None;
     }
 
@@ -1052,6 +1062,16 @@ mod tests {
         }
         for invalid in [
             "",
+            "2026-07-11T-1:00:00Z",
+            "2026-07-11T+1:00:00Z",
+            "2026-07-11T00:-1:00Z",
+            "2026-07-11T00:+1:00Z",
+            "2026-07-11T00:00:-1Z",
+            "2026-07-11T00:00:+1Z",
+            "2026-+7-11T00:00:00Z",
+            "2026-07-+1T00:00:00Z",
+            "2026-07-11T00:00:00+-1:00",
+            "2026-07-11T00:00:00+00:+1",
             "2026-02-29T00:00:00Z",
             "2026-07-11 00:00:00Z",
             "2026-07-11T24:00:00Z",

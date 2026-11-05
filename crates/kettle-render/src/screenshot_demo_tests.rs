@@ -61,3 +61,17 @@ fn narrow_screenshot_rows_remain_unwrapped_grid_rows() {
         "narrow screenshot soft-wrapped terminal rows"
     );
 }
+
+#[test]
+fn screenshot_pane_ink_stays_above_the_caption() {
+    let caption = (0.0, 176.0, 400.0, 24.0);
+    for (x, width) in [(0.0, 200.0), (200.0, 200.0)] {
+        let clip = super::capture::screenshot_body_clip(x, width, 32.0, 200.0, Some(caption.1));
+        assert!(
+            !super::rects_overlap((clip[0], clip[1], clip[2], clip[3]), caption),
+            "pane ink overlaps the caption strip"
+        );
+        let plain = super::capture::screenshot_body_clip(x, width, 32.0, 200.0, None);
+        assert_eq!(plain, [x, 32.0, width, 168.0]);
+    }
+}

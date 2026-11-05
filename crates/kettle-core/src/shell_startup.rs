@@ -127,23 +127,24 @@ pub fn zshenv_keeping_kettle_out(candidates: &[PathBuf]) -> Option<PathBuf> {
 /// A line whose first non-blank byte is `#` is a comment wherever it ends up
 /// running, so it is skipped; any other line counts, trailing comment and all.
 fn keeps_kettle_out(text: &[u8]) -> bool {
+    let line_keeps_out = |line: &[u8]| {
+        if line
+            .windows(b"ZDOTDIR".len())
+            .any(|window| window == b"ZDOTDIR")
+        {
+            return true;
+        }
+        let folded: Vec<u8> = line
+            .iter()
+            .filter(|byte| **byte != b'_')
+            .map(u8::to_ascii_lowercase)
+            .collect();
+        folded.windows(b"rcs".len()).any(|window| window == b"rcs") || sets_no_rcs(line)
+    };
     let keeps_out = text
         .split(|byte| *byte == b'\n')
         .filter(|line| line.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'#'))
-        .any(|line| {
-            if line
-                .windows(b"ZDOTDIR".len())
-                .any(|window| window == b"ZDOTDIR")
-            {
-                return true;
-            }
-            let folded: Vec<u8> = line
-                .iter()
-                .filter(|byte| **byte != b'_')
-                .map(u8::to_ascii_lowercase)
-                .collect();
-            folded.windows(b"rcs".len()).any(|window| window == b"rcs") || sets_no_rcs(line)
-        });
+        .any(line_keeps_out);
     if keeps_out || !text.windows(2).any(|pair| pair == b"\\\n") {
         return keeps_out;
     }
@@ -156,7 +157,7 @@ fn keeps_kettle_out(text: &[u8]) -> bool {
     continued
         .split(|byte| *byte == b'\n')
         .filter(|line| line.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'#'))
-        .any(sets_no_rcs)
+        .any(line_keeps_out)
 }
 
 fn sets_no_rcs(line: &[u8]) -> bool {
@@ -213,6 +214,17 @@ fn sets_no_rcs(line: &[u8]) -> bool {
 #[cfg(test)]
 mod option_tests {
     use super::keeps_kettle_out;
+
+    #[test]
+    fn continued_startup_identifiers_keep_kettle_out() {
+        for code in [
+            "unsetopt R\\\nCS",
+            "setopt no_r\\\n_cs",
+            "export ZDOT\\\nDIR=/tmp/zsh",
+        ] {
+            assert!(keeps_kettle_out(code.as_bytes()), "{code}");
+        }
+    }
 
     #[test]
     fn short_startup_options_belong_to_option_commands() {

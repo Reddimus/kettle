@@ -196,7 +196,11 @@ fn selected_face(bytes: Arc<Vec<u8>>, index: u32) -> Result<fontdb::FaceInfo, Fa
         return Err(FailureCode::RenderResource);
     }
     let cmap = font.cmap().map_err(|_| FailureCode::RenderParse)?;
-    if cmap.encoding_records().len() > MAX_CMAP_RECORDS {
+    if cmap.encoding_records().len() > MAX_CMAP_RECORDS
+        || font
+            .dmap()
+            .is_ok_and(|dmap| dmap.encoding_records().len() > MAX_CMAP_RECORDS)
+    {
         return Err(FailureCode::RenderResource);
     }
     let units = font

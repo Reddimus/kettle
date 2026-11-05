@@ -1176,6 +1176,36 @@ fn root_frame_edit_preserves_appended_frame_selection_and_playback_clock() {
 }
 
 #[test]
+fn physical_placement_eviction_cascades_before_parent_key_reuse() {
+    for synchronized in [false, true] {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b_Ga=T,i=1,p=1,f=32,s=1,v=1,C=1;AQID/w==\x1b\\");
+        harness.feed(b"\x1b_Ga=p,i=1,p=1000,P=1,Q=1,C=1\x1b\\");
+        assert!(harness.relatives.lock().unwrap().contains_key(&(1, 1000)));
+        let cap = kettle_vt::GraphicsLimits::default().placements as u32;
+        for placement in 2..=cap + 1 {
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(format!("\x1b_Ga=p,i=1,p={placement},C=1\x1b\\").as_bytes());
+            if synchronized {
+                harness.feed(b"\x1b[?2026l");
+            }
+        }
+        assert_eq!(harness.images.lock().unwrap().len(), cap as usize);
+        assert!(
+            harness.relatives.lock().unwrap().is_empty(),
+            "physical placement pressure must cascade to relative children"
+        );
+        harness.feed(b"\x1b_Ga=p,i=1,p=1,C=1\x1b\\");
+        assert!(
+            harness.relatives.lock().unwrap().is_empty(),
+            "reusing the parent key must not resurrect evicted children"
+        );
+    }
+}
+
+#[test]
 fn terminal_delete_cascades_through_the_full_relative_budget() {
     let mut harness = SyncGraphicsHarness::new();
     harness.feed(&kitty_image(1, 1, 1, 1));
@@ -2280,12 +2310,13 @@ fn repeated_frame_selection_rebases_playback_without_resetting_gap_updates() {
         harness.feed(b"\x1b_Ga=f,i=7,f=32,s=1,v=1,z=100;CAkK/w==\x1b\\");
         harness.feed(b"\x1b_Ga=f,i=7,f=32,s=1,v=1,z=100;BQYH/w==\x1b\\");
         harness.feed(b"\x1b_Ga=a,i=7,r=1,z=100,c=1,s=3\x1b\\");
-        let old_start = std::time::Instant::now() - std::time::Duration::from_millis(150);
+        let old_start = std::time::Instant::now() - std::time::Duration::from_secs(30);
         {
             let mut animations = harness.anims.lock().unwrap();
             let animation = animations.get_mut(&7).unwrap();
             animation.started = old_start;
-            assert_eq!(animation.current().unwrap().rgba[0], 8);
+            let frame = kettle_vt::kitty::current_frame(&animation.gaps, &animation.state, 150);
+            assert_eq!(animation.imgs[frame].rgba[0], 8);
             assert_eq!(animation.state.current, 1);
         }
         if synchronized {
@@ -2303,7 +2334,8 @@ fn repeated_frame_selection_rebases_playback_without_resetting_gap_updates() {
                 animation.started > old_start,
                 "repeated selection resets playback"
             );
-            assert_eq!(animation.current().unwrap().rgba[0], 1);
+            let frame = kettle_vt::kitty::current_frame(&animation.gaps, &animation.state, 0);
+            assert_eq!(animation.imgs[frame].rgba[0], 1);
             animation.started
         };
         harness.feed(b"\x1b_Ga=a,i=7,r=2,z=200\x1b\\");

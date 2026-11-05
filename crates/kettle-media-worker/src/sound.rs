@@ -20,6 +20,8 @@ use kettle_media::audio::{AudioBlock, AudioRead, AudioSource, CHANNELS};
 pub(crate) const PIECE_FRAMES: usize = 960;
 /// How often the feeding thread comes round: well inside a piece.
 const ROUND: Duration = Duration::from_millis(5);
+/// Most pieces filled before publishing the clock and taking new commands.
+const PIECES_PER_ROUND: usize = 3;
 /// How long a started speaker may go without clock progress before the sound is
 /// given up: a device that never starts leaves the session silent, not
 /// waiting.
@@ -308,39 +310,55 @@ impl Feeder {
             if wish.closed {
                 return;
             }
-            if self.round(wish, shared).is_err() {
-                shared.state.store(FAILED, Ordering::Release);
-                // Silent from here: the speaker goes with this thread.
-                return;
+            match self.round(wish, shared) {
+                Ok(true) => continue,
+                Ok(false) => std::thread::sleep(ROUND),
+                Err(()) => {
+                    shared.state.store(FAILED, Ordering::Release);
+                    // Silent from here: the speaker goes with this thread.
+                    return;
+                }
             }
-            std::thread::sleep(ROUND);
         }
     }
 
     /// One round: what the session wants, the speaker filled, the clock
-    /// kept.
-    fn round(&mut self, wish: Wish, shared: &Shared) -> Result<(), ()> {
+    /// kept. True when another round can run without waiting.
+    fn round(&mut self, wish: Wish, shared: &Shared) -> Result<bool, ()> {
         if wish.muted != self.applied.muted {
             self.speaker.set_muted(wish.muted);
+            self.applied.muted = wish.muted;
         }
         if !wish.playing {
             if self.applied.playing {
                 self.speaker.pause()?;
+                self.applied.playing = false;
             }
             self.awaiting_clock = None;
             self.progress = None;
         }
-        while let Some(index) = self
-            .pending_index
-            .take()
-            .or_else(|| self.speaker.take_free())
-        {
+        let mut filled = 0;
+        for _ in 0..PIECES_PER_ROUND {
+            if shared.wish.get() != wish {
+                return Ok(true);
+            }
+            let Some(index) = self
+                .pending_index
+                .take()
+                .or_else(|| self.speaker.take_free())
+            else {
+                break;
+            };
             if !self.fill_piece()? {
                 self.pending_index = Some(index);
                 break;
             }
             self.speaker.enqueue(index, &self.piece)?;
             self.primed = true;
+            filled += 1;
+        }
+        if shared.wish.get() != wish {
+            return Ok(true);
         }
         let playing = wish.playing && self.primed;
         if playing && !self.applied.playing {
@@ -389,7 +407,7 @@ impl Feeder {
                 shared.state.store(DONE, Ordering::Release);
             }
         }
-        Ok(())
+        Ok(filled == PIECES_PER_ROUND)
     }
 
     /// Fill `piece` with the next `PIECE_FRAMES` frames: the sound where
@@ -904,6 +922,93 @@ mod tests {
         feeder.round(wish.get(), &shared).unwrap();
         assert!(feeder.awaiting_clock.unwrap().elapsed() < CLOCK_WITHIN);
         assert_eq!(told.lock().unwrap().started, 0);
+    }
+
+    #[test]
+    fn slow_decoding_yields_to_commands_and_clock_updates() {
+        use super::testing::Told;
+        use std::sync::atomic::AtomicUsize;
+
+        struct Slow {
+            told: Arc<Mutex<Told>>,
+            reads: Arc<AtomicUsize>,
+            wish: SoundWish,
+            command: Option<PlayCommand>,
+        }
+        impl AudioSource for Slow {
+            fn next_block(
+                &mut self,
+                samples: &mut [f32],
+            ) -> Result<Option<AudioBlock>, kettle_media::FailureCode> {
+                std::thread::sleep(Duration::from_millis(20));
+                let read = self.reads.fetch_add(1, Ordering::AcqRel) + 1;
+                // Return buffers throughout a bounded stand-in track.
+                self.told.lock().unwrap().played = Some(if read < 32 {
+                    (read * PIECE_FRAMES) as f64
+                } else {
+                    0.0
+                });
+                if read == 2
+                    && let Some(command) = self.command
+                {
+                    self.wish.hear(command);
+                }
+                samples[..PIECE_FRAMES * CHANNELS].fill(0.5);
+                Ok(Some(AudioBlock {
+                    frames: PIECE_FRAMES,
+                    at_frame: ((read - 1) * PIECE_FRAMES) as u64,
+                }))
+            }
+        }
+        for command in [
+            None,
+            Some(PlayCommand::Pause),
+            Some(PlayCommand::Mute),
+            Some(PlayCommand::Close),
+        ] {
+            let (speaker, told) = stand(1);
+            let wish = SoundWish::new(false);
+            wish.hear(PlayCommand::Play);
+            let reads = Arc::new(AtomicUsize::new(0));
+            let mut feeder = Feeder::new(
+                speaker,
+                Box::new(Slow {
+                    told: told.clone(),
+                    reads: reads.clone(),
+                    wish: wish.clone(),
+                    command,
+                }),
+                0,
+                false,
+            );
+            let shared = Shared {
+                wish: wish.clone(),
+                heard: Mutex::new(None),
+                state: AtomicU8::new(RUNNING),
+            };
+            feeder.round(wish.get(), &shared).unwrap();
+            let reads = reads.load(Ordering::Acquire);
+            assert!(
+                reads <= 3,
+                "one round decoded {reads} pieces before publishing its clock"
+            );
+            if let Some(command) = command {
+                assert_eq!(reads, 2, "{command:?} must interrupt buffer filling");
+                if command != PlayCommand::Close {
+                    feeder.round(wish.get(), &shared).unwrap();
+                    match command {
+                        PlayCommand::Pause => assert!(!feeder.applied.playing),
+                        PlayCommand::Mute => assert_eq!(told.lock().unwrap().muted, [true]),
+                        _ => unreachable!(),
+                    }
+                }
+            } else {
+                assert!(
+                    shared.heard.lock().unwrap().is_some(),
+                    "the clock must progress between rounds"
+                );
+            }
+        }
     }
 
     #[test]

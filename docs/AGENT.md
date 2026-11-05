@@ -1665,7 +1665,8 @@ alias of that name exists, the launch is not checked: Kettle cannot know
 whether the expanded alias reaches the function.
 `kettle agent-setup --status` reports this in a Kettle pane with `Codex launch:`
 and `Claude Code launch:` lines. Each uses fixed wording for Kettle's function,
-your own function, or a launch that was not checked. For either agent,
+your own function, or a launch that was not checked. For Codex on either platform
+and Claude on Linux,
 with `<name>` replaced by `codex` or `claude`, the wording is:
 
 | State | Launch text |
@@ -1674,7 +1675,11 @@ with `<name>` replaced by `codex` or `claude`, the wording is:
 | Your own command | `your own <name> function runs first; it gets cards only if it ends in Kettle's launcher` |
 | Not checked | `not checked (only zsh and fish panes Kettle started are, and an alias is not); a function of your own gets cards only if it ends in Kettle's launcher` |
 
-The last two append `; kettle agent-setup --print --agent <name> --form wrapper
+On macOS, Claude's own-function line instead says `your own claude function runs
+first; macOS checks Claude's signature for cards`. Its unchecked line keeps the
+`not checked` prefix and says `macOS checks Claude's signature for cards`.
+
+The last two launcher-advice lines append `; kettle agent-setup --print --agent <name> --form wrapper
 prints one that ends in Kettle's launcher`. Codex's `Delivery:` line for your
 own command says
 `none unless your own codex function ends in Kettle's launcher (see Codex launch)`.

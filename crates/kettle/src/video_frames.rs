@@ -152,17 +152,37 @@ fn job(path: &Path, stills: VideoStills) -> Result<(Job, ExternalAttested), Fail
 }
 
 /// Take the stills `request` asks for, in a worker `client` starts.
-pub(crate) fn render(request: &FramesRequest, client: &WorkerClient) -> Result<Sheet, FailureCode> {
-    render_attested(request, client).map(|(sheet, _)| sheet)
+pub(crate) fn render(
+    request: &FramesRequest,
+    client: &WorkerClient,
+    cancelled: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<Sheet, FailureCode> {
+    let control =
+        cancelled.map(|flag| kettle_media::client::RenderControl::with_cancel_flag(flag.clone()));
+    render_attested(request, client, control.as_ref()).map(|(sheet, _)| sheet)
 }
 
 fn render_attested(
     request: &FramesRequest,
     client: &WorkerClient,
+    control: Option<&kettle_media::client::RenderControl>,
 ) -> Result<(Sheet, ExternalAttested), FailureCode> {
+    if control.is_some_and(|control| control.is_cancelled()) {
+        return Err(FailureCode::RenderTimeout);
+    }
     let stills = request.stills()?;
     let (job, attestation) = job(&request.path, stills)?;
-    let rendered = client.render(&job)?;
+    let rendered = match control {
+        Some(control) => {
+            client
+                .render_with_control(&job, control)
+                .map_err(|error| match error {
+                    kettle_media::client::RenderError::Cancelled => FailureCode::RenderTimeout,
+                    kettle_media::client::RenderError::Failure(failure) => failure,
+                })?
+        }
+        None => client.render(&job)?,
+    };
     rendered
         .validate_as(MediaKind::Video)
         .map_err(|_| FailureCode::RenderParse)?;
@@ -184,7 +204,15 @@ impl Sheet {
     /// then shrunk by a quarter at a time down to 320 pixels on its longer
     /// edge. One that fits nowhere is `TooLarge`; nothing is cut.
     pub(crate) fn jpeg(&self, fits: &dyn Fn(&[u8]) -> bool) -> Result<Vec<u8>, FailureCode> {
-        encode(self.image.clone(), fits).map(|(jpeg, _, _)| jpeg)
+        self.jpeg_cancellable(fits, None)
+    }
+
+    pub(crate) fn jpeg_cancellable(
+        &self,
+        fits: &dyn Fn(&[u8]) -> bool,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Vec<u8>, FailureCode> {
+        encode_cancellable(self.image.clone(), fits, cancelled).map(|(jpeg, _, _)| jpeg)
     }
 
     /// What it shows, in words.
@@ -194,19 +222,39 @@ impl Sheet {
 }
 
 /// The sheet as the largest JPEG `fits` accepts, with its size.
+#[cfg(test)]
 fn encode(
-    mut sheet: RgbaImage,
+    sheet: RgbaImage,
     fits: &dyn Fn(&[u8]) -> bool,
 ) -> Result<(Vec<u8>, u32, u32), FailureCode> {
+    encode_cancellable(sheet, fits, None)
+}
+
+fn encode_cancellable(
+    mut sheet: RgbaImage,
+    fits: &dyn Fn(&[u8]) -> bool,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(Vec<u8>, u32, u32), FailureCode> {
+    let check = || {
+        if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+            Err(FailureCode::RenderTimeout)
+        } else {
+            Ok(())
+        }
+    };
     loop {
+        check()?;
         // The sheet is opaque: compose flattens every frame onto it.
         let rgb = DynamicImage::ImageRgba8(sheet.clone()).to_rgb8();
         for quality in QUALITIES {
+            check()?;
             let mut jpeg = Vec::new();
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality)
                 .encode_image(&rgb)
                 .map_err(|_| FailureCode::RenderResource)?;
-            if fits(&jpeg) {
+            let accepted = fits(&jpeg);
+            check()?;
+            if accepted {
                 return Ok((jpeg, rgb.width(), rgb.height()));
             }
         }
@@ -609,7 +657,7 @@ fn write_out_attested(
 pub(crate) fn run(request: FramesRequest, out: &Path) -> i32 {
     let sheet = crate::media_client()
         .ok_or(FailureCode::WorkerUnavailable)
-        .and_then(|client| render_attested(&request, &client))
+        .and_then(|client| render_attested(&request, &client, None))
         .and_then(|(sheet, input)| sheet.jpeg(&|_| true).map(|jpeg| (sheet, jpeg, input)));
     let (sheet, jpeg, input) = match sheet {
         Ok(taken) => taken,

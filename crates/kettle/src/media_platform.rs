@@ -300,6 +300,48 @@ mod footprint {
     /// fails, and the job with it.
     const MAX_TRACKED: usize = 64;
 
+    fn remember(members: &mut Vec<pid_t>, pid: pid_t) -> io::Result<()> {
+        if !members.contains(&pid) {
+            if members.len() == MAX_TRACKED {
+                return Err(io::Error::other("too many processes to measure"));
+            }
+            members.push(pid);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn process_candidates_are_bounded_and_duplicates_are_free() {
+        let mut members = Vec::new();
+        for pid in 1..=MAX_TRACKED as pid_t {
+            remember(&mut members, pid).unwrap();
+            remember(&mut members, pid).unwrap();
+        }
+        assert!(remember(&mut members, 1000).is_err());
+        assert_eq!(members.len(), MAX_TRACKED);
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    #[test]
+    fn regression_process_lists_are_bounded_before_allocation() {
+        unsafe extern "C" fn oversized(
+            _: pid_t,
+            _: *mut libc::c_void,
+            bytes: libc::c_int,
+        ) -> libc::c_int {
+            if bytes == 0 {
+                1_000_000
+            } else {
+                (bytes as usize / std::mem::size_of::<pid_t>()).min(1_000_000) as libc::c_int
+            }
+        }
+        assert!(
+            listed(1, oversized).is_err(),
+            "oversized process list was admitted"
+        );
+    }
+
     /// How a worker's group is measured from one sample to the next.
     #[derive(Default)]
     pub(super) struct Probe {
@@ -358,9 +400,7 @@ mod footprint {
         pub(super) fn members(&mut self, leader: pid_t) -> io::Result<Vec<pid_t>> {
             let mut members = vec![leader];
             for pid in listed(leader, libc::proc_listpgrppids)? {
-                if !members.contains(&pid) {
-                    members.push(pid);
-                }
+                remember(&mut members, pid)?;
             }
             Ok(members)
         }
@@ -384,9 +424,15 @@ mod footprint {
             } else {
                 vec![leader]
             };
-            for &pid in &self.group {
-                if !members.contains(&pid) {
-                    members.push(pid);
+            for pid in std::mem::take(&mut self.group) {
+                match of_member(leader, pid) {
+                    Ok(Some(_)) => {
+                        remember(&mut self.group, pid)?;
+                        remember(&mut members, pid)?;
+                    }
+                    Ok(None) => {}
+                    Err(error) if gone(&error) => {}
+                    Err(error) => return Err(error),
                 }
             }
             Ok(members)
@@ -430,12 +476,7 @@ mod footprint {
                 Err(error) => return Err(error),
             };
             for child in children {
-                if !found.contains(&child) {
-                    found.push(child);
-                    if found.len() > MAX_TRACKED {
-                        return Err(io::Error::other("too many processes to measure"));
-                    }
-                }
+                remember(&mut found, child)?;
             }
         }
         Ok(found)
@@ -457,7 +498,7 @@ mod footprint {
                 Err(error) => return Err(error),
             };
             for field in String::from_utf8_lossy(&listed).split_ascii_whitespace() {
-                found.push(field.parse().map_err(io::Error::other)?);
+                remember(&mut found, field.parse().map_err(io::Error::other)?)?;
             }
         }
         Ok(found)
@@ -491,7 +532,7 @@ mod footprint {
             if read_capped(&format!("/proc/{pid}/stat"), 4096)
                 .is_ok_and(|stat| process_group(&stat) == Some(leader))
             {
-                members.push(pid);
+                remember(&mut members, pid)?;
             }
         }
         Ok(members)
@@ -550,20 +591,16 @@ mod footprint {
         id: pid_t,
         list: unsafe extern "C" fn(pid_t, *mut libc::c_void, libc::c_int) -> libc::c_int,
     ) -> io::Result<Vec<pid_t>> {
-        // SAFETY: with a null buffer the call only reports how many there are.
-        let count = unsafe { list(id, std::ptr::null_mut(), 0) };
-        let capacity = usize::try_from(count).map_err(|_| io::Error::last_os_error())? + 16;
-        let mut pids: Vec<pid_t> = vec![0; capacity];
-        let bytes = libc::c_int::try_from(capacity * std::mem::size_of::<pid_t>())
-            .map_err(io::Error::other)?;
+        let mut pids = [0; MAX_TRACKED + 1];
+        let bytes =
+            libc::c_int::try_from(std::mem::size_of_val(&pids)).map_err(io::Error::other)?;
         // SAFETY: `pids` is writable for `bytes` bytes of pids.
         let filled = unsafe { list(id, pids.as_mut_ptr().cast(), bytes) };
         let filled = usize::try_from(filled).map_err(|_| io::Error::last_os_error())?;
-        if filled >= capacity {
+        if filled > MAX_TRACKED {
             return Err(io::Error::other("process list did not fit"));
         }
-        pids.truncate(filled);
-        Ok(pids)
+        Ok(pids[..filled].to_vec())
     }
 
     /// The physical footprint the kernel accounts to `pid`, as Activity

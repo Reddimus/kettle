@@ -9,7 +9,7 @@
 //! Soft-skips when no PTY is available in the sandbox (mirrors kettle-core's
 //! teardown tests) so CI without a console doesn't red the suite.
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, unix))]
 use std::io::BufRead;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -834,7 +834,7 @@ fn stdout_until_killed_helper() {
     let Some(pid_path) = std::env::var_os(STDOUT_FAILURE_PID_ENV) else {
         return;
     };
-    std::fs::write(pid_path, std::process::id().to_string())
+    publish_helper_pid_with(std::path::Path::new(&pid_path), std::process::id(), || {})
         .expect("publish stdout-failure helper pid");
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "STDOUT_FAILURE_HELPER_READY").unwrap();
@@ -869,16 +869,14 @@ fn exec_reports_a_broken_stdout_and_reaps_the_child() {
     cmd.stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn stdout-failure exec");
     let stdout = child.stdout.take().expect("piped stdout");
-    let mut stdout = std::io::BufReader::new(stdout);
-    let mut prefix = String::new();
-    let ready_deadline = Instant::now() + Duration::from_secs(5);
-    while !pid_path.exists() && Instant::now() < ready_deadline {
-        let mut line = String::new();
-        if stdout.read_line(&mut line).expect("read helper readiness") == 0 {
-            break;
+    let (stdout, prefix) = match stdout_failure_readiness(stdout, Duration::from_secs(5)) {
+        Ok(ready) => ready,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("stdout-failure helper readiness expired");
         }
-        prefix.push_str(&line);
-    }
+    };
 
     // Closing the only read handle makes the next real stdout write fail with
     // BrokenPipe/ERROR_BROKEN_PIPE. This is distinct from a merely stalled
@@ -3015,4 +3013,97 @@ fn exec_sigterm_and_sigint_follow_bounded_cancellation() {
         };
         assert_eq!(status.code(), Some(130), "signal {signal}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn regression_exec_clipboard_queries_receive_empty_replies() {
+    let helper = std::env::current_exe().unwrap();
+    let (code, out, err) = run_exec_with_env(
+        &["--timeout", "5"],
+        &[
+            helper.to_str().unwrap(),
+            "--exact",
+            "clipboard_query_helper",
+            "--nocapture",
+        ],
+        None,
+        &[("KETTLE_CLIPBOARD_QUERY_HELPER", "1")],
+    );
+    if no_pty(code, &err) {
+        eprintln!("skipping clipboard query regression: no PTY");
+        return;
+    }
+    assert_eq!(code, 0, "clipboard query did not complete: {out:?}; {err}");
+    assert!(out.contains("EMPTY_CLIPBOARD_OK"), "{out:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn clipboard_query_helper() {
+    if std::env::var_os("KETTLE_CLIPBOARD_QUERY_HELPER").is_none() {
+        return;
+    }
+    let original = make_stdin_raw();
+    let reply = query_pty(b"\x1b]52;c;?\x07", b"\x07");
+    // SAFETY: original is the fixture's initialized stdin termios.
+    let _ = unsafe { libc::tcsetattr(0, libc::TCSANOW, &original) };
+    assert_eq!(
+        reply, b"\x1b]52;c;\x07",
+        "clipboard query lost its empty reply"
+    );
+    println!("EMPTY_CLIPBOARD_OK");
+}
+
+#[cfg(any(windows, unix))]
+fn stdout_failure_readiness(
+    stdout: std::process::ChildStdout,
+    limit: Duration,
+) -> Result<
+    (std::io::BufReader<std::process::ChildStdout>, String),
+    std::sync::mpsc::RecvTimeoutError,
+> {
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut stdout = std::io::BufReader::new(stdout);
+        let mut prefix = String::new();
+        loop {
+            let mut line = String::new();
+            if stdout.read_line(&mut line).expect("read helper readiness") == 0 {
+                break;
+            }
+            let ready = line.contains("STDOUT_FAILURE_HELPER_READY");
+            prefix.push_str(&line);
+            if ready {
+                break;
+            }
+        }
+        let _ = sent.send((stdout, prefix));
+    });
+    received.recv_timeout(limit)
+}
+
+#[cfg(unix)]
+#[test]
+fn regression_readiness_deadline_bounds_silent_stdout() {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exec sleep 30"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sent, received) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let result = stdout_failure_readiness(stdout, Duration::from_millis(50));
+        sent.send(result.is_err()).unwrap();
+    });
+    let result = received.recv_timeout(Duration::from_secs(1));
+    let _ = child.kill();
+    let _ = child.wait();
+    reader.join().unwrap();
+    assert_eq!(
+        result.ok(),
+        Some(true),
+        "silent stdout defeated the readiness deadline"
+    );
 }

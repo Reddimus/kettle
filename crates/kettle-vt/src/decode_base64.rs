@@ -3,23 +3,32 @@
 use base64::Engine;
 
 use crate::graphics_limits::{GraphicsBudget, GraphicsReservation};
+use crate::image::DecodeError;
 
 pub(crate) fn decode(
     input: &str,
     budget: &GraphicsBudget,
-) -> Option<(Vec<u8>, GraphicsReservation)> {
+) -> Result<(Vec<u8>, GraphicsReservation), DecodeError> {
     decode_bytes(input.bytes(), budget)
 }
 
 pub(crate) fn decode_bytes(
     input: impl Iterator<Item = u8> + Clone,
     budget: &GraphicsBudget,
-) -> Option<(Vec<u8>, GraphicsReservation)> {
+) -> Result<(Vec<u8>, GraphicsReservation), DecodeError> {
     let len = input.clone().filter(|b| !b.is_ascii_whitespace()).count();
-    let cap = len.checked_add(3)?.checked_div(4)?.checked_mul(3)?.max(1);
-    let reservation = budget.reserve_transient_cpu(cap)?;
+    let cap = len
+        .checked_add(3)
+        .and_then(|len| (len / 4).checked_mul(3))
+        .ok_or(DecodeError::NoSpace)?
+        .max(1);
+    let reservation = budget
+        .reserve_transient_cpu(cap)
+        .ok_or(DecodeError::NoSpace)?;
     let mut output = Vec::new();
-    output.try_reserve_exact(cap).ok()?;
+    output
+        .try_reserve_exact(cap)
+        .map_err(|_| DecodeError::NoSpace)?;
     output.resize(cap, 0);
     let mut input = input.filter(|b| !b.is_ascii_whitespace()).peekable();
     let mut block = [0; 4096];
@@ -34,17 +43,17 @@ pub(crate) fn decode_bytes(
         // Padding is legal only in the final quartet of the entire stream.
         // Decoding blocks independently must not accept data after padding.
         if !last && block[..used].contains(&b'=') {
-            return None;
+            return Err(DecodeError::InvalidImage);
         }
         written += base64::engine::general_purpose::STANDARD
             .decode_slice(&block[..used], &mut output[written..])
-            .ok()?;
+            .map_err(|_| DecodeError::InvalidImage)?;
         if last {
             break;
         }
     }
     output.truncate(written);
-    Some((output, reservation))
+    Ok((output, reservation))
 }
 
 #[cfg(test)]
@@ -73,6 +82,7 @@ mod tests {
                     segments.iter().flat_map(|chunk| chunk.iter().copied()),
                     &budget,
                 )
+                .ok()
                 .map(|(bytes, _)| bytes);
                 assert_eq!(actual, expected, "segment size {size}, {input:?}");
                 assert_eq!(budget.usage(), (0, 0, 0, 0));
@@ -88,7 +98,7 @@ mod tests {
                     .flat_map(|chunk| chunk.iter().copied()),
                 &budget
             )
-            .is_none()
+            .is_err()
         );
         assert_eq!(budget.usage(), (0, 0, 0, 0));
     }

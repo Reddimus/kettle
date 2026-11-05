@@ -70,11 +70,38 @@ pub(crate) fn placement_is_visible(
     snap: &PaneSnapshot,
     placement: &kettle_core::Placement,
 ) -> bool {
-    let top = u128::from(snapshot_viewport_top(snap));
-    let start = u128::from(placement.abs_line);
-    let end = start + placement.cell_rows as u128;
-    let viewport_end = top + snap.screen_lines as u128;
-    snap.screen_lines != 0 && placement.cell_rows != 0 && start < viewport_end && top < end
+    let row = i128::from(placement.abs_line) - i128::from(snapshot_viewport_top(snap));
+    let start = row as f64 + f64::from(placement.y_offset_cells);
+    let height = f64::from(placement.display_rows);
+    snap.screen_lines != 0
+        && start.is_finite()
+        && height.is_finite()
+        && height > 0.0
+        && start < snap.screen_lines as f64
+        && 0.0 < start + height
+}
+
+pub(crate) fn placement_intersects_clip(
+    snap: &PaneSnapshot,
+    placement: &kettle_core::Placement,
+    origin: (f32, f32),
+    cell: (f32, f32),
+    clip: Option<[f32; 4]>,
+) -> bool {
+    let Some(clip) = clip else {
+        return false;
+    };
+    let Some(row) = placement_viewport_row(snap, placement) else {
+        return false;
+    };
+    let rect = inline_placement_rect(origin.0, origin.1, row, cell.0, cell.1, placement);
+    placement_is_visible(snap, placement)
+        && [rect.0, rect.1, rect.2, rect.3]
+            .into_iter()
+            .all(f32::is_finite)
+        && rect.2 > 0.0
+        && rect.3 > 0.0
+        && rects_overlap(rect, (clip[0], clip[1], clip[2], clip[3]))
 }
 
 pub(crate) fn snapshot_viewport_top(snap: &PaneSnapshot) -> u64 {
@@ -316,6 +343,20 @@ pub(crate) fn pane_backdrop_rect(
     let bwid = (rw - 2.0 * bw).max(0.0);
     let bhgt = (rh - 2.0 * bw).max(0.0);
     (bwid > 0.0 && bhgt > 0.0).then_some((rx + bw, ry + bw, bwid, bhgt))
+}
+
+pub(crate) fn pane_titlebar_rect(
+    pane: Rect4,
+    allocated: Option<Rect4>,
+    border: f32,
+) -> Option<Rect4> {
+    let (x, y, w, h) = allocated?;
+    let (px, py, pw, ph) = pane_backdrop_rect(pane, border)?;
+    let left = x.max(px);
+    let top = y.max(py);
+    let right = (x + w).min(px + pw);
+    let bottom = (y + h).min(py + ph);
+    (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
 }
 
 /// Grid column of the cluster a laid-out glyph belongs to (cell-locked

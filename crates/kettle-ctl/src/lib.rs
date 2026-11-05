@@ -162,7 +162,7 @@ pub(crate) fn ensure_owned_dir(dir: &std::path::Path) -> std::io::Result<()> {
             ));
         }
     }
-    Ok(())
+    kettle_state::validate_private_file_parent(&dir.join(".kettle-endpoint-trust-check"))
 }
 
 pub(crate) fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
@@ -546,6 +546,24 @@ mod endpoint_dir_safety_tests {
         }
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o1777)).unwrap();
         super::ensure_owned_dir(&dir).expect("a sticky directory we own protects the endpoint");
+    }
+
+    #[test]
+    fn a_private_endpoint_leaf_requires_safe_ancestors() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = kettle_test_support::private_tempdir("kettle-ctl-ancestor-");
+        let shared = root.join("shared");
+        let leaf = shared.join("private");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            super::ensure_owned_dir(&leaf).is_err(),
+            "a private endpoint leaf under a non-sticky writable ancestor must be rejected"
+        );
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        super::ensure_owned_dir(&leaf).expect("sticky ancestor protects the private leaf");
     }
 
     #[test]

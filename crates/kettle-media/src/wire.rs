@@ -1350,22 +1350,29 @@ impl<'a> Reader<'a> {
                 return Err(ValidationError::BadParams.into());
             }
             let info = self.video_info()?;
-            // At most sixteen, so both passes keep them: the borrowed pass
-            // validates the whole result before any pixel is copied.
+            // At most sixteen samples fit on the stack during preflight.
             let n = self.count(usize::from(MAX_VIDEO_STILLS))?;
-            let mut samples = Vec::with_capacity(n);
-            for _ in 0..n {
-                samples.push(StillSample {
+            let mut samples = [StillSample {
+                requested_ms: 0,
+                actual_ms: 0,
+            }; MAX_VIDEO_STILLS as usize];
+            for sample in &mut samples[..n] {
+                *sample = StillSample {
                     requested_ms: self.u64()?,
                     actual_ms: self.u64()?,
-                });
+                };
+            }
+            let tolerance_ms = self.u32()?;
+            VideoStillsResult::validate_fields(&info, &samples[..n], tolerance_ms)?;
+            let mut owned = self.list(n)?;
+            if self.owned {
+                owned.extend_from_slice(&samples[..n]);
             }
             let video = VideoStillsResult {
                 info,
-                samples,
-                tolerance_ms: self.u32()?,
+                samples: owned,
+                tolerance_ms,
             };
-            video.validate()?;
             Some(video)
         } else if kind == Some(MediaKind::Video) {
             return Err(ValidationError::BadParams.into());

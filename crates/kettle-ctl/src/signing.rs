@@ -130,6 +130,70 @@ pub fn signature(
     imp::signature(process, requirement)
 }
 
+#[cfg(any(test, target_os = "macos"))]
+fn checked_executable<Token: PartialEq, Checked>(
+    mut audit_token: impl FnMut() -> Result<Token, SignatureError>,
+    mut executable: impl FnMut() -> Result<std::path::PathBuf, SignatureError>,
+    check: impl FnOnce(&Token) -> Result<Checked, SignatureError>,
+) -> Result<(Checked, std::path::PathBuf), SignatureError> {
+    let token = audit_token()?;
+    let initial_executable = executable()?;
+    let checked = check(&token);
+    // Whatever the checks found describes the instance the token names;
+    // only that instance, still running the same file, keeps it.
+    let same = executable().is_ok_and(|now| now == initial_executable)
+        && audit_token().is_ok_and(|now| now == token);
+    if !same {
+        return Err(SignatureError::Gone);
+    }
+    Ok((checked?, initial_executable))
+}
+
+#[cfg(test)]
+mod executable_snapshot_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::path::PathBuf;
+
+    #[test]
+    fn an_a_to_b_to_a_exec_cannot_mix_a_path_with_b_signing() {
+        let generation = Cell::new(1);
+        let result = checked_executable(
+            || Ok(generation.get()),
+            || {
+                // Exec to B after the first path sample, then back to A
+                // before returning the second path sample.
+                let observed = generation.get();
+                generation.set(observed + 1);
+                Ok(PathBuf::from("/executable/A"))
+            },
+            |token| Ok(if *token == 2 { "signer B" } else { "signer A" }),
+        );
+        assert_eq!(
+            result,
+            Err(SignatureError::Gone),
+            "audit tokens must enclose both executable reads"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_process_keeps_its_signature_result() {
+        let path = PathBuf::from("/executable/A");
+        assert_eq!(
+            checked_executable(|| Ok(1), || Ok(path.clone()), |_| Ok("signer A")),
+            Ok(("signer A", path.clone()))
+        );
+        assert_eq!(
+            checked_executable::<_, ()>(
+                || Ok(1),
+                || Ok(path.clone()),
+                |_| Err(SignatureError::NotValid)
+            ),
+            Err(SignatureError::NotValid)
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use super::{MAX_SIGNATURE_FIELD_BYTES, Requirement, Signature, SignatureError};
@@ -576,17 +640,11 @@ mod imp {
         process: ProcessIdentity,
         requirement: Requirement,
     ) -> Result<Signature, SignatureError> {
-        let executable = process::executable(process).map_err(|_| SignatureError::Gone)?;
-        let token = audit_token(process.pid())?;
-        let checked = check(&token, requirement);
-        // Whatever the checks found describes the instance the token names;
-        // only that instance, still running the same file, keeps it.
-        let same = audit_token(process.pid()).is_ok_and(|now| now == token)
-            && process::executable(process).is_ok_and(|now| now == executable);
-        if !same {
-            return Err(SignatureError::Gone);
-        }
-        let (identifier, team, authority, apple) = checked?;
+        let ((identifier, team, authority, apple), executable) = super::checked_executable(
+            || audit_token(process.pid()),
+            || process::executable(process).map_err(|_| SignatureError::Gone),
+            |token| check(token, requirement),
+        )?;
         Ok(Signature {
             identifier,
             team,

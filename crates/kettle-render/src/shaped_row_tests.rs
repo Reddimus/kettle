@@ -418,3 +418,55 @@ fn grapheme_metadata_survives_shaping_with_the_cell_style() {
             .all(|g| g.metadata == emoji.metadata())
     );
 }
+
+#[test]
+fn clipped_cached_grapheme_row_is_validated_when_it_becomes_visible() {
+    use super::geometry::GridGlyphCell;
+    use super::terminal::{grapheme_row_needs_validation, replace_unsupported_graphemes};
+    use super::*;
+    let mut fonts = FontSystem::new();
+    load_bundled_font(&mut fonts, kettle_config::font::REGULAR);
+    let mut swash = SwashCache::new();
+    let mut buffer = TextBuffer::new(&mut fonts, Metrics::new(14.0, 16.0));
+    buffer.set_size(Some(200.0), Some(1.0));
+    buffer.set_wrap(Wrap::None);
+    let sequence = "\u{1f469}\u{200d}\u{1f408}";
+    buffer.set_text(
+        &format!("A\n{sequence}"),
+        &Attrs::new().family(Family::Name(kettle_config::font::FAMILY)),
+        Shaping::Advanced,
+        None,
+    );
+    let cell = GridGlyphCell {
+        column: 0,
+        width: 2,
+        clustered: true,
+        text_presentation: false,
+        single_image: true,
+    };
+    let base = Attrs::new().family(Family::Name(kettle_config::font::FAMILY));
+    let mut attrs = AttrsList::new(&base);
+    attrs.add_span(0..sequence.len(), &base.metadata(cell.metadata()));
+    buffer.lines[1].set_text(sequence, LineEnding::None, attrs);
+    buffer.shape_until_scroll(&mut fonts, false);
+    assert!(!buffer.layout_runs().any(|run| run.line_i == 1));
+    assert!(!replace_unsupported_graphemes(
+        &mut buffer,
+        &mut fonts,
+        &mut swash,
+        &[1]
+    ));
+    buffer.set_size(Some(200.0), Some(48.0));
+    buffer.shape_until_scroll(&mut fonts, false);
+    assert!(buffer.layout_runs().any(|run| run.line_i == 1));
+    if grapheme_row_needs_validation(true, true, true) {
+        replace_unsupported_graphemes(&mut buffer, &mut fonts, &mut swash, &[1]);
+    }
+    assert_eq!(
+        buffer.lines[1].text(),
+        "\u{fffd}",
+        "newly visible cached grapheme row skipped validation"
+    );
+    assert!(!grapheme_row_needs_validation(true, true, false));
+    assert!(!grapheme_row_needs_validation(false, true, true));
+}

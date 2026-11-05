@@ -1477,12 +1477,16 @@ Two roles split cleanly across the bin and the GUI:
 
 `kettle mcp` reads capped input lines on a dedicated thread through a
 one-slot channel. The dispatcher monitors stdout while waiting for input,
-so a write stalled for 30 seconds also ends a connection with stdin open.
+so 30 seconds without delivery progress also ends a connection with stdin open.
 On that failure it detaches blocked transport threads; the CLI exits with
 status 1. Its writer blocks and consumes SIGPIPE and uses a private stdout
 descriptor (with F_SETNOSIGPIPE on macOS, where pipe signals are process-wide),
 so a closed pipe becomes a reported write failure and tool cancellation before
 process exit.
+
+Unix pipe writes are nonblocking. On Linux, decreases in queued pipe bytes
+count as progress even before a whole pipe-buffer slot becomes writable.
+Shutdown restores the inherited descriptor's original status flags.
 
 On Linux, each MCP `kettle_run` command starts its own `kettle exec` child
 through `/proc/self/exe`, which retains the running image after an executable
@@ -1722,6 +1726,10 @@ cursor blinking, OSC 52 writes, exit) are latched in `LatchedEvents`, the
 newest kept, and taken when the App drains the pane; a reply that finds the
 queue full is dropped until it drains. Nothing a program prints can close its
 pane.
+
+Reply loss is sticky, including OSC 52 loads refused by the clipboard journal
+or removed with an evicted store. Headless exec checks this state so it cannot
+report successful reply delivery after either bounded path loses a query.
 
 ## In-process multi-window
 

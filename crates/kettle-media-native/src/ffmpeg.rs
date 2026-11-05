@@ -495,6 +495,7 @@ fn parse_packets(text: &str) -> Result<Option<Timeline>, FailureCode> {
             continue;
         }
         let (pts, flags) = line.split_once(',').unwrap_or((line, ""));
+        let flags = flags.split(',').next().unwrap_or("");
         if flags.contains('D') {
             continue;
         }
@@ -787,7 +788,16 @@ fn packet_args(container: VideoContainer, index: u32, intervals: &[String]) -> V
         args.push("-read_intervals".to_string());
         args.push(intervals.join(","));
     }
-    args.extend(["-show_entries", "packet=pts,flags", "-of", "csv=p=0", INPUT].map(str::to_string));
+    args.extend(
+        [
+            "-show_entries",
+            "packet=pts,flags:packet_side_data=",
+            "-of",
+            "csv=p=0",
+            INPUT,
+        ]
+        .map(str::to_string),
+    );
     args
 }
 
@@ -1181,6 +1191,28 @@ impl VideoPlayer for Ffmpeg {
                 Err(error) => return Err(error),
             }
         }
+        let frame_start_ms = if initial_gap {
+            u64::try_from(
+                (i128::from(probe.stream.start_us.unwrap_or(probe.start_us))
+                    - i128::from(probe.start_us))
+                    / 1000,
+            )
+            .map_err(|_| FailureCode::RenderParse)?
+        } else {
+            start_ms
+        };
+        let args = if initial_gap {
+            play_args(
+                input.container,
+                index,
+                &seconds((frame_start_ms * 1000) as i64),
+                width,
+                height,
+                fps_milli,
+            )
+        } else {
+            args
+        };
         let file = reopen(input.file, input.identity)?;
         let streaming = stream(&self.ffmpeg, &args, file, cpu).map_err(failure)?;
         Ok(Playback {
@@ -1188,7 +1220,8 @@ impl VideoPlayer for Ffmpeg {
             opened,
             frames: Box::new(Frames {
                 streaming,
-                start_ms,
+                start_ms: frame_start_ms,
+                initial_gap: initial_gap.then_some(start_ms),
                 duration_ms: info.duration_ms,
                 fps_milli,
                 taken: 0,
@@ -1206,6 +1239,7 @@ impl VideoPlayer for Ffmpeg {
 struct Frames {
     streaming: Streaming,
     start_ms: u64,
+    initial_gap: Option<u64>,
     duration_ms: u64,
     fps_milli: u32,
     /// Frames taken so far.
@@ -1232,6 +1266,12 @@ impl FrameSource for Frames {
     ) -> Result<Option<u64>, FailureCode> {
         if rgba.len() != self.size {
             return Err(FailureCode::BadParams);
+        }
+        if let Some(at_ms) = self.initial_gap.take() {
+            for pixel in rgba.as_chunks_mut::<4>().0 {
+                pixel.copy_from_slice(&[0, 0, 0, 255]);
+            }
+            return Ok(Some(at_ms));
         }
         match self.streaming.next_piece(rgba) {
             Ok(Piece::Filled) => {
@@ -1314,7 +1354,10 @@ fn parse_still_probe(text: &str) -> Result<StillProbe, FailureCode> {
             "stream_groups.stream_group.0.components.component.0.height" => {
                 grid_height = value.parse::<u32>().ok();
             }
-            _ if key.ends_with(".rotation") && rotation.is_none() => {
+            _ if key.starts_with("streams.stream.0.side_data_list.")
+                && key.ends_with(".rotation")
+                && rotation.is_none() =>
+            {
                 rotation = value.parse::<f64>().ok();
             }
             _ => {}
@@ -1738,6 +1781,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn still_rotation_belongs_to_the_selected_image() {
+        let plain = "streams.stream.0.codec_name=\"av1\"\n\
+                     streams.stream.0.width=640\nstreams.stream.0.height=480\n";
+        for other in [
+            "streams.stream.1.side_data_list.side_data.0.rotation=-90\n",
+            "stream_groups.stream_group.1.streams.stream.0.side_data_list.side_data.0.rotation=-90\n",
+        ] {
+            let probe = parse_still_probe(&format!("{plain}{other}")).unwrap();
+            assert_eq!((probe.width, probe.height, probe.turn), (640, 480, 0));
+        }
+    }
+
     /// A still is read from its first stream, or from the grid of tiles it
     /// is made of; a turn of a quarter swaps the size it is shown at; and an
     /// answer without a coding or a size is a broken still.
@@ -2102,6 +2158,17 @@ format.duration="10.000000"
         assert_eq!(parse_packets("\n").unwrap(), None);
     }
 
+    #[test]
+    fn packet_side_data_is_not_a_flag() {
+        let timeline = parse_packets(
+            "126000,K_,MPEGTS Stream ID,224\n135000,__,MPEGTS Stream ID,224\n144000,_D,MPEGTS Stream ID,224\n153000,__,K\n",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(timeline.starts, vec![126000, 135000, 153000]);
+        assert_eq!(timeline.keys, vec![126000]);
+    }
+
     /// A decode's arguments are fixed but for the stream, the seek and the
     /// size, and its input is the descriptor: no path, no other protocol.
     #[test]
@@ -2129,7 +2196,7 @@ format.duration="10.000000"
             .join(" "),
             format!(
                 "-v error -hide_banner -protocol_whitelist file -f mov -select_streams 0 \
-                 -read_intervals 1.000000%2.000000 -show_entries packet=pts,flags -of csv=p=0 {INPUT}"
+                 -read_intervals 1.000000%2.000000 -show_entries packet=pts,flags:packet_side_data= -of csv=p=0 {INPUT}"
             )
         );
         assert!(

@@ -1,6 +1,7 @@
+use super::geometry::placement_is_visible;
 use super::{
     PaneSnapshot, fair_placement_quotas, inline_image_clip, inline_placement_rect,
-    pane_backdrop_rect, pane_grid_origin, placement_is_visible, placement_viewport_row,
+    pane_backdrop_rect, pane_grid_origin, placement_viewport_row,
 };
 use kettle_core::{ImageData, Placement};
 
@@ -154,4 +155,61 @@ fn inline_image_clip_excludes_padding_titlebar_and_pane_edges() {
         "moving the titlebar must translate the grid and clip together, \
              not shrink the drawable image viewport"
     );
+}
+
+#[test]
+fn relative_image_offset_keeps_a_fragment_visible_above_the_viewport() {
+    let snap = PaneSnapshot {
+        history_origin: 100,
+        screen_lines: 3,
+        ..PaneSnapshot::default()
+    };
+    let mut child = placement_at(99);
+    child.y_offset_cells = 0.5;
+    child.display_rows = 1.0;
+    assert!(
+        placement_is_visible(&snap, &child),
+        "visible lower half of relative image was culled"
+    );
+    assert_eq!(
+        inline_placement_rect(0.0, 0.0, -1, 10.0, 20.0, &child),
+        (0.0, -10.0, 10.0, 20.0)
+    );
+    child.y_offset_cells = 0.0;
+    assert!(!placement_is_visible(&snap, &child));
+}
+
+#[test]
+fn offscreen_relative_children_do_not_consume_the_visible_placement_quota() {
+    let snap = PaneSnapshot {
+        history_origin: 100,
+        columns: 10,
+        screen_lines: 3,
+        ..PaneSnapshot::default()
+    };
+    let mut placements = vec![placement_at(100); 257];
+    for child in &mut placements[1..256] {
+        child.col = 11;
+    }
+    placements[256].placement_id = 999;
+    let selected = placements
+        .iter()
+        .filter(|placement| {
+            super::geometry::placement_intersects_clip(
+                &snap,
+                placement,
+                (0.0, 0.0),
+                (10.0, 20.0),
+                Some([0.0, 0.0, 100.0, 60.0]),
+            )
+        })
+        .take(256)
+        .collect::<Vec<_>>();
+    assert!(
+        selected
+            .iter()
+            .any(|placement| placement.placement_id == 999),
+        "offscreen children consumed the visible placement quota"
+    );
+    assert_eq!(selected.len(), 2);
 }

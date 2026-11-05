@@ -779,6 +779,7 @@ impl Renderer {
             config,
             supported_alpha_modes,
             font_system,
+            grapheme_text_cache: Default::default(),
             text_symbol_family,
             swash,
             atlas,

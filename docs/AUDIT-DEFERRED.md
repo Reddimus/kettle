@@ -138,6 +138,14 @@ campaign and startup outlier remain inconclusive. These entries stay open.
 
 ## Platform
 
+- **Windows MCP stdout progress.** `crates/kettle/src/mcp.rs` still uses a
+  blocking writer on Windows. A slow reader can make progress without a write
+  returning before the 30-second stall limit, so the server can misclassify
+  it as stalled. Deferred because cancellable writes to inherited Windows
+  pipe handles need a separate native design and validation. Close with a
+  nonblocking or cancellable writer and native Windows tests for a one-byte
+  slow reader and an unread pipe.
+
 - **Native macOS search speech feedback.** Native Japanese Romaji composition,
   commit/cancel, caret/selection and terminal-input isolation have recorded
   desktop evidence in `docs/TESTING.md`. Spoken search-result and caret feedback

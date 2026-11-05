@@ -91,6 +91,21 @@ fn shapes_render_with_straight_alpha() {
 }
 
 #[test]
+fn plus_lighter_blends_overlapping_colors() {
+    for blend in [
+        r#"<rect width="10" height="10" fill="blue" style="mix-blend-mode:plus-lighter"/>"#,
+        r#"<style>.blend { mix-blend-mode:plus-lighter }</style><rect class="blend" width="10" height="10" fill="blue"/>"#,
+    ] {
+        let rendered = render_svg(
+            &format!(r#"<rect width="10" height="10" fill="red"/>{blend}"#),
+            10,
+        )
+        .unwrap();
+        assert_eq!(pixel(&rendered, 5, 5), [255, 0, 255, 255], "{blend}");
+    }
+}
+
+#[test]
 fn dropped_style_subtrees_cannot_hide_shapes() {
     for tag in ["foreignObject", "script"] {
         let rendered = render_svg(

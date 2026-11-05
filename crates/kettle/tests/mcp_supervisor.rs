@@ -192,6 +192,64 @@ fn real_mcp_stdout_failure_returns_failure_status() {
     assert_eq!(status.code(), Some(1));
 }
 
+fn script(pid: &std::path::Path, release: &std::path::Path) -> String {
+    let quote =
+        |path: &std::path::Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+    format!(
+        "setsid sh -c 'sleep 300 & p=$!; echo $p > \"$1\"; wait' sh {} </dev/null >/dev/null 2>&1 & \
+            while [ ! -s {} ]; do sleep 0.01; done; echo ESCAPED $(cat {}); \
+            while [ ! -f {} ]; do sleep 0.01; done; printf finished",
+        quote(pid),
+        quote(pid),
+        quote(pid),
+        quote(release)
+    )
+}
+
+#[test]
+fn regression_supervisor_fixture_quotes_temporary_paths() {
+    let directory = tempfile::Builder::new()
+        .prefix("kettle's fixture ")
+        .tempdir()
+        .unwrap();
+    let pid = directory.path().join("pid");
+    let release = directory.path().join("release");
+    std::fs::write(&release, b"").unwrap();
+    let command = format!(
+        "setsid() {{ printf 123 > \"$5\"; }}\n{}",
+        script(&pid, &release)
+    );
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", &command])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("quoted fixture paths prevented readiness");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "fixture shell rejected temporary path: {output:?}"
+    );
+    assert_eq!(std::fs::read_to_string(pid).unwrap(), "123");
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("ESCAPED 123")
+    );
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
@@ -381,18 +439,6 @@ mod linux {
                 );
             }
         }
-    }
-
-    fn script(pid: &Path, release: &Path) -> String {
-        format!(
-            "setsid sh -c 'sleep 300 & p=$!; echo $p > \"$1\"; wait' sh '{}' </dev/null >/dev/null 2>&1 & \
-            while [ ! -s '{}' ]; do sleep 0.01; done; echo ESCAPED $(cat '{}'); \
-            while [ ! -f '{}' ]; do sleep 0.01; done; printf finished",
-            pid.display(),
-            pid.display(),
-            pid.display(),
-            release.display()
-        )
     }
 
     #[test]

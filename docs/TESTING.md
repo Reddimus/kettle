@@ -137,6 +137,37 @@ with a reason set. `the_instructions_follow_the_placement` pins the guidance
 to say once that no card shows, without retrying or changing anything.
 Run these with `cargo test -p kettle --bin kettle mcp`.
 
+The `kettle-core` tests selected by `regression_clipboard_` cover the clipboard
+journal's load limit and byte-budget eviction. Both must latch reply loss even
+when the ordinary reply channel is empty, and draining must not clear it.
+The Unix MCP tests selected by `regression_real_pipe_` use a saturated OS pipe:
+a reader draining 128 bytes every 20 ms must stay alive beyond the test stall
+limit, while an unread pipe must time out and restore stdout's status flags.
+Run the real-pipe tests on both Linux and macOS; Linux also exercises queued-byte
+observations before a whole pipe-buffer slot becomes writable. Portable short
+write and stopped-writer tests remain in the MCP suite. Run offline with
+`cargo test -j 2 --locked --offline -p kettle-core regression_clipboard_` and
+`cargo test -j 2 --locked --offline -p kettle regression_real_pipe_`, then run
+the full suites with `cargo test -j 2 --locked --offline -p kettle-core -p kettle`.
+
+`regression_one_byte_pipe_reads_keep_a_small_response_alive` fills a real Unix
+pipe, queues a 512-byte response, and drains one byte every 100 ms for twice
+the shortened stall limit before collecting the remaining response. Its unread
+control, `regression_unread_pipe_stalls_a_small_response`, must still time out.
+Run both on native Linux and macOS; macOS exercises the one-byte fallback when
+an atomic write cannot fit, while Linux retains queued-byte progress tracking.
+The media worker's `continuous_due_frames_` tests run in child processes with
+a real 200 ms watchdog. A presentation budget longer than that deadline requires
+renewal after successful writes; a shorter budget requires Close to be handled
+between batches. Run offline with:
+
+```sh
+export CARGO_INCREMENTAL=0 RUST_TEST_THREADS=2
+cargo test -j 2 --locked --offline -p kettle-media-worker continuous_due_frames_
+cargo test -j 2 --locked --offline -p kettle --bin kettle small_response
+cargo test -j 2 --locked --offline -p kettle-media-worker -p kettle
+```
+
 On Linux, `file_hook_card_reports_a_lost_pickup_after_metadata_wait` and
 `file_hook_card_reports_a_changed_root_after_metadata_wait` in `kettle-ui`
 admit a live native fixture, wait for file metadata, then clear or replace the

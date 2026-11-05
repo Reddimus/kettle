@@ -139,20 +139,34 @@ impl SignedIdentity {
 /// against a genuinely published archive.
 pub(crate) trait SealVerifier {
     /// Read the identity a bundle's signature asserts, and confirm the
-    /// signature itself is intact.
-    fn identity(&self, bundle: &Path) -> Result<SignedIdentity, UpdateError>;
+    /// signature itself is intact. With `directory`, resolve the bundle from
+    /// that held directory in the verifier subprocess.
+    fn identity(
+        &self,
+        bundle: &Path,
+        directory: Option<&File>,
+    ) -> Result<SignedIdentity, UpdateError>;
 
     /// Confirm Apple notarized *this* bundle. Separate from [`Self::identity`]
     /// because the two are needed at different strictnesses.
-    fn notarized(&self, bundle: &Path) -> Result<(), UpdateError>;
+    fn notarized(&self, bundle: &Path, directory: Option<&File>) -> Result<(), UpdateError>;
 }
 
 /// The real checks, via the two tools macOS ships.
 pub(crate) struct AppleSeal;
 
 impl SealVerifier for AppleSeal {
-    fn identity(&self, bundle: &Path) -> Result<SignedIdentity, UpdateError> {
-        let verified = run(CODESIGN, &["--verify", "--deep", "--strict", "--"], bundle)?;
+    fn identity(
+        &self,
+        bundle: &Path,
+        directory: Option<&File>,
+    ) -> Result<SignedIdentity, UpdateError> {
+        let verified = run(
+            CODESIGN,
+            &["--verify", "--deep", "--strict", "--"],
+            bundle,
+            directory,
+        )?;
         if !verified.status {
             return Err(UpdateError::UnmanagedInstall(format!(
                 "the signature on {} is not intact: {}",
@@ -161,7 +175,7 @@ impl SealVerifier for AppleSeal {
             )));
         }
         // `codesign -d` reports on stderr, not stdout.
-        let described = run(CODESIGN, &["-dvvv", "--"], bundle)?;
+        let described = run(CODESIGN, &["-dvvv", "--"], bundle, directory)?;
         if !described.status {
             return Err(UpdateError::UnmanagedInstall(format!(
                 "{} is not signed: {}",
@@ -177,8 +191,13 @@ impl SealVerifier for AppleSeal {
         })
     }
 
-    fn notarized(&self, bundle: &Path) -> Result<(), UpdateError> {
-        let assessed = run(SPCTL, &["--assess", "--type", "execute", "--"], bundle)?;
+    fn notarized(&self, bundle: &Path, directory: Option<&File>) -> Result<(), UpdateError> {
+        let assessed = run(
+            SPCTL,
+            &["--assess", "--type", "execute", "--"],
+            bundle,
+            directory,
+        )?;
         if assessed.status {
             return Ok(());
         }
@@ -197,16 +216,34 @@ struct ToolOutput {
     stderr: String,
 }
 
-fn run(tool: &str, args: &[&str], bundle: &Path) -> Result<ToolOutput, UpdateError> {
-    let output = Command::new(tool)
-        .args(args)
-        .arg(bundle)
-        .output()
-        .map_err(|error| {
-            UpdateError::Io(std::io::Error::other(format!(
-                "could not run {tool}: {error}"
-            )))
-        })?;
+fn run(
+    tool: &str,
+    args: &[&str],
+    bundle: &Path,
+    directory: Option<&File>,
+) -> Result<ToolOutput, UpdateError> {
+    let mut command = Command::new(tool);
+    command.args(args).arg(bundle);
+    if let Some(directory) = directory {
+        use std::os::unix::process::CommandExt as _;
+        let fd = directory.as_raw_fd();
+        // SAFETY: the descriptor lives through output(), and fchdir is
+        // async-signal-safe. Only the child changes its working directory.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fchdir(fd) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
+    let output = command.output().map_err(|error| {
+        UpdateError::Io(std::io::Error::other(format!(
+            "could not run {tool}: {error}"
+        )))
+    })?;
     Ok(ToolOutput {
         status: output.status.success(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -422,7 +459,7 @@ pub(crate) fn locate_bundle_install(
         return Err(UpdateError::UnmanagedInstall(reason.to_string()));
     }
 
-    let identity = verifier.identity(&bundle)?;
+    let identity = verifier.identity(&bundle, None)?;
     if identity.identifier != BUNDLE_IDENTIFIER || identity.team != TEAM_IDENTIFIER {
         // A locally built app is ad-hoc signed and lands here, which is the
         // same answer Windows and Linux give a `local-dev` marker.
@@ -527,7 +564,8 @@ impl Staging {
         })
     }
 
-    /// Where the bundle being staged lives, for tools that need a pathname.
+    /// The staging pathname used by fixtures.
+    #[cfg(test)]
     fn bundle(&self) -> PathBuf {
         self.path.join(ARCHIVE_ROOT)
     }
@@ -836,15 +874,15 @@ fn stage_verified_bundle(
     verifier: &dyn SealVerifier,
 ) -> Result<(), UpdateError> {
     extract_bundle_into(staging, archive)?;
-    let bundle = staging.bundle();
-    let identity = verifier.identity(&bundle)?;
+    let bundle = Path::new(ARCHIVE_ROOT);
+    let identity = verifier.identity(bundle, Some(&staging.directory))?;
     if identity.identifier != BUNDLE_IDENTIFIER || identity.team != TEAM_IDENTIFIER {
         return Err(UpdateError::UnsafeArchive(format!(
             "the downloaded bundle is signed as {} by team {}, not as an official kettle build",
             identity.identifier, identity.team
         )));
     }
-    verifier.notarized(&bundle)
+    verifier.notarized(bundle, Some(&staging.directory))
 }
 
 /// Remove leftovers from interrupted and finished updates.
@@ -915,9 +953,22 @@ fn sweep_interrupted_updates(parent: &Path, records: &Path) {
                 pending = true;
                 continue;
             }
-            // Nothing is extracted before the identity write. Without it,
-            // remove only an empty directory: ownership cannot authorize recursion.
-            let limits = if transaction.has_identity() {
+            let bundle_metadata = open_directory_at(
+                &candidate,
+                &c_name(std::ffi::OsStr::new(ARCHIVE_ROOT)).expect("constant bundle name"),
+            )
+            .and_then(|bundle| Ok(bundle.metadata()?))
+            .ok();
+            let bundle_matches = transaction.bundle_matches(bundle_metadata.as_ref());
+            if bundle_metadata.is_some() && !bundle_matches {
+                warn_unknown_leftover();
+                pending = true;
+                continue;
+            }
+            // Without directory identity or a matching bundle, remove only an
+            // empty directory. This also recovers a sweep interrupted after
+            // deleting kettle.app but before deleting its enclosing directory.
+            let limits = if transaction.has_identity() && bundle_matches {
                 CLEANUP_LIMITS
             } else {
                 kettle_state::TreeRemovalLimits {
@@ -1096,7 +1147,7 @@ fn install_bundle_update_with_download(
     verify_sha256_bytes(&archive, &asset.sha256)?;
 
     let id = unique_suffix();
-    let staging = Staging::create(parent, &id, &records)?;
+    let mut staging = Staging::create(parent, &id, &records)?;
     if let Err(error) = stage_verified_bundle(&staging, &archive, verifier) {
         staging.discard();
         return Err(error);
@@ -1108,6 +1159,20 @@ fn install_bundle_update_with_download(
     {
         staging.discard();
         return Err(error);
+    }
+
+    let staged_bundle = open_directory_at(
+        &staging.directory,
+        &c_name(std::ffi::OsStr::new(ARCHIVE_ROOT))?,
+    )?;
+    // Either side of a crash during exchange must identify a tree we own.
+    // Persist both identities before the exchange can displace any contents.
+    if let Err(error) = staging
+        .transaction
+        .record_exchange(&staged_bundle.metadata()?, &bundle_lock.metadata()?)
+    {
+        staging.discard();
+        return Err(error.into());
     }
 
     // The source is named relative to the staging descriptor, which was opened
@@ -1135,6 +1200,18 @@ fn install_bundle_update_with_download(
             log::warn!("the macOS bundle update is installed but was not flushed: {error}");
         }
     }
+
+    require_live_bundle_identity(
+        &bundle_lock,
+        &staging.directory,
+        std::ffi::OsStr::new(ARCHIVE_ROOT),
+    )
+    .map_err(|_| {
+        UpdateError::Transaction(
+            "the update was exchanged with an unexpected bundle; preserving displaced contents"
+                .into(),
+        )
+    })?;
 
     // The staging directory now holds the bundle that was live. It is not
     // deleted here: this process still reads its icon and asset catalog out of
@@ -1239,11 +1316,15 @@ mod tests {
     }
 
     impl SealVerifier for StubSeal {
-        fn identity(&self, _bundle: &Path) -> Result<SignedIdentity, UpdateError> {
+        fn identity(
+            &self,
+            _bundle: &Path,
+            _directory: Option<&File>,
+        ) -> Result<SignedIdentity, UpdateError> {
             Ok(self.identity.clone())
         }
 
-        fn notarized(&self, bundle: &Path) -> Result<(), UpdateError> {
+        fn notarized(&self, bundle: &Path, _directory: Option<&File>) -> Result<(), UpdateError> {
             if self.notarized {
                 return Ok(());
             }
@@ -1633,6 +1714,69 @@ mod tests {
     }
 
     #[test]
+    fn staging_verification_checks_the_held_tree_after_path_substitution() {
+        struct SubstitutingSeal {
+            path: PathBuf,
+            fail_identity: bool,
+        }
+        impl SubstitutingSeal {
+            fn check(&self, bundle: &Path, directory: Option<&File>) -> Result<(), UpdateError> {
+                if run(
+                    "/bin/test",
+                    &["-f"],
+                    &bundle.join("Contents/invalid-seal"),
+                    directory,
+                )?
+                .status
+                {
+                    return Err(UpdateError::UnsafeArchive("invalid staged seal".into()));
+                }
+                Ok(())
+            }
+        }
+        impl SealVerifier for SubstitutingSeal {
+            fn identity(
+                &self,
+                bundle: &Path,
+                directory: Option<&File>,
+            ) -> Result<SignedIdentity, UpdateError> {
+                std::fs::rename(&self.path, self.path.with_extension("moved"))?;
+                std::fs::create_dir(&self.path)?;
+                seed_bundle(&self.path, ARCHIVE_ROOT);
+                if self.fail_identity {
+                    self.check(bundle, directory)?;
+                }
+                StubSeal::official().identity(bundle, directory)
+            }
+            fn notarized(
+                &self,
+                bundle: &Path,
+                directory: Option<&File>,
+            ) -> Result<(), UpdateError> {
+                self.check(bundle, directory)
+            }
+        }
+        for fail_identity in [true, false] {
+            let temp = kettle_test_support::private_tempdir("kettle-macos-verify-moved-");
+            let staging = create_staging(temp.path(), "verify").unwrap();
+            let seal = SubstitutingSeal {
+                path: staging.path.clone(),
+                fail_identity,
+            };
+            let mut files = bundle_files();
+            files.insert(
+                format!("{ARCHIVE_ROOT}/Contents/invalid-seal"),
+                (b"invalid".to_vec(), 0o644),
+            );
+            let result = stage_verified_bundle(&staging, &zip_from(&files), &seal);
+            assert!(
+                matches!(result, Err(UpdateError::UnsafeArchive(ref message)) if message == "invalid staged seal"),
+                "verification must reject the extracted tree even when its path names a valid substitute: {result:?}"
+            );
+        }
+    }
+
+    #[test]
     fn staging_refuses_a_bundle_apple_has_not_notarized() {
         let temp = kettle_test_support::private_tempdir("kettle-macos-notarize-");
 
@@ -1833,6 +1977,108 @@ mod tests {
     }
 
     #[test]
+    fn the_sweep_recovers_interrupted_bundle_deletion_and_reuses_transaction_slots() {
+        for prefix in [STAGED_PREFIX, PREVIOUS_PREFIX] {
+            let temp = kettle_test_support::private_tempdir("kettle-macos-interrupted-cleanup-");
+            let root = temp.path();
+            let records = root.join("update.transactions");
+            let live = root.join("kettle.app");
+            std::fs::create_dir(&live).unwrap();
+            let mut leftovers = Vec::new();
+            for slot in 0..8 {
+                let id = format!("interrupted-{slot}");
+                let mut staging = create_staging(root, &id).unwrap();
+                std::fs::create_dir(staging.bundle()).unwrap();
+                std::fs::write(staging.bundle().join("partial"), b"old bundle").unwrap();
+                staging
+                    .transaction
+                    .record_exchange(
+                        &std::fs::metadata(staging.bundle()).unwrap(),
+                        &std::fs::metadata(&live).unwrap(),
+                    )
+                    .unwrap();
+                let path = root.join(format!("{prefix}{id}"));
+                if prefix == PREVIOUS_PREFIX {
+                    std::fs::rename(&staging.path, &path).unwrap();
+                }
+                drop(staging);
+                // Model a sweep killed after removing the bundle, before rmdir.
+                std::fs::remove_dir_all(path.join(ARCHIVE_ROOT)).unwrap();
+                leftovers.push(path);
+            }
+            assert!(Transaction::create(&records, format!("{STAGED_PREFIX}overflow")).is_err());
+
+            sweep_interrupted_updates(root, &records);
+
+            for path in leftovers {
+                assert!(
+                    !path.exists(),
+                    "empty leftover survived: {}",
+                    path.display()
+                );
+            }
+            assert!(Transaction::load_all(&records).is_empty());
+            create_staging(root, "reused").unwrap().discard();
+            assert!(live.is_dir());
+        }
+    }
+
+    #[test]
+    fn interrupted_bundle_cleanup_preserves_unexpected_contents() {
+        for contents in [
+            "file",
+            "directory",
+            "bundle-file",
+            "bundle-symlink",
+            "bundle",
+        ] {
+            let temp = kettle_test_support::private_tempdir("kettle-macos-cleanup-contents-");
+            let root = temp.path();
+            let records = root.join("update.transactions");
+            let live = root.join("kettle.app");
+            std::fs::create_dir(&live).unwrap();
+            let mut staging = create_staging(root, "interrupted").unwrap();
+            std::fs::create_dir(staging.bundle()).unwrap();
+            staging
+                .transaction
+                .record_exchange(
+                    &std::fs::metadata(staging.bundle()).unwrap(),
+                    &std::fs::metadata(&live).unwrap(),
+                )
+                .unwrap();
+            // Keep the authorized inode allocated so a replacement cannot reuse it.
+            std::fs::rename(staging.bundle(), root.join("removed.app")).unwrap();
+            let path = staging.path.clone();
+            let unexpected = match contents {
+                "file" | "directory" => path.join("unexpected"),
+                _ => staging.bundle(),
+            };
+            match contents {
+                "file" | "bundle-file" => std::fs::write(&unexpected, b"keep").unwrap(),
+                "bundle-symlink" => std::os::unix::fs::symlink(&live, &unexpected).unwrap(),
+                _ => {
+                    std::fs::create_dir(&unexpected).unwrap();
+                    std::fs::write(unexpected.join("private"), b"keep").unwrap();
+                }
+            }
+            drop(staging);
+
+            for _ in 0..2 {
+                sweep_interrupted_updates(root, &records);
+                assert!(std::fs::symlink_metadata(&unexpected).is_ok(), "{contents}");
+                match contents {
+                    "file" | "bundle-file" => {
+                        assert_eq!(std::fs::read(&unexpected).unwrap(), b"keep");
+                    }
+                    "bundle-symlink" => assert_eq!(std::fs::read_link(&unexpected).unwrap(), live),
+                    _ => assert_eq!(std::fs::read(unexpected.join("private")).unwrap(), b"keep"),
+                }
+                assert_eq!(Transaction::load_all(&records).len(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn a_record_without_identity_cannot_authorize_recursive_removal() {
         let temp = kettle_test_support::private_tempdir("kettle-macos-pending-");
         let root = temp.path();
@@ -1929,6 +2175,104 @@ mod tests {
         assert!(!root.join(previous).exists());
         assert!(Transaction::load_all(&records).is_empty());
         assert_eq!(std::fs::read(&executable).unwrap(), b"mach-o");
+    }
+
+    #[test]
+    fn an_update_preserves_an_unexpected_bundle_displaced_by_the_exchange() {
+        struct ReplacingSeal {
+            live: PathBuf,
+            saved: PathBuf,
+            checks: std::cell::Cell<usize>,
+        }
+        impl SealVerifier for ReplacingSeal {
+            fn identity(
+                &self,
+                bundle: &Path,
+                directory: Option<&File>,
+            ) -> Result<SignedIdentity, UpdateError> {
+                if bundle == self.live {
+                    let checks = self.checks.get() + 1;
+                    self.checks.set(checks);
+                    if checks == 2 {
+                        std::fs::rename(&self.live, &self.saved)?;
+                        seed_bundle(self.live.parent().unwrap(), "kettle.app");
+                        std::fs::copy(
+                            self.saved.join("Contents/Info.plist"),
+                            self.live.join("Contents/Info.plist"),
+                        )?;
+                        std::fs::write(self.live.join("unrelated-user-data"), b"must survive")?;
+                    }
+                }
+                StubSeal::official().identity(bundle, directory)
+            }
+            fn notarized(
+                &self,
+                bundle: &Path,
+                directory: Option<&File>,
+            ) -> Result<(), UpdateError> {
+                StubSeal::official().notarized(bundle, directory)
+            }
+        }
+        let temp = kettle_test_support::private_tempdir("kettle-macos-displaced-");
+        let root = temp.path();
+        let executable = seed_bundle(root, "kettle.app");
+        let install = locate_bundle_install(&executable, &StubSeal::official()).unwrap();
+        std::fs::write(
+            &install.marker_path,
+            format!(
+                "<plist version=\"1.0\"><dict><key>CFBundleShortVersionString</key>\
+                 <string>{}</string></dict></plist>",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .unwrap();
+        let seal = ReplacingSeal {
+            live: install.prefix.clone(),
+            saved: root.join("saved.app"),
+            checks: std::cell::Cell::new(0),
+        };
+        let archive = official_zip();
+        let update = AvailableUpdate {
+            version: semver::Version::new(99, 0, 0),
+            tag: "v99.0.0".into(),
+            release_url: String::new(),
+            download_url: None,
+            asset: Some(crate::ManifestAsset {
+                target: current_target().unwrap().into(),
+                name: "kettle-macos-universal.zip".into(),
+                size: archive.len() as u64,
+                sha256: hex::encode(Sha256::digest(&archive)),
+            }),
+            signed_manifest: None,
+        };
+        let state = root.join("state");
+        let result =
+            install_bundle_update_with_download(&update, &install, &seal, &state, || Ok(archive));
+        assert_eq!(seal.checks.get(), 2);
+        let records = update_lock_path(&install.prefix, &state)
+            .unwrap()
+            .with_extension("transactions");
+        let transaction = Transaction::load_all(&records).pop().unwrap();
+        let leftover = transaction
+            .names()
+            .into_iter()
+            .map(|name| root.join(name))
+            .find(|path| {
+                path.join(ARCHIVE_ROOT)
+                    .join("unrelated-user-data")
+                    .is_file()
+            })
+            .unwrap();
+        sweep_interrupted_updates(root, &records);
+        assert_eq!(
+            std::fs::read(leftover.join(ARCHIVE_ROOT).join("unrelated-user-data")).ok(),
+            Some(b"must survive".to_vec()),
+            "sweeping must preserve a displaced bundle that was never locked or authorized"
+        );
+        assert!(
+            result.is_err(),
+            "an unexpected displaced bundle must be reported"
+        );
     }
 
     #[test]
@@ -2462,7 +2806,7 @@ mod tests {
         )
         .unwrap();
         AppleSeal
-            .notarized(&live)
+            .notarized(&live, None)
             .expect("the swapped-in bundle is still notarized");
         assert!(
             live.join("Contents/CodeResources").exists(),

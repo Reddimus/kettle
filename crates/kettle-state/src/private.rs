@@ -469,6 +469,13 @@ pub fn validate_trusted_directory(directory: &Path) -> io::Result<()> {
     }
 }
 
+/// Verify the parent chain for a current-user-owned file without opening it.
+/// Unlike [`validate_trusted_directory`], this permits sticky shared parents,
+/// where other users cannot replace a file owned by this user.
+pub fn validate_private_file_parent(path: &Path) -> io::Result<()> {
+    guard_private_parent(path)?.verify_directory()
+}
+
 /// Open a regular file for reading while holding its verified parent chain.
 ///
 /// Unlike the private-file APIs, this does not change the leaf's permissions:

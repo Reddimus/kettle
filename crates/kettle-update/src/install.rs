@@ -49,7 +49,7 @@ const UNIX_INSTALL_PROVENANCE_FILE: &str = "share/kettle/install-files.json";
 const MAX_PACKAGE_MANIFEST_BYTES: usize = 256 * 1024;
 #[cfg(windows)]
 const PENDING_SCHEMA: u32 = 3;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const PENDING_FILE: &str = ".kettle-update-pending.json";
 #[cfg(windows)]
 const RUNNING_LOCK_FILE: &str = ".kettle-running.lock";
@@ -695,7 +695,8 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
         }
 
         let running_lock_path = install.prefix.join(RUNNING_LOCK_FILE);
-        let mut running_lock = kettle_state::SharedFileLock::acquire(&running_lock_path)?;
+        let mut running_lock =
+            acquire_startup_running_lock(&running_lock_path, PENDING_HELPER_LOCK_TIMEOUT)?;
         // Close the check/lock race: an updater can publish pending state after
         // our first check but before this shared lock is acquired.
         if let Some(inspection) = inspect_pending_start(&install.prefix) {
@@ -708,7 +709,10 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
                             &fingerprint,
                             format!("the update helper could not start: {error}"),
                         ));
-                        running_lock = kettle_state::SharedFileLock::acquire(&running_lock_path)?;
+                        running_lock = acquire_startup_running_lock(
+                            &running_lock_path,
+                            PENDING_HELPER_LOCK_TIMEOUT,
+                        )?;
                     } else {
                         return Ok(ProcessStart::PendingUpdate {
                             guard: RunningInstallGuard {
@@ -2324,14 +2328,45 @@ fn record_pending_failure_locked(prefix: &Path, error: &UpdateError) {
     let _ = persist_pending(prefix, &pending);
 }
 
+#[cfg(any(windows, test))]
+fn acquire_startup_running_lock(
+    path: &Path,
+    timeout: std::time::Duration,
+) -> Result<kettle_state::SharedFileLock, UpdateError> {
+    kettle_state::SharedFileLock::acquire_timeout(path, timeout).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::TimedOut {
+            UpdateError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the update helper is still using this installation; retry startup shortly",
+            ))
+        } else {
+            error.into()
+        }
+    })
+}
+
+#[cfg(any(windows, test))]
+fn acquire_idle_cleanup_lock(
+    prefix: &Path,
+) -> Result<Option<kettle_state::ExclusiveFileLock>, UpdateError> {
+    let Some(lock) =
+        kettle_state::ExclusiveFileLock::try_acquire(&prefix.join(".kettle-update.lock"))?
+    else {
+        return Ok(None);
+    };
+    match fs::symlink_metadata(prefix.join(PENDING_FILE)) {
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Some(lock)),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[cfg(windows)]
 fn cleanup_stale_windows_update_files_if_idle(prefix: &Path) -> Result<bool, UpdateError> {
     // Staging is created before the pending record is published. Serialize
     // cleanup with that preparation window so a normal launch cannot remove an
     // update another process is still downloading, extracting, or publishing.
-    let Some(_lock) =
-        kettle_state::ExclusiveFileLock::try_acquire(&prefix.join(".kettle-update.lock"))?
-    else {
+    let Some(_lock) = acquire_idle_cleanup_lock(prefix)? else {
         return Ok(false);
     };
     let Ok(entries) = fs::read_dir(prefix) else {
@@ -3669,7 +3704,7 @@ struct JournalEntry {
 /// Schema-1 journals can be left by v2.34 if that updater is interrupted after
 /// replacing the binary. Retain a narrow recovery reader so upgrading does not
 /// strand an otherwise recoverable installation.
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct LegacyJournal {
@@ -3678,7 +3713,7 @@ struct LegacyJournal {
     entries: Vec<LegacyJournalEntry>,
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct LegacyJournalEntry {
@@ -5969,7 +6004,7 @@ fn validate_legacy_journal(journal: &LegacyJournal) -> Result<(), UpdateError> {
     Ok(())
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn validate_legacy_backup_tree(
     prefix: &Path,
     backup_dir: &Path,
@@ -6000,6 +6035,7 @@ fn validate_legacy_backup_tree(
     }
 
     let mut pending = vec![backup_dir.to_path_buf()];
+    let mut directory_count = 0_usize;
     let mut seen = std::collections::HashSet::new();
     let mut total = 0_u64;
     while let Some(directory) = pending.pop() {
@@ -6042,9 +6078,15 @@ fn validate_legacy_backup_tree(
             let relative_string = relative_to_string(relative)?;
             let key = relative_string.to_ascii_lowercase();
             if metadata.file_type().is_dir() {
-                let prefix = format!("{key}/");
+                directory_count += 1;
+                if directory_count > MAX_ARCHIVE_ENTRIES {
+                    return Err(UpdateError::Transaction(
+                        "legacy backup exceeds the directory limit".into(),
+                    ));
+                }
+                let prefix = format!("{relative_string}/");
                 if !expected
-                    .keys()
+                    .values()
                     .any(|candidate| candidate.starts_with(&prefix))
                 {
                     return Err(UpdateError::Transaction(format!(
@@ -6256,7 +6298,7 @@ fn is_sha256(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn validate_relative(path: &Path) -> Result<(), UpdateError> {
     if path.as_os_str().is_empty()
         || path.is_absolute()
@@ -8126,6 +8168,58 @@ mod tests {
         assert!(root.path().join(".kettle-update-journal.json").is_file());
     }
 
+    #[test]
+    fn legacy_backup_validation_bounds_directory_traversal() {
+        let root = test_tempdir();
+        let backup_name = ".kettle-update-backup-legacy";
+        let backup = root.path().join(backup_name);
+        let relative = format!("{}value", "d/".repeat(MAX_ARCHIVE_ENTRIES + 1));
+        let file = backup.join(&relative);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"before").unwrap();
+        let journal = LegacyJournal {
+            schema: 1,
+            backup_dir: backup_name.into(),
+            entries: vec![LegacyJournalEntry {
+                relative,
+                existed: true,
+                previous_unix_mode: None,
+            }],
+        };
+        assert!(
+            validate_legacy_backup_tree(root.path(), &backup, &journal).is_err(),
+            "legacy backup traversal must reject more than the directory quota"
+        );
+        assert_eq!(fs::read(file).unwrap(), b"before");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_backup_validation_rejects_case_aliased_empty_directories() {
+        let root = test_tempdir();
+        let backup_name = ".kettle-update-backup-legacy";
+        let backup = root.path().join(backup_name);
+        fs::create_dir_all(backup.join("abcdefgh")).unwrap();
+        if let Err(error) = fs::create_dir(backup.join("ABCDEFGH")) {
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+            return;
+        }
+        fs::write(backup.join("abcdefgh/value"), b"before").unwrap();
+        let journal = LegacyJournal {
+            schema: 1,
+            backup_dir: backup_name.into(),
+            entries: vec![LegacyJournalEntry {
+                relative: "abcdefgh/value".into(),
+                existed: true,
+                previous_unix_mode: None,
+            }],
+        };
+        assert!(
+            validate_legacy_backup_tree(root.path(), &backup, &journal).is_err(),
+            "legacy backup traversal must reject case-aliased ancestors"
+        );
+    }
+
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn legacy_journal_recovery_removes_journal_before_backup_cleanup() {
@@ -9870,6 +9964,48 @@ mod tests {
         fs4::FileExt::lock(&exclusive).unwrap();
         atomic_write(&child_executable, b"replacement", None).unwrap();
         assert_eq!(fs::read(child_executable).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn startup_running_lock_times_out_behind_a_stalled_helper() {
+        let root = test_tempdir();
+        let path = root.path().join(".kettle-running.lock");
+        let exclusive = kettle_state::ExclusiveFileLock::acquire(&path).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            send.send(acquire_startup_running_lock(
+                &path,
+                std::time::Duration::from_millis(25),
+            ))
+            .unwrap();
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_millis(500));
+        drop(exclusive);
+        waiter.join().unwrap();
+        assert!(
+            matches!(result, Ok(Err(UpdateError::Io(ref error)))
+                if error.kind() == std::io::ErrorKind::TimedOut
+                    && error.to_string().contains("retry")),
+            "startup must return a retryable timeout while the helper still holds its lock: {result:?}"
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_preserves_pending_published_after_startup_inspection() {
+        let root = test_tempdir();
+        assert!(!root.path().join(PENDING_FILE).is_file());
+        let update_lock =
+            kettle_state::ExclusiveFileLock::acquire(&root.path().join(".kettle-update.lock"))
+                .unwrap();
+        assert!(acquire_idle_cleanup_lock(root.path()).unwrap().is_none());
+        fs::write(root.path().join(PENDING_FILE), b"published pending state").unwrap();
+        drop(update_lock);
+        assert!(
+            acquire_idle_cleanup_lock(root.path()).unwrap().is_none(),
+            "cleanup must not acquire permission to delete a published update"
+        );
+        fs::remove_file(root.path().join(PENDING_FILE)).unwrap();
+        assert!(acquire_idle_cleanup_lock(root.path()).unwrap().is_some());
     }
 
     #[cfg(windows)]

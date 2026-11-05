@@ -582,7 +582,7 @@ impl Renderer {
                     .find(|&&c| matches!(c, '\u{fe0e}' | '\u{fe0f}'))
                     == Some(&'\u{fe0e}');
             let text_family = if text_presentation {
-                let family = super::fonts::grapheme_text_family(
+                let family = self.grapheme_text_cache.resolve(
                     &mut self.font_system,
                     cfg.family_for(bold, italic),
                     dc,
@@ -931,10 +931,12 @@ impl Renderer {
         // (cosmic-text's `set_metrics_and_size` early-outs on equality), so
         // steady-state frames don't relayout; a zoom / pane-resize relayouts
         // internally while PRESERVING each line's shaping cache.
+        let buffer_height = (rh - cfg.padding_y * 2.0).max(1.0);
+        let height_changed = buf.size().1 != Some(buffer_height);
         buf.set_metrics(pm);
         buf.set_size(
             Some((rw - cfg.padding_x * 2.0).max(1.0)),
-            Some((rh - cfg.padding_y * 2.0).max(1.0)),
+            Some(buffer_height),
         );
         // Terminal rows are hard-wrapped by the VT engine at `cols`; the renderer
         // must NEVER soft-wrap. Wrap::None keeps exactly one layout run per buffer
@@ -1001,7 +1003,7 @@ impl Renderer {
         // records the live run count at each row transition (one entry per
         // crossed row, `rows - 1` total).
         let mut start = 0usize;
-        let mut reshaped_grapheme_rows = Vec::new();
+        let mut grapheme_rows_to_validate = Vec::new();
         for row in 0..rows {
             let end = span_line_breaks.get(row).copied().unwrap_or(n).min(n);
             let runs = &spans[start.min(end)..end];
@@ -1016,14 +1018,18 @@ impl Renderer {
                 .unwrap_or_default();
             let key = shaped.key_with_positions(runs, positions);
             let prev = keys.get(row).copied();
+            if grapheme_row_needs_validation(
+                !positions.is_empty(),
+                prev == Some(key),
+                height_changed,
+            ) {
+                grapheme_rows_to_validate.push(row);
+            }
             if prev == Some(key) {
                 continue;
             }
             // This row reshapes — the buffer's glyph vertices will differ.
             text_changed = true;
-            if !positions.is_empty() {
-                reshaped_grapheme_rows.push(row);
-            }
             row_text.clear();
             let mut attrs_list = AttrsList::new(&default_attrs);
             for (i, (text, fg, bold, italic)) in runs[..shaped.runs].iter().enumerate() {
@@ -1095,8 +1101,9 @@ impl Renderer {
             buf,
             &mut self.font_system,
             &mut self.swash,
-            &reshaped_grapheme_rows,
+            &grapheme_rows_to_validate,
         );
+        text_changed |= replaced;
         if replaced {
             buf.shape_until_scroll(&mut self.font_system, false);
         }
@@ -1299,7 +1306,7 @@ pub(crate) struct ShapedRow {
 pub(crate) struct CellGlyphSpan {
     pub bytes: std::ops::Range<usize>,
     pub cell: super::geometry::GridGlyphCell,
-    pub family: Option<String>,
+    pub family: Option<std::sync::Arc<str>>,
 }
 
 pub(crate) fn apply_cell_positions(
@@ -1326,7 +1333,15 @@ pub(crate) fn apply_cell_positions(
     }
 }
 
-fn replace_unsupported_graphemes(
+pub(crate) fn grapheme_row_needs_validation(
+    has_graphemes: bool,
+    cached: bool,
+    height_changed: bool,
+) -> bool {
+    has_graphemes && (!cached || height_changed)
+}
+
+pub(crate) fn replace_unsupported_graphemes(
     buffer: &mut TextBuffer,
     fonts: &mut super::FontSystem,
     swash: &mut super::SwashCache,

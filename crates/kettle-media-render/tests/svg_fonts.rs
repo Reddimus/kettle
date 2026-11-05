@@ -330,6 +330,44 @@ fn font_metadata_has_bounded_tables_names_cmaps_and_variation_axes() {
 }
 
 #[test]
+fn supplied_font_delta_mapping_records_are_bounded() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("delta.ttf");
+    for count in [64_u16, 65, u16::MAX] {
+        let mut tables = fonts::tables();
+        let mut dmap = vec![0, 0];
+        dmap.extend(count.to_be_bytes());
+        for _ in 0..count {
+            dmap.extend([0, 3, 0, 10]);
+            dmap.extend((4 + u32::from(count) * 8).to_be_bytes());
+        }
+        dmap.extend([0, 12, 0, 0]);
+        dmap.extend(28_u32.to_be_bytes());
+        dmap.extend(0_u32.to_be_bytes());
+        dmap.extend(1_u32.to_be_bytes());
+        dmap.extend(u32::from('A').to_be_bytes());
+        dmap.extend(u32::from('A').to_be_bytes());
+        dmap.extend(1_u32.to_be_bytes());
+        tables.insert(*b"DMAP", dmap);
+        let bytes = fonts::sfnt(tables);
+        use skrifa::raw::TableProvider as _;
+        let font = skrifa::FontRef::new(&bytes).unwrap();
+        assert!(font.cmap().unwrap().encoding_records().len() <= 64);
+        assert_eq!(
+            font.dmap().unwrap().encoding_records().len(),
+            usize::from(count)
+        );
+        std::fs::write(&path, bytes).unwrap();
+        let expected = if count <= 64 {
+            Ok(())
+        } else {
+            Err(FailureCode::RenderResource)
+        };
+        assert_eq!(with_font(&path, 0, "A").map(|_| ()), expected, "{count}");
+    }
+}
+
+#[test]
 fn unused_fonts_and_invisible_text_do_not_warn() {
     let directory = tempfile::tempdir().unwrap();
     let font = directory.path().join("fallback.ttf");
