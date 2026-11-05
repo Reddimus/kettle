@@ -545,6 +545,7 @@ impl App {
         self.resize_all(&mut ws);
         self.sync_output_wake_gate(&ws);
         self.focused_seq = seq;
+        record_window_focus(&mut self.window_focus_order, seq);
         if should_reveal_before_first_surface_frame(
             state,
             ws.window_shown,
@@ -1343,6 +1344,7 @@ impl App {
             self.sync_pane_focus_reports(&mut target);
             self.windows.insert(target_seq, target);
             self.focused_seq = target_seq;
+            record_window_focus(&mut self.window_focus_order, target_seq);
             if ws.mux.tabs.is_empty() {
                 // The emptied torn window closes through the normal funnel
                 // (finish_window_dispatch drops it; other windows remain,
@@ -1383,6 +1385,7 @@ impl App {
                 return;
             }
             self.focused_seq = target_seq;
+            record_window_focus(&mut self.window_focus_order, target_seq);
             if torn.mux.tabs.is_empty() {
                 // Dropping outside finish_window_dispatch is safe here: the
                 // map keeps the target (and source), so the "exit only when
@@ -2935,6 +2938,7 @@ impl App {
             }
             drop(ws);
             self.hoover_mapped_groups();
+            self.window_focus_order.retain(|known| *known != seq);
             if self.windows.is_empty() {
                 event_loop.exit();
             } else if self.focused_seq == seq
@@ -2943,12 +2947,15 @@ impl App {
                 // Focus falls to the most recently opened remaining window;
                 // the OS will confirm with a Focused(true) shortly.
                 self.focused_seq = next;
+                record_window_focus(&mut self.window_focus_order, next);
             }
             return;
         }
         let mut ws = ws;
         self.sync_pane_focus_reports(&mut ws);
         self.windows.insert(seq, ws);
+        self.window_focus_order
+            .retain(|seq| self.windows.contains_key(seq));
     }
 
     pub(super) fn focus_or_open_window(
@@ -2964,6 +2971,7 @@ impl App {
             && let Some(window) = &ws.window
         {
             self.focused_seq = ws.seq;
+            record_window_focus(&mut self.window_focus_order, ws.seq);
             window.set_visible(true);
             window.set_minimized(false);
             window.focus_window();
