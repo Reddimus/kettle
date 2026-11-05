@@ -282,7 +282,7 @@ fn followup_replaced_restore_snapshot_disables_saving() {
     std::fs::rename(&newer, &path).unwrap();
     let mut failed = false;
     super::sessions::recover_startup_snapshot(
-        Some(&path),
+        &mut Some(path.clone()),
         Some(&identity),
         &mut failed,
         "restore rejected",

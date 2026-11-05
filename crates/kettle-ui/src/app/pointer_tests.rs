@@ -1184,3 +1184,27 @@ fn wheel_font_change_clears_the_scaled_zoom_baseline() {
         "manual wheel font changes must survive leaving ScaledZoom"
     );
 }
+
+#[test]
+fn command_palette_cancels_an_armed_titlebar_drag() {
+    let src = production_source();
+    let modal = src
+        .split("fn close_all_modals(")
+        .nth(1)
+        .unwrap()
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    assert!(
+        modal.contains("ws.pane_drag = None;"),
+        "modal pointer ownership must cancel an existing pane drag before release"
+    );
+    let palette = src
+        .split("Action::CommandPalette =>")
+        .nth(1)
+        .unwrap()
+        .split("Action::")
+        .next()
+        .unwrap();
+    assert!(palette.contains("self.close_all_modals(ws)"));
+}

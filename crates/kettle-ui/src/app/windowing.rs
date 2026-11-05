@@ -495,6 +495,7 @@ impl App {
                     log::error!("open_window: shell spawn failed: {e}");
                     return Err(Box::new(WindowOpen::Fresh { cwd }));
                 }
+                self.fire_tab_add_event(&mut ws);
             }
             WindowOpen::AdoptTab {
                 tab: dt,
@@ -1553,8 +1554,8 @@ impl App {
                     && !self.any_modal_open(ws)
                     && ws.mux.active_focus().is_some()
                 {
-                    self.wayland_file_drops
-                        .insert(id, (window, WaylandDropTarget::capture(ws)));
+                    let target = WaylandDropTarget::capture(ws, self.broadcast_recipients(ws));
+                    self.wayland_file_drops.insert(id, (window, target));
                 }
                 log::debug!(
                     "Wayland file drop context captured: {}",
@@ -1567,7 +1568,9 @@ impl App {
                     !self.quit_requested
                         && !self.window_close_pending(*seq)
                         && self.windows.get(seq).is_some_and(|ws| {
-                            !self.any_modal_open(ws) && *target == WaylandDropTarget::capture(ws)
+                            !self.any_modal_open(ws)
+                                && *target
+                                    == WaylandDropTarget::capture(ws, self.broadcast_recipients(ws))
                         })
                 });
                 log::debug!(
@@ -2333,12 +2336,14 @@ pub(super) struct WaylandDropTarget {
     input_generation: u64,
     preview: Option<crate::media::PreviewFocus>,
     pane_input: Option<u64>,
+    recipients: Vec<u64>,
 }
 
 #[cfg(any(target_os = "linux", test))]
 impl WaylandDropTarget {
-    pub(super) fn capture(ws: &WindowState) -> Self {
+    pub(super) fn capture(ws: &WindowState, recipients: Vec<u64>) -> Self {
         Self {
+            recipients,
             pane: ws.mux.active_focus(),
             broadcast: ws.mux.broadcast.clone(),
             input_generation: ws.ime_focus_generation,

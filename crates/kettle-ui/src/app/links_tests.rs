@@ -277,3 +277,28 @@ fn custom_url_handler_waiters_remain_bounded_until_children_exit() {
         "a fifth running custom handler must be refused"
     );
 }
+
+#[test]
+fn focus_change_before_redraw_rejects_previous_panes_links() {
+    let (mux, target, sibling) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    super::scan_links(&mut ws);
+    ws.links.push(kettle_core::Link {
+        row: 0,
+        start_col: 0,
+        end_col: 4,
+        group: 0,
+        uri: "https://pane-a.invalid/".into(),
+    });
+    assert!(super::cached_link_at_cell(&ws, 0, 2).is_some());
+    assert!(ws.mux.focus_pane(sibling));
+    let stale = super::cached_link_at_cell(&ws, 0, 2).is_some();
+    assert_eq!(super::links_pane(&ws), Some(target));
+    super::scan_links(&mut ws);
+    assert_eq!(super::links_pane(&ws), Some(sibling));
+    ws.mux.kill_children();
+    assert!(
+        !stale,
+        "link activation must reject another pane's cache before redraw"
+    );
+}

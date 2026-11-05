@@ -4000,6 +4000,7 @@ Other additions:
   configuration; absent allowlisted variables are removed from the child.
   Unreadable, oversized, invalid, or cwd-dependent connection environments refuse
   reconnect through the existing failure notice instead of selecting defaults.
+  This refusal notice uses the UI language; its diagnostic log stays in English.
   Debug output redacts captured values. Each reconnected pane owns its captured
   environment and invocation name in memory. Duplicate pane/tab, splits that
   clone the command, undo-close, and exit-action restart reuse those settings;

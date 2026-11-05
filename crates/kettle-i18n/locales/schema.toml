@@ -2182,3 +2182,6 @@ context = "Display name for the bundled Builtin Light theme; keep the configurat
 
 [messages.menu_detecting_shells]
 context = "crates/kettle-ui/src/app/menus.rs shell_menu_items: disabled loading row while shell detection runs."
+
+[messages.notify_body_reconnect_environment_unavailable]
+context = "crates/kettle-ui/src/app/remote.rs: notification body when reconnect refuses an unreadable client connection environment."

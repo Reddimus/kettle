@@ -1821,9 +1821,7 @@ impl App {
             return None;
         }
         let (row, col) = self.cursor_cell_in_rect(ws, rect);
-        ws.links
-            .iter()
-            .find(|l| l.row == row && col >= l.start_col && col <= l.end_col)
+        cached_link_at_cell(ws, row, col)
     }
 
     pub(super) fn pane_mode(

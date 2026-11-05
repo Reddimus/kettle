@@ -955,12 +955,12 @@ fn a_pending_wayland_drop_does_not_cross_another_paste() {
     )
     .expect("PTY fixture");
     let ws = WindowState::new(1, mux);
-    let target = super::WaylandDropTarget::capture(&ws);
+    let target = super::WaylandDropTarget::capture(&ws, Vec::new());
     let pane = &ws.mux.panes[&ws.mux.active_focus().unwrap()];
     assert_eq!(pane.feed_focus_report(true), PaneInputResult::Queued);
-    assert!(target == super::WaylandDropTarget::capture(&ws));
+    assert!(target == super::WaylandDropTarget::capture(&ws, Vec::new()));
     assert_eq!(pane.feed_input(b"new paste "), PaneInputResult::Queued);
-    assert!(target != super::WaylandDropTarget::capture(&ws));
+    assert!(target != super::WaylandDropTarget::capture(&ws, Vec::new()));
     ws.mux.kill_children();
 }
 

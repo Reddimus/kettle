@@ -22,6 +22,7 @@
 # panel and observed accessibility tree, including an independent second pass.
 
 [status]
+notify_body_reconnect_environment_unavailable = "draft"
 menu_detecting_shells = "draft"
 theme_builtin_dark = "draft"
 theme_builtin_light = "draft"

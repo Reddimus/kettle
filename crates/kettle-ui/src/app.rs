@@ -393,6 +393,7 @@ pub struct App {
     pending_window_closes: std::collections::BTreeSet<u64>,
     /// Quit drops every window and exits, regardless of how many are open.
     quit_requested: bool,
+    startup_error: Option<anyhow::Error>,
     /// Session recorder (asciicast trace). `Some` when recording is active for
     /// this window — requested via `--record PATH` / `KETTLE_RECORD` or the
     /// persistent `record = on` config key. `None` (the default) records

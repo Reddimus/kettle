@@ -132,7 +132,13 @@ pub(crate) fn is_bidi_format_char(c: char) -> bool {
 /// moment they arrive.
 pub(super) fn window_title(template: &str, pane_title: &str, cwd: &str, tab: usize) -> String {
     let home = crate::mux::home_dir_string();
-    window_title_with_home(template, pane_title, cwd, home.as_deref(), tab)
+    sanitize_title(&window_title_with_home(
+        template,
+        pane_title,
+        cwd,
+        home.as_deref(),
+        tab,
+    ))
 }
 
 pub(super) fn window_title_with_home(

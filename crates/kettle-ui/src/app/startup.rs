@@ -337,8 +337,13 @@ impl App {
         let mut remote_watcher = None;
         let mut remote_startup_retry = false;
         let remote_command_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        if let Some(path) = startup.remote_file.clone()
-            && let Some(dir) = path.parent().map(|p| p.to_path_buf())
+        if let Some(path) = startup.remote_file.clone().and_then(|path| {
+            std::path::absolute(path)
+                .map_err(|error| {
+                    log::warn!("remote-command watcher path unavailable: {error}");
+                })
+                .ok()
+        }) && let Some(dir) = path.parent().map(|p| p.to_path_buf())
         {
             let p = proxy.clone();
             let watched = path.clone();
@@ -715,6 +720,7 @@ impl App {
             window_icon_dark_synced: None,
             pending_window_closes: std::collections::BTreeSet::new(),
             quit_requested: false,
+            startup_error: None,
             recorder: None,
             recording_start_failed: false,
             recording_error_reported: false,
@@ -823,6 +829,7 @@ impl App {
                 Err(anyhow::anyhow!(error))
             }
         };
+        let result = result.and_then(|()| app.startup_error.take().map_or(Ok(()), Err));
         app.runtime_tracker.set_phase("exiting");
         // Pasted screenshots are captured screen content, so they do not outlive
         // the session that produced them. Runs on the error path too — an exit
@@ -1101,6 +1108,7 @@ impl App {
             && let Err(e) = self.spawn_first_tab(ws, has_launch_override)
         {
             log::error!("{e}");
+            self.startup_error = Some(anyhow::anyhow!(e));
             event_loop.exit();
             return;
         }
@@ -1137,6 +1145,7 @@ impl App {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 log::error!("failed to create window: {e}");
+                self.startup_error = Some(anyhow::anyhow!("failed to create window: {e}"));
                 ws.mux.kill_children();
                 event_loop.exit();
                 return;
@@ -1230,6 +1239,7 @@ impl App {
             Ok(r) => r,
             Err(e) => {
                 log::error!("renderer init failed: {e}");
+                self.startup_error = Some(anyhow::anyhow!("renderer init failed: {e}"));
                 ws.mux.kill_children();
                 event_loop.exit();
                 return;
@@ -1300,6 +1310,7 @@ impl App {
                 cwd.as_deref(),
             ) {
                 log::error!("failed to spawn `-e` command: {e}");
+                self.startup_error = Some(anyhow::anyhow!("failed to spawn `-e` command: {e}"));
                 event_loop.exit();
                 return;
             }
@@ -1355,6 +1366,7 @@ impl App {
         };
         if !restored && let Err(e) = ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
             log::error!("failed to spawn shell: {e}");
+            self.startup_error = Some(anyhow::anyhow!("failed to spawn shell: {e}"));
             event_loop.exit();
             return;
         }

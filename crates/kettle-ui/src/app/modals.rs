@@ -538,6 +538,7 @@ impl App {
         self.finish_selection_gesture(ws);
         ws.card_press = None;
         ws.dragging_split = None;
+        ws.pane_drag = None;
         // The press that opens a question also owns its later release.
         ws.confirm_pointer_release |= ws
             .held_buttons
@@ -2930,6 +2931,7 @@ impl App {
         // modal is gone by the release.
         ws.card_press = None;
         ws.dragging_split = None;
+        ws.pane_drag = None;
         // The modal that opens takes the keyboard from a preview lane, even
         // if it closes again before the event loop looks.
         self.exit_preview_focus(ws);

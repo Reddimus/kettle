@@ -313,19 +313,19 @@ fn docking_retargets_pane_owned_focus_state() {
 #[test]
 fn a_pending_wayland_drop_cannot_follow_changed_focus_or_broadcast() {
     let mut ws = WindowState::new(1, Mux::new());
-    let target = super::WaylandDropTarget::capture(&ws);
-    assert!(target == super::WaylandDropTarget::capture(&ws));
+    let target = super::WaylandDropTarget::capture(&ws, Vec::new());
+    assert!(target == super::WaylandDropTarget::capture(&ws, Vec::new()));
     ws.ime_focus_generation += 1;
     assert!(
-        target != super::WaylandDropTarget::capture(&ws),
+        target != super::WaylandDropTarget::capture(&ws, Vec::new()),
         "modal opened and closed"
     );
     ws.ime_focus_generation -= 1;
     ws.mux.broadcast = crate::mux::BroadcastScope::All;
-    assert!(target != super::WaylandDropTarget::capture(&ws));
+    assert!(target != super::WaylandDropTarget::capture(&ws, Vec::new()));
     ws.mux.broadcast = crate::mux::BroadcastScope::Off;
     ws.preview_focus = Some(crate::media::PreviewFocus { pane: 7, item: 8 });
-    assert!(target != super::WaylandDropTarget::capture(&ws));
+    assert!(target != super::WaylandDropTarget::capture(&ws, Vec::new()));
 }
 
 /// Peacock drift guard: the live-dedupe pool walk. Same project →
@@ -965,3 +965,40 @@ fn review_torn_tab_keeps_scaled_zoom_baseline() {
     assert!(open.contains("ws.scaled_zoom_prev_font_size = scaled_zoom_prev_font_size;"));
 }
 
+#[test]
+fn fresh_window_tab_insertion_emits_tab_add_once() {
+    let src = production_source();
+    let open = src.split("fn open_window(").nth(1).unwrap();
+    let fresh = open
+        .split("match open {")
+        .nth(1)
+        .unwrap()
+        .split("WindowOpen::AdoptTab")
+        .next()
+        .unwrap();
+    assert_eq!(
+        fresh.matches("self.fire_tab_add_event(&mut ws);").count(),
+        1,
+        "successful fresh-window tab insertion must emit tab_add exactly once"
+    );
+    assert!(
+        fresh.find("return Err(").unwrap()
+            < fresh.find("self.fire_tab_add_event(&mut ws);").unwrap()
+    );
+}
+
+#[test]
+fn pending_wayland_drop_rejects_changed_group_membership() {
+    let (mux, first, second) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    ws.mux.panes.get_mut(&first).unwrap().group_name = Some("All".into());
+    ws.mux.broadcast = BroadcastScope::Group("All".into());
+    let target = super::WaylandDropTarget::capture(&ws, ws.mux.broadcast_target_ids());
+    ws.mux.panes.get_mut(&second).unwrap().group_name = Some("All".into());
+    let changed = super::WaylandDropTarget::capture(&ws, ws.mux.broadcast_target_ids());
+    ws.mux.kill_children();
+    assert!(
+        target != changed,
+        "a delayed file drop must reject a changed broadcast recipient set"
+    );
+}

@@ -697,12 +697,9 @@ impl App {
             && ws
                 .blink_layer
                 .note_edge(now, crate::cursor_blink::quiet_window(blink_interval));
-        let term_anim = !render_hidden
-            && ws
-                .mux
-                .panes
-                .values()
-                .any(|p| p.term.has_running_animation());
+        let term_anim = !render_hidden && visible_terminal_animation(&ws.mux);
+        let (term_anim_due, term_anim_wait) =
+            terminal_animation_tick(term_anim, now, &mut ws.term_animation_tick_at);
         let term_anim_finished = std::mem::replace(&mut ws.term_animation_active, term_anim)
             && !term_anim
             && !render_hidden;
@@ -835,7 +832,7 @@ impl App {
             (!render_hidden && self.cfg.theme_schedule.is_some()).then(until_next_wall_minute);
         if (bell_active
             || blink_due
-            || term_anim
+            || term_anim_due
             || term_anim_finished
             || bg_frame_due
             || bg_retry_due
@@ -860,7 +857,7 @@ impl App {
             remaining.max(std::time::Duration::from_millis(1))
         });
         let mut wait = animation_wait(
-            bell_active || term_anim || autoscroll_active || resize_chip_active,
+            bell_active || autoscroll_active || resize_chip_active,
             bg_anim_interval,
             blink_wait,
         );
@@ -868,6 +865,9 @@ impl App {
             let next = deadline
                 .saturating_duration_since(now)
                 .max(std::time::Duration::from_millis(1));
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = term_anim_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = frame_recovery_wait {
@@ -970,7 +970,7 @@ impl App {
                     window.request_redraw();
                 }
             }
-            if ws.search.background.is_some() {
+            if search_background_ready(&ws.search, now) {
                 let next = std::time::Duration::from_millis(1);
                 wait = Some(wait.map_or(next, |current| current.min(next)));
                 if let Some(window) = &ws.window {
@@ -1019,4 +1019,30 @@ impl App {
         }
         wait.map(|remaining| now + remaining)
     }
+}
+
+pub(super) fn visible_terminal_animation(mux: &Mux) -> bool {
+    mux.leaves(mux.active, (0.0, 0.0, 1.0, 1.0))
+        .into_iter()
+        .any(|(id, _)| {
+            mux.panes
+                .get(&id)
+                .is_some_and(|pane| pane.term.has_running_animation())
+        })
+}
+
+pub(super) fn terminal_animation_tick(
+    active: bool,
+    now: std::time::Instant,
+    next_tick: &mut Option<std::time::Instant>,
+) -> (bool, Option<std::time::Duration>) {
+    if !active {
+        *next_tick = None;
+        return (false, None);
+    }
+    let due = next_tick.is_none_or(|at| now >= at);
+    if due {
+        *next_tick = Some(now + std::time::Duration::from_millis(33));
+    }
+    (due, next_tick.map(|at| at.saturating_duration_since(now)))
 }

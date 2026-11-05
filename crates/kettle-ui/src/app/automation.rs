@@ -321,6 +321,9 @@ impl App {
     /// plugins listening for `pane_close` see the right id regardless of
     /// trigger source (keybind, confirm dialog, menu).
     pub(super) fn fire_pane_close_event(&mut self, ws: &WindowState, pane_id: u64) {
+        if let Some(ctl) = self.ctl.as_mut() {
+            ctl.detach_pane(pane_id);
+        }
         self.fire_lua_event(ws, crate::LuaEvent::PaneClose(pane_id), "pane_close hook");
     }
 

@@ -283,6 +283,15 @@ impl App {
                 };
                 if at_edge {
                     if ws.search.wrap {
+                        ws.search.background = wrapped_background_search(
+                            current_token,
+                            default_direction,
+                            anchor,
+                            (top_line, bottom_line, last_column),
+                            false,
+                            false,
+                            false,
+                        );
                         ws.search.set_status_at(
                             kettle_render::SearchStatus::Searching,
                             std::time::Instant::now(),
@@ -306,7 +315,7 @@ impl App {
         let background_due = !prioritize_visible
             && !foreground_scan_ran
             && !nearby_yielded_this_turn
-            && (ws.search.background.is_some()
+            && (search_background_ready(&ws.search, now)
                 || ws
                     .search
                     .unlimited_retry_at
@@ -407,6 +416,9 @@ impl App {
             if let Some(mut job) = ws.search.background.take()
                 && job.token == current_token
             {
+                if !job.nearby {
+                    ws.search.unlimited_retry_at = None;
+                }
                 let chunk_edge = bounded_search_edge(
                     job.cursor,
                     job.direction,
@@ -2167,6 +2179,7 @@ pub(super) fn activate_quiet_search_retry(search: &mut crate::search_input::Sear
 }
 
 pub(super) fn cancel_deferred_search_retry(search: &mut crate::search_input::SearchState) {
+    search.background = None;
     search.quiet_retry_pending = false;
     search.unlimited_retry_at = None;
 }
@@ -2424,4 +2437,13 @@ pub(super) fn search_pointer_route(
         None if dragging_editor => SearchPointerRoute::Bar,
         None => SearchPointerRoute::Grid,
     }
+}
+
+pub(super) fn search_background_ready(
+    search: &crate::search_input::SearchState,
+    now: std::time::Instant,
+) -> bool {
+    search.background.as_ref().is_some_and(|job| {
+        job.nearby || job.navigation || search.unlimited_retry_at.is_none_or(|at| now >= at)
+    })
 }

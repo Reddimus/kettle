@@ -279,7 +279,11 @@ fn zsh_definition(function: &str, name: &str) -> String {
          \x20       'builtin' 'export' {marker}=0:$$\n\
          \x20     fi\n\
          \x20   else\n\
-         \x20     'builtin' 'export' {marker}=1:$$\n\
+         \x20     if (( ${{+aliases[{name}]}} )); then\n\
+         \x20       'builtin' 'export' {marker}=\n\
+         \x20     else\n\
+         \x20       'builtin' 'export' {marker}=1:$$\n\
+         \x20     fi\n\
          \x20   fi\n\
          \x20 }}\n\
          \x20 'builtin' 'typeset' -ga precmd_functions\n\
@@ -915,6 +919,11 @@ mod tests {
                 ),
                 (format!("alias {name}='print -r -- user'\n"), "1:999999", ""),
                 (format!("autoload -Uz {name}\n"), "0:999999", "1"),
+                (
+                    format!("{name}() {{ print -r -- user; }}\nalias {name}='command {name}'\n"),
+                    "0:999999",
+                    "",
+                ),
             ] {
                 scratch.write(".zshrc", &rc);
                 let probe = format!(

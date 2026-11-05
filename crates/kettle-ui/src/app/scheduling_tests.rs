@@ -370,3 +370,100 @@ fn output_frame_transition_follows_every_renderability_guard() {
     );
 }
 
+#[test]
+fn terminal_animation_redraw_waits_for_frame_deadline() {
+    let src = production_source();
+    let redraw = src
+        .split("if (bell_active")
+        .nth(1)
+        .unwrap()
+        .split("let blink_wait")
+        .next()
+        .unwrap();
+    assert!(
+        !redraw.contains("|| term_anim\n"),
+        "terminal animations must not request redraw on turns between frame deadlines"
+    );
+    assert!(redraw.contains("|| term_anim_due"));
+}
+
+#[test]
+fn inactive_tab_and_zoomed_out_animations_do_not_schedule_frames() {
+    let (mux, panes) = title_test_tab_mux(2);
+    let mut ws = WindowState::new(1, mux);
+    let image = kettle_core::ImageData::new(1, 1, vec![1, 0, 0, 255]).unwrap();
+    let started = std::time::Instant::now();
+    ws.mux.panes[&panes[0]].term.anims.lock().unwrap().insert(
+        1,
+        kettle_core::images::AnimEntry {
+            imgs: vec![image.clone(), image],
+            gaps: vec![1000, 1000],
+            state: kettle_core::images::AnimationState {
+                running: true,
+                ..Default::default()
+            },
+            started,
+        },
+    );
+    let active_while_hidden = super::visible_terminal_animation(&ws.mux);
+    assert!(ws.mux.focus_pane(panes[0]));
+    assert!(super::visible_terminal_animation(&ws.mux));
+    assert_eq!(
+        ws.mux.panes[&panes[0]].term.anims.lock().unwrap()[&1].started,
+        started
+    );
+    let cfg = title_test_config();
+    ws.mux
+        .split_with(
+            Dir::Horizontal,
+            &cfg,
+            80,
+            24,
+            8,
+            16,
+            Arc::new(|| {}),
+            title_test_argv(),
+            None,
+        )
+        .unwrap();
+    ws.mux.toggle_zoom();
+    let active_behind_zoom = super::visible_terminal_animation(&ws.mux);
+    ws.mux.kill_children();
+    assert!(
+        !active_while_hidden,
+        "inactive-tab animations must not schedule frames"
+    );
+    assert!(
+        !active_behind_zoom,
+        "animations hidden by zoom must not schedule frames"
+    );
+}
+
+#[test]
+fn animation_ticks_keep_remaining_deadline_between_turns() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let mut next = None;
+    assert_eq!(
+        super::terminal_animation_tick(true, now, &mut next),
+        (true, Some(Duration::from_millis(33)))
+    );
+    assert_eq!(
+        super::terminal_animation_tick(true, now + Duration::from_millis(10), &mut next),
+        (false, Some(Duration::from_millis(23)))
+    );
+    assert_eq!(
+        super::terminal_animation_tick(true, now + Duration::from_millis(33), &mut next),
+        (true, Some(Duration::from_millis(33)))
+    );
+    assert_eq!(
+        super::terminal_animation_tick(true, now + Duration::from_secs(10), &mut next),
+        (true, Some(Duration::from_millis(33)))
+    );
+    assert_eq!(
+        super::terminal_animation_tick(false, now + Duration::from_secs(10), &mut next),
+        (false, None)
+    );
+    assert_eq!(next, None);
+    assert!(super::terminal_animation_tick(true, now + Duration::from_secs(10), &mut next).0);
+}

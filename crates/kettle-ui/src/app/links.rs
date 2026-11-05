@@ -312,10 +312,10 @@ pub(super) fn spawn_custom_url_handler(cmd: &str, target: &str) -> std::io::Resu
                 .spawn()
             {
                 Ok(mut child) => {
-                    let _ = tx.send(Ok(()));
                     if let Err(e) = child.wait() {
                         log::warn!("custom-url-handler {cmd:?}: could not reap child: {e}");
                     }
+                    let _ = tx.send(Ok(()));
                 }
                 Err(e) => {
                     let _ = tx.send(Err(e));
@@ -975,23 +975,25 @@ pub(crate) type LinksScanKey = (
     Option<String>,
 );
 
+pub(super) fn current_links_scan_key(ws: &WindowState) -> LinksScanKey {
+    let focus = (ws.mux.active, ws.mux.active_focus());
+    let focused = ws.mux.active_focus().and_then(|id| ws.mux.panes.get(&id));
+    (
+        focus,
+        // Cheap atomic and short-lock reads.
+        focused.map(|p| p.term.output_generation()),
+        focused.map(|p| p.term.geometry_generation()),
+        focused.and_then(|p| p.term.term.lock().ok().map(|t| t.grid().display_offset())),
+        focused.and_then(|p| p.term.current_dir_or_native()),
+    )
+}
+
 /// Re-scan the focused pane's visible links into `ws.links` unless the key
 /// shows nothing they depend on has changed. The brief lock to read
 /// display_offset is cheap; the avoided work is `kettle_core::links`'
 /// per-cell regex pass.
 pub(super) fn scan_links(ws: &mut WindowState) {
-    let key: LinksScanKey = {
-        let focus = (ws.mux.active, ws.mux.active_focus());
-        let focused = ws.mux.focused().map(|pane| &*pane);
-        (
-            focus,
-            // Cheap atomic and short-lock reads.
-            focused.map(|p| p.term.output_generation()),
-            focused.map(|p| p.term.geometry_generation()),
-            focused.and_then(|p| p.term.term.lock().ok().map(|t| t.grid().display_offset())),
-            focused.and_then(|p| p.term.current_dir_or_native()),
-        )
-    };
+    let key = current_links_scan_key(ws);
     if ws.links_scan_key.as_ref() == Some(&key) {
         return;
     }
@@ -1135,4 +1137,17 @@ impl App {
     pub(super) fn update_links(&mut self, ws: &mut WindowState) {
         scan_links(ws);
     }
+}
+
+pub(super) fn cached_link_at_cell(
+    ws: &WindowState,
+    row: usize,
+    col: usize,
+) -> Option<&kettle_core::Link> {
+    if ws.links_scan_key.as_ref() != Some(&current_links_scan_key(ws)) {
+        return None;
+    }
+    ws.links
+        .iter()
+        .find(|link| link.row == row && col >= link.start_col && col <= link.end_col)
 }

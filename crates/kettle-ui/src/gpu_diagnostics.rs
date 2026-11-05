@@ -15,6 +15,7 @@ use serde::Serialize;
 const SCHEMA_VERSION: u32 = 1;
 const MAX_INCIDENT_BYTES: u64 = 256 * 1024;
 const RETAINED_INCIDENTS: usize = 10;
+const MAX_INCIDENT_SCAN: usize = 4096;
 const MAX_MESSAGE_CHARS: usize = 2048;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -336,7 +337,10 @@ fn prune_incidents_with(
     preserve: &Path,
     mut remove: impl FnMut(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
+    let mut entries = std::fs::read_dir(dir)?;
+    let mut files: Vec<PathBuf> = entries
+        .by_ref()
+        .take(MAX_INCIDENT_SCAN)
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
@@ -345,6 +349,7 @@ fn prune_incidents_with(
                 .is_some_and(|name| name.starts_with("gpu-") && name.ends_with(".jsonl"))
         })
         .collect();
+    let scan_limited = entries.next().is_some();
     files.sort();
     let mut excess = files.len().saturating_sub(RETAINED_INCIDENTS);
     for stale in files.iter().filter(|path| *path != preserve) {
@@ -357,6 +362,12 @@ fn prune_incidents_with(
             Err(error) if incident_in_use(&error) => {}
             Err(error) => return Err(error),
         }
+    }
+    if scan_limited {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "incident scan limit reached",
+        ));
     }
     Ok(())
 }
@@ -403,6 +414,46 @@ mod tests {
             kind: "Discrete",
             backend: "DX12",
         }
+    }
+
+    #[test]
+    fn gpu_retention_bounds_scans_and_cleanup_on_a_backlog() {
+        const SCAN_LIMIT: usize = 4096;
+        let root = kettle_test_support::private_tempdir("kettle-gpu-backlog-");
+        for index in 0..=SCAN_LIMIT {
+            std::fs::write(root.path().join(format!("gpu-{index:05}.jsonl")), b"{}\n").unwrap();
+        }
+        let preserve = root.path().join(format!("gpu-{SCAN_LIMIT:05}.jsonl"));
+        let result = prune_incidents(root.path(), &preserve);
+        assert!(
+            result.is_err(),
+            "an incomplete GPU directory scan must be reported"
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            RETAINED_INCIDENTS + 1
+        );
+        prune_incidents(root.path(), &preserve).unwrap();
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            RETAINED_INCIDENTS
+        );
+        assert!(preserve.exists());
+    }
+
+    #[test]
+    fn gpu_retention_caps_nonmatching_directory_entries_too() {
+        let root = kettle_test_support::private_tempdir("kettle-gpu-unrelated-");
+        for index in 0..4097 {
+            std::fs::write(root.path().join(format!("other-{index:05}")), b"").unwrap();
+        }
+        let result = prune_incidents(root.path(), &root.path().join("preserve"));
+        assert!(
+            result.is_err(),
+            "the GPU scan bound must precede filename filtering"
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 4097);
     }
 
     #[test]

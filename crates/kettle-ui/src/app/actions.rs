@@ -85,13 +85,13 @@ pub(super) fn broadcast_scope_for_default(
 /// loud instead, the way a failed preference write already does.
 pub(crate) fn report_split_failure(
     direction: &str,
-    error: &dyn std::fmt::Display,
+    error: &anyhow::Error,
     tr: &kettle_i18n::Translator,
 ) {
     log::error!("could not split pane ({direction}): {error}");
     fire_notify(
         tr.text(kettle_i18n::Text::NotifyTitleSplitFailed),
-        &error.to_string(),
+        &reconnect_failure_body(error, tr),
     );
 }
 

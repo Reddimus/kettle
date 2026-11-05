@@ -1015,3 +1015,118 @@ fn review_search_projection_uses_natural_text_width() {
     );
 }
 
+#[test]
+fn completed_nearby_scan_enqueues_wrapped_history_before_output_can_restart_it() {
+    let src = production_source();
+    let nearby = src
+        .split("if !prioritize_visible && should_start_nearby_search")
+        .nth(1)
+        .unwrap()
+        .split("let background_due")
+        .next()
+        .unwrap();
+    assert!(
+        nearby.contains("ws.search.background = wrapped_background_search("),
+        "a completed nearby miss must retain wrapped history work across continuous output"
+    );
+    assert!(
+        src.contains("&& !foreground_scan_ran"),
+        "only one foreground/background slice may run per turn"
+    );
+}
+
+#[test]
+fn opposite_navigation_at_boundary_cancels_pending_job() {
+    let mut search = crate::search_input::SearchState::default();
+    let token = kettle_core::SearchScanToken {
+        query_revision: 0,
+        output_generation: 1,
+        layout: kettle_core::SearchLayout {
+            columns: 80,
+            screen_lines: 24,
+            history_size: 10_000,
+        },
+    };
+    search.wrap = false;
+    search.focused = Some(kettle_core::SearchSpan {
+        start: kettle_core::SearchPoint::new(-10_000, 0),
+        end: kettle_core::SearchPoint::new(-10_000, 0),
+    });
+    search.background = Some(crate::search_input::BackgroundSearch {
+        token,
+        direction: kettle_core::SearchDirection::Forward,
+        cursor: kettle_core::SearchPoint::new(-9_000, 0),
+        edge: kettle_core::SearchPoint::new(23, 79),
+        wrap_anchor: kettle_core::SearchPoint::new(-10_000, 1),
+        wrapped: false,
+        nearby: false,
+        navigation: true,
+        had_focus: true,
+        output_drifted: false,
+    });
+    search.scan_token = Some(token);
+    search.invalidate_stale_navigation(token);
+    super::cancel_deferred_search_retry(&mut search);
+    search.status = kettle_render::SearchStatus::Start;
+    assert!(
+        search.background.is_none(),
+        "a newer boundary navigation must cancel the previous Next job"
+    );
+    assert!(search.focused.is_some());
+}
+
+#[test]
+fn retained_wrapped_history_job_obeys_typing_deadline_under_output() {
+    let now = std::time::Instant::now();
+    let token = kettle_core::SearchScanToken {
+        query_revision: 0,
+        output_generation: 1,
+        layout: kettle_core::SearchLayout {
+            columns: 80,
+            screen_lines: 24,
+            history_size: 10_000,
+        },
+    };
+    let mut search = crate::search_input::SearchState {
+        unlimited_retry_at: Some(now + std::time::Duration::from_millis(500)),
+        background: Some(crate::search_input::BackgroundSearch {
+            token,
+            direction: kettle_core::SearchDirection::Forward,
+            cursor: kettle_core::SearchPoint::new(-10_000, 0),
+            edge: kettle_core::SearchPoint::new(-1, 79),
+            wrap_anchor: kettle_core::SearchPoint::new(0, 0),
+            wrapped: true,
+            nearby: false,
+            navigation: false,
+            had_focus: false,
+            output_drifted: false,
+        }),
+        ..Default::default()
+    };
+    for generation in 2..7 {
+        let current = kettle_core::SearchScanToken {
+            output_generation: generation,
+            ..token
+        };
+        super::continue_background_after_output(
+            search.background.as_mut().unwrap(),
+            current,
+            -10_000,
+            23,
+            79,
+        );
+        assert!(!super::should_start_nearby_search(&search));
+        assert!(!super::search_background_ready(&search, now));
+    }
+    assert!(super::search_background_ready(
+        &search,
+        now + std::time::Duration::from_millis(500)
+    ));
+    let job = search.background.unwrap();
+    assert_eq!(job.cursor, kettle_core::SearchPoint::new(-10_000, 0));
+    assert!(job.output_drifted);
+    assert_eq!(
+        super::finished_background_search(&job, now).0,
+        kettle_render::SearchStatus::Searching
+    );
+}

@@ -984,3 +984,19 @@ fn fitted_title_diagnostics_include_the_live_bell() {
         }
     }
 }
+
+#[test]
+fn composed_window_title_sanitizes_osc_reported_cwd() {
+    let cwd = "/tmp/safe\u{202e}evil";
+    for (template, title) in [
+        (kettle_config::DEFAULT_WINDOW_TITLE_FORMAT, "kettle"),
+        ("{title}: {cwd}", "shell"),
+    ] {
+        let title = super::window_title(template, title, cwd, 1);
+        assert!(
+            !title.contains('\u{202e}'),
+            "composed window title must neutralize bidi characters from reported cwd"
+        );
+        assert!(title.contains("safe evil"));
+    }
+}

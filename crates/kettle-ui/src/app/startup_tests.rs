@@ -725,3 +725,59 @@ fn cache_dir_from_env_probes_in_order() {
     assert!(cache_dir_from_env(|_| None).is_none());
 }
 
+#[test]
+fn relative_remote_spool_watch_is_normalized_before_parent_selection() {
+    let src = production_source();
+    let remote = src
+        .split("if let Some(path) = startup.remote_file")
+        .nth(1)
+        .unwrap()
+        .split("let p = proxy.clone();")
+        .next()
+        .unwrap();
+    assert!(
+        remote.contains("std::path::absolute"),
+        "relative remote-file paths must be made absolute before watching"
+    );
+    let relative = std::path::Path::new(".run/remote.cmd");
+    let absolute = std::path::absolute(relative).unwrap();
+    let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+        .add_path(absolute.clone());
+    assert!(super::watcher_event_matches(&event, &absolute));
+    assert!(!super::watcher_event_matches(&event, relative));
+}
+
+#[test]
+fn fatal_startup_failures_are_returned_after_event_loop_exit() {
+    let src = production_source();
+    let resumed = src.split("fn resumed_inner(").nth(1).unwrap();
+    for failure in [
+        "log::error!(\"{e}\");",
+        "log::error!(\"failed to create window: {e}\");",
+        "log::error!(\"renderer init failed: {e}\");",
+        "log::error!(\"failed to spawn `-e` command: {e}\");",
+        "log::error!(\"failed to spawn shell: {e}\");",
+    ] {
+        let branch = resumed
+            .split(failure)
+            .nth(1)
+            .unwrap()
+            .split("event_loop.exit();")
+            .next()
+            .unwrap();
+        assert!(
+            branch.contains("self.startup_error = Some("),
+            "fatal startup failure must survive event-loop exit: {failure}"
+        );
+    }
+    let run = src
+        .split("let result: Result<()> = match app.start_first_pane_before_launch()")
+        .nth(1)
+        .unwrap();
+    assert!(
+        run.split("app.runtime_tracker.set_phase(\"exiting\")")
+            .next()
+            .unwrap()
+            .contains("app.startup_error.take()")
+    );
+}

@@ -1176,6 +1176,7 @@ pub(crate) struct WindowState {
     pub(crate) blink_on: bool,
     pub(crate) last_blink: std::time::Instant,
     pub(crate) term_animation_active: bool,
+    pub(crate) term_animation_tick_at: Option<std::time::Instant>,
     /// The last keystroke, paste, focus change, or settings change. The cursor
     /// stops blinking `cursor-blink-timeout` after it. Output does not count.
     pub(crate) last_blink_activity: std::time::Instant,
@@ -1596,6 +1597,7 @@ impl WindowState {
             blink_on: true,
             last_blink: std::time::Instant::now(),
             term_animation_active: false,
+            term_animation_tick_at: None,
             last_blink_activity: std::time::Instant::now(),
             blink_layer: crate::cursor_blink::BlinkLayer::default(),
             cursor_exit_log: crate::cursor_exit_log::CursorExitLog::default(),
