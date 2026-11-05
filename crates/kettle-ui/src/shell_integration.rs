@@ -195,6 +195,22 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
+    const PRINT_XDG: &str = "printf 'XDG=[%s]' (string join : -- $XDG_DATA_DIRS)";
+
+    fn printed_xdg(output: &str) -> String {
+        let value = output.rsplit_once("XDG=[").expect("XDG marker").1;
+        value.split_once(']').expect("XDG marker end").0.to_owned()
+    }
+
+    /// XDG_DATA_DIRS as an interactive fish leaves it without Kettle, from
+    /// `original` (None = unset). Distribution vendor snippets, such as
+    /// Ubuntu's snapd.fish, may set it themselves; Kettle must leave exactly
+    /// what fish would have.
+    fn fish_xdg_baseline(fish: &str, home: &Path, original: Option<&str>) -> String {
+        let env: Vec<(&str, &str)> = original.map(|v| ("XDG_DATA_DIRS", v)).into_iter().collect();
+        printed_xdg(&run(fish, &["-ic", PRINT_XDG], home, &env))
+    }
+
     #[test]
     fn zsh_login_and_nonlogin_restore_startup_and_do_not_inject_nested_shells() {
         if !Path::new("/bin/zsh").is_file() {
@@ -275,11 +291,6 @@ mod tests {
         let home = temp.path().join("home");
         let config = home.join(".config/fish");
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(
-            config.join("config.fish"),
-            "echo config >> $HOME/trace\nset -q KETTLE_XDG_DATA_DIRS; and exit 21\n",
-        )
-        .unwrap();
         let fish = ["/opt/homebrew/bin/fish", "/usr/bin/fish"]
             .into_iter()
             .find(|p| Path::new(p).is_file());
@@ -287,11 +298,19 @@ mod tests {
             eprintln!("fish not installed; native vendor startup skipped");
             return;
         };
+        let baseline = fish_xdg_baseline(fish, &home, None);
+        std::fs::write(
+            config.join("config.fish"),
+            "echo config >> $HOME/trace\nset -q KETTLE_XDG_DATA_DIRS; and exit 21\n",
+        )
+        .unwrap();
         let output = run(
             fish,
             &[
                 "-ic",
-                "emit fish_prompt; functions -q __kettle_osc7; or exit 22; set -q KETTLE_XDG_DATA_DIRS; and exit 23; set -q XDG_DATA_DIRS; and exit 24; true",
+                &format!(
+                    "emit fish_prompt; functions -q __kettle_osc7; or exit 22; set -q KETTLE_XDG_DATA_DIRS; and exit 23; {PRINT_XDG}"
+                ),
             ],
             &home,
             &[
@@ -308,6 +327,11 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(home.join("trace")).unwrap(),
             "config\n"
+        );
+        assert_eq!(
+            printed_xdg(&output),
+            baseline,
+            "an unset XDG_DATA_DIRS ends as fish leaves it without Kettle"
         );
     }
 
@@ -559,11 +583,15 @@ mod tests {
             "set -gx XDG_DATA_DIRS /user/changed\n",
         )
         .unwrap();
-        run(
+        let baseline = fish_xdg_baseline(fish, &home, Some("/original/share"));
+        assert!(baseline.starts_with("/user/changed"), "{baseline}");
+        let output = run(
             fish,
             &[
                 "-ic",
-                "test \"$XDG_DATA_DIRS\" = /user/changed; or exit 21; set -q KETTLE_XDG_DATA_DIRS; and exit 22; set -q KETTLE_XDG_DATA_DIRS_SET; and exit 23; emit fish_prompt; functions -q __kettle_osc7; or exit 24",
+                &format!(
+                    "set -q KETTLE_XDG_DATA_DIRS; and exit 22; set -q KETTLE_XDG_DATA_DIRS_SET; and exit 23; emit fish_prompt; functions -q __kettle_osc7; or exit 24; {PRINT_XDG}"
+                ),
             ],
             &home,
             &[
@@ -572,6 +600,7 @@ mod tests {
                 ("KETTLE_XDG_DATA_DIRS", "/original/share"),
             ],
         );
+        assert_eq!(printed_xdg(&output), baseline, "the user's change survives");
     }
 
     #[test]
@@ -587,7 +616,15 @@ mod tests {
         let home = temp.path().join("home");
         std::fs::create_dir(&home).unwrap();
         let xdg = format!("{}:/usr/local/share:/usr/share", directory.display());
+        // Interactive fish runs distribution snippets too (snapd.fish adds
+        // its own entry on Ubuntu); --no-config runs none.
+        let interactive = fish_xdg_baseline(fish, &home, Some("/usr/local/share:/usr/share"));
         for list in [false, true] {
+            let expected = if list {
+                "/usr/local/share:/usr/share".to_owned()
+            } else {
+                interactive.clone()
+            };
             let script = if list {
                 format!(
                     "set -gx XDG_DATA_DIRS (string split : -- $XDG_DATA_DIRS); source {};",
@@ -602,7 +639,9 @@ mod tests {
                     if list { "--no-config" } else { "--interactive" },
                     "-ic",
                     &format!(
-                        "{script} test \"$XDG_DATA_DIRS\" = /usr/local/share:/usr/share; or exit 51; emit fish_prompt; functions -q __kettle_osc7; or exit 52; fish -ic 'emit fish_prompt; functions -q __kettle_osc7; and exit 53; test \"$XDG_DATA_DIRS\" = /usr/local/share:/usr/share'"
+                        "{script} test (string join : -- $XDG_DATA_DIRS) = {expected}; or exit 51; emit fish_prompt; functions -q __kettle_osc7; or exit 52; fish -ic 'emit fish_prompt; functions -q __kettle_osc7; and exit 53; string match -q -- \"*{dir}*\" \"$XDG_DATA_DIRS\"; and exit 54; true'",
+                        expected = quote(Path::new(&expected)).unwrap(),
+                        dir = directory.display()
                     ),
                 ],
                 &home,
