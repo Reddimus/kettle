@@ -257,6 +257,29 @@ impl App {
         }
     }
 
+    fn read_paste_clipboard(&mut self, target: ClipboardType) -> Option<String> {
+        let result = self
+            .clipboard
+            .as_mut()
+            .map(|clipboard| get_clipboard_text_bounded(clipboard, target, LOCAL_PASTE_MAX + 1))
+            .unwrap_or(Err(arboard::Error::ContentNotAvailable));
+        match clipboard_paste_result(result) {
+            Ok(text) => Some(text),
+            Err(reason) => {
+                log::warn!(
+                    "terminal input rejected: {}",
+                    kettle_i18n::Translator::default().text(reason)
+                );
+                fire_notify(
+                    self.ui_text
+                        .text(kettle_i18n::Text::NotifyTitleInputNotDelivered),
+                    self.ui_text.text(reason),
+                );
+                None
+            }
+        }
+    }
+
     pub(super) fn paste_clipboard(&mut self, ws: &mut WindowState) {
         // A copied file arrives as CF_HDROP or `text/uri-list`, not text. Paste
         // its quoted path and translate it for WSL. A text clipboard falls
@@ -281,12 +304,9 @@ impl App {
         if self.cfg.paste_images.enabled() && self.paste_clipboard_image(ws) {
             return;
         }
-        let text = self
-            .clipboard
-            .as_mut()
-            .and_then(|c| c.get_text().ok())
-            .unwrap_or_default();
-        self.paste_text(ws, text);
+        if let Some(text) = self.read_paste_clipboard(ClipboardType::Clipboard) {
+            self.paste_text(ws, text);
+        }
     }
 
     /// Paste the clipboard's bitmap as the path of a temporary PNG. False
@@ -302,12 +322,9 @@ impl App {
             return false;
         };
         // Read now: by the time the PNG is ready the clipboard may have changed.
-        let fallback = self
-            .clipboard
-            .as_mut()
-            .and_then(|c| c.get_text().ok())
-            .filter(|text| local_paste_within_limit(text))
-            .unwrap_or_default();
+        let Some(fallback) = self.read_paste_clipboard(ClipboardType::Clipboard) else {
+            return true;
+        };
         if !self.paste_queue_admits(fallback.len()) {
             self.report_input_result(PaneInputResult::Oversize);
             return true;
@@ -714,15 +731,13 @@ impl App {
     pub(super) fn paste_primary(&mut self, ws: &mut WindowState) {
         #[cfg(target_os = "linux")]
         {
-            use arboard::{GetExtLinux, LinuxClipboardKind};
-            let primary = self
-                .clipboard
-                .as_mut()
-                .and_then(|c| c.get().clipboard(LinuxClipboardKind::Primary).text().ok())
-                .filter(|text| !text.is_empty());
-            if let Some(text) = primary {
-                self.paste_text(ws, text);
-                return;
+            match self.read_paste_clipboard(ClipboardType::Selection) {
+                Some(text) if !text.is_empty() => {
+                    self.paste_text(ws, text);
+                    return;
+                }
+                None => return,
+                _ => {}
             }
         }
         self.paste_clipboard(ws);
@@ -1564,4 +1579,16 @@ pub(super) fn video_preview_target_window(
             .expects_video_preview(pane, generation)
             .then_some(seq)
     })
+}
+
+pub(super) fn clipboard_paste_result(
+    result: Result<String, arboard::Error>,
+) -> Result<String, kettle_i18n::Text> {
+    use kettle_i18n::Text;
+    match result {
+        Err(arboard::Error::LimitExceeded) => Err(Text::NotifyBodyClipboardLimitExceeded),
+        Err(arboard::Error::Timeout) => Err(Text::NotifyBodyClipboardTimeout),
+        Ok(text) if !local_paste_within_limit(&text) => Err(Text::NotifyBodyClipboardLimitExceeded),
+        other => Ok(other.unwrap_or_default()),
+    }
 }

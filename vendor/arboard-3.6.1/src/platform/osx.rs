@@ -126,6 +126,14 @@ impl Clipboard {
 	}
 
 	fn string_from_type(&self, type_: &'static NSString) -> Result<String, Error> {
+		self.string_from_type_bounded(type_, None)
+	}
+
+	fn string_from_type_bounded(
+		&self,
+		type_: &'static NSString,
+		bounds: Option<crate::common::ReadBounds>,
+	) -> Result<String, Error> {
 		// XXX: There does not appear to be an alternative for obtaining text without the need for
 		// autorelease behavior.
 		autoreleasepool(|_| {
@@ -139,6 +147,11 @@ impl Clipboard {
 
 			for item in contents {
 				if let Some(string) = item.stringForType(type_) {
+					if let Some(bounds) = bounds {
+						// AppKit has already materialized the NSString; check before the Rust copy.
+						bounds.check(string.len_utf16())?;
+						bounds.check(string.len())?;
+					}
 					return Ok(string.to_string());
 				}
 			}
@@ -209,6 +222,11 @@ impl<'clipboard> Get<'clipboard> {
 
 	pub(crate) fn text(self) -> Result<String, Error> {
 		unsafe { self.clipboard.string_from_type(NSPasteboardTypeString) }
+	}
+
+	pub(crate) fn text_bounded(self, bounds: crate::common::ReadBounds) -> Result<String, Error> {
+		// SAFETY: NSPasteboardTypeString is the AppKit string type constant.
+		self.clipboard.string_from_type_bounded(unsafe { NSPasteboardTypeString }, Some(bounds))
 	}
 
 	pub(crate) fn html(self) -> Result<String, Error> {

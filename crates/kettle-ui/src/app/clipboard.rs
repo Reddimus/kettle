@@ -49,19 +49,21 @@ fn set_osc52_clipboard(
     }
 }
 
-fn get_osc52_clipboard(
+pub(super) fn get_clipboard_text_bounded(
     clipboard: &mut arboard::Clipboard,
     target: ClipboardType,
+    max_bytes: usize,
 ) -> Result<String, arboard::Error> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     match osc52_clipboard_channel(target) {
-        Osc52ClipboardChannel::Clipboard => clipboard.get_text(),
+        Osc52ClipboardChannel::Clipboard => clipboard.get_text_bounded(max_bytes, deadline),
         #[cfg(target_os = "linux")]
         Osc52ClipboardChannel::Primary => {
             use arboard::{GetExtLinux, LinuxClipboardKind};
             clipboard
                 .get()
                 .clipboard(LinuxClipboardKind::Primary)
-                .text()
+                .text_bounded(max_bytes, deadline)
         }
     }
 }
@@ -117,16 +119,7 @@ impl Osc52Clipboard for App {
         if self.cfg.osc52.can_paste() {
             self.clipboard
                 .as_mut()
-                .and_then(|c| match get_osc52_clipboard(c, target) {
-                    Ok(text) => Some(text),
-                    Err(error) => {
-                        log::warn!(
-                            "clipboard read failed (OSC 52 {target:?} target): \
-                             {error}"
-                        );
-                        None
-                    }
-                })
+                .map(|c| osc52_read_result(get_clipboard_text_bounded(c, target, OSC52_MAX + 1)))
                 .unwrap_or_default()
         } else {
             String::new()
@@ -154,6 +147,16 @@ impl App {
                     Err(error) => log::warn!("OSC 52: could not prepare text: {error}"),
                 }
             }
+        }
+    }
+}
+
+pub(super) fn osc52_read_result(result: Result<String, arboard::Error>) -> String {
+    match result {
+        Ok(text) => text,
+        Err(error) => {
+            log::warn!("clipboard read failed (OSC 52): {error}");
+            String::new()
         }
     }
 }

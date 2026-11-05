@@ -115,6 +115,36 @@ impl Clipboard {
 		})
 	}
 
+	pub(crate) fn get_text_bounded(
+		&mut self,
+		selection: LinuxClipboardKind,
+		bounds: crate::common::ReadBounds,
+	) -> Result<String, Error> {
+		use std::os::fd::AsRawFd;
+		bounds.check(0)?;
+		let (mut pipe, _) =
+			match get_contents(selection.try_into()?, Seat::Unspecified, paste::MimeType::Text) {
+				Ok(contents) => contents,
+				Err(PasteError::ClipboardEmpty | PasteError::NoMimeType) => {
+					return Err(Error::ContentNotAvailable)
+				}
+				Err(error) => return Err(handle_paste_error(error)),
+			};
+		// Wayland exposes a pipe rather than a size; bound each read before accumulating.
+		let mut data = Vec::new();
+		loop {
+			bounds.check(data.len())?;
+			wait_readable(pipe.as_raw_fd(), bounds.deadline)?;
+			let mut chunk = [0; 8192];
+			let count = pipe.read(&mut chunk).map_err(into_unknown)?;
+			bounds.check(data.len().saturating_add(count))?;
+			if count == 0 {
+				return String::from_utf8(data).map_err(|_| Error::ConversionFailure);
+			}
+			data.extend_from_slice(&chunk[..count]);
+		}
+	}
+
 	pub(crate) fn set_text(
 		&self,
 		text: Cow<'_, str>,
@@ -261,5 +291,37 @@ impl Clipboard {
 		add_clipboard_exclusions(exclude_from_history, &mut sources);
 
 		opts.copy_multi(sources).map_err(handle_copy_error)
+	}
+}
+
+fn wait_readable(fd: std::os::fd::RawFd, deadline: std::time::Instant) -> Result<(), Error> {
+	#[repr(C)]
+	struct PollFd {
+		fd: std::os::raw::c_int,
+		events: i16,
+		revents: i16,
+	}
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	type Nfds = std::os::raw::c_ulong;
+	#[cfg(not(any(target_os = "linux", target_os = "android")))]
+	type Nfds = std::os::raw::c_uint;
+	extern "C" {
+		fn poll(fds: *mut PollFd, nfds: Nfds, timeout: std::os::raw::c_int) -> std::os::raw::c_int;
+	}
+	loop {
+		let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+		if remaining.is_zero() {
+			return Err(Error::Timeout);
+		}
+		let mut poll_fd = PollFd { fd, events: 1, revents: 0 };
+		// SAFETY: poll receives one initialized pollfd for a live, exclusively read pipe.
+		let result =
+			unsafe { poll(&mut poll_fd, 1, remaining.as_millis().min(i32::MAX as u128) as i32) };
+		if result > 0 {
+			return Ok(());
+		}
+		if result < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+			return Err(into_unknown(std::io::Error::last_os_error()));
+		}
 	}
 }

@@ -10,15 +10,35 @@ pub(super) struct IncrRead {
 	pub(super) data: Vec<u8>,
 	pub(super) mismatch: bool,
 	drain: Option<(Instant, usize)>,
+	bounds: Option<(usize, Instant)>,
 }
 
 impl IncrRead {
+	pub(super) fn bounded(max_bytes: usize, deadline: Instant) -> Self {
+		Self { bounds: Some((max_bytes, deadline)), ..Self::default() }
+	}
+
+	pub(super) fn remaining_bounds(&self) -> Option<crate::common::ReadBounds> {
+		self.bounds.map(|(max_bytes, deadline)| crate::common::ReadBounds {
+			max_bytes: max_bytes.saturating_sub(self.data.len()),
+			deadline,
+		})
+	}
+
 	pub(super) fn push(
 		&mut self,
 		matches: bool,
 		value: Vec<u8>,
 		now: Instant,
 	) -> Result<bool, Error> {
+		if let Some((max_bytes, deadline)) = self.bounds {
+			if now >= deadline {
+				return Err(Error::Timeout);
+			}
+			if value.len() > max_bytes.saturating_sub(self.data.len()) {
+				return Err(Error::LimitExceeded);
+			}
+		}
 		if !matches {
 			self.mismatch = true;
 		}
@@ -34,6 +54,11 @@ impl IncrRead {
 			return Ok(true);
 		}
 		if !self.mismatch {
+			if self.bounds.is_some() {
+				self.data
+					.try_reserve_exact(value.len())
+					.map_err(|_| Error::unknown("clipboard allocation failed"))?;
+			}
 			self.data.extend(value);
 		}
 		Ok(false)
@@ -84,5 +109,45 @@ mod tests {
 		assert!(incr.push(false, vec![], now).unwrap());
 		assert!(incr.mismatch);
 		assert_eq!(incr.data, [1, 2]);
+	}
+}
+
+#[cfg(test)]
+mod bounded_tests {
+	use super::*;
+
+	#[test]
+	fn bounded_incr_rejects_oversized_correctly_typed_segments() {
+		let start = Instant::now();
+		let mut incr = IncrRead::bounded(4, start + Duration::from_secs(2));
+		let events = [(start, vec![1, 2, 3, 4]), (start, vec![5])];
+		let mut events = events.into_iter();
+		let (now, value) = events.next().unwrap();
+		assert!(!incr.push(true, value, now).unwrap());
+		assert_eq!(incr.remaining_bounds().unwrap().max_bytes, 0);
+		let (now, value) = events.next().unwrap();
+		assert!(
+			matches!(incr.push(true, value, now), Err(Error::LimitExceeded)),
+			"correctly typed INCR exceeded its byte budget"
+		);
+		assert_eq!(incr.data, [1, 2, 3, 4], "rejected chunk must not be appended");
+	}
+
+	#[test]
+	fn bounded_incr_unterminated_correctly_typed_sender_cannot_renew_deadline() {
+		let start = Instant::now();
+		let mut incr = IncrRead::bounded(1024, start + Duration::from_secs(2));
+		let events = (0..=4).map(|tick| (start + Duration::from_millis(tick * 500), vec![1]));
+		for (index, (now, value)) in events.enumerate() {
+			let result = incr.push(true, value, now);
+			if index < 4 {
+				assert!(!result.unwrap());
+			} else {
+				assert!(
+					matches!(result, Err(Error::Timeout)),
+					"correctly typed INCR exceeded its absolute deadline"
+				);
+			}
+		}
 	}
 }

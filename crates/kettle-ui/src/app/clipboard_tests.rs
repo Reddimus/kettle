@@ -137,3 +137,32 @@ fn osc52_wire_reads_answer_a_then_b_before_a_drain() {
     );
 }
 
+#[test]
+fn bounded_osc52_errors_reply_with_an_empty_payload() {
+    struct Clipboard(Option<arboard::Error>);
+    impl super::Osc52Clipboard for Clipboard {
+        fn store(&mut self, _: ClipboardType, _: String) {
+            unreachable!()
+        }
+        fn load(&mut self, _: ClipboardType) -> String {
+            super::clipboard::osc52_read_result(Err(self.0.take().unwrap()))
+        }
+    }
+    for error in [arboard::Error::LimitExceeded, arboard::Error::Timeout] {
+        let mut clipboard = Clipboard(Some(error));
+        let reply = super::apply_osc52_event(
+            &mut clipboard,
+            kettle_core::TermEvent::ClipboardLoad(
+                ClipboardType::Clipboard,
+                Arc::new(|text| {
+                    assert!(
+                        text.is_empty(),
+                        "clipboard budget failure must produce an empty OSC 52 payload"
+                    );
+                    format!("\x1b]52;c;{text}\x07")
+                }),
+            ),
+        );
+        assert_eq!(reply.as_deref(), Some("\x1b]52;c;\x07"));
+    }
+}
