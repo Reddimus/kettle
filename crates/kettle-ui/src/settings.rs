@@ -89,6 +89,8 @@ pub enum FieldKind {
         step: i64,
         suffix: &'static str,
     },
+    /// A process-wide quick-terminal shortcut persisted as a config value.
+    Hotkey,
     /// A rebindable keybinding. `action` is the canonical
     /// `Action::from_name` token (e.g. `"split_right"`). The displayed value is
     /// the chord currently bound to that action (reverse-looked-up from
@@ -103,6 +105,26 @@ pub enum FieldKind {
     /// persisted on submit. The displayed value is the current string (or a
     /// placeholder when empty).
     Text { placeholder: Text },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HotkeyCapture {
+    Cancel,
+    Value(Option<kettle_config::keybinds::Trigger>),
+    Pending,
+}
+
+pub(crate) fn capture_hotkey(
+    key: Option<kettle_config::keybinds::Key>,
+    mods: kettle_config::keybinds::Mods,
+) -> HotkeyCapture {
+    use kettle_config::keybinds::{Key, Trigger};
+    match key {
+        Some(Key::Escape) if mods.is_empty() => HotkeyCapture::Cancel,
+        Some(Key::Backspace | Key::Delete) if mods.is_empty() => HotkeyCapture::Value(None),
+        Some(key) if !mods.is_empty() => HotkeyCapture::Value(Some(Trigger::new(mods, key))),
+        _ => HotkeyCapture::Pending,
+    }
 }
 
 /// One editable setting: a human label, the config key it persists to, and how
@@ -124,6 +146,11 @@ pub struct Category {
 /// Description keys stay independent of config tokens and translated labels.
 pub fn description(field: &Field) -> Text {
     match field.label {
+        Text::QuickTerminalHotkey => Text::QuickTerminalHotkeyDescription,
+        Text::QuickTerminalPosition => Text::QuickTerminalPositionDescription,
+        Text::QuickTerminalSize => Text::QuickTerminalSizeDescription,
+        Text::QuickTerminalAnimation => Text::QuickTerminalAnimationDescription,
+        Text::QuickTerminalAutohide => Text::QuickTerminalAutohideDescription,
         Text::SettingsFieldAgentPreviews => Text::SettingsDescriptionFieldAgentPreviews,
         Text::SettingsFieldAgentPreviewsClaudeCode => {
             Text::SettingsDescriptionFieldAgentPreviewsClaudeCode
@@ -877,6 +904,31 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 keybind(T::SettingsKeybindPaste, "paste"),
             ],
         },
+        Category {
+            name: T::SettingsCategoryQuickTerminal,
+            fields: vec![
+                Field {
+                    label: T::QuickTerminalHotkey,
+                    key: "quick-terminal-hotkey",
+                    kind: FieldKind::Hotkey,
+                },
+                choice(
+                    T::QuickTerminalPosition,
+                    "quick-terminal-position",
+                    &["top", "bottom", "left", "right", "center"],
+                    &[
+                        Label::Text(T::SettingsValueTop),
+                        Label::Text(T::SettingsValueBottom),
+                        Label::Text(T::SettingsValueLeft),
+                        Label::Text(T::SettingsValueRight),
+                        Label::Text(T::QuickTerminalCenter),
+                    ],
+                ),
+                number(T::QuickTerminalSize, "quick-terminal-size", 1, 100, 5, "%"),
+                toggle(T::QuickTerminalAnimation, "quick-terminal-animation"),
+                toggle(T::QuickTerminalAutohide, "quick-terminal-autohide"),
+            ],
+        },
     ]
 }
 
@@ -971,6 +1023,10 @@ pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
                 format_number(value, suffix)
             }
         }
+        FieldKind::Hotkey => cfg
+            .quick_terminal_hotkey
+            .map(|key| key.label())
+            .unwrap_or_else(|| tr.text(T::SettingsValueUnbound).to_string()),
         FieldKind::Keybind { action } => {
             // The chord bound to this action in the effective keymap, chosen
             // as the palette and menus choose it; "Unbound" if none. The
@@ -1099,7 +1155,7 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
         }
         // Keybinds don't change via ←/→: activating one enters capture mode in
         // the overlay handler, which binds the next chord directly. No-op here.
-        FieldKind::Keybind { .. } => String::new(),
+        FieldKind::Hotkey | FieldKind::Keybind { .. } => String::new(),
         // Text fields don't cycle: activating opens an inline prompt in the
         // overlay handler. No-op here.
         FieldKind::Text { .. } => String::new(),
@@ -1109,7 +1165,7 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
 /// Is this field a rebindable keybinding? The overlay handler uses
 /// this to route Enter/Space into chord-capture instead of the value-cycle path.
 pub fn is_keybind(field: &Field) -> bool {
-    matches!(field.kind, FieldKind::Keybind { .. })
+    matches!(field.kind, FieldKind::Hotkey | FieldKind::Keybind { .. })
 }
 
 /// The canonical action token for a keybind field (for capture +
@@ -1196,6 +1252,8 @@ pub fn next_enabled_field(cfg: &Config, fields: &[Field], start: usize, step: i3
 
 pub(crate) fn read_bool(cfg: &Config, key: &str) -> bool {
     match key {
+        "quick-terminal-animation" => cfg.quick_terminal_animation,
+        "quick-terminal-autohide" => cfg.quick_terminal_autohide,
         "cursor-blink" => cfg.cursor_blink,
         "show-titlebar" => cfg.show_titlebar,
         "window-blur" => cfg.window_blur,
@@ -1218,6 +1276,7 @@ pub(crate) fn read_bool(cfg: &Config, key: &str) -> bool {
 
 fn read_choice(cfg: &Config, key: &str) -> String {
     match key {
+        "quick-terminal-position" => cfg.quick_terminal_position.token().to_string(),
         "language" => cfg.language.token().to_string(),
         "scrollbar" => match cfg.scrollbar {
             ScrollbarMode::Never => "never",
@@ -1349,6 +1408,7 @@ fn read_string(cfg: &Config, key: &str) -> String {
 
 fn read_number(cfg: &Config, key: &str) -> i64 {
     match key {
+        "quick-terminal-size" => i64::from(cfg.quick_terminal_size),
         "font-size" => cfg.font_size.round() as i64,
         // opacity is stored 0.0–1.0; the overlay edits it as a percent.
         "background-opacity" => (cfg.background_opacity * 100.0).round() as i64,
@@ -1423,6 +1483,59 @@ mod tests {
             .find(|field| field.key == "scrollback-bytes")
             .unwrap();
         assert_eq!(read(&cfg, field, &EN), "64 MB");
+    }
+
+    #[test]
+    fn quick_terminal_settings_round_trip_and_capture_global_chords() {
+        use kettle_config::keybinds::{Key, Mods};
+        let cats = categories(&[]);
+        let group = cats
+            .iter()
+            .find(|cat| cat.name == Text::SettingsCategoryQuickTerminal)
+            .unwrap();
+        assert_eq!(group.fields.len(), 5);
+        assert!(is_keybind(&group.fields[0]));
+        assert_eq!(
+            read(&Config::default(), &group.fields[0], &EN),
+            EN.text(Text::SettingsValueUnbound)
+        );
+        assert_eq!(read(&Config::default(), &group.fields[2], &EN), "40%");
+        let cfg = Config::parse_text(
+            "quick-terminal-hotkey = cmd+escape\nquick-terminal-position = center\nquick-terminal-size = 70",
+        );
+        assert_eq!(
+            read(&cfg, &group.fields[0], &EN),
+            cfg.quick_terminal_hotkey.unwrap().label()
+        );
+        assert_eq!(
+            read(&cfg, &group.fields[1], &ES),
+            ES.text(Text::QuickTerminalCenter)
+        );
+        assert_eq!(read(&cfg, &group.fields[2], &EN), "70%");
+        assert_eq!(next_value(&cfg, &group.fields[3], 0), "false");
+        assert_eq!(
+            capture_hotkey(Some(Key::Escape), Mods::empty()),
+            HotkeyCapture::Cancel
+        );
+        assert_eq!(
+            capture_hotkey(Some(Key::Delete), Mods::empty()),
+            HotkeyCapture::Value(None)
+        );
+        assert_eq!(
+            capture_hotkey(Some(Key::Char('x')), Mods::empty()),
+            HotkeyCapture::Pending
+        );
+        assert_eq!(capture_hotkey(None, Mods::CTRL), HotkeyCapture::Pending);
+        assert_eq!(
+            capture_hotkey(Some(Key::Escape), Mods::SUPER),
+            HotkeyCapture::Value(cfg.quick_terminal_hotkey)
+        );
+        assert!(
+            group
+                .fields
+                .iter()
+                .all(|field| EN.text(description(field)) != ES.text(description(field)))
+        );
     }
 
     #[test]

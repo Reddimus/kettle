@@ -2877,3 +2877,29 @@ source-located config diagnostics and notice limits, persistent-notice hit
 geometry, and tab-list titles, selection and controls on both strip axes.
 These unit and PTY tests do not establish live rendering or screen-reader
 acceptance; native UI checks remain required on each platform.
+
+## Quick terminal
+
+Portable tests cover all five positions at multiple screen sizes and offsets,
+percentage bounds, the show/hide/autohide/focus-return model, animation endpoints,
+config defaults and diagnostics, Settings reads and capture routing, CLI parsing
+and activation serialization, including bounded Wayland desktop tokens. Activation transport tests resend a toggle with
+its original launch ID and verify that it is applied only once. Pure key-mapping
+tests cover the documented Carbon and X11 chords.
+
+```sh
+cargo test --locked --offline -p kettle-config -p kettle-ctl -p kettle-i18n -p kettle-ui -p kettle
+cargo clippy --locked --offline -p kettle-config -p kettle-ctl -p kettle-i18n -p kettle-ui -p kettle --all-targets -- -D warnings
+cargo clippy --locked --offline --target aarch64-apple-darwin -p kettle-ui --all-targets -- -D warnings
+cargo clippy --locked --offline --target x86_64-unknown-linux-gnu -p kettle-ui --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+Native macOS and X11 CI must compile their registration backends. With a live
+desktop, verify repeated CLI/global/menu/palette toggles create one quick window,
+focus returns on explicit hide, switching apps autohides without stealing focus,
+tabs and splits keep their processes while hidden, monitor selection and all
+five geometries work across mixed-DPI displays, and Reduce Motion disables the
+slide. Also check a taken hotkey, rebind/clear on reload, CapsLock/NumLock on X11,
+window-list/cycling exclusion, English/Spanish Settings, and Wayland/Windows
+desktop shortcuts. A GUI-free test run does not establish these native behaviors.

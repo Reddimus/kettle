@@ -152,7 +152,7 @@ fn resumed_preserves_the_launch_override_and_pre_launch_pane() {
         .split_once("\n    }\n")
         .unwrap()
         .0;
-    assert!(body.contains("let has_launch_override = self.launch_override;"));
+    assert!(body.contains("let has_launch_override = self.launch_override || self.startup.quick_terminal;"));
     assert!(!body.contains("self.startup.command.is_some()"));
     assert!(!body.contains("self.startup.cwd.is_some()"));
     assert!(body.contains("ws.pre_launch.is_some() || has_launch_override"));
@@ -540,7 +540,7 @@ fn window_constructors_size_through_the_shared_startup_rule() {
     assert!(
         src.contains(
             "let monitor = startup_monitor(event_loop);\n        let mut attrs = self.window_attributes(state, monitor);"
-        ) && src.contains("self.window_attributes(self.cfg.window_state, monitor)"),
+        ) && src.contains("self.window_attributes(initial_window_state, monitor)"),
         "both constructors must pass the startup monitor"
     );
     assert_eq!(

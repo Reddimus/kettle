@@ -68,7 +68,26 @@ impl SystemMotion {
         {
             self.watch.preference().allows()
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(windows)]
+        {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+                SystemParametersInfoW,
+            };
+            let mut enabled = windows::core::BOOL(0);
+            // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL into this live output buffer.
+            unsafe {
+                SystemParametersInfoW(
+                    SPI_GETCLIENTAREAANIMATION,
+                    0,
+                    Some((&mut enabled as *mut windows::core::BOOL).cast()),
+                    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+                )
+            }
+            .is_ok()
+                && enabled.as_bool()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         {
             false
         }

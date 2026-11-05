@@ -82,6 +82,8 @@ pub struct ActivationRequest {
     /// cannot tell that retry apart from a second launcher click.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     launch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activation_token: Option<String>,
 }
 
 impl ActivationRequest {
@@ -92,6 +94,7 @@ impl ActivationRequest {
             cwd,
             identity,
             launch_id: Some(new_launch_id()),
+            activation_token: None,
         }
     }
 
@@ -107,12 +110,33 @@ impl ActivationRequest {
         }
     }
 
+    pub fn for_quick_terminal(identity: LaunchIdentity) -> Self {
+        Self {
+            action: "toggle_quick_terminal".into(),
+            ..Self::new(None, identity)
+        }
+    }
+
+    /// A desktop-issued Wayland token is a short-lived capability, never logged.
+    pub fn with_activation_token(mut self, token: Option<String>) -> Self {
+        self.activation_token = token;
+        self
+    }
+
+    pub fn activation_token(&self) -> Option<&str> {
+        self.activation_token.as_deref()
+    }
+
+    pub fn toggles_quick_terminal(&self) -> bool {
+        self.action == "toggle_quick_terminal"
+    }
+
     pub fn focuses_existing(&self) -> bool {
         self.action == "focus_or_open"
     }
 
     pub fn requires_recording(&self) -> bool {
-        self.identity.recording_key.is_some()
+        !self.toggles_quick_terminal() && self.identity.recording_key.is_some()
     }
 
     fn launch_id(&self) -> Option<&str> {
@@ -121,7 +145,16 @@ impl ActivationRequest {
 
     pub(crate) fn is_valid(&self) -> bool {
         self.v == PROTOCOL_VERSION
-            && matches!(self.action.as_str(), "open_window" | "focus_or_open")
+            && matches!(
+                self.action.as_str(),
+                "open_window" | "focus_or_open" | "toggle_quick_terminal"
+            )
+            && self.activation_token.as_ref().is_none_or(|token| {
+                self.toggles_quick_terminal()
+                    && !token.is_empty()
+                    && token.len() <= 4096
+                    && !token.chars().any(char::is_control)
+            })
             && self.cwd.as_ref().is_none_or(|cwd| {
                 !cwd.is_empty()
                     && cwd.len() <= MAX_CWD_BYTES
@@ -305,6 +338,16 @@ pub fn activate_or_elect(
     }
     let paths = activation_paths(&crate::discovery::registry_dir(), build);
     activate_or_elect_at(request, &paths)
+}
+
+/// Advertise a GUI launched with explicit options, without forwarding those
+/// options to another process. The UI may restrict this endpoint to toggles.
+pub fn elect_if_idle(
+    build: BuildKey,
+    identity: LaunchIdentity,
+) -> io::Result<Option<PrimaryHandle>> {
+    let paths = activation_paths(&crate::discovery::registry_dir(), build);
+    try_become_primary(&paths, identity)
 }
 
 fn activate_or_elect_at(
@@ -795,7 +838,7 @@ fn handle_client(
             return;
         }
     };
-    let status = if request.identity != *identity {
+    let status = if !request.toggles_quick_terminal() && request.identity != *identity {
         // An incompatible launch never reaches the handler, so re-deciding it
         // for a retry costs nothing and can open nothing.
         ResponseStatus::Incompatible
@@ -1194,6 +1237,68 @@ mod tests {
         assert!(matches!(second, ActivationOutcome::Activated));
         drop(server);
         drop(dir);
+    }
+
+    #[test]
+    fn quick_terminal_retry_applies_once_without_a_desktop_or_socket() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ledger = LaunchLedger::default();
+        let count = AtomicUsize::new(0);
+        let handler = |request: ActivationRequest| {
+            assert!(request.toggles_quick_terminal());
+            count.fetch_add(1, Ordering::Relaxed);
+            true
+        };
+        let request = ActivationRequest::for_quick_terminal(LaunchIdentity::default());
+        for _ in 0..2 {
+            assert_eq!(
+                activate_once(request.clone(), &ledger, &handler),
+                ResponseStatus::Activated
+            );
+        }
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            activate_once(
+                ActivationRequest::for_quick_terminal(LaunchIdentity::default()),
+                &ledger,
+                &handler
+            ),
+            ResponseStatus::Activated
+        );
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn quick_terminal_round_trip_toggles_once_per_launch_id() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (_dir, paths) = test_paths("quick-toggle");
+        let request = ActivationRequest::for_quick_terminal(LaunchIdentity::default());
+        let ActivationOutcome::Primary(primary) =
+            activate_or_elect_at(request.clone(), &paths).unwrap()
+        else {
+            panic!("the first quick-terminal launch must become primary");
+        };
+        let toggles = Arc::new(AtomicUsize::new(0));
+        let count = toggles.clone();
+        let _server = spawn_test_server(primary, &paths.endpoint, move |request| {
+            assert!(request.toggles_quick_terminal());
+            count.fetch_add(1, Ordering::Relaxed);
+            true
+        })
+        .unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                request_activation(&paths.endpoint, &request).unwrap(),
+                ResponseStatus::Activated
+            );
+        }
+        assert_eq!(toggles.load(Ordering::Relaxed), 1);
+        let next = ActivationRequest::for_quick_terminal(LaunchIdentity::default());
+        assert_eq!(
+            request_activation(&paths.endpoint, &next).unwrap(),
+            ResponseStatus::Activated
+        );
+        assert_eq!(toggles.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -1926,6 +2031,54 @@ mod tests {
         assert_ne!(
             stable_hash(b"kettle".iter().copied()),
             stable_hash(b"elttlek".iter().copied())
+        );
+    }
+}
+
+#[cfg(test)]
+mod quick_terminal_tests {
+    use super::*;
+    #[test]
+    fn quick_terminal_activation_token_is_bounded_and_round_trips() {
+        let request = ActivationRequest::for_quick_terminal(LaunchIdentity::default())
+            .with_activation_token(Some("desktop-issued-token".into()));
+        assert!(request.is_valid());
+        let parsed: ActivationRequest =
+            serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+        assert_eq!(parsed.activation_token(), Some("desktop-issued-token"));
+        for token in [String::new(), "x".repeat(4097), "token\nline".into()] {
+            assert!(
+                !ActivationRequest::for_quick_terminal(LaunchIdentity::default())
+                    .with_activation_token(Some(token))
+                    .is_valid()
+            );
+        }
+        assert!(
+            !ActivationRequest::new(None, LaunchIdentity::default())
+                .with_activation_token(Some("token".into()))
+                .is_valid()
+        );
+    }
+
+    #[test]
+    fn toggle_round_trips_as_a_valid_idempotent_activation() {
+        let request = ActivationRequest::for_quick_terminal(LaunchIdentity::default());
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: ActivationRequest = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_valid());
+        assert!(parsed.toggles_quick_terminal());
+        assert!(!parsed.focuses_existing());
+        assert!(parsed.cwd().is_none());
+        assert_eq!(request.launch_id(), parsed.launch_id());
+        assert!(json.contains("toggle_quick_terminal"));
+        let recorded = ActivationRequest::for_quick_terminal(LaunchIdentity {
+            recording_key: Some("dir:aaaa".into()),
+            record_raw_input: true,
+        });
+        assert!(recorded.is_valid());
+        assert!(
+            !recorded.requires_recording(),
+            "a toggle does not start a new recorded terminal"
         );
     }
 }

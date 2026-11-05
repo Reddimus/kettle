@@ -316,6 +316,8 @@ impl App {
         // Enumerate the system fonts while the event loop starts (AppKit's
         // launch, on macOS) instead of after it.
         let mut font_preload = crate::font_preload::FontPreload::start();
+        let quick_previous = crate::quick_terminal::native::PreviousApp::capture();
+        let initial_quick_focus = startup.quick_terminal;
         // Reclaim pasted-image directories from a run that died before its own
         // cleanup. Age-gated, so a sibling instance mid-session is untouched.
         crate::paste_image::sweep_stale();
@@ -334,7 +336,11 @@ impl App {
             .unwrap_or_default();
         let another_build_running = other_builds.running();
         let activation = startup.activation.take().and_then(|primary| {
-            match crate::activation_server::ActivationInbox::start(primary, proxy.clone()) {
+            match crate::activation_server::ActivationInbox::start(
+                primary,
+                proxy.clone(),
+                startup.activation_quick_only,
+            ) {
                 Ok(inbox) => Some(inbox),
                 Err(error) => {
                     log::warn!("bare-launch activation server unavailable: {error}");
@@ -769,6 +775,12 @@ impl App {
             agent_launches: kettle_ctl::agent_launch::LaunchScopes::default(),
             proxy,
             activation,
+            quick_terminal: crate::quick_terminal::Runtime {
+                previous: quick_previous,
+                initial_focus: initial_quick_focus,
+                activation_token: startup.quick_terminal_activation_token.take(),
+                ..Default::default()
+            },
             runtime_tracker,
             wake_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             config_reload_pending,
@@ -1053,12 +1065,17 @@ impl App {
         if ws.window.is_some() {
             return;
         }
+        let initial_window_state = if self.startup.quick_terminal {
+            kettle_config::WindowState::Hidden
+        } else {
+            self.cfg.window_state
+        };
         crate::startup_trace::mark(crate::startup_trace::Phase::Resumed);
         // Explicit command/cwd launches never restore a saved workspace.
         // Preserve the fields until the existing consumed-once spawn path
         // below, but decide and preflight the restore before native resources
         // are allocated.
-        let has_launch_override = self.launch_override;
+        let has_launch_override = self.launch_override || self.startup.quick_terminal;
         // A launch override means the named layout is not loaded, so it must
         // not be written back either — otherwise the flag that names a layout
         // is the same flag that destroys it.
@@ -1128,7 +1145,7 @@ impl App {
         // fresh normal or hidden window knows its size before it exists.
         let early_start = restore_plan.is_none()
             && matches!(
-                self.cfg.window_state,
+                initial_window_state,
                 kettle_config::WindowState::Normal | kettle_config::WindowState::Hidden
             );
         let startup_surface = if ws.pre_launch.is_some() {
@@ -1165,9 +1182,9 @@ impl App {
         // Create the window hidden while renderer init runs on the event-loop
         // thread. The first successful paint reveals it; `window_state =
         // hidden` remains hidden.
-        ws.window_shown = !should_reveal_after_renderer_init(self.cfg.window_state);
+        ws.window_shown = !should_reveal_after_renderer_init(initial_window_state);
         ws.startup_window = true;
-        let mut attrs = self.window_attributes(self.cfg.window_state, monitor);
+        let mut attrs = self.window_attributes(initial_window_state, monitor);
         if let Some((width, height)) = startup_surface {
             attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
         }
@@ -1180,6 +1197,9 @@ impl App {
             if let Some((x, y)) = surface.position {
                 attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
             }
+        }
+        if self.startup.quick_terminal {
+            attrs = self.quick_window_attributes(attrs, event_loop);
         }
         // Startup is measured, not guessed: the window is created HIDDEN and
         // revealed at the first paint, so everything between here and that
@@ -1199,8 +1219,14 @@ impl App {
         self.apply_post_create(&window);
         #[cfg(target_os = "macos")]
         {
-            ws.macos_titlebar_tabs = macos_titlebar_policy(&self.cfg) == MacosTitlebarPolicy::Tabs;
+            // The quick terminal is borderless; it never hosts titlebar tabs.
+            ws.macos_titlebar_tabs = !self.startup.quick_terminal
+                && macos_titlebar_policy(&self.cfg) == MacosTitlebarPolicy::Tabs;
         }
+        if self.startup.quick_terminal {
+            crate::quick_terminal::native::configure(&window);
+        }
+
         ws.native_fullscreen = Some(crate::native_fullscreen::NativeFullscreen::install(
             &window,
             ws.seq,
@@ -1247,7 +1273,7 @@ impl App {
         if let Some(h) = window_hwnd(&window) {
             set_window_background_brush(h, self.cfg.theme.background);
         }
-        let early_reveal = should_reveal_after_renderer_init(self.cfg.window_state)
+        let early_reveal = should_reveal_after_renderer_init(initial_window_state)
             && background_is_dark_enough_to_reveal_early(self.cfg.theme.background);
         if early_reveal {
             window.set_visible(true);
@@ -1511,7 +1537,7 @@ impl App {
         // retains the exact head message and about_to_wait drives retries.
         let _ = self.poll_pending_lua_commands(ws, event_loop, std::time::Instant::now());
         if should_reveal_before_first_surface_frame(
-            self.cfg.window_state,
+            initial_window_state,
             ws.window_shown,
             cfg!(target_os = "macos"),
         ) {
@@ -1529,7 +1555,7 @@ impl App {
         // A window that starts hidden presents nothing until it is shown, so
         // its startup trace ends here, without a first frame. Any other
         // window's trace is printed by the first frame it presents.
-        if !should_reveal_after_renderer_init(self.cfg.window_state) {
+        if !should_reveal_after_renderer_init(initial_window_state) {
             crate::startup_trace::flush();
         }
         // The first frame is scheduled. The signed-feed worker skips the first

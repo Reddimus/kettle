@@ -198,6 +198,7 @@ mod notices;
 mod paste;
 mod pointer;
 mod preview;
+mod quick_terminal;
 mod search;
 mod sessions;
 mod system_opener;
@@ -253,6 +254,7 @@ pub enum UserEvent {
     /// A compatible bare Kettle launch asked this primary process to open a
     /// fresh OS window. The bounded inbox carries the request and completion.
     Activation,
+    ToggleQuickTerminal,
     /// Remote control: the remote-command file changed and
     /// the watcher needs the main thread to read + process new lines.
     /// One event per change (notify coalesces consecutive writes), so
@@ -426,6 +428,7 @@ pub struct App {
     /// this event-loop thread to confirm window creation before telling the
     /// secondary launcher it may exit.
     activation: Option<crate::activation_server::ActivationInbox>,
+    quick_terminal: crate::quick_terminal::Runtime,
     /// Privacy-safe event-loop phase tracker. A separate watchdog records a
     /// bounded incident when a callback stops making progress; it never
     /// captures terminal contents, command lines, or paths.
@@ -668,6 +671,22 @@ impl ApplicationHandler<UserEvent> for App {
         self.resumed_inner(&mut ws, event_loop);
         self.sync_output_wake_gate(&ws);
         self.finish_window_dispatch(event_loop, seq, ws);
+        self.quick_terminal.wayland = self
+            .windows
+            .values()
+            .filter_map(|ws| ws.window.as_deref())
+            .any(window_is_wayland);
+        if self.quick_terminal.wayland && self.quick_terminal.initial_focus {
+            self.quick_terminal.previous = Default::default();
+        }
+        if self.startup.quick_terminal
+            && self.quick_terminal.model.window.is_none()
+            && self.gpu.is_some()
+        {
+            self.quick_terminal.model.window = Some(seq);
+            self.toggle_quick_terminal(event_loop);
+        }
+        self.reconcile_quick_hotkey();
         self.drain_activation_requests(event_loop);
         #[cfg(target_os = "linux")]
         {
@@ -741,6 +760,9 @@ impl ApplicationHandler<UserEvent> for App {
                         handle.request_redraw();
                     }
                 }
+            }
+            UserEvent::ToggleQuickTerminal => {
+                self.toggle_quick_terminal(el);
             }
             UserEvent::Activation => self.drain_activation_requests(el),
             #[cfg(target_os = "macos")]
@@ -1045,7 +1067,7 @@ impl ApplicationHandler<UserEvent> for App {
         // the per-window wait requests merge to the EARLIEST deadline so one
         // window's animation can't starve another's coalesced output flush.
         let seqs: Vec<u64> = self.windows.keys().copied().collect();
-        let mut earliest_deadline: Option<std::time::Instant> = None;
+        let mut earliest_deadline = self.quick_terminal_tick(now);
         // The poll covers every window, so one checkout is enough.
         let mut remote_poll_due = self.remote_poll_due.is_some_and(|due| due <= now);
         for seq in seqs {

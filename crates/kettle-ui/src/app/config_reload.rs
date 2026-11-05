@@ -373,6 +373,7 @@ impl App {
         new.resolve_theme_mode(self.os_theme_dark);
         self.last_schedule_decision = None;
         self.cfg = new;
+        self.reconcile_quick_hotkey();
         self.sync_macos_menu(None);
         self.reconcile_agent_display();
         self.reconcile_claude_plugin();

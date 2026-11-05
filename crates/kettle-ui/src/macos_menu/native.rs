@@ -98,6 +98,7 @@ fn equivalent(trigger: Trigger) -> (String, NSEventModifierFlags) {
         Key::PageDown => "\u{f72d}".into(),
         Key::Enter => "\r".into(),
         Key::Tab => "\t".into(),
+        Key::Escape => "\u{1b}".into(),
         Key::Backspace => "\u{8}".into(),
         Key::Delete => "\u{f728}".into(),
     };

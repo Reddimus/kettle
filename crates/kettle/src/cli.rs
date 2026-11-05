@@ -438,10 +438,12 @@ pub(crate) enum OnOffArg {
     Off,
 }
 
-/// Agent-first subcommands. Each is a self-contained non-GUI entry point that
-/// returns early from `main` before any winit/GPU work.
+/// CLI subcommands. QuickTerminal continues into GUI startup if no instance
+/// is running; other commands return before winit/GPU work.
 #[derive(clap::Subcommand, Debug)]
 pub(crate) enum Cmd {
+    /// Toggle the dedicated quick terminal in the running instance, or start Kettle.
+    QuickTerminal,
     #[command(name = "__media-preview-worker", hide = true)]
     MediaPreviewWorker,
     /// Run a command under a real PTY, headlessly, and stream its output to

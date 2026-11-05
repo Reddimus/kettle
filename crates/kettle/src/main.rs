@@ -173,6 +173,23 @@ where
     }
 }
 
+fn launch_activation_request(
+    quick_terminal: bool,
+    reopen: bool,
+    cwd: Option<String>,
+    identity: kettle_ctl::activation::LaunchIdentity,
+    activation_token: Option<String>,
+) -> kettle_ctl::activation::ActivationRequest {
+    use kettle_ctl::activation::ActivationRequest;
+    if quick_terminal {
+        ActivationRequest::for_quick_terminal(identity).with_activation_token(activation_token)
+    } else if reopen {
+        ActivationRequest::for_reopen(cwd, identity)
+    } else {
+        ActivationRequest::new(cwd, identity)
+    }
+}
+
 fn is_media_preview_worker_argv<I, S>(args: I) -> bool
 where
     I: IntoIterator<Item = S>,
@@ -611,14 +628,19 @@ fn main() -> anyhow::Result<()> {
     // default `warn` filter, so the line appears only when the user raises
     // logging (`RUST_LOG=info kettle ...`).
     log::info!("kettle {KETTLE_VERSION} starting");
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
 
     // Agent-first: subcommands are self-contained non-GUI entry
     // points. Dispatch BEFORE any GUI flag handling / config-path checks and
     // exit with the subcommand's own code — `kettle exec`'s exit code is the
     // child's, so it must drive `std::process::exit`, not `return Ok(())`.
-    if let Some(cmd) = cli.cmd {
+    let quick_terminal = matches!(cli.cmd, Some(Cmd::QuickTerminal));
+    let quick_terminal_activation_token = (quick_terminal && cfg!(target_os = "linux"))
+        .then(|| std::env::var("XDG_ACTIVATION_TOKEN").ok())
+        .flatten();
+    if let Some(cmd) = cli.cmd.take() {
         match cmd {
+            Cmd::QuickTerminal => {}
             Cmd::MediaPreviewWorker => {
                 eprintln!(
                     "kettle: __media-preview-worker is an internal command and cannot be combined with launcher options"
@@ -1311,15 +1333,18 @@ fn main() -> anyhow::Result<()> {
         },
         kettle_ui::queue_desktop_notification,
     );
-    let activation = if bare_gui_launch && !cli.new_process {
+    let activation_quick_only = !bare_gui_launch && !quick_terminal;
+    let activation = if (bare_gui_launch || quick_terminal) && !cli.new_process {
         let cwd = std::env::current_dir()
             .ok()
             .and_then(|path| path.to_str().map(str::to_string));
-        let request = if cli.reopen {
-            kettle_ctl::activation::ActivationRequest::for_reopen(cwd, activation_identity)
-        } else {
-            kettle_ctl::activation::ActivationRequest::new(cwd, activation_identity)
-        };
+        let request = launch_activation_request(
+            quick_terminal,
+            cli.reopen,
+            cwd,
+            activation_identity,
+            quick_terminal_activation_token.clone(),
+        );
         // Each build elects its own primary, so a launch after an update
         // opens in the newly installed version (#575).
         let build = kettle_ctl::activation::BuildKey::new(env!("KETTLE_SOURCE_HASH"))
@@ -1335,17 +1360,33 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             Ok(kettle_ctl::activation::ActivationOutcome::Primary(primary)) => Some(primary),
+            Ok(kettle_ctl::activation::ActivationOutcome::Standalone) if quick_terminal => {
+                anyhow::bail!(
+                    "the running Kettle instance could not accept the quick-terminal toggle"
+                );
+            }
             Ok(kettle_ctl::activation::ActivationOutcome::Standalone) => None,
+            Err(error) if quick_terminal => {
+                return Err(error.into());
+            }
             Err(error) => {
                 log::warn!("bare-launch activation unavailable: {error}; opening separately");
                 None
             }
         }
     } else {
-        None
+        let build = kettle_ctl::activation::BuildKey::new(env!("KETTLE_SOURCE_HASH"))
+            .expect("the build script emits a 16-digit hex source hash");
+        kettle_ctl::activation::elect_if_idle(build, activation_identity).unwrap_or_else(|error| {
+            log::warn!("quick-terminal activation unavailable: {error}");
+            None
+        })
     };
     kettle_ui::run_with(kettle_ui::Options {
         activation,
+        quick_terminal,
+        quick_terminal_activation_token,
+        activation_quick_only,
         command: (!cli.exec.is_empty()).then_some(cli.exec),
         // Dropdown-parity: the About panel shows exactly what
         // `--version` prints (crate version + git hash).
@@ -4178,5 +4219,29 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&base);
         let _ = std::fs::remove_dir_all(&untrusted);
+    }
+}
+
+#[cfg(test)]
+mod quick_terminal_cli_tests {
+    use super::*;
+    #[test]
+    fn quick_terminal_subcommand_sends_the_toggle_activation() {
+        let cli = Cli::try_parse_from(["kettle", "quick-terminal"]).unwrap();
+        let quick = matches!(cli.cmd, Some(Cmd::QuickTerminal));
+        assert!(quick);
+        let request = launch_activation_request(
+            quick,
+            cli.reopen,
+            Some("/tmp".into()),
+            Default::default(),
+            Some("desktop-issued-token".into()),
+        );
+        assert!(request.toggles_quick_terminal());
+        assert!(request.cwd().is_none());
+        let json = serde_json::to_value(request).unwrap();
+        assert_eq!(json["action"], "toggle_quick_terminal");
+        assert!(json["launch_id"].is_string());
+        assert_eq!(json["activation_token"], "desktop-issued-token");
     }
 }

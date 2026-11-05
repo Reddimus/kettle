@@ -205,6 +205,7 @@ pub(crate) fn menu_model(tr: &Translator, bindings: &Bindings, context: Context)
                 Sep,
                 item(T::MacosMenuZoomPane, Action::ToggleZoom),
                 item(T::MacosMenuFullscreen, Action::ToggleFullscreen),
+                item(T::QuickTerminalToggle, Action::ToggleQuickTerminal),
             ],
             false,
         ),

@@ -1312,6 +1312,14 @@ impl App {
                     self.focused_seq = ws.seq;
                     record_window_focus(&mut self.window_focus_order, ws.seq);
                 }
+                if self.quick_terminal.model.visible {
+                    if f {
+                        self.quick_terminal.focus_check = None;
+                    } else {
+                        self.quick_terminal.focus_check =
+                            Some(std::time::Instant::now() + std::time::Duration::from_millis(40));
+                    }
+                }
                 if !f {
                     self.confirm_cancel_press(ws);
                     ws.confirm_pointer_release = false;
@@ -1408,6 +1416,7 @@ impl App {
                 // or whatever global hotkey the user
                 // bound. Honors only on focus-LOSS (f == false).
                 if !f
+                    && Some(ws.seq) != self.quick_terminal.model.window
                     && self.cfg.hide_on_lose_focus
                     && let Some(w) = &ws.window
                 {

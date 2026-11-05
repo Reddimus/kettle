@@ -14,6 +14,10 @@ use crate::app::UserEvent;
 const MAX_PENDING_ACTIVATIONS: usize = 32;
 const UI_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn accepts_action(quick_only: bool, request: &ActivationRequest) -> bool {
+    !quick_only || request.toggles_quick_terminal()
+}
+
 pub(crate) struct PendingActivation {
     pub(crate) request: ActivationRequest,
     pub(crate) completion: SyncSender<bool>,
@@ -48,9 +52,13 @@ impl ActivationInbox {
     pub(crate) fn start(
         primary: PrimaryHandle,
         proxy: EventLoopProxy<UserEvent>,
+        quick_only: bool,
     ) -> std::io::Result<Self> {
         let (sender, receiver) = crossbeam_channel::bounded(MAX_PENDING_ACTIVATIONS);
         kettle_ctl::activation::spawn_server(primary, move |request| {
+            if !accepts_action(quick_only, &request) {
+                return false;
+            }
             let (completion, result) = std::sync::mpsc::sync_channel(1);
             let pending = Arc::new(AtomicBool::new(true));
             if sender
@@ -87,6 +95,16 @@ impl ActivationInbox {
 mod tests {
     use super::*;
     use kettle_ctl::activation::LaunchIdentity;
+
+    #[test]
+    fn explicit_option_launches_advertise_only_quick_terminal_toggles() {
+        let normal = ActivationRequest::new(None, LaunchIdentity::default());
+        let quick = ActivationRequest::for_quick_terminal(LaunchIdentity::default());
+        assert!(!accepts_action(true, &normal));
+        assert!(accepts_action(true, &quick));
+        assert!(accepts_action(false, &normal));
+        assert!(accepts_action(false, &quick));
+    }
 
     #[test]
     fn timed_out_activations_are_not_opened_when_the_inbox_drains() {

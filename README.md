@@ -10,6 +10,8 @@ Kettle is a GPU-accelerated terminal for macOS and Linux. It has tabs, splits,
 search, session restore and themes, and it shows the pictures, diagrams,
 documents and videos your coding agents make right in the chat.
 
+Use `kettle quick-terminal` for a persistent hotkey window; configure it in Settings → Quick terminal.
+
 ![Kettle on macOS with terminal output beside an SVG preview](docs/images/kettle-hero.png)
 
 Native macOS window, TokyoNight Night. [Capture notes](docs/images/README.md).

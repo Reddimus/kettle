@@ -735,6 +735,7 @@ impl App {
             UserEvent::CardsTipClaimed(_)
             | UserEvent::GpusDetected(_)
             | UserEvent::ShellsDetected
+            | UserEvent::ToggleQuickTerminal
             | UserEvent::Activation
             | UserEvent::PastedImageEncoded
             | UserEvent::NativeFullscreenExited { .. }

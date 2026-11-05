@@ -82,6 +82,7 @@ mod notifications;
 mod owned_dir;
 mod pane_partition;
 mod paste_image;
+mod quick_terminal;
 mod runtime_diagnostics;
 mod search_input;
 mod session;
@@ -366,6 +367,12 @@ pub struct Options {
     /// One-shot primary-election handle for bare-launch activation. The Kettle
     /// binary supplies this only when no earlier process accepted the launch.
     pub activation: Option<kettle_ctl::activation::PrimaryHandle>,
+    /// Start directly in the dedicated quick window after activation election.
+    pub quick_terminal: bool,
+    /// Desktop-issued Wayland activation capability for a cold quick launch.
+    pub quick_terminal_activation_token: Option<String>,
+    /// Explicit launcher options remain local; advertise only quick toggles.
+    pub activation_quick_only: bool,
     /// Run this argv in the first tab instead of the shell (`kettle -e …`).
     pub command: Option<Vec<String>>,
     /// Dropdown-parity: the bin crate's full version string (crate

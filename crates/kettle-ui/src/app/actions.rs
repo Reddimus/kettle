@@ -874,6 +874,11 @@ impl App {
             Action::ScaledZoom => {
                 self.toggle_zoom_with_scale(ws, Some(1.5));
             }
+            Action::ToggleQuickTerminal => {
+                // A dispatch temporarily checks its source window out of the map.
+                // Queue the global operation until the epilogue returns it.
+                let _ = self.proxy.send_event(UserEvent::ToggleQuickTerminal);
+            }
             Action::ToggleFullscreen => {
                 if let Some(w) = &ws.window {
                     w.set_fullscreen(if w.fullscreen().is_some() {

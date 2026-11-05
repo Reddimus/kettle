@@ -464,11 +464,21 @@ Interactive convenience alias for
 .BR "kettle update" .
 .
 .SH SUBCOMMANDS
+.TP
+.B kettle quick-terminal
+Toggle the dedicated quick terminal in the running instance, or start Kettle.
+Its tabs and splits keep running while hidden. Configure position (top, bottom,
+left, right, center), screen percentage (default 40), animation, autohide, and
+hotkey in Settings or with quick-terminal-* config keys. macOS and X11 register
+the configured global hotkey; on Wayland and Windows bind this command in the
+desktop shortcut settings. System Reduce Motion disables the slide.
+.PP
 The bare
 .B kettle
 command (above) is the GUI launcher. These subcommands are the
-non-interactive / agent control surface; each returns before any window or GPU
-work. See
+non-interactive / agent control surface, apart from quick-terminal, which
+starts the GUI when no instance is running. Other subcommands return before
+any window or GPU work. See
 .B docs/AGENT.md
 for the full reference and threat model.
 .TP

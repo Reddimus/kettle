@@ -96,6 +96,7 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PaletteIncreaseFontSize, IncreaseFontSize),
         (T::PaletteDecreaseFontSize, DecreaseFontSize),
         (T::PaletteResetFontSize, ResetFontSize),
+        (T::QuickTerminalToggle, ToggleQuickTerminal),
         (T::PaletteToggleFullscreen, ToggleFullscreen),
         (T::PaletteToggleBroadcastAll, ToggleBroadcastAll),
         (T::PaletteToggleBroadcastGroup, ToggleBroadcastGroup),
@@ -399,6 +400,7 @@ mod tests {
             ToggleBroadcastGroup,
             ToggleBroadcastWindow,
             ToggleBroadcastOff,
+            ToggleQuickTerminal,
             ToggleFullscreen,
             Reset,
             ClearHistory,
@@ -560,6 +562,7 @@ mod tests {
                 | ToggleBroadcastGroup
                 | ToggleBroadcastWindow
                 | ToggleBroadcastOff
+                | ToggleQuickTerminal
                 | ToggleFullscreen
                 | Reset
                 | ClearHistory

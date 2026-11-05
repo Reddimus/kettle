@@ -28,6 +28,7 @@ pub enum Key {
     Tab,
     /// Edit keys. They let a config bind `Cmd+Backspace`, which macOS uses
     /// for delete-to-line-start.
+    Escape,
     Backspace,
     Delete,
     F(u8),
@@ -103,6 +104,7 @@ impl Trigger {
             Key::End => "End".into(),
             Key::Enter => "Enter".into(),
             Key::Tab => "Tab".into(),
+            Key::Escape => "Escape".into(),
             Key::Backspace => "Backspace".into(),
             Key::Delete => "Delete".into(),
             Key::F(n) => format!("F{n}"),
@@ -498,6 +500,7 @@ pub enum Action {
     /// from the misnamed `ToggleBroadcastAll` which is
     /// actually per-tab.
     ToggleBroadcastWindow,
+    ToggleQuickTerminal,
     ToggleFullscreen,
     /// Full terminal reset (RIS, `\e c`) of the focused pane's terminal.
     /// Nothing is sent to the program running in it.
@@ -886,6 +889,7 @@ pub fn action_names() -> Vec<&'static str> {
         "broadcast-window",
         "toggle_broadcast_window",
         "toggle-broadcast-window",
+        "toggle_quick_terminal",
         "toggle_fullscreen",
         "full_screen",
         "reset",
@@ -1240,6 +1244,7 @@ impl Action {
             "group_tab_toggle" => ToggleGroupTab,
             "group_win_toggle" => ToggleGroupWindow,
 
+            "toggle_quick_terminal" => ToggleQuickTerminal,
             "toggle_fullscreen" | "full_screen" => ToggleFullscreen,
             "reset" => Reset,
             "clear_history" | "clear_scrollback" | "clear_buffer" => ClearHistory,
@@ -1383,6 +1388,7 @@ fn parse_key(s: &str) -> Option<Key> {
         "end" => Key::End,
         "enter" | "return" => Key::Enter,
         "tab" => Key::Tab,
+        "escape" | "esc" => Key::Escape,
         "backspace" | "bs" => Key::Backspace,
         "delete" | "del" => Key::Delete,
         "plus" => Key::Char('+'),

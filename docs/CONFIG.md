@@ -346,6 +346,50 @@ PowerShell to see your installed distro names.
 > instead of opening a shell. To get a Linux *login* shell, ask for it
 > inside the distro: `command = wsl.exe -d Ubuntu -- bash -l`.
 
+### Quick terminal
+
+`kettle quick-terminal` toggles a dedicated borderless window in the running
+instance over the private activation channel, or starts Kettle directly in that
+window. The first toggle creates it; later toggles reuse its tabs, splits and
+running programs. Normal windows keep their own workspace. The action
+`toggle_quick_terminal` is also in the command palette, the macOS View menu,
+and the keybind map, for example `keybind = ctrl+grave=toggle_quick_terminal`.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `quick-terminal-position` | `top` \| `bottom` \| `left` \| `right` \| `center` | `top` | Screen edge, or centered on the screen |
+| `quick-terminal-size` | integer percent, 1-100 | `40` | Top/bottom use this fraction of screen height and full width; left/right use this fraction of width and full height; center uses this fraction of both dimensions |
+| `quick-terminal-hotkey` | modified key chord, or `none` | unset | Examples: `ctrl+grave`, `cmd+escape`. Settings has a key-capture field; bare Delete/Backspace clears it and bare Esc cancels capture |
+| `quick-terminal-animation` | bool | `true` | Slide into view in 150 ms. System Reduce Motion or `reduce-motion = on` makes it instant, as does `false` |
+| `quick-terminal-autohide` | bool | `true` | Hide when another application gains focus. Switching to another Kettle window keeps it visible |
+
+Each show selects the screen under the pointer (the active screen on macOS),
+requests placement above normal windows and focuses the terminal. Toggling it
+again hides it and returns focus to the previous app or Kettle window. When you
+switch apps yourself, autohide keeps focus in the app you selected. Hidden tabs
+and splits keep running; the quick workspace is not saved into normal session
+restore. Position and size changes apply on the next show. Hotkey changes
+register on reload.
+
+macOS registers global shortcuts through Carbon `RegisterEventHotKey`, without
+Accessibility permission. X11 uses passive root-window `XGrabKey` registrations,
+including CapsLock and NumLock variants. An unavailable or already-taken chord
+shows a translated notice. macOS excludes the window from its Window menu and
+window cycling; Windows skips its taskbar entry and Alt-Tab and X11 requests skip-taskbar
+and skip-pager hints.
+
+On **Wayland and Windows**, set a desktop shortcut that runs
+`kettle quick-terminal`. A configured `quick-terminal-hotkey` logs once that it
+is not registered there. Wayland compositors control window placement,
+stacking, visibility and activation; screen-edge placement and sliding require
+compositor window rules where the compositor does not honor these requests.
+Desktop launchers should supply `XDG_ACTIVATION_TOKEN` (for a custom `.desktop`
+launcher, set `StartupNotify=true`); Kettle forwards this bounded token to the
+running instance to raise and focus the quick window. Without a desktop token,
+Wayland activation remains subject to the compositor's focus policy. Hiding
+requests minimization on Wayland. No extra global-shortcut service or
+Accessibility permission is required.
+
 ### Extended keys
 
 Both kebab-case and underscore spellings are accepted for every key in this
@@ -544,7 +588,7 @@ Keys: any single printable character is a valid key — letters `a`..`z`,
 (e.g. `ctrl+,` for `open_settings`). Plus the named keys: `f1`..`f12`,
 `up`/`down`/`left`/`right`, `page_up`/`page_down` (aliases `pageup`/`pagedown`,
 `prior`/`next`), `home`/`end`, `enter` (alias `return`), `tab`,
-`backspace` (alias `bs`), `delete` (alias `del`), and the symbolic
+`escape` (alias `esc`), `backspace` (alias `bs`), `delete` (alias `del`), and the symbolic
 names `plus`/`minus`/`equal` for `+`/`-`/`=`.
 
 GTK's accelerator syntax works too, unchanged from a Terminator config:
@@ -590,7 +634,7 @@ directions undo each other).
 
 **Window**: `new_window` (opens another window **in this process**, so
 tabs can move live between windows), `close_window`,
-`toggle_fullscreen`, `move_tab_to_new_window` (tear the focused tab out
+`toggle_fullscreen`, `toggle_quick_terminal`, `move_tab_to_new_window` (tear the focused tab out
 into its own window LIVE — running programs keep running; dragging a tab
 past the tab bar does the same with the mouse, Chromium-style: the live
 window rides the pointer, and dropping it on another

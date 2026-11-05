@@ -675,6 +675,46 @@ pub enum WindowState {
     Hidden,
 }
 
+/// Screen edge used by the dedicated quick terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuickTerminalPosition {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Center,
+}
+
+impl QuickTerminalPosition {
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "top" => Self::Top,
+            "bottom" => Self::Bottom,
+            "left" => Self::Left,
+            "right" => Self::Right,
+            "center" => Self::Center,
+            _ => return None,
+        })
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Center => "center",
+        }
+    }
+}
+
+/// A global chord must include a modifier and round-trip through Settings.
+pub fn parse_quick_terminal_hotkey(value: &str) -> Option<keybinds::Trigger> {
+    let trigger = keybinds::parse_trigger(value)?;
+    (!trigger.mods.is_empty()).then_some(trigger)
+}
+
 /// `gpu-power-preference`: which GPU wgpu should request the adapter from.
 /// Default is `Auto`: let wgpu / the platform pick the adapter unless the user
 /// pins a specific GPU. This is the least surprising cross-platform policy:
@@ -1556,6 +1596,11 @@ pub struct Config {
     /// `hide_on_lose_focus`): hide window when it loses focus.
     /// Quake-style behavior. winit hint; partial OS support.
     pub hide_on_lose_focus: bool,
+    pub quick_terminal_position: QuickTerminalPosition,
+    pub quick_terminal_size: u8,
+    pub quick_terminal_hotkey: Option<keybinds::Trigger>,
+    pub quick_terminal_animation: bool,
+    pub quick_terminal_autohide: bool,
     /// Terminator parity (terminatorlib/config.py:78
     /// `sticky`): show window on every workspace (X11 only;
     /// no-op on Wayland and most other platforms).
@@ -3078,6 +3123,11 @@ impl Default for Config {
             scroll_tabbar: true,
             tab_min_width: 120.0,
             hide_on_lose_focus: false,
+            quick_terminal_position: QuickTerminalPosition::Top,
+            quick_terminal_size: 40,
+            quick_terminal_hotkey: None,
+            quick_terminal_animation: true,
+            quick_terminal_autohide: true,
             sticky: false,
             hide_from_taskbar: false,
             backspace_binding: BackspaceBinding::AsciiDel,
@@ -3707,6 +3757,8 @@ impl Config {
         "geometry-hinting",
         "geometry_hinting",
         "hide-from-taskbar",
+        "quick-terminal-animation",
+        "quick-terminal-autohide",
         "hide-on-lose-focus",
         "hide_from_taskbar",
         "hide_on_lose_focus",
@@ -3853,6 +3905,9 @@ impl Config {
                 // the clamp range, or `--check-config` would pass a value the
                 // runtime changes. The runtime still clamps; the warning just
                 // makes the change visible.
+                "quick-terminal-position" => QuickTerminalPosition::parse(v).is_some(),
+                "quick-terminal-size" => v.parse::<u8>().is_ok_and(|n| (1..=100).contains(&n)),
+                "quick-terminal-hotkey" => v == "none" || parse_quick_terminal_hotkey(v).is_some(),
                 "font-size" => v.parse::<f32>().is_ok_and(|n| (5.0..=72.0).contains(&n)),
                 "font" => parse_font_description(v)
                     .is_some_and(|(_, size)| size.is_none_or(|n| (5.0..=72.0).contains(&n))),
@@ -5076,6 +5131,29 @@ impl Config {
                         && v.is_finite()
                     {
                         cfg.tab_min_width = v.clamp(40.0, 600.0);
+                    }
+                }
+                "quick-terminal-position" => {
+                    if let Some(position) = QuickTerminalPosition::parse(&e.value) {
+                        cfg.quick_terminal_position = position;
+                    }
+                }
+                "quick-terminal-size" => {
+                    if let Ok(size) = e.value.parse::<u8>() {
+                        cfg.quick_terminal_size = size.clamp(1, 100);
+                    }
+                }
+                "quick-terminal-hotkey" => {
+                    cfg.quick_terminal_hotkey = parse_quick_terminal_hotkey(&e.value);
+                }
+                "quick-terminal-animation" => {
+                    if let Some(value) = parse_bool(&e.value) {
+                        cfg.quick_terminal_animation = value;
+                    }
+                }
+                "quick-terminal-autohide" => {
+                    if let Some(value) = parse_bool(&e.value) {
+                        cfg.quick_terminal_autohide = value;
                     }
                 }
                 "hide-on-lose-focus" | "hide_on_lose_focus" => {
@@ -13602,5 +13680,62 @@ mod chrome_state_tests {
             ]
         );
         assert_eq!(loaded.config.font_size, 15.0);
+    }
+}
+
+#[cfg(test)]
+mod quick_terminal_tests {
+    use super::*;
+    #[test]
+    fn defaults_and_all_quick_terminal_settings_parse() {
+        let d = Config::default();
+        assert_eq!(d.quick_terminal_position, QuickTerminalPosition::Top);
+        assert_eq!(d.quick_terminal_size, 40);
+        assert!(d.quick_terminal_hotkey.is_none());
+        assert!(d.quick_terminal_animation && d.quick_terminal_autohide);
+        for position in ["top", "bottom", "left", "right", "center"] {
+            let text = format!(
+                "quick-terminal-position = {position}\nquick-terminal-size = 63\nquick-terminal-hotkey = cmd+escape\nquick-terminal-animation = false\nquick-terminal-autohide = false\n"
+            );
+            let c = Config::parse_text(&text);
+            assert!(Config::detect_malformed_values(&text).is_empty());
+            assert!(Config::parse_collect(&text).1.is_empty());
+            assert_eq!(c.quick_terminal_position.token(), position);
+            assert_eq!(c.quick_terminal_size, 63);
+            assert_eq!(
+                c.quick_terminal_hotkey.unwrap().label(),
+                keybinds::parse_trigger("cmd+escape").unwrap().label()
+            );
+            assert!(!c.quick_terminal_animation);
+            assert!(!c.quick_terminal_autohide);
+        }
+        assert!(
+            Config::parse_text("quick-terminal-hotkey = ctrl+grave")
+                .quick_terminal_hotkey
+                .is_some()
+        );
+        assert!(
+            Config::parse_text("quick-terminal-hotkey = none")
+                .quick_terminal_hotkey
+                .is_none()
+        );
+        assert_eq!(
+            Config::parse_text("quick-terminal-size = 0").quick_terminal_size,
+            1
+        );
+        for text in [
+            "quick-terminal-size = 101",
+            "quick-terminal-size = -1",
+            "quick-terminal-position = middle",
+            "quick-terminal-hotkey = grave",
+            "quick-terminal-hotkey = ctrl+typo",
+            "quick-terminal-animation = maybe",
+        ] {
+            assert!(!Config::detect_malformed_values(text).is_empty(), "{text}");
+        }
+        assert_eq!(
+            Action::from_name("toggle_quick_terminal"),
+            Some(Action::ToggleQuickTerminal)
+        );
     }
 }

@@ -4740,3 +4740,25 @@ coordinates. Config diagnostics retain tokenizer source lines and raw key names,
 exclude values, and cap the notice at three entries plus a remaining count.
 Tab accessibility uses the renderer's `TabBar` segments and control rectangles
 on either axis, with pane anchors to reject stale actions after tabs close.
+
+## Quick terminal
+
+`kettle-ui::quick_terminal` owns a pure visibility/focus-return model and screen
+geometry. `App` owns one optional quick-window sequence alongside its regular
+windows, so hiding preserves the same Mux and PTYs. The event-loop integration
+reuses window construction, renderer initialization, focus reports and frame
+scheduling. A 150 ms slide uses the shared system motion preference; no worker
+mutates window geometry. The quick workspace is excluded from normal saved
+sessions.
+
+`kettle quick-terminal` uses `kettle-ctl` activation with a validated
+`toggle_quick_terminal` action and the existing per-launch idempotency key,
+private endpoint, bounded queue and confirmation timeout. A lost reply cannot
+toggle twice. A bounded desktop-issued Wayland activation token travels only
+with a quick toggle and is consumed through the existing Wayland bridge; it is
+never logged. An expired or absent token cannot bypass compositor focus policy.
+A new primary starts directly in its quick window. Native hotkey
+registrations are scoped resources: Carbon handlers on the macOS main thread,
+and an X11 connection whose passive grabs end when the registration drops.
+Native callbacks only enqueue an event-loop toggle. Wayland and Windows use
+desktop shortcuts invoking the CLI.

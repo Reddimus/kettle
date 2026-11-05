@@ -175,10 +175,14 @@ impl App {
         }
         // Include the checked-out window; the save budget prefers recently
         // focused nonempty windows without restricting window creation.
-        let mut wins: Vec<(u64, crate::session::SWindow)> =
-            vec![(ws.seq, Self::snapshot_window(ws))];
-        for w in self.windows.values() {
-            wins.push((w.seq, Self::snapshot_window(w)));
+        let mut wins: Vec<(u64, crate::session::SWindow)> = Vec::new();
+        for window in std::iter::once(ws).chain(self.windows.values()) {
+            if self.quick_terminal.model.window != Some(window.seq) {
+                wins.push((window.seq, Self::snapshot_window(window)));
+            }
+        }
+        if wins.is_empty() {
+            return;
         }
         let windows = session_windows_for_save(wins, &self.window_focus_order);
         // Mirror the first retained window for older readers.

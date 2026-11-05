@@ -8,6 +8,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- A quick terminal: `kettle quick-terminal`, a palette/menu/keybind action, or
+  `quick-terminal-hotkey` (registered natively on macOS and X11) slides a
+  dedicated window in from a screen edge. Its tabs and splits persist while
+  hidden; it returns focus when toggled away, hides when another app is
+  focused, respects Reduce Motion, and has its own Settings group.
 - Failed commands keep their pane and final output with an exit-code banner.
   Restart with Enter or its button; close with Escape, the Close button, or
   the close-pane shortcut. `exit-behavior` also supports closing or holding

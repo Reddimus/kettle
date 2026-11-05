@@ -1745,6 +1745,25 @@ impl App {
         // to `None` via `to_kkey`, so we simply stay in capture until a real key
         // arrives. Any other chord is bound to the action live AND appended to
         // the config file so it survives restart.
+        if capturing && cats[cat].fields[fld].key == "quick-terminal-hotkey" {
+            use crate::settings::HotkeyCapture;
+            match crate::settings::capture_hotkey(to_kkey(key), to_mods(ws.mods)) {
+                HotkeyCapture::Pending => return,
+                HotkeyCapture::Cancel => {}
+                HotkeyCapture::Value(trigger) => {
+                    let value =
+                        trigger.map_or_else(|| "none".to_string(), |trigger| trigger.label());
+                    if self.persist_pref("quick-terminal-hotkey", &value) {
+                        self.cfg.quick_terminal_hotkey = trigger;
+                        self.reconcile_quick_hotkey();
+                    }
+                }
+            }
+            if let Some(nav) = ws.settings_nav.as_mut() {
+                nav.capturing = false;
+            }
+            return;
+        }
         if capturing {
             if matches!(key, Key::Named(NamedKey::Escape)) {
                 if let Some(n) = ws.settings_nav.as_mut() {

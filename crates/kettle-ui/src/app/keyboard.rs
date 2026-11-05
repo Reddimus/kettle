@@ -781,6 +781,7 @@ pub(super) fn toggles_once_per_press(action: &Action) -> bool {
         Action::ToggleViMode
             | Action::ToggleZoom
             | Action::ScaledZoom
+            | Action::ToggleQuickTerminal
             | Action::ToggleFullscreen
             | Action::ToggleBroadcastAll
             | Action::ToggleBroadcastGroup
@@ -1258,6 +1259,7 @@ pub(super) fn to_kkey(key: &Key) -> Option<KKey> {
             // character " ", so without this the `ctrl+shift+space` vi-mode
             // default, and any `space` chord in a config, never matched.
             NamedKey::Space => KKey::Char(' '),
+            NamedKey::Escape => KKey::Escape,
             // Without these two the `cmd+backspace` default parses out of the
             // config and then never matches a real key press.
             NamedKey::Backspace => KKey::Backspace,

@@ -355,7 +355,9 @@ impl App {
         // A tear-off window opens Normal (it must be visible at the drop
         // point); a fresh window honors the configured window-state except
         // Hidden (an invisible NewWindow helps nobody).
+        let is_quick = matches!(open, WindowOpen::Quick);
         let state = match (&open, self.cfg.window_state) {
+            (WindowOpen::Quick, _) => kettle_config::WindowState::Hidden,
             (WindowOpen::AdoptTab { .. }, _) | (WindowOpen::Restore(_), _) => {
                 kettle_config::WindowState::Normal
             }
@@ -396,6 +398,9 @@ impl App {
         if let Some(s) = size {
             attrs = attrs.with_inner_size(s);
         }
+        if is_quick {
+            attrs = self.quick_window_attributes(attrs, event_loop);
+        }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -404,6 +409,9 @@ impl App {
             }
         };
         self.apply_post_create(&window);
+        if is_quick {
+            crate::quick_terminal::native::configure(&window);
+        }
         let native_material =
             crate::native_material::NativeMaterial::install(&window, &self.cfg, self.proxy.clone());
         let size = window.inner_size();
@@ -478,8 +486,13 @@ impl App {
         let area = self.area(&ws);
         let (cols, rows) = self.grid_of(&ws, area);
         let geometry = self.pty_geometry_for_grid(&ws, cols, rows);
+        let fresh_cwd = match &open {
+            WindowOpen::Fresh { cwd } => cwd.clone(),
+            _ => None,
+        };
         match open {
-            WindowOpen::Fresh { cwd } => {
+            WindowOpen::Fresh { .. } | WindowOpen::Quick => {
+                let cwd = fresh_cwd;
                 if let Err(e) = ws.mux.new_tab_with_geometry(
                     &self.cfg,
                     geometry,
@@ -559,7 +572,9 @@ impl App {
         if let (Some(bridge), Some(window)) = (self.wayland.as_mut(), ws.window.clone()) {
             bridge.attach_drag_carrier(ws.seq, window);
         }
-        self.start_window_frames(&mut ws);
+        if !is_quick {
+            self.start_window_frames(&mut ws);
+        }
         self.windows.insert(seq, ws);
         Ok(seq)
     }
@@ -2474,7 +2489,10 @@ pub(super) struct TornDrag {
 /// How a new in-process window starts life.
 pub(super) enum WindowOpen {
     /// A fresh window with one shell tab (`Action::NewWindow`).
-    Fresh { cwd: Option<String> },
+    Fresh {
+        cwd: Option<String>,
+    },
+    Quick,
     /// Adopt a tab detached from another window — the live tab move /
     /// tear-off. PTYs keep running; nothing respawns.
     AdoptTab {
@@ -2943,6 +2961,11 @@ impl App {
             return;
         }
         if take_window_close_request(&mut self.pending_window_closes, seq) {
+            if self.quick_terminal.model.window == Some(seq) {
+                self.quick_terminal.model = Default::default();
+                self.quick_terminal.slide = None;
+                self.quick_terminal.focus_check = None;
+            }
             self.close_update_toast_window(seq);
             // A dying window that is the torn window or the manual-follow
             // capture holder takes its drag with it. Abandon eagerly (clears
@@ -3034,7 +3057,11 @@ impl App {
                 continue;
             }
             let cwd = request.request.cwd().map(str::to_string);
-            let opened = if request.request.focuses_existing() {
+            let opened = if request.request.toggles_quick_terminal() {
+                self.quick_terminal.activation_token =
+                    request.request.activation_token().map(str::to_string);
+                self.toggle_quick_terminal(event_loop)
+            } else if request.request.focuses_existing() {
                 self.focus_or_open_window(event_loop, cwd)
             } else {
                 self.open_window(event_loop, WindowOpen::Fresh { cwd }, None, None)
@@ -3043,6 +3070,7 @@ impl App {
             if opened {
                 log::info!("bare-launch activation activated a window");
                 if !request.request.focuses_existing()
+                    && !request.request.toggles_quick_terminal()
                     && let Some(recorder) = self.recorder.as_mut()
                 {
                     recorder.record_marker("kettle:activation_window");

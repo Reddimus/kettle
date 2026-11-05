@@ -2516,3 +2516,45 @@ args = [{ name = "title", type = "str" }]
 
 [messages.a11y_new_tab_menu]
 context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+
+[messages.quick_terminal_toggle]
+context = "crates/kettle-ui: Command palette and macOS View menu action. Toggles the dedicated quick terminal."
+
+[messages.settings_category_quick_terminal]
+context = "crates/kettle-ui: Settings group for the dedicated hotkey window."
+
+[messages.quick_terminal_hotkey]
+context = "crates/kettle-ui: Settings key-capture field label."
+
+[messages.quick_terminal_position]
+context = "crates/kettle-ui: Settings screen edge choice label."
+
+[messages.quick_terminal_size]
+context = "crates/kettle-ui: Settings screen percentage label."
+
+[messages.quick_terminal_animation]
+context = "crates/kettle-ui: Settings slide animation toggle label."
+
+[messages.quick_terminal_autohide]
+context = "crates/kettle-ui: Settings auto-hide toggle label."
+
+[messages.quick_terminal_center]
+context = "crates/kettle-ui: Settings centered screen position choice."
+
+[messages.quick_terminal_hotkey_description]
+context = "crates/kettle-ui: Settings global hotkey description. Keep the CLI command verbatim."
+
+[messages.quick_terminal_position_description]
+context = "crates/kettle-ui: Settings position description."
+
+[messages.quick_terminal_size_description]
+context = "crates/kettle-ui: Settings size description."
+
+[messages.quick_terminal_animation_description]
+context = "crates/kettle-ui: Settings animation description."
+
+[messages.quick_terminal_autohide_description]
+context = "crates/kettle-ui: Settings autohide description."
+
+[messages.quick_terminal_hotkey_failed]
+context = "crates/kettle-ui: Notice when Carbon or X11 rejects global hotkey registration."

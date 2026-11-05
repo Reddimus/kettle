@@ -88,7 +88,8 @@ fn complete_structure_in_english_and_spanish() {
                 "Reset Font Size",
                 "|",
                 "Zoom Pane",
-                "Enter Full Screen"
+                "Enter Full Screen",
+                "Toggle quick terminal"
             ],
             vec!["Next Tab", "Previous Tab"],
         ]
@@ -138,7 +139,8 @@ fn complete_structure_in_english_and_spanish() {
                 "Restablecer el tamaño de letra",
                 "|",
                 "Ampliar panel",
-                "Entrar en pantalla completa"
+                "Entrar en pantalla completa",
+                "Mostrar u ocultar la terminal rápida"
             ],
             vec!["Pestaña siguiente", "Pestaña anterior"],
         ]
@@ -199,6 +201,7 @@ fn complete_structure_in_english_and_spanish() {
             Action::ResetFontSize,
             Action::ToggleZoom,
             Action::ToggleFullscreen,
+            Action::ToggleQuickTerminal,
             Action::NextTab,
             Action::PrevTab,
         ]
