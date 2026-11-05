@@ -13640,9 +13640,9 @@ mod chrome_state_tests {
                 expected
             );
         }
-        assert!(!Config::detect_malformed_values("exit-behavior = clsoe").is_empty());
+        assert!(!Config::detect_malformed_values("exit-behavior = linger").is_empty());
         assert_eq!(
-            Config::parse_text("exit-behavior = clsoe").exit_action,
+            Config::parse_text("exit-behavior = linger").exit_action,
             ExitAction::CloseOnSuccess
         );
         assert_eq!(
