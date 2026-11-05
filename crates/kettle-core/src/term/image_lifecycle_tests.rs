@@ -1206,13 +1206,81 @@ fn physical_placement_eviction_cascades_before_parent_key_reuse() {
 }
 
 #[test]
+fn relative_depth_admission_preserves_new_and_replaced_placements() {
+    for synchronized in [false, true] {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b_Ga=T,i=1,p=1,q=2,f=24,s=1,v=1,C=1;AAAA\x1b\\");
+        for placement in 2..=9 {
+            harness.feed(
+                format!(
+                    "\x1b_Ga=p,i=1,p={placement},P=1,Q={},q=2\x1b\\",
+                    placement - 1
+                )
+                .as_bytes(),
+            );
+        }
+        assert_eq!(harness.relatives.lock().unwrap().len(), 8);
+        harness.feed(b"\x1b_Ga=p,i=1,p=20,P=1,Q=1,q=2\x1b\\");
+        for placement in [10, 20, 1] {
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(format!("\x1b_Ga=p,i=1,p={placement},P=1,Q=9\x1b\\").as_bytes());
+            if synchronized {
+                harness.feed(b"\x1b[?2026l");
+            }
+            let replies = ordinary_reply_bytes(&harness);
+            assert_eq!(replies.len(), 1);
+            assert!(
+                replies[0].contains(";EINVAL:"),
+                "over-depth placement accepted: {replies:?}"
+            );
+        }
+        let relatives = harness.relatives.lock().unwrap();
+        assert!(!relatives.contains_key(&(1, 10)));
+        assert_eq!(relatives[&(1, 20)].parent_placement, 1);
+        assert_eq!(harness.images.lock().unwrap()[0].placement_id, 1);
+    }
+}
+
+#[test]
+fn relative_depth_replacement_preserves_descendant_visibility() {
+    let mut harness = SyncGraphicsHarness::new();
+    harness.feed(b"\x1b_Ga=T,i=1,p=1,q=2,f=24,s=1,v=1,C=1;AAAA\x1b\\");
+    for placement in 2..=9 {
+        harness.feed(
+            format!(
+                "\x1b_Ga=p,i=1,p={placement},P=1,Q={},q=2\x1b\\",
+                placement - 1
+            )
+            .as_bytes(),
+        );
+    }
+    harness.feed(b"\x1b_Ga=p,i=1,p=20,P=1,Q=1,q=2\x1b\\");
+    harness.feed(b"\x1b_Ga=p,i=1,p=2,P=1,Q=20\x1b\\");
+    let replies = ordinary_reply_bytes(&harness);
+    assert!(
+        replies[0].contains(";EINVAL:"),
+        "replacement made a descendant too deep: {replies:?}"
+    );
+    assert_eq!(
+        harness.relatives.lock().unwrap()[&(1, 2)].parent_placement,
+        1
+    );
+}
+
+#[test]
 fn terminal_delete_cascades_through_the_full_relative_budget() {
     let mut harness = SyncGraphicsHarness::new();
     harness.feed(&kitty_image(1, 1, 1, 1));
     let cap = kettle_vt::GraphicsLimits::default().placements as u32;
     for placement in 2..=cap + 1 {
-        harness
-            .feed(format!("\x1b_Ga=p,i=1,p={placement},P=1,Q={}\x1b\\", placement - 1).as_bytes());
+        let parent = if (placement - 2) % 8 == 0 {
+            1
+        } else {
+            placement - 1
+        };
+        harness.feed(format!("\x1b_Ga=p,i=1,p={placement},P=1,Q={parent}\x1b\\").as_bytes());
     }
     assert_eq!(harness.relatives.lock().unwrap().len(), cap as usize);
 

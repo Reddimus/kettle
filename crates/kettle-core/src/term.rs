@@ -3220,13 +3220,14 @@ fn commit_local_geometry(
     desired: PtyGeometry,
     grid_options: Option<TermConfig>,
 ) {
-    commit_local_geometry_inner(term, geometry, None, desired, grid_options);
+    commit_local_geometry_inner(term, geometry, None, None, desired, grid_options);
 }
 
 fn commit_local_geometry_inner(
     term: &SharedTerm,
     geometry: &Arc<Mutex<VersionedPtyGeometry>>,
     prompts: Option<&Mutex<std::collections::VecDeque<u64>>>,
+    correlation: Option<&Mutex<command_correlation::CommandCorrelation>>,
     desired: PtyGeometry,
     grid_options: Option<TermConfig>,
 ) {
@@ -3261,6 +3262,13 @@ fn commit_local_geometry_inner(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         geometry.geometry = desired;
         geometry.generation = geometry.generation.wrapping_add(1);
+    }
+    if grid_resized
+        && old_columns != desired.columns
+        && let Some(correlation) = correlation
+        && let Ok(mut state) = correlation.lock()
+    {
+        state.invalidate_capture();
     }
     if grid_resized
         && old_columns != desired.columns
@@ -3352,6 +3360,7 @@ pub struct CommandFinished {
 pub struct CorrelatedCommandFinished {
     pub command: CommandFinished,
     pub token: kettle_vt::CommandToken,
+    /// Physical output row, or `u64::MAX` when reflow made capture unavailable.
     pub start_line: u64,
 }
 
@@ -6515,7 +6524,7 @@ impl Terminal {
                                                             image_id: entry.parent_img,
                                                             placement_id: entry.parent_placement,
                                                         },
-                                                        8,
+                                                        crate::images::MAX_RELATIVE_DEPTH - 1,
                                                     )?;
                                                     let (abs_line, col) = relative_origin(
                                                         parent_abs,
@@ -8187,7 +8196,7 @@ impl Terminal {
                     image_id: e.parent_img,
                     placement_id: e.parent_placement,
                 },
-                8,
+                crate::images::MAX_RELATIVE_DEPTH - 1,
             ) else {
                 continue;
             };
@@ -8376,6 +8385,7 @@ impl Terminal {
             &self.term,
             &self.geometry,
             Some(&self.prompts),
+            Some(&self.command_correlation),
             desired,
             grid_options,
         );
@@ -10241,9 +10251,14 @@ fn apply_graphics_chunk_at(
                         placement_id: placement,
                     }),
                 );
-                if resolver.has_cycle(PlacementKey {
-                    image_id: id,
-                    placement_id: placement,
+                if proposed.keys().any(|&(image_id, placement_id)| {
+                    resolver.exceeds_depth(
+                        PlacementKey {
+                            image_id,
+                            placement_id,
+                        },
+                        crate::images::MAX_RELATIVE_DEPTH,
+                    )
                 }) {
                     return Err(GraphicsAdmissionError::InvalidGeometry);
                 }

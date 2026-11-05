@@ -192,6 +192,8 @@ pub fn resolve_chain(
     Some(relative_origin(base.0, base.1, h, v))
 }
 
+pub(crate) const MAX_RELATIVE_DEPTH: u32 = 8;
+
 /// A metadata-only snapshot of placement origins and relative parent edges.
 #[derive(Default)]
 pub(crate) struct RelativeResolver {
@@ -266,8 +268,8 @@ impl RelativeResolver {
             .or_insert(key.placement_id);
     }
 
-    pub(crate) fn has_cycle(&self, mut parent: PlacementKey) -> bool {
-        let mut seen = HashSet::new();
+    pub(crate) fn exceeds_depth(&self, mut parent: PlacementKey, max_depth: u32) -> bool {
+        let mut depth = 0;
         loop {
             if parent.placement_id == 0 {
                 let Some(&placement_id) = self
@@ -282,12 +284,13 @@ impl RelativeResolver {
             if self.origins.contains_key(&parent) {
                 return false;
             }
-            if !seen.insert(parent) {
-                return true;
-            }
             let Some(&(grandparent, _, _)) = self.parents.get(&parent) else {
                 return false;
             };
+            if depth == max_depth {
+                return true;
+            }
+            depth += 1;
             parent = grandparent;
         }
     }

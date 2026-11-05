@@ -1,3 +1,61 @@
+#[test]
+fn column_reflow_invalidates_active_and_undrained_command_capture() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut terminal = Terminal::new(
+        &["/bin/sh".into(), "-c".into(), "read ready".into()],
+        None,
+        100,
+        80,
+        24,
+        8,
+        16,
+        false,
+        CursorShape::Block,
+        None,
+        tx,
+        Arc::new(|| {}),
+    )
+    .expect("command capture fixture");
+    let at = std::time::Instant::now();
+    for finished in [false, true] {
+        terminal
+            .try_resize_geometry(PtyGeometry::new(80, 24, 640, 384))
+            .unwrap();
+        let token = kettle_vt::CommandToken::parse(&[b'a'; 32]).unwrap();
+        {
+            let mut term = terminal.term.lock().unwrap();
+            let mut processor: Processor = Processor::new();
+            processor.advance(&mut *term, b"\x1b[2J\x1b[H");
+            processor.advance(&mut *term, &[b'x'; 60]);
+            processor.advance(&mut *term, b"\r\noutput");
+        }
+        {
+            let mut state = terminal.command_correlation.lock().unwrap();
+            state.arm(token);
+            assert!(state.start(token, at, 1));
+            if finished {
+                assert!(state.finish(Some(token), 1, Some(0), at));
+            }
+        }
+        terminal
+            .try_resize_geometry(PtyGeometry::new(40, 24, 320, 384))
+            .unwrap();
+        assert_eq!(
+            terminal.correlated_command_start_line(token),
+            Some(u64::MAX),
+            "reflow must make command output unavailable"
+        );
+        let mut state = terminal.command_correlation.lock().unwrap();
+        if !finished {
+            assert!(state.finish(Some(token), 1, Some(0), at));
+        }
+        let events = state.drain();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_line, u64::MAX);
+        assert_eq!(events[0].command.exit_code, Some(0));
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn native_resize_observes_committed_geometry_and_failure_is_retryable() {

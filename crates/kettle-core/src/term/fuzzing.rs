@@ -256,7 +256,7 @@ impl SyncGraphicsHarness {
             scrolling_history: history,
             ..TermConfig::default()
         });
-        commit_local_geometry_inner(&self.term, &self.geometry, None, desired, options);
+        commit_local_geometry_inner(&self.term, &self.geometry, None, None, desired, options);
         if grid_changed {
             let oldest = self
                 .term
