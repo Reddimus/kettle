@@ -405,6 +405,16 @@ fn bash_ignores_posix_env(program: &Path) -> bool {
         )
 }
 
+#[cfg(unix)]
+fn bash_env_option(cmd: &CommandBuilder, variable: &str, option: &[u8]) -> bool {
+    cmd.get_env(variable).is_some_and(|value| {
+        value
+            .as_encoded_bytes()
+            .split(|byte| *byte == b':')
+            .any(|entry| entry == option)
+    })
+}
+
 /// Add `startup` to `cmd`, the command a pane runs. `explicit` is the
 /// program a `command` naming just a shell runs, and `None` when the pane
 /// runs the user's shell, which `cmd` then finds as it will at spawn. A
@@ -440,7 +450,19 @@ pub(crate) fn apply(cmd: &mut CommandBuilder, explicit: Option<&str>, startup: &
                 let Some(invocation) = BashInvocation::parse(cmd) else {
                     return;
                 };
-                if bash_ignores_posix_env(&program) {
+                if bash_ignores_posix_env(&program)
+                    || cmd.get_env("POSIXLY_CORRECT").is_some()
+                    || bash_env_option(cmd, "SHELLOPTS", b"posix")
+                {
+                    return;
+                }
+                let bashrc = directory.join("bashrc");
+                // Do not borrow ENV or enable POSIX mode when the startup file
+                // is already unavailable. O_NONBLOCK also rejects FIFOs safely.
+                if !open_without_waiting(&bashrc)
+                    .and_then(|file| file.metadata())
+                    .is_ok_and(|metadata| metadata.is_file())
+                {
                     return;
                 }
                 let original = cmd.get_env("ENV").map(OsStr::to_owned);
@@ -448,7 +470,12 @@ pub(crate) fn apply(cmd: &mut CommandBuilder, explicit: Option<&str>, startup: &
                     "KETTLE_BASH_ENV_SET",
                     if original.is_some() { "1" } else { "" },
                 );
-                cmd.env("KETTLE_BASH_ENV", original.unwrap_or_default());
+                cmd.env("KETTLE_BASH_USER_ENV", original.unwrap_or_default());
+                let inherit_errexit = bash_env_option(cmd, "BASHOPTS", b"inherit_errexit");
+                cmd.env(
+                    "KETTLE_BASH_INHERIT_ERREXIT",
+                    if inherit_errexit { "1" } else { "" },
+                );
                 cmd.env(
                     "KETTLE_BASH_NOPROFILE",
                     if invocation.noprofile { "1" } else { "" },
@@ -459,7 +486,10 @@ pub(crate) fn apply(cmd: &mut CommandBuilder, explicit: Option<&str>, startup: &
                 } else {
                     cmd.env_remove("KETTLE_BASH_RCFILE");
                 }
-                cmd.env("ENV", directory.join("bashrc"));
+                // Bash expands ENV as shell text, but does not re-expand the
+                // result of this parameter expansion as shell syntax.
+                cmd.env("KETTLE_BASH_ENV", bashrc);
+                cmd.env("ENV", "${KETTLE_BASH_ENV}");
                 let argv = cmd.get_argv_mut();
                 if argv.is_empty() {
                     argv.push(program.clone().into_os_string());
@@ -968,12 +998,182 @@ mod tests {
 mod automatic_tests {
     use super::*;
 
-    #[test]
-    fn automatic_bash_uses_env_and_keeps_login_flags() {
+    fn bash_startup_fixture() -> (kettle_test_support::PrivateTempDir, ShellStartup) {
+        let temp = kettle_test_support::private_tempdir("kettle-bash-startup-");
+        std::fs::write(temp.join("bashrc"), "").unwrap();
         let startup = ShellStartup {
-            integration: Some("/private/startup".into()),
+            integration: Some(temp.path().to_path_buf()),
             ..Default::default()
         };
+        (temp, startup)
+    }
+
+    fn regression_bash() -> Option<&'static str> {
+        let bash = if cfg!(target_os = "macos") {
+            "/opt/homebrew/bin/bash"
+        } else {
+            "/bin/bash"
+        };
+        if Path::new(bash).is_file() {
+            Some(bash)
+        } else {
+            eprintln!("modern Bash not installed; native regression skipped");
+            None
+        }
+    }
+
+    fn regression_launch(cmd: &CommandBuilder, script: &str) -> std::process::Output {
+        std::process::Command::new(&cmd.get_argv()[0])
+            .args(&cmd.get_argv()[1..])
+            .args(["-ic", script])
+            .env_clear()
+            .envs(cmd.iter_full_env_as_str())
+            .current_dir(cmd.get_cwd().unwrap())
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn regression_bash_env_path_is_not_reexpanded() {
+        let Some(bash) = regression_bash() else {
+            return;
+        };
+        let temp = kettle_test_support::private_tempdir("kettle-bash-env-");
+        for name in ["literal $USER", "literal $(touch x)"] {
+            let directory = temp.join(name);
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("bashrc"), "set +o posix\nunset ENV KETTLE_BASH_ENV KETTLE_BASH_ENV_SET\nprintf startup-loaded\n").unwrap();
+            let mut cmd = CommandBuilder::new(bash);
+            cmd.env_clear();
+            cmd.env("HOME", temp.path());
+            cmd.env("PATH", "/usr/bin:/bin");
+            cmd.env("USER", "expanded-user");
+            cmd.cwd(temp.path());
+            apply(
+                &mut cmd,
+                Some(bash),
+                &ShellStartup {
+                    integration: Some(directory),
+                    ..Default::default()
+                },
+            );
+            let output = regression_launch(&cmd, "[[ ! -o posix ]] || exit 61; exit 0");
+            assert!(!temp.join("x").exists(), "ENV executed directory syntax");
+            assert!(output.status.success(), "{name}: {:?}", output);
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("startup-loaded"),
+                "{name}: {:?}",
+                output
+            );
+        }
+    }
+
+    #[test]
+    fn regression_bash_missing_env_file_keeps_native_startup() {
+        let Some(bash) = regression_bash() else {
+            return;
+        };
+        let temp = kettle_test_support::private_tempdir("kettle-bash-missing-");
+        std::fs::write(temp.join(".bashrc"), "printf native-startup\n").unwrap();
+        let mut cmd = CommandBuilder::new(bash);
+        cmd.env_clear();
+        cmd.env("HOME", temp.path());
+        cmd.env("PATH", "/usr/bin:/bin");
+        cmd.env("ENV", "/original/env");
+        cmd.cwd(temp.path());
+        let before = cmd.clone();
+        apply(
+            &mut cmd,
+            Some(bash),
+            &ShellStartup {
+                integration: Some(temp.join("missing")),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            cmd, before,
+            "an unavailable startup file must leave Bash untouched"
+        );
+        let output = regression_launch(
+            &cmd,
+            "[[ ! -o posix && $ENV == /original/env ]] || exit 62; exit 0",
+        );
+        assert!(output.status.success(), "{:?}", output);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("native-startup"));
+    }
+
+    #[test]
+    fn regression_bash_inherited_posix_mode_is_left_untouched() {
+        let Some(bash) = regression_bash() else {
+            return;
+        };
+        let temp = kettle_test_support::private_tempdir("kettle-bash-posix-");
+        std::fs::write(temp.join("bashrc"), "set +o posix\nprintf wrong-startup\n").unwrap();
+        let user_env = temp.join("user-env");
+        std::fs::write(&user_env, "[[ -o posix ]] || exit 63; printf user-env\n").unwrap();
+        for (name, value) in [
+            ("POSIXLY_CORRECT", "1"),
+            ("POSIXLY_CORRECT", ""),
+            ("SHELLOPTS", "braceexpand:posix:hashall"),
+        ] {
+            let mut cmd = CommandBuilder::new(bash);
+            cmd.env_clear();
+            cmd.env("HOME", temp.path());
+            cmd.env("PATH", "/usr/bin:/bin");
+            cmd.env("ENV", &user_env);
+            cmd.env(name, value);
+            cmd.cwd(temp.path());
+            let before = cmd.clone();
+            apply(
+                &mut cmd,
+                Some(bash),
+                &ShellStartup {
+                    integration: Some(temp.path().to_path_buf()),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(cmd, before, "{name}={value} must be left alone");
+            let output = regression_launch(&cmd, "[[ -o posix ]] || exit 64; exit 0");
+            assert!(output.status.success(), "{:?}", output);
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "user-env");
+        }
+    }
+
+    #[test]
+    fn regression_bash_records_inherited_inherit_errexit() {
+        let temp = kettle_test_support::private_tempdir("kettle-bash-options-");
+        std::fs::write(temp.join("bashrc"), "").unwrap();
+        for (bashopts, expected) in [
+            (None, ""),
+            (Some(""), ""),
+            (Some("inherit_errexit"), "1"),
+            (Some("extglob:inherit_errexit:nullglob"), "1"),
+            (Some("not_inherit_errexit"), ""),
+        ] {
+            let mut cmd = CommandBuilder::new("/custom/bash");
+            cmd.env_clear();
+            if let Some(value) = bashopts {
+                cmd.env("BASHOPTS", value);
+            }
+            apply(
+                &mut cmd,
+                Some("/custom/bash"),
+                &ShellStartup {
+                    integration: Some(temp.path().to_path_buf()),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                cmd.get_env("KETTLE_BASH_INHERIT_ERREXIT"),
+                Some(OsStr::new(expected)),
+                "{bashopts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_bash_uses_env_and_keeps_login_flags() {
+        let (_temp, startup) = bash_startup_fixture();
         for flags in [
             vec![],
             vec!["-l"],
@@ -998,10 +1198,7 @@ mod automatic_tests {
             assert_eq!(cmd.get_argv()[1], OsStr::new("--posix"));
             let login = flags.contains(&"-l") || flags.contains(&"--login");
             assert_eq!(cmd.get_argv().iter().any(|arg| arg == "--login"), login);
-            assert_eq!(
-                cmd.get_env("ENV"),
-                Some(OsStr::new("/private/startup/bashrc"))
-            );
+            assert_eq!(cmd.get_env("ENV"), Some(OsStr::new("${KETTLE_BASH_ENV}")));
             assert_eq!(cmd.get_env("KETTLE_BASH_ENV_SET"), Some(OsStr::new("")));
             assert_eq!(
                 cmd.get_env("KETTLE_BASH_NOPROFILE"),
@@ -1028,10 +1225,7 @@ mod automatic_tests {
 
     #[test]
     fn automatic_bash_preserves_real_login_launch_and_env() {
-        let startup = ShellStartup {
-            integration: Some("/private/startup".into()),
-            ..Default::default()
-        };
+        let (_temp, startup) = bash_startup_fixture();
         let mut cmd = CommandBuilder::new_default_prog();
         cmd.env("SHELL", "/bin/bash");
         cmd.env("ENV", "/user/env");
@@ -1045,12 +1239,9 @@ mod automatic_tests {
         } else {
             assert!(cmd.get_argv().iter().any(|arg| arg == "--login"));
             assert!(cmd.get_argv().iter().any(|arg| arg == "--posix"));
+            assert_eq!(cmd.get_env("ENV"), Some(OsStr::new("${KETTLE_BASH_ENV}")));
             assert_eq!(
-                cmd.get_env("ENV"),
-                Some(OsStr::new("/private/startup/bashrc"))
-            );
-            assert_eq!(
-                cmd.get_env("KETTLE_BASH_ENV"),
+                cmd.get_env("KETTLE_BASH_USER_ENV"),
                 Some(OsStr::new("/user/env"))
             );
         }
@@ -1067,10 +1258,7 @@ mod automatic_tests {
             eprintln!("modern Bash not installed; default launch skipped");
             return;
         }
-        let startup = ShellStartup {
-            integration: Some("/private/startup".into()),
-            ..Default::default()
-        };
+        let (_temp, startup) = bash_startup_fixture();
         for original in [None, Some(""), Some("/user/original")] {
             let mut cmd = CommandBuilder::new_default_prog();
             cmd.env("SHELL", bash);
@@ -1088,7 +1276,7 @@ mod automatic_tests {
                 Some(OsStr::new(if original.is_some() { "1" } else { "" }))
             );
             assert_eq!(
-                cmd.get_env("KETTLE_BASH_ENV"),
+                cmd.get_env("KETTLE_BASH_USER_ENV"),
                 Some(OsStr::new(original.unwrap_or("")))
             );
         }
@@ -1106,10 +1294,7 @@ mod automatic_tests {
             )
             .unwrap();
         }
-        let startup = ShellStartup {
-            integration: Some("/private/startup".into()),
-            ..Default::default()
-        };
+        let (_temp, startup) = bash_startup_fixture();
         for default in [true, false] {
             let mut cmd = if default {
                 CommandBuilder::new_default_prog()

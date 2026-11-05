@@ -29,10 +29,17 @@ Previous/next-prompt navigation keeps its existing bindings and behavior.
   A system zshenv that overrides `ZDOTDIR` or disables startup files prevents
   injection; use the manual snippet in that case.
 - Bash uses `--posix` with a private `ENV` startup file and `--login` for
-  login panes. The wrapper turns POSIX mode off, restores your `ENV`, then
+  login panes. A separate variable holds the private pathname so Bash cannot
+  expand literal `$` or command substitutions in directory names. An unavailable
+  startup file at launch leaves Bash untouched. The wrapper turns POSIX mode
+  off, preserves an inherited `BASHOPTS=inherit_errexit`, restores your `ENV`, then
   sources `/etc/profile` and the first readable `.bash_profile`, `.bash_login`
-  or `.profile` for login shells; other panes read `.bashrc` or `--rcfile`'s
-  file. It honors `--noprofile` and `--norc`, then loads Kettle's hooks.
+  or `.profile` for login shells. Nonlogin interactive panes source the first
+  readable `/etc/bash.bashrc` or `/etc/bash/bashrc`, then `.bashrc` or
+  `--rcfile`'s file (including a leading `~` or `~/`). Kettle does not source
+  `/etc/bashrc`; Fedora's personal `.bashrc` sources it. It honors `--noprofile`
+  and `--norc`, then loads Kettle's hooks. Explicit `--posix`, a set
+  `POSIXLY_CORRECT`, or `SHELLOPTS` containing `posix` leaves Bash untouched.
   Login state and `.bash_logout` processing stay native. macOS system Bash
   3.2.57 ignores this `ENV` route, so Kettle launches it untouched; use the
   manual snippet below or a separately installed modern Bash for hooks.

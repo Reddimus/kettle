@@ -32,20 +32,26 @@ fn files(agent: &ShellStartup) -> Option<crate::owned_dir::OwnedFiles> {
     );
     // --posix selects ENV without losing the shell's real login state.
     let bashrc = r#"set +o posix
-shopt -u inherit_errexit 2>/dev/null || :
+if [ "${KETTLE_BASH_INHERIT_ERREXIT-}" != 1 ]; then
+  shopt -u inherit_errexit 2>/dev/null || :
+fi
 declare +x __kettle_noprofile=${KETTLE_BASH_NOPROFILE-}
 declare +x __kettle_norc=${KETTLE_BASH_NORC-}
 declare +x __kettle_rcfile=${KETTLE_BASH_RCFILE-$HOME/.bashrc}
+case $__kettle_rcfile in
+  '~') __kettle_rcfile=~ ;;
+  '~/'*) __kettle_rcfile=~/${__kettle_rcfile#'~/'} ;;
+esac
 if [[ -n $__kettle_rcfile && $__kettle_rcfile != */* ]]; then
   __kettle_rcfile=./$__kettle_rcfile
 fi
 declare +x __kettle_hooks=${BASH_SOURCE[0]%/*}/kettle.bash
 if [ "${KETTLE_BASH_ENV_SET-}" = 1 ]; then
-  export ENV="$KETTLE_BASH_ENV"
+  export ENV="$KETTLE_BASH_USER_ENV"
 else
   unset ENV
 fi
-unset KETTLE_BASH_ENV KETTLE_BASH_ENV_SET KETTLE_BASH_NOPROFILE KETTLE_BASH_NORC KETTLE_BASH_RCFILE
+unset KETTLE_BASH_ENV KETTLE_BASH_USER_ENV KETTLE_BASH_ENV_SET KETTLE_BASH_INHERIT_ERREXIT KETTLE_BASH_NOPROFILE KETTLE_BASH_NORC KETTLE_BASH_RCFILE
 if shopt -q login_shell; then
   if [ "$__kettle_noprofile" != 1 ]; then
     [ ! -r /etc/profile ] || . /etc/profile
@@ -55,6 +61,9 @@ if shopt -q login_shell; then
     fi
   fi
 elif [ "$__kettle_norc" != 1 ]; then
+  if [ -r /etc/bash.bashrc ]; then . /etc/bash.bashrc
+  elif [ -r /etc/bash/bashrc ]; then . /etc/bash/bashrc
+  fi
   [ ! -r "$__kettle_rcfile" ] || . "$__kettle_rcfile"
 fi
 declare -F __kettle_pc >/dev/null || builtin source -- "$__kettle_hooks"
@@ -62,23 +71,24 @@ unset __kettle_noprofile __kettle_norc __kettle_rcfile __kettle_hooks
 "#
     .to_owned();
     let vendor = r#"set -l __kettle_xdg_entry (string replace -r '/fish/vendor_conf.d/[^/]+$' '' -- (status filename))
-if contains -- "$__kettle_xdg_entry" $XDG_DATA_DIRS
+set -l __kettle_xdg_entries (string split : -- $XDG_DATA_DIRS)
+if contains -- "$__kettle_xdg_entry" $__kettle_xdg_entries
     set -l __kettle_xdg_remaining
     set -l __kettle_xdg_item
-    for __kettle_xdg_item in $XDG_DATA_DIRS
+    for __kettle_xdg_item in $__kettle_xdg_entries
         if test "$__kettle_xdg_item" != "$__kettle_xdg_entry"
             set -a __kettle_xdg_remaining "$__kettle_xdg_item"
         end
     end
     if test (count $__kettle_xdg_remaining) -gt 0
-        set -gx XDG_DATA_DIRS $__kettle_xdg_remaining
+        set -gx XDG_DATA_DIRS (string join : -- $__kettle_xdg_remaining)
     else if test "$KETTLE_XDG_DATA_DIRS_SET" = 1
         set -gx XDG_DATA_DIRS ""
     else
         set -e XDG_DATA_DIRS
     end
 end
-set -e __kettle_xdg_entry
+set -e __kettle_xdg_entry __kettle_xdg_entries
 set -e KETTLE_XDG_DATA_DIRS
 set -e KETTLE_XDG_DATA_DIRS_SET
 if status is-interactive
@@ -372,7 +382,7 @@ mod tests {
                 &home,
                 &[
                     ("ENV", directory.join("bashrc").to_str().unwrap()),
-                    ("KETTLE_BASH_ENV", "/user/original"),
+                    ("KETTLE_BASH_USER_ENV", "/user/original"),
                     ("KETTLE_BASH_ENV_SET", "1"),
                     ("KETTLE_BASH_NOPROFILE", if noprofile { "1" } else { "" }),
                     ("KETTLE_BASH_NORC", if norc { "1" } else { "" }),
@@ -429,7 +439,7 @@ mod tests {
                 &[
                     ("ENV", directory.join("bashrc").to_str().unwrap()),
                     ("KETTLE_BASH_ENV_SET", if saved { "1" } else { "" }),
-                    ("KETTLE_BASH_ENV", ""),
+                    ("KETTLE_BASH_USER_ENV", ""),
                     ("KETTLE_BASH_NOPROFILE", "1"),
                 ],
             );
@@ -562,6 +572,170 @@ mod tests {
                 ("KETTLE_XDG_DATA_DIRS", "/original/share"),
             ],
         );
+    }
+
+    #[test]
+    fn regression_fish_colon_xdg_does_not_inject_nested_shells() {
+        let Some(fish) = ["/opt/homebrew/bin/fish", "/usr/bin/fish"]
+            .into_iter()
+            .find(|p| Path::new(p).is_file())
+        else {
+            eprintln!("Fish not installed; colon XDG regression skipped");
+            return;
+        };
+        let (temp, directory) = fixture();
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let xdg = format!("{}:/usr/local/share:/usr/share", directory.display());
+        for list in [false, true] {
+            let script = if list {
+                format!(
+                    "set -gx XDG_DATA_DIRS (string split : -- $XDG_DATA_DIRS); source {};",
+                    quote(&directory.join("fish/vendor_conf.d/00-kettle.fish")).unwrap()
+                )
+            } else {
+                String::new()
+            };
+            run(
+                fish,
+                &[
+                    if list { "--no-config" } else { "--interactive" },
+                    "-ic",
+                    &format!(
+                        "{script} test \"$XDG_DATA_DIRS\" = /usr/local/share:/usr/share; or exit 51; emit fish_prompt; functions -q __kettle_osc7; or exit 52; fish -ic 'emit fish_prompt; functions -q __kettle_osc7; and exit 53; test \"$XDG_DATA_DIRS\" = /usr/local/share:/usr/share'"
+                    ),
+                ],
+                &home,
+                &[("XDG_DATA_DIRS", &xdg), ("KETTLE_XDG_DATA_DIRS_SET", "1")],
+            );
+        }
+    }
+
+    fn regression_bash() -> Option<&'static str> {
+        let bash = if cfg!(target_os = "macos") {
+            "/opt/homebrew/bin/bash"
+        } else {
+            "/bin/bash"
+        };
+        if Path::new(bash).is_file() {
+            Some(bash)
+        } else {
+            eprintln!("modern Bash not installed; native regression skipped");
+            None
+        }
+    }
+
+    #[test]
+    fn regression_bash_system_rc_precedes_personal_rc_once() {
+        let Some(bash) = regression_bash() else {
+            return;
+        };
+        let (temp, directory) = fixture();
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let first = home.join("system-first");
+        let second = home.join("system-second");
+        // Stage the absolute system locations without changing host configuration.
+        let rc = std::fs::read_to_string(directory.join("bashrc"))
+            .unwrap()
+            .replace("/etc/bash.bashrc", first.to_str().unwrap())
+            .replace("/etc/bash/bashrc", second.to_str().unwrap());
+        let startup = home.join("bashrc");
+        std::fs::write(&startup, rc).unwrap();
+        std::fs::copy(directory.join("kettle.bash"), home.join("kettle.bash")).unwrap();
+        std::fs::write(&second, "echo second >> \"$HOME/trace\"\n").unwrap();
+        std::fs::write(home.join(".bashrc"), "echo personal >> \"$HOME/trace\"\n").unwrap();
+        for (first_exists, norc, login, expected) in [
+            (true, false, false, "first\npersonal\n"),
+            (false, false, false, "second\npersonal\n"),
+            (true, true, false, ""),
+            (true, false, true, ""),
+        ] {
+            if first_exists {
+                std::fs::write(&first, "echo first >> \"$HOME/trace\"\n").unwrap();
+            } else {
+                std::fs::remove_file(&first).unwrap();
+            }
+            let mut args = vec!["--posix", "--noprofile"];
+            if login {
+                args.push("--login");
+            }
+            args.extend([
+                "-ic",
+                "declare -F __kettle_pc >/dev/null || exit 54; exit 0",
+            ]);
+            run(
+                bash,
+                &args,
+                &home,
+                &[
+                    ("ENV", startup.to_str().unwrap()),
+                    ("KETTLE_BASH_NOPROFILE", "1"),
+                    ("KETTLE_BASH_NORC", if norc { "1" } else { "" }),
+                ],
+            );
+            assert_eq!(
+                std::fs::read_to_string(home.join("trace")).unwrap_or_default(),
+                expected
+            );
+            let _ = std::fs::remove_file(home.join("trace"));
+        }
+    }
+
+    #[test]
+    fn regression_bash_preserves_inherited_inherit_errexit() {
+        let Some(bash) = regression_bash() else {
+            return;
+        };
+        let (temp, directory) = fixture();
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let check = "shopt -q inherit_errexit || exit 55; (set -e; value=$(false; printf wrong); printf wrong-after) > \"$HOME/errexit\"; result=$?; [[ $result == 1 && ! -s $HOME/errexit ]] || exit 56;";
+        std::fs::write(home.join(".bashrc"), format!("{check}\nprintf startup\n")).unwrap();
+        let output = run(
+            bash,
+            &[
+                "--posix",
+                "-ic",
+                &format!("{check} declare -F __kettle_pc >/dev/null || exit 57; exit 0"),
+            ],
+            &home,
+            &[
+                ("ENV", directory.join("bashrc").to_str().unwrap()),
+                ("BASHOPTS", "inherit_errexit"),
+                ("KETTLE_BASH_INHERIT_ERREXIT", "1"),
+            ],
+        );
+        assert!(output.contains("startup"));
+    }
+
+    #[test]
+    fn regression_bash_custom_rcfile_expands_home_tilde() {
+        let Some(bash) = regression_bash() else {
+            return;
+        };
+        let (temp, directory) = fixture();
+        let home = temp.path().join("home with spaces");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join(".customrc"), "printf custom-startup\n").unwrap();
+        for option in ["--rcfile", "--init-file"] {
+            let native = run(bash, &[option, "~/.customrc", "-ic", "exit 0"], &home, &[]);
+            assert!(native.contains("custom-startup"));
+            let injected = run(
+                bash,
+                &[
+                    "--posix",
+                    "-ic",
+                    "declare -F __kettle_pc >/dev/null || exit 58; exit 0",
+                ],
+                &home,
+                &[
+                    ("ENV", directory.join("bashrc").to_str().unwrap()),
+                    ("KETTLE_BASH_RCFILE", "~/.customrc"),
+                ],
+            );
+            assert_eq!(injected, native, "{option}");
+        }
     }
 
     #[test]
