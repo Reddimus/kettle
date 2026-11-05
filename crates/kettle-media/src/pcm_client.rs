@@ -232,7 +232,7 @@ fn supervise(
                     wire::MAX_READY_FRAME_BYTES,
                 );
                 let terminal = !matches!(frame, Ok(Some(_)));
-                if events.send(frame).is_err() || terminal {
+                if events.send((frame, Instant::now())).is_err() || terminal {
                     return;
                 }
             }
@@ -265,7 +265,7 @@ fn supervise(
         return;
     }
     match worker.next(&received, until, Some(&control.0.cancel)) {
-        Ok(Ok(Some(Frame::Ready(ready))))
+        Ok((Ok(Some(Frame::Ready(ready))), _))
             if check_ready(hello, &ready) == HandshakeOutcome::Compatible => {}
         _ => return,
     }
@@ -278,11 +278,11 @@ fn supervise(
             Instant::now() + Duration::from_secs(3600),
             Some(&control.0.cancel),
         ) {
-            Ok(Ok(Some(Frame::Pcm(Message::Feedback(now))))) => {
+            Ok((Ok(Some(Frame::Pcm(Message::Feedback(now)))), received)) => {
                 if !control.credit(now) {
                     return;
                 }
-                feedback(now);
+                feedback(aged_feedback(now, received.elapsed()));
                 if now.failed {
                     worker.stop();
                     return;
@@ -359,7 +359,7 @@ fn write(
 }
 
 /// Queue residence ages a hardware timestamp; stale timestamps carry only credits.
-pub(crate) fn aged_feedback(mut feedback: Feedback, elapsed: Duration) -> Message {
+pub(crate) fn aged_feedback(mut feedback: Feedback, elapsed: Duration) -> Feedback {
     let age = u128::from(feedback.age_us) + elapsed.as_micros();
     if age > 250_000 {
         feedback.played_frame = None;
@@ -367,7 +367,7 @@ pub(crate) fn aged_feedback(mut feedback: Feedback, elapsed: Duration) -> Messag
     } else {
         feedback.age_us = age as u32;
     }
-    Message::Feedback(feedback)
+    feedback
 }
 
 #[cfg(test)]
@@ -414,16 +414,155 @@ mod tests {
         }
     }
     #[test]
-    fn hardware_clock_ages_in_the_parent_queue() {
-        let Message::Feedback(fresh) = aged_feedback(feedback(), Duration::from_millis(200)) else {
-            panic!()
+    fn hardware_clock_ages_in_the_reader_channel() {
+        use crate::client::{
+            FileIdentity, UnavailableCause, WorkerClient, WorkerExit, WorkerPlatform, WorkerProcess,
         };
+        use std::io::{Cursor, Read};
+        use std::path::Path;
+
+        struct QueuedReader {
+            bytes: Cursor<Vec<u8>>,
+            start: Option<mpsc::Receiver<()>>,
+            drained: Option<mpsc::Sender<()>>,
+        }
+        impl Read for QueuedReader {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                if let Some(start) = self.start.take() {
+                    start.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                let n = self.bytes.read(bytes)?;
+                if n == 0
+                    && let Some(drained) = self.drained.take()
+                {
+                    drained.send(()).unwrap();
+                }
+                Ok(n)
+            }
+        }
+        struct DelayedProbe {
+            start: Option<mpsc::Sender<()>>,
+            drained: mpsc::Receiver<()>,
+            killed: bool,
+        }
+        impl WorkerProcess for DelayedProbe {
+            fn try_wait(&mut self) -> std::io::Result<Option<WorkerExit>> {
+                if let Some(start) = self.start.take() {
+                    start.send(()).unwrap();
+                    self.drained.recv_timeout(Duration::from_secs(5)).unwrap();
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+                Ok(self.killed.then_some(WorkerExit::Signal(9)))
+            }
+            fn kill(&mut self) {
+                self.killed = true;
+            }
+            fn footprint(&mut self) -> std::io::Result<u64> {
+                Ok(1)
+            }
+        }
+        struct Fake(Mutex<Option<SpawnedWorker>>);
+        impl WorkerPlatform for Fake {
+            fn worker_path(&self) -> Result<&Path, UnavailableCause> {
+                Ok(Path::new("/install/kettle-media-worker"))
+            }
+            fn inspect(&self, _: &Path) -> Result<FileIdentity, UnavailableCause> {
+                Ok(FileIdentity {
+                    dev: 1,
+                    ino: 2,
+                    size: 3,
+                    mtime_seconds: 4,
+                    mtime_nanos: 5,
+                    ctime_seconds: 6,
+                    ctime_nanos: 7,
+                })
+            }
+            fn verify(&self, _: &Path) -> Result<(), UnavailableCause> {
+                Ok(())
+            }
+            fn spawn(&self, _: &Path) -> std::io::Result<SpawnedWorker> {
+                Ok(self.0.lock().unwrap().take().unwrap())
+            }
+            fn guard_pipe_writes(&self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let hello = Hello {
+            build_id: crate::BuildId::from_embedded("1.0.0", "ab12").unwrap(),
+        };
+        let mut bytes = wire::encode(
+            &Frame::Ready(crate::Ready {
+                build_id: hello.build_id.clone(),
+            }),
+            Direction::WorkerToParent,
+        )
+        .unwrap();
+        bytes.extend(
+            wire::encode(
+                &Frame::Pcm(Message::Feedback(Feedback {
+                    consumed: 1,
+                    ..feedback()
+                })),
+                Direction::WorkerToParent,
+            )
+            .unwrap(),
+        );
+        let (start, starting) = mpsc::channel();
+        let (drained, draining) = mpsc::channel();
+        let client = WorkerClient::new(
+            hello.build_id.clone(),
+            Box::new(Fake(Mutex::new(Some(SpawnedWorker {
+                process: Box::new(DelayedProbe {
+                    start: Some(start),
+                    drained: draining,
+                    killed: false,
+                }),
+                stdin: Box::new(std::io::sink()),
+                stdout: Box::new(QueuedReader {
+                    bytes: Cursor::new(bytes),
+                    start: Some(starting),
+                    drained: Some(drained),
+                }),
+            })))),
+        );
+        let control = control();
+        assert!(control.offer(block(0)));
+        assert!(control.0.queue.lock().unwrap().dispatch().is_some());
+        let delivered = Arc::new(Mutex::new(None));
+        let saved = Arc::clone(&delivered);
+        let cancel = control.clone();
+        let sink: FeedbackSink = Box::new(move |feedback| {
+            *saved.lock().unwrap() = Some(feedback);
+            cancel.close();
+        });
+        supervise(
+            &client.shared,
+            &hello,
+            Budgets::PRODUCTION,
+            &pcm::Open {
+                generation: 7,
+                start_frame: 0,
+                end_frame: 48_000,
+                muted: false,
+            },
+            &control,
+            [Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))],
+            &sink,
+        );
+        let delivered = delivered.lock().unwrap().unwrap();
+        assert_eq!(delivered.played_frame, None, "reader-queued clock is stale");
+        assert_eq!(delivered.age_us, 0);
+        assert_eq!(delivered.consumed, 1);
+        assert_eq!(control.0.queue.lock().unwrap().flow.consumed(), 1);
+    }
+
+    #[test]
+    fn hardware_clock_ages_in_the_parent_queue() {
+        let fresh = aged_feedback(feedback(), Duration::from_millis(200));
         assert_eq!(fresh.played_frame, Some(100));
         assert_eq!(fresh.age_us, 250_000);
-        let Message::Feedback(stale) = aged_feedback(feedback(), Duration::from_micros(200_001))
-        else {
-            panic!()
-        };
+        let stale = aged_feedback(feedback(), Duration::from_micros(200_001));
         assert_eq!(stale.played_frame, None);
         assert_eq!(stale.consumed, 0);
     }

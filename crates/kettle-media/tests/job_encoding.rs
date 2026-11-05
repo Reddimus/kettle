@@ -2,7 +2,9 @@
 //! with the same refusals, and without copying its source. This test binary
 //! installs a counting allocator, so it lives outside the crate, which forbids
 //! unsafe code.
-use kettle_media::wire::{Direction, Frame, WireError, encode, encode_job};
+use kettle_media::wire::{
+    Direction, Frame, HEADER_BYTES, WireError, decode_with_stats, encode, encode_job,
+};
 use kettle_media::*;
 
 mod common;
@@ -146,4 +148,40 @@ fn borrowed_job_encoding_does_not_copy_the_source() {
         cloned >= 2 * len,
         "the cloning path allocated only {cloned} bytes, so a copy would go unseen"
     );
+}
+
+#[test]
+fn truncated_still_samples_do_not_allocate() {
+    let mut rendered = common::rendered_as(MediaKind::Video);
+    let video = rendered.video.as_mut().unwrap();
+    video.samples = vec![video.samples[0]; usize::from(MAX_VIDEO_STILLS)];
+    let mut bytes = encode(&Frame::Rendered(rendered), Direction::WorkerToParent).unwrap();
+    bytes.truncate(bytes.len() - usize::from(MAX_VIDEO_STILLS) * 16 - 4 - 1);
+    let length = u32::try_from(bytes.len() - HEADER_BYTES).unwrap();
+    bytes[7..11].copy_from_slice(&length.to_le_bytes());
+    let mut report = None;
+    let allocated = allocated_by(|| {
+        report = Some(decode_with_stats(&bytes, Direction::WorkerToParent));
+    });
+    let report = report.unwrap();
+    assert_eq!(report.result, Err(WireError::Truncated));
+    assert_eq!(report.allocations.requested_bytes, 0);
+    assert_eq!(allocated, 0, "truncated still samples allocated memory");
+}
+
+#[test]
+fn still_sample_allocations_are_counted_once() {
+    let rendered = common::rendered_as(MediaKind::Video);
+    let expected = rendered.rgba.len()
+        + rendered.video.as_ref().unwrap().samples.len() * std::mem::size_of::<StillSample>();
+    let frame = Frame::Rendered(rendered);
+    let bytes = encode(&frame, Direction::WorkerToParent).unwrap();
+    let mut report = None;
+    let allocated = allocated_by(|| {
+        report = Some(decode_with_stats(&bytes, Direction::WorkerToParent));
+    });
+    let report = report.unwrap();
+    assert_eq!(report.result.unwrap(), frame);
+    assert_eq!(report.allocations.requested_bytes, expected);
+    assert_eq!(allocated, expected, "still samples must allocate only once");
 }
