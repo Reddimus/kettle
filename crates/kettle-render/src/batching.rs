@@ -359,13 +359,20 @@ impl Renderer {
         // then composited below the shared chrome-text pass, so its own labels
         // and the context-menu labels both remain readable above images.
         self.picker_surfaces.draw_range(&mut pass, 0..u32::MAX);
+        self.rounded_surfaces.draw_range(
+            &mut pass,
+            self.transport_surface_count
+                ..self.transport_surface_count + self.settings_surface_count,
+        );
         self.menu_quads.draw(&mut pass);
         self.media_receipt_img.draw(&mut pass);
         self.toast_surfaces.draw_range(&mut pass, 0..u32::MAX);
         self.menu_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
-        self.rounded_surfaces
-            .draw_range(&mut pass, self.transport_surface_count..u32::MAX);
+        self.rounded_surfaces.draw_range(
+            &mut pass,
+            self.transport_surface_count + self.settings_surface_count..u32::MAX,
+        );
         self.confirmation_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         Ok(())

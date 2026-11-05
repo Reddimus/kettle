@@ -4617,3 +4617,15 @@ DECRQM and private-mode save/restore recognize mode 5. DECSTR preserves it, as
 XTerm does; RIS restores normal video while retaining the other OSC resources.
 Mode changes fully damage the terminal without reinterpreting stored text,
 protection, grapheme payloads or retained images.
+
+### Settings layout
+
+`kettle-ui::settings` owns the field catalogue, descriptions, bounded search
+editor and stable category/field identities. Search projects matching fields
+in catalogue order; edits still use the original config key and persistence
+path. `kettle-render::settings_layout` owns the centered panel, responsive
+panes, visible rows, value chips, search field, grouped headings and pinned
+footer rectangles. Rendering, mouse hit tests, inline editing/IME, AccessKit
+bounds and `ctl ui_geometry` consume that layout with chrome font metrics,
+independent of terminal cell scaling. Diagnostics expose category, row, chip,
+label, description and search rectangles without the search query or values.

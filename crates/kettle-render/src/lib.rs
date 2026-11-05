@@ -87,8 +87,7 @@ use gpu::{
 };
 use gpu::{latch_gpu_fault, live_device_limits, resolve_headless_adapter};
 use labels::{
-    display_width, fit_key_hint, fit_single_line_label, middle_ellipsis, take_cols_back,
-    take_cols_front,
+    display_width, fit_key_hint, fit_single_line_label, middle_ellipsis, take_cols_front,
 };
 pub use labels::{fit_pane_titlebar_title, fit_tab_segment_title};
 #[cfg(test)]
@@ -140,16 +139,12 @@ use search::{
 };
 #[cfg(test)]
 use search::{search_bar_text, search_editor_label, search_focused_label};
-use settings::{
-    SETTINGS_FIELD_START, settings_display_lines, settings_fit_display_line,
-    settings_painted_lines, settings_panel_cols, settings_panel_layout, settings_tab_rect,
-};
 pub use settings::{
-    SettingsHit, SettingsOverlay, SettingsPanelGeometry, SettingsRow, settings_hit_test,
-    settings_hit_test_with_text_width, settings_panel_geometry, settings_value_rect,
+    SettingsControl, SettingsHit, SettingsLayout, SettingsOverlay, SettingsPanelGeometry,
+    SettingsRow, SettingsRowGeometry, settings_hit_test, settings_hit_test_with_text_width,
+    settings_layout, settings_panel_geometry, settings_value_rect,
 };
-#[cfg(test)]
-use settings::{settings_fit_line, settings_row_line};
+use settings::{SettingsTextKind, settings_text_items};
 pub use terminal::{HighlightRect, LinkRect, PaintedCard, PaneView};
 use terminal::{
     PendingCursorGlyph, cursor_glyph_damage_key, cursor_glyph_top, invalidate_pane_titlebar_texts,
@@ -532,19 +527,9 @@ pub struct Renderer {
     context_menu_hint_buffers: Vec<TextBuffer>,
     /// Last text shaped into each `context_menu_hint_buffers` slot.
     context_menu_hint_texts: Vec<String>,
-    /// One text buffer per display line of the settings overlay
-    /// (title, category tabs, field rows, footer). Grown + truncated like the
-    /// context-menu pool.
+    /// Shaped settings slots, truncated to the shared layout's visible text.
     settings_buffers: Vec<TextBuffer>,
-    /// Last text shaped into each `settings_buffers` slot. Moving the focused
-    /// row changes only 2 of N lines (the old/new `▸` mark). The whole-overlay
-    /// `settings_lines_cache` gate below still recomputes `lines` on any
-    /// overlay change, but this gate skips the reshape for every row whose text
-    /// is unaffected.
-    settings_texts: Vec<String>,
-    /// Source overlay for `settings_lines_cache`; a mismatch invalidates it.
-    settings_lines_source: Option<SettingsOverlay>,
-    settings_lines_cache: Vec<String>,
+    settings_texts: Vec<(String, bool)>,
     /// Label and secondary-description buffers for the focused pane's
     /// completion shelf. Separate pools keep the command token crisp while the
     /// explanation stays visually subordinate.
@@ -640,6 +625,7 @@ pub struct Renderer {
     toast_surfaces: rounded_surface::RoundedSurfacePipeline,
     picker_surfaces: rounded_surface::RoundedSurfacePipeline,
     transport_surface_count: u32,
+    settings_surface_count: u32,
     confirmation_text_renderer: TextRenderer,
     confirmation_text: confirm::ConfirmText,
     confirmation_labels_prepared: bool,
@@ -901,7 +887,6 @@ impl Renderer {
                 self.context_menu_texts.clear();
                 self.context_menu_hint_texts.clear();
                 self.settings_texts.clear();
-                self.settings_lines_source = None;
                 self.completion_texts.clear();
                 self.completion_spans.clear();
                 self.completion_selected.clear();
@@ -2642,55 +2627,47 @@ impl Renderer {
             }
         }
 
-        // Settings-overlay row buffers (one per display line).
+        // Shape the same clipped slots used by painting and pointer input.
         if let Some(set) = &overlay.settings {
-            // `settings_display_lines` runs a `format!()` per display line, so
-            // memoize its output against the last `SettingsOverlay` it was
-            // computed from. The panel, like the context menu, sits open across
-            // blink/hover-driven redraws with nothing actually changing.
-            if self.settings_lines_source.as_ref() != Some(set) {
-                self.settings_lines_cache = settings_display_lines(set);
-                self.settings_lines_source = Some(set.clone());
-            }
-            let lines = &self.settings_lines_cache;
+            let layout = settings_layout(
+                set,
+                (cw, self.overlay_text_line_height()),
+                (sw, sh),
+                self.overlay_text_cell_width(),
+            );
+            let lines = settings_text_items(set, &layout, self.overlay_text_cell_width());
             while self.settings_buffers.len() < lines.len() {
-                let b = TextBuffer::new(&mut self.font_system, metrics);
-                self.settings_buffers.push(b);
+                self.settings_buffers
+                    .push(TextBuffer::new(&mut self.font_system, metrics));
             }
-            // Grows off ITS OWN length, not `settings_buffers`', for the same
-            // reason as `context_menu_texts` above. The font-family invalidation
-            // clears only the `_texts` cache, so the two pools must each regrow
-            // independently or indexing below could panic.
             while self.settings_texts.len() < lines.len() {
-                self.settings_texts.push(String::new());
+                self.settings_texts.push((String::new(), false));
             }
             self.settings_buffers.truncate(lines.len());
             self.settings_texts.truncate(lines.len());
-            // Panel width fits the content but never exceeds the surface
-            // (so it stays usable in a small window); see the matching clamp
-            // in the quad/area pass below.
-            let panel_w = (settings_panel_cols(set, lines) * cw + 48.0).min((sw - 40.0).max(120.0));
-            let row_h = ch + 6.0;
-            let text_cw = self.overlay_text_cell_width();
-            for (i, line) in lines.iter().enumerate() {
+            for (i, item) in lines.iter().enumerate() {
                 let buf = &mut self.settings_buffers[i];
-                buf.set_metrics(metrics);
-                let text_w = (panel_w - 32.0).max(text_cw);
-                let fitted = settings_fit_display_line(set, i, line, panel_w, text_cw);
-                buf.set_size(Some(text_w), Some(row_h));
+                let title = item.kind == SettingsTextKind::Title;
+                let factor = if title { 1.2 } else { 1.0 };
+                buf.set_metrics(Metrics::new(
+                    metrics.font_size * factor,
+                    metrics.line_height * factor,
+                ));
+                buf.set_size(Some(item.rect.2), Some(item.rect.3));
                 buf.set_wrap(Wrap::None);
-                // Moving the focused row only changes 2 of N lines (the old/new
-                // `▸` mark). This per-row gate spares the other N-2 rows a
-                // reshape even on a frame where the memoization above DID
-                // recompute `lines`.
-                if self.settings_texts[i] != fitted {
+                let bold = title || item.kind == SettingsTextKind::Heading;
+                if self.settings_texts[i].0 != item.text || self.settings_texts[i].1 != bold {
                     buf.set_text(
-                        &fitted,
-                        &Attrs::new().family(Family::Name(&family)),
+                        &item.text,
+                        &Attrs::new().family(Family::Name(&family)).weight(if bold {
+                            Weight::BOLD
+                        } else {
+                            Weight::NORMAL
+                        }),
                         Shaping::Advanced,
                         None,
                     );
-                    self.settings_texts[i] = fitted;
+                    self.settings_texts[i] = (item.text.clone(), bold);
                 }
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
@@ -4076,104 +4053,144 @@ impl Renderer {
             }
         }
 
-        // Settings overlay — a centered modal panel drawn on top via
-        // the menu pipeline (dim backdrop + panel + accent border + focused-row
-        // highlight as quads; one TextArea per display line).
+        // Settings surfaces use the menu layer, before all modal text.
+        let mut settings_surfaces = Vec::new();
         if let Some(set) = &overlay.settings {
-            // Reuse the buffer-prep pass's memoized lines rather than running
-            // `settings_display_lines` (one `format!()` per display line) a
-            // SECOND time per frame. `self.settings_lines_cache` was just
-            // (re)computed for this exact `set` above, in the same
-            // `render_frame` call, so both passes stay in lockstep.
-            let lines = &self.settings_lines_cache;
-            let layout = settings_panel_layout(set, lines, cw, ch, sw, sh);
-            let (row_h, panel_w, panel_h, px, py) = (
-                layout.row_h,
-                layout.panel_w,
-                layout.panel_h,
-                layout.px,
-                layout.py,
-            );
-            // Multi-window: the settings overlay's accent follows
-            // this WINDOW's chrome accent, so it matches the focus border +
-            // active tab rather than always-blue.
-            let acc = self.ui_accent(cfg, theme);
-            // Dim backdrop over the whole window so the panel reads as modal.
-            // On the Background page, dim LESS so the live wallpaper (the real
-            // animated starfield / image) shows around the panel as a genuine
-            // preview while you change `background-type`.
-            let backdrop_a = set.backdrop_alpha();
-            menu_q.push(rect(0.0, 0.0, sw, sh, theme.background, backdrop_a));
-            // Panel background (near-opaque) + accent border.
-            menu_q.push(rect(px, py, panel_w, panel_h, theme.background, 1.0));
-            menu_q.push(rect(px, py, panel_w, 2.0, acc, 1.0));
-            menu_q.push(rect(px, py + panel_h - 2.0, panel_w, 2.0, acc, 1.0));
-            menu_q.push(rect(px, py, 2.0, panel_h, acc, 1.0));
-            menu_q.push(rect(px + panel_w - 2.0, py, 2.0, panel_h, acc, 1.0));
-            if let Some((x, y, w, h)) = settings_tab_rect(
+            let layout = settings_layout(
                 set,
-                set.active_category,
-                lines,
-                &layout,
+                (cw, self.overlay_text_line_height()),
+                (sw, sh),
                 self.overlay_text_cell_width(),
-            ) {
-                menu_q.push(rect(x, y + h - 2.0, w, 2.0, acc, 1.0));
+            );
+            let acc = self.ui_accent(cfg, theme);
+            let selected = self.chrome_colors.surface(
+                theme.background,
+                acc,
+                0.18,
+                self.config.format.is_srgb(),
+            );
+            let border = self.chrome_colors.surface(
+                theme.background,
+                theme.palette[8],
+                0.65,
+                self.config.format.is_srgb(),
+            );
+            let rail = self.chrome_colors.icon(acc, selected);
+            let rgba = |c: Rgb, a| {
+                [
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
+                    a,
+                ]
+            };
+            let mut shape = |r: Rect4, fill: Rgb, alpha, stroke: Rgb, border, radius| {
+                settings_surfaces.push(rounded_surface::RoundedSurface {
+                    pos: [r.0, r.1],
+                    size: [r.2, r.3],
+                    fill: rgba(fill, alpha),
+                    stroke: rgba(stroke, 1.0),
+                    params: [radius, border, 0.0, 0.0],
+                });
+            };
+            shape(
+                (0.0, 0.0, sw, sh),
+                theme.background,
+                set.backdrop_alpha(),
+                theme.background,
+                0.0,
+                0.0,
+            );
+            shape(layout.rect, theme.background, 1.0, border, 1.0, 6.0);
+            if let Some(side) = layout.sidebar_rect {
+                shape(
+                    (side.0 + side.2 - 1.0, side.1 + 12.0, 1.0, side.3 - 24.0),
+                    border,
+                    1.0,
+                    border,
+                    0.0,
+                    0.0,
+                );
             }
-            // Focused field-row highlight.
-            let hi_line = SETTINGS_FIELD_START + set.focused_row;
-            let hi_y = py + 12.0 + (hi_line - layout.first_line) as f32 * row_h;
-            menu_q.push(rect(px + 6.0, hi_y, panel_w - 12.0, row_h, acc, 0.22));
-            let sfg = theme.foreground;
-            // Disabled fields and footer hints keep a quieter, readable color.
-            for (visible_index, i) in settings_painted_lines(&layout) {
-                if i >= self.settings_buffers.len() {
-                    break;
+            if let Some(Some(r)) = layout.category_rects.get(set.active_category) {
+                shape(*r, selected, 1.0, selected, 0.0, 4.0);
+                shape(
+                    (r.0, r.1 + 4.0, 2.0, (r.3 - 8.0).max(0.0)),
+                    rail,
+                    1.0,
+                    rail,
+                    0.0,
+                    0.0,
+                );
+            }
+            shape(
+                layout.search_rect,
+                theme.background,
+                1.0,
+                if set.search_focused { acc } else { border },
+                1.0,
+                4.0,
+            );
+            for row in &layout.rows {
+                if row.index == set.focused_row && !set.search_focused {
+                    shape(row.rect, selected, 1.0, selected, 0.0, 4.0);
                 }
-                let background = if i == hi_line {
-                    self.chrome_colors.surface(
-                        theme.background,
-                        acc,
-                        0.22,
-                        self.config.format.is_srgb(),
-                    )
+                let data = &set.rows[row.index];
+                let on = data.control == SettingsControl::Toggle(true) && !data.disabled;
+                shape(
+                    row.chip_rect,
+                    if on { acc } else { theme.background },
+                    1.0,
+                    border,
+                    1.0,
+                    if matches!(data.control, SettingsControl::Toggle(_)) {
+                        row.chip_rect.3 / 2.0
+                    } else {
+                        4.0
+                    },
+                );
+            }
+            let items = settings_text_items(set, &layout, self.overlay_text_cell_width());
+            for (i, item) in items.iter().enumerate() {
+                let mut background = theme.background;
+                let foreground = theme.foreground;
+                let mut muted = matches!(
+                    item.kind,
+                    SettingsTextKind::Muted | SettingsTextKind::Description(_)
+                );
+                match item.kind {
+                    SettingsTextKind::Category(index) if index == set.active_category => {
+                        background = selected;
+                    }
+                    SettingsTextKind::Label(index)
+                    | SettingsTextKind::Value(index)
+                    | SettingsTextKind::Description(index) => {
+                        let row = &set.rows[index];
+                        muted |= row.disabled;
+                        if item.kind == SettingsTextKind::Value(index) {
+                            if row.control == SettingsControl::Toggle(true) && !row.disabled {
+                                background = acc;
+                            }
+                        } else if index == set.focused_row && !set.search_focused {
+                            background = selected;
+                        }
+                    }
+                    _ => {}
+                }
+                let color = if muted {
+                    self.chrome_colors.muted(foreground, background)
                 } else {
-                    theme.background
-                };
-                let muted = i >= SETTINGS_FIELD_START + set.rows.len()
-                    || (i >= SETTINGS_FIELD_START
-                        && set
-                            .rows
-                            .get(i - SETTINGS_FIELD_START)
-                            .is_some_and(|r| r.disabled));
-                let row_color = if muted {
-                    self.chrome_colors.muted(sfg, background)
-                } else {
-                    self.chrome_colors.text(sfg, background)
+                    self.chrome_colors.text(foreground, background)
                 };
                 menu_areas.push(TextArea {
                     buffer: &self.settings_buffers[i],
-                    left: px + 16.0,
-                    top: py + 12.0 + visible_index as f32 * row_h + 3.0,
+                    left: item.rect.0,
+                    top: item.rect.1,
                     scale: 1.0,
-                    bounds: TextBounds {
-                        left: px as i32,
-                        top: py as i32,
-                        right: (px + panel_w) as i32,
-                        bottom: (py + panel_h) as i32,
-                    },
-                    default_color: GColor::rgb(row_color.r, row_color.g, row_color.b),
+                    bounds: text_bounds_for_rect(item.rect),
+                    default_color: GColor::rgb(color.r, color.g, color.b),
                     custom_glyphs: &[],
                 });
-            }
-            let cue_w = 12.0;
-            let cue_x = px + (panel_w - cue_w) * 0.5;
-            if layout.first_line > 0 {
-                menu_q.push(rect(cue_x, py + 2.0, cue_w, 3.0, acc, 0.85));
-            }
-            let content_end = SETTINGS_FIELD_START + set.rows.len() + 2;
-            if layout.first_line + layout.visible_lines < content_end {
-                let content_bottom = py + 12.0 + layout.visible_lines as f32 * row_h;
-                menu_q.push(rect(cue_x, content_bottom - 3.0, cue_w, 3.0, acc, 0.85));
             }
         }
 
@@ -4459,6 +4476,8 @@ impl Renderer {
             prepared_text_areas_damage_key(&menu_areas).hash(&mut h);
             prepared_text_areas_damage_key(&confirmation_areas).hash(&mut h);
             self.confirmation_text.key().hash(&mut h);
+            bytemuck::cast_slice::<rounded_surface::RoundedSurface, u8>(&settings_surfaces)
+                .hash(&mut h);
             bytemuck::cast_slice::<rounded_surface::RoundedSurface, u8>(&confirmation_surfaces)
                 .hash(&mut h);
             completion_text_damage_key(
@@ -4839,6 +4858,8 @@ impl Renderer {
         self.overlay_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &over);
         self.transport_surface_count = transport_surfaces.len() as u32;
+        transport_surfaces.extend_from_slice(&settings_surfaces);
+        self.settings_surface_count = settings_surfaces.len() as u32;
         transport_surfaces.extend_from_slice(&confirmation_surfaces);
         self.rounded_surfaces.upload(
             &self.gpu.device,

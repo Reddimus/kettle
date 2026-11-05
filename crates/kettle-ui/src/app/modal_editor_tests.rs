@@ -89,12 +89,19 @@ fn review_settings_rejects_oversized_initial_paths() {
 #[test]
 fn review_settings_value_slot_uses_natural_font_width() {
     let set = kettle_render::SettingsOverlay {
+        search_query: String::new(),
+        search_focused: false,
+        search_placeholder: String::new(),
+        no_matches: String::new(),
         categories: vec!["Background".into()],
         label_cols: 12,
         value_cols: 20,
         active_category: 0,
         background_page: true,
         rows: vec![kettle_render::SettingsRow {
+            description: String::new(),
+            category: 0,
+            control: kettle_render::SettingsControl::Text,
             label: "Image path".into(),
             value: String::new(),
             disabled: false,
@@ -105,20 +112,16 @@ fn review_settings_value_slot_uses_natural_font_width() {
         footer_note: None,
     };
     let text_cw = 10.0;
-    for (scale, prefix_cols) in [(0.5, 14.0), (1.0, 16.0), (2.0, 16.0)] {
+    for scale in [0.5, 1.0, 2.0] {
         let cw = text_cw * scale;
-        let panel = kettle_render::settings_panel_geometry(&set, cw, 20.0, 1600.0, 600.0);
+        let layout = kettle_render::settings_layout(&set, (cw, 20.0), (1600.0, 600.0), text_cw);
         let value = kettle_render::settings_value_rect(&set, cw, 20.0, 1600.0, 600.0, text_cw);
-        // Narrow panels shorten the label to ten columns. The marker and
-        // gap add four more, all in the font's natural advance.
+        let chip = layout.rows[0].chip_rect;
         assert_eq!(
-            value.0,
-            panel.rect.0 + 16.0 + prefix_cols * text_cw,
-            "scale {scale}"
+            value,
+            (chip.0 + 4.0, chip.1 + 4.0, chip.2 - 8.0, chip.3 - 8.0)
         );
-        assert!(value.2 > 0.0);
-        assert!(value.0 + value.2 <= panel.rect.0 + panel.rect.2 - 16.0);
-        assert_eq!(value.1, panel.focused_rect.1);
+        assert!(value.2 > 200.0, "text paths need a usable editor width");
     }
 }
 
@@ -376,4 +379,34 @@ fn modal_word_editing_uses_physical_option_after_native_masking() {
             }
         }
     }
+}
+
+#[test]
+fn settings_search_focus_transition_ends_composition_and_enter_repeat() {
+    use winit::event::ElementState;
+    use winit::keyboard::{KeyCode, PhysicalKey};
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.settings_nav = Some(crate::settings::SettingsNav {
+        search_focused: true,
+        query: "cursor".into(),
+        ..Default::default()
+    });
+    assert_eq!(modal_editor(&ws).unwrap().text(), "cursor");
+    update_ime_preedit(&mut ws, "old phrase".into(), None);
+    let owner = top_modal(&ws);
+    ws.settings_nav.as_mut().unwrap().search_focused = false;
+    let enter = PhysicalKey::Code(KeyCode::Enter);
+    remember_closing_key(&mut ws, owner, enter);
+    assert!(
+        ws.ime_preedit.is_none(),
+        "search composition must not reach a result's editor"
+    );
+    assert!(
+        drop_closing_key_repeat(&mut ws.closing_keys, enter, ElementState::Pressed, true),
+        "holding Enter after entering results must not toggle a setting"
+    );
+    assert!(
+        !take_ime_commit(&mut ws),
+        "the old search commit must be rejected"
+    );
 }

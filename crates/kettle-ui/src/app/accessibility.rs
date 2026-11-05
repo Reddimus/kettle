@@ -717,9 +717,13 @@ impl App {
             settings.footer_note.hash(&mut hasher);
             settings.active_category.hash(&mut hasher);
             settings.focused_row.hash(&mut hasher);
+            settings.search_query.hash(&mut hasher);
+            settings.search_focused.hash(&mut hasher);
             for row in &settings.rows {
                 row.label.hash(&mut hasher);
                 row.value.hash(&mut hasher);
+                row.description.hash(&mut hasher);
+                row.category.hash(&mut hasher);
                 row.disabled.hash(&mut hasher);
             }
         }
@@ -967,6 +971,13 @@ impl App {
         }
         if modal_editor(ws).is_some_and(|editor| editor.text() != before) {
             reset_modal_results(ws);
+            if let Some(nav) = ws.settings_nav.as_mut().filter(|nav| nav.search_focused) {
+                nav.reconcile(
+                    &crate::settings::categories(&self.gpu_choices),
+                    &self.cfg,
+                    &self.ui_text,
+                );
+            }
         }
         ws.accessibility_pending = true;
         self.update_ime_cursor_area(ws);
@@ -1138,6 +1149,42 @@ impl App {
                 }
             }
             return;
+        }
+        if ws.confirm_dialog.is_none()
+            && ws.context_menu.is_none()
+            && ws.palette_input.is_none()
+            && ws.theme_picker_input.is_none()
+            && ws.settings_text_edit.is_none()
+            && ws.settings_nav.is_some()
+            && [
+                accessibility_modal_id(MODAL_KIND_SETTINGS_SEARCH, 1),
+                accessibility_modal_text_run_id(MODAL_KIND_SETTINGS_SEARCH),
+            ]
+            .contains(&request.target_node)
+            && matches!(
+                request.action,
+                AccessibilityAction::Focus
+                    | AccessibilityAction::Click
+                    | AccessibilityAction::SetValue
+                    | AccessibilityAction::ReplaceSelectedText
+                    | AccessibilityAction::SetTextSelection
+            )
+        {
+            if !ws.settings_nav.as_ref().unwrap().search_focused {
+                end_modal_composition(ws);
+            }
+            ws.settings_nav.as_mut().unwrap().search_focused = true;
+            if matches!(
+                request.action,
+                AccessibilityAction::Focus | AccessibilityAction::Click
+            ) {
+                ws.accessibility_pending = true;
+                self.update_ime_cursor_area(ws);
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+                return;
+            }
         }
         if let Some(kind) = accessibility_modal_input_kind(ws)
             && [
@@ -1630,6 +1677,8 @@ pub(super) const MODAL_KIND_SSH: u64 = 7;
 pub(super) const MODAL_KIND_TITLE: u64 = 8;
 pub(super) const MODAL_KIND_THEMES: u64 = 10;
 pub(super) const MODAL_KIND_SETTINGS: u64 = 11;
+pub(super) const MODAL_KIND_SETTINGS_SEARCH: u64 = 12;
+const MODAL_KIND_SETTINGS_GROUP: u64 = 13;
 /// Text runs take kinds of their own, above every modal kind, so no row index
 /// can reach them.
 const MODAL_KIND_TEXT_RUN: u64 = 1 << 8;
@@ -1649,6 +1698,12 @@ pub(super) fn accessibility_modal_input_kind(ws: &WindowState) -> Option<u64> {
         Some(MODAL_KIND_THEMES)
     } else if ws.settings_text_edit.is_some() {
         Some(MODAL_KIND_SETTINGS)
+    } else if ws
+        .settings_nav
+        .as_ref()
+        .is_some_and(|nav| nav.search_focused)
+    {
+        Some(MODAL_KIND_SETTINGS_SEARCH)
     } else if ws.layout_picker_input.is_some() {
         Some(MODAL_KIND_LAYOUTS)
     } else if ws.ssh_input.is_some() {
@@ -1952,9 +2007,43 @@ pub(super) fn modal_accessibility_projection(
     if let Some(settings) = overlay.settings.as_ref() {
         let container_id = accessibility_modal_id(5, 0);
         let list_id = accessibility_modal_id(5, 1);
+        let layout = kettle_render::settings_layout(settings, metrics, surface, metrics.0);
+        let bounds = |r: kettle_render::Rect4| {
+            accesskit::Rect::new(
+                r.0 as f64,
+                r.1 as f64,
+                (r.0 + r.2) as f64,
+                (r.1 + r.3) as f64,
+            )
+        };
+        let search_id = accessibility_modal_id(MODAL_KIND_SETTINGS_SEARCH, 1);
+        let mut search = Node::new(Role::TextInput);
+        search.set_label(tr.text(kettle_i18n::Text::SettingsA11ySearch));
+        search.set_value(settings.search_query.clone());
+        search.set_bounds(bounds(layout.search_rect));
+        search.add_action(AccessibilityAction::Focus);
+        search.add_action(AccessibilityAction::SetValue);
+        search.add_action(AccessibilityAction::ReplaceSelectedText);
+        let field = if settings.search_focused {
+            overlay.text_field.as_ref()
+        } else {
+            None
+        };
+        push_text_input_run(
+            &mut projection.nodes,
+            &mut search,
+            accessibility_modal_text_run_id(MODAL_KIND_SETTINGS_SEARCH),
+            &settings.search_query,
+            field,
+        );
+        projection.nodes.push((search_id, search));
+        if settings.search_focused && projection.focus.is_none() {
+            projection.focus = Some(search_id);
+        }
         let mut children = Vec::with_capacity(settings.rows.len());
         for (index, row) in settings.rows.iter().enumerate() {
             if index == settings.focused_row
+                && !settings.search_focused
                 && !picker_open
                 && overlay.edit_title.is_none()
                 && let Some(field) = overlay.text_field.as_ref()
@@ -1963,6 +2052,7 @@ pub(super) fn modal_accessibility_projection(
                 let mut input = Node::new(Role::TextInput);
                 input.set_label(row.label.clone());
                 input.set_value(field.text.clone());
+                input.set_description(row.description.clone());
                 let (x, y, width, height) = field.rect;
                 input.set_bounds(accesskit::Rect::new(
                     x as f64,
@@ -2000,7 +2090,20 @@ pub(super) fn modal_accessibility_projection(
             // description, which Orca speaks after the name. Windows reads
             // the value itself.
             #[cfg(all(unix, not(target_os = "macos")))]
-            node.set_description(row.value.clone());
+            node.set_description(if row.description.is_empty() {
+                row.value.clone()
+            } else {
+                format!("{}. {}", row.value, row.description)
+            });
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            if !row.description.is_empty() {
+                node.set_description(row.description.clone());
+            }
+            if let Some(geometry) = layout.rows.iter().find(|r| r.index == index) {
+                node.set_bounds(bounds(geometry.rect));
+            } else {
+                node.set_hidden();
+            }
             if row.disabled {
                 node.set_disabled();
             }
@@ -2010,15 +2113,48 @@ pub(super) fn modal_accessibility_projection(
         }
         let mut list = Node::new(Role::ListBox);
         list.set_label(tr.text(kettle_i18n::Text::SettingsA11yFields));
-        list.set_children(children.clone());
+        if settings.search_query.is_empty() {
+            list.set_children(children.clone());
+        } else if settings.rows.is_empty() {
+            let id = accessibility_modal_id(MODAL_KIND_SETTINGS_GROUP, 0);
+            let mut empty = Node::new(Role::Label);
+            empty.set_label(tr.text(kettle_i18n::Text::SettingsNoMatches));
+            empty.set_bounds(bounds(layout.empty_rect));
+            projection.nodes.push((id, empty));
+            list.set_children([id]);
+        } else {
+            let mut groups = Vec::new();
+            for (category, name) in settings.categories.iter().enumerate() {
+                let members: Vec<_> = settings
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| row.category == category)
+                    .map(|(i, _)| children[i])
+                    .collect();
+                if members.is_empty() {
+                    continue;
+                }
+                let id = accessibility_modal_id(MODAL_KIND_SETTINGS_GROUP, category + 1);
+                let mut group = Node::new(Role::Group);
+                group.set_label(name.clone());
+                group.set_children(members);
+                if let Some((_, rect)) = layout.groups.iter().find(|(c, _)| *c == category) {
+                    group.set_bounds(bounds(*rect));
+                }
+                projection.nodes.push((id, group));
+                groups.push(id);
+            }
+            list.set_children(groups);
+        }
         projection.nodes.push((list_id, list));
         let mut dialog = Node::new(Role::Dialog);
         dialog.set_label(match settings.categories.get(settings.active_category) {
             Some(category) => tr.settings_a11y_dialog(category),
             None => tr.text(kettle_i18n::Text::SettingsA11yTitle).to_string(),
         });
-        dialog.set_children([list_id]);
-        dialog.set_bounds(full_bounds);
+        dialog.set_children([search_id, list_id]);
+        dialog.set_bounds(bounds(layout.rect));
         projection.roots.push(container_id);
         projection.nodes.push((container_id, dialog));
         if projection.focus.is_none() {

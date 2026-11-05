@@ -8,6 +8,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Settings opens as a centred two-pane window: categories in a sidebar,
+  a search field that finds settings by name, description or config key,
+  a one-line description under every setting, and values drawn as controls
+  (On/Off pills, ‹ choice ›). Narrow windows fall back to a single pane.
 - The command palette and the theme, layout and SSH pickers open as one
   centred card near the top of the window, with the query field above its
   results, and command labels highlight the characters that match the query.

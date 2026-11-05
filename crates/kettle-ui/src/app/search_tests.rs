@@ -782,6 +782,7 @@ fn search_follows_focus_with_its_query_and_toggles() {
 
 #[test]
 fn reopened_search_selects_the_remembered_query() {
+    use crate::app::{SearchCarryOver, fresh_search_state};
     let now = std::time::Instant::now();
     let carried = SearchCarryOver {
         query: "line 5".into(),

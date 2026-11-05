@@ -279,7 +279,10 @@ fn ui_geometry_exposes_modal_accessibility_and_settings_scroll_without_values() 
         .and_then(|rest| rest.split("fn ctl_perform_action(").next())
         .expect("ui_geometry body");
     for needle in [
-        "kettle_render::settings_panel_geometry",
+        "kettle_render::settings_layout",
+        "\"search_rect\":",
+        "\"chip_rect\":",
+        "\"description_rect\":",
         "\"first_line\":",
         "\"visible_lines\":",
         "\"focused_rect\":",
@@ -634,6 +637,7 @@ fn confirmation_accessibility_excludes_the_retained_settings_subtree() {
     let overlay = kettle_render::Overlay {
         confirm_dialog: Some(confirmation_test_overlay()),
         settings: Some(kettle_render::SettingsOverlay {
+            search_query: String::new(), search_focused: false, search_placeholder: String::new(), no_matches: String::new(),
             categories: vec!["Keybinds".into()],
             label_cols: 20,
             value_cols: 20,
@@ -803,6 +807,7 @@ fn modal_text_inputs_expose_their_text_and_selection() {
 fn settings_rows_carry_their_values_for_every_screen_reader() {
     let overlay = kettle_render::Overlay {
         settings: Some(kettle_render::SettingsOverlay {
+            search_query: String::new(), search_focused: false, search_placeholder: String::new(), no_matches: String::new(),
             categories: vec!["Appearance".into()],
             label_cols: 20,
             value_cols: 20,
@@ -811,6 +816,7 @@ fn settings_rows_carry_their_values_for_every_screen_reader() {
             rows: [("Theme", "Builtin Dark"), ("Font size", "14"), ("Background image", "")]
                 .into_iter()
                 .map(|(label, value)| kettle_render::SettingsRow {
+            description: String::new(), category: 0, control: Default::default(),
                     label: label.into(),
                     value: value.into(),
                     disabled: false,
@@ -886,7 +892,7 @@ fn accessibility_key_tracks_the_modal_text_caret_and_selection() {
 #[test]
 fn modal_text_runs_cannot_collide_with_rows_or_decode_as_buttons() {
     use super::{
-        MODAL_KIND_LAYOUTS, MODAL_KIND_PALETTE, MODAL_KIND_SETTINGS, MODAL_KIND_SSH, MODAL_KIND_THEMES,
+        MODAL_KIND_LAYOUTS, MODAL_KIND_PALETTE, MODAL_KIND_SETTINGS, MODAL_KIND_SETTINGS_SEARCH, MODAL_KIND_SSH, MODAL_KIND_THEMES,
         MODAL_KIND_TITLE, accessibility_confirm_button_index, accessibility_modal_id,
         accessibility_modal_text_run_id,
     };
@@ -897,6 +903,7 @@ fn modal_text_runs_cannot_collide_with_rows_or_decode_as_buttons() {
         MODAL_KIND_TITLE,
         MODAL_KIND_THEMES,
         MODAL_KIND_SETTINGS,
+        MODAL_KIND_SETTINGS_SEARCH,
     ];
     let runs: Vec<_> = kinds.iter().map(|&kind| accessibility_modal_text_run_id(kind)).collect();
     for (index, run) in runs.iter().enumerate() {
@@ -952,12 +959,14 @@ fn settings_inline_edit_exposes_text_caret_and_actions() {
     });
     let overlay = kettle_render::Overlay {
         settings: Some(kettle_render::SettingsOverlay {
+            search_query: String::new(), search_focused: false, search_placeholder: String::new(), no_matches: String::new(),
             categories: vec!["Background".into()],
             active_category: 0,
             label_cols: 20,
             value_cols: 20,
             background_page: true,
             rows: vec![kettle_render::SettingsRow {
+            description: String::new(), category: 0, control: Default::default(),
                 label: "Background image".into(),
                 value: String::new(),
                 disabled: false,
@@ -985,7 +994,7 @@ fn settings_inline_edit_exposes_text_caret_and_actions() {
     let (id, input) = projection
         .nodes
         .iter()
-        .find(|(_, node)| node.role() == accesskit::Role::TextInput)
+        .find(|(_, node)| node.role() == accesskit::Role::TextInput && node.label() == Some("Background image"))
         .expect("Settings inline edit must expose a TextInput");
     assert_eq!(projection.focus, Some(*id));
     assert_eq!(input.value(), Some("/tmp/image.png"));
@@ -1245,4 +1254,41 @@ fn picker_accessibility_bounds_follow_header_rows_and_scroll() {
         .find(|(_, node)| node.role() == accesskit::Role::Dialog)
         .unwrap();
     assert_eq!(dialog.1.bounds(), Some(bounds(card_rect)));
+}
+
+#[test]
+fn settings_search_and_row_descriptions_have_layout_bounds_and_text_actions() {
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.settings_nav = Some(crate::settings::SettingsNav { search_focused: true, query: "font".into(), ..Default::default() });
+    assert_eq!(super::accessibility_modal_input_kind(&ws), Some(super::MODAL_KIND_SETTINGS_SEARCH));
+    let settings = kettle_render::SettingsOverlay {
+        categories: vec!["Appearance".into()], search_query: "font".into(), search_focused: true,
+        rows: vec![kettle_render::SettingsRow { label: "Font size".into(), value: "14 pt".into(),
+            description: "Set the terminal font size in points.".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    let layout = kettle_render::settings_layout(&settings, (8.0, 16.0), (1280.0, 820.0), 8.0);
+    let overlay = kettle_render::Overlay {
+        settings: Some(settings),
+        text_field: Some(kettle_render::TextFieldOverlay { text: "font".into(), cursor_byte: 4,
+            selection: Some((0, 4)), rect: layout.search_rect, prefix: String::new(), hint: String::new(),
+            horizontal_scroll: 0, accent_palette: 0 }), ..Default::default()
+    };
+    let projection = super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    let search_id = super::accessibility_modal_id(super::MODAL_KIND_SETTINGS_SEARCH, 1);
+    assert_eq!(projection.focus, Some(search_id));
+    let search = &projection.nodes.iter().find(|(id, _)| *id == search_id).unwrap().1;
+    assert_eq!(search.role(), accesskit::Role::TextInput);
+    assert_eq!(search.label(), Some("Search settings")); assert_eq!(search.value(), Some("font"));
+    let r = layout.search_rect;
+    assert_eq!(search.bounds(), Some(accesskit::Rect::new(r.0 as f64, r.1 as f64, (r.0 + r.2) as f64, (r.1 + r.3) as f64)));
+    for action in [accesskit::Action::Focus, accesskit::Action::SetValue, accesskit::Action::ReplaceSelectedText, accesskit::Action::SetTextSelection] {
+        assert!(search.supports_action(action));
+    }
+    assert!(search.text_selection().is_some());
+    let row = &projection.nodes.iter().find(|(_, node)| node.role() == accesskit::Role::ListBoxOption).unwrap().1;
+    assert!(row.label().unwrap().contains("Font size")); assert_eq!(row.value(), Some("14 pt"));
+    assert!(row.description().unwrap().contains("Set the terminal font size in points."));
+    let r = layout.rows[0].rect;
+    assert_eq!(row.bounds(), Some(accesskit::Rect::new(r.0 as f64, r.1 as f64, (r.0 + r.2) as f64, (r.1 + r.3) as f64)));
 }

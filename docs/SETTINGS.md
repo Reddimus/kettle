@@ -4,6 +4,24 @@ kettle has a built-in **Settings** panel so you can change the common options
 without editing a config file. Open it with **`Ctrl + ,`** or
 **right-click → Settings…**.
 
+The centered window has a category sidebar and a search field. The right pane
+shows the category title, a short description under each option, and a value
+control. On/Off pills show boolean state, choices have arrows, and quantities
+show their units. Below a panel width of 640 pixels, categories become a
+horizontal strip above the options. Long labels, descriptions and values
+shorten with an ellipsis.
+
+## Finding an option
+
+Click **Search settings**, or press **Cmd+F** on macOS or **Ctrl+F** elsewhere.
+With `vim-menu-nav` enabled, **/** also focuses the search field. Type to match
+labels, descriptions or config keys across every category. Matching ignores
+case and Spanish accents. Results stay grouped by category; **Enter** or
+**Down** moves from the search field into the results. Normal navigation and
+value editing work there too. A search with no matches shows **No settings
+match**. **Esc** clears the query; another **Esc** closes Settings. Clicking a
+category clears the search and opens that category.
+
 ## Navigating
 
 | Key | Action |
@@ -12,11 +30,11 @@ without editing a config file. Open it with **`Ctrl + ,`** or
 | ← / → | Change the highlighted option |
 | Space / Enter | Toggle / cycle the highlighted option; on the Theme row, open the theme picker |
 | Tab / Shift+Tab | Next / previous category |
-| Esc | Close |
+| Esc | Clear a search query, or close if the query is empty |
 
 The panel is also fully **mouse-driven**: **left-click** a row to cycle its
 value forward, **right-click** to cycle back, **scroll-wheel** over a row to
-adjust it, **click a category tab** to switch pages, and **click outside** the
+adjust it, **click a category** to switch pages, and **click outside** the
 panel to close. (A keybind row starts capture on click, the image-path row opens
 an inline text prompt, and the Theme row opens the theme picker.)
 
@@ -39,9 +57,11 @@ keep reserved space below scrolling fields in short windows.
 Labels and display values use sentence case. Theme and GPU names retain their
 spelling. Quantities use a space before the unit, for example `13 pt`, `6 px`,
 `120 MB`, `24 h`, and `10 s`. Percentages use `99%`. Config tokens do not change.
-All categories share a label column with a two-cell gap before values. Narrow
-panels shorten labels and values separately with an ellipsis. Category names
-have two spaces between them; an underline marks the selected category.
+Labels and descriptions sit to the left of the value controls. The active
+category uses the same selection highlight as menus. Search, category controls,
+and the right pane footer stay in place while the focused option scrolls into
+view. The panel uses 72% of the window width (560-980 pixels) and 78% of its
+height (360-760 pixels), with at least 16 pixels of margin on each side.
 
 ## What's in the panel
 

@@ -1503,12 +1503,19 @@ fn confirmation_preserves_settings_below_opaque_panel() {
         overlay.confirm_dialog.as_ref().unwrap(),
     );
     overlay.settings = Some(SettingsOverlay {
+        search_query: String::new(),
+        search_focused: false,
+        search_placeholder: String::new(),
+        no_matches: String::new(),
         categories: vec!["Keys".into()],
         label_cols: 20,
         value_cols: 20,
         active_category: 0,
         background_page: false,
         rows: vec![SettingsRow {
+            description: String::new(),
+            category: 0,
+            control: Default::default(),
             label: "A conflicting key binding".into(),
             value: "Ctrl+W".into(),
             disabled: false,

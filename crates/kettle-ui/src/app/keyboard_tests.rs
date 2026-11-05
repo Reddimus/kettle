@@ -590,6 +590,7 @@ fn a_key_that_closes_or_replaces_a_modal_stops_repeating() {
         category: 0,
         field: 0,
         capturing: true,
+    ..Default::default()
     });
     let owner = top_modal(&ws);
     assert_eq!(owner, Some(KeyModal::SettingsCapture));
@@ -618,6 +619,7 @@ fn every_held_closing_key_stops_repeating() {
         category: 0,
         field: 0,
         capturing: false,
+    ..Default::default()
     });
     remember_closing_key(&mut ws, owner, enter);
     let owner = top_modal(&ws);

@@ -1434,7 +1434,7 @@ context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: GPU k
 context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
 
 [messages.settings_heading]
-context = "crates/kettle-render/src/lib.rs settings_display_lines: panel title. category is a translated category name."
+context = "crates/kettle-ui/src/settings.rs: legacy formatted Settings heading. category is a translated category name."
 args = [{ name = "category", type = "str" }]
 
 [messages.settings_hint_category]
@@ -2194,3 +2194,181 @@ context = "crates/kettle-ui/src/app/menus.rs shell_menu_items: disabled loading 
 
 [messages.notify_body_reconnect_environment_unavailable]
 context = "crates/kettle-ui/src/app/remote.rs: notification body when reconnect refuses an unreadable client connection environment."
+
+[messages.settings_description_field_agent_previews]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_agent_previews_claude_code]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_agent_previews_codex]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_agent_previews_agy]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_add_kettle_to_path]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_background_animation]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_background_image]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_background_opacity]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_background_type]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_bell]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_chrome_background]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_close_button_on_tab]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_completion_overlay]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_copy_on_select]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_cursor_blink]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_cursor_blink_timeout]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_cursor_shape]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_detachable_tabs]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_focus]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_font_size]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_gpu_backend]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_gpu_device]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_gpu_force_software]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_gpu_power_preference]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_invert_search]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_language]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_mouse_hide_while_typing]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_scroll_tabbar]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_scrollback_lines]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_scrollback_memory]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_scrollbar]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_scrollbar_width]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_search_case]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_search_wrap]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_show_titlebar]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_tab_bar]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_tab_bar_position]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_tab_min_width]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_theme]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_update_check_interval]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_update_policy]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_vim_menu_nav]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_window_blur]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_window_padding]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_close_pane]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_command_palette]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_copy]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_new_tab]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_next_tab]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_open_settings]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_paste]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_previous_tab]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_split_down]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_split_right]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_start_search]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_toggle_zoom]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_search_placeholder]
+context = "crates/kettle-ui/src/settings.rs: Settings search input placeholder and accessible name."
+
+[messages.settings_no_matches]
+context = "crates/kettle-ui/src/settings.rs: Settings search empty result."
+
+
+[messages.settings_a11y_search]
+context = "crates/kettle-ui/src/app/accessibility.rs: Settings search TextInput name, read without the screen."

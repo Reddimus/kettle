@@ -2743,3 +2743,16 @@ Keep credentials and raw account transcripts out of evidence; retain only the
 matching tool receipt fields, card geometry, screenshot, source revision, and
 owned-process cleanup result. Native ownership tests must see the host's real
 UIDs; a user namespace that reports `/` as UID 65534 is not a valid substitute.
+
+### Settings window regression coverage
+
+`kettle-render` settings tests check proportional panel sizing, sidebar versus
+single-pane placement at 1280x820, 800x600 and 560x600, nonoverlapping slots,
+focused-row scrolling, pinned notes, category/search/chip hits and editor
+rectangles. English, Spanish and pseudo-localized text must fit their clipped
+slots. `kettle-ui` settings tests check label/description/config-key search,
+Spanish accent folding, catalogue grouping, focus routing and disabled rows;
+AccessKit tests cover row descriptions and the search text input. Every field
+must have a short description in both catalogues, and `kettle-i18n` checks
+schema and Spanish draft status coverage. These pure tests do not establish
+live rendering or native screen-reader acceptance.

@@ -617,6 +617,7 @@ pub(super) enum KeyModal {
     ThemePicker,
     SettingsText,
     SettingsCapture,
+    SettingsSearch,
     Settings,
     LayoutPicker,
     Ssh,
@@ -643,6 +644,12 @@ pub(super) fn top_modal(ws: &WindowState) -> Option<KeyModal> {
         KeyModal::SettingsText
     } else if settings_capture_active(ws) {
         KeyModal::SettingsCapture
+    } else if ws
+        .settings_nav
+        .as_ref()
+        .is_some_and(|nav| nav.search_focused)
+    {
+        KeyModal::SettingsSearch
     } else if ws.settings_nav.is_some() {
         KeyModal::Settings
     } else if ws.layout_picker_input.is_some() {

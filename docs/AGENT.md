@@ -250,6 +250,14 @@ includes them. Negative coordinates are valid on monitors left of or above
 the primary display. Use the reported scale factor when converting screenshot
 or logical coordinates, and sample each target window independently.
 
+When Settings is open, `ui_geometry.settings` reports the panel, optional
+sidebar, content and search rectangles, visible category rectangles, and each
+visible row's index, row, label, description and chip rectangles. It also
+reports search focus and the focused result index. The legacy `first_line`
+and `visible_lines` keys now describe the first visible result row and visible
+row count. These bounds use the same layout as rendering and mouse input;
+queries and config values are omitted.
+
 When a confirmation is open, `ui_geometry.confirmation` reports its centered
 panel, heading, and body rectangles; scroll offset and limit; and each button's
 label, bounds, focus, hover, pressed, and destructive state. It is null otherwise.

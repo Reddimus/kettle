@@ -161,6 +161,12 @@ impl App {
             self.theme_picker_key(ws, &key, Some(text));
         } else if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
             self.settings_text_key(ws, &key, Some(text));
+        } else if ws
+            .settings_nav
+            .as_ref()
+            .is_some_and(|nav| nav.search_focused)
+        {
+            self.settings_search_key(ws, &key, Some(text));
         } else if ws.settings_nav.is_some() {
             ws.mods = latched_mods;
             return;

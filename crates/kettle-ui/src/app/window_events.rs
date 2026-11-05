@@ -1848,6 +1848,17 @@ impl App {
                     // captured, or refused with a notification, once per repeat.
                     let inert = if settings_capture_active(ws) {
                         event.repeat
+                    } else if ws
+                        .settings_nav
+                        .as_ref()
+                        .is_some_and(|nav| nav.search_focused)
+                    {
+                        modal_repeat_is_inert(
+                            ModalRepeat::Palette,
+                            event.repeat,
+                            &event.logical_key,
+                            ws.mods.control_key(),
+                        )
                     } else {
                         // Only a repeat needs the focused row's kind.
                         let steps = event.repeat && self.settings_row_steps(ws);
@@ -1859,7 +1870,18 @@ impl App {
                         )
                     };
                     if !inert {
-                        self.settings_key(ws, &event.logical_key, event_loop);
+                        let handled = self.settings_search_key(ws, &event.logical_key, text);
+                        if handled
+                            && matches!(
+                                event.logical_key,
+                                Key::Named(NamedKey::Escape | NamedKey::Enter)
+                            )
+                        {
+                            ws.closing_keys.insert(event.physical_key);
+                        }
+                        if !handled {
+                            self.settings_key(ws, &event.logical_key, event_loop);
+                        }
                     }
                     remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {

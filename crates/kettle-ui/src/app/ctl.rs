@@ -1284,21 +1284,23 @@ impl App {
         let diagnostic_overlay = self.overlay(target, false);
         let picker = picker_diagnostic_geometry(&diagnostic_overlay);
         let settings = diagnostic_overlay.settings.as_ref().map(|settings| {
-            let geometry = kettle_render::settings_panel_geometry(
-                settings,
-                cell_w,
-                cell_h,
-                surface.0 as f32,
-                surface.1 as f32,
-            );
+            let layout = kettle_render::settings_layout(settings, (cell_w, self.overlay_text_line_height(target)),
+                (surface.0 as f32, surface.1 as f32), self.overlay_text_cell_width(target));
+            let focused = layout.rows.iter().find(|row| row.index == settings.focused_row).map_or(layout.empty_rect, |row| row.rect);
             serde_json::json!({
-                "rect": rect_json(geometry.rect),
-                "focused_rect": rect_json(geometry.focused_rect),
+                "rect": rect_json(layout.rect),
+                "focused_rect": rect_json(focused),
+                "sidebar_rect": layout.sidebar_rect.map(rect_json),
+                "content_rect": rect_json(layout.content_rect),
+                "search_rect": rect_json(layout.search_rect),
+                "search_focused": settings.search_focused,
+                "categories": layout.category_rects.iter().map(|r| r.map(rect_json)).collect::<Vec<_>>(),
+                "rows": layout.rows.iter().map(|row| serde_json::json!({"index": row.index, "rect": rect_json(row.rect), "chip_rect": rect_json(row.chip_rect), "label_rect": rect_json(row.label_rect), "description_rect": rect_json(row.description_rect)})).collect::<Vec<_>>(),
                 "focused_row": settings.focused_row,
                 "row_count": settings.rows.len(),
                 "active_category": settings.active_category,
-                "first_line": geometry.first_line,
-                "visible_lines": geometry.visible_lines,
+                "first_line": layout.first_row,
+                "visible_lines": layout.rows.len(),
             })
         });
         let confirmation = diagnostic_overlay.confirm_dialog.as_ref().map(|dialog| {
@@ -1912,6 +1914,7 @@ impl App {
                 Key::Character(text) if !mods.control_key() => Some(text.as_str()),
                 _ => None,
             };
+            let modal_owner = top_modal(ws);
             match modal {
                 TextModal::Confirm => {
                     self.confirm_dialog_key(ws, key, event_loop);
@@ -1923,7 +1926,11 @@ impl App {
                 TextModal::Palette => self.palette_key(ws, key, text, event_loop),
                 TextModal::ThemePicker => self.theme_picker_key(ws, key, text),
                 TextModal::SettingsText => self.settings_text_key(ws, key, text),
-                TextModal::Settings => self.settings_key(ws, key, event_loop),
+                TextModal::Settings => {
+                    if !self.settings_search_key(ws, key, text) {
+                        self.settings_key(ws, key, event_loop);
+                    }
+                }
                 TextModal::LayoutPicker => self.layout_picker_key(ws, key, text),
                 TextModal::Ssh => self.ssh_key(ws, key, text),
                 TextModal::TitleEdit => self.title_edit_key(ws, key, text),
@@ -1933,6 +1940,9 @@ impl App {
                     }
                 }
                 TextModal::Preview => self.preview_focus_key(ws, key, false),
+            }
+            if top_modal(ws) != modal_owner && open_text_modal(ws) == Some(modal) {
+                end_modal_composition(ws);
             }
             applied += 1;
             // Stop as soon as the modal this batch addressed is gone (Esc,
