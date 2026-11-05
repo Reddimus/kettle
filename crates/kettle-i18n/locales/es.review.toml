@@ -42,6 +42,8 @@ search_regex_off = "draft"
 search_counting = "draft"
 scrollback_return = "draft"
 
+command_mark_a11y_success = "draft"
+command_mark_a11y_failure = "draft"
 macos_menu_app = "draft"
 macos_menu_shell = "draft"
 macos_menu_edit = "draft"
@@ -835,6 +837,8 @@ keys = [
     "confirm_paste_one_line",
     "search_a11y_regex",
     "scrollback_a11y",
+    "command_mark_a11y_success",
+    "command_mark_a11y_failure",
     "settings_a11y_search",
     "media_viewer_a11y",
     "media_viewer_a11y_pin",

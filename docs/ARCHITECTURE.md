@@ -4675,3 +4675,17 @@ Ancestor text is clipped under child panels. AccessKit nests the child Menu
 under the expanded parent MenuItem, with actions on visible ancestor rows.
 Menus have no editable text or IME caret; paste consent reuses the existing
 confirmation layout and IME ownership rules.
+
+### Automatic shell startup and command outcomes
+
+`kettle-ui::shell_integration` extends the core `shell_startup` launch additions
+with immutable files verified by `owned_dir`. It composes with agent startup,
+restores borrowed environment before running user startup, and loads the
+canonical bundled hooks. No startup files belonging to the user are changed.
+The per-file verification read limit is 64 KiB, covering the Fish integration.
+
+The core reader stores bounded known command outcomes separately from prompt
+navigation, anchored to primary-grid document rows at command start. The UI
+captures outcomes into render snapshots. `scrollbar::command_tick_rect` owns
+the shared overlay geometry for rendering, AccessKit and control diagnostics.
+Terminal grid, hit tests and IME layout do not change.

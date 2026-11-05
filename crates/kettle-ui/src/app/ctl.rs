@@ -1484,6 +1484,21 @@ impl App {
                         "id": id,
                         "rect": rect_json(partition.leaf),
                         "terminal": rect_json(partition.terminal),
+                        "command_marks": target.mux.panes.get(id).map(|pane| {
+                            use kettle_core::Dimensions as _;
+                            let marks = pane.term.command_marks();
+                            let Ok(term) = pane.term.term.lock() else { return Vec::new(); };
+                            let origin = term.grid().history_origin();
+                            let total = term.grid().history_size() + term.grid().screen_lines();
+                            let scale = target.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
+                            marks.into_iter().filter_map(|mark| {
+                                let [x, y, w, h] = kettle_core::scrollbar::command_tick_rect(
+                                    partition.terminal, scale, self.cfg.scrollbar_width, origin, total, mark,
+                                )?;
+                                Some(serde_json::json!({"row": mark.row, "exit_code": mark.exit_code,
+                                    "rect": rect_json((x, y, w, h))}))
+                            }).collect::<Vec<_>>()
+                        }).unwrap_or_default(),
                         "focused": target.mux.active_focus() == Some(*id),
                     }))
                     .collect::<Vec<_>>(),

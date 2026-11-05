@@ -1954,6 +1954,23 @@ impl Renderer {
             }
         }
 
+        // Result ticks remain visible even when the scrollbar thumb is hidden.
+        for pv in panes {
+            for mark in &pv.snap.command_marks {
+                if let Some([x, y, w, h]) = kettle_core::scrollbar::command_tick_rect(
+                    pv.terminal,
+                    self.scale,
+                    cfg.scrollbar_width,
+                    pv.snap.history_origin,
+                    pv.snap.history_size + pv.snap.screen_lines,
+                    *mark,
+                ) {
+                    let color = theme.palette[if mark.exit_code == 0 { 2 } else { 1 }];
+                    over.push(rect(x, y, w, h, color, 1.0));
+                }
+            }
+        }
+
         // The card a click would open: an accent outline just inside its
         // visible part, over its frame. Static, so there is no motion to
         // reduce.

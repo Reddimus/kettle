@@ -818,6 +818,9 @@ search_a11y_regex = "Use regular expressions"
 search_regex_on = "Regex: On"
 search_regex_off = "Regex: Off"
 search_counting = "Counting…"
+command_mark_a11y_success = "Command succeeded (exit code {code})"
+
+command_mark_a11y_failure = "Command failed (exit code {code})"
 
 [completion_matches]
 one = "{count} match"

@@ -831,6 +831,7 @@ impl App {
                     true
                 };
                 if snapshot_ready {
+                    snaps[si].command_marks = p.term.command_marks();
                     let cwd = p.term.current_dir_or_native();
                     let mut title_parts = pane_title_parts(
                         &self.cfg.agent_badge,

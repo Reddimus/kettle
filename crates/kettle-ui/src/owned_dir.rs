@@ -17,7 +17,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 /// Largest file the check reads; Kettle's own are well under it.
-pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024;
+pub(crate) const MAX_FILE_BYTES: u64 = 64 * 1024;
 
 /// Reads the executable and version an older directory under a root names,
 /// for deciding what is stale.

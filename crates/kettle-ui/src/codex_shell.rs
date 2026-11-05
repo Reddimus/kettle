@@ -430,6 +430,7 @@ pub(crate) fn for_new_pane() -> Option<kettle_core::shell_startup::ShellStartup>
     }
     checked.ok()?;
     Some(kettle_core::shell_startup::ShellStartup {
+        integration: None,
         zsh: Some(offered.directory.join(ZSH_DIRECTORY)),
         fish: Some(offered.fish),
     })
@@ -715,6 +716,7 @@ mod tests {
             Self {
                 base,
                 startup: kettle_core::shell_startup::ShellStartup {
+                    integration: None,
                     zsh: Some(offered.directory.join(ZSH_DIRECTORY)),
                     fish: Some(offered.fish),
                 },

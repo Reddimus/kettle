@@ -1,12 +1,7 @@
-//! What Kettle adds to the startup of the zsh or fish a pane runs, leaving
-//! the user's own startup files as they are. zsh reads a `.zshenv` of
-//! Kettle's in place of the user's, through a `ZDOTDIR` Kettle borrows and
-//! that file puts back; fish runs Kettle's code after the user's
-//! configuration, as `fish -C`, with nothing borrowed.
-//!
-//! Only the shell a pane starts with no arguments of its own gets them: the
-//! user's shell, or a `command` naming just the shell. The shell is the one
-//! the PTY runs, decided by the same lookup.
+//! Startup additions for a pane's bash, zsh or fish. Agent helpers and
+//! automatic integration share this launch boundary. Only the default shell
+//! or an explicit command naming a bare shell receives additions; wrappers
+//! and commands with arguments remain exact.
 
 use portable_pty::CommandBuilder;
 use std::ffi::{OsStr, OsString};
@@ -15,6 +10,8 @@ use std::path::{Path, PathBuf};
 /// Startup additions for a pane's shell.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShellStartup {
+    /// Checked private automatic integration files, independent of agent helpers.
+    pub integration: Option<PathBuf>,
     /// A directory whose `.zshenv`, written with [`zshenv`], zsh reads in
     /// place of the user's.
     pub zsh: Option<PathBuf>,
@@ -381,7 +378,49 @@ pub(crate) fn apply(cmd: &mut CommandBuilder, explicit: Option<&str>, startup: &
         None if cmd.is_default_prog() => PathBuf::from(cmd.get_shell()),
         None => return,
     };
-    let additions = additions(&program, cmd.get_env("ZDOTDIR"), startup);
+    let mut startup = startup.clone();
+    if let Some(directory) = &startup.integration {
+        match program.file_name().and_then(OsStr::to_str) {
+            Some("zsh") => startup.zsh = Some(directory.join("zsh")),
+            Some("bash") => {
+                // Bash ignores --rcfile for login shells. The rcfile reproduces
+                // login startup before loading the integration instead.
+                let login =
+                    cmd.is_default_prog() || cmd.get_argv().iter().skip(1).any(|arg| arg == "-l");
+                if cmd.is_default_prog() {
+                    cmd.get_argv_mut().push(program.clone().into_os_string());
+                } else {
+                    cmd.get_argv_mut().retain(|arg| arg != "-l");
+                }
+                cmd.env("KETTLE_BASH_LOGIN", if login { "1" } else { "0" });
+                cmd.arg("--rcfile");
+                cmd.arg(directory.join("bashrc"));
+            }
+            Some("fish") => {
+                let original = cmd.get_env("XDG_DATA_DIRS").map(OsStr::to_owned);
+                cmd.env(
+                    "KETTLE_XDG_DATA_DIRS_SET",
+                    if original.is_some() { "1" } else { "" },
+                );
+                cmd.env(
+                    "KETTLE_XDG_DATA_DIRS",
+                    original.as_deref().unwrap_or_default(),
+                );
+                let mut value = directory.as_os_str().to_owned();
+                value.push(":");
+                value.push(
+                    original
+                        .as_deref()
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or_else(|| OsStr::new("/usr/local/share:/usr/share")),
+                );
+                cmd.env("XDG_DATA_DIRS", value);
+            }
+            _ => {}
+        }
+    }
+    let additions = additions(&program, cmd.get_env("ZDOTDIR"), &startup);
+
     for (name, value) in additions.env {
         cmd.env(name, value);
     }
@@ -416,6 +455,7 @@ mod tests {
 
     fn startup() -> ShellStartup {
         ShellStartup {
+            integration: None,
             zsh: Some(PathBuf::from("/kettle/zsh")),
             fish: Some("function codex; end".to_owned()),
         }
@@ -621,6 +661,7 @@ mod tests {
         let program = dir.path().join("bin/zsh");
         let system = dir.path().join("etc/zshenv");
         let startup = ShellStartup {
+            integration: None,
             zsh: Some(dir.path().join("kettle")),
             fish: None,
         };
@@ -657,6 +698,7 @@ mod tests {
         let program = dir.path().join("bin/zsh");
         let system = dir.path().join("etc/zshenv");
         let startup = ShellStartup {
+            integration: None,
             zsh: Some(dir.path().join("kettle")),
             fish: None,
         };
@@ -688,6 +730,7 @@ mod tests {
             Some(system)
         );
         let startup = ShellStartup {
+            integration: None,
             zsh: Some(dir.path().join("kettle")),
             fish: None,
         };
@@ -848,5 +891,94 @@ mod tests {
         );
         assert_eq!(system_zshenvs(Path::new("/bin/zsh")).len(), 2);
         assert_eq!(system_zshenvs(Path::new("zsh")).len(), 2);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod automatic_tests {
+    use super::*;
+
+    #[test]
+    fn automatic_bash_uses_rcfile_and_reproduces_login_startup() {
+        let startup = ShellStartup {
+            integration: Some("/private/startup".into()),
+            ..Default::default()
+        };
+        let mut cmd = CommandBuilder::new_default_prog();
+        cmd.env("SHELL", "/bin/bash");
+        apply(&mut cmd, None, &startup);
+        assert!(!cmd.is_default_prog());
+        assert_eq!(
+            cmd.get_argv(),
+            &["/bin/bash", "--rcfile", "/private/startup/bashrc"].map(OsString::from)
+        );
+        assert_eq!(cmd.get_env("KETTLE_BASH_LOGIN"), Some(OsStr::new("1")));
+        let mut cmd = CommandBuilder::new("/bin/bash");
+        apply(&mut cmd, Some("/bin/bash"), &startup);
+        assert_eq!(cmd.get_env("KETTLE_BASH_LOGIN"), Some(OsStr::new("0")));
+    }
+
+    #[test]
+    fn automatic_fish_borrows_xdg_but_keeps_agent_after_config_code() {
+        let startup = ShellStartup {
+            integration: Some("/private/startup".into()),
+            fish: Some("agent".into()),
+            ..Default::default()
+        };
+        for original in [None, Some(""), Some("/custom/share:/usr/share")] {
+            let mut cmd = CommandBuilder::new("/usr/bin/fish");
+            cmd.env_remove("XDG_DATA_DIRS");
+            if let Some(value) = original {
+                cmd.env("XDG_DATA_DIRS", value);
+            }
+            apply(&mut cmd, Some("/usr/bin/fish"), &startup);
+            assert_eq!(
+                cmd.get_env("KETTLE_XDG_DATA_DIRS_SET"),
+                Some(OsStr::new(if original.is_some() { "1" } else { "" }))
+            );
+            assert_eq!(
+                cmd.get_env("KETTLE_XDG_DATA_DIRS"),
+                Some(OsStr::new(original.unwrap_or("")))
+            );
+            assert!(
+                cmd.get_env("XDG_DATA_DIRS")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("/private/startup:")
+            );
+            assert_eq!(
+                cmd.get_argv(),
+                &["/usr/bin/fish", "-C", "agent"].map(OsString::from)
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_commands_with_arguments_and_other_programs_are_unchanged() {
+        let startup = ShellStartup {
+            integration: Some("/private/startup".into()),
+            ..Default::default()
+        };
+        for argv in [
+            vec!["/bin/bash", "-c", "echo hello"],
+            vec!["/usr/bin/ssh", "host"],
+            vec!["/usr/bin/sudo", "bash"],
+            vec!["/bin/sh"],
+        ] {
+            let mut cmd = CommandBuilder::from_argv(argv.iter().map(OsString::from).collect());
+            let before = cmd.clone();
+            apply(
+                &mut cmd,
+                if argv.len() == 1 { Some(argv[0]) } else { None },
+                &startup,
+            );
+            assert_eq!(cmd.get_argv(), before.get_argv());
+            assert_eq!(cmd.get_env("ZDOTDIR"), before.get_env("ZDOTDIR"));
+            assert_eq!(
+                cmd.get_env("XDG_DATA_DIRS"),
+                before.get_env("XDG_DATA_DIRS")
+            );
+        }
     }
 }

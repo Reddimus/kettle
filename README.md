@@ -43,8 +43,8 @@ update toast) or `update-policy = off` (no automatic network request).
 2. Split the window with `Ctrl+Shift+E` (side by side) or `Ctrl+Shift+O`
    (top and bottom).
 3. Open Settings with `Ctrl+,`.
-4. Optional: add [shell integration](docs/SHELL-INTEGRATION.md) for prompt
-   jumps and completion cards.
+4. Bash, Zsh and Fish get [shell integration](docs/SHELL-INTEGRATION.md)
+   automatically for prompt jumps, command results and completion cards.
 
 Kettle reloads its `key = value` config when you save it.
 `kettle --write-default-config` creates one, `kettle --config-path` finds it

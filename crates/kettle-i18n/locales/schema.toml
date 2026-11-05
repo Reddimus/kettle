@@ -2474,3 +2474,11 @@ plural = "count"
 context = "Screen reader name of the pane's return-to-live button. lines is a grouped count of rows above the live bottom; count selects plural."
 args = [{ name = "lines", type = "str" }, { name = "count", type = "u64" }]
 plural = "count"
+
+[messages.command_mark_a11y_success]
+context = "crates/kettle-ui/src/app/accessibility.rs: description of a completed command tick in the scrollbar. code is its signed OSC 133 exit code."
+args = [{ name = "code", type = "str" }]
+
+[messages.command_mark_a11y_failure]
+context = "crates/kettle-ui/src/app/accessibility.rs: description of a completed command tick in the scrollbar. code is its signed OSC 133 exit code."
+args = [{ name = "code", type = "str" }]

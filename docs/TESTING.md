@@ -2843,3 +2843,16 @@ and hover/click/arrow-key menu navigation at 800x600 in English and Spanish.
 Check VoiceOver/AccessKit nesting, resize/DPI changes, and `kettle ctl
 ui_geometry` parent-panel bounds against the painted panels. No headless unit
 test substitutes for that rendering and assistive-technology pass.
+
+### First-launch shell integration
+
+`cargo test -p kettle-ui shell_integration` exercises the checked private
+startup files with native Bash (including macOS 3.2), Zsh and Fish when installed.
+It checks user startup order, one-time sourcing and restoration of injected
+paths before child shells. `cargo test -p kettle-core automatic_tests` checks
+launch construction without a PTY. Command outcome tests cover duplicate and
+unknown statuses, bounded retention and shared DPI-aware scrollbar rectangles;
+`repeated_output_starts_are_one_command` checks the reader's actual OSC path.
+Accessibility tests check English/Spanish exit-code descriptions against that
+geometry. Native UI/GPU acceptance still requires rendered ticks on each OS;
+headless source and geometry checks do not establish visual acceptance.

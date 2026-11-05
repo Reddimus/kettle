@@ -208,7 +208,9 @@ Print the OSC 133 shell-integration snippet for
 .I SHELL
 (one of:
 .BR bash ", " zsh ", " fish ", " powershell ).
-Append to your rc file to enable jump-to-prompt
+New Bash, Zsh and Fish panes load these hooks automatically with
+.BR "shell-integration = auto" .
+For manual setup, append to your rc file to enable jump-to-prompt
 .RB ( "Ctrl+Up" " / " "Ctrl+Down" )
 inside kettle:
 .PP

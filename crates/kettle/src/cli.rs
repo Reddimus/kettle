@@ -94,15 +94,16 @@ pub(crate) struct Cli {
 
     /// Print the OSC 133 shell-integration snippet for SHELL (one of
     /// `bash`, `zsh`, `fish`, `powershell` — also `pwsh` / `ps1`) and
-    /// exit. Append to your shell rc file to enable `Ctrl+Up` /
-    /// `Ctrl+Down` jump-to-prompt:
+    /// exit. New macOS/Linux Bash, Zsh and Fish panes load these hooks
+    /// automatically (`shell-integration = auto`). For manual setup, append
+    /// to your shell rc file to enable `Ctrl+Up` / `Ctrl+Down` jump-to-prompt:
     ///
     ///   kettle --shell-integration bash       >> ~/.bashrc
     ///   kettle --shell-integration zsh        >> ~/.zshrc
     ///   kettle --shell-integration fish       >> ~/.config/fish/config.fish
     ///   kettle --shell-integration powershell >> $PROFILE   # PS 5+ / PS 7+
     ///
-    /// Kettle starts the default Unix shell as a login shell. Bash reads the first
+    /// Default Unix shells use login startup. Bash reads the first
     /// readable `~/.bash_profile`, `~/.bash_login`, or `~/.profile`, not `~/.bashrc`
     /// automatically. If that active login startup file does not already source
     /// `~/.bashrc`, add this line to it (create `~/.bash_profile` only if none exists):

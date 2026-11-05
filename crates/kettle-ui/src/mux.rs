@@ -2383,7 +2383,10 @@ impl Mux {
         // Kettle's Codex integration for the pane's shell, offered while
         // `agent-display-codex` and agent previews are on, checked again now.
         #[cfg(unix)]
-        let shell_startup = crate::codex_shell::for_new_pane().unwrap_or_default();
+        let shell_startup = crate::shell_integration::for_new_pane(
+            crate::codex_shell::for_new_pane().unwrap_or_default(),
+            launch.is_none() && cfg.shell_integration,
+        );
         #[cfg(not(unix))]
         let shell_startup = kettle_core::shell_startup::ShellStartup::default();
         // Terminator parity: route through new_with_env so

@@ -2,6 +2,8 @@
 //! driven by a dedicated reader thread.
 
 mod command_correlation;
+mod command_marks;
+pub use command_marks::CommandMark;
 mod local_echo;
 pub use command_correlation::CommandCorrelationCapability;
 pub use local_echo::LocalEcho;
@@ -3526,6 +3528,7 @@ pub struct Terminal {
     /// `pop_front`, not a `Vec::drain(0..1)` that shifts all ~2048 elements on
     /// every prompt once full — this is the hot reader-thread path.
     prompts: Arc<Mutex<std::collections::VecDeque<u64>>>,
+    command_marks: Arc<Mutex<command_marks::CommandMarks>>,
     prompt_seen: Arc<AtomicBool>,
     /// Terminator parity (`command_notify.py` plugin):
     /// OSC 133 OutputStart timestamp — set when `OutputStart` fires,
@@ -4915,8 +4918,8 @@ mod default_pane_shell_tests {
 /// first, then kettle's hook wraps the resulting prompt.
 /// cmd.exe is left untouched — its process cwd already tracks `cd` (read by the
 /// native poll). `inject = false` (config `shell-integration = off`) reproduces
-/// the bare [`default_prog`]. Unix-shell rc-hook injection is a follow-up; on
-/// non-Windows this currently defers to [`default_prog`].
+/// the bare [`default_prog`]. Unix startup additions are applied later, after
+/// the configured environment, through [`crate::shell_startup`].
 fn default_prog_with_integration(inject: bool) -> CommandBuilder {
     #[cfg(windows)]
     if inject
@@ -5810,6 +5813,7 @@ impl Terminal {
         let graphics_reflow_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let prompts: Arc<Mutex<std::collections::VecDeque<u64>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let command_marks = Arc::new(Mutex::new(command_marks::CommandMarks::default()));
         let prompt_seen = Arc::new(AtomicBool::new(false));
         // Terminator parity (`command_notify.py`):
         // per-pane OSC 133 OutputStart timestamp + completed-command
@@ -5909,6 +5913,7 @@ impl Terminal {
             let graphics_gate = graphics_gate.clone();
             let graphics_reflow_generation = graphics_reflow_generation.clone();
             let prompts = prompts.clone();
+            let command_marks = command_marks.clone();
             let prompt_seen = prompt_seen.clone();
             let output_started_at = output_started_at.clone();
             let command_generation = command_generation.clone();
@@ -6735,6 +6740,9 @@ impl Terminal {
                                             );
                                         }
                                         Chunk::Prompt(kind @ (PromptKind::PromptStart | PromptKind::IntegratedPromptStart(_) | PromptKind::CorrelationDisabledPromptStart)) => {
+                                            if let Ok(mut marks) = command_marks.lock() {
+                                                marks.cancel_pending();
+                                            }
                                             command_shell.announce(kind);
                                             let prompt_row = if let Ok(t) = term.lock()
                                                 && !t.mode().contains(
@@ -6805,6 +6813,13 @@ impl Terminal {
                                                 *t = Some(std::time::Instant::now());
                                                 command_shell.command_started();
                                             }
+                                            if let Ok(t) = term.lock()
+                                                && !t.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+                                                && let Ok(prompts) = prompts.lock()
+                                                && let Ok(mut marks) = command_marks.lock()
+                                            {
+                                                marks.begin(prompts.back().copied());
+                                            }
                                             // `shell_idle` needs a REAL OutputStart source.
                                             // Prompt marks alone never authorize a
                                             // close-confirm skip, or an A/B/D-only
@@ -6834,6 +6849,9 @@ impl Terminal {
                                                     &mut deferred_graphics, &proxy,
                                                 );
                                             }
+                                            if let Ok(mut marks) = command_marks.lock() {
+                                                marks.end(code);
+                                            }
                                             let started = output_started_at.lock().ok().and_then(|mut t| t.take());
                                             if let Some(started) = started
                                                 && let Ok(mut q) = command_finished.lock() {
@@ -6859,6 +6877,9 @@ impl Terminal {
                                         // close-confirm skip never applies. B is not a
                                         // command end, so no CommandFinished is pushed.
                                         Chunk::Prompt(PromptKind::CommandStart) => {
+                                            if let Ok(mut marks) = command_marks.lock() {
+                                                marks.cancel_pending();
+                                            }
                                             if let Ok(mut completion) = completion_cell.lock() {
                                                 hide_completion_view_slot(&mut completion);
                                             }
@@ -7075,6 +7096,7 @@ impl Terminal {
             graphics_gate,
             graphics_reflow_generation,
             prompts,
+            command_marks,
             prompt_seen,
             output_started_at,
             command_generation,
@@ -7838,6 +7860,28 @@ impl Terminal {
             .unwrap_or_default()
     }
 
+    /// Known completed-command outcomes. Alternate screens never show shell marks.
+    pub fn command_marks(&self) -> Vec<CommandMark> {
+        let Ok(term) = self.term.lock() else {
+            return Vec::new();
+        };
+        if term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        {
+            return Vec::new();
+        }
+        let grid = term.grid();
+        let origin = grid.history_origin();
+        let end = origin
+            .saturating_add(grid.history_size() as u64)
+            .saturating_add(grid.screen_lines() as u64);
+        self.command_marks
+            .lock()
+            .map(|mut marks| marks.retained(origin, end))
+            .unwrap_or_default()
+    }
+
     /// Visible row span occupied by the active prompt and command line.
     ///
     /// Completion UI uses the OSC 133 prompt start rather than guessing from
@@ -8399,6 +8443,9 @@ impl Terminal {
             prune(&self.images, oldest_abs);
         }
         if columns_reflowed {
+            if let Ok(mut marks) = self.command_marks.lock() {
+                marks.clear();
+            }
             clear_reflowed_regular_placements(
                 &self.images,
                 &self.relatives,

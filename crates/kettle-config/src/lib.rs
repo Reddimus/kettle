@@ -1468,17 +1468,11 @@ pub struct Config {
     /// ~/.bash_profile, ...). The default shell always starts as a login
     /// shell. Default false matches Terminator.
     pub login_shell: bool,
-    /// Auto-load kettle's shell integration into the DEFAULT shell kettle
-    /// launches, so the shell reports its working directory (OSC 7) + prompt
-    /// marks (OSC 133) with zero `$PROFILE` setup. This is what makes the tab
-    /// track `cd` for a stock PowerShell (whose `Set-Location` does NOT update
-    /// the OS process cwd, so it cannot be read from outside the process).
-    /// Injects for pwsh/powershell via `-NoExit -Command` and a short bootstrap
-    /// that decodes the embedded `kettle.ps1` (the user's `$PROFILE` still loads
-    /// first; kettle only wraps the resulting prompt). cmd.exe needs no
-    /// injection (its process cwd tracks `cd`, read by the native poll).
-    /// Default `true`; `shell-integration = off` launches the shell untouched
-    /// (rely on a manually-sourced `$PROFILE` integration).
+    /// Auto-load the bundled integration into default or bare explicit bash,
+    /// zsh and fish shells on Unix, and PowerShell on Windows. User startup
+    /// runs before the hooks. `auto` (default) enables injection; `off` disables
+    /// it. Legacy boolean values remain accepted. Commands with arguments and
+    /// wrappers are left alone. See docs/SHELL-INTEGRATION.md.
     pub shell_integration: bool,
     /// Terminator parity (terminatorlib/config.py:118
     /// `exit_action`): what to do when the shell process exits.
@@ -4143,6 +4137,8 @@ impl Config {
                 // recognizes. `BOOL_KEYS` lists both spellings of many keys,
                 // but the tokenizer yields only the hyphenated form, so compare
                 // each entry in that folded spelling.
+                "shell-integration" | "shell_integration" =>
+                    v.eq_ignore_ascii_case("auto") || parse_bool(v).is_some(),
                 k if Self::BOOL_KEYS
                     .iter()
                     .any(|listed| listed.replace('_', "-") == k) =>
@@ -4938,7 +4934,9 @@ impl Config {
                     }
                 }
                 "shell-integration" | "shell_integration" => {
-                    if let Some(b) = parse_bool(&e.value) {
+                    if e.value.eq_ignore_ascii_case("auto") {
+                        cfg.shell_integration = true;
+                    } else if let Some(b) = parse_bool(&e.value) {
                         cfg.shell_integration = b;
                     }
                 }
@@ -8395,8 +8393,17 @@ cell-height = 1.2\n";
         assert_eq!(d.ask_before_closing, AskBeforeClosing::MultipleTerminals);
         assert!(Config::parse_text("login-shell = true").login_shell);
         assert!(Config::parse_text("login_shell = true").login_shell);
-        // shell-integration is a bool, default on.
+        // The boolean field retains legacy spellings and adds auto.
         assert!(Config::default().shell_integration);
+        assert!(Config::parse_text("shell-integration = auto").shell_integration);
+        assert!(
+            Config::parse_text("shell-integration = off\nshell-integration = auto")
+                .shell_integration
+        );
+        assert!(Config::parse_text("shell_integration = AUTO").shell_integration);
+        assert!(Config::detect_malformed_values("shell-integration = auto").is_empty());
+        assert!(Config::detect_malformed_values("shell_integration = AUTO").is_empty());
+        assert!(!Config::detect_malformed_values("shell-integration = maybe").is_empty());
         assert!(!Config::parse_text("shell-integration = off").shell_integration);
         assert!(!Config::parse_text("shell-integration = false").shell_integration);
         assert!(Config::parse_text("shell_integration = on").shell_integration);

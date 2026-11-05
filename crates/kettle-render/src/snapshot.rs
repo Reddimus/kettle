@@ -129,6 +129,8 @@ impl SnapCell {
 /// `RenderableContent` plus the grid dimensions the scrollbar / image
 /// anchoring need.
 pub struct PaneSnapshot {
+    /// Completed commands for the scrollbar overlay. Filled by the UI.
+    pub command_marks: Vec<kettle_core::term::CommandMark>,
     /// Viewport cells in `display_iter` order (row-major, all columns).
     pub cells: Vec<SnapCell>,
     /// Full inline-card combining sequences, independent of SnapCell glyph marks.
@@ -158,6 +160,7 @@ pub struct PaneSnapshot {
 impl Default for PaneSnapshot {
     fn default() -> Self {
         Self {
+            command_marks: Vec::new(),
             cells: Vec::new(),
             card_marks: CardMarks::default(),
             card_marks_collected: false,

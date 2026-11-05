@@ -8,6 +8,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Bash, Zsh and Fish panes now load shell integration on first launch, without
+  editing startup files. Set `shell-integration = off` to disable it.
+- Completed commands leave success or failure ticks by the scrollbar, with
+  their exit codes available to screen readers.
 - `paste-protection` (`auto` by default) asks before a paste that contains
   a newline or control characters when the program has not turned on
   bracketed paste, with Paste, Paste as one line and Cancel; `always`

@@ -244,6 +244,30 @@ impl App {
                     ),
                 ));
             }
+            let scale = ws.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
+            if let Ok(term) = pane.term.term.lock() {
+                use kettle_core::Dimensions as _;
+                let origin = term.grid().history_origin();
+                let total = term.grid().history_size() + term.grid().screen_lines();
+                drop(term);
+                for mark in pane.term.command_marks() {
+                    if let Some(rect) = kettle_core::scrollbar::command_tick_rect(
+                        partition.terminal,
+                        scale,
+                        self.cfg.scrollbar_width,
+                        origin,
+                        total,
+                        mark,
+                    ) {
+                        let id = next_terminal_accessibility_row_id();
+                        pane_children.push(id);
+                        nodes.push((
+                            id,
+                            command_mark_accessibility_node(mark, rect, &self.ui_text),
+                        ));
+                    }
+                }
+            }
             node.set_children(pane_children);
             if pane.read_only {
                 node.set_read_only();
@@ -2559,6 +2583,33 @@ pub(super) fn accessibility_parent_menu_item(
     None
 }
 
+fn accessibility_scrollback_id(pane: u64) -> NodeId {
+    NodeId((1 << 54) | pane)
+}
+
+pub(super) fn command_mark_accessibility_node(
+    mark: kettle_core::term::CommandMark,
+    rect: [f32; 4],
+    tr: &kettle_i18n::Translator,
+) -> Node {
+    let mut node = Node::new(Role::Comment);
+    let code = mark.exit_code.to_string();
+    let description = if mark.exit_code == 0 {
+        tr.command_mark_a11y_success(&code)
+    } else {
+        tr.command_mark_a11y_failure(&code)
+    };
+    node.set_label(description.clone());
+    node.set_description(description);
+    node.set_bounds(accesskit::Rect::new(
+        rect[0] as f64,
+        rect[1] as f64,
+        (rect[0] + rect[2]) as f64,
+        (rect[1] + rect[3]) as f64,
+    ));
+    node
+}
+
 #[cfg(test)]
 mod context_menu_nesting_tests {
     use super::*;
@@ -2641,7 +2692,4 @@ mod context_menu_nesting_tests {
         );
         assert_eq!(projection.focus, Some(accessibility_modal_id(2, 1)));
     }
-
-fn accessibility_scrollback_id(pane: u64) -> NodeId {
-    NodeId((1 << 54) | pane)
 }
