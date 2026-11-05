@@ -5015,3 +5015,48 @@ fn review_titlebar_editor_paint_and_measurement_share_fitted_metrics() {
     );
     assert_eq!(measured, painted);
 }
+
+#[test]
+fn strip_add_and_dropdown_glyphs_draw_larger_than_tab_text() {
+    let _serialized = gpu_test_guard();
+    let cfg = gpu_test_config();
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 400, 160, 1.0, false).unwrap()
+    else {
+        eprintln!("strip control glyph check skipped: no GPU adapter");
+        return;
+    };
+    let snap = snapshot_of(20, 2, b"");
+    for in_titlebar in [false, true] {
+        let mut tabs = TabBar::hidden();
+        tabs.height = 32.0;
+        tabs.in_titlebar = in_titlebar;
+        tabs.band = (0.0, 0.0, 400.0, 32.0);
+        tabs.new_tab_menu = (336.0, 0.0, 32.0, 32.0);
+        tabs.new_tab = (368.0, 0.0, 32.0, 32.0);
+        tabs.segments.push(TabSeg {
+            idx: 0,
+            rect: (78.0, 0.0, 160.0, 32.0),
+            title_rect: (86.0, 0.0, 100.0, 32.0),
+            hint: None,
+            close: (0.0, 0.0, 0.0, 0.0),
+            title: "shell".into(),
+            path: None,
+            active: true,
+            activity: TabActivity::Normal,
+        });
+        let mut terminal = pane(&snap, 400, 160);
+        terminal.rect = (0.0, 32.0, 400.0, 128.0);
+        terminal.terminal = terminal.rect;
+        capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
+        let text = renderer.tab_close_buffer.metrics().font_size;
+        for size in [
+            renderer.tabbar_buffer.metrics().font_size,
+            renderer.new_tab_arrow_buffer.metrics().font_size,
+        ] {
+            assert!(
+                size > text * 1.3,
+                "titlebar={in_titlebar}: control glyph {size} vs tab text {text}"
+            );
+        }
+    }
+}

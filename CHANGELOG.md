@@ -51,8 +51,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Automatic selection and search text colours meet 4.5:1 contrast against
   their highlight, including dim text and underlined links, while preserving
   readable cell colours and explicit highlight foregrounds.
-- Horizontal tab strips use full-size controls and at least 4.5:1 contrast
-  for control glyphs, shortcut hints and inactive titles. A single tab hides
+- Horizontal tab strips draw larger + and ▾ controls and use at least 4.5:1
+  contrast for control glyphs, shortcut hints and inactive titles. A single tab hides
   its shortcut hint and close button until hovered, including in the macOS
   titlebar; both controls return with multiple tabs.
 - Joined emoji, skin tones, flags and VS16 emoji now share grapheme cells by

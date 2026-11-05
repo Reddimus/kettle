@@ -232,8 +232,14 @@ mod tests {
     #[test]
     fn horizontal_controls_keep_strip_text_metrics_and_contrast() {
         let source = crate::production_source();
-        for buffer in ["tabbar_buffer", "new_tab_arrow_buffer", "tab_close_buffer"] {
-            assert!(source.contains(&format!("self.{buffer}.set_metrics(tab_metrics);")));
+        // The close glyph shares the tab text size; + and ▾ draw larger
+        // (TAB_CONTROL_GLYPH_SCALE) because they are small shapes.
+        for (buffer, metrics) in [
+            ("tabbar_buffer", "control_metrics"),
+            ("new_tab_arrow_buffer", "control_metrics"),
+            ("tab_close_buffer", "tab_metrics"),
+        ] {
+            assert!(source.contains(&format!("self.{buffer}.set_metrics({metrics});")));
             assert!(source.contains(&format!("buffer: &self.{buffer},")));
         }
         for statement in [

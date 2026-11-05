@@ -97,6 +97,9 @@ use gpu::{latch_gpu_fault, live_device_limits, resolve_headless_adapter};
 use labels::{
     display_width, fit_key_hint, fit_single_line_label, middle_ellipsis, take_cols_front,
 };
+/// Size of the strip's `+` and `▾` glyphs relative to tab text.
+pub(crate) const TAB_CONTROL_GLYPH_SCALE: f32 = 1.35;
+
 pub use labels::{fit_pane_titlebar_title, fit_tab_segment_title, tab_segment_label};
 #[cfg(test)]
 use labels::{fit_tab_path, fit_tab_title};
@@ -2394,6 +2397,17 @@ impl Renderer {
         } else {
             (metrics, cw, ch)
         };
+        // `+` and `▾` are small shapes at text size; draw them larger so the
+        // strip's controls read as controls, capped to the strip height.
+        let control_metrics = {
+            let scale = (TAB_CONTROL_GLYPH_SCALE)
+                .min((tabbar.height / tab_metrics.line_height.max(1.0)).max(1.0));
+            Metrics::new(
+                tab_metrics.font_size * scale,
+                tab_metrics.line_height * scale,
+            )
+        };
+        let control_ch = control_metrics.line_height;
         // Tab-bar text: one buffer per segment + the `+` button.
         let have_tabs = tabbar.height > 0.0 && !tabbar.segments.is_empty();
         if have_tabs {
@@ -2478,7 +2492,7 @@ impl Renderer {
             self.tab_close_buffer
                 .shape_until_scroll(&mut self.font_system, false);
             // `+` button glyph.
-            self.tabbar_buffer.set_metrics(tab_metrics);
+            self.tabbar_buffer.set_metrics(control_metrics);
             self.tabbar_buffer
                 .set_size(Some(tabbar.new_tab.2), Some(tabbar.height));
             // Constant glyph, shaped once per font family.
@@ -2496,7 +2510,7 @@ impl Renderer {
             // The `▾` dropdown arrow, shaped in its own buffer so it
             // lands inside `new_tab_menu` (left of `+`). Skipped when disabled.
             if tabbar.new_tab_menu.2 > 0.0 {
-                self.new_tab_arrow_buffer.set_metrics(tab_metrics);
+                self.new_tab_arrow_buffer.set_metrics(control_metrics);
                 self.new_tab_arrow_buffer
                     .set_size(Some(tabbar.new_tab_menu.2), Some(tabbar.height));
                 // Constant glyph, shaped once per font family.
@@ -4096,7 +4110,7 @@ impl Renderer {
                     nh,
                 )
             };
-            let (plus_left, plus_top) = centered_text_origin(plus_content, (plus_w, tab_ch));
+            let (plus_left, plus_top) = centered_text_origin(plus_content, (plus_w, control_ch));
             areas.push(TextArea {
                 buffer: &self.tabbar_buffer,
                 left: plus_left,
@@ -4124,7 +4138,7 @@ impl Renderer {
                     .next()
                     .map_or(tab_cw, |run| run.line_w);
                 let (arrow_left, arrow_top) =
-                    centered_text_origin((ax, ay, aw, ah), (arrow_w, tab_ch));
+                    centered_text_origin((ax, ay, aw, ah), (arrow_w, control_ch));
                 areas.push(TextArea {
                     buffer: &self.new_tab_arrow_buffer,
                     left: arrow_left,
