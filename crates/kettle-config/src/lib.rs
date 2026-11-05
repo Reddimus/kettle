@@ -1340,6 +1340,9 @@ impl ThemeOverrides {
                 *slot = color;
             }
         }
+        if self.selection_foreground.is_some() {
+            theme.selection_foreground_explicit = true;
+        }
     }
 }
 

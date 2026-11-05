@@ -397,13 +397,14 @@ pub(crate) enum CellHighlight {
     Search(bool),
 }
 
-/// Keep compliant theme pairs intact; lift faint selection fills and then text.
+/// Keep explicit foregrounds intact and resolve automatic text against the fill.
 #[cfg(test)]
 pub(crate) fn selection_colors(theme: &kettle_config::Theme, background: Rgb) -> (Rgb, Rgb) {
     highlight_colors_cached(
         CellHighlight::Selection,
         &kettle_config::Config::default(),
         theme,
+        theme.foreground,
         background,
         &mut MinimumContrastCache::default(),
     )
@@ -413,19 +414,36 @@ pub(crate) fn highlight_colors_cached(
     highlight: CellHighlight,
     cfg: &kettle_config::Config,
     theme: &kettle_config::Theme,
+    foreground: Rgb,
     background: Rgb,
     cache: &mut MinimumContrastCache,
 ) -> (Rgb, Rgb) {
-    match highlight {
+    let (explicit, bg) = match highlight {
         CellHighlight::Search(true) => (
-            cfg.search_foreground.unwrap_or(theme.background),
+            cfg.search_foreground,
             cfg.search_background.unwrap_or(theme.palette[3]),
         ),
         _ => {
             let bg = cache.resolve(theme.selection_background, background, 3.0);
-            (cache.resolve(theme.selection_foreground, bg, 4.5), bg)
+            (
+                theme
+                    .selection_foreground_explicit
+                    .then_some(theme.selection_foreground),
+                bg,
+            )
+        }
+    };
+    if let Some(fg) = explicit {
+        return (fg, bg);
+    }
+    // Preserve readable cell colours, then prefer the theme's own neutrals.
+    // Cache the comparisons too: repeated palette colours share this hot path.
+    for fg in [foreground, theme.background, theme.foreground] {
+        if cache.resolve(fg, bg, 4.5) == fg {
+            return (fg, bg);
         }
     }
+    (cache.resolve(foreground, bg, 4.5), bg)
 }
 
 #[cfg(test)]
@@ -462,7 +480,7 @@ pub(crate) fn resolved_cell_foreground_cached(
     let (fg, bg, dim) = match highlight {
         CellHighlight::None => (fg, bg, dim),
         _ => {
-            let (fg, bg) = highlight_colors_cached(highlight, cfg, theme, bg, cache);
+            let (fg, bg) = highlight_colors_cached(highlight, cfg, theme, fg, bg, cache);
             (fg, bg, false)
         }
     };
@@ -594,7 +612,10 @@ mod selection_contrast_tests {
 
     #[test]
     fn inactive_search_fills_contrast_with_each_cell_background() {
-        let theme = kettle_config::Theme::default();
+        let theme = kettle_config::Theme {
+            selection_foreground_explicit: false,
+            ..kettle_config::Theme::default()
+        };
         let cfg = kettle_config::Config::default();
         let mut cache = MinimumContrastCache::default();
         for bg in [
@@ -603,8 +624,14 @@ mod selection_contrast_tests {
             Rgb::new(255, 255, 255),
             theme.selection_background,
         ] {
-            let (fg, fill) =
-                highlight_colors_cached(CellHighlight::Search(false), &cfg, &theme, bg, &mut cache);
+            let (fg, fill) = highlight_colors_cached(
+                CellHighlight::Search(false),
+                &cfg,
+                &theme,
+                theme.foreground,
+                bg,
+                &mut cache,
+            );
             assert!(color::contrast_ratio(fill, bg) >= 3.0);
             assert!(color::contrast_ratio(fg, fill) >= 4.5);
         }
@@ -616,6 +643,7 @@ mod selection_contrast_tests {
             background: Rgb::new(20, 20, 20),
             selection_background: Rgb::new(24, 24, 24),
             selection_foreground: Rgb::new(220, 220, 220),
+            selection_foreground_explicit: false,
             ..kettle_config::Theme::default()
         };
         let (fg, bg) = selection_colors(&theme, theme.background);
@@ -623,6 +651,7 @@ mod selection_contrast_tests {
         assert!(color::contrast_ratio(fg, bg) >= 4.5);
         theme.selection_background = Rgb::new(220, 220, 220);
         theme.selection_foreground = Rgb::new(20, 20, 20);
+        theme.selection_foreground_explicit = true;
         assert_eq!(
             selection_colors(&theme, theme.background),
             (theme.selection_foreground, theme.selection_background)

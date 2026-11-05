@@ -372,9 +372,7 @@ impl Renderer {
         let snap = pv.snap;
         let term_colors = &snap.colors;
         let cols = snap.columns;
-        // Cells inside the selection range get their fg swapped to
-        // `theme.selection_foreground` so dark-on-dark themes stay readable
-        // under the highlight.
+        // Highlight foregrounds resolve against the fill painted below them.
         let selection_range = snap.selection;
         // Snapshot cells + selection carry
         // GRID-ABSOLUTE lines (negative when scrolled into history); the per-cell
@@ -647,6 +645,7 @@ impl Renderer {
                             highlight,
                             cfg,
                             theme,
+                            fg,
                             if selected && search.is_none() {
                                 default_bg
                             } else {
@@ -744,6 +743,7 @@ impl Renderer {
                     CellHighlight::Search(active),
                     cfg,
                     theme,
+                    fg,
                     bg,
                     &mut self.minimum_contrast_cache,
                 )

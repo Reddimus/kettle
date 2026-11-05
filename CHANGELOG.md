@@ -43,6 +43,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Automatic selection and search text colours meet 4.5:1 contrast against
+  their highlight, including dim text and underlined links, while preserving
+  readable cell colours and explicit highlight foregrounds.
 - On macOS, top tabs share the titlebar by default, with a centred title for a
   single tab, native window dragging, and the system double-click action on
   empty strip space. `macos-titlebar-style = native` restores the separate

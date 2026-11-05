@@ -81,9 +81,9 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `background` / `foreground` | color | from theme | Hex/`#rgb`/`rgb:`/X11 name |
 | `cursor-color` | color | from theme | The block cursor color. `cursor-bg-color` and `cursor_bg_color` are aliases |
 | `cursor-fg-color` | color | from theme | The glyph color under a focused block cursor. The block is filled with `cursor-color` and its glyph is recolored to this value |
-| `selection-background` / `selection-foreground` | color | from theme | |
+| `selection-background` / `selection-foreground` | color | from theme | Selection fills meet 3:1 against the terminal background. An explicit foreground is preserved; otherwise text keeps its colour when it meets 4.5:1 against the effective fill, then prefers the theme background or foreground, with contrast adjustment as a fallback |
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
-| `search-foreground` / `search-background` | color | from theme | Search-match + quick-select highlight. Default derives from the active theme (`search-background` → the theme's yellow `palette[3]`, `search-foreground` → the theme background), so it matches whatever theme is set; override with an explicit color |
+| `search-foreground` / `search-background` | color | from theme | Current search-match + quick-select highlight. The background defaults to the theme's yellow `palette[3]`. Automatic search text keeps its colour at 4.5:1 against that fill, then prefers the theme background or foreground, with contrast adjustment as a fallback. Quick-select labels default to the theme background. An explicit search foreground is preserved |
 | `scrollback` | int / `infinite` | `10000` | Line-count history cap; `0`, `infinite` or `unlimited` = effectively unbounded before the byte cap is applied |
 | `scrollback-bytes` (`scrollback-byte-limit`, `scrollback-memory`) | bytes with optional `K`/`M`/`G`, `KiB`/`MiB`/`GiB`, or `0` | `64000000` | Per-pane scrollback memory budget (64 MB by default; the 10,000-line cap still applies). Includes the active screen, protects visible rows, and trims oldest history by reducing the effective line cap. `0` disables the byte cap and uses `scrollback` only. The budget is an **estimate over the inline grid**: it does not walk each cell's optional heap storage (combining marks, underline color, hyperlink), because that would mean touching every cell on the PTY reader's path. Those are separately bounded — combining marks are capped per cell, and hyperlink text is shared across the cells of one link — so actual usage exceeds the configured value by a bounded factor rather than an unbounded one |
 | `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px), `0` or more |
@@ -518,9 +518,16 @@ moves a key into the main table without changing its parser arm.
 ### Selection and history controls
 
 Faint selection fills are strengthened to at least 3:1 against the terminal
-background; selected text is adjusted to 4.5:1. Theme colours that already meet
-these ratios remain unchanged. Non-current search fills meet 3:1 against each
-cell background; the current result also has an underline.
+background. Without an explicit `selection-foreground` in the theme or config,
+selected text keeps its cell colour when it meets 4.5:1 against the effective
+selection fill. Otherwise Kettle uses the theme background or foreground,
+whichever first meets 4.5:1, and adjusts the cell colour if neither passes.
+This also applies to dim text and underlined links. Explicit selection
+foregrounds are preserved. Non-current search matches use the same rules,
+with fills meeting 3:1 against each cell background. The current match uses
+the same automatic text contrast rule against its search fill, unless
+`search-foreground` is explicit, and also has an underline. The optional
+`minimum-contrast` setting still applies after resolving highlight colours.
 
 A pane scrolled into history shows a bottom-right **↓ 1,234 lines** pill. Click it
 to return that pane to live output. It disappears at the bottom and when a pane
