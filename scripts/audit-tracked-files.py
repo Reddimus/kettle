@@ -170,6 +170,11 @@ def audit_png(path: str, data: bytes) -> list[str]:
 
 def audit_binary(path: str, data: bytes) -> list[str]:
     suffix = PurePosixPath(path).suffix.lower()
+    if suffix == ".plist":
+        # bplist00: an 8-byte header and a 32-byte trailer at minimum.
+        if not data.startswith(b"bplist00") or len(data) < 40:
+            return [f"{path}: invalid binary property list"]
+        return []
     if suffix in {".ttf", ".otf"}:
         return audit_sfnt(path, data)
     if suffix == ".png":
@@ -300,6 +305,9 @@ def audit(root: Path) -> dict[str, Any]:
         is_binary = not structured and (
             suffix in BINARY_EXTENSIONS
             or (suffix not in TEXT_EXTENSIONS and b"\0" in data)
+            # Property lists are XML or Apple's binary format; only the
+            # binary form, which declares itself, is audited as binary.
+            or (suffix == ".plist" and data.startswith(b"bplist"))
         )
         text: str | None = None
         if is_symlink:

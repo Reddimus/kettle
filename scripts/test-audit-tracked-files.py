@@ -128,6 +128,21 @@ class TrackedFileAuditTests(unittest.TestCase):
                 errors = AUDIT.audit(root)["errors"]
                 self.assertIn(f"{name}: NUL byte in text", errors)
 
+    def test_binary_property_lists_are_binary_and_xml_ones_text(self) -> None:
+        fixture = SCRIPT.parent.parent / "crates/kettle-ui/tests/fixtures/reopen-version.plist"
+        for name, data, accepted in (
+            ("binary.plist", fixture.read_bytes(), True),
+            ("truncated.plist", b"bplist00\x00", False),
+            ("xml.plist", b'<?xml version="1.0"?>\n<plist version="1.0"><dict/></plist>\n', True),
+            ("nul.plist", b"<plist>\x00</plist>\n", False),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / name).write_bytes(data)
+                initialize_repository(root)
+                errors = [e for e in AUDIT.audit(root)["errors"] if e.startswith(name)]
+                self.assertEqual(not errors, accepted, errors)
+
     def test_text_unset_files_keep_their_bytes(self) -> None:
         """A file `.gitattributes` marks `-text` keeps its CRLF, its last
         line without a newline and its trailing white space; any other text
