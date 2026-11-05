@@ -620,7 +620,12 @@ pub(super) fn config_watch_paths(
     let mut current = requested;
     for _ in 0..40 {
         let resolved = match (current.parent(), current.file_name()) {
-            (Some(parent), Some(name)) => std::fs::canonicalize(parent)?.join(name),
+            (Some(parent), Some(name)) => match std::fs::canonicalize(parent) {
+                Ok(parent) => parent.join(name),
+                // Keep the original symlink watch when its target directory is absent.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(paths),
+                Err(error) => return Err(error),
+            },
             _ => current.clone(),
         };
         if !paths.contains(&resolved) {
