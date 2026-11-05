@@ -241,7 +241,7 @@ fn review_unread_startup_snapshot_disables_saving() {
 fn repeated_restore_recovery_keeps_session_saving_enabled() {
     let temp = kettle_test_support::private_tempdir("kettle-repeat-restore-");
     let path = temp.path().join("session.json");
-    std::fs::write(&path, br#"{"tabs":[],"active":0}"#).unwrap();
+    crate::session::write_test_session_file(&path, br#"{"tabs":[],"active":0}"#);
     let (_, identity) = crate::session::load_snapshot_result(&path)
         .unwrap()
         .unwrap();

@@ -2833,6 +2833,7 @@ pub(crate) mod unix {
         macos_acl::clear_extended_acl(&directory)?;
         let directory_identity = FileIdentity::from_metadata(&directory.metadata()?);
         let cleanup_directory = directory.try_clone()?;
+        let cleanup_parent = parent.try_clone()?;
         let cleanup_guard = PrivateParentGuard::new(staged_path).ok().filter(|guard| {
             guard.directory().metadata().ok().is_some_and(|metadata| {
                 parent.metadata().ok().is_some_and(|parent_metadata| {
@@ -2852,18 +2853,20 @@ pub(crate) mod unix {
                 }
             }
             sync_directory(&cleanup_directory)?;
-            // A writable parent cannot support conditional removal of even
-            // an empty directory. Retain the empty reservation in that case.
-            if let Some(guard) = cleanup_guard
-                && guard.verify_directory().is_ok()
-                && entry_stat(guard.directory(), &staging_name)?
-                    .is_some_and(|stat| FileIdentity::from_stat(&stat) == directory_identity)
+            // A writable parent can swap the reservation after the identity
+            // check, but AT_REMOVEDIR can remove only an empty directory there.
+            let removal_parent = cleanup_guard
+                .as_ref()
+                .filter(|guard| guard.verify_directory().is_ok())
+                .map_or(&cleanup_parent, |guard| guard.directory());
+            if entry_stat(removal_parent, &staging_name)?
+                .is_some_and(|stat| FileIdentity::from_stat(&stat) == directory_identity)
             {
-                // SAFETY: guard holds the directory fd open and staging_c remains
+                // SAFETY: removal_parent holds the directory fd open and staging_c remains
                 // NUL-terminated for unlinkat; AT_REMOVEDIR requests directory removal.
                 if unsafe {
                     libc::unlinkat(
-                        guard.directory().as_raw_fd(),
+                        removal_parent.as_raw_fd(),
                         staging_c.as_ptr(),
                         libc::AT_REMOVEDIR,
                     )
@@ -2871,7 +2874,7 @@ pub(crate) mod unix {
                 {
                     return Err(io::Error::last_os_error());
                 }
-                sync_directory(guard.directory())?;
+                sync_directory(removal_parent)?;
             }
             Ok(())
         });
@@ -6930,7 +6933,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn staged_discard_retains_an_empty_reservation_in_a_writable_parent() {
+    fn staged_replacement_and_discard_remove_reservations_in_a_writable_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_tempdir();
+        let exports = root.path().join("exports");
+        std::fs::create_dir(&exports).unwrap();
+        std::fs::set_permissions(&exports, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let destination = exports.join("shot.png");
+        std::fs::write(&destination, b"previous PNG").unwrap();
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut staged = stage_user_selected_file_replace(&destination).unwrap();
+        staged.write_all(b"complete PNG").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous PNG");
+        staged.publish().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete PNG");
+
+        let mut staged = stage_user_selected_file_replace(&destination).unwrap();
+        staged.write_all(b"partial PNG").unwrap();
+        staged.discard().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete PNG");
+        let entries: Vec<_> = std::fs::read_dir(&exports)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, [std::ffi::OsString::from("shot.png")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_discard_removes_an_empty_reservation_in_a_writable_parent() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let root = crate::test_tempdir();
@@ -6944,8 +6977,8 @@ mod tests {
         staged.discard().unwrap();
 
         let reservation = exports.join(format!(".kettle-export-{}.tmp", "ab".repeat(16)));
-        assert!(reservation.is_dir());
-        assert_eq!(std::fs::read_dir(reservation).unwrap().count(), 0);
+        assert!(!reservation.exists());
+        assert_eq!(std::fs::read_dir(exports).unwrap().count(), 0);
         assert!(!destination.exists());
     }
 
@@ -7069,10 +7102,12 @@ mod tests {
     #[test]
     fn private_creation_has_no_inherited_acl_before_first_hardening() {
         use std::io::{Seek as _, SeekFrom};
+        use std::os::unix::fs::PermissionsExt as _;
 
         let root = crate::test_tempdir();
         let parent = root.path().join("searchable");
         std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
         let status = std::process::Command::new("/bin/chmod")
             .args(["+a", "everyone allow read,file_inherit"])
             .arg(&parent)

@@ -1048,6 +1048,16 @@ fn stash_oversize_session(
 }
 
 #[cfg(test)]
+pub(crate) fn write_test_session_file(path: &std::path::Path, contents: impl AsRef<[u8]>) {
+    std::fs::write(path, contents).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod tests {
 
     /// A session kettle loads but refuses to restore must survive the launch.
@@ -1324,7 +1334,7 @@ mod tests {
         };
         let original = serde_json::to_vec(&legacy).unwrap();
         assert!(original.len() as u64 <= MAX_SESSION_BYTES);
-        std::fs::write(&path, &original).unwrap();
+        write_test_session_file(&path, &original);
         let mut loaded = load_from_path(&path).expect("a valid compact legacy session");
         loaded.windows.push(SWindow {
             tabs: loaded.tabs.clone(),
@@ -1603,7 +1613,7 @@ mod tests {
         // matter, because the size check rejects the file before reading it;
         // even one byte past the cap would exercise that branch.
         let oversize = vec![b'A'; 17 * 1024 * 1024];
-        std::fs::write(&path, &oversize).unwrap();
+        write_test_session_file(&path, &oversize);
         assert!(
             load_from_path(&path).is_none(),
             "oversize session must not deserialize"
@@ -1631,7 +1641,7 @@ mod tests {
         let dir = private_tempdir();
         let path = dir.path().join("session.json");
         let bytes = b"{\"tabs\":[],\"active\":0,\"theme\":\"caf\xe9\",\"windows\":[]}";
-        std::fs::write(&path, bytes).unwrap();
+        write_test_session_file(&path, bytes);
 
         assert!(load_from_path(&path).is_none());
         assert!(!path.exists());
@@ -1654,7 +1664,7 @@ mod tests {
         // or restore it, rather than silently losing their tabs and splits.
         let dir = tmp_dir("corrupted");
         let path = dir.join("session.json");
-        std::fs::write(&path, "{ this is not valid json at all").unwrap();
+        write_test_session_file(&path, "{ this is not valid json at all");
         assert!(
             load_from_path(&path).is_none(),
             "corrupted file should not deserialize"
@@ -1923,7 +1933,7 @@ mod tests {
         let dir = tmp_dir("ok");
         let path = dir.join("session.json");
         let s = Session::default();
-        std::fs::write(&path, serde_json::to_string_pretty(&s).unwrap()).unwrap();
+        write_test_session_file(&path, serde_json::to_string_pretty(&s).unwrap());
         let loaded = load_from_path(&path).expect("valid session loads");
         assert!(loaded.is_empty());
         assert!(path.exists());
