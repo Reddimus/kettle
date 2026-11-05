@@ -1,6 +1,42 @@
 use super::{ShellActivity, classify_shell_activity};
 
 #[test]
+#[cfg(unix)]
+fn resizing_a_multiline_prompt_preserves_shell_state_and_keyboard_claims() {
+    use super::{CursorShape, PtyGeometry, Terminal};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut terminal = Terminal::new(
+        &["/bin/sh".into(), "-c".into(),
+            r"printf '\033]133;A\007\033]133;C\007\033]133;D;0\007\033]133;A\007prompt\r\nREADY\033[>1u'; read answer".into()],
+        None, 100, 80, 24, 8, 16, false, CursorShape::Block, None, tx, Arc::new(|| {}),
+    ).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !terminal
+        .screen_text(0)
+        .is_some_and(|screen| screen.text.contains("READY"))
+    {
+        assert!(Instant::now() < deadline, "prompt fixture did not arrive");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(terminal.shell_activity(), ShellActivity::Idle);
+    assert!(terminal.keyboard_claims().at_prompt);
+    assert!(terminal.keyboard_claims().keyboard_protocol);
+    terminal
+        .try_resize_geometry(PtyGeometry::new(100, 24, 800, 384))
+        .unwrap();
+    assert!(terminal.prompts.lock().unwrap().is_empty());
+    assert_eq!(
+        terminal.shell_activity(),
+        ShellActivity::Idle,
+        "discarding navigation anchors must preserve observed shell state"
+    );
+    assert!(terminal.keyboard_claims().at_prompt);
+    assert!(terminal.keyboard_claims().keyboard_protocol);
+}
+
+#[test]
 fn command_admission_rejects_running_shell() {
     let started = std::sync::Mutex::new(Some(std::time::Instant::now()));
     let generation = std::sync::atomic::AtomicU64::new(7);

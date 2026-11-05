@@ -152,6 +152,57 @@ fn reader_prompt_glue_deduplicates_the_ring_before_resetting_completion() {
 }
 
 #[test]
+fn optional_resync_preserves_requests_between_prompt_and_sync() {
+    let cell = Mutex::new(CompletionSlot::default());
+    reset_completion_session(&cell, 0);
+    apply_completion_update(
+        &cell,
+        CompletionUpdate::Sync {
+            session: 7,
+            keys: kettle_vt::completion::KEY_TAB,
+        },
+    );
+    arm_completion_refresh_slot(&mut cell.lock().unwrap(), Instant::now());
+    apply_completion_prompt_start(&cell, 1, true);
+    with_completion_input_admission_slot(
+        &mut cell.lock().unwrap(),
+        &[b"\t"],
+        Instant::now(),
+        || ((), true),
+    );
+    apply_completion_update(
+        &cell,
+        CompletionUpdate::Sync {
+            session: 8,
+            keys: kettle_vt::completion::KEY_TAB,
+        },
+    );
+    for request in 1..=3 {
+        if request > 1 {
+            with_completion_input_admission_slot(
+                &mut cell.lock().unwrap(),
+                &[b"\t"],
+                Instant::now(),
+                || ((), true),
+            );
+        }
+        apply_completion_update(
+            &cell,
+            CompletionUpdate::Show(sequenced_list(8, request, request)),
+        );
+        assert_eq!(
+            cell.lock()
+                .unwrap()
+                .list
+                .as_ref()
+                .and_then(|list| list.request),
+            Some(request),
+            "a replacement sync must retain every admitted request"
+        );
+    }
+}
+
+#[test]
 fn a_moved_prompt_without_a_command_preserves_or_replaces_its_session() {
     let completion = Mutex::new(CompletionSlot::default());
     let prompts = Mutex::new(std::collections::VecDeque::new());

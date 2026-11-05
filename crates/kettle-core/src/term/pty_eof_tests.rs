@@ -41,6 +41,40 @@ fn unterminated(bytes: &[u8], rules: CanonicalEofRules) -> std::result::Result<b
 }
 
 #[test]
+fn linux_vdiscard_is_ordinary_canonical_input() {
+    assert_eq!(unterminated(b"\x0f", rules()), Ok(true));
+    assert_eq!(
+        unterminated(
+            b"\x0f",
+            CanonicalEofRules {
+                word_erase: WordEraseMode::BsdSimple,
+                ..rules()
+            }
+        ),
+        Ok(false)
+    );
+    assert!(
+        CanonicalEofRules {
+            veof: Some(0x0f),
+            ..rules()
+        }
+        .supports_eof()
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn native_linux_vdiscard_then_eof_delivers_an_empty_record() {
+    use super::PtyEofProgress;
+    let (mut stdin, mut slave) = native_stdin_pair();
+    assert_eq!(stdin.try_write(b"\x0f").unwrap(), 1);
+    assert_eq!(stdin.try_signal_eof().unwrap(), PtyEofProgress::Pending);
+    assert_eq!(read_native_record(&mut slave), b"\x0f");
+    assert_eq!(stdin.try_signal_eof().unwrap(), PtyEofProgress::Signaled);
+    assert!(read_native_record(&mut slave).is_empty());
+}
+
+#[test]
 fn unterminated_canonical_record_uses_configured_veof_twice() {
     assert_eq!(
         pty_eof_sequence(true, 0x1a, 0xff, true),

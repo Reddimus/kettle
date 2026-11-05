@@ -270,25 +270,25 @@ fn widening_reanchors_only_a_single_row_active_prompt() {
     use std::collections::VecDeque;
 
     let mut active = VecDeque::from([4, 9]);
-    rebase_prompt_marks_after_column_reflow(&mut active, 80, 160, 9, 7);
+    rebase_prompt_marks_after_column_reflow(&mut active, 80, 160, 9, 7, false);
     assert_eq!(active, VecDeque::from([7]));
 
     let mut multiline = VecDeque::from([4, 8]);
-    rebase_prompt_marks_after_column_reflow(&mut multiline, 80, 160, 9, 7);
+    rebase_prompt_marks_after_column_reflow(&mut multiline, 80, 160, 9, 7, false);
     assert!(
         multiline.is_empty(),
         "a prompt starting above the cursor cannot be reconstructed after reflow"
     );
 
     let mut narrowed = VecDeque::from([9]);
-    rebase_prompt_marks_after_column_reflow(&mut narrowed, 160, 80, 9, 12);
+    rebase_prompt_marks_after_column_reflow(&mut narrowed, 160, 80, 9, 12, false);
     assert!(
         narrowed.is_empty(),
         "narrowing can split even a formerly single-row prompt"
     );
 
     let mut unchanged_row = VecDeque::from([9]);
-    rebase_prompt_marks_after_column_reflow(&mut unchanged_row, 128, 98, 9, 9);
+    rebase_prompt_marks_after_column_reflow(&mut unchanged_row, 128, 98, 9, 9, false);
     assert_eq!(
         unchanged_row,
         VecDeque::from([9]),
@@ -1584,7 +1584,8 @@ fn full_pump_queue_yields_to_teardown_drain() {
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
     let pump = std::thread::spawn(move || {
         pump_start.wait();
-        let result = forward_pty_buffer_or_drain(&raw_tx, &drain_for_pump, 2, vec![2], 1);
+        let result =
+            forward_pty_buffer_or_drain(&raw_tx, &drain_for_pump, 2, vec![2], 1, &mut None);
         done_tx.send(result).expect("publish pump handoff result");
     });
 

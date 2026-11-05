@@ -125,6 +125,9 @@ const MAX_QUOTED_PATH: usize = 1024;
 /// Support"`). Nothing here touches the filesystem.
 pub(crate) fn quoted_paths(line: &str) -> impl Iterator<Item = (usize, usize, usize)> + '_ {
     quoted_runs(line).filter_map(|(open, close)| {
+        if !quote_has_end(line, close) {
+            return None;
+        }
         let quote = char::from(line.as_bytes()[open]);
         let body = &line[open + 1..close];
         // A quoted network (`"10.0.0.1/24/"`) is an address, as unquoted.
@@ -136,22 +139,16 @@ pub(crate) fn quoted_paths(line: &str) -> impl Iterator<Item = (usize, usize, us
 
 /// The quoted runs in `line`, as the byte offsets of each opening and closing
 /// quote: a `"`, `'` or `` ` `` where a token may start, the next of the same
-/// quote within [`MAX_QUOTED_PATH`] bytes, and a token boundary or a
-/// separator after it (past a location suffix). Runs do not overlap.
+/// quote within [`MAX_QUOTED_PATH`] bytes, or the end of the line when no
+/// close is in reach. Rejected closing boundaries still enclose bare matches.
+/// Runs do not overlap.
 pub(crate) fn quoted_runs(line: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
     let mut from = 0;
-    // A quote that opened but did not close on a boundary still holds the
-    // text up to its closing quote: another kind of quote inside it is part
-    // of that text (`ssh host "cat '/srv/a b.pdf'"&&…`), not a path's.
-    let mut held: Option<(usize, char)> = None;
     std::iter::from_fn(move || {
         while let Some(offset) = line[from..].find(['"', '\'', '`']) {
             let open = from + offset;
             let quote = char::from(line.as_bytes()[open]);
             from = open + 1;
-            if held.is_some_and(|(until, outer)| open < until && quote != outer) {
-                continue;
-            }
             // Not after a `:`, which joins a remote host to its path
             // (`host:"/srv/a b.pdf"`, `'user@host':"…"`) as often as a
             // compact JSON key to its value, nor after an escaped space, which
@@ -174,24 +171,22 @@ pub(crate) fn quoted_runs(line: &str) -> impl Iterator<Item = (usize, usize)> + 
             else {
                 // No close in reach: the rest of the line may still be this
                 // quote's text.
-                held = Some((line.len(), quote));
-                continue;
+                from = line.len();
+                return Some((open, line.len()));
             };
-            // The closing quote ends the token, so a separator may follow it
-            // directly, as in JSON's `"…","line":3`; other text may not.
-            let (tail, grep) = skip_location(&line[close + 1..]);
-            if !(grep
-                || ends_a_match(tail)
-                || tail.starts_with([',', ';', ':', ')', ']', '}', '>']))
-            {
-                held = Some((close, quote));
-                continue;
-            }
             from = close + 1;
             return Some((open, close));
         }
         None
     })
+}
+
+fn quote_has_end(line: &str, close: usize) -> bool {
+    if close >= line.len() {
+        return false;
+    }
+    let (tail, grep) = skip_location(&line[close + 1..]);
+    grep || ends_a_match(tail) || tail.starts_with([',', ';', ':', ')', ']', '}', '>'])
 }
 
 /// Whether a bare path reaches the end of any quoted run holding it.
@@ -207,10 +202,11 @@ pub(crate) fn path_reaches_quote(
         .last()
         .filter(|&&(_, close)| end <= close)
         .is_none_or(|&(_, close)| {
-            skip_location(&line[end..close])
-                .0
-                .trim_start_matches(|c| ",;:?!.".contains(c))
-                .is_empty()
+            quote_has_end(line, close)
+                && skip_location(&line[end..close])
+                    .0
+                    .trim_start_matches(|c| ",;:?!.".contains(c))
+                    .is_empty()
         })
 }
 
@@ -1037,6 +1033,11 @@ mod tests {
             ("\"/model sonnet\"", Some(("/model", false))),
             ("\"and/or more words\"", Some(("and/or", false))),
             ("'My Files/a b.txt'", Some(("Files/a", false))),
+            (
+                "cat \"My Files/a.pdf b.txt\".bak",
+                Some(("Files/a.pdf", false)),
+            ),
+            ("cat \"My Files/a.pdf b.txt", Some(("Files/a.pdf", false))),
             ("\" docs/a b.pdf\"", Some(("docs/a", false))),
             ("\"docs/a b.pdf \"", Some(("docs/a", false))),
             ("\"docs//a b.pdf\"", None),

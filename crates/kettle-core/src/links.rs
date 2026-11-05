@@ -185,11 +185,13 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
             &mut text,
             &mut pos_of_byte,
         );
-        // A match touching an edge where the line was cut may be a fragment
-        // of a longer URL or path: no link rather than a wrong one.
-        let text_len = text.len();
+        // Any part of a token cut at the viewport edge may belong to a URL.
+        let leading_end = text.find(char::is_whitespace).unwrap_or(text.len());
+        let trailing_start = text
+            .rfind(char::is_whitespace)
+            .map_or(0, |at| at + text[at..].chars().next().unwrap().len_utf8());
         let fragment = move |start: usize, end: usize| {
-            (read.cut_before && start == 0) || (read.cut_after && end == text_len)
+            (read.cut_before && start < leading_end) || (read.cut_after && end > trailing_start)
         };
         let mut push =
             |start: usize, len: usize, uri: String, covered: &mut Vec<crate::hints::Taken>| {
@@ -820,6 +822,13 @@ mod tests {
             alacritty_terminal::vte::ansi::Processor::new();
         processor.advance(&mut term, bytes);
         term
+    }
+
+    #[test]
+    fn clipped_url_query_is_not_a_local_link() {
+        let term = term_fed(10, 4, b"https://x.test/a?redirect=/etc/hosts \r\nok");
+        let found = links_with_cwd(&term, Some("/work"));
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]

@@ -666,6 +666,7 @@ impl Write for ReplaySafeCastWriter {
 struct LazyTargetCastWriter {
     target: RecordingTarget,
     writer: Option<ReplaySafeCastWriter>,
+    initializing_path: Option<PathBuf>,
 }
 
 impl LazyTargetCastWriter {
@@ -673,6 +674,7 @@ impl LazyTargetCastWriter {
         Self {
             target,
             writer: None,
+            initializing_path: None,
         }
     }
 
@@ -687,21 +689,11 @@ impl LazyTargetCastWriter {
                 RecordingTarget::Directory(directory) => {
                     let (path, file) = create_unique_private_recording(directory)?;
                     if let Err(error) = prepare_private_directory(directory) {
-                        drop(file);
-                        let _ = std::fs::remove_file(&path);
+                        kettle_state::discard_created_private_file(file, &path);
                         return Err(error);
                     }
-                    if let Err(error) = prune_recording_directory(
-                        directory,
-                        record_max_directory_bytes(),
-                        record_max_files(),
-                    ) {
-                        log::warn!(
-                            "record: could not apply retention in {}: {error}",
-                            directory.display()
-                        );
-                    }
                     log::info!("record: secured asynchronous target {}", path.display());
+                    self.initializing_path = Some(path);
                     ReplaySafeCastWriter::new(file)
                 }
             };
@@ -716,14 +708,41 @@ impl LazyTargetCastWriter {
 
 impl Write for LazyTargetCastWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let initializing = self.writer.is_none();
+        let initializing = self
+            .writer
+            .as_ref()
+            .is_none_or(|writer| writer.committed_len == 0);
         let writer = self.open()?;
-        writer.write_all(bytes)?;
-        if initializing {
-            // A created cast must become a valid header-only trace before later
-            // events are accepted from the queue; abrupt clean shutdown can
-            // then lose a tail without leaving an invalid artifact.
-            writer.flush()?;
+        let result = writer.write_all(bytes).and_then(|()| {
+            if initializing {
+                // A created cast must become a valid header-only trace before later
+                // events are accepted from the queue; abrupt clean shutdown can
+                // then lose a tail without leaving an invalid artifact.
+                writer.flush()
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = result {
+            if let Some(path) = self.initializing_path.take()
+                && let Some(writer) = self.writer.take()
+            {
+                kettle_state::discard_created_private_file(writer.file, &path);
+            }
+            return Err(error);
+        }
+        if self.initializing_path.take().is_some()
+            && let RecordingTarget::Directory(directory) = &self.target
+            && let Err(error) = prune_recording_directory(
+                directory,
+                record_max_directory_bytes(),
+                record_max_files(),
+            )
+        {
+            log::warn!(
+                "record: could not apply retention in {}: {error}",
+                directory.display()
+            );
         }
         Ok(bytes.len())
     }
@@ -1154,6 +1173,21 @@ fn prune_recording_directory(
     max_bytes: u64,
     max_files: usize,
 ) -> std::io::Result<()> {
+    prune_recording_directory_after_scan(directory, max_bytes, max_files, || {})
+}
+
+fn prune_recording_directory_after_scan(
+    directory: &Path,
+    max_bytes: u64,
+    max_files: usize,
+    mut after_scan: impl FnMut(),
+) -> std::io::Result<()> {
+    // Keep this lock file in place so every process serializes on one inode.
+    let Some(_retention_lock) =
+        kettle_state::ExclusiveFileLock::try_acquire(&directory.join(".kettle-retention.lock"))?
+    else {
+        return Ok(());
+    };
     // Windowing the scan must not narrow what retention is willing to examine.
     // A candidate that is locked, unreadable, or no longer the file the scan
     // saw is skipped for the next oldest, so a batch whose entries are all
@@ -1169,6 +1203,7 @@ fn prune_recording_directory(
     let mut batch = RETENTION_BATCH_MIN;
     loop {
         let scan = scan_recording_directory(directory, after.as_ref(), batch)?;
+        after_scan();
         total_bytes = scan.total_bytes;
         total_files = scan.total_files;
         batch = retention_batch_for(total_files, max_files);
@@ -2169,6 +2204,76 @@ mod tests {
         )
         .unwrap();
         drop(other);
+    }
+
+    #[test]
+    fn failed_managed_header_preserves_completed_recordings() {
+        let temp = test_tempdir();
+        for index in 0..super::record_max_files() {
+            let path = temp.path().join(format!("kettle-session-{index}-1-0.cast"));
+            let mut file = kettle_state::create_private_file_new(&path).unwrap();
+            writeln!(file, "{}", header_line(80, 24)).unwrap();
+        }
+        let mut writer =
+            super::LazyTargetCastWriter::new(RecordingTarget::Directory(temp.path().to_owned()));
+        writer.open().unwrap();
+        let paths = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "cast")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths.len(),
+            super::record_max_files() + 1,
+            "opening an empty replacement must not prune completed casts"
+        );
+        let new_path = paths
+            .iter()
+            .find(|path| std::fs::metadata(path).unwrap().len() == 0)
+            .unwrap();
+        writer.writer.as_mut().unwrap().file = std::fs::File::open(new_path).unwrap();
+        assert!(
+            writer
+                .write_all(format!("{}\n", header_line(80, 24)).as_bytes())
+                .is_err()
+        );
+        assert!(
+            !new_path.exists(),
+            "failed initialization must discard the empty cast"
+        );
+        assert_eq!(
+            scan_recording_directory(temp.path(), None, 100)
+                .unwrap()
+                .total_files,
+            super::record_max_files()
+        );
+    }
+
+    #[test]
+    fn overlapping_retention_passes_preserve_the_shared_budget() {
+        let temp = test_tempdir();
+        for index in 0..3 {
+            let path = temp.path().join(format!("kettle-session-{index}-1-0.cast"));
+            kettle_state::create_private_file_new(&path).unwrap();
+        }
+        let mut competed = false;
+        super::prune_recording_directory_after_scan(temp.path(), u64::MAX, 2, || {
+            if !competed {
+                competed = true;
+                prune_recording_directory(temp.path(), u64::MAX, 2).unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            scan_recording_directory(temp.path(), None, 10)
+                .unwrap()
+                .total_files,
+            2,
+            "overlapping retention passes must delete only the shared overage"
+        );
     }
 
     #[test]
