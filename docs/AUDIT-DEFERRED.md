@@ -166,6 +166,15 @@ campaign and startup outlier remain inconclusive. These entries stay open.
 
 ## Platform
 
+- **Descriptor sweep on generic Unix.** On Unix systems other than Linux and
+  macOS, the media worker's close-on-exec sweep stops at the current
+  `RLIMIT_NOFILE`, so a descriptor opened above a later-lowered limit is
+  missed (`vendor` sandbox helper, `unix.rs`). Kettle ships for Linux, macOS
+  and Windows only. Sweeping to the hard limit is not enough either, and
+  `closefrom` in `pre_exec` would close the standard library's exec-error
+  pipe. Close with a per-platform descriptor enumeration (`/dev/fd` or
+  `kinfo_file`) run before `fork` on each supported BSD.
+
 - **Windows MCP stdout progress.** `crates/kettle/src/mcp.rs` still uses a
   blocking writer on Windows. A slow reader can make progress without a write
   returning before the 30-second stall limit, so the server can misclassify

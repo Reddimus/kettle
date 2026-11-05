@@ -107,6 +107,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   off the UI thread, a trigger never reruns for a match it already handled,
   sessions save at most the 16 windows restore accepts, and screen readers
   get the same character boundaries as the caret.
+- Kitty relative-placement chains deeper than eight are refused when
+  defined, command output captures are reported unavailable after a column
+  reflow instead of copying the wrong rows, offscreen screenshots no longer
+  leave a truncated file when they fail, GPU setup keeps trying other
+  backends when one device fails to open, and macOS audio decoding moved off
+  the sound-control thread.
 
 ## [5.9.0] — 2026-11-03
 
