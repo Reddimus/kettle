@@ -1,5 +1,25 @@
 use super::*;
 
+pub(super) fn remote_watch_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let path = std::path::absolute(path)?;
+    let filename = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "remote spool needs a filename",
+        )
+    })?;
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "remote spool needs a parent",
+        )
+    })?;
+    // The spool may not exist yet. Resolve only its existing, private parent
+    // so native events through aliases such as /tmp use the same path.
+    kettle_state::create_private_dirs(parent)?;
+    Ok(std::fs::canonicalize(parent)?.join(filename))
+}
+
 /// Locate the XDG cache dir for the current user without
 /// pulling in the `dirs` crate. Probes `$XDG_CACHE_HOME` first
 /// (the spec-canonical var) then `$HOME/.cache` on Linux/macOS,
@@ -338,7 +358,7 @@ impl App {
         let mut remote_startup_retry = false;
         let remote_command_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         if let Some(path) = startup.remote_file.clone().and_then(|path| {
-            std::path::absolute(path)
+            remote_watch_path(&path)
                 .map_err(|error| {
                     log::warn!("remote-command watcher path unavailable: {error}");
                 })
@@ -348,12 +368,6 @@ impl App {
             let p = proxy.clone();
             let watched = path.clone();
             let pending = remote_command_pending.clone();
-            // `remote.cmd` is a command channel into this terminal, so its
-            // parent must be private before the lock below touches anything.
-            // Repairing here rather than relying on some other subsystem
-            // having run first is the difference between the watcher working
-            // on this launch and on the next one.
-            let _ = kettle_state::create_private_dirs(&dir);
             use notify::Watcher;
             let built = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 if let Ok(ev) = res
