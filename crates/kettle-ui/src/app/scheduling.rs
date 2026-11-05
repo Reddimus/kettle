@@ -448,6 +448,11 @@ impl App {
         } else {
             None
         };
+        // Hidden windows can skip rendering, but taskbar clears still need to retry.
+        let taskbar_retry_due = ws.taskbar.retry_deadline().is_some_and(|at| now >= at);
+        if taskbar_retry_due {
+            self.poll_taskbar_progress(ws);
+        }
         let render_hidden = window_is_render_hidden(ws);
         self.sync_output_wake_gate(ws);
         let mut frame_recovery_wait = None;
@@ -861,6 +866,12 @@ impl App {
             bg_anim_interval,
             blink_wait,
         );
+        if let Some(deadline) = ws.taskbar.retry_deadline() {
+            let next = deadline
+                .saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1));
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
         if let Some(deadline) = bg_retry_at {
             let next = deadline
                 .saturating_duration_since(now)

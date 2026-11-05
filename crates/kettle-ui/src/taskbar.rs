@@ -64,6 +64,11 @@ impl Taskbar {
             });
     }
 
+    /// Next retry for an unsuccessful update, including a clear during backoff.
+    pub(crate) fn retry_deadline(&self) -> Option<std::time::Instant> {
+        self.progress.retry_at
+    }
+
     /// Clear any outstanding OS attention request (the taskbar-button flash)
     /// on `window`. winit's `request_user_attention(None)` does not
     /// reliably stop the Windows 11 taskbar flash once it's started, so on
@@ -233,6 +238,55 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_idle_taskbar_retry_is_scheduled_for_a_later_clear() {
+        let now = std::time::Instant::now();
+        let mut state = AppliedProgress::default();
+        state.apply_with(now, Some(Progress::Normal(20)), || true);
+        state.apply_with(now, Some(Progress::Normal(60)), || false);
+        state.apply_with(now + std::time::Duration::from_millis(100), None, || {
+            panic!("backoff must still throttle a different value")
+        });
+        let mut taskbar = Taskbar {
+            inner: imp::Inner::new(),
+            progress: state,
+        };
+        let deadline = taskbar
+            .retry_deadline()
+            .expect("failed update needs a retry deadline");
+        let source = kettle_test_support::code_only(include_str!("app/scheduling.rs"));
+        assert!(
+            source.contains("ws.taskbar.retry_deadline()"),
+            "idle event-loop scheduling must consume the taskbar deadline"
+        );
+        let poll = source
+            .split("if taskbar_retry_due {")
+            .nth(1)
+            .unwrap()
+            .split('}')
+            .next()
+            .unwrap();
+        assert!(
+            poll.contains("self.poll_taskbar_progress(ws)"),
+            "a due retry must run even when a hidden window cannot redraw"
+        );
+        let wait = source
+            .split("if let Some(deadline) = ws.taskbar.retry_deadline() {")
+            .nth(1)
+            .unwrap()
+            .split('}')
+            .next()
+            .unwrap();
+        assert!(
+            wait.contains("saturating_duration_since(now)") && wait.contains("current.min(next)"),
+            "the retry deadline must wake an otherwise idle event loop"
+        );
+        assert_eq!(deadline, now + std::time::Duration::from_secs(1));
+        taskbar.progress.apply_with(deadline, None, || true);
+        assert_eq!(taskbar.progress.last, None);
+        assert_eq!(taskbar.retry_deadline(), None);
+    }
 
     #[test]
     fn failed_taskbar_clear_retries_after_a_delay() {
