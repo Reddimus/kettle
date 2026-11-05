@@ -33,7 +33,7 @@ pub mod agy_plugin;
 mod app;
 pub mod codex_shell;
 mod held_buttons;
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 mod test_bus;
 #[cfg(any(target_os = "linux", test))]
 mod wayland;

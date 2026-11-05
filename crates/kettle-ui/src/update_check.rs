@@ -431,6 +431,64 @@ fn with_locked_cache(change: impl FnOnce(&mut UpdateCache)) -> bool {
     }
 }
 
+fn prepare_cache_check(
+    cache: &mut UpdateCache,
+    now: u64,
+    interval_secs: u64,
+    mut save: impl FnMut(&UpdateCache) -> bool,
+) -> bool {
+    // The caller owns the check lock, so no worker can own this old attempt.
+    if cache.last_outcome == Some(LastOutcome::Installing) {
+        cache.note_attempt_finished();
+        save(cache);
+    }
+    if cache.last_check == 0 {
+        if seed_first_run(cache, now, save) {
+            return false;
+        }
+        log::warn!("update-check: the record is not writable; checking without it");
+    } else if !is_due(now, cache.last_check, interval_secs) {
+        return false;
+    }
+    true
+}
+
+fn prepare_check(mut in_flight: CheckInFlight, interval_secs: u64) -> Option<CheckInFlight> {
+    in_flight._file_lock = match try_acquire_check_lock() {
+        Ok(CheckLockAttempt::Acquired(lock)) => lock,
+        Ok(CheckLockAttempt::Busy) => return None,
+        Err(error) => {
+            log::warn!("update-check: could not acquire throttle lock: {error}");
+            return None;
+        }
+    };
+    let now = now_secs();
+    let mut cache = load_cache().unwrap_or_default();
+    if !prepare_cache_check(&mut cache, now, interval_secs, save_cache) {
+        return None;
+    }
+    // Persist the throttle before starting network I/O. The process guard and
+    // OS file lock make the read/update decision exclusive across every window
+    // and process sharing this config directory.
+    mutate_cache(|cache| cache.last_check = now);
+    Some(in_flight)
+}
+
+fn spawn_check_worker<T: Send + 'static>(
+    prepare: impl FnOnce() -> Option<T> + Send + 'static,
+    check: impl FnOnce(T) + Send + 'static,
+    finished: impl FnOnce() + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("kettle-update-check".into())
+        .spawn(move || {
+            if let Some(prepared) = prepare() {
+                check(prepared);
+            }
+            finished();
+        })
+}
+
 /// Run at most once per `interval_hours` (default 24 = daily) after the first
 /// launch. `Auto` installs only into an official installer-owned layout and
 /// never restarts this running process. Safe to call repeatedly (e.g. from the
@@ -460,38 +518,11 @@ pub fn maybe_spawn_check(
     if CHECK_IN_FLIGHT.swap(true, Ordering::AcqRel) {
         return;
     }
-    let file_lock = match try_acquire_check_lock() {
-        Ok(CheckLockAttempt::Acquired(lock)) => lock,
-        Ok(CheckLockAttempt::Busy) => {
-            CHECK_IN_FLIGHT.store(false, Ordering::Release);
-            return;
-        }
-        Err(error) => {
-            CHECK_IN_FLIGHT.store(false, Ordering::Release);
-            log::warn!("update-check: could not acquire throttle lock: {error}");
-            return;
-        }
-    };
-    let in_flight = CheckInFlight {
-        _file_lock: file_lock,
-    };
-    let now = now_secs();
-    let mut cache = load_cache().unwrap_or_default();
-    if cache.last_check == 0 {
-        if seed_first_run(&mut cache, now, save_cache) {
-            return;
-        }
-        log::warn!("update-check: the record is not writable; checking without it");
-    } else if !is_due(now, cache.last_check, interval_secs) {
-        return;
-    }
-    // Persist the throttle before starting network I/O. The process guard and
-    // OS file lock make the read/update decision exclusive across every window
-    // and process sharing this config directory.
-    mutate_cache(|cache| cache.last_check = now);
-    let _ = std::thread::Builder::new()
-        .name("kettle-update-check".into())
-        .spawn(move || {
+    let in_flight = CheckInFlight { _file_lock: None };
+    let finished = proxy.clone();
+    let _ = spawn_check_worker(
+        move || prepare_check(in_flight, interval_secs),
+        move |in_flight| {
             let _in_flight = in_flight;
             let client = FeedClient::new();
             let outcome = client.check(current);
@@ -594,15 +625,15 @@ pub fn maybe_spawn_check(
                                     }
                                 }
                                 InstallFailure::Quiet => {
-                                    log::info!(
-                                        "update {} not installed now: {error}",
-                                        update.tag
-                                    );
+                                    log::info!("update {} not installed now: {error}", update.tag);
                                 }
                                 InstallFailure::Failed => {
                                     // The raw error can hold paths and is not
                                     // translated: it goes to the log only.
-                                    log::warn!("automatic update to {} failed: {error}", update.tag);
+                                    log::warn!(
+                                        "automatic update to {} failed: {error}",
+                                        update.tag
+                                    );
                                     let counts = failure_counts(&error);
                                     if let Some(notify) = mutate_cache(|cache| {
                                         cache.note_failure(&update.tag, counts)
@@ -614,12 +645,15 @@ pub fn maybe_spawn_check(
                                     }
                                 }
                             }
-                            let _ = proxy.send_event(UserEvent::UpdateCheckFinished);
                         }
                     }
                 }
             }
-        });
+        },
+        move || {
+            let _ = finished.send_event(UserEvent::UpdateCheckFinished);
+        },
+    );
 }
 
 /// Whether a failed install says something about the release. A dropped
@@ -1129,6 +1163,107 @@ mod tests {
         );
         bytes.push(b' ');
         assert!(super::read_cache(bytes.as_slice(), limit as u64).is_none());
+    }
+
+    #[test]
+    fn an_up_to_date_worker_refreshes_ui_facts() {
+        let temp = crate::test_tempdir();
+        let path = temp.path().join("update-check.json");
+        let destination = path.clone();
+        let (send, events) = std::sync::mpsc::channel();
+        super::spawn_check_worker(
+            || Some(()),
+            move |()| {
+                let mut cache = UpdateCache::default();
+                cache.note_up_to_date("v5.1.0".into());
+                assert!(super::save_cache_at(&destination, &cache));
+            },
+            move || {
+                send.send(crate::app::UserEvent::UpdateCheckFinished)
+                    .unwrap();
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        let cache = super::load_cache_at(&path).unwrap();
+        assert_eq!(cache.last_outcome, Some(LastOutcome::UpToDate));
+        assert!(matches!(
+            events
+                .try_recv()
+                .expect("successful up-to-date checks must refresh UI facts"),
+            crate::app::UserEvent::UpdateCheckFinished
+        ));
+    }
+
+    #[test]
+    fn an_abandoned_install_is_reconciled_before_the_throttle() {
+        let temp = crate::test_tempdir();
+        let path = temp.path().join("update-check.json");
+        let mut cache = UpdateCache {
+            last_check: 42,
+            ..UpdateCache::default()
+        };
+        cache.note_installing("v5.2.0");
+        assert!(super::save_cache_at(&path, &cache));
+        let _lock = match super::try_acquire_file_lock(&temp.path().join("check.lock")).unwrap() {
+            CheckLockAttempt::Acquired(Some(lock)) => lock,
+            _ => panic!("no worker should own the abandoned check"),
+        };
+        let mut cache = super::load_cache_at(&path).unwrap();
+        assert!(!super::prepare_cache_check(&mut cache, 43, DAY, |record| {
+            super::save_cache_at(&path, record)
+        }));
+        let cache = super::load_cache_at(&path).unwrap();
+        assert_eq!(cache.last_check, 42, "recovery must retain the throttle");
+        assert_eq!(
+            cache.last_outcome,
+            Some(LastOutcome::Available),
+            "an abandoned install must not remain Installing"
+        );
+        let install = kettle_update::InstallSnapshot::default();
+        let facts = super::facts_from(
+            &cache,
+            &install.local_state(),
+            install.kind(),
+            kettle_config::UpdatePolicy::Notify,
+            &v("5.1.0"),
+        );
+        assert_eq!(
+            facts.release.unwrap().state,
+            crate::update_notice::ReleaseState::Available
+        );
+    }
+
+    #[test]
+    fn throttle_io_does_not_block_the_caller() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let (entered_tx, entered) = channel();
+        let (release, released) = channel();
+        let (returned_tx, returned) = channel();
+        let caller = std::thread::spawn(move || {
+            let worker = super::spawn_check_worker(
+                move || {
+                    entered_tx.send(()).unwrap();
+                    released.recv().unwrap();
+                    Some(())
+                },
+                |()| {},
+                || {},
+            )
+            .unwrap();
+            returned_tx.send(()).unwrap();
+            worker
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        let responsive = returned.recv_timeout(Duration::from_millis(250)).is_ok();
+        release.send(()).unwrap();
+        caller.join().unwrap().join().unwrap();
+        assert!(
+            responsive,
+            "throttle I/O blocked the caller until persistence finished"
+        );
     }
 
     #[test]

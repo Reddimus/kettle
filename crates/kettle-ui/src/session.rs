@@ -704,6 +704,8 @@ fn changed_session() -> std::io::Error {
 /// change session state. Reading the file, rather than trusting cached bytes or
 /// length, also detects same-size edits made by another window.
 pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<()> {
+    s.validated_restore_windows()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     if let Some(dir) = p.parent() {
         kettle_state::create_private_dirs(dir)?;
     }
@@ -810,7 +812,8 @@ pub(crate) fn load_snapshot_result(
         Err(error) => return Err(error),
     }
     let _lock = session_lock(p)?;
-    let (file, size) = open_session_file(p)?;
+    let file = kettle_state::open_trusted_file_read(p)?;
+    let size = file.metadata()?.len();
     let identity = SnapshotIdentity::of(&file)?;
     if size > MAX_SESSION_BYTES {
         stash_oversize_session(p, &identity, size, MAX_SESSION_BYTES)?;
@@ -988,10 +991,8 @@ fn open_session_file(path: &std::path::Path) -> std::io::Result<(std::fs::File, 
 /// every window, split ratio and working directory within seconds of a launch
 /// that looks ordinary.
 ///
-/// The rejections are reachable without a hostile file, because nothing on the
-/// save side enforces the limits the load side checks: seventeen open windows,
-/// or more than 256 panes, or a large enough aggregate surface area, and kettle
-/// writes a file it will refuse to read back.
+/// Older snapshots or excessive aggregate surface area can still fail restore
+/// even though the save path now checks the window and pane limits.
 #[cfg(test)]
 fn stash_unrestorable_session(path: &std::path::Path, reason: &str) {
     let Ok((file, _)) = open_session_file(path) else {
@@ -1506,6 +1507,41 @@ mod tests {
 
     fn tmp_dir(label: &str) -> kettle_test_support::PrivateTempDir {
         kettle_test_support::private_tempdir(&format!("kettle-session-{label}-"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_trust_rejects_writable_command_snapshots() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = private_tempdir();
+        let path = dir.path().join("layout.json");
+        let text =
+            br#"{"tabs":[{"root":{"Leaf":{"cwd":null,"cmd":["untrusted-command"]}}}],"active":0}"#;
+        serde_json::from_slice::<Session>(text).unwrap();
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let error = load_snapshot_result(&path)
+            .err()
+            .expect("writable session commands must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&path).unwrap(), text);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o666
+        );
+    }
+
+    #[test]
+    fn session_trust_rejects_hardlinked_snapshots() {
+        let dir = private_tempdir();
+        let path = dir.path().join("layout.json");
+        save_to_path(&Session::default(), &path).unwrap();
+        std::fs::hard_link(&path, dir.path().join("alias.json")).unwrap();
+        let error = load_snapshot_result(&path)
+            .err()
+            .expect("hardlinked session must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(path.exists());
     }
 
     #[test]
@@ -2028,6 +2064,53 @@ mod tests {
         let empty = Session::default();
         assert!(empty.windows_normalized().is_empty());
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn outgoing_session_fanout_preserves_the_previous_snapshot() {
+        let dir = private_tempdir();
+        let path = dir.path().join("session.json");
+        save_to_path(&Session::default(), &path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let windows = Session {
+            windows: (0..=MAX_RESTORE_WINDOWS)
+                .map(|_| SWindow {
+                    tabs: vec![tab_with_leaves(1)],
+                    active: 0,
+                    geometry: None,
+                })
+                .collect(),
+            ..Session::default()
+        };
+        let panes = Session {
+            tabs: vec![tab_with_leaves(MAX_RESTORE_PANES + 1)],
+            ..Session::default()
+        };
+        for session in [windows, panes] {
+            let error = save_to_path(&session, &path)
+                .expect_err("unrestorable fan-out must not replace a snapshot");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+        let exact = Session {
+            windows: (0..MAX_RESTORE_WINDOWS)
+                .map(|_| SWindow {
+                    tabs: vec![tab_with_leaves(MAX_RESTORE_PANES / MAX_RESTORE_WINDOWS)],
+                    active: 0,
+                    geometry: None,
+                })
+                .collect(),
+            ..Session::default()
+        };
+        save_to_path(&exact, &path).unwrap();
+        assert_eq!(
+            load_from_path(&path)
+                .unwrap()
+                .validated_restore_windows()
+                .unwrap()
+                .len(),
+            MAX_RESTORE_WINDOWS
+        );
     }
 
     #[test]

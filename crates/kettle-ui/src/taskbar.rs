@@ -15,14 +15,42 @@ use winit::window::Window;
 /// COM calls.
 pub struct Taskbar {
     inner: imp::Inner,
+    progress: AppliedProgress,
+}
+
+#[derive(Default)]
+struct AppliedProgress {
     last: Option<Progress>,
+    retry_at: Option<std::time::Instant>,
+}
+
+impl AppliedProgress {
+    fn apply_with(
+        &mut self,
+        now: std::time::Instant,
+        progress: Option<Progress>,
+        set: impl FnOnce() -> bool,
+    ) {
+        if (progress == self.last && self.retry_at.is_none())
+            || self.retry_at.is_some_and(|at| now < at)
+        {
+            return;
+        }
+        log::debug!("taskbar: focused-pane OSC 9;4 progress -> {progress:?}");
+        if set() {
+            self.last = progress;
+            self.retry_at = None;
+        } else {
+            self.retry_at = Some(now + std::time::Duration::from_secs(1));
+        }
+    }
 }
 
 impl Taskbar {
     pub fn new() -> Self {
         Self {
             inner: imp::Inner::new(),
-            last: None,
+            progress: AppliedProgress::default(),
         }
     }
 
@@ -30,12 +58,10 @@ impl Taskbar {
     /// when nothing is focused/reporting — to `window`'s taskbar button.
     /// Cheap no-op when unchanged since the previous call.
     pub fn apply(&mut self, window: &Window, progress: Option<Progress>) {
-        if progress == self.last {
-            return;
-        }
-        log::debug!("taskbar: focused-pane OSC 9;4 progress -> {progress:?}");
-        self.last = progress;
-        self.inner.set(window, progress);
+        self.progress
+            .apply_with(std::time::Instant::now(), progress, || {
+                self.inner.set(window, progress)
+            });
     }
 
     /// Clear any outstanding OS attention request (the taskbar-button flash)
@@ -70,48 +96,39 @@ mod imp {
         // Lazily created on first use: COM must be initialized first, which
         // winit does via `OleInitialize` on the event-loop (STA) thread.
         list: Option<ITaskbarList3>,
-        tried: bool,
     }
 
     impl Inner {
         pub fn new() -> Self {
-            Self {
-                list: None,
-                tried: false,
-            }
+            Self { list: None }
         }
 
         fn list(&mut self) -> Option<&ITaskbarList3> {
-            if !self.tried {
-                self.tried = true;
-                let created: Option<ITaskbarList3> =
-                    // SAFETY: winit initialized COM on this STA; TaskbarList supports
-                    // ITaskbarList3 and no aggregation is requested.
-                    unsafe { CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER).ok() };
-                if let Some(l) = &created {
-                    // SAFETY: HrInit must be called once before use.
-                    unsafe {
-                        let _ = l.HrInit();
-                    }
-                }
-                self.list = created;
+            if self.list.is_none() {
+                // SAFETY: winit initialized COM on this STA; TaskbarList supports
+                // ITaskbarList3 and no aggregation is requested.
+                let created: ITaskbarList3 =
+                    unsafe { CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER).ok()? };
+                // SAFETY: HrInit must succeed before the interface is used.
+                unsafe { created.HrInit().ok()? };
+                self.list = Some(created);
             }
             self.list.as_ref()
         }
 
-        pub fn set(&mut self, window: &Window, progress: Option<Progress>) {
+        pub fn set(&mut self, window: &Window, progress: Option<Progress>) -> bool {
             let Some(hwnd) = hwnd_of(window) else {
                 log::debug!("taskbar: no Win32 hwnd yet; skipping");
-                return;
+                return false;
             };
             let Some(list) = self.list() else {
                 log::debug!("taskbar: ITaskbarList3 unavailable; skipping");
-                return;
+                return false;
             };
             // SAFETY: `hwnd` is this process's live top-level window; the COM
             // calls only reference it. A taskbar hint is best-effort — any
-            // error is logged and swallowed, never propagated, so it can't
-            // take down the terminal.
+            // error is logged and retried by the caller, so it cannot take
+            // down the terminal.
             let r: windows::core::Result<()> = unsafe {
                 match progress {
                     None | Some(Progress::Clear) => list.SetProgressState(hwnd, TBPF_NOPROGRESS),
@@ -129,10 +146,12 @@ mod imp {
                         .and_then(|()| list.SetProgressValue(hwnd, p as u64, 100)),
                 }
             };
+            let applied = r.is_ok();
             match r {
                 Ok(()) => log::debug!("taskbar: applied {progress:?} via ITaskbarList3"),
                 Err(e) => log::debug!("taskbar: ITaskbarList3 call failed: {e}"),
             }
+            applied
         }
 
         pub fn clear_attention(&self, window: &Window) {
@@ -201,10 +220,39 @@ mod imp {
 
         /// No taskbar-progress API is wired up off Windows yet (a macOS dock
         /// badge could be added via objc2 as a follow-up).
-        pub fn set(&mut self, _window: &Window, _progress: Option<Progress>) {}
+        pub fn set(&mut self, _window: &Window, _progress: Option<Progress>) -> bool {
+            true
+        }
 
         /// No taskbar attention API off Windows; the winit
         /// `request_user_attention(None)` path handles those platforms.
         pub fn clear_attention(&self, _window: &Window) {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_taskbar_clear_retries_after_a_delay() {
+        let mut state = AppliedProgress::default();
+        let now = std::time::Instant::now();
+        state.apply_with(now, Some(Progress::Normal(50)), || true);
+        state.apply_with(now, None, || false);
+        let calls = std::cell::Cell::new(0);
+        state.apply_with(now + std::time::Duration::from_millis(100), None, || {
+            calls.set(calls.get() + 1);
+            true
+        });
+        assert_eq!(calls.get(), 0, "failed updates must not retry every frame");
+        state.apply_with(now + std::time::Duration::from_secs(1), None, || {
+            calls.set(calls.get() + 1);
+            true
+        });
+        assert_eq!(calls.get(), 1, "a failed clear must be retried");
+        state.apply_with(now + std::time::Duration::from_secs(2), None, || {
+            panic!("a successful clear must be cached")
+        });
     }
 }

@@ -267,13 +267,14 @@ fn file_identity_from_open(mut file: std::fs::File) -> Option<FileIdentity> {
     Some(FileIdentity {
         len: metadata.len(),
         modified: metadata.modified().ok(),
-        fingerprint: sampled_fingerprint(&mut file, metadata.len())?,
+        fingerprint: sampled_fingerprint(&mut file, &metadata)?,
         platform: platform_file_identity(&file, &metadata)?,
     })
 }
 
-fn sampled_fingerprint(file: &mut std::fs::File, len: u64) -> Option<[u8; 32]> {
+fn sampled_fingerprint(file: &mut std::fs::File, metadata: &std::fs::Metadata) -> Option<[u8; 32]> {
     use sha2::{Digest as _, Sha256};
+    let len = metadata.len();
 
     // `File::try_clone` may duplicate this handle while sharing its file
     // offset. Seek before every read so background validation cannot depend on
@@ -286,6 +287,13 @@ fn sampled_fingerprint(file: &mut std::fs::File, len: u64) -> Option<[u8; 32]> {
     offsets.sort_unstable();
     let mut hasher = Sha256::new();
     hasher.update(len.to_le_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        // Restoring mtime cannot restore ctime after an unsampled rewrite.
+        hasher.update(metadata.ctime().to_le_bytes());
+        hasher.update(metadata.ctime_nsec().to_le_bytes());
+    }
     let mut previous = None;
     for offset in offsets {
         if previous == Some(offset) {
@@ -976,8 +984,8 @@ struct Checked {
     /// The opened video's device, inode, size and modification time, which
     /// the media worker is held to; zero on Windows, where none runs.
     identity: kettle_media::PathIdentity,
-    /// The SHA-256 of the video's length and its first, middle and last
-    /// 64 KiB, which a second check must find again.
+    /// The SHA-256 of the video's length, Unix change time and its first,
+    /// middle and last 64 KiB, which a second check must find again.
     fingerprint: [u8; 32],
     /// The video's cached thumbnails, each opened as the video was (Linux).
     cached: Vec<CachedThumbnail>,
@@ -2271,6 +2279,57 @@ mod tests {
             !file_identity_matches(&candidate.path, &identity, &retained),
             "replacing the source object must invalidate a same-size, same-mtime poster"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unsampled_rewrite_with_restored_mtime_invalidates_the_poster() {
+        use std::os::unix::fs::FileExt as _;
+        let dir = crate::test_tempdir();
+        let video = dir.path().join("clip.mp4");
+        write_test_video(&video, VIDEO_FIXTURE);
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&video)
+            .unwrap();
+        writer.set_len(1024 * 1024).unwrap();
+        let (original, retained) = file_identity(&video).unwrap();
+        let first = Checked {
+            size: original.len,
+            identity: stamp(&retained, original.len).unwrap(),
+            fingerprint: original.fingerprint,
+            ..bare_check()
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        writer.write_all_at(&[1], 128 * 1024).unwrap();
+        writer
+            .set_times(std::fs::FileTimes::new().set_modified(original.modified.unwrap()))
+            .unwrap();
+        let (changed, _) = file_identity(&video).unwrap();
+        assert_eq!(changed.len, original.len);
+        assert_eq!(changed.modified, original.modified);
+        assert_eq!(changed.platform, original.platform);
+        let again = Checked {
+            size: changed.len,
+            identity: stamp(&retained, changed.len).unwrap(),
+            fingerprint: changed.fingerprint,
+            ..bare_check()
+        };
+        assert_eq!(again.identity, first.identity);
+        let (image, _) = poster_rechecked(
+            &video,
+            &first,
+            vec![worker_reply(
+                kettle_media::MediaKind::Video,
+                Some(first.identity),
+            )],
+            PreviewChildOutcome::Ready(again),
+        );
+        assert!(
+            image.is_none(),
+            "an unsampled rewrite with restored mtime must invalidate the poster"
+        );
+        assert!(!file_identity_matches(&video, &original, &retained));
     }
 
     #[cfg(unix)]
