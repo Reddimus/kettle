@@ -142,6 +142,8 @@ pub struct SearchOverlay {
     pub wrap: bool,
     pub case_mode: SearchCaseMode,
     pub regex: bool,
+    /// Current configured shortcut, supplied by the UI for the control hint.
+    pub regex_shortcut: Option<String>,
     pub match_position: usize,
     pub match_total: Option<usize>,
     pub match_limited: bool,
@@ -167,6 +169,7 @@ impl Default for SearchOverlay {
             wrap: true,
             case_mode: SearchCaseMode::Smart,
             regex: true,
+            regex_shortcut: None,
             match_position: 0,
             match_total: None,
             match_limited: false,
@@ -1091,7 +1094,13 @@ pub(crate) fn search_bar_segments(
     // `Results limited` — look like just another word in the strip rather than
     // an answer. The slot keeps its width either way, so nothing shifts when
     // the status appears and disappears.
-    let status = if matches!(search.status, SearchStatus::Match | SearchStatus::NoMatch) {
+    let regex_hint = (search.hovered == Some(SearchControl::Regex)
+        || search.focused == SearchControl::Regex)
+        .then_some(search.regex_shortcut.as_deref())
+        .flatten();
+    let status = if let Some(shortcut) = regex_hint {
+        fit_single_line_label(shortcut, cols(geometry.status).max(1))
+    } else if matches!(search.status, SearchStatus::Match | SearchStatus::NoMatch) {
         String::new()
     } else {
         fit_single_line_label(

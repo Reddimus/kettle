@@ -213,7 +213,7 @@ impl SearchCountScan {
         focused
             .and_then(|span| {
                 self.spans
-                    .binary_search_by_key(&span.start, |found| found.start)
+                    .binary_search_by_key(&(span.start, span.end), |found| (found.start, found.end))
                     .ok()
             })
             .map_or(0, |index| index + 1)
@@ -1517,6 +1517,36 @@ mod tests {
         }
         assert!(scan.complete && !scan.limited);
         assert!(scan.spans.is_empty());
+    }
+
+    #[test]
+    fn review_regression_count_ordinals_compare_complete_combining_spans() {
+        let mut term = empty_term(10, 1);
+        write_ascii(&mut term, 0, 0, "ab");
+        term.grid_mut()[Line(0)][Column(0)].push_zerowidth('\u{0301}');
+        let compiled = CompiledSearch::compile("a|\u{0301}b", CaseSensitivity::Always)
+            .unwrap()
+            .unwrap();
+        let token = SearchScanToken::capture(&term, 0, 0);
+        let mut scan = SearchCountScan::new(compiled, token, SearchPoint::new(0, 0));
+        scan.advance(&term);
+        assert!(scan.complete && !scan.limited);
+        assert_eq!(
+            scan.spans,
+            vec![
+                SearchSpan::new(SearchPoint::new(0, 0), SearchPoint::new(0, 0)),
+                SearchSpan::new(SearchPoint::new(0, 0), SearchPoint::new(0, 1)),
+            ]
+        );
+        assert_eq!(scan.position(Some(scan.spans[0])), 1);
+        assert_eq!(scan.position(Some(scan.spans[1])), 2);
+        assert_eq!(
+            scan.position(Some(SearchSpan::new(
+                SearchPoint::new(0, 0),
+                SearchPoint::new(0, 2)
+            ))),
+            0
+        );
     }
 
     fn card_cell(term: &mut Term<EventProxy>, line: i32, col: usize, count: usize) {

@@ -135,8 +135,8 @@ budget shows **Pattern too complex**.
   `Shift+Cmd+G` (`Ctrl+G` / `Ctrl+Shift+G` on Linux).
 - **Wrap** controls whether stepping crosses the history boundary.
 - **Regex** switches between regular expressions and literal text. Click it or
-  press `Ctrl+Shift+Alt+R`; regex starts on, including the literal fallback for
-  invalid patterns.
+  press `Alt+R` on Linux and Windows, `Cmd+Alt+R` on macOS; regex starts on,
+  including the literal fallback for invalid patterns.
 - Click **Case** to cycle modes. **Smart** ignores case until the pattern contains an uppercase character;
   **Match** always matches case; **Ignore** never matches case.
 - **Invert** flips the default direction. `Escape` closes the bar while keeping

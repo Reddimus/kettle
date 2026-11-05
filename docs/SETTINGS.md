@@ -224,5 +224,6 @@ and at least one result remain visible down to a 120-pixel window height.
 
 The default **Scrollback memory** is **64 MB** per pane. The separate default
 **Scrollback lines** cap remains 10,000; either cap can trim the oldest history.
-The search bar's **Regex** button (also `Ctrl+Shift+Alt+R`) changes the current
-search between regex and literal text without changing a saved preference.
+The search bar's **Regex** button (`Alt+R` on Linux and Windows, `Cmd+Alt+R`
+on macOS) changes the current search between regex and literal text without
+changing a saved preference.

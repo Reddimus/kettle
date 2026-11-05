@@ -1643,7 +1643,11 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(cs, Char('c'), Copy);
     bind(cs, Char('v'), Paste);
     bind(cs, Char('f'), StartSearch);
-    bind(cs | Mods::ALT, Char('r'), ToggleSearchRegex);
+    // Ctrl+Alt with printable text is Windows AltGr composition.
+    #[cfg(not(target_os = "macos"))]
+    bind(a, Char('r'), ToggleSearchRegex);
+    #[cfg(target_os = "macos")]
+    bind(Mods::SUPER | a, Char('r'), ToggleSearchRegex);
     // Font-size zoom: every variant of "Ctrl + the plus/minus area" maps
     // to the same action. The `+` glyph on a US layout *is* `Shift+=` —
     // winit reports the chord as `mods = Ctrl+Shift, key = '+'`, which
@@ -1891,10 +1895,8 @@ mod tests {
         production
     }
 
-    /// The copied and selected diagram previews parse by either spelling
-    /// and claim no default shortcut.
     #[test]
-    fn search_regex_has_a_distinct_default_chord_and_action() {
+    fn review_regression_search_regex_has_a_composition_safe_default() {
         assert_eq!(
             Action::from_name("toggle_search_regex"),
             Some(Action::ToggleSearchRegex)
@@ -1902,7 +1904,11 @@ mod tests {
         let bindings = defaults();
         assert_eq!(
             bindings.get(&Trigger {
-                mods: Mods::CTRL | Mods::SHIFT | Mods::ALT,
+                mods: if cfg!(target_os = "macos") {
+                    Mods::SUPER | Mods::ALT
+                } else {
+                    Mods::ALT
+                },
                 key: Key::Char('r')
             }),
             Some(&Action::ToggleSearchRegex)

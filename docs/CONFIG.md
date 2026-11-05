@@ -176,7 +176,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `backspace-binding` | `ascii-del`\|`control-h`\|`escape-sequence`\|`auto` | `ascii-del` | Startup byte(s) the Backspace key sends; an application can override them with DEC mode 67 until terminal reset. `ascii-del` = `0x7f` (the modern default); `control-h` = `0x08` for hosts expecting the old binding |
 | `delete-binding` | `ascii-del`\|`control-h`\|`escape-sequence`\|`auto` | `escape-sequence` | Byte(s) the Delete key sends. `escape-sequence` = the standard `CSI 3~` |
 | `login-shell` | bool | `false` | Launch the shell a `command` names as a login shell (`-l`). On macOS and Linux your default shell already starts as a login shell, with `-` and its name as `argv[0]`, so it needs no flag; on Windows the default shells (pwsh, powershell, cmd) take no `-l`, so `login-shell` leaves them alone. Ignored for `wsl.exe` (where `-l` means "list distros" — see the WSL note below) |
-| `shell-integration` (alias `shell_integration`) | `auto`\|`off` | `auto` | New macOS/Linux panes automatically load integration for the default bash, zsh or fish, or a `command` naming just that shell. User startup runs once before Kettle's hooks; private startup paths are restored before child programs run. Bash reproduces login startup through its rcfile; zsh uses a private `ZDOTDIR`; fish uses `XDG_DATA_DIRS` vendor configuration. Commands with arguments, SSH, sudo and other wrappers are left alone. `off` disables automatic hooks; legacy `on`/`true` and `false` still work. Manual snippets still work. See [SHELL-INTEGRATION.md](SHELL-INTEGRATION.md). |
+| `shell-integration` (alias `shell_integration`) | `auto`\|`off` | `auto` | New macOS/Linux panes automatically load integration for the default bash, zsh or fish, or a `command` naming just that shell. User startup runs once before Kettle's hooks; each bootstrap clears its borrowed environment when it runs. Bash uses `--posix`/`ENV` while preserving login state; macOS system Bash 3.2 is launched untouched and needs manual hooks. Zsh uses a private `ZDOTDIR`; fish removes its injected `XDG_DATA_DIRS` entry while preserving user edits. Bash startup-only flags also receive hooks. Scripts, other arguments, SSH, sudo and other wrappers are left alone. `off` disables automatic hooks; legacy `on`/`true` and `false` still work. Manual snippets still work. See [SHELL-INTEGRATION.md](SHELL-INTEGRATION.md). |
 | `completion-overlay` | `auto`\|`off` | `auto` | Present shell-owned candidates in a detached card aligned with the command's first editable column and never at the cursor. Kettle prefers the lane above the command and flips the card below its final wrapped row when that shows more results. The card stays inside the active pane's terminal grid and never covers the command, pane title, or tab bar. If neither lane fits or the pane is narrower than 20 columns, no card is drawn. Wrapped input falls back to the first grid column. `auto` replaces only stock Fish or PowerShell bindings, never custom bindings, and stays off inside tmux/screen. Bash and Zsh provide cooperative helpers. The shell still owns matching and edits. Changes apply to new shells so an existing wrapper never becomes invisible mid-session |
 | `term` | string | `xterm-256color` | The `TERM` value exported to the PTY |
 | `colorterm` | string | `truecolor` | The `COLORTERM` value exported to the PTY (advertises 24-bit color) |
@@ -196,7 +196,10 @@ Patterns use Rust regex syntax through `regex-automata`'s meta engine and are
 limited to **4096 UTF-8 bytes**. A pattern that **fails to parse** is retried as
 a literal, so searching for `call(x` or a bare `(` finds that text on screen
 instead of reporting an error. Regex is on by default; click **Regex** or press
-`Ctrl+Shift+Alt+R` (`toggle_search_regex`, rebindable) to switch to literal text.
+`Alt+R` on Linux and Windows, `Cmd+Alt+R` on macOS
+(`toggle_search_regex`, rebindable) to switch to literal text. Hover or focus the
+Regex control to see its currently bound shortcut. Windows AltGr composition
+continues to type into the query.
 This toggle is local to the open window's search and does not change a config key.
 In regex mode a pattern that **does** parse keeps regex meaning, so `a|b` and
 `^row` work as expected. Literal mode finds punctuation such as `call(x)` and
@@ -606,7 +609,7 @@ extend the selection to the top / bottom of the buffer, bound by default to
 **Shift+Home** / **Shift+End** (Shift+click still extends to the click point).
 **Ctrl+Home** / **Ctrl+End** scroll to the top / bottom instead.
 
-**Search + jump**: `start_search` (`search`), `prev_prompt`
+**Search + jump**: `start_search` (`search`), `toggle_search_regex`, `prev_prompt`
 (`jump_to_prompt_prev`), `next_prompt` (`jump_to_prompt_next`).
 
 **Scrollback**: `scroll_line_up`, `scroll_line_down`, `scroll_page_up`,

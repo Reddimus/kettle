@@ -47,6 +47,7 @@ update toast) or `update-policy = off` (no automatic network request).
 3. Open Settings with `Ctrl+,`.
 4. Bash, Zsh and Fish get [shell integration](docs/SHELL-INTEGRATION.md)
    automatically for prompt jumps, command results and completion cards.
+   macOS system Bash 3.2 needs the linked manual setup.
 
 Kettle reloads its `key = value` config when you save it.
 `kettle --write-default-config` creates one, `kettle --config-path` finds it
@@ -64,6 +65,7 @@ lists every setting.
 | Focus the pane in a direction, Linux | `Alt+Arrow` |
 | Focus the pane in a direction, macOS | `Cmd+Opt+Arrow` or `Ctrl+Cmd+Arrow` |
 | Search | `Ctrl+Shift+F` |
+| Toggle regex while searching | `Alt+R` (Linux/Windows), `Cmd+Alt+R` (macOS) |
 | Command palette | `Ctrl+Shift+K` |
 | Copy or paste | `Ctrl+Shift+C` or `Ctrl+Shift+V` |
 | Settings | `Ctrl+,` |

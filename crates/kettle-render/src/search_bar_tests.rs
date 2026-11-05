@@ -1055,3 +1055,38 @@ fn match_count_is_exact_or_explicitly_incomplete_in_both_languages() {
         );
     }
 }
+
+#[test]
+fn review_regression_regex_hint_uses_the_supplied_binding() {
+    for shortcut in ["Alt+R", "Cmd+Alt+R", "Ctrl+F9"] {
+        for focused in [false, true] {
+            let mut search = SearchOverlay {
+                status: SearchStatus::Match,
+                regex_shortcut: Some(shortcut.into()),
+                focused: if focused {
+                    SearchControl::Regex
+                } else {
+                    SearchControl::Editor
+                },
+                hovered: (!focused).then_some(SearchControl::Regex),
+                ..SearchOverlay::default()
+            };
+            let geometry = search_bar_geometry(2400.0, 800.0, 8.0, 16.0, &search.tr);
+            let text = search_bar_text(&search, geometry, 8.0);
+            assert!(
+                text.contains(shortcut),
+                "missing actual shortcut {shortcut}: {text}"
+            );
+            search.regex_shortcut = None;
+            let text = search_bar_text(&search, geometry, 8.0);
+            assert!(
+                !text.contains(shortcut),
+                "unbound toggle retained a shortcut"
+            );
+            search.regex_shortcut = Some(shortcut.into());
+            search.focused = SearchControl::Editor;
+            search.hovered = None;
+            assert!(!search_bar_text(&search, geometry, 8.0).contains(shortcut));
+        }
+    }
+}

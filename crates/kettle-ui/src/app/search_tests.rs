@@ -1255,11 +1255,139 @@ fn count_is_invalidated_by_edits_and_regex_control_is_a_shortcut() {
     assert_eq!(search.count_label(&EN_TEXT), "Counting\u{2026}");
     search.note_edit(std::time::Instant::now());
     assert!(search.count_scan.is_none());
-    assert_eq!(super::search_bar_shortcut_kind(&kettle_config::Action::ToggleSearchRegex), super::SearchBarShortcut::Run);
-    assert!(!super::search_bar_claims(&winit::keyboard::Key::Character("R".into()),
-        winit::keyboard::ModifiersState::CONTROL | winit::keyboard::ModifiersState::SHIFT | winit::keyboard::ModifiersState::ALT,
-        cfg!(target_os="macos"), true, false));
+    assert_eq!(
+        super::search_bar_shortcut_kind(&kettle_config::Action::ToggleSearchRegex),
+        super::SearchBarShortcut::Run
+    );
+    assert!(!super::search_bar_claims(
+        &winit::keyboard::Key::Character("r".into()),
+        if cfg!(target_os = "macos") {
+            winit::keyboard::ModifiersState::SUPER | winit::keyboard::ModifiersState::ALT
+        } else {
+            winit::keyboard::ModifiersState::ALT
+        },
+        cfg!(target_os = "macos"),
+        true,
+        false
+    ));
     let source = production_source();
     assert!(source.contains("Self::return_pane_to_live(ws, pane)"));
     assert!(source.contains("self.scrollback_pill_for(target, *pane, partition.terminal)"));
+}
+
+#[test]
+fn review_regression_count_wakes_after_nearby_match_without_blinking() {
+    use alacritty_terminal::vte::ansi::Processor;
+    use std::time::{Duration, Instant};
+
+    let (mux, panes) = title_test_tab_mux(1);
+    let pane = panes[0];
+    let mut ws = WindowState::new(1, mux);
+    {
+        let mut term = ws.mux.panes[&pane].term.term.lock().unwrap();
+        let mut parser: Processor = Default::default();
+        parser.advance(&mut *term, "needle ".repeat(1200).as_bytes());
+    }
+    ws.search.open = true;
+    ws.search.target_pane = Some(pane);
+    ws.search.editor.insert("needle", 4096);
+    // Leave ample time for the first nearby scan on a loaded runner.
+    ws.search
+        .note_edit(Instant::now() + Duration::from_millis(100));
+    let deadline = ws.search.typing_pause_until.unwrap();
+    App::update_search_for_pane(&mut ws, pane, 0);
+    assert_eq!(ws.search.status, kettle_render::SearchStatus::Match);
+    assert!(ws.search.unlimited_retry_at.is_none());
+    assert!(ws.search.background.is_none());
+    assert!(!ws.search.count_scan.as_ref().unwrap().complete);
+    assert_eq!(ws.search.count_label(&EN_TEXT), "Counting\u{2026}");
+    assert_eq!(
+        super::animation_wait(false, None, None),
+        None,
+        "blinking disabled"
+    );
+    assert_eq!(
+        super::search_work_deadline(&ws.search, Instant::now()),
+        Some(deadline)
+    );
+    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    for _ in 0..200 {
+        let now = Instant::now();
+        assert!(super::search_work_deadline(&ws.search, now).is_some_and(|at| at <= now));
+        App::update_search_for_pane(&mut ws, pane, 0);
+        if ws.search.count_scan.as_ref().unwrap().complete {
+            break;
+        }
+    }
+    let scan = ws.search.count_scan.as_ref().unwrap();
+    assert!(scan.complete && !scan.limited);
+    assert_eq!(scan.spans.len(), 1200);
+    assert!(!ws.search.count_label(&EN_TEXT).contains("Counting"));
+    assert_eq!(
+        super::search_work_deadline(&ws.search, Instant::now()),
+        None
+    );
+    ws.search.open = false;
+    assert_eq!(
+        super::search_work_deadline(&ws.search, Instant::now()),
+        None
+    );
+}
+
+#[test]
+fn review_regression_regex_default_filters_text_and_preserves_altgr() {
+    use kettle_config::{Key as KKey, Mods, Trigger};
+    use winit::keyboard::{Key, ModifiersState as M};
+    let bindings = kettle_config::keybinds::defaults();
+    let key = Key::Character("r".into());
+    let mods = if cfg!(target_os = "macos") {
+        M::SUPER | M::ALT
+    } else {
+        M::ALT
+    };
+    let bound = super::resolve_keybind_action(&bindings, Some(&key), None, mods, None);
+    assert!(matches!(bound, Some((_, Action::ToggleSearchRegex))));
+    for (macos, windows, mods, configured_mods) in [
+        (false, false, M::ALT, Mods::ALT),
+        (false, true, M::ALT, Mods::ALT),
+        (true, false, M::SUPER | M::ALT, Mods::SUPER | Mods::ALT),
+    ] {
+        let bindings = [(
+            Trigger::new(configured_mods, KKey::Char('r')),
+            Action::ToggleSearchRegex,
+        )]
+        .into_iter()
+        .collect();
+        let bound = super::resolve_keybind_action(&bindings, Some(&key), None, mods, None);
+        assert!(matches!(bound, Some((_, Action::ToggleSearchRegex))));
+        let accepted = crate::modal_input::accept_text(Some("r"), mods);
+        assert_eq!(
+            super::search_bar_text(accepted, mods, bound.is_some(), windows),
+            None
+        );
+        assert!(!super::search_bar_claims(&key, mods, macos, true, false));
+        assert_eq!(
+            super::search_bar_shortcut_kind(&Action::ToggleSearchRegex),
+            super::SearchBarShortcut::Run
+        );
+    }
+    // Even a bound Ctrl+Alt chord must leave Windows AltGr composition intact.
+    for mods in [M::CONTROL | M::ALT, M::CONTROL | M::ALT | M::SHIFT] {
+        let composed = crate::modal_input::accept_text(Some("@"), mods);
+        let typed = super::search_bar_text(composed, mods, true, true).unwrap();
+        let mut editor = crate::search_input::SearchEditor::default();
+        editor.type_text(typed, 4096);
+        assert_eq!(editor.text(), "@");
+    }
+}
+
+#[test]
+fn review_regression_regex_shortcut_leaves_terminal_input_alone_when_search_is_closed() {
+    let source = production_source();
+    let body = source.split("fn chord_falls_through(").nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .expect("shared native/control keyboard routing");
+    let compact = body.split_whitespace().collect::<String>();
+    assert!(compact.contains("!ws.search.open&&matches!(action,Action::ToggleSearchRegex)"),
+        "the search-only shortcut must fall through before global dispatch");
 }

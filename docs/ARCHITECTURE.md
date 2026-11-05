@@ -2188,7 +2188,10 @@ whole scrollback buffer:
   query. No search state is process-global. Navigation and visible highlights
   use separate `CompiledSearch` instances so alternating work slices cannot
   discard each other's saved offsets. Both receive the same scan token and
-  reset on query, output, or layout changes.
+  reset on query, output, or layout changes. The exact-count scan has an
+  independent scheduler deadline after the typing pause, even when nearby
+  navigation has already found a match. Ordinals compare complete grid spans
+  because combining marks can give distinct matches the same start cell.
   The Unicode editor moves, selects, and deletes by grapheme boundary. A scan
   token combines pane output generation, query revision, and terminal layout.
   Query changes and reflow restart work from a fresh viewport anchor. Plain PTY
@@ -4693,9 +4696,25 @@ confirmation layout and IME ownership rules.
 
 `kettle-ui::shell_integration` extends the core `shell_startup` launch additions
 with immutable files verified by `owned_dir`. It composes with agent startup,
-restores borrowed environment before running user startup, and loads the
-canonical bundled hooks. No startup files belonging to the user are changed.
+clears borrowed launch state at each shell's bootstrap, and loads the canonical
+bundled hooks. No startup files belonging to the user are changed.
 The per-file verification read limit is 64 KiB, covering the Fish integration.
+Startup variants are content-addressed. Under the install lock each launch
+refreshes the verified directory's mtime; cleanup preserves every variant used
+within 24 hours and up to four older variants. The recent variants take priority
+over the count limit because starting shells may still reference them.
+
+Automatic Bash uses `--posix` and `ENV`, with `--login` for actual login shells.
+Its startup file disables POSIX mode and `inherit_errexit`, restores the user's
+`ENV`, clears exported helpers, then sources the login profiles or interactive
+rcfile according to the invocation flags before loading hooks. User startup is
+sourced at top level so its declarations retain their normal scope. macOS system
+Bash 3.2.57 ignores this `ENV` route and reads normal startup even with `--posix`;
+Kettle leaves `/bin/bash` and `/usr/bin/bash` untouched there. Those shells retain
+login state and logout processing and can use manually installed hooks.
+Fish removes only Kettle's entry from the current `XDG_DATA_DIRS`, preserving
+changes from earlier user snippets. Zsh wrappers accept readable text or compiled
+`.zwc` startup files, as the core `.zshenv` wrapper does.
 
 The core reader stores bounded known command outcomes separately from prompt
 navigation, anchored to primary-grid document rows at command start. The UI

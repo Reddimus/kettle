@@ -1594,7 +1594,8 @@ impl App {
         trigger: Trigger,
         action: &Action,
     ) -> bool {
-        self.adaptive_focus_chord_falls_through(ws, trigger, action)
+        (!ws.search.open && matches!(action, Action::ToggleSearchRegex))
+            || self.adaptive_focus_chord_falls_through(ws, trigger, action)
             || self.chord_goes_to_program(ws, trigger, action)
     }
 

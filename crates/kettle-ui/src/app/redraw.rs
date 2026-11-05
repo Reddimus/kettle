@@ -463,6 +463,10 @@ impl App {
                 wrap: s.wrap,
                 case_mode: map_search_case_mode(s.case_mode),
                 regex: s.regex,
+                regex_shortcut: kettle_config::keybinds::ui_hint_label(
+                    &self.cfg.keybinds,
+                    &Action::ToggleSearchRegex,
+                ),
                 match_position: s
                     .count_scan
                     .as_ref()
