@@ -88,6 +88,8 @@ def write_config(path: Path, language: str, theme: str) -> None:
         "theme = TokyoNight Day" if theme == "light" else "theme = TokyoNight Night",
         "cursor-blink = false",
         "window-title-format = {title}",
+        # Every tab and split runs the same plain shell (see capture_state).
+        "command = bash --noprofile --norc",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -115,12 +117,10 @@ def capture_state(smoke, kettle: str, out: Path, name: str, language: str, theme
         cfg = scratch / "kettle.cfg"
         write_config(cfg, language, theme)
         env = private_env(home)
-        # A plain shell with a fixed prompt, so images do not depend on the
-        # account's shell, its startup files or the host name.
+        # The config's plain shell gets a fixed prompt, so images do not
+        # depend on the account's shell, its startup files or the host name.
         env["PS1"] = "$ "
-        shell = ["-e", "bash", "--noprofile", "--norc"]
-        with smoke.LiveKettle(kettle, cfg, scratch / "kettle.log",
-                              extra_args=shell, extra_env=env) as live:
+        with smoke.LiveKettle(kettle, cfg, scratch / "kettle.log", extra_env=env) as live:
             width, height = SIZES[size]
             live.json_ctl("resize_window", {"width": width, "height": height})
             smoke.live_shell_command(live, FIXTURE_TEXT, READY, timeout_ms=15000)
