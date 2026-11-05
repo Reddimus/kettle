@@ -496,6 +496,35 @@ pub(crate) fn emit_cell_locked_glyphs(
     queue: &wgpu::Queue,
     char_starts: &mut Vec<u32>,
 ) {
+    emit_positioned_glyphs(
+        out,
+        buf,
+        origin,
+        cell_width,
+        positioning,
+        default_color,
+        char_starts,
+        |key| {
+            let mut image = None;
+            glyph_pipeline.ensure_glyph(device, queue, key, || {
+                image = swash.get_image_uncached(font_system, key);
+                RasterGlyph::from_swash(image.as_ref()?)
+            })
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_positioned_glyphs(
+    out: &mut Vec<GlyphInstance>,
+    buf: &TextBuffer,
+    origin: (f32, f32),
+    cell_width: f32,
+    positioning: GlyphPositioning,
+    default_color: GColor,
+    char_starts: &mut Vec<u32>,
+    mut glyph_slot: impl FnMut(glyphon::cosmic_text::CacheKey) -> Option<super::glyphpipe::GlyphSlot>,
+) {
     for run in buf.layout_runs() {
         let cell_w = match positioning {
             GlyphPositioning::Continuous => None,
@@ -540,58 +569,74 @@ pub(crate) fn emit_cell_locked_glyphs(
         }
         let mut active_cell = None;
         let mut cluster_x = 0.0;
-        for glyph in run.glyphs.iter() {
-            let col = super::geometry::glyph_grid_col_with_metadata(
-                char_starts,
-                glyph.start,
-                glyph.metadata,
-            );
-            if active_cell != Some(col) {
-                active_cell = Some(col);
-                cluster_x = prefix_anchors
-                    .get(&glyph.metadata)
-                    .copied()
-                    .unwrap_or(glyph.x);
+        use unicode_segmentation::UnicodeSegmentation;
+        let emoji_clusters: Vec<_> = run
+            .text
+            .grapheme_indices(true)
+            .filter(|(_, text)| super::fonts::emoji_text(text))
+            .map(|(start, text)| start..start + text.len())
+            .collect();
+        let emoji_cluster = |glyph: &glyphon::cosmic_text::LayoutGlyph| {
+            let index = emoji_clusters
+                .partition_point(|range| range.start <= glyph.start)
+                .checked_sub(1)?;
+            (glyph.start < emoji_clusters[index].end).then_some(index)
+        };
+        for glyphs in run
+            .glyphs
+            .chunk_by(|a, b| a.metadata == b.metadata && emoji_cluster(a) == emoji_cluster(b))
+        {
+            let first = &glyphs[0];
+            let start = out.len();
+            for glyph in glyphs {
+                let col = super::geometry::glyph_grid_col_with_metadata(
+                    char_starts,
+                    glyph.start,
+                    glyph.metadata,
+                );
+                if active_cell != Some(col) {
+                    active_cell = Some(col);
+                    cluster_x = prefix_anchors
+                        .get(&glyph.metadata)
+                        .copied()
+                        .unwrap_or(glyph.x);
+                }
+                // Keep the shaped offsets until every image in the cluster
+                // has been rasterized, so fitting uses their combined ink.
+                let off_x = cell_w.map_or(origin.0, |cw| {
+                    let cell_left = origin.0 + col as f32 * cw;
+                    cell_locked_glyph_offset(cell_left, glyph, cluster_x)
+                });
+                let phys = glyph.physical((off_x, origin.1), 1.0);
+                let Some(slot) = glyph_slot(phys.cache_key) else {
+                    continue;
+                };
+                let color = glyph.color_opt.unwrap_or(default_color);
+                out.push(GlyphInstance {
+                    pos: [
+                        (phys.x + slot.left) as f32,
+                        (line_y.round() as i32 + phys.y - slot.top) as f32,
+                    ],
+                    size: [slot.w, slot.h],
+                    uv: [slot.atlas_x, slot.atlas_y],
+                    uv_size: [slot.w, slot.h],
+                    color: [
+                        color.r() as f32 / 255.0,
+                        color.g() as f32 / 255.0,
+                        color.b() as f32 / 255.0,
+                        color.a() as f32 / 255.0,
+                    ],
+                    kind: slot.kind,
+                    _pad: [0; 1],
+                });
             }
-            // Pin the pen to the cell, snapped to an integer physical pixel
-            // (crisp + cache-friendly: x_bin = 0), while keeping any intra-
-            // cluster x_offset. Feeding cosmic-text's `physical()` an offset that
-            // lands the logical X exactly there reuses its exact cache-key +
-            // vertical + subpixel math, so the rasterized bitmap is byte-
-            // identical to glyphon's.
-            let off_x = cell_w.map_or(origin.0, |cw| {
-                let cell_left = origin.0 + col as f32 * cw;
-                cell_locked_glyph_offset(cell_left, glyph, cluster_x)
-            });
-            let phys = glyph.physical((off_x, origin.1), 1.0);
-            let key = phys.cache_key;
-            let mut image = None;
-            let slot = match glyph_pipeline.ensure_glyph(device, queue, key, || {
-                image = swash.get_image_uncached(font_system, key);
-                RasterGlyph::from_swash(image.as_ref()?)
-            }) {
-                Some(s) => s,
-                None => continue, // empty / whitespace glyph — nothing to draw
-            };
-            let color = glyph.color_opt.unwrap_or(default_color);
-            let qx = phys.x + slot.left;
-            let qy = line_y.round() as i32 + phys.y - slot.top;
-            let mut left = qx as f32;
-            let mut top = qy as f32;
-            let mut width = slot.w;
-            let mut height = slot.h;
-            let mut uv_x = slot.atlas_x;
-            let mut uv_width = slot.w;
-            let cell = super::geometry::GridGlyphCell::from_metadata(glyph.metadata);
-            if glyph.glyph_id != 0
-                && run
-                    .text
-                    .get(glyph.start..glyph.end)
-                    .is_some_and(super::fonts::emoji_text)
+            let cell = super::geometry::GridGlyphCell::from_metadata(first.metadata);
+            if let Some(index) = emoji_cluster(first)
+                && glyphs.iter().all(|glyph| glyph.glyph_id != 0)
             {
+                let text = &run.text[emoji_clusters[index].clone()];
                 let columns = cell.map_or_else(
                     || {
-                        let text = &run.text[glyph.start..glyph.end];
                         text[alacritty_terminal::term::grapheme_base_offset(text)..]
                             .chars()
                             .next()
@@ -601,47 +646,74 @@ pub(crate) fn emit_cell_locked_glyphs(
                     },
                     |cell| cell.width,
                 );
-                let x = cell_w.map_or(origin.0 + glyph.x, |cw| origin.0 + col as f32 * cw);
-                (left, top, width, height) = super::fonts::fit_emoji(
+                let col = super::geometry::glyph_grid_col_with_metadata(
+                    char_starts,
+                    first.start,
+                    first.metadata,
+                );
+                let x = cell_w.map_or(origin.0 + first.x, |cw| origin.0 + col as f32 * cw);
+                fit_emoji_glyphs(
+                    &mut out[start..],
                     (
                         x,
                         origin.1 + run.line_top,
                         columns as f32 * cell_width,
                         run.line_height,
                     ),
-                    (slot.w, slot.h),
                 );
             }
             if let Some(cw) = cell_w
                 && let Some(cell) = cell
                 && cell.clustered
             {
+                let left = (origin.0 + cell.column as f32 * cw).round();
                 let right = (origin.0 + (cell.column + cell.width) as f32 * cw).round();
-                let clipped = (origin.0 + cell.column as f32 * cw).round().max(left);
-                let scale = width / slot.w;
-                width = (left + width).min(right) - clipped;
-                if width <= 0.0 {
-                    continue;
+                let mut kept = start;
+                for index in start..out.len() {
+                    let mut glyph = out[index];
+                    let clipped = left.max(glyph.pos[0]);
+                    let scale = glyph.size[0] / glyph.uv_size[0];
+                    let width = (glyph.pos[0] + glyph.size[0]).min(right) - clipped;
+                    if width <= 0.0 {
+                        continue;
+                    }
+                    glyph.uv[0] += (clipped - glyph.pos[0]) / scale;
+                    glyph.uv_size[0] = width / scale;
+                    glyph.pos[0] = clipped;
+                    glyph.size[0] = width;
+                    out[kept] = glyph;
+                    kept += 1;
                 }
-                uv_x += (clipped - left) / scale;
-                uv_width = width / scale;
-                left = clipped;
+                out.truncate(kept);
             }
-            out.push(GlyphInstance {
-                pos: [left, top],
-                size: [width, height],
-                uv: [uv_x, slot.atlas_y],
-                uv_size: [uv_width, slot.h],
-                color: [
-                    color.r() as f32 / 255.0,
-                    color.g() as f32 / 255.0,
-                    color.b() as f32 / 255.0,
-                    color.a() as f32 / 255.0,
-                ],
-                kind: slot.kind,
-                _pad: [0; 1],
-            });
         }
+    }
+}
+
+fn fit_emoji_glyphs(glyphs: &mut [GlyphInstance], cell: Rect4) {
+    let mut bounds = (
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    );
+    for glyph in glyphs.iter() {
+        bounds.0 = bounds.0.min(glyph.pos[0]);
+        bounds.1 = bounds.1.min(glyph.pos[1]);
+        bounds.2 = bounds.2.max(glyph.pos[0] + glyph.size[0]);
+        bounds.3 = bounds.3.max(glyph.pos[1] + glyph.size[1]);
+    }
+    let (width, height) = (bounds.2 - bounds.0, bounds.3 - bounds.1);
+    if !(width > 0.0 && height > 0.0) {
+        return;
+    }
+    let fitted = super::fonts::fit_emoji(cell, (width, height));
+    let scale = fitted.2 / width;
+    for glyph in glyphs {
+        glyph.pos[0] = fitted.0 + (glyph.pos[0] - bounds.0) * scale;
+        glyph.pos[1] = fitted.1 + (glyph.pos[1] - bounds.1) * scale;
+        glyph.size[0] *= scale;
+        glyph.size[1] *= scale;
     }
 }
 

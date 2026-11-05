@@ -1584,7 +1584,13 @@ not establish pixel coverage.
 Nerd Font for default-emoji/VS16 raster measurements, VS15 exclusion,
 aspect-ratio fitting and single-image fallback. A separate host-font test
 checks supported ZWJ and skin-tone compositions; it reports `EMOJI_FONT_SKIP`
-when a host lacks coverage. Arabic joining is checked against the isolated
+when a host lacks coverage. Portable glyph-emission tests check one shared
+scale and preserved shaped offsets for lightning plus a combining acute in
+both renderer settings and both 2027 modes, without a GPU. A portable Indic
+ZWJ classification test excludes non-emoji from the single-image rule; a
+host-font test also verifies the two-image Devanagari Sangam MN conjunct,
+reporting `INDIC_FONT_SKIP` when that face is unavailable.
+Arabic joining is checked against the isolated
 form, with distinct initial, medial and final glyph IDs, cell metadata and
 optional ligatures both on and off. The bundled fonts lack Arabic, so that
 test requires a host fallback and reports `ARABIC_FONT_SKIP` if unavailable.

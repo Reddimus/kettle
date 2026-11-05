@@ -83,16 +83,218 @@ fn emoji_sizing_respects_cluster_width() {
 }
 
 #[test]
+fn emoji_combining_mark_keeps_one_shared_transform_in_all_positioning_modes() {
+    use super::batching::{GlyphPositioning, cell_locked_glyph_offset, emit_positioned_glyphs};
+    use super::glyphpipe::GlyphSlot;
+
+    let mut fonts = fixture_fonts();
+    let mut swash = SwashCache::new();
+    let origin = (100.0, 50.0);
+    let cell_width = 20.0;
+    let text = "\u{26a1}\u{301} X";
+    let attrs = Attrs::new().family(Family::Name(kettle_config::font::FAMILY));
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        for clustered in [false, true] {
+            let mut buf = buffer(&mut fonts, text, &attrs);
+            if clustered {
+                let mut spans = AttrsList::new(&attrs);
+                for (bytes, column, width) in [(0..5, 0, 2), (6..7, 2, 1)] {
+                    let cell = GridGlyphCell {
+                        column,
+                        width,
+                        clustered: true,
+                        text_presentation: false,
+                        single_image: false,
+                    };
+                    spans.add_span(bytes, &attrs.clone().metadata(cell.metadata()));
+                }
+                buf.lines[0].set_attrs_list(spans);
+                buf.shape_until_scroll(&mut fonts, false);
+            }
+            let positioning = match mode {
+                TextRendererMode::Grid => GlyphPositioning::Grid(cell_width),
+                TextRendererMode::Legacy if clustered => GlyphPositioning::GraphemeRows(cell_width),
+                TextRendererMode::Legacy => GlyphPositioning::Continuous,
+            };
+            let run = buf.layout_runs().next().unwrap();
+            let emoji: Vec<_> = run.glyphs.iter().filter(|g| g.start < 5).collect();
+            assert_eq!(emoji.len(), 2, "fixture must have a separate acute glyph");
+            assert_eq!(emoji[0].start..emoji[0].end, emoji[1].start..emoji[1].end);
+            let raw_pos = |glyph: &glyphon::cosmic_text::LayoutGlyph, column, cluster_x| {
+                let off_x = if matches!(positioning, GlyphPositioning::Continuous) {
+                    origin.0
+                } else {
+                    cell_locked_glyph_offset(
+                        origin.0 + column as f32 * cell_width,
+                        glyph,
+                        cluster_x,
+                    )
+                };
+                let physical = glyph.physical((off_x, origin.1), 1.0);
+                let image = swash
+                    .get_image(&mut fonts, physical.cache_key)
+                    .as_ref()
+                    .unwrap();
+                [
+                    (physical.x + image.placement.left) as f32,
+                    run.line_y.round() + (physical.y - image.placement.top) as f32,
+                ]
+            };
+            let mut raw_pos = raw_pos;
+            let raw_base = raw_pos(emoji[0], 0, emoji[0].x);
+            let raw_mark = raw_pos(emoji[1], 0, emoji[0].x);
+            let neighbor = run.glyphs.iter().find(|g| g.start == 6).unwrap();
+            let raw_neighbor = raw_pos(neighbor, 2, neighbor.x);
+            let mut instances = Vec::new();
+            emit_positioned_glyphs(
+                &mut instances,
+                &buf,
+                origin,
+                cell_width,
+                positioning,
+                GColor::rgb(255, 255, 255),
+                &mut Vec::new(),
+                |key| {
+                    let image = swash.get_image(&mut fonts, key).as_ref()?;
+                    (image.placement.width > 0 && image.placement.height > 0).then_some(GlyphSlot {
+                        kind: 1,
+                        atlas_x: 0.0,
+                        atlas_y: 0.0,
+                        w: image.placement.width as f32,
+                        h: image.placement.height as f32,
+                        left: image.placement.left,
+                        top: image.placement.top,
+                    })
+                },
+            );
+            assert_eq!(instances.len(), 3);
+            let [base, mark, neighbor] = instances.as_slice() else {
+                unreachable!()
+            };
+            let scale = base.size[0] / base.uv_size[0];
+            for glyph in [base, mark] {
+                for axis in 0..2 {
+                    assert!(
+                        (glyph.size[axis] / glyph.uv_size[axis] - scale).abs() < 0.001,
+                        "{mode:?}, 2027={clustered}: all cluster images must share one scale"
+                    );
+                }
+            }
+            for axis in 0..2 {
+                assert!(
+                    ((mark.pos[axis] - base.pos[axis]) - (raw_mark[axis] - raw_base[axis]) * scale)
+                        .abs()
+                        < 0.001,
+                    "{mode:?}, 2027={clustered}: preserve shaped mark displacement"
+                );
+            }
+            let left = base.pos[0].min(mark.pos[0]);
+            let top = base.pos[1].min(mark.pos[1]);
+            let right = (base.pos[0] + base.size[0]).max(mark.pos[0] + mark.size[0]);
+            let bottom = (base.pos[1] + base.size[1]).max(mark.pos[1] + mark.size[1]);
+            assert!((left + right - (origin.0 * 2.0 + 40.0)).abs() < 0.001);
+            assert!((top + bottom - (origin.1 * 2.0 + 32.0)).abs() < 0.001);
+            assert!(right - left <= 40.001 && bottom - top <= 32.001);
+            assert!(
+                (right - left - 40.0).abs() < 0.001 || (bottom - top - 32.0).abs() < 0.001,
+                "combined ink must fill at least one cell dimension"
+            );
+            assert_eq!(
+                neighbor.pos, raw_neighbor,
+                "neighbor must keep its baseline and advance"
+            );
+        }
+    }
+}
+
+#[test]
+fn non_emoji_zwj_clusters_do_not_require_one_image() {
+    for flags in [Flags::GRAPHEME, Flags::GRAPHEME | Flags::WIDE_CHAR] {
+        assert!(!cluster_needs_single_image(
+            flags,
+            '\u{915}',
+            &['\u{94d}', '\u{200d}', '\u{937}'],
+        ));
+    }
+    assert!(cluster_needs_single_image(
+        Flags::GRAPHEME,
+        '\u{600}',
+        &['\u{1f469}', '\u{200d}', '\u{1f4bb}'],
+    ));
+}
+
+#[test]
+fn indic_zwj_cluster_preserves_multiple_shaped_images() {
+    let mut fonts = FontSystem::new();
+    if !fonts.db().faces().any(|face| {
+        face.families
+            .iter()
+            .any(|(name, _)| name == "Devanagari Sangam MN")
+    }) {
+        eprintln!("INDIC_FONT_SKIP: Devanagari Sangam MN is unavailable");
+        return;
+    }
+    let text = "\u{915}\u{94d}\u{200d}\u{937}";
+    let cell = GridGlyphCell {
+        column: 0,
+        width: 1,
+        clustered: true,
+        text_presentation: false,
+        single_image: cluster_needs_single_image(
+            Flags::GRAPHEME,
+            '\u{915}',
+            &['\u{94d}', '\u{200d}', '\u{937}'],
+        ),
+    };
+    let attrs = Attrs::new()
+        .family(Family::Name("Devanagari Sangam MN"))
+        .metadata(cell.metadata());
+    let mut buf = buffer(&mut fonts, text, &attrs);
+    let mut swash = SwashCache::new();
+    let run = buf.layout_runs().next().unwrap();
+    assert!(run.glyphs.iter().all(|glyph| glyph.glyph_id != 0));
+    let images = run
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            swash
+                .get_image(&mut fonts, glyph.physical((0.0, 0.0), 1.0).cache_key)
+                .as_ref()
+                .is_some_and(|image| image.placement.width > 0 && image.placement.height > 0)
+        })
+        .count();
+    assert_eq!(images, 2, "fixture must shape half-ka and ssa separately");
+    assert!(!replace_unsupported_graphemes(
+        &mut buf,
+        &mut fonts,
+        &mut swash,
+        &[0]
+    ));
+    assert_eq!(buf.lines[0].text(), text);
+    eprintln!("INDIC_SHAPING_PASS: retained {images} images in Devanagari Sangam MN");
+}
+
+#[test]
 fn joined_and_skin_tone_clusters_have_one_image_or_one_replacement() {
     let mut fonts = fixture_fonts();
     let mut swash = SwashCache::new();
     let flags = Flags::GRAPHEME | Flags::WIDE_CHAR;
     for marks in [&['\u{200d}', '\u{1f4bb}'][..], &['\u{1f3fd}'][..]] {
-        let single_image = cluster_needs_single_image(flags, false, marks);
+        let single_image = cluster_needs_single_image(flags, '\u{1f469}', marks);
         assert!(single_image);
-        assert!(cluster_needs_single_image(Flags::GRAPHEME, false, marks));
-        assert!(!cluster_needs_single_image(Flags::WIDE_CHAR, false, marks));
-        assert!(!cluster_needs_single_image(flags, true, marks));
+        assert!(cluster_needs_single_image(
+            Flags::GRAPHEME,
+            '\u{1f469}',
+            marks
+        ));
+        assert!(!cluster_needs_single_image(
+            Flags::WIDE_CHAR,
+            '\u{1f469}',
+            marks
+        ));
+        let mut text_marks = marks.to_vec();
+        text_marks.push('\u{fe0e}');
+        assert!(!cluster_needs_single_image(flags, '\u{1f469}', &text_marks));
         let cell = GridGlyphCell {
             column: 0,
             width: 2,

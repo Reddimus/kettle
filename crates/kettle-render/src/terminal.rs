@@ -616,7 +616,7 @@ impl Renderer {
                         },
                         clustered: flags.contains(Flags::GRAPHEME),
                         text_presentation,
-                        single_image: cluster_needs_single_image(flags, text_presentation, marks),
+                        single_image: cluster_needs_single_image(flags, dc, marks),
                     },
                     family: text_family.clone(),
                 });
@@ -1588,12 +1588,18 @@ pub(crate) fn push_cell_decorations(
     }
 }
 
-pub(crate) fn cluster_needs_single_image(flags: Flags, text: bool, marks: &[char]) -> bool {
-    flags.contains(Flags::GRAPHEME)
-        && !text
-        && marks
+pub(crate) fn cluster_needs_single_image(flags: Flags, first: char, marks: &[char]) -> bool {
+    if !flags.contains(Flags::GRAPHEME)
+        || !marks
             .iter()
             .any(|c| *c == '\u{200d}' || matches!(c, '\u{1f3fb}'..='\u{1f3ff}'))
+    {
+        return false;
+    }
+    let text: String = std::iter::once(first)
+        .chain(marks.iter().copied())
+        .collect();
+    super::fonts::emoji_text(&text)
 }
 
 /// Draws one cell's underline segment(s), giving each `Flags::ALL_UNDERLINES`

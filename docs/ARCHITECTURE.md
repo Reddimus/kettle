@@ -3256,8 +3256,10 @@ matches glyphon's
 (mask = `sRGB→linear(fg) · coverage`, color = straight sample of an sRGB atlas),
 so antialiasing, gamma and theme colors are identical. Ordinary glyphs differ
 only in X position. Emoji presentation fits its ink to the cell rectangle
-while preserving aspect ratio; separate destination and atlas-source sizes
-scale the bitmap without changing shaped advances or neighboring baselines.
+while preserving aspect ratio. All images in an emoji cluster share one fit
+of their combined ink bounds, preserving shaped combining-mark offsets;
+separate destination and atlas-source sizes scale the bitmaps without changing
+shaped advances or neighboring baselines.
 The block-cursor glyph uses the same fit. This prevents glyph drift. Without
 pinning, a glyph whose advance
 differs from the cell width (fallback-font CJK / color emoji / some symbols,
@@ -3286,8 +3288,9 @@ not accept a tint, so this route keeps bitmap dimming separate from the
 contrast floor applied to ordinary text. Focus and dimming settings participate
 in the glyph damage key, including when text colours stay at the contrast floor.
 Grapheme-mode rows use their explicit cluster positions in both renderer
-settings. ZWJ and skin-tone sequences require one visible raster image;
+settings. Emoji ZWJ and skin-tone sequences require one visible raster image;
 unsupported compositions draw one replacement while grid text stays intact.
+Non-emoji ZWJ clusters retain all their shaped images.
 The sizing changes do not alter grid rectangles, so pointer hit testing,
 AccessKit, `ctl ui_geometry` and terminal IME placement retain the same cells.
 
