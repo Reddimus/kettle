@@ -258,7 +258,9 @@ class ProcessCleanupTests(unittest.TestCase):
                 child = root / 'child.py'
                 child.write_text('import os, signal, sys\nfrom pathlib import Path\n'
                                  'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
-                                 'Path(sys.argv[1]).write_text(str(os.getpid()))\n'
+                                 'staged = Path(sys.argv[1] + ".tmp")\n'
+                                 'staged.write_text(str(os.getpid()))\n'
+                                 'os.replace(staged, sys.argv[1])  # readers never see a partial pid\n'
                                  'signal.pause()\n')
                 pid_file = root / 'child-pid'
                 process = subprocess.Popen(
@@ -273,6 +275,8 @@ class ProcessCleanupTests(unittest.TestCase):
                     while not pid_file.exists() and time.monotonic() < deadline:
                         time.sleep(0.01)
                     self.assertTrue(pid_file.exists(), 'child did not start')
+                    # The child renames a complete pid into place, so the
+                    # name appearing means its contents are final.
                     child_pid = int(pid_file.read_text())
                     self.assertNotEqual(process.wait(timeout=10), 0)
                     with self.assertRaises(ProcessLookupError, msg='registration failure left a terminal running'):
@@ -313,7 +317,9 @@ class ProcessCleanupTests(unittest.TestCase):
                 child = root / 'child.py'
                 child.write_text('import os, signal, sys\nfrom pathlib import Path\n'
                                  'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
-                                 'Path(sys.argv[1]).write_text(str(os.getpid()))\n'
+                                 'staged = Path(sys.argv[1] + ".tmp")\n'
+                                 'staged.write_text(str(os.getpid()))\n'
+                                 'os.replace(staged, sys.argv[1])  # readers never see a partial pid\n'
                                  'if sys.argv[2] == "completion":\n'
                                  '    Path(os.environ["COMPLETION_MARKER"]).write_text("7\\n")\n'
                                  'signal.pause()\n')
