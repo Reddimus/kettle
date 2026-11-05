@@ -354,6 +354,7 @@ struct CanonicalEofRules {
 }
 
 impl CanonicalEofRules {
+    #[cfg(any(unix, test))]
     fn discard_character(self) -> Option<u8> {
         // Linux N_TTY leaves VDISCARD unimplemented, even with IEXTEN.
         self.vdiscard
