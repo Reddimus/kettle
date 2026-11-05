@@ -82,6 +82,11 @@ fn failed_offscreen_screenshot_preserves_destination() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("existing.png");
     std::fs::write(&out, b"previous PNG").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let result = super::capture::persist_offscreen_screenshot_with(&out, |writer| {
         writer.write_all(b"partial PNG")?;
         writer.flush()?;
@@ -102,6 +107,11 @@ fn offscreen_screenshot_atomically_replaces_destination() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("existing.png");
     std::fs::write(&out, b"previous PNG").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     super::capture::persist_offscreen_screenshot_with(&out, |writer| {
         writer.write_all(b"complete PNG")?;
         writer.flush()?;

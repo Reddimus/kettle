@@ -430,6 +430,18 @@ For private-path and trusted-decoder changes, repeat focused tests under
 umask `002`. Fixtures must create private roots explicitly rather than inherit
 ambient permissions. Existing unrelated directories must keep their modes.
 
+`staged_replacement_and_discard_remove_reservations_in_a_writable_parent` creates
+an explicitly mode-0775 export parent and checks that replacement and discarded
+exports leave only the destination. Unix cleanup removes the identity-matching
+empty reservation through the held selected-parent descriptor when private-parent
+verification is unavailable. The `screenshot_demo_tests` destination fixtures
+are explicitly mode 0600 on Unix; their parents keep their created permissions.
+Session loading and restore-recovery fixtures also set mode 0600 explicitly,
+so they exercise recovery rather than the trusted reader's writable-file refusal.
+The macOS `private_creation_has_no_inherited_acl_before_first_hardening` fixture
+sets its searchable private-state parent to mode 0755 before seeding its ACL.
+Repeat these tests under both umask `022` and `002`.
+
 `kettle-state`'s Windows-only
 `private_directory_creation_uses_a_protected_current_user_dacl` checks both
 levels of a newly created directory tree through `READ_CONTROL` handles,

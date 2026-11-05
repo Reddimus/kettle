@@ -390,8 +390,10 @@ overwrites or follows an existing leaf. A writable export parent can still
 rename or remove the staging name or published pathname; the open file object
 remains the one Kettle created. Unix cleanup uses the held private staging
 directory and never unlinks a published export pathname. Empty staging
-directories are removed only under a verified trusted parent; a concurrently
-writable parent retains the empty reservation. Cleanup failure is
+directories are identity-checked and removed through the verified trusted parent
+when available, or through the selected parent descriptor already held for
+staging. Removal uses `unlinkat(..., AT_REMOVEDIR)`, so even in a writable parent
+it can remove only an empty directory. Cleanup failure is
 reported, but the pathname is not
 a durable capability. This policy is not a substitute for private-state storage
 and is never used implicitly.
