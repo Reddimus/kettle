@@ -77,7 +77,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `font-family-bold` / `-italic` / `-bold-italic` | string | — | Per-style family overrides (fall back to `font-family`) |
 | `font-size` | float | `13` | |
 | `cell-width` / `cell-height` | float 0.5–3.0 | `1.0` | Multiplier applied to measured terminal cell width / height. Values are clamped at parse time and reload live with font metric changes |
-| `text-renderer` | enum | `grid` | `grid` \| `legacy`. `grid` pins every glyph to its terminal cell (`col × cell_w`) so fallback-font glyphs, emoji, symbols, and ligatures cannot drift away from selection, cursor, or mouse hit testing. `legacy` restores the older continuous layout for diagnosing renderer regressions |
+| `text-renderer` | enum | `grid` | `grid` \| `legacy`. `grid` pins every glyph to its terminal cell (`col × cell_w`) so fallback-font glyphs, emoji, symbols, and ligatures cannot drift away from selection, cursor, or mouse hit testing. `legacy` restores the older continuous layout for diagnosing renderer regressions; grapheme-mode rows still follow their grid-owned cluster positions. Both modes fit emoji presentation to the cell height and width and draw grapheme-mode ZWJ and skin-tone sequences as one glyph or one replacement |
 | `background` / `foreground` | color | from theme | Hex/`#rgb`/`rgb:`/X11 name |
 | `cursor-color` | color | from theme | The block cursor color. `cursor-bg-color` and `cursor_bg_color` are aliases |
 | `cursor-fg-color` | color | from theme | The glyph color under a focused block cursor. The block is filled with `cursor-color` and its glyph is recolored to this value |

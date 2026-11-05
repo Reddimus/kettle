@@ -180,6 +180,13 @@ impl Default for PaneSnapshot {
 }
 
 impl PaneSnapshot {
+    pub(crate) fn has_emoji(&self) -> bool {
+        self.cells.iter().any(|cell| {
+            !cell.flags.contains(Flags::HIDDEN)
+                && super::fonts::emoji_presentation(cell.c, cell.zerowidth())
+        })
+    }
+
     pub(crate) fn has_graphemes(&self) -> bool {
         self.cells
             .iter()

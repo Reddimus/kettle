@@ -612,9 +612,7 @@ impl Renderer {
                         },
                         clustered: flags.contains(Flags::GRAPHEME),
                         text_presentation,
-                        single_image: flags.contains(Flags::GRAPHEME | Flags::WIDE_CHAR)
-                            && !text_presentation
-                            && marks.contains(&'\u{200d}'),
+                        single_image: cluster_needs_single_image(flags, text_presentation, marks),
                     },
                     family: text_family.clone(),
                 });
@@ -906,7 +904,13 @@ impl Renderer {
                         emoji_qualified: gmarks.contains(&'\u{FE0F}'),
                         attrs: gattrs,
                         color: gcolor,
-                        clip: pv.terminal,
+                        clip: if super::fonts::emoji_presentation(gch, gmarks) {
+                            let left = bx.max(pv.terminal.0);
+                            let right = (bx + cw * bcells).min(pv.terminal.0 + pv.terminal.2);
+                            (left, pv.terminal.1, (right - left).max(0.0), pv.terminal.3)
+                        } else {
+                            pv.terminal
+                        },
                     });
                 }
             }
@@ -1208,7 +1212,11 @@ impl Renderer {
         for (i, pv) in panes.iter().enumerate() {
             let inactive = pane_inactive_amount(pv, panes.len(), cfg);
             let graphemes = pv.snap.has_graphemes();
-            if cfg.text_renderer == TextRendererMode::Legacy && inactive == 0.0 && !graphemes {
+            if cfg.text_renderer == TextRendererMode::Legacy
+                && inactive == 0.0
+                && !graphemes
+                && !pv.snap.has_emoji()
+            {
                 continue;
             }
             let (rx, ry, rw, rh) = pv.terminal;
@@ -1236,6 +1244,7 @@ impl Renderer {
                 out,
                 buf,
                 (ox, oy),
+                cw,
                 if cfg.text_renderer == TextRendererMode::Grid {
                     GlyphPositioning::Grid(cw)
                 } else if graphemes {
@@ -1533,6 +1542,17 @@ pub(crate) fn push_cell_decorations(
     if flags.contains(Flags::STRIKEOUT) {
         quads.push(rect(x, y + ch * 0.5, cw, 1.0, fg, 1.0));
     }
+    if flags.contains(Flags::OVERLINE) {
+        quads.push(rect(x, y, cw, 1.0, fg, 1.0));
+    }
+}
+
+pub(crate) fn cluster_needs_single_image(flags: Flags, text: bool, marks: &[char]) -> bool {
+    flags.contains(Flags::GRAPHEME)
+        && !text
+        && marks
+            .iter()
+            .any(|c| *c == '\u{200d}' || matches!(c, '\u{1f3fb}'..='\u{1f3ff}'))
 }
 
 /// Draws one cell's underline segment(s), giving each `Flags::ALL_UNDERLINES`

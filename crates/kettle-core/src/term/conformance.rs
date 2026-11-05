@@ -138,6 +138,47 @@ fn feed(term: &mut Term<EventProxy>, p: &mut Processor, bytes: &[u8]) {
     p.advance(term, bytes);
 }
 
+#[test]
+fn overline_is_independent_and_reported_and_reset() {
+    let (mut term, mut p, rx) = harness_rx(20, 4);
+    feed(&mut term, &mut p, b"\x1b[4;9;53mA\x1bP$qm\x1b\\");
+    assert_eq!(drain_pty(&rx), "\x1bP1$r0;4;9;53m\x1b\\");
+    assert!(
+        term.grid()[Line(0)][Column(0)]
+            .flags
+            .contains(Flags::OVERLINE | Flags::UNDERLINE | Flags::STRIKEOUT)
+    );
+    feed(&mut term, &mut p, b"\x1b[55mB\x1bP$qm\x1b\\");
+    assert_eq!(drain_pty(&rx), "\x1bP1$r0;4;9m\x1b\\");
+    assert!(
+        !term.grid()[Line(0)][Column(1)]
+            .flags
+            .contains(Flags::OVERLINE)
+    );
+    assert!(
+        term.grid()[Line(0)][Column(1)]
+            .flags
+            .contains(Flags::UNDERLINE | Flags::STRIKEOUT)
+    );
+    feed(&mut term, &mut p, b"\x1b[53m\x1b7\x1b[0mC\x1b8D\x1b[0mE");
+    assert!(
+        term.grid()[Line(0)][Column(2)]
+            .flags
+            .contains(Flags::OVERLINE)
+    );
+    assert!(
+        !term.grid()[Line(0)][Column(3)]
+            .flags
+            .contains(Flags::OVERLINE)
+    );
+    feed(&mut term, &mut p, b"\x1b[53m \x1b[0m");
+    use alacritty_terminal::grid::GridCell;
+    assert!(
+        !term.grid()[Line(0)][Column(4)].is_empty(),
+        "overlined blanks must survive trimming"
+    );
+}
+
 /// Feed bytes through the PTY reader thread's two-stage path,
 /// `Extractor::feed` then `Processor::advance` on each `Chunk::Pass`, so a
 /// test exercises kettle's real pipeline instead of the alacritty

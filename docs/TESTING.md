@@ -1580,6 +1580,25 @@ fallback, monochrome presentation and cached cursor frames. Tests that cannot
 obtain a GPU report an explicit `GRAPHEME_*_GPU_SKIP`; a portable test pass does
 not establish pixel coverage.
 
+`kettle-render`'s `emoji_shaping_tests` use only the bundled JetBrains Mono
+Nerd Font for default-emoji/VS16 raster measurements, VS15 exclusion,
+aspect-ratio fitting and single-image fallback. A separate host-font test
+checks supported ZWJ and skin-tone compositions; it reports `EMOJI_FONT_SKIP`
+when a host lacks coverage. Arabic joining is checked against the isolated
+form, with distinct initial, medial and final glyph IDs, cell metadata and
+optional ligatures both on and off. The bundled fonts lack Arabic, so that
+test requires a host fallback and reports `ARABIC_FONT_SKIP` if unavailable.
+`emoji_ink_is_fitted_without_changing_grid_widths_or_baselines` checks actual
+glyph instances using the bundled font in both renderers and both 2027 modes;
+it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.
+
+Core `overline_is_independent_and_reported_and_reset` covers SGR 53/55,
+DECRQSS, reset, saved cursor attributes and decorated blanks. Parser and
+renderer tests cover attribute dispatch and top-of-cell quads, including
+conceal and coexistence with underline/strikeout. The esctest expectation
+file has no SGR 53 exception to remove. Live conformance and rendering remain
+separate acceptance checks.
+
 The generator round-trip check runs with implicit text encodings treated as
 errors on every platform. It generates into a temporary directory, compares
 the bytes with the checked-in tables, and rejects missing or stale output.

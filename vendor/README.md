@@ -108,6 +108,9 @@ date. Recheck that before upgrading a crate or dropping a patch.
   rectangle scroll, while placements crossing a margin stay stationary.
   DECSTR, RIS, DECALN, DECCOLM and resizing restore full-width margins.
   DECRQSS reports the current horizontal margins.
+  SGR 53/55 set and clear an independent overline flag, retained on blank
+  cells and reported by DECRQSS. The engine exposes its pinned Unicode
+  Emoji_Presentation classifier so rendering and cell widths share a table.
   DECNKM (66) aliases the existing keypad state, including mode reports and
   save/restore. DECBKM (67) exposes negotiated Backarrow state to key encoders;
   RIS and DECSTR clear that negotiation. VT level 5 DECNCSM (95) preserves
@@ -341,6 +344,7 @@ cosmic-text release that contains both commits.
   `GraphemeClustering`. CSI REP dispatches to `Handler::repeat_char`, whose
   default preserves legacy scalar repetition while Kettle can repeat a cell's
   complete retained cluster.
+  SGR 53 and 55 dispatch explicit Overline and CancelOverline attributes.
   XTMODKEYS tells restore from disable. Upstream's `ModifyOtherKeys::Reset` is
   split in two. `Restore` covers `CSI > 4 m` and a parameterless `CSI > m`,
   which the parser reads as `CSI > 0 m`. `Disable` covers `CSI > 4 ; 0 m`.

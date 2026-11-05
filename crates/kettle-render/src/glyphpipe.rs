@@ -42,17 +42,19 @@ use crate::upload::{
 pub struct GlyphInstance {
     /// Top-left in physical pixels.
     pub pos: [f32; 2],
-    /// Size in physical pixels (= the atlas slot's pixel size).
+    /// Destination size in physical pixels.
     pub size: [f32; 2],
     /// Atlas slot top-left in atlas PIXELS. The shader normalizes by the live
     /// `textureDimensions`, so growing the atlas never invalidates an instance.
     pub uv: [f32; 2],
+    /// Source size in atlas pixels, independent of emoji destination scaling.
+    pub uv_size: [f32; 2],
     /// Straight-alpha sRGB rgba. Mask glyphs use the foreground; color glyphs
     /// use rgb as their dimming backdrop and alpha as the retained brightness.
     pub color: [f32; 4],
     /// 0 = sample the color atlas, 1 = sample the mask atlas.
     pub kind: u32,
-    pub _pad: [u32; 3],
+    pub _pad: [u32; 1],
 }
 
 impl GlyphInstance {
@@ -642,8 +644,9 @@ fn vs(
     @location(0) pos: vec2<f32>,
     @location(1) size: vec2<f32>,
     @location(2) uv_px: vec2<f32>,
-    @location(3) color: vec4<f32>,
-    @location(4) kind: u32,
+    @location(3) uv_size: vec2<f32>,
+    @location(4) color: vec4<f32>,
+    @location(5) kind: u32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 4>(
         vec2<f32>(0.0, 0.0),
@@ -667,7 +670,7 @@ fn vs(
     }
     var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.uv = (uv_px + c * size) / vec2<f32>(dim);
+    out.uv = (uv_px + c * uv_size) / vec2<f32>(dim);
     out.color = color;
     out.kind = kind;
     return out;
@@ -725,9 +728,10 @@ mod target_color_tests {
             pos: [0.0; 2],
             size: [1.0; 2],
             uv: [0.0; 2],
+            uv_size: [1.0; 2],
             color: [1.0, 0.5, 0.0, 1.0],
             kind: 0,
-            _pad: [0; 3],
+            _pad: [0; 1],
         };
         let background = kettle_config::Rgb::new(0, 51, 102);
         let original = bitmap.color;
@@ -959,7 +963,7 @@ impl GlyphPipeline {
                     array_stride: std::mem::size_of::<GlyphInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x4, 4 => Uint32
+                        0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Uint32
                     ],
                 })],
             },
@@ -1696,21 +1700,23 @@ mod tests {
     fn glyph_instance_layout_is_stable() {
         assert_eq!(std::mem::size_of::<GlyphInstance>(), 56);
         // Field order matches `0 => Float32x2 (pos @0), 1 => size @8,
-        // 2 => uv @16, 3 => color @24, 4 => kind @40`.
+        // 2 => uv @16, 3 => uv_size @24, 4 => color @32, 5 => kind @48`.
         let i = GlyphInstance {
             pos: [1.0, 2.0],
             size: [3.0, 4.0],
             uv: [5.0, 6.0],
+            uv_size: [3.0, 4.0],
             color: [0.1, 0.2, 0.3, 1.0],
             kind: 1,
-            _pad: [0; 3],
+            _pad: [0; 1],
         };
         let bytes = bytemuck::bytes_of(&i);
         assert_eq!(&bytes[0..8], bytemuck::bytes_of(&i.pos));
         assert_eq!(&bytes[8..16], bytemuck::bytes_of(&i.size));
         assert_eq!(&bytes[16..24], bytemuck::bytes_of(&i.uv));
-        assert_eq!(&bytes[24..40], bytemuck::bytes_of(&i.color));
-        assert_eq!(&bytes[40..44], bytemuck::bytes_of(&i.kind));
+        assert_eq!(&bytes[24..32], bytemuck::bytes_of(&i.uv_size));
+        assert_eq!(&bytes[32..48], bytemuck::bytes_of(&i.color));
+        assert_eq!(&bytes[48..52], bytemuck::bytes_of(&i.kind));
     }
 
     /// `lru_victims` picks the smallest-epoch entries — the ones `evict_lru`

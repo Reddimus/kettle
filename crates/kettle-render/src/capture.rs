@@ -537,6 +537,7 @@ pub fn capture_png_with_annotation(
                     &mut grid_instances,
                     buf_ref,
                     origin,
+                    cw,
                     super::GlyphPositioning::Grid(cw),
                     default_color,
                     &mut grid_glyphs,

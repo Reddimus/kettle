@@ -59,6 +59,11 @@ pub fn grapheme_base_offset(text: &str) -> usize {
     grapheme::base_offset(text)
 }
 
+/// Unicode Emoji_Presentation property from the engine's pinned tables.
+pub fn emoji_presentation(c: char) -> bool {
+    grapheme::emoji_presentation(c)
+}
+
 /// Max size of the window title stack.
 const TITLE_STACK_MAX_DEPTH: usize = 4096;
 
@@ -3650,6 +3655,8 @@ impl<T: EventListener> Handler for Term<T> {
             Attr::CancelHidden => cursor.template.flags.remove(Flags::HIDDEN),
             Attr::Strike => cursor.template.flags.insert(Flags::STRIKEOUT),
             Attr::CancelStrike => cursor.template.flags.remove(Flags::STRIKEOUT),
+            Attr::Overline => cursor.template.flags.insert(Flags::OVERLINE),
+            Attr::CancelOverline => cursor.template.flags.remove(Flags::OVERLINE),
         }
     }
 
@@ -4209,6 +4216,7 @@ fn sgr_report(cell: &Cell) -> String {
         (Flags::INVERSE, "7"),
         (Flags::HIDDEN, "8"),
         (Flags::STRIKEOUT, "9"),
+        (Flags::OVERLINE, "53"),
     ] {
         if flags.contains(flag) {
             parts.push(sgr.to_owned());

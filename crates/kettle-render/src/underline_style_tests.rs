@@ -22,6 +22,36 @@ fn plain_underline_is_a_single_full_width_line() {
 }
 
 #[test]
+fn overline_draws_at_the_cell_top_independently_of_other_decorations() {
+    let mut quads = Vec::new();
+    super::push_cell_decorations(
+        &mut quads,
+        (X, Y, CW, CH),
+        0,
+        Flags::OVERLINE | Flags::UNDERLINE | Flags::STRIKEOUT,
+        COLOR,
+        Rgb::new(0, 255, 0),
+    );
+    assert_eq!(quads.len(), 3);
+    assert_eq!(quads[2].pos, [X, Y]);
+    assert_eq!(quads[2].size, [CW, 1.0]);
+    assert_eq!(
+        quads[2].color, quads[1].color,
+        "overline uses foreground, like strikeout"
+    );
+    quads.clear();
+    super::push_cell_decorations(
+        &mut quads,
+        (X, Y, CW, CH),
+        0,
+        Flags::OVERLINE | Flags::HIDDEN,
+        COLOR,
+        COLOR,
+    );
+    assert!(quads.is_empty());
+}
+
+#[test]
 fn double_underline_adds_a_second_stacked_line() {
     let quads = quads_for(Flags::DOUBLE_UNDERLINE, 0);
     assert_eq!(

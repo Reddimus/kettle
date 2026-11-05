@@ -4046,6 +4046,82 @@ fn grapheme_positive_scalars_do_not_displace_the_next_cell_in_either_renderer() 
 }
 
 #[test]
+fn emoji_ink_is_fitted_without_changing_grid_widths_or_baselines() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
+        eprintln!("EMOJI_SIZING_GPU_SKIP: no adapter");
+        return;
+    };
+    // Both glyphs are in the bundled font. Restrict the font database so
+    // portable pixel coverage cannot accidentally depend on an OS emoji face.
+    renderer.font_system =
+        FontSystem::new_with_locale_and_db("en-US".into(), fontdb::Database::new());
+    load_bundled_font(&mut renderer.font_system, kettle_config::font::REGULAR);
+    renderer.text_symbol_family = None;
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        cfg.text_renderer = mode;
+        for clustered in [false, true] {
+            for emoji in ["\u{26a1}", "\u{a9}\u{fe0f}"] {
+                let input = format!(
+                    "\x1b[?2027{}{}X\x1b[?25l",
+                    if clustered { 'h' } else { 'l' },
+                    emoji
+                );
+                let snap = snapshot_of(20, 4, input.as_bytes());
+                let _image = capture(
+                    &mut renderer,
+                    &cfg,
+                    &[pane(&snap, 640, 180)],
+                    &focused(false),
+                );
+                let glyph = &renderer.glyph_instances[0];
+                let columns = if clustered || emoji.starts_with('\u{26a1}') {
+                    2
+                } else {
+                    1
+                };
+                let expected = super::fonts::fit_emoji(
+                    (
+                        cfg.padding_x,
+                        cfg.padding_y,
+                        columns as f32 * renderer.cell_w,
+                        renderer.cell_h,
+                    ),
+                    (glyph.uv_size[0], glyph.uv_size[1]),
+                );
+                assert!(
+                    (glyph.pos[0] - expected.0).abs() < 0.01,
+                    "{mode:?} {clustered} {emoji:?}"
+                );
+                assert!((glyph.pos[1] - expected.1).abs() < 0.01);
+                assert!((glyph.size[0] - expected.2).abs() < 0.01);
+                assert!((glyph.size[1] - expected.3).abs() < 0.01);
+                assert_eq!(snap.cells.iter().find(|c| c.c == 'X').unwrap().col, columns);
+                let baseline = renderer.pane_buffers[0]
+                    .layout_runs()
+                    .next()
+                    .unwrap()
+                    .line_y;
+                let _cached = capture(
+                    &mut renderer,
+                    &cfg,
+                    &[pane(&snap, 640, 180)],
+                    &focused(false),
+                );
+                assert_eq!(
+                    renderer.pane_buffers[0]
+                        .layout_runs()
+                        .next()
+                        .unwrap()
+                        .line_y,
+                    baseline
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn grapheme_vs15_after_vs16_prefers_a_monochrome_face_without_shrinking() {
     use image::GenericImageView;
     let _serial = gpu_test_guard();

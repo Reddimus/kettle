@@ -486,6 +486,7 @@ pub(crate) fn emit_cell_locked_glyphs(
     out: &mut Vec<GlyphInstance>,
     buf: &TextBuffer,
     origin: (f32, f32),
+    cell_width: f32,
     positioning: GlyphPositioning,
     default_color: GColor,
     glyph_pipeline: &mut GlyphPipeline,
@@ -576,25 +577,61 @@ pub(crate) fn emit_cell_locked_glyphs(
             let qx = phys.x + slot.left;
             let qy = line_y.round() as i32 + phys.y - slot.top;
             let mut left = qx as f32;
+            let mut top = qy as f32;
             let mut width = slot.w;
+            let mut height = slot.h;
             let mut uv_x = slot.atlas_x;
+            let mut uv_width = slot.w;
+            let cell = super::geometry::GridGlyphCell::from_metadata(glyph.metadata);
+            if glyph.glyph_id != 0
+                && run
+                    .text
+                    .get(glyph.start..glyph.end)
+                    .is_some_and(super::fonts::emoji_text)
+            {
+                let columns = cell.map_or_else(
+                    || {
+                        let text = &run.text[glyph.start..glyph.end];
+                        text[alacritty_terminal::term::grapheme_base_offset(text)..]
+                            .chars()
+                            .next()
+                            .and_then(unicode_width::UnicodeWidthChar::width)
+                            .unwrap_or(1)
+                            .max(1)
+                    },
+                    |cell| cell.width,
+                );
+                let x = cell_w.map_or(origin.0 + glyph.x, |cw| origin.0 + col as f32 * cw);
+                (left, top, width, height) = super::fonts::fit_emoji(
+                    (
+                        x,
+                        origin.1 + run.line_top,
+                        columns as f32 * cell_width,
+                        run.line_height,
+                    ),
+                    (slot.w, slot.h),
+                );
+            }
             if let Some(cw) = cell_w
-                && let Some(cell) = super::geometry::GridGlyphCell::from_metadata(glyph.metadata)
+                && let Some(cell) = cell
                 && cell.clustered
             {
                 let right = (origin.0 + (cell.column + cell.width) as f32 * cw).round();
                 let clipped = (origin.0 + cell.column as f32 * cw).round().max(left);
+                let scale = width / slot.w;
                 width = (left + width).min(right) - clipped;
                 if width <= 0.0 {
                     continue;
                 }
-                uv_x += clipped - left;
+                uv_x += (clipped - left) / scale;
+                uv_width = width / scale;
                 left = clipped;
             }
             out.push(GlyphInstance {
-                pos: [left, qy as f32],
-                size: [width, slot.h],
+                pos: [left, top],
+                size: [width, height],
                 uv: [uv_x, slot.atlas_y],
+                uv_size: [uv_width, slot.h],
                 color: [
                     color.r() as f32 / 255.0,
                     color.g() as f32 / 255.0,
@@ -602,7 +639,7 @@ pub(crate) fn emit_cell_locked_glyphs(
                     color.a() as f32 / 255.0,
                 ],
                 kind: slot.kind,
-                _pad: [0; 3],
+                _pad: [0; 1],
             });
         }
     }

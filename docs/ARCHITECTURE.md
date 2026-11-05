@@ -3244,8 +3244,12 @@ emits one pinned instance each, rasterized through cosmic-text's own `SwashCache
 into a private mask+color atlas. Without pane dimming, the fragment shader
 matches glyphon's
 (mask = `sRGB→linear(fg) · coverage`, color = straight sample of an sRGB atlas),
-so antialiasing, gamma and theme colors are identical. Only the X position
-differs. This prevents glyph drift. Without pinning, a glyph whose advance
+so antialiasing, gamma and theme colors are identical. Ordinary glyphs differ
+only in X position. Emoji presentation fits its ink to the cell rectangle
+while preserving aspect ratio; separate destination and atlas-source sizes
+scale the bitmap without changing shaped advances or neighboring baselines.
+The block-cursor glyph uses the same fit. This prevents glyph drift. Without
+pinning, a glyph whose advance
 differs from the cell width (fallback-font CJK / color emoji / some symbols,
 ligature clusters, a mismatched-width bold/italic face) shifts every following
 glyph off the `col × cell_w` grid that the selection highlight, cursor and mouse
@@ -3265,11 +3269,17 @@ and the off phase skips their instance range and the cursor-glyph pass at draw
 time. A steady frame re-draws the retained instance buffer. A blink must never
 invalidate or stale-draw ordinary pane glyphs.
 
-Inactive Legacy panes also use this glyph pipeline, retaining glyphon's
+Legacy panes containing emoji and inactive Legacy panes also use this glyph
+pipeline, retaining glyphon's
 continuous positions instead of pinning to cells. Glyphon's color shader does
 not accept a tint, so this route keeps bitmap dimming separate from the
 contrast floor applied to ordinary text. Focus and dimming settings participate
 in the glyph damage key, including when text colours stay at the contrast floor.
+Grapheme-mode rows use their explicit cluster positions in both renderer
+settings. ZWJ and skin-tone sequences require one visible raster image;
+unsupported compositions draw one replacement while grid text stays intact.
+The sizing changes do not alter grid rectangles, so pointer hit testing,
+AccessKit, `ctl ui_geometry` and terminal IME placement retain the same cells.
 
 Every GPU upload goes through `upload.rs`, which holds the renderer's only
 `write_buffer` and `write_texture` calls. Each pipeline keeps an exact CPU copy

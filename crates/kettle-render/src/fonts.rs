@@ -3,6 +3,81 @@ use super::{
     SwashCache, TextBuffer, fontdb,
 };
 
+pub(crate) fn emoji_presentation(base: char, marks: &[char]) -> bool {
+    match marks
+        .iter()
+        .rev()
+        .find(|c| matches!(c, '\u{fe0e}' | '\u{fe0f}'))
+    {
+        Some('\u{fe0f}') => true,
+        Some('\u{fe0e}') => false,
+        _ => alacritty_terminal::term::emoji_presentation(base),
+    }
+}
+
+pub(crate) fn emoji_text(text: &str) -> bool {
+    let mut chars = text[alacritty_terminal::term::grapheme_base_offset(text)..].chars();
+    chars
+        .next()
+        .is_some_and(|base| emoji_presentation(base, &chars.collect::<Vec<_>>()))
+}
+
+/// Preserve aspect ratio and center ink inside the grid-owned rectangle.
+pub(crate) fn fit_emoji((x, y, w, h): super::Rect4, ink: (f32, f32)) -> super::Rect4 {
+    let scale = (w / ink.0).min(h / ink.1);
+    let (iw, ih) = (ink.0 * scale, ink.1 * scale);
+    (x + (w - iw) * 0.5, y + (h - ih) * 0.5, iw, ih)
+}
+
+pub(crate) fn emoji_cursor_transform(
+    buffer: &TextBuffer,
+    fonts: &mut FontSystem,
+    swash: &mut SwashCache,
+    cell: super::Rect4,
+) -> Option<(f32, f32, f32)> {
+    if !(cell.2 > 0.0 && cell.3 > 0.0) {
+        return None;
+    }
+    let run = buffer.layout_runs().next()?;
+    if !emoji_text(run.text) {
+        return None;
+    }
+    let mut bounds = (
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    );
+    for glyph in run.glyphs {
+        if glyph.glyph_id == 0 {
+            return None;
+        }
+        let physical = glyph.physical((0.0, 0.0), 1.0);
+        if let Some(image) = swash.get_image(fonts, physical.cache_key).as_ref()
+            && image.placement.width > 0
+            && image.placement.height > 0
+        {
+            let x = (physical.x + image.placement.left) as f32;
+            let y = run.line_y.round() + (physical.y - image.placement.top) as f32;
+            bounds.0 = bounds.0.min(x);
+            bounds.1 = bounds.1.min(y);
+            bounds.2 = bounds.2.max(x + image.placement.width as f32);
+            bounds.3 = bounds.3.max(y + image.placement.height as f32);
+        }
+    }
+    let (w, h) = (bounds.2 - bounds.0, bounds.3 - bounds.1);
+    if !(w > 0.0 && h > 0.0) {
+        return None;
+    }
+    let fitted = fit_emoji(cell, (w, h));
+    let scale = fitted.2 / w;
+    Some((
+        fitted.0 - bounds.0 * scale,
+        fitted.1 - bounds.1 * scale,
+        scale,
+    ))
+}
+
 /// Monochrome faces that carry text-presentation symbols, most specific first.
 ///
 /// A colour-emoji face is deliberately absent: it is what these steer away

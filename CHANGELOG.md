@@ -8,6 +8,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- SGR 53 overline (and SGR 55 to clear it) is drawn like underline at the
+  top of the cell.
 - On macOS, a complete menu bar: Kettle (with Settings…), Shell, Edit, View
   and Window menus list every common action with the shortcut it is bound to
   in your config, in English and Spanish, and macOS lists Kettle's windows in
@@ -17,6 +19,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- With grapheme clusters on (mode 2027), emoji ZWJ sequences and emoji with
+  skin-tone modifiers draw as one glyph across the cluster's width, and emoji
+  presentation fills the cell height like other emoji.
 - The tab strip draws the active tab as a raised surface in the terminal's
   background with an accent edge, inactive tabs as muted labels without a
   fill, close buttons only on the active and hovered tabs, activity as a dot

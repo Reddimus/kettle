@@ -35,6 +35,7 @@ bitflags! {
         const DRAWN                     = 1 << 17;
         const BLINK                     = 1 << 18;
         const GRAPHEME                  = 1 << 19;
+        const OVERLINE                  = 1 << 20;
         const ALL_UNDERLINES            = Self::UNDERLINE.bits() | Self::DOUBLE_UNDERLINE.bits()
                                         | Self::UNDERCURL.bits() | Self::DOTTED_UNDERLINE.bits()
                                         | Self::DASHED_UNDERLINE.bits();
@@ -287,6 +288,7 @@ impl GridCell for Cell {
                 Flags::INVERSE
                     | Flags::ALL_UNDERLINES
                     | Flags::STRIKEOUT
+                    | Flags::OVERLINE
                     | Flags::WRAPLINE
                     | Flags::WIDE_CHAR_SPACER
                     | Flags::LEADING_WIDE_CHAR_SPACER

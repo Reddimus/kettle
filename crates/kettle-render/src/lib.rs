@@ -3702,7 +3702,10 @@ impl Renderer {
             // panes use our pipeline at their original layout positions so
             // bitmap dimming and ordinary text contrast remain independent.
             if cfg.text_renderer == TextRendererMode::Legacy {
-                if pane_inactive_amount(pv, panes.len(), cfg) > 0.0 || pv.snap.has_graphemes() {
+                if pane_inactive_amount(pv, panes.len(), cfg) > 0.0
+                    || pv.snap.has_graphemes()
+                    || pv.snap.has_emoji()
+                {
                     continue;
                 }
                 areas.push(TextArea {
@@ -4871,11 +4874,24 @@ impl Renderer {
                 .set_text(gtext, &gattrs, Shaping::Advanced, None);
             self.cursor_glyph_buffer
                 .shape_until_scroll(&mut self.font_system, false);
+            let (left, top, scale) = fonts::emoji_cursor_transform(
+                &self.cursor_glyph_buffer,
+                &mut self.font_system,
+                &mut self.swash,
+                (gx, gy, gclip.2, self.cell_h),
+            )
+            .unwrap_or_else(|| {
+                (
+                    gx,
+                    cursor_glyph_top(gy, baseline, &self.cursor_glyph_buffer),
+                    1.0,
+                )
+            });
             let area = TextArea {
                 buffer: &self.cursor_glyph_buffer,
-                left: gx,
-                top: cursor_glyph_top(gy, baseline, &self.cursor_glyph_buffer),
-                scale: 1.0,
+                left,
+                top,
+                scale,
                 bounds: TextBounds {
                     left: gclip.0 as i32,
                     top: gclip.1 as i32,
@@ -5470,6 +5486,9 @@ mod glyph_cell_lock_tests;
 
 #[cfg(test)]
 mod paragraph_separator_shaping_tests;
+
+#[cfg(test)]
+mod emoji_shaping_tests;
 
 #[cfg(test)]
 mod update_toast_tests;
