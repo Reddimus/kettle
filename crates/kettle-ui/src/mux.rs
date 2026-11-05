@@ -1031,6 +1031,8 @@ pub struct Pane {
     /// (`exit-action = hold`). `reap()` skips it until the user explicitly
     /// closes it (which sets `closed`).
     pub held: bool,
+    pub exit_code: Option<u32>,
+    pub close_on_success: bool,
     /// A held pane keeps its grid but must not keep an exited direct child as a
     /// zombie. `false` means the ordered PTY exit arrived before `try_wait`
     /// could collect the process and about-to-wait must retry on a bounded
@@ -1171,7 +1173,10 @@ impl Pane {
     /// `send_text`/`run_command`), NOT the terminal protocol. Both paths share
     /// the bounded PTY-input worker so neither can block the UI.
     pub fn feed_input(&self, bytes: &[u8]) -> PaneInputResult {
-        if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
+        if let Some(result) = pane_input_policy(
+            !self.held && self.pty_input.failed(),
+            self.read_only || self.held,
+        ) {
             return result;
         }
         if bytes.len() > MAX_USER_INPUT_MESSAGE_BYTES {
@@ -1184,7 +1189,10 @@ impl Pane {
     /// the room its input keeps for releases, so a full queue never leaves
     /// the program holding the press.
     pub fn feed_mouse_release(&self, bytes: &[u8]) -> PaneInputResult {
-        if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
+        if let Some(result) = pane_input_policy(
+            !self.held && self.pty_input.failed(),
+            self.read_only || self.held,
+        ) {
             return result;
         }
         let bytes: Arc<[u8]> = Arc::from(bytes);
@@ -1197,7 +1205,10 @@ impl Pane {
     }
 
     pub fn feed_input_shared(&self, bytes: Arc<[u8]>) -> PaneInputResult {
-        if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
+        if let Some(result) = pane_input_policy(
+            !self.held && self.pty_input.failed(),
+            self.read_only || self.held,
+        ) {
             return result;
         }
         let input = bytes.as_ref();
@@ -1216,7 +1227,10 @@ impl Pane {
     /// Admit an already validated synthetic key batch as one queue item while
     /// retaining each key boundary for completion request accounting.
     pub fn feed_key_inputs(&self, inputs: &[Vec<u8>]) -> PaneInputResult {
-        if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
+        if let Some(result) = pane_input_policy(
+            !self.held && self.pty_input.failed(),
+            self.read_only || self.held,
+        ) {
             return result;
         }
         let Some(total) = inputs
@@ -1249,7 +1263,10 @@ impl Pane {
 
     /// Mouse reports are protocol input, so KAM and SRM do not affect them.
     pub fn feed_pointer_input(&self, bytes: &[u8]) -> PaneInputResult {
-        if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
+        if let Some(result) = pane_input_policy(
+            !self.held && self.pty_input.failed(),
+            self.read_only || self.held,
+        ) {
             return result;
         }
         if bytes.len() > MAX_USER_INPUT_MESSAGE_BYTES {
@@ -1278,7 +1295,10 @@ impl Pane {
     /// initial prompt crosses ConPTY. Keep the user lane so a report cannot jump
     /// ahead of already queued keystrokes.
     pub fn feed_focus_report(&self, focused: bool) -> PaneInputResult {
-        if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
+        if let Some(result) = pane_input_policy(
+            !self.held && self.pty_input.failed(),
+            self.read_only || self.held,
+        ) {
             return result;
         }
         self.pty_input.enqueue_focus_report(focused)
@@ -2334,6 +2354,20 @@ impl Mux {
         argv: &[String],
         launch: Option<&ReconnectLaunch>,
     ) -> Result<u64> {
+        self.spawn_pane_replaying(cfg, geometry, waker, cwd, argv, launch, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_pane_replaying(
+        &mut self,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+        cwd: Option<&str>,
+        argv: &[String],
+        launch: Option<&ReconnectLaunch>,
+        replay: Option<(u64, &kettle_core::ProcessLaunch)>,
+    ) -> Result<u64> {
         #[cfg(windows)]
         let launch_argv = pane_launch_argv(argv, default_wsl_distribution);
         #[cfg(windows)]
@@ -2365,7 +2399,10 @@ impl Mux {
         // the matching UI is disabled.
         // Allocated before the spawn so the child's environment can name its
         // pane. A failed spawn leaves a harmless gap; ids are never reused.
-        let id = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = replay.map_or_else(
+            || NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            |(id, _)| id,
+        );
         let mut pane_env = pane_environment(cfg, id, std::process::id());
         let mut remove_env = vec![
             "KETTLE_OWN_CLAUDE".to_owned(),
@@ -2406,6 +2443,7 @@ impl Mux {
             &cfg.colorterm,
             &pane_env,
             &kettle_core::LaunchOverrides {
+                replay: replay.map(|(_, command)| command),
                 argv0: launch.and_then(|settings| settings.argv0.as_deref()),
                 remove_env: &remove_env,
             },
@@ -2466,6 +2504,8 @@ impl Mux {
                 group_name: None,
                 closed: false,
                 held: false,
+                exit_code: None,
+                close_on_success: false,
                 held_child_reaped: false,
                 exit_observed: false,
                 #[cfg(windows)]
@@ -4223,6 +4263,43 @@ impl Mux {
         std::mem::take(&mut self.closed_panes)
     }
 
+    /// Replace a held process in place, preserving the split, tab and pane identity.
+    /// Spawn failure leaves its output and restart controls available.
+    pub fn restart_held(
+        &mut self,
+        id: u64,
+        cfg: &Config,
+        geometry: PtyGeometry,
+        waker: Waker,
+    ) -> Result<bool> {
+        let Some(pane) = self
+            .panes
+            .get(&id)
+            .filter(|pane| pane.held && pane.held_child_reaped)
+        else {
+            return Ok(false);
+        };
+        let command = pane.term.launch.clone();
+        let argv = pane.argv.clone();
+        let launch = pane.reconnect_launch.clone();
+        let group = pane.group_name.clone();
+        let read_only = pane.read_only;
+        self.spawn_pane_replaying(
+            cfg,
+            geometry,
+            waker,
+            None,
+            &argv,
+            launch.as_ref(),
+            Some((id, &command)),
+        )?;
+        if let Some(pane) = self.panes.get_mut(&id) {
+            pane.group_name = group;
+            pane.read_only = read_only;
+        }
+        Ok(true)
+    }
+
     /// Reap panes whose child exited; prune empty splits/tabs.
     pub fn reap(&mut self) -> ReapOutcome {
         let dead: Vec<u64> = self
@@ -4256,7 +4333,11 @@ impl Mux {
         let mut pending = false;
         for pane in self.panes.values_mut() {
             if pane.held && pane.exit_observed && !pane.held_child_reaped {
-                pane.held_child_reaped = pane.term.child_exit_code().is_some();
+                pane.exit_code = pane.term.child_exit_code();
+                pane.held_child_reaped = pane.exit_code.is_some();
+                if pane.held_child_reaped && pane.exit_code == Some(0) && pane.close_on_success {
+                    pane.closed = true;
+                }
                 pending |= !pane.held_child_reaped;
             }
         }
@@ -4678,7 +4759,7 @@ impl Mux {
                     delivery.record_for(id, receipt_pane, PaneInputResult::Failed);
                     continue;
                 }
-                if p.read_only {
+                if p.read_only || p.held {
                     delivery.record_for(id, receipt_pane, PaneInputResult::ReadOnly);
                     continue;
                 }
@@ -4714,7 +4795,7 @@ impl Mux {
         let targets = ids.iter().filter_map(|id| {
             self.panes
                 .get(id)
-                .filter(|pane| !pane.read_only && !pane.pty_input_failed())
+                .filter(|pane| !pane.held && !pane.read_only && !pane.pty_input_failed())
                 .map(|pane| (*id, pane.path_argv()))
         });
         let formatted = match format_paths_for_targets_bounded(
@@ -4731,7 +4812,7 @@ impl Mux {
             if let Some(pane) = self.panes.get(&id) {
                 if pane.pty_input_failed() {
                     delivery.record_for(id, receipt_pane, PaneInputResult::Failed);
-                } else if pane.read_only {
+                } else if pane.read_only || pane.held {
                     delivery.record_for(id, receipt_pane, PaneInputResult::ReadOnly);
                 }
             }
@@ -4745,7 +4826,7 @@ impl Mux {
                 delivery.record_for(id, receipt_pane, PaneInputResult::Failed);
                 continue;
             }
-            if pane.read_only {
+            if pane.read_only || pane.held {
                 delivery.record_for(id, receipt_pane, PaneInputResult::ReadOnly);
                 continue;
             }
@@ -4779,7 +4860,7 @@ impl Mux {
             let Some(pane) = self
                 .panes
                 .get(&id)
-                .filter(|pane| !pane.read_only && !pane.pty_input_failed())
+                .filter(|pane| !pane.held && !pane.read_only && !pane.pty_input_failed())
             else {
                 continue;
             };
@@ -10146,7 +10227,8 @@ mod node_tests {
             .expect("held-child status poll body");
         assert!(
             body.contains("pane.held && pane.exit_observed && !pane.held_child_reaped")
-                && body.contains("pane.term.child_exit_code().is_some()"),
+                && body.contains("pane.exit_code = pane.term.child_exit_code();")
+                && body.contains("pane.held_child_reaped = pane.exit_code.is_some();"),
             "Hold must collect a status that lagged PTY EOF, but only after the ordered exit event"
         );
     }
@@ -11307,7 +11389,7 @@ mod node_tests {
         let src = production_source();
         let spawn = src.split_once("fn spawn_pane(").expect("spawn_pane").1;
         let allocated = spawn
-            .find("let id = NEXT_PANE_ID.fetch_add(")
+            .find("let id = replay.map_or_else(")
             .expect("pane id allocation");
         let environment = spawn
             .find("pane_environment(cfg, id, std::process::id())")

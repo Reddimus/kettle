@@ -239,7 +239,26 @@ impl App {
             self.drain_events(ws);
         }
         self.process_pending_pane_restarts(ws);
+        let waiting_status = ws
+            .mux
+            .panes
+            .values()
+            .filter(|p| p.held && !p.held_child_reaped)
+            .count();
         let held_child_reap_pending = ws.mux.poll_held_child_statuses();
+        if waiting_status
+            != ws
+                .mux
+                .panes
+                .values()
+                .filter(|p| p.held && !p.held_child_reaped)
+                .count()
+        {
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
         // A log worker can fail after PTY output becomes silent. Its direct
         // event-loop wake reaches this poll even when output-generation gating
         // correctly decides there is no frame to paint.

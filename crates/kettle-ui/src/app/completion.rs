@@ -34,7 +34,7 @@ impl App {
         }
         let pane_id = ws.mux.active_focus()?;
         let pane = ws.mux.panes.get(&pane_id)?;
-        if !pane.completion_overlay {
+        if !pane.completion_overlay || pane.held {
             return None;
         }
         let (mode, display_offset, columns, rows) = {
@@ -65,7 +65,7 @@ impl App {
             kettle_core::CompletionKind::Completion => kettle_i18n::Text::CompletionKindCompletions,
             kettle_core::CompletionKind::Prediction => kettle_i18n::Text::CompletionKindPrediction,
         });
-        Some(kettle_render::CompletionOverlay {
+        let projection = kettle_render::CompletionOverlay {
             tr: self.ui_text,
             pane_rect,
             grid_rect: (
@@ -90,6 +90,18 @@ impl App {
                     position: candidate.position,
                 })
                 .collect(),
-        })
+        };
+        if let Some(rect) = kettle_render::completion_overlay_rect(&projection, self.menu_cell(ws))
+            && self.persistent_notices(ws).iter().any(|(_, notice)| {
+                let cover = notice.geometry.rect;
+                rect.0 < cover.0 + cover.2
+                    && cover.0 < rect.0 + rect.2
+                    && rect.1 < cover.1 + cover.3
+                    && cover.1 < rect.1 + rect.3
+            })
+        {
+            return None;
+        }
+        Some(projection)
     }
 }

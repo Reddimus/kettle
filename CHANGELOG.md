@@ -8,6 +8,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Failed commands keep their pane and final output with an exit-code banner.
+  Restart with Enter or its button; close with Escape, the Close button, or
+  the close-pane shortcut. `exit-behavior` also supports closing or holding
+  every exit, and restart keeps the original command, directory and
+  environment.
+- Config typos and invalid values show a dismissible in-window notice with
+  the file, line and key at startup and reload, while Kettle keeps running.
+- Screen readers can select and close tabs and activate New tab and the New
+  tab menu in horizontal and vertical tab strips.
 - Bash, Zsh and Fish panes now load shell integration on first launch, without
   editing startup files. Set `shell-integration = off` to disable it.
 - Completed commands leave success or failure ticks by the scrollbar, with
@@ -29,6 +38,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The tab strip appears only with more than one tab by default. Set
+  `tab-bar = always` to keep it in a single-tab window.
 - Search shows the current match and total (3/122) next to the query, has a
   Regex toggle beside Case (Case cycles on click), and draws other matches
   with stronger contrast.

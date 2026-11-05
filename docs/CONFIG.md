@@ -13,7 +13,7 @@ Numeric keys with documented ranges
 (`font-size`, `background-opacity`, `unfocused-split-opacity`,
 `scroll-multiplier`, `minimum-contrast`, `cursor-blink-interval`,
 `cursor-blink-timeout`) clamp at parse-time *and* flag out-of-range values via
-`--check-config`.
+`--check-config` and the in-window config notice.
 
 Config path: kettle first probes `$XDG_CONFIG_HOME/kettle/config` (honored on
 every OS). Failing that, the fallback is per-OS: on Unix/macOS
@@ -109,7 +109,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `record-max-bytes` | bytes with optional `K`/`M`/`G`, `KiB`/`MiB`/`GiB` | `536870912` (512 MiB) | Largest single cast; the session stops at an event boundary before it and the title shows `[REC LIMIT]`. Minimum `1024`; anything lower (zero included) is rejected rather than read as "unlimited", because a cast that cannot hold its own header would stop the recorder from ever starting |
 | `record-max-files` | positive integer | `50` | Kettle-owned casts kept in the managed recording directory; oldest unlocked pruned first |
 | `record-max-directory-bytes` | bytes with optional `K`/`M`/`G`, `KiB`/`MiB`/`GiB` | `5368709120` (5 GiB) | Total budget for Kettle-owned casts in that directory, pruned oldest-first. Minimum `1048576` (1 MiB): retention deletes to fit, so a bare `500` meaning 500 MB would wipe the directory, and is rejected instead |
-| `tab-bar` | `off`\|`auto`\|`always` | `always` | When the tab bar is shown (`auto` = only with >1 tab) |
+| `tab-bar` | `off`\|`auto`\|`always` | `auto` | When the tab bar is shown (`auto` = only with >1 tab) |
 | `tab-bar-position` (`tab-position`) | `top`\|`bottom`\|`left`\|`right`\|`hidden` | `top` | Where the tab bar sits. `left`/`right` render a **vertical** tab strip (its width is `tab-bar-width`); when its tabs don't fit the window's height it scrolls with `⌃ ⌄` buttons and the mouse wheel, keeping the active tab in view. `hidden` forces the bar off regardless of `tab-bar` |
 | `tab-bar-width` | float 40–600 px | `180` | Width of the vertical tab strip when `tab-bar-position = left`/`right`. Clamped `[40, 600]`; ignored for `top`/`bottom` bars |
 | `tab-min-width` | float 40–600 px | `120` | Minimum width of a horizontal tab segment. Tabs divide the bar evenly and **fill it** (no maximum — they always maximize width); once they would shrink below this, the bar overflows and (with `scroll-tabbar`) scrolls. Clamped `[40, 600]` |
@@ -377,7 +377,8 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `background-blur` | bool | `false` | CPU-side 3-pass separable box blur at decode (approximates Gaussian) |
 | `background-darkness` | float 0..1 | `0.5` | Opacity of the terminal background over a transparent, image, or starfield backdrop. `0.0` is fully see-through; `1.0` hides the backdrop. Only applies when `background-type` is not `solid` |
 | `inactive-color-offset` / `inactive-bg-color-offset` | float 0..1 | `1.0` / `1.0` | How far an unfocused pane recedes. Both are read with `unfocused-split-opacity`, and the strongest value wins. Kettle composites one overlay rather than reshaping each glyph |
-| `exit-action` | enum | `close` | What happens when the shell exits: `close`, `hold` the dead pane, or `restart` the same argv and working directory in a new tab. Duplicate child-exit notifications are coalesced |
+| `exit-behavior` | `close`\|`close-on-success`\|`hold` | `close-on-success` | Close successful processes; retain failed processes and their output with an exit-code banner. Enter or Restart runs the original command with its launch directory and environment in the same pane. Escape or Close dismisses the pane; the close chord also works. `close` closes every exit; `hold` retains every exit. Reload applies to future exits |
+| `exit-action` | enum | unset | Compatibility policy: explicit `close`, `hold`, or `restart` (same argv and current working directory in a new tab). `exit-behavior` takes precedence when both are present. Duplicate exit notifications are coalesced |
 | `broadcast-default` | `all`\|`group`\|`off` | `group` | Scope enabled by the broadcast chord. `group` targets the active tab, `all` targets every pane in the window, and `off` prevents the chord from enabling broadcast. Kettle waits for the chord instead of starting a window in an input-mirroring state |
 | `split-to-group` | bool | `false` | A new split joins the broadcast group of the pane it came from, so splitting a grouped pane widens the group instead of quietly dropping out of it |
 | `autoclean-groups` | bool | `true` | Forget a broadcast group after its last pane closes. This prevents a stale group target from claiming a later pane that reuses the same name |
@@ -877,3 +878,10 @@ GPU device labels resolve ID-only and name-only pins against detected adapters;
 `scrollback-bytes = 120MB` displays as **120 MB** under **Scrollback memory**.
 **Update check interval** displays hours as **24 h**. The panel also displays
 `13 pt`, `6 px`, `10 s`, and `99%`. See [SETTINGS.md](SETTINGS.md).
+
+Unknown keys and invalid values at startup and reload also appear in a dismissible
+in-window notice. It names the config filename, source line, and key for up to
+three settings, followed by `+N more`. Values are omitted, including environment
+values. Ignored settings use their defaults; valid settings still apply. Dismissing
+a notice keeps it hidden until the diagnostics change. Use `kettle --check-config`
+for the complete diagnostics.

@@ -291,10 +291,12 @@ impl App {
         {
             log::warn!("Lua config path synchronization failed: {error:#}");
         }
+        let mut diagnostics = None;
         let (mut new, malformed) = match path {
             Some(path) => match read_config_for_reload(&path, self.config_trust) {
                 Ok(None) => (Config::default(), Vec::new()),
                 Ok(Some(loaded)) => {
+                    diagnostics = Some((path.clone(), loaded.diagnostics()));
                     if !loaded.unknown_keys.is_empty() {
                         log::warn!(
                             "{}: unrecognized config keys: {}",
@@ -319,6 +321,12 @@ impl App {
             },
             None => (Config::default(), Vec::new()),
         };
+        if let Some((path, entries)) = diagnostics {
+            self.set_config_notice(&path, &entries);
+        } else {
+            self.config_notice = None;
+            self.config_notice_last = None;
+        }
         // Surface malformed values (typos the parser silently ignores, e.g.
         // `cursor-style = beem`) on live reload. `--check-config` already
         // catches these at the CLI, but a live edit otherwise reverted with no

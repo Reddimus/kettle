@@ -43,7 +43,12 @@ impl App {
     /// Combined chrome-band hit-test. True when the cursor is over the tab
     /// bar or the status bar, which belong in the "OS arrow cursor" group.
     pub(super) fn cursor_in_chrome_band(&self, ws: &WindowState) -> bool {
-        self.cursor_in_tab_bar(ws)
+        self.persistent_notices(ws).iter().any(|(_, toast)| {
+            toast
+                .geometry
+                .hit_test(ws.cursor.x as f32, ws.cursor.y as f32)
+                .is_some()
+        }) || self.cursor_in_tab_bar(ws)
             || self.cursor_in_status_bar(ws)
             || self.update_toast_projection(ws).is_some_and(|toast| {
                 toast
@@ -414,16 +419,18 @@ impl App {
                 (0.0, 0.0, 0.0, 0.0)
             }
         };
+        let (menu, plus) = split_new_tab_button(
+            (strip_x, plus_y, strip_w, height),
+            height.min(strip_w * 0.5),
+        );
         TabBar {
             height,
             y: strip_y,
             segments,
-            new_tab: (strip_x, plus_y, strip_w, height),
-            // No dropdown arrow on vertical bars — the bottom-of-
-            // strip full-width `+` has nowhere sensible for a left-side arrow.
-            new_tab_menu: (0.0, 0.0, 0.0, 0.0),
+            new_tab: plus,
+            new_tab_menu: menu,
             hovered_new_tab: ws.hovered_new_tab,
-            hovered_new_tab_menu: false,
+            hovered_new_tab_menu: ws.hovered_new_tab_menu,
             broadcast: ws.mux.is_broadcast_on(),
             hovered_close_idx: ws.hovered_close_idx,
             hovered_tab_idx: None,

@@ -2856,3 +2856,10 @@ unknown statuses, bounded retention and shared DPI-aware scrollbar rectangles;
 Accessibility tests check English/Spanish exit-code descriptions against that
 geometry. Native UI/GPU acceptance still requires rendered ticks on each OS;
 headless source and geometry checks do not establish visual acceptance.
+
+Chrome state regression coverage includes the auto tab default, exit-policy
+status matrix, replay of original launch environment and cwd in the same pane,
+source-located config diagnostics and notice limits, persistent-notice hit
+geometry, and tab-list titles, selection and controls on both strip axes.
+These unit and PTY tests do not establish live rendering or screen-reader
+acceptance; native UI checks remain required on each platform.

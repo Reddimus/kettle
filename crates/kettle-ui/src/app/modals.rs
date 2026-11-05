@@ -2576,7 +2576,7 @@ pub(super) fn tab_close_scope(ws: &WindowState, idx: usize) -> (usize, usize) {
             ws.mux
                 .panes
                 .get(id)
-                .map(|p| !p.term.shell_idle())
+                .map(|p| !p.held && !p.term.shell_idle())
                 .unwrap_or(true)
         })
         .count();
@@ -2591,7 +2591,7 @@ pub(super) fn window_close_scope(ws: &WindowState) -> (usize, usize) {
         ws.mux
             .panes
             .values()
-            .filter(|p| !p.term.shell_idle())
+            .filter(|p| !p.held && !p.term.shell_idle())
             .count(),
     )
 }

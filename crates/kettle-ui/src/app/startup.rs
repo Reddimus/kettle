@@ -460,11 +460,13 @@ impl App {
         // field below can both use it; inside the struct init, a bare `cfg.…`
         // would hit the `cfg!()` macro instead.
         let initial_path = startup.config.clone().or_else(Config::default_path);
+        let mut config_diagnostics = None;
         let mut initial_cfg = match initial_path.as_deref().filter(|path| path.exists()) {
             Some(path) => match prepare_config_directory(path, startup.config_trust)
                 .and_then(|()| Config::read_from_with_trust(path, startup.config_trust))
             {
                 Ok(loaded) => {
+                    config_diagnostics = Some((path.to_path_buf(), loaded.diagnostics()));
                     if !loaded.unknown_keys.is_empty() {
                         log::warn!(
                             "{}: unrecognized config keys: {}",
@@ -832,6 +834,8 @@ impl App {
             update_facts: crate::update_notice::UpdateFacts::default(),
             update_local_dismissals: crate::update_notice::LocalDismissals::default(),
             update_restart_dismissed: false,
+            config_notice: None,
+            config_notice_last: None,
             update_toast: None,
             update_toast_receipts: None,
             update_toast_claiming: None,
@@ -848,6 +852,9 @@ impl App {
             torn_drag: None,
             last_session_sweep: None,
         };
+        if let Some((path, diagnostics)) = config_diagnostics {
+            app.set_config_notice(&path, &diagnostics);
+        }
         app.runtime_tracker.set_window_count(app.windows.len());
         // Before the first pane, which may start Claude Code or Codex.
         app.reconcile_claude_plugin();

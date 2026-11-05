@@ -521,6 +521,9 @@ impl App {
                 // isn't a modal here.
                 // A press of any button is the pointer's: focus is no longer
                 // on a card.
+                if ws.tab_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                }
                 if ws.card_focus.take().is_some() {
                     ws.accessibility_pending = true;
                 }
@@ -680,7 +683,9 @@ impl App {
                 let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
                 // A preview lane owns every press over it, so the terminal
                 // beside it never gets one.
-                if self.press_update_toast(ws, px, py, bcode) {
+                if self.press_persistent_notice(ws, px, py, bcode)
+                    || self.press_update_toast(ws, px, py, bcode)
+                {
                     return;
                 }
                 if self.press_preview_lane(ws, px, py, bcode) {
@@ -1452,6 +1457,9 @@ impl App {
                     winit::event::Ime::Commit(_) => true,
                     _ => false,
                 };
+                if typing && ws.tab_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                }
                 if typing && ws.card_focus.take().is_some() {
                     ws.accessibility_pending = true;
                 }
@@ -1499,6 +1507,9 @@ impl App {
             WindowEvent::KeyboardInput { event, .. } => {
                 // A key press returns focus from a card that assistive
                 // technology focused to the pane, where the key goes.
+                if event.state == ElementState::Pressed && ws.tab_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                }
                 if event.state == ElementState::Pressed && ws.card_focus.take().is_some() {
                     ws.accessibility_pending = true;
                 }
@@ -1507,7 +1518,13 @@ impl App {
                     &event.logical_key,
                     ws.mods,
                 );
-                let ui_owns_key = toast_owns_key
+                let held_key = (!self.any_modal_open(ws)
+                    && ws.preview_focus.is_none()
+                    && ws.ime_preedit.is_none())
+                .then(|| notices::held_pane_key(ws, &event.logical_key))
+                .flatten();
+                let ui_owns_key = held_key.is_some()
+                    || toast_owns_key
                     || !matches!(ws.detach_drag, crate::detach::DragState::Idle)
                     || ws.context_menu.is_some()
                     || ws.vi_mode.is_some()
@@ -1554,6 +1571,11 @@ impl App {
                 }
                 if event.state == ElementState::Released {
                     self.write_terminal_key_event(ws, &event, false);
+                    return;
+                }
+                if let Some((pane, restart)) = held_key {
+                    ws.closing_keys.insert(event.physical_key);
+                    self.activate_persistent_notice(ws, Some(pane), restart);
                     return;
                 }
                 if !toast_owns_key && self.update_toast_focus.take().is_some() {

@@ -88,8 +88,8 @@ pub use search::{
 pub use term::default_pane_shell;
 pub use term::{
     CommandCorrelationCapability, CommandFinished, CorrelatedCommandFinished, KeyboardClaims,
-    LaunchOverrides, ProtocolNotification, PtyEofProgress, PtyGeometry, PtyInputTail,
-    PtyOutputSender, PtyReadProgress, PtyReadStatus, PtyStdin, PtyWriter, ScreenText,
+    LaunchOverrides, ProcessLaunch, ProtocolNotification, PtyEofProgress, PtyGeometry,
+    PtyInputTail, PtyOutputSender, PtyReadProgress, PtyReadStatus, PtyStdin, PtyWriter, ScreenText,
     SelectionTextTooLarge, SessionLogFailure, SharedTerm, ShellActivity, Terminal,
     TerminalCapabilities, WorkingDirectoryPolicy, selected_diagram_sources, selection_text_bounded,
 };

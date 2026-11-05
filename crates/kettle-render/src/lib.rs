@@ -104,7 +104,8 @@ pub use overlays::{
     MediaPasteReceiptOverlay, NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar,
     TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
     format_media_size, media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
-    tab_drag, theme_picker_prefix, title_edit_prefix, update_toast_geometry,
+    notification_geometry_with_notices, persistent_notice_geometry, tab_drag, theme_picker_prefix,
+    title_edit_prefix, update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
@@ -477,8 +478,8 @@ pub struct Renderer {
     scrollback_buffers: Vec<TextBuffer>,
     resize_overlay_buffer: TextBuffer,
     resize_overlay_text: String,
-    update_toast_buffers: [TextBuffer; 3],
-    update_toast_text: [String; 3],
+    update_toast_buffers: Vec<TextBuffer>,
+    update_toast_text: Vec<String>,
     /// Input-method preedit buffer and equality gate.
     ime_buffer: TextBuffer,
     ime_quads: QuadPipeline,
@@ -2620,7 +2621,20 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        if let Some(toast) = &overlay.update_toast {
+        let toast_count = usize::from(overlay.update_toast.is_some()) + overlay.notices.len();
+        while self.update_toast_buffers.len() < toast_count * 3 {
+            self.update_toast_buffers
+                .push(TextBuffer::new(&mut self.font_system, metrics));
+            self.update_toast_text.push(String::new());
+        }
+        self.update_toast_buffers.truncate(toast_count * 3);
+        self.update_toast_text.truncate(toast_count * 3);
+        for (notice_index, toast) in overlay
+            .update_toast
+            .iter()
+            .chain(&overlay.notices)
+            .enumerate()
+        {
             let texts = [&toast.message, &toast.details, &toast.close];
             let rects = [
                 toast.geometry.message,
@@ -2629,19 +2643,20 @@ impl Renderer {
             ];
             let text_cell_width = self.overlay_text_cell_width();
             for (i, (text, rect)) in texts.into_iter().zip(rects).enumerate() {
-                let buffer = &mut self.update_toast_buffers[i];
+                let slot = notice_index * 3 + i;
+                let buffer = &mut self.update_toast_buffers[slot];
                 buffer.set_metrics(metrics);
                 buffer.set_size(Some(rect.2), Some(rect.3));
                 let (displayed, wrap) = toast_buffer_text(text, rect.2, text_cell_width, i == 0);
                 buffer.set_wrap(wrap);
-                if self.update_toast_text[i] != displayed {
+                if self.update_toast_text[slot] != displayed {
                     buffer.set_text(
                         &displayed,
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
                         None,
                     );
-                    self.update_toast_text[i] = displayed.into_owned();
+                    self.update_toast_text[slot] = displayed.into_owned();
                 }
                 buffer.shape_until_scroll(&mut self.font_system, false);
             }
@@ -2957,8 +2972,9 @@ impl Renderer {
             }
         }
 
-        let notifications = notification_geometry(
+        let notifications = notification_geometry_with_notices(
             overlay.update_toast.as_ref().map(|toast| toast.geometry),
+            &overlay.notices,
             overlay.media_paste_receipt.as_ref(),
             overlay.completion.as_ref(),
             (cw, ch),
@@ -3145,15 +3161,19 @@ impl Renderer {
         // Pre-size for the menu / settings-overlay rows it collects.
         let mut menu_areas: Vec<TextArea> = Vec::with_capacity(48);
         let mut ime_areas: Vec<TextArea> = Vec::with_capacity(1);
-        let mut toast_surfaces = None;
-        if let Some(toast) = &overlay.update_toast
-            && let Some(geometry) = notifications.toast
+        let mut toast_surfaces = Vec::new();
+        for (notice_index, toast) in overlay
+            .update_toast
+            .iter()
+            .chain(&overlay.notices)
+            .enumerate()
         {
+            let geometry = toast.geometry;
             let text_line_height = self.overlay_text_line_height();
             let alpha = toast.opacity.clamp(0.0, 1.0);
             let accent = self.ui_accent(cfg, theme);
             let palette = update_toast::palette(theme, accent, &mut self.chrome_colors);
-            toast_surfaces = Some(update_toast::surfaces(
+            toast_surfaces.extend(update_toast::surfaces(
                 geometry,
                 &palette,
                 alpha,
@@ -3166,11 +3186,11 @@ impl Renderer {
             {
                 let (ax, ay, aw, ah) = area;
                 menu_areas.push(TextArea {
-                    buffer: &self.update_toast_buffers[i],
+                    buffer: &self.update_toast_buffers[notice_index * 3 + i],
                     left: if i == 0 {
                         ax
                     } else {
-                        let width = self.update_toast_buffers[i]
+                        let width = self.update_toast_buffers[notice_index * 3 + i]
                             .layout_runs()
                             .map(|run| run.line_w)
                             .fold(0.0, f32::max);
@@ -3178,7 +3198,10 @@ impl Renderer {
                     },
                     top: if i == 0 {
                         ay + (ah
-                            - self.update_toast_buffers[i].layout_runs().count().max(1) as f32
+                            - self.update_toast_buffers[notice_index * 3 + i]
+                                .layout_runs()
+                                .count()
+                                .max(1) as f32
                                 * text_line_height)
                             .max(0.0)
                             * 0.5
@@ -5138,14 +5161,8 @@ impl Renderer {
             [sw, sh],
             &transport_surfaces,
         );
-        self.toast_surfaces.upload(
-            &self.gpu.device,
-            &self.gpu.queue,
-            [sw, sh],
-            toast_surfaces
-                .as_ref()
-                .map_or(&[][..], |surfaces| &surfaces[..]),
-        );
+        self.toast_surfaces
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &toast_surfaces);
         let picker_surfaces = overlay
             .context_menu
             .as_ref()

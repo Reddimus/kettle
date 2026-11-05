@@ -1224,7 +1224,7 @@ fn notification_geometry_preserves_unobstructed_placement_and_hides_when_full() 
             .is_none()
     );
     let src = production_source();
-    assert!(src.contains("let notifications = notification_geometry("));
+    assert!(src.contains("let notifications = notification_geometry_with_notices("));
     assert_eq!(
         src.matches("&& let Some(geometry) = notifications.receipt")
             .count(),
@@ -1236,7 +1236,7 @@ fn notification_geometry_preserves_unobstructed_placement_and_hides_when_full() 
         include_str!("../../kettle-ui/src/app/accessibility.rs"),
     ] {
         assert!(!ui.contains("kettle_render::media_paste_receipt_geometry("));
-        assert!(ui.contains("kettle_render::notification_geometry("));
+        assert!(ui.contains("kettle_render::notification_geometry_with_notices("));
     }
 }
 
@@ -1295,5 +1295,56 @@ fn top_lane_small_font_receipt_details_clear_the_dismiss_button() {
     assert!(
         text.lines()
             .all(|line| display_width(line) as f32 * 8.0 <= detail.2)
+    );
+}
+
+#[test]
+fn persistent_config_and_exit_notices_displace_or_hide_paste_receipts() {
+    let receipt = receipt(true);
+    let covering = super::UpdateToastGeometry {
+        rect: receipt.pane_rect,
+        message: receipt.pane_rect,
+        details: receipt.pane_rect,
+        close: receipt.pane_rect,
+        radius: 0.0,
+        unit: 1.0,
+    };
+    let notices = [super::UpdateToastOverlay {
+        geometry: covering,
+        message: "fixture".into(),
+        details: String::new(),
+        close: "x".into(),
+        opacity: 1.0,
+        focused: None,
+    }];
+    let hidden = super::notification_geometry_with_notices(
+        None,
+        &notices,
+        Some(&receipt),
+        None,
+        CELL,
+        CELL.0,
+        CELL.1,
+    );
+    assert!(
+        hidden.toast.is_none(),
+        "a persistent notice is not an update delivery"
+    );
+    assert!(
+        hidden.receipt.is_none(),
+        "an entirely covered pane has no reachable paste receipt"
+    );
+    let clear = super::notification_geometry_with_notices(
+        None,
+        &[],
+        Some(&receipt),
+        None,
+        CELL,
+        CELL.0,
+        CELL.1,
+    );
+    assert!(
+        clear.receipt.is_some(),
+        "dismissal restores the receipt's geometry"
     );
 }

@@ -168,6 +168,25 @@ impl App {
         let cards = self.accessible_cards(ws);
         let mut children = Vec::with_capacity(layout.len());
         let mut nodes = Vec::with_capacity(layout.len() * 2 + cards.len() + 1);
+        if !self.pointer_modal_open(ws) {
+            let anchors: Vec<_> = (0..ws.mux.tabs.len())
+                .filter_map(|i| ws.mux.tab_anchor_panes(i).first().copied())
+                .collect();
+            let tabs = tab_accessibility_projection(
+                &self.tab_bar(ws),
+                &anchors,
+                self.cfg.tab_bar_pos.is_vertical(),
+                &self.ui_text,
+            );
+            if !tabs.is_empty() {
+                children.push(ACCESSIBILITY_TAB_LIST_ID);
+                nodes.extend(tabs);
+            }
+            for (pane, toast) in self.persistent_notices(ws) {
+                children.push(persistent_notice_id(pane, 0));
+                nodes.extend(persistent_notice_nodes(pane, &toast));
+            }
+        }
         ws.accessibility_text_rows
             .borrow_mut()
             .retain(|pane, _| ws.mux.panes.contains_key(pane));
@@ -622,8 +641,9 @@ impl App {
             nodes.push((ACCESSIBILITY_COMPLETION_CONTAINER_ID, list));
         }
         if let Some(receipt) = overlay.media_paste_receipt.as_ref()
-            && let Some(geometry) = kettle_render::notification_geometry(
+            && let Some(geometry) = kettle_render::notification_geometry_with_notices(
                 overlay.update_toast.as_ref().map(|toast| toast.geometry),
+                &overlay.notices,
                 Some(receipt),
                 overlay.completion.as_ref(),
                 self.menu_cell(ws),
@@ -725,6 +745,10 @@ impl App {
         }
         nodes.push((ACCESSIBILITY_ROOT_ID, root));
         let focus = modal_focus
+            .or_else(|| {
+                ws.tab_focus
+                    .filter(|target| nodes.iter().any(|(id, _)| id == target))
+            })
             .or(self
                 .update_toast_focus
                 .filter(|_| overlay.update_toast.is_some()))
@@ -767,6 +791,7 @@ impl App {
             .map(|open| (open.pane, open.control))
             .hash(&mut hasher);
         ws.card_focus.hash(&mut hasher);
+        ws.tab_focus.hash(&mut hasher);
         for (instance, card, item) in self.accessible_cards(ws) {
             instance.hash(&mut hasher);
             card.rect.map(f32::to_bits).hash(&mut hasher);
@@ -923,6 +948,38 @@ impl App {
                 }
             }
         }
+        self.cfg.tab_bar_pos.is_vertical().hash(&mut hasher);
+        let anchors: Vec<_> = (0..ws.mux.tabs.len())
+            .filter_map(|i| ws.mux.tab_anchor_panes(i).first().copied())
+            .collect();
+        for (id, node) in tab_accessibility_projection(
+            &self.tab_bar(ws),
+            &anchors,
+            self.cfg.tab_bar_pos.is_vertical(),
+            &self.ui_text,
+        ) {
+            id.hash(&mut hasher);
+            node.label().hash(&mut hasher);
+            node.is_selected().hash(&mut hasher);
+            if let Some(rect) = node.bounds() {
+                for value in [rect.x0, rect.y0, rect.x1, rect.y1] {
+                    value.to_bits().hash(&mut hasher);
+                }
+            }
+        }
+        for (pane, toast) in self.persistent_notices(ws) {
+            pane.hash(&mut hasher);
+            toast.message.hash(&mut hasher);
+            for rect in [
+                toast.geometry.rect,
+                toast.geometry.details,
+                toast.geometry.close,
+            ] {
+                for value in [rect.0, rect.1, rect.2, rect.3] {
+                    value.to_bits().hash(&mut hasher);
+                }
+            }
+        }
         self.update_toast_focus.hash(&mut hasher);
         let projected_completion = overlay.completion.as_ref();
         projected_completion.is_some().hash(&mut hasher);
@@ -967,8 +1024,9 @@ impl App {
             }
             receipt.remote.hash(&mut hasher);
             receipt.expanded.hash(&mut hasher);
-            if let Some(geometry) = kettle_render::notification_geometry(
+            if let Some(geometry) = kettle_render::notification_geometry_with_notices(
                 overlay.update_toast.as_ref().map(|toast| toast.geometry),
+                &overlay.notices,
                 Some(receipt),
                 overlay.completion.as_ref(),
                 self.menu_cell(ws),
@@ -1160,6 +1218,80 @@ impl App {
                 window.request_redraw();
             }
             return;
+        }
+        ws.tab_focus = None;
+        if !self.pointer_modal_open(ws) {
+            for (pane, _) in self.persistent_notices(ws) {
+                for part in [1, 2] {
+                    if request.target_node == persistent_notice_id(pane, part)
+                        && request.action == AccessibilityAction::Click
+                    {
+                        self.activate_persistent_notice(ws, pane, part == 1);
+                        return;
+                    }
+                }
+            }
+            let bar = self.tab_bar(ws);
+            let anchors: Vec<_> = (0..ws.mux.tabs.len())
+                .filter_map(|i| ws.mux.tab_anchor_panes(i).first().copied())
+                .collect();
+            let projected = tab_accessibility_projection(
+                &bar,
+                &anchors,
+                self.cfg.tab_bar_pos.is_vertical(),
+                &self.ui_text,
+            );
+            if projected.iter().any(|(id, node)| {
+                *id == request.target_node && node.supports_action(request.action)
+            }) {
+                if request.target_node == ACCESSIBILITY_TAB_NEW_ID {
+                    self.handle_action(ws, Action::NewTab, event_loop);
+                } else if request.target_node == ACCESSIBILITY_TAB_MENU_ID {
+                    let (x, y, _, h) = bar.new_tab_menu;
+                    self.open_new_tab_menu(ws, x, y + h);
+                } else if let Some((index, close)) =
+                    anchors.iter().enumerate().find_map(|(i, anchor)| {
+                        if request.target_node == accessibility_tab_id(*anchor, false) {
+                            Some((i, false))
+                        } else if request.target_node == accessibility_tab_id(*anchor, true) {
+                            Some((i, true))
+                        } else {
+                            None
+                        }
+                    })
+                {
+                    if close {
+                        let (panes, busy) = tab_close_scope(ws, index);
+                        let anchors = ws.mux.tab_anchor_panes(index);
+                        if !self.confirm_close(
+                            ws,
+                            panes,
+                            busy,
+                            ConfirmAction::CloseTabHolding(anchors),
+                        ) {
+                            let pre = self.focus_key(ws);
+                            if ws.mux.close_tab_at(index) {
+                                self.save_session(ws);
+                                self.request_window_close(ws.seq);
+                            }
+                            self.fire_tab_close_event(ws, index);
+                            self.note_focus_change(ws, pre);
+                        }
+                    } else {
+                        let pre = self.focus_key(ws);
+                        ws.mux.active = index;
+                        ws.mux.touch_active_tab_seen();
+                        self.note_focus_change(ws, pre);
+                        ws.tab_focus = Some(request.target_node);
+                    }
+                }
+                self.resize_all(ws);
+                ws.accessibility_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+                return;
+            }
         }
         if accessibility_confirm_button_index(request.target_node).is_some() {
             return;
@@ -2584,7 +2716,7 @@ pub(super) fn accessibility_parent_menu_item(
 }
 
 fn accessibility_scrollback_id(pane: u64) -> NodeId {
-    NodeId((1 << 54) | pane)
+    NodeId((1 << 52) | pane)
 }
 
 pub(super) fn command_mark_accessibility_node(
@@ -2608,6 +2740,126 @@ pub(super) fn command_mark_accessibility_node(
         (rect[1] + rect[3]) as f64,
     ));
     node
+}
+
+const ACCESSIBILITY_TAB_LIST_ID: NodeId = NodeId(1 << 54);
+const ACCESSIBILITY_TAB_NEW_ID: NodeId = NodeId((1 << 54) | 1);
+const ACCESSIBILITY_TAB_MENU_ID: NodeId = NodeId((1 << 54) | 2);
+
+pub(super) fn accessibility_tab_id(anchor: u64, close: bool) -> NodeId {
+    NodeId((1 << 54) | (anchor * 2 + 4) | u64::from(close))
+}
+
+fn accessibility_rect(rect: Rect) -> accesskit::Rect {
+    accesskit::Rect::new(
+        rect.0 as f64,
+        rect.1 as f64,
+        (rect.0 + rect.2) as f64,
+        (rect.1 + rect.3) as f64,
+    )
+}
+
+pub(super) fn tab_accessibility_projection(
+    bar: &TabBar,
+    anchors: &[u64],
+    vertical: bool,
+    tr: &kettle_i18n::Translator,
+) -> Vec<(NodeId, Node)> {
+    if bar.height <= 0.0 {
+        return Vec::new();
+    }
+    let mut nodes = Vec::new();
+    let mut children = Vec::new();
+    for seg in &bar.segments {
+        let Some(anchor) = anchors.get(seg.idx).copied() else {
+            continue;
+        };
+        let id = accessibility_tab_id(anchor, false);
+        let mut tab = Node::new(Role::Tab);
+        tab.set_label(seg.title.clone());
+        tab.set_selected(seg.active);
+        tab.add_action(AccessibilityAction::Click);
+        tab.add_action(AccessibilityAction::Focus);
+        if tab_shown(seg) {
+            tab.set_bounds(accessibility_rect(seg.rect));
+            if seg.close.2 > 0.0 && seg.close.3 > 0.0 {
+                let close_id = accessibility_tab_id(anchor, true);
+                let mut close = Node::new(Role::Button);
+                close.set_label(tr.a11y_tab_close(&seg.title));
+                close.add_action(AccessibilityAction::Click);
+                close.set_bounds(accessibility_rect(seg.close));
+                tab.set_children(vec![close_id]);
+                nodes.push((close_id, close));
+            }
+        }
+        nodes.push((id, tab));
+        children.push(id);
+    }
+    for (id, rect, label) in [
+        (
+            ACCESSIBILITY_TAB_NEW_ID,
+            bar.new_tab,
+            tr.text(kettle_i18n::Text::PaletteNewTab),
+        ),
+        (
+            ACCESSIBILITY_TAB_MENU_ID,
+            bar.new_tab_menu,
+            tr.text(kettle_i18n::Text::A11yNewTabMenu),
+        ),
+    ] {
+        if rect.2 > 0.0 && rect.3 > 0.0 && rect.0 > PARKED_TAB / 2.0 && rect.1 > PARKED_TAB / 2.0 {
+            let mut button = Node::new(Role::Button);
+            button.set_label(label);
+            button.add_action(AccessibilityAction::Click);
+            button.set_bounds(accessibility_rect(rect));
+            nodes.push((id, button));
+            children.push(id);
+        }
+    }
+    let mut list = Node::new(Role::TabList);
+    list.set_orientation(if vertical {
+        accesskit::Orientation::Vertical
+    } else {
+        accesskit::Orientation::Horizontal
+    });
+    list.set_label(tr.text(kettle_i18n::Text::A11yTabList));
+    list.set_children(children);
+    nodes.push((ACCESSIBILITY_TAB_LIST_ID, list));
+    nodes
+}
+
+pub(super) fn persistent_notice_id(pane: Option<u64>, part: u64) -> NodeId {
+    NodeId((1 << 53) | (pane.map_or(0, |id| id + 1) * 4) | part)
+}
+
+pub(super) fn persistent_notice_nodes(
+    pane: Option<u64>,
+    toast: &kettle_render::UpdateToastOverlay,
+) -> Vec<(NodeId, Node)> {
+    let mut status = Node::new(Role::Status);
+    status.set_label(toast.message.clone());
+    status.set_live(accesskit::Live::Polite);
+    status.set_bounds(accessibility_rect(toast.geometry.rect));
+    let mut nodes = Vec::new();
+    let mut children = Vec::new();
+    for (part, rect, label) in [
+        (1, toast.geometry.details, &toast.details),
+        (2, toast.geometry.close, &toast.close),
+    ] {
+        if label.is_empty() {
+            continue;
+        }
+        let id = persistent_notice_id(pane, part);
+        let mut button = Node::new(Role::Button);
+        button.set_label(label.clone());
+        button.set_bounds(accessibility_rect(rect));
+        button.add_action(AccessibilityAction::Click);
+        children.push(id);
+        nodes.push((id, button));
+    }
+    status.set_children(children);
+    nodes.push((persistent_notice_id(pane, 0), status));
+    nodes
 }
 
 #[cfg(test)]

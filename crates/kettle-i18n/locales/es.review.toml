@@ -44,6 +44,17 @@ scrollback_return = "draft"
 
 command_mark_a11y_success = "draft"
 command_mark_a11y_failure = "draft"
+process_exited = "draft"
+process_exit_pending = "draft"
+process_restart = "draft"
+process_close = "draft"
+config_notice = "draft"
+config_notice_more = "draft"
+notice_dismiss = "draft"
+a11y_tab_list = "draft"
+a11y_tab_close = "draft"
+a11y_new_tab_menu = "draft"
+
 macos_menu_app = "draft"
 macos_menu_shell = "draft"
 macos_menu_edit = "draft"
@@ -839,6 +850,16 @@ keys = [
     "scrollback_a11y",
     "command_mark_a11y_success",
     "command_mark_a11y_failure",
+    "process_exited",
+    "process_exit_pending",
+    "process_restart",
+    "process_close",
+    "config_notice",
+    "config_notice_more",
+    "notice_dismiss",
+    "a11y_tab_list",
+    "a11y_tab_close",
+    "a11y_new_tab_menu",
     "settings_a11y_search",
     "media_viewer_a11y",
     "media_viewer_a11y_pin",

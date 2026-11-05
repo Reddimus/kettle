@@ -145,8 +145,8 @@ fn every_modal_branch_records_its_closing_key() {
     assert_eq!(
         src.matches("ws.closing_keys.insert(event.physical_key);")
             .count(),
-        4,
-        "pane, tab and torn-window drag cancels, plus Settings search Escape/Enter"
+        5,
+        "pane, tab and torn-window drag cancels, Settings search, and held-pane restart/close"
     );
 }
 

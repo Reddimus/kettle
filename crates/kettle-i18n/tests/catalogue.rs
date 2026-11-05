@@ -158,7 +158,21 @@ fn every_spanish_message_has_a_review_status() {
         .collect::<Vec<_>>();
     let expected = spanish
         .keys()
-        .filter(|key| key.starts_with("confirm_") || key.contains("a11y"))
+        .filter(|key| {
+            key.starts_with("confirm_")
+                || key.contains("a11y")
+                // These visible notice labels also name live regions and buttons.
+                || matches!(
+                    key.as_str(),
+                    "process_exited"
+                        | "process_exit_pending"
+                        | "process_restart"
+                        | "process_close"
+                        | "config_notice"
+                        | "config_notice_more"
+                        | "notice_dismiss"
+                )
+        })
         .cloned()
         .collect::<Vec<_>>();
     let mut sorted = listed.clone();

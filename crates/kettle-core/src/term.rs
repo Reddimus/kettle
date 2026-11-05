@@ -1183,13 +1183,29 @@ pub struct PtyGeometry {
 }
 
 /// Overrides needed when reproducing an existing direct client launch.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Default)]
 pub struct LaunchOverrides<'a> {
+    /// An exact in-memory launch to replay after a held process exits.
+    pub replay: Option<&'a ProcessLaunch>,
     /// Unix invocation name, independent of the executable path.
     pub argv0: Option<&'a str>,
     /// Variables absent from the original client, removed after pane env.
     pub remove_env: &'a [String],
 }
+
+impl std::fmt::Debug for LaunchOverrides<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaunchOverrides")
+            .field("replay", &self.replay.is_some())
+            .field("argv0", &self.argv0)
+            .field("remove_env", &self.remove_env)
+            .finish()
+    }
+}
+
+/// Private command, cwd and environment snapshot. Never persisted or logged.
+#[derive(Clone)]
+pub struct ProcessLaunch(CommandBuilder);
 
 /// Runtime capabilities that influence terminal protocol replies.
 ///
@@ -3447,6 +3463,7 @@ impl ConPtyCloseState {
 }
 
 pub struct Terminal {
+    pub launch: ProcessLaunch,
     pub term: SharedTerm,
     term_config: TermConfig,
     scrollback_line_limit: usize,
@@ -5674,70 +5691,78 @@ impl Terminal {
         let startup_geometry =
             crate::startup_geometry::Trace::start(pair.master.as_raw_fd(), recording_start_ns);
 
-        let mut cmd = pane_command(argv, login_shell, shell_integration);
-        #[cfg(windows)]
-        overlay_windows_parent_env(&mut cmd, std::env::vars_os());
-        cmd.set_process_tree_containment(capabilities.contain_process_tree);
-        // Apply user pane env before terminal identity env so `term` /
-        // `colorterm` stay authoritative for those protocol-critical values.
-        for (name, value) in extra_env {
-            cmd.env(name, value);
-        }
-        #[cfg(unix)]
-        if let Some(argv0) = launch.argv0 {
-            cmd.set_argv0(argv0);
-        }
-        for name in launch.remove_env {
-            cmd.env_remove(name);
-        }
-        // Honor cfg.term + cfg.colorterm (empty preserves
-        // kettle's default).
-        cmd.env(
-            "TERM",
-            if term_env.is_empty() {
-                "xterm-256color"
-            } else {
-                term_env
-            },
-        );
-        cmd.env(
-            "COLORTERM",
-            if colorterm_env.is_empty() {
-                "truecolor"
-            } else {
-                colorterm_env
-            },
-        );
-        cmd.env("TERM_PROGRAM", "kettle");
-        // `TERM_PROGRAM_VERSION` is the de-facto pair to `TERM_PROGRAM`
-        // (iTerm2 / kitty / WezTerm / Ghostty all set it). Neovim's
-        // `:checkhealth provider`, fish's prompt themers, and various
-        // diagnostic tools key off the pair when probing whether they're
-        // running under a known modern terminal. Kettle's own crate
-        // version is the obvious answer — populated from Cargo at build
-        // time so a bumped `kettle/Cargo.toml` flows through with no
-        // separate version string to keep in sync.
-        cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        // Env vars set on the child's *Windows* process do NOT cross into a
-        // WSL distro unless listed in `WSLENV`. Without this, `COLORTERM` is
-        // silently dropped at the WSL boundary, so a program inside WSL that
-        // detects truecolor from `$COLORTERM` falls back to 256-color with
-        // washed-out, mis-mapped colors. Append the pane and terminal-identity
-        // env vars set above to WSLENV with the `/u` flag ("pass Windows→WSL
-        // only"), preserving any the user already set. When the child isn't
-        // `wsl.exe`, WSLENV is just an extra, ignored env var.
-        cmd.env(
-            "WSLENV",
-            child_wslenv(&std::env::var("WSLENV").unwrap_or_default(), extra_env),
-        );
-        // After the environment, which decides the shell the PTY runs and
-        // holds the `ZDOTDIR` zsh would have read.
-        let explicit = match argv {
-            [program] => Some(program.as_str()),
-            _ => None,
+        let cmd = if let Some(replay) = launch.replay {
+            let mut command = replay.0.clone();
+            command.set_require_cwd(true);
+            command
+        } else {
+            let mut cmd = pane_command(argv, login_shell, shell_integration);
+            #[cfg(windows)]
+            overlay_windows_parent_env(&mut cmd, std::env::vars_os());
+            cmd.set_process_tree_containment(capabilities.contain_process_tree);
+            // Apply user pane env before terminal identity env so `term` /
+            // `colorterm` stay authoritative for those protocol-critical values.
+            for (name, value) in extra_env {
+                cmd.env(name, value);
+            }
+            #[cfg(unix)]
+            if let Some(argv0) = launch.argv0 {
+                cmd.set_argv0(argv0);
+            }
+            for name in launch.remove_env {
+                cmd.env_remove(name);
+            }
+            // Honor cfg.term + cfg.colorterm (empty preserves
+            // kettle's default).
+            cmd.env(
+                "TERM",
+                if term_env.is_empty() {
+                    "xterm-256color"
+                } else {
+                    term_env
+                },
+            );
+            cmd.env(
+                "COLORTERM",
+                if colorterm_env.is_empty() {
+                    "truecolor"
+                } else {
+                    colorterm_env
+                },
+            );
+            cmd.env("TERM_PROGRAM", "kettle");
+            // `TERM_PROGRAM_VERSION` is the de-facto pair to `TERM_PROGRAM`
+            // (iTerm2 / kitty / WezTerm / Ghostty all set it). Neovim's
+            // `:checkhealth provider`, fish's prompt themers, and various
+            // diagnostic tools key off the pair when probing whether they're
+            // running under a known modern terminal. Kettle's own crate
+            // version is the obvious answer — populated from Cargo at build
+            // time so a bumped `kettle/Cargo.toml` flows through with no
+            // separate version string to keep in sync.
+            cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+            // Env vars set on the child's *Windows* process do NOT cross into a
+            // WSL distro unless listed in `WSLENV`. Without this, `COLORTERM` is
+            // silently dropped at the WSL boundary, so a program inside WSL that
+            // detects truecolor from `$COLORTERM` falls back to 256-color with
+            // washed-out, mis-mapped colors. Append the pane and terminal-identity
+            // env vars set above to WSLENV with the `/u` flag ("pass Windows→WSL
+            // only"), preserving any the user already set. When the child isn't
+            // `wsl.exe`, WSLENV is just an extra, ignored env var.
+            cmd.env(
+                "WSLENV",
+                child_wslenv(&std::env::var("WSLENV").unwrap_or_default(), extra_env),
+            );
+            // After the environment, which decides the shell the PTY runs and
+            // holds the `ZDOTDIR` zsh would have read.
+            let explicit = match argv {
+                [program] => Some(program.as_str()),
+                _ => None,
+            };
+            apply_working_directory(&mut cmd, cwd, cwd_policy);
+            crate::shell_startup::apply(&mut cmd, explicit, shell_startup);
+            cmd
         };
-        apply_working_directory(&mut cmd, cwd, cwd_policy);
-        crate::shell_startup::apply(&mut cmd, explicit, shell_startup);
+        let process_launch = ProcessLaunch(cmd.clone());
         #[cfg(unix)]
         let reader_poll_fd = pair
             .master
@@ -7110,6 +7135,7 @@ impl Terminal {
             osc_cwd_seen: osc_cwd_seen_for_struct,
             progress: progress_cell,
             argv: argv.to_vec(),
+            launch: process_launch,
             default_shell_program,
             session_log: session_log_for_struct,
             log_strip_ansi: log_strip_ansi_for_struct,

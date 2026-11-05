@@ -26,6 +26,18 @@ would anywhere. Run `kettle` commands here; from another macOS terminal,
 use `~/Applications/kettle.app/Contents/MacOS/kettle` if `kettle` is not on
 your `PATH`.
 
+A single-tab window hides the tab strip by default. Creating another tab shows
+it; set `tab-bar = always` to keep it visible. Horizontal and vertical strips
+expose their tab titles, selected tab, Close buttons, New tab, and New tab menu
+to screen readers. The menu button beside `+` opens shell choices and shortcuts.
+
+If the shell or directly launched command fails, its pane stays open with
+"Process exited with code N". Press **Enter** or click **Restart** to run the
+same command with its original working directory and environment in that pane.
+Press **Escape**, click **Close**, or use the close-pane chord to close it.
+Successful processes close automatically. Set `exit-behavior = hold` to keep
+successful exits too, or `exit-behavior = close` to close every exit.
+
 ## 3. Change settings — no file editing required
 
 Press **`Ctrl + ,`** (or **right-click → Settings…**) to open the **Settings**
@@ -44,6 +56,11 @@ affect new panes. See [Settings](SETTINGS.md) for exceptions. For advanced
 options not in the panel, the
 **Advanced** path opens the config file with your operating system's default app. Full reference:
 [SETTINGS.md](SETTINGS.md) and [CONFIG.md](CONFIG.md).
+
+Unknown config keys and invalid values show a dismissible notice inside the
+window at startup and reload. It names up to three filename:line locations and
+keys, with a count of additional issues. The affected settings use defaults;
+valid settings still apply. Run `kettle --check-config` to see every issue.
 
 ## 4. Splits, tabs, and getting around
 

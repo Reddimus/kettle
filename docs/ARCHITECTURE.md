@@ -4689,3 +4689,22 @@ navigation, anchored to primary-grid document rows at command start. The UI
 captures outcomes into render snapshots. `scrollbar::command_tick_rect` owns
 the shared overlay geometry for rendering, AccessKit and control diagnostics.
 Terminal grid, hit tests and IME layout do not change.
+
+## Process exits and persistent chrome notices
+
+The UI applies exit policy only after ordered PTY EOF or the existing bounded
+Windows drain. A successful direct-child status closes `close-on-success`
+panes; failures and `hold` panes retain their grids and release the child handle.
+A late status is polled on the existing bounded held-child cadence.
+`ProcessLaunch` retains a clone of the actual spawn command builder in memory,
+including cwd, invocation name and environment. Held-pane restart replays it
+with the same pane ID and split placement; failed spawn preserves the old pane.
+The snapshot is never serialized or logged.
+
+Persistent exit banners and config diagnostics reuse the update-toast painter.
+Their overlay rectangles are projected once for paint, pointer hit testing,
+AccessKit and `ctl ui_geometry`; they do not reserve terminal rows or move IME
+coordinates. Config diagnostics retain tokenizer source lines and raw key names,
+exclude values, and cap the notice at three entries plus a remaining count.
+Tab accessibility uses the renderer's `TabBar` segments and control rectangles
+on either axis, with pane anchors to reject stale actions after tabs close.

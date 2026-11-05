@@ -361,6 +361,11 @@ impl App {
                 cursor_visible,
                 resize_overlay,
                 update_toast: self.update_toast_projection(ws),
+                notices: self
+                    .persistent_notices(ws)
+                    .into_iter()
+                    .map(|(_, toast)| toast)
+                    .collect(),
                 context_menu,
                 context_menu_parents: self.context_menu_parent_overlays(ws),
                 confirm_dialog: confirm_dialog_early,
@@ -500,6 +505,11 @@ impl App {
             cursor_visible,
             resize_overlay,
             update_toast: None,
+            notices: self
+                .persistent_notices(ws)
+                .into_iter()
+                .map(|(_, toast)| toast)
+                .collect(),
             context_menu,
             context_menu_parents: self.context_menu_parent_overlays(ws),
             confirm_dialog,

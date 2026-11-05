@@ -377,8 +377,8 @@ fn startup_geometry_cells_convert_to_inner_size() {
     };
     assert_eq!(
         startup_inner_size_px(&cfg),
-        Some((976, 684)),
-        "120x40 cells + default padding + default top tab bar"
+        Some((976, 656)),
+        "120x40 cells + default padding; the auto tab bar is hidden"
     );
 
     cfg.tab_bar = kettle_config::TabBarMode::Auto;
@@ -414,7 +414,7 @@ fn startup_geometry_cells_convert_to_inner_size() {
 }
 
 /// A fresh window with no configured size opens at the 160x45 default
-/// grid (1296x764 logical px with the default chrome), fitted to 90 % x
+/// grid (1296x736 logical px with the default chrome), fitted to 90 % x
 /// 85 % of the monitor. The numbers below are the ones the docs quote.
 #[test]
 fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
@@ -426,12 +426,12 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
     assert_eq!((STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS), (160, 45));
     assert_eq!(
         default_startup_inner_size(&cfg, None),
-        (1296.0, 764.0),
-        "160x45 cells + 8 px padding + the default top tab bar, no monitor known"
+        (1296.0, 736.0),
+        "160x45 cells + 8 px padding with the single-tab strip hidden, no monitor known"
     );
     assert_eq!(
         default_startup_inner_size(&cfg, Some((1920.0, 1080.0))),
-        (1296.0, 764.0),
+        (1296.0, 736.0),
         "a 1080p monitor fits the whole target (about 152x41 cells at the 14 px font)"
     );
     assert_eq!(
@@ -441,7 +441,7 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
     );
     assert_eq!(
         default_startup_inner_size(&cfg, Some((3440.0, 1440.0))),
-        (1296.0, 764.0),
+        (1296.0, 736.0),
         "an ultrawide gets the same terminal-sized window, not a monitor fraction"
     );
     assert_eq!(
@@ -457,7 +457,7 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
         ..Default::default()
     };
     let tiny = Some(StartupMonitor::from_physical(640, 480, 1.0));
-    assert_eq!(startup_inner_size(&explicit, tiny), (3216.0, 3244.0));
+    assert_eq!(startup_inner_size(&explicit, tiny), (3216.0, 3216.0));
     assert_eq!(
         startup_inner_size(&cfg, tiny),
         (576.0, 408.0),

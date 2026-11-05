@@ -1055,6 +1055,8 @@ pub(crate) struct WindowState {
     /// The card instance assistive technology moved focus to, until a key
     /// press returns it to the pane.
     pub(crate) card_focus: Option<u64>,
+    /// A tab focused by assistive technology, until ordinary input resumes.
+    pub(crate) tab_focus: Option<accesskit::NodeId>,
     /// The card a primary press at the pointer would take, for the hand
     /// cursor and the hover outline.
     pub(crate) card_hover: Option<kettle_render::PaintedCard>,
@@ -1565,6 +1567,7 @@ impl WindowState {
             card_press: None,
             card_sightings: crate::media::CardSightings::default(),
             card_focus: None,
+            tab_focus: None,
             card_hover: None,
             card_settle_wake: None,
             card_hover_stale: false,

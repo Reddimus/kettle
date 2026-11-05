@@ -11,6 +11,18 @@ menu_category_title = "Título"
 menu_category_group = "Grupo"
 menu_category_appearance = "Apariencia"
 menu_category_commands = "Comandos"
+
+process_exited = "El proceso terminó con el código {code}"
+process_exit_pending = "El proceso terminó; esperando el estado"
+process_restart = "Reiniciar (Enter)"
+process_close = "Cerrar (Esc)"
+config_notice = "Opciones de configuración ignoradas:\n{entries}"
+config_notice_more = "+{count} más"
+notice_dismiss = "Descartar"
+a11y_tab_list = "Pestañas"
+a11y_tab_close = "Cerrar {title}"
+a11y_new_tab_menu = "Menú de nueva pestaña"
+
 # Neutral Latin American Spanish. The owner designated an independent reviewer.
 # Rendered context and required second-pass acceptance remain pending for 5.0.
 

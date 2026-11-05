@@ -94,6 +94,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/system_opener.rs"),
         include_str!("app/title.rs"),
         include_str!("app/update_toast.rs"),
+        include_str!("app/notices.rs"),
         include_str!("app/window_events.rs"),
         include_str!("app/windowing.rs"),
     ]
@@ -192,6 +193,7 @@ mod gpu_recovery;
 mod media;
 mod menus;
 mod modals;
+mod notices;
 mod paste;
 mod pointer;
 mod preview;
@@ -587,6 +589,8 @@ pub struct App {
     update_local_dismissals: crate::update_notice::LocalDismissals,
     /// This process dismissed its restart notice, until it exits.
     update_restart_dismissed: bool,
+    config_notice: Option<String>,
+    config_notice_last: Option<String>,
     update_toast: Option<crate::update_toast::Toast>,
     update_toast_receipts: Option<crate::update_toast::ReceiptWriter>,
     update_toast_claiming: Option<(crate::update_notice::Notice, u64)>,

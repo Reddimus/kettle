@@ -7,6 +7,7 @@
 
 #[derive(Debug, Clone)]
 pub struct Entry {
+    pub line: usize,
     /// The key folded to kettle's canonical spelling: lowercased, with `_`
     /// rewritten to `-`.
     ///
@@ -227,7 +228,7 @@ pub fn parse(input: &str) -> Vec<Entry> {
     // silently doesn't apply.
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let mut section = Section::default();
-    for raw in input.lines() {
+    for (line_index, raw) in input.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -261,6 +262,7 @@ pub fn parse(input: &str) -> Vec<Entry> {
             continue;
         }
         out.push(Entry {
+            line: line_index + 1,
             key,
             raw_key,
             value,

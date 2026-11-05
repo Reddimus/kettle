@@ -663,8 +663,9 @@ impl Renderer {
             .collect();
         let status_bar_buffer = TextBuffer::new(&mut font_system, metrics);
         let resize_overlay_buffer = TextBuffer::new(&mut font_system, metrics);
-        let update_toast_buffers =
-            std::array::from_fn(|_| TextBuffer::new(&mut font_system, metrics));
+        let update_toast_buffers = (0..3)
+            .map(|_| TextBuffer::new(&mut font_system, metrics))
+            .collect();
         let mut completion_header_buffer = TextBuffer::new(&mut font_system, metrics);
         completion_header_buffer.set_wrap(Wrap::None);
         let mut completion_count_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -814,7 +815,7 @@ impl Renderer {
             resize_overlay_buffer,
             resize_overlay_text: String::new(),
             update_toast_buffers,
-            update_toast_text: std::array::from_fn(|_| String::new()),
+            update_toast_text: vec![String::new(); 3],
             ime_buffer,
             ime_quads,
             ime_text_renderer,

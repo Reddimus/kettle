@@ -447,7 +447,7 @@ impl App {
                 let busy = usize::from(
                     ws.mux
                         .focused()
-                        .map(|p| !p.term.shell_idle())
+                        .map(|p| !p.held && !p.term.shell_idle())
                         .unwrap_or(true),
                 );
                 // Name the pane now — by the time the prompt is answered,

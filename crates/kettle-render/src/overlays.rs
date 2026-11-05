@@ -335,6 +335,8 @@ pub struct Overlay {
     /// renderer just draws a centered `cols×rows` chip above everything).
     pub resize_overlay: Option<(u16, u16)>,
     pub update_toast: Option<UpdateToastOverlay>,
+    /// Persistent notices use the same painter and geometry as update toasts.
+    pub notices: Vec<UpdateToastOverlay>,
     /// Terminator parity (drag a terminal elsewhere in its tab): `Some(rect)`
     /// while a live pane drag has a drop target latched. The rect is the half
     /// of the target pane the dropped terminal would take, washed in accent
@@ -1668,4 +1670,74 @@ pub(crate) fn menu_text_bounds_outside(
     .into_iter()
     .filter(|part| part.left < part.right && part.top < part.bottom)
     .collect()
+}
+
+/// Persistent notice geometry, constrained to its owning pane or window content.
+/// This overlays the terminal without moving its grid or IME cursor.
+pub fn persistent_notice_geometry(
+    rect: Rect4,
+    cell: (f32, f32),
+    message_rows: usize,
+    action_cells: usize,
+    close_cells: usize,
+) -> Option<UpdateToastGeometry> {
+    let (x, y, w, h) = rect;
+    if ![x, y, w, h, cell.0, cell.1].iter().all(|v| v.is_finite())
+        || w <= 0.0
+        || h <= 0.0
+        || cell.0 <= 0.0
+        || cell.1 <= 0.0
+    {
+        return None;
+    }
+    let pad = 6.0_f32.min(w * 0.05).min(h * 0.05);
+    let height = ((message_rows.max(1) as f32 + 1.0) * cell.1 + 4.0 * pad).min(h);
+    let button_h = cell.1.min(height * 0.5);
+    let controls_y = y + height - pad - button_h;
+    let available = (w - 3.0 * pad).max(0.0);
+    let close_w = (close_cells as f32 * cell.0 + 2.0 * pad).min(available * 0.5);
+    let action_w = (action_cells as f32 * cell.0 + 2.0 * pad).min(available - close_w);
+    Some(UpdateToastGeometry {
+        rect: (x, y, w, height),
+        message: (
+            x + pad,
+            y + pad,
+            (w - 2.0 * pad).max(0.0),
+            (controls_y - y - 2.0 * pad).max(0.0),
+        ),
+        details: (x + pad, controls_y, action_w, button_h),
+        close: (x + w - pad - close_w, controls_y, close_w, button_h),
+        radius: pad,
+        unit: 1.0,
+    })
+}
+
+/// Persistent notices take the same precedence over paste receipts as update toasts.
+pub fn notification_geometry_with_notices(
+    toast: Option<UpdateToastGeometry>,
+    notices: &[UpdateToastOverlay],
+    receipt: Option<&MediaPasteReceiptOverlay>,
+    completion: Option<&CompletionOverlay>,
+    cell: (f32, f32),
+    text_cell_width: f32,
+    text_line_height: f32,
+) -> NotificationGeometry {
+    let obstruction = notices
+        .iter()
+        .rev()
+        .find(|notice| {
+            receipt.is_some_and(|receipt| rects_overlap(notice.geometry.rect, receipt.pane_rect))
+        })
+        .map(|notice| notice.geometry)
+        .or(toast);
+    let mut result = notification_geometry(
+        obstruction,
+        receipt,
+        completion,
+        cell,
+        text_cell_width,
+        text_line_height,
+    );
+    result.toast = toast;
+    result
 }

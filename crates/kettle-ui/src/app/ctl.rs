@@ -1451,6 +1451,10 @@ impl App {
                 "facts": crate::update_notice::fact_rows(&self.update_facts, &self.ui_text),
             })
         });
+        let notices = self.persistent_notices(target).into_iter().map(|(pane, toast)| serde_json::json!({
+            "pane": pane, "message": toast.message, "rect": rect_json(toast.geometry.rect),
+            "restart": rect_json(toast.geometry.details), "close": rect_json(toast.geometry.close),
+        })).collect::<Vec<_>>();
         let mut geometry = serde_json::json!({
                 "window": target.seq,
                 "window_focused": target.window_focused,
@@ -1596,6 +1600,7 @@ impl App {
                 // (macOS). Timing, geometry and counts only.
                 "cursor_blink": self.cursor_blink_diagnostics(target),
         });
+        geometry["notices"] = notices.into();
         geometry["picker"] = picker.into();
         geometry["text_field"] = diagnostic_overlay
             .text_field
@@ -2396,7 +2401,9 @@ impl App {
         if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some()) {
             return true;
         }
-        if self.press_update_toast(ws, px, py, bcode) {
+        if self.press_persistent_notice(ws, px, py, bcode)
+            || self.press_update_toast(ws, px, py, bcode)
+        {
             return true;
         }
         if self.press_preview_lane(ws, px, py, bcode) {

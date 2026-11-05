@@ -756,8 +756,10 @@ pub enum BroadcastDefault {
 /// `exit_action`): what to do when the shell process exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExitAction {
-    /// Close the pane (kettle default + Terminator default).
+    /// Close successful processes; retain failed processes for inspection.
     #[default]
+    CloseOnSuccess,
+    /// Close the pane (the legacy Terminator default).
     Close,
     /// Re-spawn the shell. Useful for long-running session windows.
     Restart,
@@ -2037,6 +2039,55 @@ pub struct LoadedConfig {
     pub malformed_values: Vec<String>,
 }
 
+/// A source location for a setting ignored by the config loader.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigDiagnostic {
+    pub line: usize,
+    pub key: String,
+}
+
+impl LoadedConfig {
+    /// Diagnostics contain key names only, never values such as environment secrets.
+    pub fn diagnostics(&self) -> Vec<ConfigDiagnostic> {
+        let mut result = Vec::new();
+        let unknown: std::collections::HashSet<_> = self.unknown_keys.iter().collect();
+        let malformed: std::collections::HashSet<_> = self.malformed_values.iter().collect();
+        for entry in parse::parse(&self.text) {
+            let invalid = format!("{} = {:?}", entry.raw_key, entry.value);
+            if unknown.contains(&entry.raw_key) || malformed.contains(&invalid) {
+                result.push(ConfigDiagnostic {
+                    line: entry.line,
+                    key: entry.raw_key,
+                });
+            }
+        }
+        for (index, raw) in self
+            .text
+            .strip_prefix('\u{feff}')
+            .unwrap_or(&self.text)
+            .lines()
+            .enumerate()
+        {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') || parse::section_header(line).is_some() {
+                continue;
+            }
+            if line.contains('\0') || !line.contains('=') {
+                let key = line.split_once('=').map_or_else(
+                    || line.split_whitespace().next().unwrap_or(line),
+                    |(key, _)| key.trim(),
+                );
+                result.push(ConfigDiagnostic {
+                    line: index + 1,
+                    key: key.to_owned(),
+                });
+            }
+        }
+        result.sort_by_key(|diagnostic| diagnostic.line);
+        result
+    }
+}
+
 /// Provenance of the config path selected for a read.
 ///
 /// Default and named-profile paths are discovered by kettle and therefore
@@ -2979,7 +3030,7 @@ impl Default for Config {
             record_max_bytes: None,
             record_max_files: None,
             record_max_directory_bytes: None,
-            tab_bar: TabBarMode::Always,
+            tab_bar: TabBarMode::Auto,
             tab_bar_pos: TabBarPos::Top,
             status_bar: StatusBarMode::Off,
             borderless: false,
@@ -3001,7 +3052,7 @@ impl Default for Config {
             env: Vec::new(),
             login_shell: false,
             shell_integration: true,
-            exit_action: ExitAction::Close,
+            exit_action: ExitAction::CloseOnSuccess,
             agent_server: AgentServer::Off,
             agent_display: false,
             agent_display_claude_code: false,
@@ -3985,6 +4036,7 @@ impl Config {
                     v.to_ascii_lowercase().as_str(),
                     "off" | "false" | "none" | "top" | "bottom" | "true" | "on"
                 ),
+                "exit-behavior" => matches!(v.to_ascii_lowercase().as_str(), "close" | "close-on-success" | "hold"),
                 "exit-action" | "exit_action" => {
                     matches!(v.to_ascii_lowercase().as_str(), "close" | "restart" | "hold")
                 }
@@ -4384,6 +4436,7 @@ impl Config {
         // canonical key vs Terminator-spelled alias.
         let mut explicit_canonical_bell = false;
         let entries = parse::parse(text);
+        let has_exit_behavior = entries.iter().any(|entry| entry.key == "exit-behavior");
         // A canonical policy wins regardless of line order. This matters for
         // migrated configs that still carry the legacy boolean below it.
         let has_update_policy = entries
@@ -4794,8 +4847,8 @@ impl Config {
                 "tab-bar" => {
                     cfg.tab_bar = match e.value.to_ascii_lowercase().as_str() {
                         "off" | "none" | "false" => TabBarMode::Off,
-                        "auto" => TabBarMode::Auto,
-                        _ => TabBarMode::Always,
+                        "always" => TabBarMode::Always,
+                        _ => TabBarMode::Auto,
                     }
                 }
                 "tab-bar-position" | "tab-position" | "tab_position" => {
@@ -4940,7 +4993,17 @@ impl Config {
                         cfg.shell_integration = b;
                     }
                 }
+                "exit-behavior" => {
+                    cfg.exit_action = match e.value.to_ascii_lowercase().as_str() {
+                        "close" => ExitAction::Close,
+                        "hold" => ExitAction::Hold,
+                        _ => ExitAction::CloseOnSuccess,
+                    };
+                }
                 "exit-action" | "exit_action" => {
+                    if has_exit_behavior {
+                        continue;
+                    }
                     cfg.exit_action = match e.value.to_ascii_lowercase().as_str() {
                         "restart" => ExitAction::Restart,
                         "hold" => ExitAction::Hold,
@@ -7780,7 +7843,7 @@ cell-height = 1.2\n";
     #[test]
     fn tab_bar_config() {
         let d = Config::default();
-        assert_eq!(d.tab_bar, TabBarMode::Always);
+        assert_eq!(d.tab_bar, TabBarMode::Auto);
         assert_eq!(d.tab_bar_pos, TabBarPos::Top);
         assert_eq!(
             Config::parse_text("tab-bar = auto").tab_bar,
@@ -8389,7 +8452,7 @@ cell-height = 1.2\n";
         // Drift guard.
         let d = Config::default();
         assert!(!d.login_shell);
-        assert_eq!(d.exit_action, ExitAction::Close);
+        assert_eq!(d.exit_action, ExitAction::CloseOnSuccess);
         assert_eq!(d.ask_before_closing, AskBeforeClosing::MultipleTerminals);
         assert!(Config::parse_text("login-shell = true").login_shell);
         assert!(Config::parse_text("login_shell = true").login_shell);
@@ -13435,5 +13498,71 @@ font-size = 15
         assert_eq!(cfg.window_title_format, "a'b");
         let mismatched = Config::parse_text("window-title-format = \"unterminated\n");
         assert_eq!(mismatched.window_title_format, "\"unterminated");
+    }
+}
+
+#[cfg(test)]
+mod chrome_state_tests {
+    use super::*;
+
+    #[test]
+    fn exit_behavior_defaults_alias_validation_and_precedence() {
+        assert_eq!(Config::default().exit_action, ExitAction::CloseOnSuccess);
+        for (value, expected) in [
+            ("close", ExitAction::Close),
+            ("close-on-success", ExitAction::CloseOnSuccess),
+            ("hold", ExitAction::Hold),
+        ] {
+            let text = format!("exit_behavior = {value}\nexit-action = restart\n");
+            let (config, unknown) = Config::parse_collect(&text);
+            assert!(unknown.is_empty());
+            assert!(Config::detect_malformed_values(&text).is_empty());
+            assert_eq!(config.exit_action, expected);
+            assert_eq!(
+                Config::parse_text(&format!("exit-action = restart\nexit-behavior = {value}"))
+                    .exit_action,
+                expected
+            );
+        }
+        assert!(!Config::detect_malformed_values("exit-behavior = clsoe").is_empty());
+        assert_eq!(
+            Config::parse_text("exit-behavior = clsoe").exit_action,
+            ExitAction::CloseOnSuccess
+        );
+        assert_eq!(
+            Config::parse_text("tab-bar = always").tab_bar,
+            TabBarMode::Always
+        );
+    }
+
+    #[test]
+    fn diagnostics_keep_source_lines_and_key_spelling_without_values() {
+        let text = "\u{feff}# fixture\n[global_config]\nFONT_SIZE = wrong\ntypo_key = private-value\nfont-size = 15\n[profiles]\n[[other]]\nignored = value\n[[default]]\ncursor-style = beem\n".to_string();
+        let (config, unknown_keys) = Config::parse_collect(&text);
+        let malformed_values = Config::detect_malformed_values(&text);
+        let loaded = LoadedConfig {
+            text,
+            config,
+            unknown_keys,
+            malformed_values,
+        };
+        assert_eq!(
+            loaded.diagnostics(),
+            vec![
+                ConfigDiagnostic {
+                    line: 3,
+                    key: "FONT_SIZE".into()
+                },
+                ConfigDiagnostic {
+                    line: 4,
+                    key: "typo_key".into()
+                },
+                ConfigDiagnostic {
+                    line: 10,
+                    key: "cursor-style".into()
+                },
+            ]
+        );
+        assert_eq!(loaded.config.font_size, 15.0);
     }
 }

@@ -8,8 +8,13 @@ impl App {
         ws: &WindowState,
     ) -> Option<kettle_render::MediaPasteReceiptGeometry> {
         let (receipt, completion) = self.media_paste_receipt_projection(ws)?;
-        kettle_render::notification_geometry(
+        kettle_render::notification_geometry_with_notices(
             self.update_toast_projection(ws).map(|toast| toast.geometry),
+            &self
+                .persistent_notices(ws)
+                .into_iter()
+                .map(|(_, notice)| notice)
+                .collect::<Vec<_>>(),
             Some(&receipt),
             completion.as_ref(),
             self.menu_cell(ws),
@@ -64,8 +69,13 @@ impl App {
         {
             return false;
         }
-        let Some(geometry) = kettle_render::notification_geometry(
+        let Some(geometry) = kettle_render::notification_geometry_with_notices(
             self.update_toast_projection(ws).map(|toast| toast.geometry),
+            &self
+                .persistent_notices(ws)
+                .into_iter()
+                .map(|(_, notice)| notice)
+                .collect::<Vec<_>>(),
             Some(&receipt),
             completion.as_ref(),
             self.menu_cell(ws),

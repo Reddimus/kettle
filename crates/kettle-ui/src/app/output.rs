@@ -11,12 +11,17 @@ fn apply_pane_exit_action(
     }
     pane.exit_observed = true;
     match action {
-        kettle_config::ExitAction::Hold => {
+        kettle_config::ExitAction::Hold | kettle_config::ExitAction::CloseOnSuccess => {
             pane.held = true;
             // `try_wait` is now safe: the ordered PTY exit (or the bounded
             // fallback below) has finished consuming output. Cache the status
             // and release the Unix zombie while the held grid stays visible.
-            pane.held_child_reaped = pane.term.child_exit_code().is_some();
+            pane.exit_code = pane.term.child_exit_code();
+            pane.held_child_reaped = pane.exit_code.is_some();
+            pane.close_on_success = action == kettle_config::ExitAction::CloseOnSuccess;
+            if pane.close_on_success && pane.exit_code == Some(0) {
+                pane.closed = true;
+            }
         }
         kettle_config::ExitAction::Restart => {
             if !pending_restarts.contains(&pane_id) {
@@ -291,7 +296,7 @@ impl App {
         // post-drain handler can process them with a fresh borrow.
         let mut pending_restarts_local: Vec<u64> = Vec::new();
         for (&pane_id, pane) in ws.mux.panes.iter_mut() {
-            if pane.pty_input_failed() {
+            if !pane.held && pane.pty_input_failed() {
                 log::error!("closing pane {pane_id}: its PTY input transport failed");
                 pane.closed = true;
                 while pane.rx.try_recv().is_ok() {}
@@ -923,4 +928,143 @@ impl App {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod exit_behavior_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_exit_policy_preserves_failure_output_and_restarts_original_launch_in_place() {
+        let root = tempfile::tempdir().unwrap();
+        for (policy, code, held) in [
+            (kettle_config::ExitAction::CloseOnSuccess, 0, false),
+            (kettle_config::ExitAction::CloseOnSuccess, 7, true),
+            (kettle_config::ExitAction::Hold, 0, true),
+            (kettle_config::ExitAction::Hold, 9, true),
+            (kettle_config::ExitAction::Close, 9, false),
+        ] {
+            let cfg = Config {
+                env: vec![("KETTLE_EXIT_FIXTURE".into(), "original".into())],
+                shell_integration: false,
+                login_shell: false,
+                ..Config::default()
+            };
+            let argv = vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!(
+                    "printf 'value=%s\\ncwd=%s\\n' \"$KETTLE_EXIT_FIXTURE\" \"$PWD\"; exit {code}"
+                ),
+            ];
+            let mut mux = Mux::new();
+            let geometry = PtyGeometry::from_cell_size(120, 24, 8, 16);
+            mux.new_tab_with_geometry(&cfg, geometry, Arc::new(|| {}), &argv, root.path().to_str())
+                .expect("PTY fixture");
+            let id = mux.active_focus().unwrap();
+            let wait = |pane: &Pane| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !pane.term.take_exited() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "ordered PTY exit timed out"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            };
+            wait(&mux.panes[&id]);
+            let mut pending = Vec::new();
+            apply_pane_exit_action(policy, id, mux.panes.get_mut(&id).unwrap(), &mut pending);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while mux.poll_held_child_statuses() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(!mux.panes[&id].closed, held);
+            assert!(pending.is_empty());
+            if held {
+                assert_eq!(mux.panes[&id].exit_code, Some(code));
+                let original = mux.panes[&id].term.screen_text(0).unwrap().text;
+                assert!(original.contains("value=original"), "{original}");
+                assert!(
+                    original.contains(&format!(
+                        "cwd={}",
+                        root.path().canonicalize().unwrap().display()
+                    )),
+                    "{original}"
+                );
+                assert!(!mux.reap().layout_changed);
+                let changed = Config {
+                    env: vec![("KETTLE_EXIT_FIXTURE".into(), "changed".into())],
+                    shell: Some("/no/such/program".into()),
+                    ..Config::default()
+                };
+                assert!(
+                    mux.restart_held(id, &changed, geometry, Arc::new(|| {}))
+                        .unwrap()
+                );
+                assert_eq!(mux.active_focus(), Some(id));
+                assert_eq!(mux.tabs.len(), 1);
+                assert!(!mux.panes[&id].held);
+                wait(&mux.panes[&id]);
+                let restarted = mux.panes[&id].term.screen_text(0).unwrap().text;
+                assert_eq!(
+                    restarted, original,
+                    "restart must preserve command, cwd and environment"
+                );
+                apply_pane_exit_action(policy, id, mux.panes.get_mut(&id).unwrap(), &mut pending);
+                apply_pane_exit_action(policy, id, mux.panes.get_mut(&id).unwrap(), &mut pending);
+                assert!(pending.is_empty(), "duplicate exit is idempotent");
+            } else {
+                assert!(mux.reap().mux_empty);
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn a_failed_held_pane_restart_retains_output_and_pane_identity() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("once");
+    std::fs::write(&script, "#!/bin/sh\nprintf 'final-output\\n'\nexit 3\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let cfg = Config::default();
+    let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
+    let mut mux = Mux::new();
+    mux.new_tab_with_geometry(
+        &cfg,
+        geometry,
+        Arc::new(|| {}),
+        &[script.to_string_lossy().into_owned()],
+        root.path().to_str(),
+    )
+    .unwrap();
+    let id = mux.active_focus().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !mux.panes[&id].term.take_exited() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    apply_pane_exit_action(
+        kettle_config::ExitAction::Hold,
+        id,
+        mux.panes.get_mut(&id).unwrap(),
+        &mut Vec::new(),
+    );
+    while mux.poll_held_child_statuses() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let output = mux.panes[&id].term.screen_text(0).unwrap().text;
+    std::fs::remove_file(script).unwrap();
+    assert!(
+        mux.restart_held(id, &cfg, geometry, Arc::new(|| {}))
+            .is_err()
+    );
+    assert_eq!(mux.active_focus(), Some(id));
+    assert!(mux.panes[&id].held);
+    assert_eq!(mux.panes[&id].term.screen_text(0).unwrap().text, output);
 }

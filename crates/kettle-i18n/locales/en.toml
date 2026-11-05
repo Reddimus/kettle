@@ -11,6 +11,18 @@ menu_category_title = "Title"
 menu_category_group = "Group"
 menu_category_appearance = "Appearance"
 menu_category_commands = "Commands"
+
+process_exited = "Process exited with code {code}"
+process_exit_pending = "Process exited; waiting for status"
+process_restart = "Restart (Enter)"
+process_close = "Close (Esc)"
+config_notice = "Config settings ignored:\n{entries}"
+config_notice_more = "+{count} more"
+notice_dismiss = "Dismiss"
+a11y_tab_list = "Tabs"
+a11y_tab_close = "Close {title}"
+a11y_new_tab_menu = "New tab menu"
+
 # English reference text. Every key in schema.toml, nothing else.
 
 screenshot_dimensions_too_large = "Screenshot dimensions exceed the GPU texture limit; reduce window padding or font size."

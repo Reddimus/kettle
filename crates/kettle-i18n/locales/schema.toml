@@ -2482,3 +2482,37 @@ args = [{ name = "code", type = "str" }]
 [messages.command_mark_a11y_failure]
 context = "crates/kettle-ui/src/app/accessibility.rs: description of a completed command tick in the scrollbar. code is its signed OSC 133 exit code."
 args = [{ name = "code", type = "str" }]
+
+[messages.process_exited]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+args = [{ name = "code", type = "u64" }]
+
+[messages.process_exit_pending]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+
+[messages.process_restart]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+
+[messages.process_close]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+
+[messages.config_notice]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+args = [{ name = "entries", type = "str" }]
+
+[messages.config_notice_more]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+args = [{ name = "count", type = "u64" }]
+
+[messages.notice_dismiss]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+
+[messages.a11y_tab_list]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+
+[messages.a11y_tab_close]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+args = [{ name = "title", type = "str" }]
+
+[messages.a11y_new_tab_menu]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."

@@ -1369,3 +1369,123 @@ fn completed_command_ticks_describe_status_and_exit_code_in_both_languages() {
         }
     }
 }
+
+#[test]
+fn tab_accessibility_exposes_titles_selection_and_named_actions_on_both_axes() {
+    for vertical in [false, true] {
+        let mut bar = kettle_render::TabBar::hidden();
+        bar.height = 28.0;
+        bar.new_tab = if vertical {
+            (0.0, 56.0, 120.0, 28.0)
+        } else {
+            (240.0, 0.0, 28.0, 28.0)
+        };
+        bar.new_tab_menu = if vertical {
+            (120.0, 56.0, 28.0, 28.0)
+        } else {
+            (268.0, 0.0, 28.0, 28.0)
+        };
+        for index in 0..2 {
+            let rect = if vertical {
+                (0.0, index as f32 * 28.0, 148.0, 28.0)
+            } else {
+                (index as f32 * 120.0, 0.0, 120.0, 28.0)
+            };
+            bar.segments.push(kettle_render::TabSeg {
+                idx: index,
+                rect,
+                title_rect: rect,
+                hint: None,
+                close: (rect.0 + rect.2 - 28.0, rect.1, 28.0, 28.0),
+                title: format!("shell {index}"),
+                path: None,
+                active: index == 1,
+                activity: kettle_render::TabActivity::Normal,
+            });
+        }
+        for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+            let tr = kettle_i18n::Translator::new(language);
+            let nodes = super::tab_accessibility_projection(&bar, &[10, 20], vertical, &tr);
+            assert_eq!(
+                nodes
+                    .iter()
+                    .filter(|(_, node)| node.role() == accesskit::Role::TabList)
+                    .count(),
+                1
+            );
+            let tabs: Vec<_> = nodes
+                .iter()
+                .filter(|(_, node)| node.role() == accesskit::Role::Tab)
+                .collect();
+            assert_eq!(tabs.len(), 2);
+            assert_eq!(tabs[0].1.label(), Some("shell 0"));
+            assert!(!tabs[0].1.is_selected().unwrap());
+            assert!(tabs[1].1.is_selected().unwrap());
+            assert!(tabs[0].1.supports_action(accesskit::Action::Click));
+            let close = nodes
+                .iter()
+                .find(|(id, _)| *id == super::accessibility_tab_id(10, true))
+                .unwrap();
+            assert_eq!(close.1.label(), Some(tr.a11y_tab_close("shell 0").as_str()));
+            assert_eq!(close.1.bounds().unwrap().y0, bar.segments[0].close.1 as f64);
+            for text in [
+                tr.text(kettle_i18n::Text::PaletteNewTab),
+                tr.text(kettle_i18n::Text::A11yNewTabMenu),
+            ] {
+                assert!(nodes.iter().any(|(_, node)| node.label() == Some(text)
+                    && node.supports_action(accesskit::Action::Click)));
+            }
+            bar.height = 0.0;
+            assert!(super::tab_accessibility_projection(&bar, &[10, 20], vertical, &tr).is_empty());
+            bar.height = 28.0;
+        }
+    }
+}
+
+#[test]
+fn persistent_notice_accessibility_matches_both_control_rectangles() {
+    let geometry = kettle_render::persistent_notice_geometry(
+        (41.0, 70.0, 500.0, 300.0),
+        (8.0, 16.0),
+        2,
+        15,
+        11,
+    )
+    .unwrap();
+    let toast = kettle_render::UpdateToastOverlay {
+        geometry,
+        message: EN_TEXT.process_exited(7),
+        details: EN_TEXT.text(kettle_i18n::Text::ProcessRestart).into(),
+        close: EN_TEXT.text(kettle_i18n::Text::ProcessClose).into(),
+        opacity: 1.0,
+        focused: None,
+    };
+    let nodes = super::persistent_notice_nodes(Some(10), &toast);
+    assert_eq!(nodes.len(), 3);
+    let status = nodes
+        .iter()
+        .find(|(_, n)| n.role() == accesskit::Role::Status)
+        .unwrap();
+    assert_eq!(status.1.label(), Some("Process exited with code 7"));
+    for (part, rect) in [(1, geometry.details), (2, geometry.close)] {
+        let (_, button) = nodes
+            .iter()
+            .find(|(id, _)| *id == super::persistent_notice_id(Some(10), part))
+            .unwrap();
+        assert!(button.supports_action(accesskit::Action::Click));
+        let bounds = button.bounds().unwrap();
+        assert_eq!(
+            (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+            (
+                rect.0 as f64,
+                rect.1 as f64,
+                (rect.0 + rect.2) as f64,
+                (rect.1 + rect.3) as f64
+            )
+        );
+    }
+    assert_ne!(
+        super::persistent_notice_id(Some(10), 1),
+        super::persistent_notice_id(None, 1)
+    );
+}

@@ -88,7 +88,8 @@ impl App {
     }
 
     pub(super) fn toast_visible(&self, ws: &WindowState) -> bool {
-        ws.window_focused
+        self.persistent_notices(ws).is_empty()
+            && ws.window_focused
             && ws.window_shown
             && !ws.window_occluded
             && ws
