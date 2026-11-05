@@ -46,6 +46,41 @@ fn standalone_test_functions_cannot_satisfy_source_guards() {
 }
 
 #[test]
+fn test_only_enum_variants_do_not_erase_production_variants() {
+    for variant in [
+        "TestOnly,",
+        "TestOnly(u8),",
+        "TestOnly { value: u8 },",
+        "r#TestOnly /* comment */ ,",
+    ] {
+        let src = format!("enum E {{ #[cfg(test)] {variant} Production {{ guard_needle: u8 }}, }}");
+        assert_kept(
+            variant,
+            &src,
+            &["Production { guard_needle: u8 }"],
+            &["TestOnly", "#[cfg(test)]"],
+        );
+    }
+    for variant in ["TestOnly", "TestOnly(u8)"] {
+        let src = format!("enum E {{ Production {{ guard_needle: u8 }}, #[cfg(test)] {variant} }}");
+        assert_kept(
+            variant,
+            &src,
+            &["Production { guard_needle: u8 }", ", }"],
+            &["TestOnly", "#[cfg(test)]"],
+        );
+    }
+    for variant in ["TestOnly = 1", "TestOnly = { 1 }"] {
+        let src =
+            format!("enum E {{ #[cfg(test)] {variant}, Production {{ guard_needle: u8 }}, }}");
+        assert!(
+            std::panic::catch_unwind(|| production_source(&src)).is_err(),
+            "unsupported discriminant must fail closed: {src}"
+        );
+    }
+}
+
+#[test]
 fn brace_inside_hashed_raw_string_does_not_end_the_item_early() {
     assert_kept(
         "hashed raw string",

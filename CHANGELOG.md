@@ -11,6 +11,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Update pulldown-cmark to 0.13.6, fixing quadratic parsing of nested image
   wikilinks (RUSTSEC-2026-0433, #763), and async-executor to 1.14.1, replacing
   a yanked release.
+- Keep an atomically replaced file's group, clear macOS extended ACLs when
+  repairing an owned private directory, and reject parent-directory
+  components before repairing modes.
+- Resolve trusted symlinks and Windows reparse points one component at a
+  time, like realpath(3), following a link only when the directory holding
+  it is trusted (at most 40 links and 4096 components). Relative dotfile
+  links such as `../../dotfiles/kettle/config` keep loading.
+- Leave a visible export in place when its creation check fails instead of
+  unlinking a name in an untrusted parent, and charge queued directory
+  entries against the shared removal budget as they are listed.
+
+### Fixed
+
+- Arch and Homebrew packages ship the renderer license texts from the
+  release archive under `share/doc/kettle`, and the manual page describes
+  the macOS self-update path and its Homebrew refusal.
+- The test-support source scanner no longer lets a test-only enum variant
+  hide the production variant after it, and scratch directories are removed
+  only when their lifetime lock is free.
 
 ## [5.9.0] — 2026-11-03
 

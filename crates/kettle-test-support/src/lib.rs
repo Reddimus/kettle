@@ -449,6 +449,21 @@ fn find_item_end(bytes: &[u8], mut cursor: usize) -> Result<usize, ()> {
         return Err(());
     }
 
+    // Unit and tuple variants have neither a body nor a semicolon.
+    if let Some((_, end)) = identifier(bytes, cursor) {
+        let mut end = skip_trivia(bytes, end)?;
+        if bytes.get(end) == Some(&b'(') {
+            end = matching_delimiter_end(bytes, end, b'(', b')')?;
+            end = skip_trivia(bytes, end)?;
+        }
+        match bytes.get(end) {
+            Some(b',') => return Ok(end + 1),
+            Some(b'}') => return Ok(end),
+            Some(b'=') => return Err(()),
+            _ => {}
+        }
+    }
+
     let requires_semicolon = item_requires_semicolon(bytes, cursor)?;
     let mut paren_depth = 0usize;
     let mut bracket_depth = 0usize;
@@ -743,12 +758,15 @@ fn looks_like_char_literal(bytes: &[u8], quote: usize) -> bool {
 
 /// An automatically removed private scratch directory.
 #[derive(Debug)]
-pub struct PrivateTempDir(tempfile::TempDir);
+pub struct PrivateTempDir {
+    directory: tempfile::TempDir,
+    _lock: tempfile::NamedTempFile,
+}
 
 impl PrivateTempDir {
     /// Return the scratch directory path.
     pub fn path(&self) -> &Path {
-        self.0.path()
+        self.directory.path()
     }
 }
 
@@ -768,9 +786,7 @@ impl std::ops::Deref for PrivateTempDir {
 
 /// How old a scratch directory must be before a later run will remove it.
 ///
-/// Long enough that a concurrently running test process is never in range —
-/// the whole suite finishes in minutes — and short enough that the leftovers
-/// never accumulate across a working session.
+/// Live directories remain protected by their lifetime locks regardless of age.
 const STALE_SCRATCH_AFTER: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// Remove scratch directories that *earlier processes* left behind.
@@ -790,15 +806,38 @@ fn sweep_stale_scratch(base: &Path, prefix: &str, max_age: std::time::Duration) 
         if !name.starts_with(prefix) {
             continue;
         }
-        let stale = entry
-            .metadata()
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let stale = metadata
+            .modified()
             .ok()
-            .and_then(|metadata| metadata.modified().ok())
             .and_then(|modified| now.duration_since(modified).ok())
             .is_some_and(|age| age >= max_age);
         if stale {
-            // Still best-effort: the process that pinned it may yet be alive.
-            let _ = std::fs::remove_dir_all(entry.path());
+            let path = entry.path();
+            let lock_path = if metadata.is_dir() {
+                path.with_added_extension("lock")
+            } else if metadata.is_file() && path.extension().is_some_and(|ext| ext == "lock") {
+                if path.with_extension("").exists() {
+                    continue;
+                }
+                path.clone()
+            } else {
+                continue;
+            };
+            let Ok(lock) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+            else {
+                continue;
+            };
+            if lock.try_lock().is_ok()
+                && (!metadata.is_dir() || std::fs::remove_dir_all(&path).is_ok())
+            {
+                let _ = std::fs::remove_file(lock_path);
+            }
         }
     }
 }
@@ -837,20 +876,101 @@ pub fn private_tempdir(prefix: &str) -> PrivateTempDir {
 
     sweep_stale_scratch(&base, prefix, STALE_SCRATCH_AFTER);
 
+    // Lock before publishing the directory, and keep the lock outside the
+    // fixture so callers can rely on an initially empty directory.
+    let lock = tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(".lock")
+        .tempfile_in(&base)
+        .expect("create private test directory lock");
+    lock.as_file().lock().expect("lock private test directory");
+    builder
+        .prefix(lock.path().file_stem().expect("scratch lock filename"))
+        .rand_bytes(0);
     let dir = builder
         .tempdir_in(&base)
         .expect("create private test directory");
-    PrivateTempDir(dir)
+    PrivateTempDir {
+        directory: dir,
+        _lock: lock,
+    }
 }
 
 #[cfg(test)]
 mod sweep_tests {
+    #[test]
+    fn aged_live_scratch_survives_cleanup() {
+        const CHILD_PATH: &str = "KETTLE_SWEEP_LIVE_CHILD_PATH";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let path = std::path::PathBuf::from(path);
+            super::sweep_stale_scratch_for_test(
+                path.parent().unwrap(),
+                path.file_name().unwrap().to_str().unwrap(),
+                std::time::Duration::ZERO,
+            );
+            return;
+        }
+        let live = super::private_tempdir("kettle-sweep-live-");
+        let path = live.path().to_path_buf();
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
+        std::fs::write(path.join("fixture"), b"still in use").unwrap();
+        super::sweep_stale_scratch_for_test(
+            path.parent().unwrap(),
+            path.file_name().unwrap().to_str().unwrap(),
+            std::time::Duration::ZERO,
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "sweep_tests::aged_live_scratch_survives_cleanup"])
+            .env(CHILD_PATH, &path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
+            "cleanup child failed: {output:?}"
+        );
+        assert!(path.exists(), "an aged live scratch directory must survive");
+        assert_eq!(
+            std::fs::read(path.join("fixture")).unwrap(),
+            b"still in use"
+        );
+        drop(live);
+        assert!(
+            !path.exists(),
+            "dropping the guard must remove its directory"
+        );
+        assert!(!path.with_added_extension("lock").exists());
+    }
+
+    #[test]
+    fn abandoned_scratch_locks_are_removed() {
+        let base = super::private_tempdir("kettle-sweep-orphan-");
+        let lock_path = base.path().join("kettle-orphan-aaaa.lock");
+        let lock = std::fs::File::create_new(&lock_path).unwrap();
+        lock.lock().unwrap();
+        super::sweep_stale_scratch_for_test(
+            base.path(),
+            "kettle-orphan-",
+            std::time::Duration::ZERO,
+        );
+        assert!(
+            lock_path.exists(),
+            "a live lock must survive before publication"
+        );
+        drop(lock);
+        super::sweep_stale_scratch_for_test(
+            base.path(),
+            "kettle-orphan-",
+            std::time::Duration::ZERO,
+        );
+        assert!(!lock_path.exists(), "an abandoned lock must be removed");
+    }
+
     /// The sweep has to remove what an earlier run pinned, and leave everything
     /// else alone — including the live directories of a run happening right now,
     /// which is the failure mode that would turn this cleanup into flakiness.
     ///
-    /// Age is the only thing separating the two, so it is passed in here rather
-    /// than waiting an hour for the real threshold.
+    /// Age is passed in here rather than waiting an hour for the real threshold.
     #[test]
     fn stale_scratch_goes_and_everything_else_stays() {
         let base = super::private_tempdir("kettle-sweep-base-");
@@ -860,6 +980,8 @@ mod sweep_tests {
         let foreign = base.path().join("kettle-1000");
         for dir in [&stale, &fresh, &foreign] {
             std::fs::create_dir(dir).expect("fixture directory");
+            std::fs::File::create_new(dir.with_added_extension("lock"))
+                .expect("fixture lifetime lock");
         }
 
         // Zero age: everything matching the prefix is old enough to go.
@@ -869,6 +991,7 @@ mod sweep_tests {
             std::time::Duration::ZERO,
         );
         assert!(!stale.exists(), "a stale scratch directory must be removed");
+        assert!(!stale.with_added_extension("lock").exists());
         assert!(
             fresh.exists(),
             "a directory outside the prefix must survive"

@@ -189,18 +189,13 @@ fn remove_contents(
     {
         let mut stream = DirectoryStream::open(directory)?;
         while let Some(name) = stream.next_name()? {
-            if names.len() >= *remaining {
-                return Err(limit_error("too many entries"));
-            }
+            *remaining = remaining
+                .checked_sub(1)
+                .ok_or_else(|| limit_error("too many entries"))?;
             names.push(name);
         }
     }
     for name in names {
-        // Children spend the same budget, so it can run out partway through
-        // a listing that fitted when it was read.
-        *remaining = remaining
-            .checked_sub(1)
-            .ok_or_else(|| limit_error("too many entries"))?;
         let listed = stat_at(directory, &name)?;
         if listed.st_mode & libc::S_IFMT != libc::S_IFDIR {
             unlink_at(directory, &name, 0)?;
@@ -511,6 +506,33 @@ mod tests {
         let error = remove_directory_tree_at(&parent, OsStr::new("tree"), &held, limits)
             .expect_err("four entries exceed a limit of two");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn queued_siblings_spend_the_shared_entry_budget() {
+        let root = crate::test_tempdir();
+        let tree = root.path().join("tree");
+        for child in ["a", "b", "c", "d"] {
+            fs::create_dir_all(tree.join(child)).unwrap();
+            fs::write(tree.join(child).join("file"), b"keep").unwrap();
+        }
+        let parent = open_dir(root.path());
+        let held = open_dir(&tree);
+        let limits = TreeRemovalLimits {
+            max_depth: 8,
+            max_entries: 4,
+        };
+
+        let error = remove_directory_tree_at(&parent, OsStr::new("tree"), &held, limits)
+            .expect_err("queued siblings leave no budget for a child listing");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        for child in ["a", "b", "c", "d"] {
+            assert!(
+                tree.join(child).join("file").exists(),
+                "a child listing exceeded the budget reserved by queued siblings"
+            );
+        }
     }
 
     #[test]
