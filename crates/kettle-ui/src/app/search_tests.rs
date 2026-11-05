@@ -743,7 +743,7 @@ fn search_follows_focus_with_its_query_and_toggles() {
         invert: true,
         focused_control: kettle_render::SearchControl::Next,
     };
-    let moved = fresh_search_state(2, carried.clone(), 7, now);
+    let moved = fresh_search_state(2, carried.clone(), 7, now, false);
     assert!(moved.open);
     assert_eq!(moved.target_pane, Some(2));
     assert_eq!(moved.query(), "needle");
@@ -770,13 +770,38 @@ fn search_follows_focus_with_its_query_and_toggles() {
         3,
         SearchCarryOver {
             query: String::new(),
-            ..carried
+            ..carried.clone()
         },
         0,
         now,
+        true,
     );
     assert_eq!(fresh.status, kettle_render::SearchStatus::Typing);
     assert_eq!(fresh.target_pane, Some(3));
+}
+
+#[test]
+fn reopened_search_selects_the_remembered_query() {
+    let now = std::time::Instant::now();
+    let carried = SearchCarryOver {
+        query: "line 5".into(),
+        wrap: true,
+        case_mode: kettle_config::SearchCaseSensitivity::Smart,
+        invert: false,
+        focused_control: kettle_render::SearchControl::Editor,
+    };
+    let reopened = fresh_search_state(1, carried.clone(), 0, now, true);
+    assert_eq!(
+        reopened.editor.selection(),
+        Some(0.."line 5".len()),
+        "a reopened bar must select its remembered query so typing replaces it"
+    );
+    let moved = fresh_search_state(2, carried, 0, now, false);
+    assert_eq!(
+        moved.editor.selection(),
+        None,
+        "a bar following focus keeps the caret where the user left it"
+    );
 }
 
 #[test]

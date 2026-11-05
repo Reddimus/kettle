@@ -899,11 +899,13 @@ impl App {
             invert: self.cfg.invert_search,
             focused_control: kettle_render::SearchControl::Editor,
         };
+        let reopened = carried.is_none();
         ws.search = fresh_search_state(
             pane_id,
             carried.unwrap_or(defaults),
             display_offset,
             std::time::Instant::now(),
+            reopened,
         );
         self.resize_all(ws);
         // Reserving the responsive Search lane can shrink the terminal by several rows. In a
@@ -2264,12 +2266,16 @@ pub(super) fn search_retarget(target_pane: Option<u64>, focus: Option<u64>) -> O
 
 /// The bar's state for `pane_id`, scanning from `display_offset`. A non-empty
 /// query starts searching immediately; the anchor is derived by the caller
-/// once the lane's resize has settled.
+/// once the lane's resize has settled. A `reopened` bar selects its remembered
+/// query, as a browser's or editor's find field does, so typing replaces it
+/// while Enter and the arrows search with it; a bar that follows focus to
+/// another pane keeps the caret where the user left it.
 pub(super) fn fresh_search_state(
     pane_id: u64,
     carried: SearchCarryOver,
     display_offset: usize,
     now: std::time::Instant,
+    reopened: bool,
 ) -> crate::search_input::SearchState {
     let mut search = crate::search_input::SearchState {
         open: true,
@@ -2288,6 +2294,9 @@ pub(super) fn fresh_search_state(
     };
     if !search.query().is_empty() {
         search.note_edit(now);
+        if reopened {
+            search.editor.select_all();
+        }
     }
     search
 }
