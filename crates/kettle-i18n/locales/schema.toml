@@ -2663,3 +2663,32 @@ plural = "count"
 context = "crates/kettle-ui/src/app/clipboard.rs: per-pane notice after a program successfully sets the clipboard. count is Unicode code points after internal markers and excess bytes are removed. No clipboard text is shown."
 args = [{ name = "count", type = "u64" }]
 plural = "count"
+
+[messages.link_open_click]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status, link-single-click enabled."
+
+[messages.link_open_command_click]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status on macOS, modifier click required."
+
+[messages.link_open_control_click]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status on Linux/Windows, modifier click required."
+
+[messages.hint_action_open_url]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint legend action for a URL, typed label without Shift."
+
+[messages.hint_action_open_path]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint legend alternate action for a resolvable local path."
+
+[messages.hint_action_copy]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint legend action for a copied target, including remote paths."
+
+[messages.hint_action_preview]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint legend action for inline cards or preview link mode."
+
+[messages.hint_legend]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint-mode instructions; plain and alternate list the actual actions offered by the visible targets."
+args = [{ name = "plain", type = "str" }, { name = "alternate", type = "str" }]
+
+[messages.hint_legend_plain]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint-mode instructions when Shift does not change the action."
+args = [{ name = "plain", type = "str" }]

@@ -826,6 +826,7 @@ impl Renderer {
             tab_buffers: Vec::new(),
             tab_hint_buffers: Vec::new(),
             hint_buffers: Vec::new(),
+            pane_status_buffers: Vec::new(),
             context_menu_buffers: Vec::new(),
             context_menu_texts: Vec::new(),
             context_menu_match_keys: Vec::new(),

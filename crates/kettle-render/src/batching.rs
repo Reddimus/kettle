@@ -97,6 +97,7 @@ pub(crate) fn completion_text_damage_key(
 pub(crate) fn text_overlay_requires_continuous_prepare(overlay: &Overlay) -> bool {
     overlay.search.is_some()
         || !overlay.hint_labels.is_empty()
+        || !overlay.pane_statuses.is_empty()
         || overlay.ime_preedit.is_some()
         || overlay.ssh_query.is_some()
         || overlay.palette_query.is_some()

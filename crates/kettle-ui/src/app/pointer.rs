@@ -1758,8 +1758,7 @@ impl App {
             .or_else(|| self.lane_cursor_icon(ws))
             .or_else(|| self.split_seam_hover_icon(ws))
             .unwrap_or_else(|| {
-                let want_pointer = (ws.mods.control_key() || ws.mods.super_key())
-                    && self.link_at_cursor(ws).is_some();
+                let want_pointer = self.hovered_link_at_cursor(ws).is_some();
                 if want_pointer {
                     CursorIcon::Pointer
                 } else {
@@ -1827,6 +1826,21 @@ impl App {
     fn cursor_cell(&self, ws: &WindowState) -> Option<(usize, usize)> {
         let rect = self.focused_terminal(ws, self.area(ws))?;
         Some(self.cursor_cell_in_rect(ws, rect))
+    }
+
+    pub(super) fn hovered_link_at_cursor<'a>(
+        &self,
+        ws: &'a WindowState,
+    ) -> Option<&'a kettle_core::Link> {
+        if self.pointer_modal_open(ws) {
+            return None;
+        }
+        link_under_native_pointer(
+            ws,
+            self.focused_terminal(ws, self.area(ws))?,
+            Self::cell_size(ws).unwrap_or((8.0, 16.0)),
+            (self.cfg.padding_x, self.cfg.padding_y),
+        )
     }
 
     pub(super) fn link_at_cursor<'a>(&self, ws: &'a WindowState) -> Option<&'a kettle_core::Link> {

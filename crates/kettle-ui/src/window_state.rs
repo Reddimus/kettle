@@ -987,6 +987,7 @@ pub(crate) struct WindowState {
     /// app.rs (`scan_links` re-scans only on output, resize, scroll, focus or
     /// cwd).
     pub(crate) links_scan_key: Option<LinksScanKey>,
+    pub(crate) link_hover_key: Option<LinksScanKey>,
     /// The buttons whose press a pane's program received, each with that
     /// pane, until its one release goes there too.
     pub(crate) held_buttons: crate::held_buttons::HeldButtons,
@@ -1557,6 +1558,7 @@ impl WindowState {
             scrollbar_hover: None,
             dragging_split: None,
             links_scan_key: None,
+            link_hover_key: None,
             held_buttons: crate::held_buttons::HeldButtons::default(),
             last_mouse_cell: None,
             links: Vec::new(),

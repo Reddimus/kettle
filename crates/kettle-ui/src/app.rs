@@ -1180,3 +1180,6 @@ mod native_menu;
 
 #[cfg(test)]
 mod quick_terminal_regression_tests;
+
+#[cfg(test)]
+mod link_hint_ux_tests;

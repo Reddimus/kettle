@@ -738,6 +738,17 @@ impl App {
             .focused_terminal(ws, self.area(ws))
             .is_some_and(|(rx, ry, rw, rh)| px >= rx && px < rx + rw && py >= ry && py < ry + rh);
         let mut items = Vec::new();
+        let has_hintable_link = !ws.links.is_empty()
+            || self.collect_hints(ws, false).iter().any(|target| {
+                matches!(
+                    target.what,
+                    HintWhat::Text {
+                        kind: kettle_core::hints::Kind::Url | kettle_core::hints::Kind::Path,
+                        ..
+                    }
+                )
+            });
+        append_link_hints_menu_item(&mut items, in_focused_pane && has_hintable_link, tr);
         if in_focused_pane && let Some(url) = self.link_at_cursor(ws).map(|l| l.uri.clone()) {
             items.extend(link_menu_rows(&url, links_pane(ws), tr));
         }
@@ -3083,7 +3094,7 @@ pub(super) fn grouped_terminal_menu(
             | ContextMenuItem::Preview { .. } => None,
             ContextMenuItem::Item { action, .. } | ContextMenuItem::DynamicItem { action, .. } => {
                 match action {
-                    Action::Copy | Action::Paste | Action::SelectAll => None,
+                    Action::Copy | Action::Paste | Action::SelectAll | Action::HintMode => None,
                     Action::SplitAuto
                     | Action::SplitRight
                     | Action::SplitLeft
@@ -3376,4 +3387,18 @@ fn context_menu_row_at(
             .map(|item| matches!(item, ContextMenuItem::Separator)),
     )
     .map(|index| index + start)
+}
+
+pub(super) fn append_link_hints_menu_item(
+    items: &mut Vec<ContextMenuItem>,
+    has_links: bool,
+    tr: kettle_i18n::Translator,
+) {
+    if has_links {
+        items.push(ContextMenuItem::Item {
+            label: tr.text(kettle_i18n::Text::PaletteHintMode),
+            action: Action::HintMode,
+            enabled: true,
+        });
+    }
 }

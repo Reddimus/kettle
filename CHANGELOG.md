@@ -24,6 +24,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   `osc52-notify = false`); blocked OSC 52 reads and writes explain the policy
   once per pane. The README now documents paste choices and accessibility.
 
+- Links now highlight under the pointer and show their destination and opening
+  gesture in a status pill. Quick-select hints include on-screen help, shorter
+  labels that use nearby blank space, and entries in the Edit and terminal
+  menus. Progress counters such as `158/158` no longer look like file links.
+
 - A quick terminal: `kettle quick-terminal`, a palette/menu/keybind action, or
   `quick-terminal-hotkey` (registered natively on macOS and X11) slides a
   dedicated window in from a screen edge. Its tabs and splits persist while

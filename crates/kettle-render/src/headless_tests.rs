@@ -3634,6 +3634,8 @@ fn inactive_color_emoji_dim(mode: TextRendererMode) {
     cfg.unfocused_split_opacity = 1.0;
     cfg.inactive_color_offset = 1.0;
     cfg.inactive_bg_color_offset = 1.0;
+    // Compare text dimming only: unfocused panes otherwise draw a hollow cursor.
+    cfg.cursor_unfocused_style = kettle_config::CursorUnfocusedStyle::Hidden;
     let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 400, 160).unwrap() else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
@@ -4179,7 +4181,7 @@ fn emoji_ink_is_fitted_without_changing_grid_widths_or_baselines() {
 }
 
 #[test]
-fn grapheme_vs15_after_vs16_prefers_a_monochrome_face_without_shrinking() {
+fn grapheme_vs15_prefers_a_monochrome_face() {
     use image::GenericImageView;
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
@@ -4192,14 +4194,17 @@ fn grapheme_vs15_after_vs16_prefers_a_monochrome_face_without_shrinking() {
     };
     cfg.theme.foreground = Rgb::new(255, 255, 255);
     cfg.theme.background = Rgb::new(0, 0, 0);
-    for sequence in [
-        "\u{2764}\u{fe0f}\u{fe0e}",
-        "\u{231a}\u{fe0e}",
-        "\u{1f600}\u{fe0e}",
+    // VS15 after VS16 keeps the widened cluster; VS15 directly after a wide
+    // variation base narrows it to one cell, as wcwidth measures it. Either way
+    // the text presentation draws with a monochrome face.
+    for (sequence, after_x) in [
+        ("\u{2764}\u{fe0f}\u{fe0e}", 3),
+        ("\u{231a}\u{fe0e}", 2),
+        ("\u{1f600}\u{fe0e}", 3),
     ] {
         let text = format!("\x1b[?2027h{sequence}X\x1b[?25l");
         let snap = snapshot_of(20, 4, text.as_bytes());
-        assert_eq!(snap.cursor.point.column.0, 3);
+        assert_eq!(snap.cursor.point.column.0, after_x, "{sequence:?}");
         let frame = capture(
             &mut renderer,
             &cfg,
@@ -4385,11 +4390,13 @@ fn grapheme_prefixes_keep_the_first_spacing_glyph_visible_in_its_cell() {
     };
     cfg.theme.foreground = Rgb::new(255, 255, 255);
     cfg.theme.background = Rgb::new(0, 0, 0);
-    for (prefix, base) in [
-        ("\u{600}", "A"),
-        ("\u{605}", "A"),
-        ("\u{70f}", "A"),
-        ("\u{94d}", "\u{915}"),
+    // A prepended concatenation mark takes its own cell (wcwidth), so its
+    // cluster is two cells wide; a leading virama adds nothing.
+    for (prefix, base, after_x) in [
+        ("\u{600}", "A", 3),
+        ("\u{605}", "A", 3),
+        ("\u{70f}", "A", 3),
+        ("\u{94d}", "\u{915}", 2),
     ] {
         let reference = snapshot_of(20, 4, format!("\x1b[?2027h{base}X\x1b[?25l").as_bytes());
         let expected = capture(
@@ -4409,7 +4416,7 @@ fn grapheme_prefixes_keep_the_first_spacing_glyph_visible_in_its_cell() {
             4,
             format!("\x1b[?2027h{prefix}{base}X\x1b[?25l").as_bytes(),
         );
-        assert_eq!(snap.cursor.point.column.0, 2);
+        assert_eq!(snap.cursor.point.column.0, after_x, "{prefix:?}");
         let actual = capture(
             &mut renderer,
             &cfg,
@@ -5100,6 +5107,7 @@ fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
                     row: 0,
                     width: 20,
                     hover: false,
+                    explicit: false,
                 }],
                 ..Overlay::default()
             };
@@ -5129,12 +5137,28 @@ fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
                 Some(GColor::rgb(expected.r, expected.g, expected.b))
             );
             assert!(color::contrast_ratio(expected, fill) >= 4.5);
-            // Link underlines and SGR decorations must survive the highlight fill.
-            let pixel = frame.get_pixel(
-                (cfg.padding_x + renderer.cell_w * 0.5) as u32,
-                (cfg.padding_y + renderer.cell_h - 1.0).floor() as u32,
-            );
-            let ink = Rgb::new(pixel[0], pixel[1], pixel[2]);
+            // Link underlines (the focused pane's overlay) and SGR decorations
+            // must survive the highlight fill: the strongest decoration ink in
+            // the lower half of the first cell reaches 4.5:1 against it.
+            let x = (cfg.padding_x + renderer.cell_w * 0.5) as u32;
+            let rows = (cfg.padding_y + renderer.cell_h * 0.5).ceil() as u32
+                ..(cfg.padding_y + renderer.cell_h).floor() as u32;
+            let rows: Vec<u32> = if split_focused {
+                // The link underline owns the bottom pixel row.
+                vec![(cfg.padding_y + renderer.cell_h - 1.0).floor() as u32]
+            } else {
+                rows.collect()
+            };
+            let ink = rows
+                .into_iter()
+                .map(|y| {
+                    let pixel = frame.get_pixel(x, y);
+                    Rgb::new(pixel[0], pixel[1], pixel[2])
+                })
+                .max_by(|a, b| {
+                    color::contrast_ratio(*a, fill).total_cmp(&color::contrast_ratio(*b, fill))
+                })
+                .expect("cell rows");
             assert!(
                 color::contrast_ratio(ink, fill) >= 4.5,
                 "{window_focused}/{split_focused}: {ink:?} on {fill:?}"

@@ -267,6 +267,28 @@ See [configuration](docs/CONFIG.md) and [getting started](docs/GETTING-STARTED.m
 - Signed self-updates
 - An optional local control API and MCP server, both off by default
 
+## Links and quick-select hints
+
+Hover a link to highlight it and see its destination and opening gesture.
+Detected URLs and paths have a thin, dim underline; explicit OSC 8 links have
+a dotted underline. The hovered link uses a solid accent underline and a hand
+cursor. The destination pill moves away from the link and disappears when you
+leave, scroll, type, or change focus. `link-single-click` changes its gesture
+from Cmd-click (macOS) or Ctrl-click to a plain click.
+
+Press **Ctrl+Shift+H**, choose **Quick-select hints** in the command palette or
+macOS Edit menu, or use that entry in the terminal context menu when links or
+paths are visible. Type a label to open a URL or copy other text. Hold Shift
+while completing a label to copy a URL or open a local path; inline cards open
+their preview. The legend shows the available actions and **Esc** cancels.
+Labels use the shortest prefix-free codes, with easy keys nearest the bottom.
+They sit in blank cells before matches when possible. At column zero they use
+blank cells after the match when available; otherwise they overlay its start.
+Paths need path context: progress counters such as `158/158`, ratios such as
+`a/b` and slash-joined words such as `read/write` stay plain text; a relative
+path is underlined when its last part has an extension or it has three parts. Remote or unresolved paths are copied; see
+[configuration and hint actions](docs/CONFIG.md).
+
 ## Privacy
 
 Pasting media sends a quoted local path to the pane, never the file. The

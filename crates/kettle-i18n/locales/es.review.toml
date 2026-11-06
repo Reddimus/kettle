@@ -44,6 +44,16 @@ settings_value_hidden_cursor = "draft"
 settings_value_unchanged_cursor = "draft"
 settings_field_copy_trim_whitespace = "draft"
 settings_description_field_copy_trim_whitespace = "draft"
+
+link_open_click = "draft"
+link_open_command_click = "draft"
+link_open_control_click = "draft"
+hint_action_open_url = "draft"
+hint_action_open_path = "draft"
+hint_action_copy = "draft"
+hint_action_preview = "draft"
+hint_legend = "draft"
+hint_legend_plain = "draft"
 settings_field_restore_session = "draft"
 settings_description_field_restore_session = "draft"
 settings_description_field_grapheme_clustering = "draft"
@@ -899,6 +909,12 @@ keys = [
     "confirm_paste_escapes",
     "confirm_paste_controls",
     "osc52_copied",
+
+    "hint_legend",
+    "hint_legend_plain",
+    "link_open_click",
+    "link_open_command_click",
+    "link_open_control_click",
     "confirm_paste_heading",
     "confirm_paste_body",
     "confirm_paste_one_line",

@@ -699,21 +699,51 @@ impl App {
                 base.line.0
             })
             .collect();
-        let mut found = hint_targets_with_cards(hints::detect_rows(g, &lines, cols), &cards);
+        let links =
+            kettle_core::links::links_with_cwd(&t, p.term.current_dir_or_native().as_deref());
+        let spans = hint_spans_with_links(hints::detect_rows(g, &lines, cols), &links);
+        let ends: std::collections::HashMap<_, _> = spans
+            .iter()
+            .map(|span| ((span.row, span.start), span.end))
+            .collect();
+        let mut found = hint_targets_with_cards(spans, &cards);
         // Quick select for previews labels only what a lane can show.
         if preview {
             found.retain(|(_, _, what)| hint_previews(what));
         }
+        found.sort_by_key(|(row, col, _)| (std::cmp::Reverse(*row), *col));
         let labels = hints::labels(found.len(), hints::ALPHABET);
+        let mut occupied = std::collections::HashSet::new();
         found
             .into_iter()
             .zip(labels)
-            .map(|((row, col, what), label)| HintTarget {
-                row,
-                col,
-                label,
-                pane,
-                what,
+            .map(|((row, col, what), label)| {
+                let end = ends.get(&(row, col)).copied().unwrap_or(col);
+                let label_col = if matches!(what, HintWhat::Card(_)) {
+                    col
+                } else {
+                    hint_label_column(col, end, label.len(), cols, |column| {
+                        let cell = &g[Point::new(Line(lines[row]), Column(column))];
+                        cell.c == ' '
+                            && !occupied.contains(&(row, column))
+                            && !cards.iter().any(|((top, left), (bottom, right), _)| {
+                                (*top..=*bottom).contains(&row)
+                                    && (*left..=*right).contains(&column)
+                            })
+                            && cell.hyperlink().is_none()
+                            && !cell.flags.contains(kettle_core::Flags::WIDE_CHAR_SPACER)
+                    })
+                };
+                for column in label_col..label_col.saturating_add(label.len()).min(cols) {
+                    occupied.insert((row, column));
+                }
+                HintTarget {
+                    row,
+                    col: label_col,
+                    label,
+                    pane,
+                    what,
+                }
             })
             .collect()
     }

@@ -896,6 +896,16 @@ confirm_paste_without_controls = "Paste Without Controls"
 osc52_denied_read = "A program was blocked from reading the clipboard by the osc52 policy. Clipboard reads require osc52 = paste or both."
 osc52_denied_write = "A program was blocked from copying to the clipboard by the osc52 policy. Clipboard writes require osc52 = copy or both."
 
+link_open_click = "Click to open"
+link_open_command_click = "⌘-click to open"
+link_open_control_click = "Ctrl+click to open"
+hint_action_open_url = "open URL"
+hint_action_open_path = "open local path"
+hint_action_copy = "copy text"
+hint_action_preview = "preview"
+hint_legend = "Label: {plain} · Shift+label: {alternate} · Esc to cancel"
+hint_legend_plain = "Label: {plain} · Esc to cancel"
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"

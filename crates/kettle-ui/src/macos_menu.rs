@@ -88,7 +88,8 @@ impl Context {
             | Action::ClosePane
             | Action::SplitRight
             | Action::SplitDown
-            | Action::StartSearch => self.pane,
+            | Action::StartSearch
+            | Action::HintMode => self.pane,
             _ => true,
         }
     }
@@ -129,7 +130,11 @@ pub(crate) fn menu_model_with_profiles(
         .map(|(trigger, action)| (*trigger, action.clone()))
         .collect();
     let item = |text, action: Action| {
-        let shortcut = command_shortcut(&command_bindings, &action);
+        let shortcut = command_shortcut(&command_bindings, &action).or_else(|| {
+            matches!(action, Action::HintMode)
+                .then(|| command_shortcut(bindings, &action))
+                .flatten()
+        });
         Row::Item {
             title: tr.text(text).to_string(),
             enabled: context.enables(&action),
@@ -223,6 +228,7 @@ pub(crate) fn menu_model_with_profiles(
                 item(T::MacosMenuSelectAll, Action::SelectAll),
                 Sep,
                 item(T::MacosMenuFind, Action::StartSearch),
+                item(T::PaletteHintMode, Action::HintMode),
                 Sep,
                 item(T::MacosMenuClear, Action::ClearHistory),
             ],

@@ -440,7 +440,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `log-strip-ansi` | bool | `false` | Strip ANSI escape sequences from the per-pane session log (`Action::ToggleSessionLog`) before writing. `true` → log is plain-text (CSI / OSC / single-char ESC all stripped); `false` → raw stream is preserved (`cat`-replayable in a terminal) |
 | `light-theme` / `dark-theme` | theme name | `""` (falls back to `theme`) | Themes swapped by `Action::ToggleLightDark`. Lookup is case insensitive; an empty side falls back to `theme` |
 | `search-case-sensitive` | enum | `smart` | `smart` ignores case until the query contains uppercase. `always` / `sensitive` forces matching case; `never` / `insensitive` always ignores it. `case-sensitive = true/false` remains accepted as an alias |
-| `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click) |
+| `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click). Hover shows the destination and the current opening gesture; the pill clears on pointer exit, scrolling, typing or focus loss |
 | `disable-mouse-paste` | bool | `false` | Block middle-click paste |
 | `paste-protection` | enum | `auto` | `auto` confirms text containing CR/LF, C0 controls other than TAB, DEL or C1 controls when any writable recipient has not enabled bracketed paste. `always` confirms every multi-line paste, including bracketed mode. `off` never confirms. The dialog reports line and control counts with a visible-control preview. It offers Paste, Paste as one line, Paste Without Controls (only when controls exist; removes whole escape sequences and controls while preserving TAB/CR/LF), and Cancel (focused initially). All modes remove embedded ESC bytes in bracketed paste. See [Pasting](../README.md#pasting) |
 | `clipboard-paste-protection` | bool | — | Retired legacy key; accepted and ignored. Use `paste-protection` for the current policy |
@@ -866,6 +866,15 @@ click outside the lane, a file drop, another menu or dialog opening, or the
 lane closing, collapsing or changing item gives the keyboard back; the
 pointer and the wheel work as ever elsewhere, and an input method stays off
 meanwhile. None has a default binding.
+
+Hint labels use the shortest prefix-free codes, with the easiest keys assigned
+from the bottom of the viewport. Blank cells before a match hold its label;
+at column zero blank cells after it are used when available. Without space the
+label overlays the match start. A translated legend explains the available
+plain-label and Shift-label actions and Esc cancellation. Explicit OSC 8 captions
+use their stored destination. Quick-select hints is also available in the
+macOS Edit menu, the palette (with its current binding), and the terminal context
+menu when a link or path is visible. This adds no configuration keys.
 
 **Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
 `quick_select`; labels the URLs, paths (a quoted or backticked path may hold

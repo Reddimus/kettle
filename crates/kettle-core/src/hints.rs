@@ -95,6 +95,57 @@ fn is_cidr(text: &str) -> bool {
         && prefix.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Require path context so progress counters and short ratios are ordinary text.
+/// Explicit roots are unambiguous; relative names need a filename extension,
+/// multiple directories, or a component with at least two letters.
+pub(crate) fn has_path_context(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if text.starts_with(['/', '\\'])
+        || text.starts_with("~/")
+        || text.starts_with("./")
+        || text.starts_with("../")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
+    {
+        return true;
+    }
+    let text = text.split(':').next().unwrap_or(text);
+    let parts: Vec<_> = text.split('/').collect();
+    let letters = |part: &str| part.chars().filter(|c| c.is_alphabetic()).count();
+    parts.iter().any(|part| letters(part) >= 2)
+        || (parts.len() >= 3 && parts.iter().any(|part| letters(part) > 0))
+        || parts.last().is_some_and(|name| {
+            name.rsplit_once('.')
+                .is_some_and(|(stem, ext)| !stem.is_empty() && ext.chars().any(char::is_alphabetic))
+        })
+}
+
+/// The stricter context for paths Kettle underlines on its own: besides
+/// [`has_path_context`], a relative name without an explicit root needs an
+/// extension on its last part or at least three parts, so slash-joined words
+/// in prose (`read/write`, `and/or`, `Save/restore`) are not drawn as links.
+/// Hint mode, an explicit request, keeps the looser rule.
+pub(crate) fn has_link_path_context(text: &str) -> bool {
+    if !has_path_context(text) {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    if text.starts_with(['/', '\\', '~', '.'])
+        || (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+    {
+        return true;
+    }
+    let text = text.split(':').next().unwrap_or(text);
+    let parts: Vec<_> = text.split('/').collect();
+    parts.len() >= 3
+        || parts.last().is_some_and(|name| {
+            name.rsplit_once('.')
+                .is_some_and(|(stem, ext)| !stem.is_empty() && ext.chars().any(char::is_alphabetic))
+        })
+}
+
 /// Whether a path may start right after `before`: the line's start, a space,
 /// an opening delimiter, `=` (`--out=dir/x`), or the separators that list,
 /// chain or redirect paths (`:` in `PATH=/a:/b`, `,`, `;`, `&`, `<`, `>`,
@@ -453,7 +504,10 @@ fn detect_line(
             let fragment = (cut.0 && m.start() == 0) || (cut.1 && m.end() == line.len());
             if trimmed.is_empty()
                 || fragment
-                || (*kind == Kind::Path && (is_cidr(trimmed) || !path_may_start_after(before)))
+                || (*kind == Kind::Path
+                    && (is_cidr(trimmed)
+                        || !has_path_context(trimmed)
+                        || !path_may_start_after(before)))
             {
                 continue;
             }
@@ -576,40 +630,114 @@ pub fn selection_at(grid: &Grid<Cell>, line: i32, col: usize) -> Option<(usize, 
 /// one comfortable keystroke.
 pub const ALPHABET: &str = "asdfghjklqwertyuiopzxcvbnm";
 
-/// `n` distinct fixed-width labels over `alphabet`, shortest width that
-/// fits, in lexicographic order (`a, b, …` then `aa, ab, …`). Stable, so a
-/// target's label doesn't jump around as you type to filter.
+/// Shortest prefix-free labels, keeping easy alphabet keys short. Expand the
+/// last shortest leaf first; no assigned label can consume another's prefix.
+/// Empty or unary alphabets cannot represent multiple prefix-free labels.
 pub fn labels(n: usize, alphabet: &str) -> Vec<String> {
-    let a: Vec<char> = alphabet.chars().collect();
-    if n == 0 || a.is_empty() {
+    let mut alphabet_chars = Vec::new();
+    for c in alphabet.chars() {
+        if !alphabet_chars.contains(&c) {
+            alphabet_chars.push(c);
+        }
+    }
+    let base = alphabet_chars.len();
+    if n == 0 || base == 0 || (base == 1 && n > 1) {
         return Vec::new();
     }
-    let base = a.len();
-    // A single-character alphabet can't make `n` distinct FIXED-width labels —
-    // `base^width` is always 1, so the width search below would loop forever.
-    // Fall back to distinct INCREASING-length labels (`a`, `aa`, `aaa`, …).
-    if base == 1 {
-        return (0..n).map(|i| a[0].to_string().repeat(i + 1)).collect();
+    if n <= base {
+        return alphabet_chars.iter().take(n).map(char::to_string).collect();
     }
-    let mut width = 1usize;
-    while base.checked_pow(width as u32).is_none_or(|cap| cap < n) {
+    let mut width = 1;
+    let mut capacity = base;
+    while let Some(next) = capacity.checked_mul(base).filter(|next| *next <= n) {
+        capacity = next;
         width += 1;
     }
-    (0..n)
-        .map(|mut i| {
-            let mut digits = vec![0usize; width];
-            for d in digits.iter_mut().rev() {
-                *d = i % base;
-                i /= base;
-            }
-            digits.into_iter().map(|d| a[d]).collect()
-        })
-        .collect()
+    let expanded = n.saturating_sub(capacity).div_ceil(base - 1);
+    let short = capacity - expanded;
+    let mut labels = Vec::with_capacity(n);
+    for mut index in 0..capacity {
+        let ordinal = index;
+        let mut digits = vec![alphabet_chars[0]; width];
+        for digit in digits.iter_mut().rev() {
+            *digit = alphabet_chars[index % base];
+            index /= base;
+        }
+        let prefix: String = digits.into_iter().collect();
+        if ordinal < short {
+            labels.push(prefix);
+        } else {
+            let remaining_prefixes = capacity - ordinal - 1;
+            let children = base.min(n - labels.len() - remaining_prefixes * base);
+            labels.extend(
+                alphabet_chars
+                    .iter()
+                    .take(children)
+                    .map(|c| format!("{prefix}{c}")),
+            );
+        }
+    }
+    labels
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_context_rejects_ratios_and_keeps_real_paths() {
+        for text in ["158/158", "1/2", "N/N", "a/b", "1.2/3.4"] {
+            assert!(
+                detect(&[text]).iter().all(|h| h.kind != Kind::Path),
+                "{text}"
+            );
+        }
+        for text in [
+            "src/main.rs",
+            "./build.sh",
+            "~/project",
+            "/usr/bin/env",
+            "crates/a/b.rs:12:4",
+        ] {
+            assert!(
+                detect(&[text]).iter().any(|h| h.kind == Kind::Path),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn labels_keep_short_keys_and_are_prefix_free() {
+        let labels = labels(28, ALPHABET);
+        assert_eq!(labels.iter().filter(|label| label.len() == 1).count(), 25);
+        for (i, label) in labels.iter().enumerate() {
+            for (j, other) in labels.iter().enumerate() {
+                assert!(
+                    i == j || !other.starts_with(label),
+                    "{label} prefixes {other}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn label_codes_are_prefix_free_at_each_width_boundary() {
+        for n in [1, 25, 26, 27, 28, 675, 676, 677, 900] {
+            let codes = labels(n, ALPHABET);
+            assert_eq!(codes.len(), n);
+            for (i, code) in codes.iter().enumerate() {
+                assert!(
+                    codes
+                        .iter()
+                        .enumerate()
+                        .all(|(j, other)| i == j || !other.starts_with(code))
+                );
+            }
+            let shortest = codes.iter().map(String::len).min().unwrap();
+            assert!(codes.iter().all(|code| code.len() <= shortest + 1));
+        }
+        assert_eq!(labels(3, "aabc"), ["a", "b", "c"]);
+    }
 
     #[test]
     fn trailing_dot_components_remain_in_path_hints() {
@@ -1275,32 +1403,19 @@ mod tests {
         // With the real home-row alphabet the first labels are a, s, d…
         assert_eq!(labels(3, ALPHABET), vec!["a", "s", "d"]);
 
-        // Just past the alphabet → all uniform 2-char, distinct.
+        // Just past the alphabet keeps easy single keys; only the tail grows.
         let n = abc.len() + 2;
         let many = labels(n, abc);
-        assert!(many.iter().all(|l| l.len() == 2), "uniform width");
-        assert_eq!(many[0], "aa");
-        assert_eq!(many[1], "ab");
+        assert_eq!(many.iter().filter(|l| l.len() == 1).count(), 25);
+        assert_eq!(many[0], "a");
+        assert_eq!(many[1], "b");
         let uniq: std::collections::HashSet<_> = many.iter().collect();
         assert_eq!(uniq.len(), n, "all labels distinct");
         // Deterministic for a given n (labels are assigned once per scan).
         assert_eq!(labels(n, abc), labels(n, abc));
         // Degenerate alphabet → no labels (caller falls back).
         assert!(labels(5, "").is_empty());
-        // A single-character alphabet must NOT hang (the
-        // fixed-width search can't represent n>1) — fall back to distinct
-        // increasing-length labels.
         assert_eq!(labels(1, "x"), vec!["x"]);
-        assert_eq!(labels(3, "x"), vec!["x", "xx", "xxx"]);
-        let single = labels(50, "x");
-        assert_eq!(single.len(), 50);
-        assert_eq!(
-            single
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            50,
-            "all distinct, no hang"
-        );
+        assert!(labels(3, "x").is_empty());
     }
 }

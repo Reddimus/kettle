@@ -171,8 +171,13 @@ fn a_settled_card_under_the_pointer_shows_it_takes_a_click() {
         "WindowEvent::MouseInput { state: ElementState::Released, button, .. } => {",
         "WindowEvent::MouseWheel { delta, phase, .. } => {",
     ] {
+        let dismissal = if handler.contains("MouseWheel") {
+            "dismiss_link_hover(ws); "
+        } else {
+            ""
+        };
         assert!(
-            source.contains(&format!("{handler} ws.resume_native_pointer();")),
+            source.contains(&format!("{handler} {dismissal}ws.resume_native_pointer();")),
             "{handler}"
         );
     }

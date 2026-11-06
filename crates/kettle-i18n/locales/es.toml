@@ -897,6 +897,16 @@ confirm_paste_without_controls = "Pegar sin caracteres de control"
 osc52_denied_read = "La política osc52 bloqueó la lectura del portapapeles por un programa. Las lecturas requieren osc52 = paste o both."
 osc52_denied_write = "La política osc52 bloqueó la copia al portapapeles por un programa. Las copias requieren osc52 = copy o both."
 
+link_open_click = "Hacer clic para abrir"
+link_open_command_click = "⌘-clic para abrir"
+link_open_control_click = "Ctrl+clic para abrir"
+hint_action_open_url = "abrir URL"
+hint_action_open_path = "abrir ruta local"
+hint_action_copy = "copiar texto"
+hint_action_preview = "ver vista previa"
+hint_legend = "Etiqueta: {plain} · Shift+etiqueta: {alternate} · Esc para cancelar"
+hint_legend_plain = "Etiqueta: {plain} · Esc para cancelar"
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"

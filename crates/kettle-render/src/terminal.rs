@@ -97,6 +97,39 @@ pub struct LinkRect {
     pub row: usize,
     pub width: usize,
     pub hover: bool,
+    pub explicit: bool,
+}
+
+/// Detected links rest as a dim thin line; OSC 8 rests dotted. Hover wins
+/// over either source and uses the accent at full opacity.
+pub(crate) fn link_decoration(link: &LinkRect) -> (bool, f32, f32) {
+    if link.hover {
+        (false, 1.5, 1.0)
+    } else {
+        (link.explicit, 1.0, 0.55)
+    }
+}
+
+#[cfg(test)]
+mod link_decoration_tests {
+    use super::*;
+    #[test]
+    fn detected_explicit_and_hovered_links_have_distinct_decorations() {
+        let mut link = LinkRect {
+            col: 0,
+            row: 0,
+            width: 8,
+            hover: false,
+            explicit: false,
+        };
+        assert_eq!(link_decoration(&link), (false, 1.0, 0.55));
+        link.explicit = true;
+        assert_eq!(link_decoration(&link), (true, 1.0, 0.55));
+        link.hover = true;
+        assert_eq!(link_decoration(&link), (false, 1.5, 1.0));
+        link.explicit = false;
+        assert_eq!(link_decoration(&link), (false, 1.5, 1.0));
+    }
 }
 
 pub(crate) fn unfocused_cursor_shape(
@@ -851,8 +884,11 @@ impl Renderer {
                 && link.row as i32 == vrow
                 && col < link.col.saturating_add(link.width)
             {
+                // Detected links rest thin and dim, OSC 8 links rest dotted, and
+                // the hovered link is a solid accent line (`link_decoration`).
+                let (dotted, thickness, rest_alpha) = link_decoration(link);
                 let ink = if link.hover {
-                    theme.palette[6]
+                    self.ui_accent(cfg, theme)
                 } else {
                     theme.palette[4]
                 };
@@ -878,14 +914,29 @@ impl Renderer {
                 } else {
                     &mut highlight_decorations
                 };
-                target.push(rect(
-                    ox + col as f32 * cw,
-                    oy + (vrow + 1) as f32 * ch - 1.5,
-                    cw,
-                    1.5,
-                    ink,
-                    1.0,
-                ));
+                // Over a highlight the line keeps full strength and the full
+                // 1.5 px weight: its ink was resolved against the fill above,
+                // and a thinner line would blend into it.
+                let (thickness, alpha) = if matches!(highlight, CellHighlight::None) {
+                    (thickness, rest_alpha)
+                } else {
+                    (thickness.max(1.5), 1.0)
+                };
+                let cell_x = ox + col as f32 * cw;
+                let y = oy + (vrow + 1) as f32 * ch - thickness;
+                if dotted {
+                    // Dots keep one phase across the link's cells.
+                    let step = (3.0 * self.scale).max(1.0);
+                    let link_x = ox + link.col as f32 * cw;
+                    let mut x = link_x + ((cell_x - link_x) / step).ceil() * step;
+                    while x < cell_x + cw {
+                        let width = self.scale.min(cell_x + cw - x);
+                        target.push(rect(x, y, width, thickness, ink, alpha));
+                        x += step;
+                    }
+                } else {
+                    target.push(rect(cell_x, y, cw, thickness, ink, alpha));
+                }
             }
             // Combining (zero-width) marks layered on this cell — a decomposed
             // accent (`e`+U+0301), an emoji ZWJ sequence, a variation selector.

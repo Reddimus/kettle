@@ -222,6 +222,7 @@ impl App {
                 self.update_dock_target(cursor, torn_hwnd, None);
             }
             WindowEvent::CursorLeft { .. } => {
+                dismiss_link_hover(ws);
                 if let Some(dialog) = ws.confirm_dialog.as_mut() {
                     dialog.armed_press = None;
                 }
@@ -269,6 +270,7 @@ impl App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                ws.link_hover_key = Some(current_links_scan_key(ws));
                 ws.cursor = position;
                 ws.native_pointer = Some(position);
                 ws.selection_autoscroll_edge = 0;
@@ -1229,6 +1231,7 @@ impl App {
                 }
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
+                dismiss_link_hover(ws);
                 ws.resume_native_pointer();
                 // A gesture ending (macOS momentum scroll, and any backend that
                 // reports phases) drops leftover sub-detent residue so a partial
@@ -1303,6 +1306,7 @@ impl App {
                 }
             }
             WindowEvent::Focused(f) => {
+                dismiss_link_hover(ws);
                 ws.window_focused = f;
                 ws.os_focus_known = true;
                 if f {
@@ -1483,6 +1487,9 @@ impl App {
                     winit::event::Ime::Commit(_) => true,
                     _ => false,
                 };
+                if typing {
+                    dismiss_link_hover(ws);
+                }
                 if typing && ws.tab_focus.take().is_some() {
                     ws.accessibility_pending = true;
                 }
@@ -1531,6 +1538,9 @@ impl App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if key_dismisses_link_hover(event.state, &event.logical_key, event.physical_key) {
+                    dismiss_link_hover(ws);
+                }
                 // A key press returns focus from a card that assistive
                 // technology focused to the pane, where the key goes.
                 if event.state == ElementState::Pressed && ws.tab_focus.take().is_some() {

@@ -1501,6 +1501,26 @@ impl App {
             "pane": pane, "message": toast.message, "rect": rect_json(toast.geometry.rect),
             "restart": rect_json(toast.geometry.details), "close": rect_json(toast.geometry.close),
         })).collect::<Vec<_>>();
+        let pane_statuses = diagnostic_overlay
+            .pane_statuses
+            .iter()
+            .map(|status| {
+                serde_json::json!({
+                    "kind": if status.target.is_some() { "link_hover" } else { "hint_legend" },
+                    "rect": rect_json(status.rect),
+                })
+            })
+            .collect::<Vec<_>>();
+        let hint_labels = diagnostic_overlay
+            .hint_labels
+            .iter()
+            .zip(&diagnostic_overlay.hint_bounds)
+            .map(|(hint, rect)| {
+                serde_json::json!({
+                    "label": hint.label, "rect": rect_json(*rect), "dim": hint.dim,
+                })
+            })
+            .collect::<Vec<_>>();
         let mut geometry = serde_json::json!({
                 "window": target.seq,
                 "window_focused": target.window_focused,
@@ -1625,6 +1645,8 @@ impl App {
                 // (macOS). Timing, geometry and counts only.
                 "cursor_blink": self.cursor_blink_diagnostics(target),
         });
+        geometry["pane_statuses"] = serde_json::json!(pane_statuses);
+        geometry["hint_labels"] = serde_json::json!(hint_labels);
         geometry["notices"] = notices.into();
         geometry["picker"] = picker.into();
         geometry["text_field"] = diagnostic_overlay

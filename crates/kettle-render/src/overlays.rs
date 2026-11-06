@@ -14,6 +14,25 @@ pub struct HintLabel {
     pub dim: bool,
 }
 
+/// Clipped chip bounds used by painting, AccessKit and control diagnostics.
+pub fn hint_label_rect(
+    hint: &HintLabel,
+    pane: Rect4,
+    cell: (f32, f32),
+    padding: (f32, f32),
+) -> Rect4 {
+    let origin = crate::pane_grid_origin(pane, padding);
+    let (cw, ch) = cell;
+    let x = origin.0 + hint.col as f32 * cw;
+    let y = origin.1 + hint.row as f32 * ch;
+    (
+        x.max(pane.0),
+        y.max(pane.1),
+        (hint.label.chars().count().max(1) as f32 * cw).min((pane.0 + pane.2 - x).max(0.0)),
+        ch.min((pane.1 + pane.3 - y).max(0.0)),
+    )
+}
+
 /// One row of the right-click context menu. Action labels are owned
 /// `String` so the UI can build them on-demand (e.g. conditionally
 /// enable Copy based on whether a selection exists); the renderer
@@ -266,6 +285,9 @@ pub struct Overlay {
     pub links: Vec<LinkRect>,
     /// Quick-select hint labels (drawn over the focused pane).
     pub hint_labels: Vec<HintLabel>,
+    /// Painted label bounds in surface pixels, supplied by the UI projection.
+    pub hint_bounds: Vec<Rect4>,
+    pub pane_statuses: Vec<crate::PaneStatus>,
     /// Input-method preedit text drawn at the focused terminal cursor.
     pub ime_preedit: Option<ImePreedit>,
     /// Shell completion card shown above or below the focused pane's command.

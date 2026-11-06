@@ -164,7 +164,12 @@ fn every_spanish_message_has_a_review_status() {
                 // These visible notice labels also name live regions and buttons.
                 || matches!(
                     key.as_str(),
-                    "process_exited"
+                    "hint_legend"
+                        | "hint_legend_plain"
+                        | "link_open_click"
+                        | "link_open_command_click"
+                        | "link_open_control_click"
+                        | "process_exited"
                         | "process_exit_pending"
                         | "process_restart"
                         | "process_close"

@@ -299,7 +299,7 @@ update toast, the screen-reader names, Kettle's desktop notifications, the
 macOS Dock menu and the macOS menu bar are on it. The menu bar is Kettle's own
 (`macos_menu`): a pure, portable model defines the translated Kettle, Shell,
 Edit, View and Window menus, actions, separators, enabled state and live Cmd
-shortcut hints. AppKit installation replaces winit's startup menu on `resumed`
+shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
 and reconciles it after focused-window dispatch and config reload, registering
 Services and the Windows menu each time. Menu text follows the configured
 language on reload; other UI surfaces still require a restart. The root NSMenu
@@ -4890,3 +4890,16 @@ canonicalizes shifted US punctuation to base keys plus Shift before persistence
 and native registration.
 Native callbacks only enqueue an event-loop toggle. Wayland and Windows use
 desktop shortcuts invoking the CLI.
+
+
+Link hover and hint chrome use `kettle-render::PaneStatus` projections from the
+focused terminal rectangle. `link_status_layout` shares destination elision and
+avoidance bounds across painting, AccessKit and `ui_geometry`; hint chips share
+`hint_label_rect`. The legend wraps and moves clear of bottom-row chips when
+space permits. All are passive overlays, so they reserve no terminal cells and
+do not change pointer grid mapping or terminal IME placement. A hover records
+`LinksScanKey` at native pointer movement and becomes invalid on viewport or
+focus changes. Typing, wheel input, pointer exit and focus events explicitly
+dismiss it. Modifier presses preserve it so the advertised opening gesture
+remains visible. Hint actions and their legend share `hint_action`; OSC 8
+captions use the URI rather than their displayed text.

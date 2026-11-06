@@ -111,3 +111,130 @@ pub(super) fn hint_previews(what: &HintWhat) -> bool {
         _ => false,
     }
 }
+
+/// Prefer enough blank cells before a match; at the left edge use blank
+/// cells after it if possible. Otherwise retain the overlay fallback.
+pub(super) fn hint_label_column(
+    start: usize,
+    end: usize,
+    width: usize,
+    columns: usize,
+    blank: impl Fn(usize) -> bool,
+) -> usize {
+    if start >= width && (start - width..start).all(&blank) {
+        start - width
+    } else if start == 0
+        && end.saturating_add(width) < columns
+        && (end + 1..=end + width).all(blank)
+    {
+        end + 1
+    } else {
+        start
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum HintLegendAction {
+    OpenUrl,
+    OpenPath,
+    Copy,
+    Preview,
+}
+
+pub(super) fn hint_legend_text(
+    tr: &kettle_i18n::Translator,
+    plain: &[HintLegendAction],
+    alternate: &[HintLegendAction],
+) -> String {
+    use kettle_i18n::Text as T;
+    let words = |actions: &[HintLegendAction]| {
+        actions
+            .iter()
+            .map(|action| {
+                tr.text(match action {
+                    HintLegendAction::OpenUrl => T::HintActionOpenUrl,
+                    HintLegendAction::OpenPath => T::HintActionOpenPath,
+                    HintLegendAction::Copy => T::HintActionCopy,
+                    HintLegendAction::Preview => T::HintActionPreview,
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(" / ")
+    };
+    if plain == alternate {
+        tr.hint_legend_plain(&words(plain))
+    } else {
+        tr.hint_legend(&words(plain), &words(alternate))
+    }
+}
+
+impl App {
+    pub(super) fn hint_legend(&self, ws: &WindowState, targets: &[HintTarget]) -> String {
+        let mut plain = Vec::new();
+        let mut alternate = Vec::new();
+        for target in targets {
+            for (shift, actions) in [(false, &mut plain), (true, &mut alternate)] {
+                let action = if ws.hint_preview || matches!(target.what, HintWhat::Card(_)) {
+                    HintLegendAction::Preview
+                } else if let HintWhat::Text {
+                    kind,
+                    text,
+                    bounded,
+                } = &target.what
+                {
+                    let pane = ws.mux.panes.get(&target.pane);
+                    let remote =
+                        matches!(pane.map(pane_path_origin), None | Some(PathOrigin::Remote));
+                    match hint_action(*kind, shift, remote || !bounded) {
+                        HintAction::OpenUrl => HintLegendAction::OpenUrl,
+                        HintAction::OpenPath
+                            if hint_path_url(
+                                text,
+                                pane.and_then(|p| p.term.current_dir_or_native()).as_deref(),
+                                crate::mux::home_dir_string().as_deref(),
+                            )
+                            .is_some() =>
+                        {
+                            HintLegendAction::OpenPath
+                        }
+                        _ => HintLegendAction::Copy,
+                    }
+                } else {
+                    continue;
+                };
+                if !actions.contains(&action) {
+                    actions.push(action);
+                }
+            }
+        }
+        hint_legend_text(&self.ui_text, &plain, &alternate)
+    }
+}
+
+/// OSC 8's destination takes precedence over the text it decorates, including
+/// a human-readable caption that would otherwise have no hint target.
+pub(super) fn hint_spans_with_links(
+    mut spans: Vec<kettle_core::hints::HintSpan>,
+    links: &[kettle_core::Link],
+) -> Vec<kettle_core::hints::HintSpan> {
+    let explicit: Vec<_> = links.iter().filter(|link| link.explicit).collect();
+    spans.retain(|span| {
+        !explicit.iter().any(|link| {
+            span.row == link.row && span.start <= link.end_col && span.end >= link.start_col
+        })
+    });
+    let mut groups = std::collections::HashSet::new();
+    for link in explicit {
+        if groups.insert(link.group) {
+            spans.push(kettle_core::hints::HintSpan {
+                row: link.row,
+                start: link.start_col,
+                end: link.end_col,
+                kind: kettle_core::hints::Kind::Url,
+                text: link.uri.clone(),
+                bounded: true,
+            });
+        }
+    }
+    spans
+}

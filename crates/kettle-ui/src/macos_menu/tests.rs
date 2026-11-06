@@ -81,6 +81,7 @@ fn complete_structure_in_english_and_spanish() {
                 "Select All",
                 "|",
                 "Find…",
+                "Quick-select hints",
                 "|",
                 "Clear Scrollback"
             ],
@@ -136,6 +137,7 @@ fn complete_structure_in_english_and_spanish() {
                 "Seleccionar todo",
                 "|",
                 "Buscar…",
+                "Selección rápida con etiquetas",
                 "|",
                 "Borrar el historial de la terminal"
             ],
@@ -205,6 +207,7 @@ fn complete_structure_in_english_and_spanish() {
             Action::Paste,
             Action::SelectAll,
             Action::StartSearch,
+            Action::HintMode,
             Action::ClearHistory,
             Action::CommandPalette,
             Action::OpenThemePicker,
@@ -430,4 +433,49 @@ fn native_items_retain_the_command_they_were_built_with() {
     assert!(native.contains("item.setRepresentedObject(Some(target_obj))"));
     assert!(native.contains("invocation.action.clone()"));
     assert!(!native.contains("sender.tag()"));
+}
+
+#[test]
+fn edit_menu_hints_follow_rebinding_and_require_a_pane() {
+    let trigger = Trigger::new(Mods::SUPER | Mods::SHIFT, Key::Char('u'));
+    let bindings = [(trigger, Action::HintMode)].into_iter().collect();
+    for context in [
+        ready(),
+        Context {
+            pane: false,
+            ..ready()
+        },
+    ] {
+        let model = menu_model(&Translator::new(Language::En), &bindings, context);
+        let row = model[2]
+            .rows
+            .iter()
+            .find(|row| {
+                matches!(
+                    row,
+                    Row::Item {
+                        command: Command::Kettle(Action::HintMode),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        if let Row::Item {
+            shortcut, enabled, ..
+        } = row
+        {
+            assert_eq!(*shortcut, Some(trigger));
+            assert_eq!(*enabled, context.pane);
+        }
+    }
+}
+
+#[test]
+fn hint_menu_displays_its_control_shortcut_when_no_command_binding_exists() {
+    let trigger = Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('h'));
+    let bindings = [(trigger, Action::HintMode)].into_iter().collect();
+    let model = menu_model(&Translator::new(Language::En), &bindings, ready());
+    assert!(model[2].rows.iter().any(|row| matches!(row,Row::Item {
+        command:Command::Kettle(Action::HintMode), shortcut:Some(found), ..
+    } if *found == trigger)));
 }

@@ -929,6 +929,23 @@ impl App {
                 component.to_bits().hash(&mut hasher);
             }
         }
+        for status in &overlay.pane_statuses {
+            status.description.hash(&mut hasher);
+            status.target.hash(&mut hasher);
+            if let Some(bounds) = status.link_bounds {
+                for value in [bounds.0, bounds.1, bounds.2, bounds.3] {
+                    value.to_bits().hash(&mut hasher);
+                }
+            }
+            for value in [status.rect.0, status.rect.1, status.rect.2, status.rect.3] {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
+        for bounds in &overlay.hint_bounds {
+            for value in [bounds.0, bounds.1, bounds.2, bounds.3] {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
         for hint in &overlay.hint_labels {
             hint.row.hash(&mut hasher);
             hint.col.hash(&mut hasher);
@@ -2220,6 +2237,45 @@ pub(super) fn modal_accessibility_projection(
         }
     }
 
+    for (index, status) in overlay.pane_statuses.iter().enumerate() {
+        let id = accessibility_modal_id(18, index);
+        let mut node = Node::new(if status.target.is_some() {
+            Role::Tooltip
+        } else {
+            Role::Status
+        });
+        node.set_label(status.description.clone());
+        node.set_live(accesskit::Live::Polite);
+        let (x, y, w, h) = status.rect;
+        node.set_bounds(accesskit::Rect::new(
+            x as f64,
+            y as f64,
+            (x + w) as f64,
+            (y + h) as f64,
+        ));
+        if let Some(target) = &status.target {
+            let link_id = accessibility_modal_id(19, index);
+            let mut link = Node::new(Role::Link);
+            link.set_label(target.clone());
+            link.set_tooltip(status.description.clone());
+            link.set_described_by(vec![id]);
+            link.set_children(vec![id]);
+            if let Some((x, y, w, h)) = status.link_bounds {
+                link.set_bounds(accesskit::Rect::new(
+                    x as f64,
+                    y as f64,
+                    (x + w) as f64,
+                    (y + h) as f64,
+                ));
+            }
+            projection.roots.push(link_id);
+            projection.nodes.push((link_id, link));
+        } else {
+            projection.roots.push(id);
+        }
+        projection.nodes.push((id, node));
+    }
+
     if !overlay.hint_labels.is_empty() {
         let container_id = accessibility_modal_id(3, 0);
         let mut children = Vec::with_capacity(overlay.hint_labels.len());
@@ -2227,6 +2283,14 @@ pub(super) fn modal_accessibility_projection(
             let id = accessibility_modal_id(3, index + 1);
             let mut node = Node::new(Role::ListBoxOption);
             node.set_label(hint.label.clone());
+            if let Some(&(x, y, w, h)) = overlay.hint_bounds.get(index) {
+                node.set_bounds(accesskit::Rect::new(
+                    x as f64,
+                    y as f64,
+                    (x + w) as f64,
+                    (y + h) as f64,
+                ));
+            }
             if hint.dim {
                 node.set_disabled();
             }
@@ -2235,6 +2299,14 @@ pub(super) fn modal_accessibility_projection(
         }
         let mut node = Node::new(Role::ListBox);
         node.set_label(tr.text(kettle_i18n::Text::HintA11yList));
+        if let Some(legend) = overlay
+            .pane_statuses
+            .iter()
+            .find(|status| status.target.is_none())
+        {
+            node.set_description(legend.description.clone());
+        }
+        node.set_live(accesskit::Live::Polite);
         node.set_children(children);
         projection.roots.push(container_id);
         projection.nodes.push((container_id, node));

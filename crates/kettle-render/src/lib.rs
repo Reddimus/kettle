@@ -17,6 +17,8 @@ mod fonts;
 mod geometry;
 mod gpu;
 mod labels;
+mod link_status;
+pub use link_status::{PaneStatus, avoid_hint_labels, hint_legend_layout, link_status_layout};
 mod overlays;
 mod screenshot;
 mod scrollback;
@@ -110,9 +112,9 @@ pub use overlays::{
     MediaPasteReceiptGeometry, MediaPasteReceiptHit, MediaPasteReceiptKind,
     MediaPasteReceiptOverlay, NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar,
     TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
-    format_media_size, media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
-    notification_geometry_with_notices, persistent_notice_geometry, tab_drag, theme_picker_prefix,
-    title_edit_prefix, toast_text_rows, update_toast_geometry,
+    format_media_size, hint_label_rect, media_paste_receipt_geometry, menu, menu_row_chars,
+    notification_geometry, notification_geometry_with_notices, persistent_notice_geometry,
+    tab_drag, theme_picker_prefix, title_edit_prefix, toast_text_rows, update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
@@ -529,6 +531,7 @@ pub struct Renderer {
     tab_buffers: Vec<TextBuffer>,
     tab_hint_buffers: Vec<TextBuffer>,
     hint_buffers: Vec<TextBuffer>,
+    pane_status_buffers: Vec<TextBuffer>,
     /// One text buffer per row of the right-click context menu. Reused
     /// across openings to amortize allocation; trimmed when the row
     /// count shrinks for a smaller menu.
@@ -1893,18 +1896,20 @@ impl Renderer {
                         1.0,
                     ));
                 }
+            }
+            if pv.focused {
                 // Quick-select hint label chips, with the menus on top of
                 // everything, inline cards included: a card's label sits on
                 // its poster and provenance tab. Hint mode closes any menu
                 // first, so nothing else is up there. A chip is cut to its
                 // pane, as its label is, so one at the last column never
                 // covers the next pane.
-                for hint in &overlay.hint_labels {
-                    let n = hint.label.chars().count().max(1) as f32;
-                    let left = grid_origin.0 + hint.col as f32 * cw;
-                    let top = grid_origin.1 + hint.row as f32 * ch;
-                    let (x0, y0) = (left.max(rx), top.max(ry));
-                    let (x1, y1) = ((left + n * cw).min(rx + rw), (top + ch).min(ry + rh));
+                for (index, hint) in overlay.hint_labels.iter().enumerate() {
+                    let (x0, y0, w, h) =
+                        overlay.hint_bounds.get(index).copied().unwrap_or_else(|| {
+                            hint_label_rect(hint, pv.terminal, (cw, ch), (pad_x, pad_y))
+                        });
+                    let (x1, y1) = (x0 + w, y0 + h);
                     if x1 > x0 && y1 > y0 {
                         menu_q.push(rect(
                             x0,
@@ -3120,6 +3125,40 @@ impl Renderer {
                 .shape(font_system, metrics, &family, lane, &geometry, glyph_width);
         }
 
+        self.pane_status_buffers
+            .truncate(overlay.pane_statuses.len());
+        while self.pane_status_buffers.len() < overlay.pane_statuses.len() {
+            self.pane_status_buffers
+                .push(TextBuffer::new(&mut self.font_system, metrics));
+        }
+        for (status, buffer) in overlay
+            .pane_statuses
+            .iter()
+            .zip(&mut self.pane_status_buffers)
+        {
+            buffer.set_metrics(metrics);
+            buffer.set_size(Some((status.rect.2 - 12.0).max(0.0)), Some(status.rect.3));
+            buffer.set_wrap(Wrap::None);
+            buffer.set_text(
+                &status.text,
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(&mut self.font_system, false);
+            menu_q.insert(
+                0,
+                rect(
+                    status.rect.0,
+                    status.rect.1,
+                    status.rect.2,
+                    status.rect.3,
+                    theme.background,
+                    1.0,
+                ),
+            );
+        }
+
         // Quick-select hint label glyphs (one buffer per label).
         if !overlay.hint_labels.is_empty() {
             while self.hint_buffers.len() < overlay.hint_labels.len() {
@@ -4301,6 +4340,21 @@ impl Renderer {
                 custom_glyphs: &[],
             });
         }
+        for (status, buffer) in overlay.pane_statuses.iter().zip(&self.pane_status_buffers) {
+            menu_areas.push(TextArea {
+                buffer,
+                left: status.rect.0 + 6.0,
+                top: status.rect.1,
+                scale: 1.0,
+                bounds: text_bounds_for_rect(status.rect),
+                default_color: gc(theme.foreground),
+                custom_glyphs: &[],
+            });
+        }
+
+        for bounds in &overlay.hint_bounds {
+            overlays::exclude_menu_text(&mut menu_areas, *bounds);
+        }
         // Hint labels over the focused pane, drawn with the menus, above
         // their chips and every card.
         if let Some((frx, fry, frw, frh)) = focus_origin {
@@ -4870,6 +4924,9 @@ impl Renderer {
             }
             self.update_toast_text.hash(&mut h);
             self.ime_text.hash(&mut h);
+            for status in &overlay.pane_statuses {
+                status.text.hash(&mut h);
+            }
             prepared_text_areas_damage_key(&areas).hash(&mut h);
             prepared_text_areas_damage_key(&ime_areas).hash(&mut h);
             // Completion buffers are retained while the card is static. Hash
