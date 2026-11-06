@@ -2,6 +2,7 @@
 [files]
 extend-exclude = [
     "vendor/",
+    "crates/kettle-core/data/",
     "assets/",
     "docs/licenses/",
     "docs/changelog/",
