@@ -458,16 +458,19 @@ impl App {
         if ws.search.open {
             ws.search.editor.clear_selection();
         }
-        if ws.mods.shift_key() && !ws.mods.alt_key() && self.extend_selection_to_cursor(ws, area, 0)
-        {
+        // Pointer gestures read the keys physically held: on macOS Option
+        // selects a rectangle (Terminal.app, Ghostty) whether or not
+        // `macos-option-as-alt` makes it Meta for typing.
+        let held = super::keyboard::held_modifiers(ws);
+        if held.shift_key() && !held.alt_key() && self.extend_selection_to_cursor(ws, area, 0) {
             return;
         }
         let cell = self.cursor_cell(ws);
         let clicks = cell.map(|(r, c)| Self::click_count(ws, r, c)).unwrap_or(1);
-        let kind = selection_kind(clicks, ws.mods.alt_key());
+        let kind = selection_kind(clicks, held.alt_key());
         let mut smart_selected = false;
         if clicks == 2
-            && !ws.mods.alt_key()
+            && !held.alt_key()
             && let Some((row, col)) = cell
             && let Some((start, end)) = self.smart_selection_for_cell(ws, row, col)
             && self.apply_smart_selection(ws, area, row, start, end)

@@ -1137,6 +1137,33 @@ fn selection_kind_maps_clicks_and_alt() {
 }
 
 #[test]
+fn mouse_selection_reads_physically_held_modifiers() {
+    // On macOS `ws.mods` hides Option unless `macos-option-as-alt` maps it
+    // to Meta, so Option-drag must not read it for block selection.
+    let src = super::production_source();
+    let body = src
+        .split("fn begin_or_extend_mouse_selection")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("selection start");
+    assert!(body.contains("held_modifiers(ws)"));
+    assert!(!body.contains("ws.mods.alt_key()"));
+    assert!(!body.contains("ws.mods.shift_key()"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn option_drag_selects_a_block_with_option_not_mapped_to_alt() {
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.macos_raw_mods = winit::keyboard::ModifiersState::ALT;
+    ws.macos_left_option_pressed = true;
+    super::keyboard::refresh_macos_modifiers(&mut ws, kettle_config::MacosOptionAsAlt::None);
+    assert!(!ws.mods.alt_key(), "Option composes text by default");
+    let held = super::keyboard::held_modifiers(&ws);
+    assert!(matches!(selection_kind(1, held.alt_key()), SelectionType::Block));
+}
+
+#[test]
 fn finding_tab_pointer_uses_painted_band() {
     let body = finding_body(include_str!("chrome.rs"), "cursor_in_tab_bar");
     assert!(
