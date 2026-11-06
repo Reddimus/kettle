@@ -91,6 +91,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The focused pane's title is bold as well as highlighted, so focus does not
+  rest on colour alone.
+
 - On Linux, `restore-session = auto` (the default) now reopens the previous
   session, as Ptyxis, GNOME's terminal, does. Set `restore-session = false` to
   open fresh windows as before.

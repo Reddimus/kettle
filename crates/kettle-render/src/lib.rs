@@ -1025,21 +1025,30 @@ impl Renderer {
                 buf.set_metrics(metrics);
                 buf.set_size(Some(rw), Some(titlebar_h));
                 // `Buffer::set_text` re-shapes unconditionally, so gate it on
-                // text change and a steady title costs nothing.
-                if self.pane_titlebar_texts[i] != label {
+                // text change and a steady title costs nothing. The focused
+                // pane's title is bold as well as tinted, a cue that does not
+                // rest on colour alone; a NUL, which no title holds, marks it
+                // in the key so a focus change reshapes.
+                let key = if pv.focused {
+                    format!("\u{0}{label}")
+                } else {
+                    label.clone()
+                };
+                if self.pane_titlebar_texts[i] != key {
                     // Use Advanced shaping, like every other chrome buffer. The
                     // title is shell-controlled OSC 0/2 text (agents such as
                     // Claude Code lead with a status glyph) and the label can
                     // carry the 🔔 bell. Basic skips cosmic-text's platform
                     // font fallback (Segoe UI Emoji/Symbol, Noto), so any
                     // glyph outside the bundled Nerd Font would render as tofu.
-                    buf.set_text(
-                        &label,
-                        &Attrs::new().family(Family::Name(&family)),
-                        Shaping::Advanced,
-                        None,
-                    );
-                    self.pane_titlebar_texts[i] = label;
+                    let attrs = Attrs::new().family(Family::Name(&family));
+                    let attrs = if pv.focused {
+                        attrs.weight(Weight::BOLD)
+                    } else {
+                        attrs
+                    };
+                    buf.set_text(&label, &attrs, Shaping::Advanced, None);
+                    self.pane_titlebar_texts[i] = key;
                 }
                 buf.shape_until_scroll(&mut self.font_system, false);
             }

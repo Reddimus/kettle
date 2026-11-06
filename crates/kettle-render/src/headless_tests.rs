@@ -5274,3 +5274,47 @@ fn unfocused_window_and_split_cursor_are_steady_and_respect_dectcem() {
     );
     assert_eq!(cursor_pixels(&off, &cfg, &snap), 0);
 }
+
+/// The focused pane's title is bold, the others regular, so which pane has
+/// focus does not rest on the titlebar colour alone; moving focus reshapes.
+#[test]
+fn the_focused_pane_title_is_bold() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 200) else {
+        eprintln!("PANE_TITLE_WEIGHT_GPU_SKIP: no adapter");
+        return;
+    };
+    cfg.show_titlebar = true;
+    let snap = snapshot_of(20, 4, b"left");
+    let other = snapshot_of(20, 4, b"right");
+    let weights = |renderer: &mut Renderer, focus_left: bool| {
+        let mut left = pane(&snap, 320, 200);
+        left.rect = (0.0, 0.0, 320.0, 200.0);
+        left.titlebar = Some((0.0, 0.0, 320.0, 24.0));
+        left.terminal = (0.0, 24.0, 320.0, 176.0);
+        left.title = "left";
+        left.focused = focus_left;
+        let mut right = pane(&other, 320, 200);
+        right.id = 2;
+        right.rect = (320.0, 0.0, 320.0, 200.0);
+        right.titlebar = Some((320.0, 0.0, 320.0, 24.0));
+        right.terminal = (320.0, 24.0, 320.0, 176.0);
+        right.title = "right";
+        right.focused = !focus_left;
+        capture(renderer, &cfg, &[left, right], &focused(true));
+        [0, 1].map(|i| {
+            renderer.pane_titlebar_buffers[i].lines[0]
+                .attrs_list()
+                .defaults()
+                .weight
+        })
+    };
+    assert_eq!(
+        weights(&mut renderer, true),
+        [glyphon::Weight::BOLD, glyphon::Weight::NORMAL]
+    );
+    assert_eq!(
+        weights(&mut renderer, false),
+        [glyphon::Weight::NORMAL, glyphon::Weight::BOLD]
+    );
+}
