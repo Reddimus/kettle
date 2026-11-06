@@ -271,7 +271,8 @@ fn wrap(text: &str, columns: usize) -> Vec<String> {
                 prefix
                     .char_indices()
                     .rev()
-                    .find(|&(_, c)| c.is_whitespace())
+                    // A no-break space keeps a count with its noun.
+                    .find(|&(_, c)| c.is_whitespace() && !matches!(c, '\u{a0}' | '\u{202f}'))
                     .map(|(i, _)| i)
                     .filter(|&i| i > 0)
                     .unwrap_or(prefix.len())
@@ -437,6 +438,14 @@ pub(crate) fn button_colors(
 
 #[cfg(test)]
 mod tests {
+
+    /// A count and its noun, joined by a no-break space, never split.
+    #[test]
+    fn a_no_break_space_keeps_a_count_with_its_noun() {
+        let lines = super::wrap("send 2\u{a0}lines now", 8);
+        assert_eq!(lines, ["send", "2\u{a0}lines", "now"]);
+    }
+
     use super::*;
     fn dialog() -> ConfirmDialogOverlay {
         ConfirmDialogOverlay {

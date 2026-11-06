@@ -96,6 +96,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The paste confirmation puts its counts on their own line, keeps each count
+  with its noun when wrapping, lists Paste without controls first after Cancel
+  when the text holds controls, and shows a raw Paste in the warning colour.
+
 - Settings switches show a knob (right when on, left when off) with a label
   chosen for contrast against the accent. Delete or Backspace resets the
   highlighted setting to its default, and the footer says so.

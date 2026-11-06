@@ -1725,20 +1725,26 @@ pub(super) fn text_paste_confirmation(
 ) -> ConfirmDialogState {
     use kettle_i18n::Text as T;
     let found = crate::paste_safety::analyse(text);
-    let mut buttons = vec![
-        ConfirmButton::Cancel,
-        ConfirmButton::Confirm {
-            label: tr.text(T::MenuPaste).to_string(),
-            destructive: false,
-        },
-        ConfirmButton::PasteOneLine {
-            label: tr.text(T::ConfirmPasteOneLine).to_string(),
-        },
-    ];
-    if found.escapes + found.controls > 0 {
+    // With controls in the text, the sanitised paste is the recommended
+    // choice after Cancel, and a raw paste carries the warning colour.
+    let controls = found.escapes + found.controls > 0;
+    let mut buttons = vec![ConfirmButton::Cancel];
+    if controls {
         buttons.push(ConfirmButton::PasteWithoutControls {
             label: tr.text(T::ConfirmPasteWithoutControls).to_string(),
         });
+    }
+    let paste = ConfirmButton::Confirm {
+        label: tr.text(T::MenuPaste).to_string(),
+        destructive: controls,
+    };
+    let one_line = ConfirmButton::PasteOneLine {
+        label: tr.text(T::ConfirmPasteOneLine).to_string(),
+    };
+    if controls {
+        buttons.extend([one_line, paste]);
+    } else {
+        buttons.extend([paste, one_line]);
     }
     ConfirmDialogState {
         heading: tr.text(T::ConfirmPasteHeading).to_string(),

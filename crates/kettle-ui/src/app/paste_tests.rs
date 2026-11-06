@@ -1573,16 +1573,33 @@ fn paste_controls_dialog_summarises_and_keeps_all_choices_accessible() {
         assert!(dialog.body.contains(&tr.confirm_paste_escapes(2)));
         assert!(dialog.body.contains(&tr.confirm_paste_controls(1)));
         assert!(dialog.body.contains("\u{241b}[31mred\u{241b}[0m\u{2407}"));
+        // The sanitised paste is the first choice after Cancel; the raw
+        // paste comes last, in the warning colour.
         let super::ConfirmAction::Paste {
             target,
             text: clean,
             ..
-        } = super::confirmation_button_action(&dialog, 3).unwrap()
+        } = super::confirmation_button_action(&dialog, 1).unwrap()
         else {
             panic!("paste action")
         };
         assert_eq!(target, Some(7));
         assert_eq!(clean, "one\r\ntwored");
+        let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+        assert_eq!(
+            overlay
+                .buttons
+                .iter()
+                .map(|button| button.destructive)
+                .collect::<Vec<_>>(),
+            [false, false, false, true]
+        );
+        let super::ConfirmAction::Paste { text: raw, .. } =
+            super::confirmation_button_action(&dialog, 3).unwrap()
+        else {
+            panic!("paste action")
+        };
+        assert_eq!(raw, text);
         assert_eq!(confirm_dialog_keypress(0, 4, K::Enter), R::Activate(0));
         assert_eq!(confirm_dialog_keypress(0, 4, K::ShiftTab), R::Move(3));
         assert_eq!(confirm_dialog_keypress(3, 4, K::Tab), R::Move(0));
@@ -1645,7 +1662,7 @@ fn paste_controls_dialog_summarises_and_keeps_all_choices_accessible() {
         }
         let overlay = super::confirm_dialog_overlay(&dialog, &tr);
         assert_eq!(
-            overlay.buttons[3].label,
+            overlay.buttons[1].label,
             tr.text(Text::ConfirmPasteWithoutControls)
         );
     }
