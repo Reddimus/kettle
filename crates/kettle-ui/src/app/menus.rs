@@ -980,7 +980,7 @@ impl App {
                 }
                 // The submenu sign sits in the hint column, right-aligned
                 // like a native menu's.
-                ContextMenuItem::Submenu { .. } => "▸".to_string(),
+                ContextMenuItem::Submenu { .. } => SUBMENU_SIGN.to_string(),
                 ContextMenuItem::NewTabShell { .. } => {
                     let h = if shell_ordinal < 9 {
                         kettle_config::keybinds::ui_hint_label(
@@ -2265,6 +2265,10 @@ pub(super) enum ContextMenuClick {
         pane: Option<u64>,
     },
 }
+
+/// The hint of a row that opens a submenu. Screen readers get the row's
+/// popup state instead of this sign.
+pub(super) const SUBMENU_SIGN: &str = "▸";
 
 /// One entry in the right-click context menu. `Separator` rows render
 /// as a thin divider in the menu and are skipped during keyboard nav

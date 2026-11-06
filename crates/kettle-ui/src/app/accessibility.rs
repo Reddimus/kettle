@@ -2214,7 +2214,9 @@ pub(super) fn modal_accessibility_projection(
             let id = accessibility_modal_id(2, index + 1);
             let mut node = Node::new(Role::MenuItem);
             node.set_label(row.label.clone());
-            if !row.hint.is_empty() {
+            if row.hint == SUBMENU_SIGN {
+                node.set_has_popup(accesskit::HasPopup::Menu);
+            } else if !row.hint.is_empty() {
                 node.set_description(row.hint.clone());
             }
             if !row.enabled {
@@ -2671,7 +2673,7 @@ pub(super) fn nest_context_menu_accessibility(
             let id = accessibility_modal_id(kind, index + 1);
             let mut item = Node::new(Role::MenuItem);
             item.set_label(row.label.clone());
-            if !row.hint.is_empty() {
+            if !row.hint.is_empty() && row.hint != SUBMENU_SIGN {
                 item.set_description(row.hint.clone());
             }
             if row.enabled {
@@ -2988,6 +2990,41 @@ mod context_menu_nesting_tests {
             panel_h_clamped: 28.0,
             a11y_label: None,
         }
+    }
+
+    /// A row that opens a submenu says so through its popup state; the
+    /// drawn sign is not read out as a description. A shortcut still is.
+    #[test]
+    fn a_submenu_row_opens_a_menu_rather_than_describing_its_arrow() {
+        let mut menu = panel("Split", (40.0, 60.0));
+        menu.rows[0].hint = SUBMENU_SIGN.to_string();
+        menu.rows.push(ContextMenuRow {
+            matched_chars: None,
+            label: "Paste".into(),
+            separator: false,
+            enabled: true,
+            hint: "⌘V".into(),
+        });
+        let overlay = Overlay {
+            context_menu: Some(menu),
+            ..Overlay::default()
+        };
+        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let projection =
+            modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
+        let node = |index: usize| {
+            &projection
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == accessibility_modal_id(2, index))
+                .unwrap()
+                .1
+        };
+        assert_eq!(node(1).label(), Some("Split"));
+        assert_eq!(node(1).has_popup(), Some(accesskit::HasPopup::Menu));
+        assert_eq!(node(1).description(), None);
+        assert_eq!(node(2).has_popup(), None);
+        assert_eq!(node(2).description(), Some("⌘V"));
     }
 
     #[test]
