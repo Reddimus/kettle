@@ -2,6 +2,61 @@
 use super::*;
 use crate::quick_terminal::{self as quick, Effect, Rect};
 
+trait VisibilityWindow {
+    fn is_visible(&self) -> Option<bool>;
+    fn has_focus(&self) -> bool;
+    fn set_visible(&self, visible: bool);
+    fn set_minimized(&self, minimized: bool);
+}
+
+impl VisibilityWindow for winit::window::Window {
+    fn is_visible(&self) -> Option<bool> {
+        self.is_visible()
+    }
+    fn has_focus(&self) -> bool {
+        self.has_focus()
+    }
+    fn set_visible(&self, visible: bool) {
+        self.set_visible(visible);
+    }
+    fn set_minimized(&self, minimized: bool) {
+        self.set_minimized(minimized);
+    }
+}
+
+fn dispatch_visibility_toggle(
+    model: &mut quick::Model,
+    seq: u64,
+    window: &impl VisibilityWindow,
+    wayland: bool,
+) -> Effect {
+    let quick = model.window == Some(seq);
+    let visible = if quick {
+        model.visible
+    } else {
+        window.is_visible().unwrap_or(true)
+    };
+    if visible && window.has_focus() {
+        if quick {
+            // Dispatch has checked this window out of App::windows.
+            hide_native_window(window, wayland);
+            model.toggle(false)
+        } else {
+            window.set_visible(false);
+            Effect::None
+        }
+    } else {
+        Effect::Show
+    }
+}
+
+fn hide_native_window(window: &impl VisibilityWindow, wayland: bool) {
+    window.set_visible(false);
+    if wayland {
+        window.set_minimized(true);
+    }
+}
+
 impl App {
     pub(super) fn quick_window_attributes(
         &self,
@@ -138,20 +193,15 @@ impl App {
 
     pub(super) fn toggle_window_visibility(&mut self, ws: &mut WindowState) {
         let Some(window) = &ws.window else { return };
-        let visible = if self.quick_terminal.model.window == Some(ws.seq) {
-            self.quick_terminal.model.visible
-        } else {
-            window.is_visible().unwrap_or(true)
-        };
-        if visible && window.has_focus() {
-            window.set_visible(false);
-            if self.quick_terminal.model.window == Some(ws.seq)
-                && let Effect::Hide { return_focus } = self.quick_terminal.model.toggle(false)
-            {
-                self.hide_quick_terminal(return_focus);
-            }
-        } else {
-            self.reveal_window(ws);
+        match dispatch_visibility_toggle(
+            &mut self.quick_terminal.model,
+            ws.seq,
+            window.as_ref(),
+            self.quick_terminal.wayland,
+        ) {
+            Effect::Hide { return_focus } => self.hide_quick_terminal(return_focus),
+            Effect::Show => self.reveal_window(ws),
+            Effect::None => {}
         }
     }
 
@@ -247,10 +297,7 @@ impl App {
             .and_then(|seq| self.windows.get(&seq))
             && let Some(window) = &ws.window
         {
-            window.set_visible(false);
-            if self.quick_terminal.wayland {
-                window.set_minimized(true);
-            }
+            hide_native_window(window.as_ref(), self.quick_terminal.wayland);
         }
         if return_focus {
             if let Some(window) = self
@@ -352,5 +399,53 @@ impl App {
             }
         }
         next
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct RecordedWindow(RefCell<Vec<(&'static str, bool)>>);
+    impl VisibilityWindow for RecordedWindow {
+        fn is_visible(&self) -> Option<bool> {
+            // Wayland cannot report visibility reliably.
+            None
+        }
+        fn has_focus(&self) -> bool {
+            true
+        }
+        fn set_visible(&self, visible: bool) {
+            self.0.borrow_mut().push(("visible", visible));
+        }
+        fn set_minimized(&self, minimized: bool) {
+            self.0.borrow_mut().push(("minimized", minimized));
+        }
+    }
+
+    #[test]
+    fn review_s4_dispatch_hides_checked_out_quick_window() {
+        for wayland in [false, true] {
+            let mut windows = std::collections::BTreeMap::from([(1, RecordedWindow::default())]);
+            let mut model = quick::Model::for_startup(true, 1);
+            model.reveal(true);
+            // Keyboard and remote dispatch remove their target before delivering
+            // ToggleVisibility. The native operation must use that target.
+            let window = windows.remove(&1).unwrap();
+            assert!(windows.is_empty());
+            assert_eq!(
+                dispatch_visibility_toggle(&mut model, 1, &window, wayland),
+                Effect::Hide { return_focus: true }
+            );
+            assert!(!model.visible);
+            let mut expected = vec![("visible", false)];
+            if wayland {
+                expected.push(("minimized", true));
+            }
+            assert_eq!(*window.0.borrow(), expected);
+            windows.insert(1, window);
+        }
     }
 }

@@ -8,6 +8,20 @@ use winit::event_loop::EventLoopProxy;
 // Carbon virtual key codes are physical US positions. X11 uses keysyms and
 // resolves them against the server's current keyboard mapping at registration.
 #[cfg(any(target_os = "macos", test))]
+fn carbon_trigger(mut trigger: Trigger) -> Trigger {
+    if let Key::Char(symbol) = trigger.key
+        && let Some(base) = "~!@#$%^&*()_+{}|:\"<>?"
+            .chars()
+            .zip("`1234567890-=[]\\;',./".chars())
+            .find_map(|(shifted, base)| (symbol == shifted).then_some(base))
+    {
+        trigger.key = Key::Char(base);
+        trigger.mods |= Mods::SHIFT;
+    }
+    trigger
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn carbon_key(key: Key) -> Option<u32> {
     Some(match key {
         Key::Escape => 53,
@@ -122,15 +136,72 @@ fn x11_keysym(key: Key) -> Option<u32> {
 }
 
 #[cfg(any(all(unix, not(target_os = "macos")), test))]
-fn x11_keycode(first: u8, per_code: u8, symbols: &[u32], key: Key) -> Option<u8> {
+fn x11_keycode(
+    first: u8,
+    per_code: u8,
+    symbols: &[u32],
+    key: Key,
+    level3: Option<u16>,
+    mode_switch: Option<u16>,
+) -> Option<(u8, u16)> {
     if per_code == 0 {
         return None;
     }
     let symbol = x11_keysym(key)?;
-    let offset = symbols
-        .chunks(usize::from(per_code))
-        .position(|keys| keys.first() == Some(&symbol))?;
-    first.checked_add(u8::try_from(offset).ok()?)
+    for (offset, keys) in symbols.chunks_exact(usize::from(per_code)).enumerate() {
+        for (column, &candidate) in keys.iter().enumerate() {
+            if candidate != symbol {
+                continue;
+            }
+            // Core X11 exposes two groups' base/Shift pairs first. XKB
+            // appends their Level3/Level4 pairs after those four columns.
+            // Legacy four-column maps use Mode_switch (or ISO_Level3) alone.
+            let selector = match column / 2 {
+                0 => Some(0),
+                1 => mode_switch.or(level3),
+                2 => level3,
+                3 => mode_switch.zip(level3).map(|(group, level)| group | level),
+                _ => None,
+            };
+            if let Some(selector) = selector {
+                let code = first.checked_add(u8::try_from(offset).ok()?)?;
+                return Some((code, selector | (column as u16 & 1)));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+fn x11_modifier_mask(
+    first: u8,
+    per_code: u8,
+    symbols: &[u32],
+    per_modifier: u8,
+    modifiers: &[u8],
+    symbol: u32,
+) -> Option<u16> {
+    if per_code == 0 || per_modifier == 0 {
+        return None;
+    }
+    modifiers
+        .chunks_exact(usize::from(per_modifier))
+        .take(8)
+        .enumerate()
+        .find_map(|(index, codes)| {
+            codes
+                .iter()
+                .any(|code| {
+                    *code != 0
+                        && code.checked_sub(first).is_some_and(|offset| {
+                            symbols
+                                .chunks_exact(usize::from(per_code))
+                                .nth(usize::from(offset))
+                                .is_some_and(|keys| keys.contains(&symbol))
+                        })
+                })
+                .then_some(1 << index)
+        })
 }
 
 #[cfg(target_os = "macos")]
@@ -145,7 +216,6 @@ pub(crate) fn register(
     proxy: EventLoopProxy<UserEvent>,
     wayland: bool,
 ) -> Result<Option<Registration>, String> {
-    let trigger = kettle_config::normalize_quick_terminal_hotkey(trigger);
     if wayland || cfg!(windows) {
         static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -276,6 +346,7 @@ mod macos {
     }
     impl Registration {
         pub fn new(trigger: Trigger, proxy: EventLoopProxy<UserEvent>) -> Result<Self, String> {
+            let trigger = carbon_trigger(trigger);
             let code = carbon_key(trigger.key).ok_or("unsupported Carbon hotkey")?;
             let mut proxy = Box::new(Callback {
                 proxy,
@@ -379,14 +450,34 @@ mod x11 {
             if mapping.keysyms_per_keycode == 0 {
                 return Err("empty X11 keyboard mapping".into());
             }
-            let code = x11_keycode(
+            let modifier_map = conn
+                .get_modifier_mapping()
+                .map_err(|e| e.to_string())?
+                .reply()
+                .map_err(|e| e.to_string())?;
+            if modifier_map.keycodes_per_modifier() == 0 {
+                return Err("empty X11 modifier mapping".into());
+            }
+            let modifier_mask = |symbol| {
+                x11_modifier_mask(
+                    first,
+                    mapping.keysyms_per_keycode,
+                    &mapping.keysyms,
+                    modifier_map.keycodes_per_modifier(),
+                    &modifier_map.keycodes,
+                    symbol,
+                )
+            };
+            let (code, required_mods) = x11_keycode(
                 first,
                 mapping.keysyms_per_keycode,
                 &mapping.keysyms,
                 trigger.key,
+                modifier_mask(0xfe03), // ISO_Level3_Shift
+                modifier_mask(0xff7e), // Mode_switch
             )
             .ok_or("key is absent from the X11 keyboard map")?;
-            let mut mods = ModMask::default();
+            let mut mods = ModMask::from(required_mods);
             for (modifier, mask) in [
                 (Mods::CTRL, ModMask::CONTROL),
                 (Mods::SHIFT, ModMask::SHIFT),
@@ -398,14 +489,6 @@ mod x11 {
                 }
             }
             // NumLock is not fixed to Mod2 on every keyboard map.
-            let modifier_map = conn
-                .get_modifier_mapping()
-                .map_err(|e| e.to_string())?
-                .reply()
-                .map_err(|e| e.to_string())?;
-            if modifier_map.keycodes_per_modifier() == 0 {
-                return Err("empty X11 modifier mapping".into());
-            }
             let num_codes: Vec<u8> = mapping
                 .keysyms
                 .chunks(usize::from(mapping.keysyms_per_keycode))
@@ -518,6 +601,66 @@ mod x11 {
 mod tests {
     use super::*;
     #[test]
+    fn review_s4_x11_german_unshifted_plus() {
+        let trigger = kettle_config::parse_quick_terminal_hotkey("ctrl+plus").unwrap();
+        assert_eq!(trigger.key, Key::Char('+'));
+        assert_eq!(trigger.mods, Mods::CTRL);
+        assert_eq!(
+            x11_keycode(20, 4, &[43, 42, 126, 0], trigger.key, Some(1 << 7), None),
+            Some((20, 0))
+        );
+    }
+
+    #[test]
+    fn review_s4_x11_us_shifted_tilde() {
+        assert_eq!(
+            x11_keycode(49, 2, &[96, 126], Key::Char('~'), None, None),
+            Some((49, 1))
+        );
+    }
+
+    #[test]
+    fn review_s4_x11_level3_uses_live_modifier_mapping() {
+        // Level3 is Mod3 here, rather than the commonly assumed Mod5.
+        let symbols = [43, 42, 126, 124, 0xfe03, 0xfe03, 0, 0];
+        let modifiers = [0, 0, 0, 0, 0, 21, 0, 0];
+        let level3 = x11_modifier_mask(20, 4, &symbols, 1, &modifiers, 0xfe03);
+        assert_eq!(level3, Some(1 << 5));
+        assert_eq!(
+            x11_keycode(20, 4, &symbols, Key::Char('~'), level3, None),
+            Some((20, 1 << 5))
+        );
+        assert_eq!(
+            x11_keycode(20, 4, &symbols, Key::Char('|'), level3, None),
+            Some((20, (1 << 5) | 1))
+        );
+        assert_eq!(
+            x11_keycode(20, 4, &symbols, Key::Char('~'), None, None),
+            None
+        );
+        assert_eq!(
+            x11_keycode(20, 0, &symbols, Key::Char('~'), level3, None),
+            None
+        );
+        assert_eq!(x11_modifier_mask(20, 4, &symbols, 0, &[], 0xfe03), None);
+
+        // XKB core replies also include duplicate base/Shift columns before
+        // Level3/Level4. Both groups and every column must be considered.
+        let symbols = [43, 42, 43, 42, 126, 124, 64, 35];
+        for (symbol, expected) in [
+            ('~', 1 << 5),
+            ('|', (1 << 5) | 1),
+            ('@', (1 << 5) | (1 << 7)),
+            ('#', (1 << 5) | (1 << 7) | 1),
+        ] {
+            assert_eq!(
+                x11_keycode(20, 8, &symbols, Key::Char(symbol), level3, Some(1 << 7)),
+                Some((20, expected))
+            );
+        }
+    }
+
+    #[test]
     fn review_quick_captured_shifted_punctuation_maps_to_both_native_backends() {
         use crate::settings::{HotkeyCapture, capture_hotkey};
         for (symbol, base) in "~!@#$%^&*()_+{}|:\"<>?"
@@ -529,12 +672,18 @@ mod tests {
             else {
                 panic!("capture failed")
             };
-            assert_eq!(trigger.key, Key::Char(base), "captured {symbol}");
+            assert_eq!(trigger.key, Key::Char(symbol), "captured {symbol}");
             assert_eq!(trigger.mods, Mods::CTRL | Mods::SHIFT);
-            assert_eq!(carbon_key(trigger.key), carbon_key(Key::Char(base)));
-            assert!(carbon_key(trigger.key).is_some());
+            let carbon = carbon_trigger(trigger);
+            assert_eq!(carbon.key, Key::Char(base));
+            assert_eq!(carbon.mods, Mods::CTRL | Mods::SHIFT);
+            assert_eq!(carbon_key(carbon.key), carbon_key(Key::Char(base)));
+            assert!(carbon_key(carbon.key).is_some());
             let mapping = [base as u32, symbol as u32];
-            assert_eq!(x11_keycode(49, 2, &mapping, trigger.key), Some(49));
+            assert_eq!(
+                x11_keycode(49, 2, &mapping, trigger.key, None, None),
+                Some((49, 1))
+            );
             let parsed = kettle_config::parse_quick_terminal_hotkey(&trigger.label()).unwrap();
             assert_eq!(parsed, trigger);
         }
@@ -561,5 +710,8 @@ mod tests {
         assert_eq!(x11_keysym(ctrl_grave.key), Some(0x60));
         assert_eq!(x11_keysym(cmd_escape.key), Some(0xff1b));
         assert_eq!(x11_keysym(Key::F(12)), Some(0xffc9));
+        let option_a = kettle_config::parse_quick_terminal_hotkey("alt+a").unwrap();
+        assert_eq!(carbon_key(carbon_trigger(option_a).key), Some(0));
+        assert_eq!(carbon_mods(option_a.mods), 1 << 11);
     }
 }
